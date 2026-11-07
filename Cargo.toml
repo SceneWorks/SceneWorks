@@ -1,5 +1,12 @@
 [workspace]
 resolver = "2"
+# Security-patched dependency leaves retain dependency-only test/build semantics.
+exclude = [
+    "vendor/zip9-candle-audio-kokoro",
+    "vendor/zip9-candle-core",
+    "vendor/zip9-mlx-gen",
+    "vendor/zip9-tauri-plugin-updater",
+]
 members = [
     "apps/desktop",
     "apps/rust-api",
@@ -35,6 +42,32 @@ license-file = "LICENSE"
 # Pinned once here so all crates resolve the same version and the JSON envelope
 # stays consistent across the api / worker / desktop sidecars.
 [workspace.dependencies]
+if-addrs = "0.13"
+# Common versions and shared features live here. Members retain additive features and target
+# gates: in particular sha2/asm is Apple ARM-only, and desktop's futures-util/tokio defaults
+# stay disabled. Default-off roots let members opt into defaults without Cargo ignoring a
+# member's attempt to disable inherited defaults.
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0" }
+uuid = { version = "1.11", features = ["v4"] }
+tokio = { version = "1.40", default-features = false }
+tempfile = { version = "3.27" }
+nix = { version = "0.29", default-features = false, features = ["signal"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+sha2 = { version = "0.10" }
+futures-util = { version = "0.3", default-features = false }
+axum = { version = "0.7" }
+base64 = { version = "0.22" }
+fs2 = { version = "0.4" }
+glob = { version = "0.3" }
+parking_lot = { version = "0.12" }
+mime_guess = { version = "2.0" }
+subtle = { version = "2.6" }
+tower = { version = "0.5", features = ["util"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+parquet = { version = "60.0", default-features = false, features = ["snap"] }
+rmcp = { version = "=2.2.0" }
+imageproc = { version = "0.25", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 # Cross-platform "send to the OS trash" (Windows Recycle Bin / macOS Trash / Linux
@@ -142,17 +175,17 @@ all = "warn"
 # the candle-gen -> inference cutover. This patch re-applies it for every SceneWorks build.
 #
 # Candle-core is also vendored at the final inference pin: its CUDA graph upload API is needed by
-# candle-llm. Cargo ignores dependency-workspace patches, so both root patches must resolve from
-# the same inference revision as the direct crates. The bump script moves every patched rev and
-# the lock guard refuses a missing, upstream, or skewed resolution.
+# candle-llm. Cargo ignores dependency-workspace patches. The kernel overrides retain the direct
+# inference revision. Retired exact-revision security ports remain historical source evidence
+# in vendor/zip9-source-overrides.json; they are no longer effective Cargo overrides.
 #
 # candle-metal-kernels is vendored for the upstream rank > 4 strided-reduce out-of-bounds fix
 # (inference sc-25909; see its VENDORED.md). The macOS runtime compiles it through candle-core's
 # Metal backend, so without this patch SceneWorks would build the unfixed upstream kernels.
 [patch."https://github.com/huggingface/candle"]
-candle-core = { git = "https://github.com/SceneWorks/inference", rev = "6012abad731c94f6c53428029b8d16e917b0a5b7" }
-candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "6012abad731c94f6c53428029b8d16e917b0a5b7" }
-candle-metal-kernels = { git = "https://github.com/SceneWorks/inference", rev = "6012abad731c94f6c53428029b8d16e917b0a5b7" }
+candle-core = { git = "https://github.com/SceneWorks/inference", rev = "2b09938e33370915d4f853389961709b8bbf8bf9" }
+candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "2b09938e33370915d4f853389961709b8bbf8bf9" }
+candle-metal-kernels = { git = "https://github.com/SceneWorks/inference", rev = "2b09938e33370915d4f853389961709b8bbf8bf9" }
 
 # Build the SHA-256 stack optimized even in the dev/test profile.
 #

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -7,6 +8,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { platformFixtureSkip } from "./test-platform-capabilities.mjs";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
@@ -121,6 +123,10 @@ import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
 import {
   canonicalJson, capturePlannedCase, recordId, validateBundle,
 } from "./memory-calibration-harness.mjs";
+
+const posixProcessFixture = { skip: platformFixtureSkip("posix-processes") };
+const posixIdentityFixture = { skip: platformFixtureSkip("posix-process-identity") };
+const posixPermissionFixture = { skip: platformFixtureSkip("posix-permissions") };
 
 const TEXT_ENCODER_INVENTORY = {
   root: "/models/gemma",
@@ -1075,7 +1081,7 @@ test("SC-20216 failure receipt is phase-authenticated, non-ingestible and mutati
   );
 });
 
-test("SC-20216 publishes only after validation and never overwrites a failure receipt", async (t) => {
+test("SC-20216 publishes only after validation and never overwrites a failure receipt", posixIdentityFixture, async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "sc20216-failure-publish-"));
   t.after(() => cleanupCanaryScratch(root));
   const canonical = path.join(root, "canonical.json");
@@ -1115,7 +1121,7 @@ test("SC-20216 publishes only after validation and never overwrites a failure re
   await canonicalClaim.release();
 });
 
-test("SC-20216 jointly reserves canonical and failure outcomes across races and stale state", async (t) => {
+test("SC-20216 jointly reserves canonical and failure outcomes across races and stale state", posixIdentityFixture, async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "sc20216-outcome-race-"));
   t.after(() => cleanupCanaryScratch(root));
   const canonical = path.join(root, "canonical.json");
@@ -1175,7 +1181,7 @@ test("SC-20216 jointly reserves canonical and failure outcomes across races and 
     "a claimed but interrupted outcome must remain fail-closed");
 });
 
-test("distinct contained campaign outputs share one exclusive SC-18946 execution claim", async (t) => {
+test("distinct contained campaign outputs share one exclusive SC-18946 execution claim", posixIdentityFixture, async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "sc20318-shared-execution-"));
   t.after(() => cleanupCanaryScratch(root));
   const stagedOutput = path.join(root, "sc-20191", "staged.json");
@@ -1244,7 +1250,7 @@ test("SC-20254 freezes one distinct bounded full-A/V carrier and rejects identit
   }
 });
 
-test("SC-20254 success/failure receipts are chained, exclusive and canonically rejected", async (t) => {
+test("SC-20254 success/failure receipts are chained, exclusive and canonically rejected", posixIdentityFixture, async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "sc20254-outcome-"));
   t.after(() => cleanupCanaryScratch(root));
   const canonicalOutput = path.join(root, "canonical-campaign-bundle.json");
@@ -1704,7 +1710,7 @@ test("SC-20318 synthetic adapter to harness path yields one distinct schema-vali
   }
 });
 
-test("SC-20430 q8 and bf16 synthetic adapter paths yield distinct schema-valid bundles", async (t) => {
+test("SC-20430 q8 and bf16 synthetic adapter paths yield distinct schema-valid bundles", posixPermissionFixture, async (t) => {
   const repo = await cleanCampaignHarnessRepo(t);
   const records = [];
   const bundles = {};
@@ -2457,7 +2463,7 @@ test("the production runner can only launch through the identity-checked watchdo
   );
   assert.match(
     source,
-    /await assertHostPreflight\(hostMemoryBytes, signal\);\n\s*const status = await new Promise\(\(resolve, reject\) => \{\n\s*const child = spawn/,
+    /withMacMetalExecutionLease\(MAX_RUNTIME_SECONDS, async \(\) => \{\n\s*await assertHostPreflight\(hostMemoryBytes, signal\);\n\s*return await new Promise\(\(resolve, reject\) => \{\n\s*const child = spawn/,
     "the campaign entry host gate must also be the final operation before watchdog launch",
   );
   const boundedController = source.slice(
@@ -2466,9 +2472,14 @@ test("the production runner can only launch through the identity-checked watchdo
   );
   assert.match(
     boundedController,
-    /await assertHostPreflight\(hostMemoryBytes, signal\);\n\s*const status = await new Promise\(\(resolve, reject\) => \{\n\s*const child = spawn/,
+    /withMacMetalExecutionLease\(MAX_RUNTIME_SECONDS, async \(\) => \{\n\s*await assertHostPreflight\(hostMemoryBytes, signal\);\n\s*return await new Promise\(\(resolve, reject\) => \{\n\s*const child = spawn/,
     "the bounded carrier host gate must be the final operation before its one watchdog launch",
   );
+  assert.equal(source.match(/withMacMetalExecutionLease\(MAX_RUNTIME_SECONDS, async \(\) => \{/g)?.length, 3,
+    "each original physical watchdog acquires/reuses the host-global execution lease before its final preflight");
+  assert.equal(source.match(/spawn\("\/usr\/bin\/python3", watchdogArgs, scopedMetalChildOptions\(/g)?.length, 3,
+    "the actual original watchdogs inherit the verified descriptor, never a new model session");
+  assert.match(source, /const \{ preLaunchHost, status \} = await withMacMetalExecutionLease\(MAX_RUNTIME_SECONDS, async \(\) => \{\n\s*const preLaunchHost = await assertHostPreflight/);
   assert.equal(BOUNDED_CARRIER_PROFILE, "bounded-carrier");
   assert.match(boundedController, /--require-provider-phases/);
   assert.match(boundedController, /"--provider-phase-profile", "bounded-carrier"/);
@@ -2499,7 +2510,7 @@ test("the production runner can only launch through the identity-checked watchdo
   assert.match(source, /process\.exitCode = error instanceof CanaryInterrupted \? error\.exitCode : 1/);
 });
 
-test("the runner binds the pinned toolchain and private same-volume artifact clones", async () => {
+test("the runner binds the pinned toolchain and private same-volume artifact clones", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "sc19741-runner-test-"));
   try {
     const source = path.join(root, "source");
@@ -2509,8 +2520,10 @@ test("the runner binds the pinned toolchain and private same-volume artifact clo
     const device = (await stat(root, { bigint: true })).dev;
     await cloneArtifactTree(source, destination, device);
     assert.equal(await readFile(path.join(destination, "weights.safetensors"), "utf8"), "immutable\n");
-    assert.equal((await stat(destination)).mode & 0o777, 0o500);
-    assert.equal((await stat(path.join(destination, "weights.safetensors"))).mode & 0o777, 0o400);
+    await t.test("private artifact clone POSIX mode seals", posixPermissionFixture, async () => {
+      assert.equal((await stat(destination)).mode & 0o777, 0o500);
+      assert.equal((await stat(path.join(destination, "weights.safetensors"))).mode & 0o777, 0o400);
+    });
     const original = { root: source, files: 1, bytes: 10, sha256: "abc" };
     assert.deepEqual(inventoryAtRoot(original, destination), {
       root: destination, files: 1, bytes: 10, sha256: "abc",
@@ -2613,7 +2626,9 @@ test("the exact Cargo build metallib is uniquely selected and overrides every gl
     PMETAL_CACHE_DIR: "/Users/test/.cache/pmetal",
     XDG_CACHE_HOME: "/Users/test/.cache",
   }, roots, prepared, runtimeHome);
-  assert.equal((await stat(runtimeHome)).mode & 0o777, 0o700);
+  await t.test("runtime home POSIX permission seal", posixPermissionFixture, async () => {
+    assert.equal((await stat(runtimeHome)).mode & 0o777, 0o700);
+  });
   assert.deepEqual(await readdir(runtimeHome), []);
   assert.equal(environment.HOME, runtimeHome);
   assert.notEqual(environment.HOME, "/Users/test");
@@ -2667,7 +2682,7 @@ test("preparation identity and cache keys change for every canonical input", () 
   ));
 });
 
-test("a completed cache is atomically reused without rebuilding or rehashing file contents", async (t) => {
+test("a completed cache is atomically reused without rebuilding or rehashing file contents", posixPermissionFixture, async (t) => {
   const fixture = await cacheFixture(t);
   const first = await prepareCanaryCache(fixture.options);
   assert.equal(first.reused, false);
@@ -2697,7 +2712,7 @@ test("a completed cache is atomically reused without rebuilding or rehashing fil
   ]);
 });
 
-test("cache validation rejects canonical identity, completion, permission and metadata mutations", async (t) => {
+test("cache validation rejects canonical identity, completion, permission and metadata mutations", posixPermissionFixture, async (t) => {
   const canonical = await cacheFixture(t);
   await prepareCanaryCache(canonical.options);
   const changedIdentity = structuredClone(canonical.identity);
@@ -2772,7 +2787,7 @@ test("cache validation rejects canonical identity, completion, permission and me
   );
 });
 
-test("partial publication, orphaned ownership and concurrent preparation recover safely", async (t) => {
+test("partial publication, orphaned ownership and concurrent preparation recover safely", posixPermissionFixture, async (t) => {
   const partial = await cacheFixture(t);
   await mkdir(path.dirname(partial.preparationRoot), { recursive: true, mode: 0o700 });
   await mkdir(partial.preparationRoot, { mode: 0o700 });
@@ -2861,7 +2876,7 @@ test("a reused live PID with a different process start identity is recovered as 
   await assert.rejects(() => stat(lock), { code: "ENOENT" });
 });
 
-test("cancellation during clone, build and publication removes owned staging and locks", async (t) => {
+test("cancellation during clone, build and publication removes owned staging and locks", posixPermissionFixture, async (t) => {
   for (const phase of ["clone", "build", "publish"]) {
     const fixture = await cacheFixture(t);
     const cancellation = new AbortController();
@@ -2903,6 +2918,69 @@ test("cancellation during clone, build and publication removes owned staging and
   }
 });
 
+// Synthetic process/census dependencies below never signal any PID. The original real owned
+// CPU cancellation and Darwin zombie fixtures remain unchanged immediately below these cases.
+const completeGroupCensus = (stdout) => ({ status: 0, signal: null, error: undefined, stdout });
+const groupRow = (state, pid = 43211, group = 43210) => `${pid} 43210 ${group} ${state}\n`.replaceAll("\\n", "\n");
+function simulatedGroupDenial(observations) {
+  const denial = Object.assign(new Error("kill EPERM CPU fixture"), { code: "EPERM" });
+  let signals = 0, censuses = 0;
+  const invoke = () => killProcessGroup({ pid: 43210 }, "SIGKILL", {
+    sendSignal(pid, signal) { assert.equal(pid, -43210); assert.equal(signal, "SIGKILL"); signals += 1; throw denial; },
+    censusProcess(program, args) {
+      assert.equal(program, "/bin/ps"); assert.deepEqual(args, ["-axo", "pid=,ppid=,pgid=,stat="]);
+      const result = observations[Math.min(censuses, observations.length - 1)]; censuses += 1;
+      if (result instanceof Error) throw result;
+      return result;
+    },
+  });
+  return { denial, invoke, counts: () => ({ signals, censuses }) };
+}
+for (const [label, final] of [["zombie", groupRow("Z")], ["absent", groupRow("S", 54322, 54321)]]) {
+  test(`EPERM fresh owned-group observation accepts only proved ${label}, without another signal`, () => {
+    const fixture = simulatedGroupDenial([completeGroupCensus(groupRow("S")), completeGroupCensus(final)]);
+    assert.doesNotThrow(fixture.invoke);
+    assert.deepEqual(fixture.counts(), { signals: 1, censuses: 2 });
+  });
+}
+for (const [label, observations] of [
+  ["live", [completeGroupCensus(groupRow("S"))]],
+  ["unknown state", [completeGroupCensus(groupRow("?"))]],
+  ["nonzero census", [{ status: 1, signal: null, stdout: "" }]],
+  ["census error", [Object.assign(new Error("ps unavailable"), { code: "EPERM" })]],
+  ["malformed census", [completeGroupCensus("not a process row\n")]],
+  ["hidden live member beyond diagnostic window", [completeGroupCensus(Array.from({ length: 40 }, (_, index) => groupRow("Z", 50000 + index)).join("") + groupRow("S", 60000))]],
+]) {
+  test(`EPERM ${label} remains an actionable ownership failure, never verified cleanup`, () => {
+    const fixture = simulatedGroupDenial(observations);
+    assert.throws(fixture.invoke, (error) => error === fixture.denial && error.code === "EPERM"
+      && error.ownedGroupCleanup.pgid === 43210 && error.ownedGroupCleanup.observations.length === 2);
+    assert.deepEqual(fixture.counts(), { signals: 1, censuses: 2 });
+    assert.match(fixture.denial.message, /owned group cleanup unverified/);
+    assert.ok(fixture.denial.ownedGroupCleanup.observations.every((observation) => observation.members.length <= 32));
+  });
+}
+test("non-EPERM signalling failures are not retried or hidden", () => {
+  const denial = Object.assign(new Error("invalid signal fixture"), { code: "EINVAL" });
+  assert.throws(() => killProcessGroup({ pid: 43210 }, "SIGKILL", {
+    sendSignal() { throw denial; }, censusProcess() { assert.fail("not an EPERM census"); },
+  }), (error) => error === denial);
+});
+test("close-time cleanup failure rejects controllably and cannot masquerade as completed cancellation", async () => {
+  const child = new EventEmitter(); child.pid = 43210; child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+  const cancellation = new AbortController(), interruption = new CanaryInterrupted("SIGTERM");
+  const failure = Object.assign(new Error("owned cleanup unverified CPU fixture"), { code: "EPERM" });
+  const signals = [];
+  const operation = runOwnedCommand("cpu-fixture-never-executed", [], {
+    signal: cancellation.signal,
+    spawnProcess() { return child; },
+    killOwnedGroup(actual, signal) { assert.equal(actual, child); signals.push(signal); if (signal === "SIGKILL") throw failure; },
+  });
+  cancellation.abort(interruption); child.emit("close", null, "SIGTERM");
+  await assert.rejects(operation, (error) => error === failure && error.cause === interruption && !(error instanceof CanaryInterrupted));
+  assert.deepEqual(signals, ["SIGTERM", "SIGKILL"], "no new signals or cleanup-success classification");
+});
+
 test("signalling a group whose only member is an unreaped zombie is not a failure", { skip: process.platform !== "darwin" && "Darwin-specific EPERM" }, async () => {
   // Darwin answers EPERM, not ESRCH, for a zombie-only group. That is the routine state right after
   // an owned command's root exits and launchd has not yet reaped an orphaned descendant, so the
@@ -2931,7 +3009,7 @@ test("signalling a group whose only member is an unreaped zombie is not a failur
   }
 });
 
-test("owned command cancellation terminates descendants before rejecting", async (t) => {
+test("owned command cancellation terminates descendants before rejecting", posixProcessFixture, async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "sc19741-owned-command-"));
   t.after(() => cleanupCanaryScratch(root));
   const pidFile = path.join(root, "child.pid");

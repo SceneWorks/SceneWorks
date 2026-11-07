@@ -20,9 +20,8 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// The `<safe>` in the API/worker's managed `models/<safe>` download directory. Byte-identical to
-/// the API (`apps/rust-api/src/lib.rs::safe_download_dir`) and the worker
-/// (`sceneworks_worker::paths::safe_download_dir`); receipts written by either are read here.
+/// The `<safe>` in the API/worker's managed `models/<safe>` download directory.
+/// Both re-export this implementation so receipt paths share one compatibility spelling.
 pub fn safe_download_dir(value: &str) -> String {
     let mut output = String::new();
     let mut in_replacement = false;
@@ -160,8 +159,6 @@ type DigestKey = (PathBuf, u64, Option<std::time::SystemTime>);
 /// SHA-256 of `path`, memoized per (path, size, mtime) for the life of the process, so a catalog
 /// read does not re-hash a multi-GB derived weights file that has not changed.
 fn memoized_file_sha256(path: &Path, len: u64) -> std::io::Result<String> {
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
     static CACHE: std::sync::OnceLock<std::sync::Mutex<BTreeMap<DigestKey, String>>> =
         std::sync::OnceLock::new();
     let modified = std::fs::metadata(path)?.modified().ok();
@@ -170,17 +167,7 @@ fn memoized_file_sha256(path: &Path, len: u64) -> std::io::Result<String> {
     if let Some(hit) = cache.lock().ok().and_then(|map| map.get(&key).cloned()) {
         return Ok(hit);
     }
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 1 << 20];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let digest = format!("{:x}", hasher.finalize());
+    let digest = crate::hashing::sha256_file(path)?;
     if let Ok(mut map) = cache.lock() {
         map.insert(key, digest.clone());
     }
@@ -606,7 +593,9 @@ fn string_array_field(payload: &Value, field: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn pattern_matches(pattern: &str, value: &str) -> bool {
+/// Match the manifest/download glob contract: default `glob` options, ASCII case-folded
+/// only on Windows. Malformed patterns never match.
+pub fn pattern_matches(pattern: &str, value: &str) -> bool {
     let (pattern, value) = if cfg!(windows) {
         (pattern.to_ascii_lowercase(), value.to_ascii_lowercase())
     } else {
@@ -615,7 +604,8 @@ fn pattern_matches(pattern: &str, value: &str) -> bool {
     glob::Pattern::new(&pattern).is_ok_and(|pattern| pattern.matches(&value))
 }
 
-fn allow_pattern_matches(path: &str, patterns: &[String]) -> bool {
+/// An empty allow-list permits every path; otherwise any matching pattern permits it.
+pub fn allow_pattern_matches(path: &str, patterns: &[String]) -> bool {
     if patterns.is_empty() {
         return true;
     }
@@ -797,13 +787,14 @@ pub fn receipt_requirements_for_model(
 ) -> Vec<ExternalArtifactRequirement> {
     let model_id = model.get("id").and_then(Value::as_str);
     let mut requirements = Vec::new();
-    let downloads = model
+    let downloads: Vec<_> = model
         .get("downloads")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter(|download| is_supported_model_download(download));
-    for download in downloads {
+        .filter(|download| is_supported_model_download(download))
+        .collect();
+    for download in &downloads {
         if is_co_requisite_download(download)
             && download.get("required").and_then(Value::as_str) == Some("soft")
         {
@@ -825,10 +816,40 @@ pub fn receipt_requirements_for_model(
             .to_owned();
         let declared_files = string_array_field(download, "files");
         for receipt in receipt_file_sets(&managed, repo, receipt_model_id) {
+            // Component installs share the primary's model/repository/variant receipt key.
+            // If a receipt fits a sibling component instead of this primary row, let the exact
+            // primary declaration supply its files. Shared LICENSE/README files do not prove
+            // that the transformer was recorded. Preserve stale primary receipts otherwise.
+            let sibling_component_receipt = !is_co_requisite_download(download)
+                && !declared_files.is_empty()
+                && !receipt
+                    .files
+                    .iter()
+                    .all(|file| allow_pattern_matches(file, &declared_files))
+                && downloads.iter().any(|sibling| {
+                    if !is_co_requisite_download(sibling)
+                        || sibling.get("repo").and_then(Value::as_str) != Some(repo)
+                        || sibling
+                            .get("variant")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .unwrap_or("default")
+                            != variant
+                    {
+                        return false;
+                    }
+                    let files = string_array_field(sibling, "files");
+                    !files.is_empty()
+                        && receipt
+                            .files
+                            .iter()
+                            .all(|file| allow_pattern_matches(file, &files))
+                });
             // A receipt belongs to this row only when its recorded variant matches, or — for
             // legacy variant-less receipts — when its files fall inside this row's declared
             // patterns. Sibling-tier receipts never leak into the selected closure.
-            if receipt
+            if sibling_component_receipt || receipt
                 .variant
                 .as_deref()
                 .is_some_and(|receipt_variant| receipt_variant != variant)
@@ -838,6 +859,17 @@ pub fn receipt_requirements_for_model(
                         .files
                         .iter()
                         .any(|file| allow_pattern_matches(file, &declared_files)))
+                // A co-requisite row reads receipts without a model id, so any receipt in its
+                // repository can reach it, including the primary's when both rows share one
+                // snapshot (sc-27985: MOSS-Image SFT's `moss-shared-snapshot` row inherited the
+                // transformer receipt and lost its own text encoder and VAE files). It belongs to
+                // the row only when every recorded file is one the row declares.
+                || (is_co_requisite_download(download)
+                    && !declared_files.is_empty()
+                    && !receipt
+                        .files
+                        .iter()
+                        .all(|file| allow_pattern_matches(file, &declared_files)))
             {
                 continue;
             }
@@ -938,10 +970,21 @@ pub fn selected_requirements_for_closure(
     let mut requirements = receipt_requirements_for_model(selected, data_dir);
     let receipt_backed = !requirements.is_empty();
     for declared in declared_exact_requirements_for_model(selected) {
+        // A co-requisite row is covered only when an existing requirement of the same identity
+        // already holds every declared file: several co-requisite rows can share a repository and
+        // variant with different files (MOSS's `moss-dmd-lora` / `-time` / `-dataspace`), and
+        // matching on identity alone kept only the first (sc-27985). A primary receipt stays
+        // authoritative even when the current manifest lists different files, so a still-usable
+        // install never gains a second primary.
         if !requirements.iter().any(|requirement| {
             requirement.repository == declared.repository
                 && requirement.variant == declared.variant
                 && requirement.is_primary == declared.is_primary
+                && (declared.is_primary
+                    || declared
+                        .files
+                        .iter()
+                        .all(|file| requirement.files.contains(file)))
         }) {
             requirements.push(declared);
         }
@@ -1147,6 +1190,37 @@ mod tests {
             serde_json::to_vec(&json!({ "receipts": receipts })).unwrap(),
         )
         .unwrap();
+    }
+
+    /// sc-27985: a primary receipt stays authoritative when the current manifest's exact primary
+    /// file list moved on, so a still-usable install keeps exactly one (receipt-backed) primary.
+    #[test]
+    fn a_stale_primary_receipt_is_not_joined_by_the_changed_declared_primary() {
+        let temp = tempfile::tempdir().unwrap();
+        write_receipts(
+            temp.path(),
+            "owner/model",
+            json!([{"repo":"owner/model", "modelId":"model", "variant":"default",
+                    "resolvedFiles":["model-v1.safetensors"], "snapshotRevision": REV_A}]),
+        );
+        let model = json!({
+            "id": "model",
+            "downloads": [
+                {"provider":"huggingface", "repo":"owner/model", "revision": REV_A,
+                 "default":true, "files":["model-v2.safetensors"]}
+            ]
+        });
+
+        let selected =
+            selected_requirements_for_model(&model, std::env::consts::OS, None, temp.path());
+
+        assert!(selected.receipt_backed);
+        assert_eq!(selected.requirements.len(), 1);
+        assert!(selected.requirements[0].is_primary);
+        assert_eq!(
+            selected.requirements[0].files,
+            vec![PathBuf::from("model-v1.safetensors")]
+        );
     }
 
     #[test]

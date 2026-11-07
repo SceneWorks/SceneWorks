@@ -21,7 +21,7 @@ fn artifact_owner(
         "manifestSha256":manifest})
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 fn owner_matches(dir: &Path, run_id: &str, asset_id: &str, sha256: &str) -> WorkerResult<String> {
     let path = dir.join(OWNER_FILE);
     let file = std::fs::File::open(&path)?;
@@ -111,10 +111,7 @@ pub(crate) fn require_unloaded(live: usize) -> WorkerResult<()> {
 /// The narrow injectable boundary around the native cover closure and its explicit unload.
 // The neither build keeps the trait for job routing but has no native transcriber to read these
 // fields; its implementation rejects the request before touching any input.
-#[cfg_attr(
-    not(any(target_os = "macos", feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) struct TranscriptionInput<'a> {
     pub snapshots: &'a [(String, PathBuf)],
     pub audio: gen_core::AudioTrack,
@@ -136,7 +133,7 @@ pub(crate) trait TranscriptionBackend: Send + Sync + 'static {
 
 pub(crate) struct NativeTranscription;
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 impl TranscriptionBackend for NativeTranscription {
     fn live_models(&self) -> usize {
         crate::inference_runtime::audio_providers::candle_audio_sheetsage2::provider::live_models()
@@ -273,7 +270,7 @@ impl TranscriptionBackend for NativeTranscription {
     }
 }
 
-#[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 impl TranscriptionBackend for NativeTranscription {
     fn live_models(&self) -> usize {
         0
@@ -295,7 +292,7 @@ pub(crate) fn live_models() -> usize {
 
 /// A completed artifact may outlive a failed terminal progress POST. A retried job replays that
 /// same immutable artifact instead of loading a second transcriber or overwriting its files.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 async fn published_details(
     dir: &Path,
     source_sha256: &str,
@@ -359,7 +356,7 @@ async fn published_details(
     })))
 }
 
-#[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 async fn published_details(
     dir: &Path,
     _: &str,
@@ -542,7 +539,8 @@ pub(crate) async fn run<B: TranscriptionBackend>(
     };
     let audio = {
         let scratch = decode_scratch(&job.id)?;
-        let disk_cap = fs2::available_space(scratch.path())?.saturating_sub(64 << 20);
+        let disk_cap =
+            sceneworks_core::disk::disk_free_bytes(scratch.path())?.saturating_sub(64 << 20);
         if disk_cap < (2 << 20) || (source_layout.is_some() && output_cap > disk_cap) {
             return Err(WorkerError::InvalidPayload(format!(
                 "yue2: transcription scratch disk cannot admit {:.2} GiB of decoded recording",
@@ -608,7 +606,7 @@ pub(crate) async fn run<B: TranscriptionBackend>(
     let source_sha = source.sha256.clone();
     let partial_for_cleanup = partial.clone();
     let (tx, mut rx) = tokio::sync::watch::channel::<Option<(f64, String)>>(None);
-    let handle = tokio::task::spawn_blocking(move || {
+    let handle = crate::load_progress::spawn_blocking(move || {
         let _lease = lease;
         let mut progress = |fraction, message| {
             tx.send_replace(Some((fraction, message)));
@@ -632,7 +630,7 @@ pub(crate) async fn run<B: TranscriptionBackend>(
     let pump = {
         let api = api.clone();
         let job_id = job.id.clone();
-        tokio::spawn(async move {
+        crate::load_progress::spawn(async move {
             let mut last = None::<Instant>;
             while rx.changed().await.is_ok() {
                 if let Some(at) = last {
@@ -820,7 +818,7 @@ mod tests {
     /// A catalog without either pinned cover component is refused before the backend is entered.
     #[test]
     fn cover_snapshot_resolution_fails_closed_on_missing_component() {
-        let settings = Settings::from_env();
+        let settings = crate::test_env::offline_settings();
         let entry = json!({"conditionalComponents": []});
         let error = cover_snapshots(&settings, &entry).unwrap_err().to_string();
         assert!(error.contains("yue2_sheetsage2"), "{error}");

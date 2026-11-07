@@ -6,11 +6,11 @@
 //! depth-control path ([`crate::image_jobs`] strict control, `ControlKind::Depth`) accepts such an
 //! asset as its control map: [`depth_asset_control_image`] decodes a COPY of the raw map and derives
 //! the near-bright control image through the engine's own adapter
-//! ([`gen_core::iris::depth::near_bright_control_image`]). The `.npy` on disk is only ever read.
+//! ([`gen_core_iris::depth::near_bright_control_image`]). The `.npy` on disk is only ever read.
 
 use std::path::Path;
 
-use gen_core::iris::depth::{near_bright_control_image, DepthMap, VALUE_CONVENTION};
+use gen_core_iris::depth::{near_bright_control_image, DepthMap, VALUE_CONVENTION};
 use sceneworks_core::depth_map::{decode_npy_f32, DEPTH_ASSET_TYPE};
 use sceneworks_core::project_store::ProjectStore;
 use serde_json::Value;

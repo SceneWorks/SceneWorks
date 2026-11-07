@@ -760,10 +760,15 @@ impl Default for TrainingCaptionOptions {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ImageJobRequest {
     pub(crate) project_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) appearance: Option<sceneworks_core::appearance::AppearanceSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) moss_image_advanced: Option<sceneworks_core::moss_image_advanced::EditAdvanced>,
     #[serde(default)]
     pub(crate) project_name: Option<String>,
     #[serde(default = "default_image_mode")]
     pub(crate) mode: String,
+    #[serde(default)]
     pub(crate) prompt: String,
     /// A NATIVE prompt batch (sc-25681): prompts the model renders together in one pass, only for a
     /// model declaring `image.maxPromptBatchImages` (Iris-3B). `prompt` must equal `prompts[0]`.
@@ -841,6 +846,24 @@ pub(crate) struct ImageJobRequest {
     // (sc-6358). Mirrors VideoJobRequest.reference_asset_ids.
     #[serde(default)]
     pub(crate) reference_asset_ids: Vec<String>,
+    // Keep these carriers visible to family validation. FLUX.3 must refuse unsupported strength,
+    // not let serde erase it and enqueue a different request (including an explicit 1.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) strength: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reference_strength: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) denoising_strength: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) image_strength: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) ip_adapter_scale: Option<Value>,
+    #[serde(
+        default,
+        rename = "ip_adapter_scale",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) ip_adapter_scale_snake: Option<Value>,
     // Optional inpaint mask asset (sc-2476): white = edit region. Honored only by
     // inpaint-capable models (the `image_inpaint` capability, SDXL family); others
     // ignore it and run the whole-image edit. Threaded to the worker payload as-is.
@@ -1055,6 +1078,8 @@ pub(crate) fn default_interleave_max_images() -> u32 {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct VideoJobRequest {
     pub(crate) project_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) appearance: Option<sceneworks_core::appearance::AppearanceSelection>,
     #[serde(default)]
     pub(crate) project_name: Option<String>,
     #[serde(default = "default_video_mode")]
@@ -1064,6 +1089,10 @@ pub(crate) struct VideoJobRequest {
     pub(crate) negative_prompt: String,
     #[serde(default = "default_video_model")]
     pub(crate) model: String,
+    /// Original immutable import identity when replaying a recipe. Never a replacement catalog
+    /// entry: the server resolves today's plan and refuses if it no longer matches this identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) expected_imported_model_ref: Option<Value>,
     /// Clip length in seconds, or `None` when the caller named none — which the MCP server does
     /// whenever *its* caller does (`server.rs` omits the key rather than sending a default).
     ///
@@ -1236,6 +1265,9 @@ pub(crate) struct AudioJobRequest {
     /// range is the real gate the generator's `validate` applies (sc-13409).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) guidance: Option<f32>,
+    /// Optional native flow schedule shift; omitted preserves the model default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) scheduler_shift: Option<f32>,
     /// Solver step count for diffusion-audio models (Sound FX / MOSS-SoundEffect + Music / ACE-Step).
     /// Rides the top-level [`gen_core::GenerationRequest::steps`]. `None` ⇒ the model's default (MOSS:
     /// 100; ACE-Step turbo: 8). Bounded to a blanket sane ceiling here; the model's advertised step
@@ -1372,6 +1404,10 @@ pub(crate) struct ModelDownloadRequest {
     /// else the first supported entry) — the back-compat single-variant behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) variant: Option<String>,
+    /// Repair one missing resident row of a plan-backed imported H3 assembly. The server binds
+    /// this identifier to its persisted component closure; it never accepts a repo or file path.
+    #[serde(default)]
+    pub(crate) component_id: Option<String>,
     /// The caller asserts the user has accepted the license of the weights this request FETCHES
     /// (sc-17227). Read by `create_model_download_job` and `create_lora_download_job`, which share
     /// this body. Consulted when the catalog entry the path id names carries
@@ -1510,6 +1546,11 @@ pub(crate) struct ModelImportRequest {
     pub(crate) files: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) family: Option<String>,
+    /// Explicit MiniMax-H3 compatibility: tensor architecture cannot identify its operation partition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) base_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) minimax_h3_partition: Option<String>,
     /// Optional caller-supplied SHA-256 of the imported file. When present, the worker
     /// verifies the downloaded file against it and fails on a mismatch (sc-6137). HF
     /// repo imports are verified automatically from HF's own per-file digests.

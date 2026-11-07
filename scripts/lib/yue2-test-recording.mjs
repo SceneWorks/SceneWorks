@@ -1,3 +1,4 @@
+import { sha256 } from "./file-sha256.mjs";
 // sc-23002 (epic 22988): the redistributable source recording the YuE2 terminal acceptance run
 // transcribes (AT2: recording → reviewed transcription → cover). It is generated, never committed:
 // the theme of Beethoven's "Ode to Joy" (public domain), played by a harmonic-rich lead over a
@@ -7,7 +8,6 @@
 // Math.pow or Math.exp, whose results the ECMAScript spec leaves implementation-approximated — so
 // the bytes (and their SHA-256) are the same on every host and Node release.
 
-import { createHash } from "node:crypto";
 
 export const RECORDING_GENERATOR_ID = "sceneworks-yue2-ode-to-joy-v1";
 export const SILENCE_GENERATOR_ID = "sceneworks-digital-silence-v1";
@@ -121,7 +121,6 @@ export function pcm16Wav(samples, rate) {
   return Buffer.concat([header, data]);
 }
 
-const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 /** The Ode to Joy test recording: its WAV bytes, SHA-256 and what made it. */
 export function generateTestRecording() {

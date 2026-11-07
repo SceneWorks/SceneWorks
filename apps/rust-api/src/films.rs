@@ -421,7 +421,9 @@ fn render_resolutions(plan: &ProductionPlan, capabilities: &PlannerCapabilities)
 fn clear_step_override(plan: &mut ProductionPlan) {
     if let Some(advanced) = plan.model.advanced.as_mut() {
         advanced.steps = None;
-        if advanced.reference_image_short_edge.is_none() {
+        if advanced.reference_image_short_edge.is_none()
+            && advanced.reference_image_resize_mode.is_none()
+        {
             plan.model.advanced = None;
         }
     }
@@ -451,7 +453,7 @@ pub(crate) async fn update_reference_pack(
         project_call(state, move |store| {
             let mut draft = store.get_film_draft(&project_id, &draft_id)?;
             if draft.revision != payload.draft_revision {
-                return Err(ProjectStoreError::BadRequest(format!(
+                return Err(ProjectStoreError::Conflict(format!(
                     "Film draft revision conflict: expected {}, got {}",
                     draft.revision, payload.draft_revision
                 )));

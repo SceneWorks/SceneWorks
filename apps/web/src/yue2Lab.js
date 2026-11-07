@@ -31,18 +31,7 @@ export {
   yue2TakeFilename,
 };
 
-// What a job does (core `Yue2JobKind`).
-export const YUE2_KINDS = Object.freeze([
-  "create",
-  "plan",
-  "fromPlan",
-  "cover",
-  "renderVersion",
-  "decode",
-  "transcribe",
-]);
-
-export const YUE2_KIND_LABELS = Object.freeze({
+const YUE2_KIND_LABELS = Object.freeze({
   create: "Song",
   plan: "Plan only",
   fromPlan: "From saved plan",
@@ -105,7 +94,7 @@ export const SAMPLING_TOKEN_DEFAULTS = Object.freeze({
   semanticSampling: { minTokens: 200, maxTokens: 9000 },
 });
 
-export function emptySampling() {
+function emptySampling() {
   return Object.fromEntries(SAMPLING_FIELDS.map((field) => [field.key, ""]));
 }
 
@@ -312,7 +301,7 @@ function compact(object) {
   return Object.keys(out).length ? out : undefined;
 }
 
-export function samplingBody(raw) {
+function samplingBody(raw) {
   if (!raw || typeof raw !== "object") {
     return undefined;
   }
@@ -433,7 +422,7 @@ function transcriptionBody(s) {
 }
 
 // SheetSage2 transcribes 300 s windows; core `check_transcription`'s defaults and bounds.
-export const TRANSCRIPTION_WINDOW_SECONDS = 300;
+const TRANSCRIPTION_WINDOW_SECONDS = 300;
 export const TRANSCRIPTION_DEFAULT_OVERLAP_SECONDS = 200;
 export const TRANSCRIPTION_DEFAULT_LOOKAHEAD_SECONDS = 100;
 
@@ -583,7 +572,7 @@ export function yue2RequestProblems(kind, settings, target = {}, context = {}) {
 
 // A seed is shown, recorded and exported through JavaScript, where a Number is exact only up to
 // 2^53 - 1: a larger typed seed would silently become a different one, so it is refused.
-export const MAX_SAFE_SEED = Number.MAX_SAFE_INTEGER;
+const MAX_SAFE_SEED = Number.MAX_SAFE_INTEGER;
 
 export function seedValueProblem(raw) {
   if (raw === "" || raw === null || raw === undefined) {
@@ -670,7 +659,7 @@ export function yue2CoverSetup(model) {
 }
 
 // `cc-by-nc-4.0` → `CC BY-NC 4.0`: the catalog's licence id, as a licence is printed.
-export function componentLicenseLabel(id) {
+function componentLicenseLabel(id) {
   const match = typeof id === "string" ? id.match(/^cc-([a-z-]+)-(\d\.\d)$/i) : null;
   return match ? `CC ${match[1].toUpperCase()} ${match[2]}` : (id ?? "");
 }
@@ -697,7 +686,7 @@ export function midiNoteLabel(midi) {
 }
 
 const EXPORT_KIND_ORDER = ["midi", "lab", "abc", "json", "text", "data"];
-export const EXPORT_KIND_LABELS = Object.freeze({
+const EXPORT_KIND_LABELS = Object.freeze({
   midi: "MIDI",
   lab: "LAB (timed labels)",
   abc: "ABC scores",
@@ -847,7 +836,7 @@ const TRUNCATION_TEXT = {
     "The semantic tokens reached their budget and were cut short — the recording ends before the lyrics do.",
 };
 
-export function isYue2Job(job) {
+function isYue2Job(job) {
   return Boolean(job?.payload && typeof job.payload === "object" && job.payload.yue2);
 }
 
@@ -977,9 +966,9 @@ export function yue2RunExport(job, assets = [], exportedAt = new Date().toISOStr
 // Exported .abc files open with a `%` comment naming the licence, so a score file that leaves the
 // app keeps the noncommercial distinction (E2). The native YuE2 dialect requires `X:1` on the
 // first line, so the lab strips this header again whenever a score is pasted back in.
-export const ABC_EXPORT_MARKER = "% SceneWorks YuE2 export:";
+const ABC_EXPORT_MARKER = "% SceneWorks YuE2 export:";
 
-export function yue2AbcExportHeader(policy) {
+function yue2AbcExportHeader(policy) {
   const license = policy?.license?.license || licenseFromNotice(policy?.license?.notice) || "see the model licence";
   const parts = [`${ABC_EXPORT_MARKER} weights licence ${license}`];
   if (policy?.nonCommercial !== false) {

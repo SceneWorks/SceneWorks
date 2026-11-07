@@ -11,7 +11,7 @@
 //! This module owns the Iris-specific pieces those surfaces share:
 //!
 //! * **the plan** ([`preview_restore_plan`]) — the engine's own pure planner
-//!   (`gen_core::iris::restoration::plan`) run with no weights, so the UI can show the real
+//!   (`gen_core_iris::restoration::plan`) run with no weights, so the UI can show the real
 //!   processing and output dimensions BEFORE submission, labelled honestly when the input budget
 //!   downscaled the source ([`plan_summary`]); the job records the same plan on its result;
 //! * **the install** ([`resolve_restore_export_dir`]) — cache-only resolution of the task's own
@@ -25,10 +25,10 @@
 
 use std::path::{Path, PathBuf};
 
-use gen_core::iris::restoration::{
+use gen_core::{CancelFlag, InputSizing, TargetSize, TransformRequest};
+use gen_core_iris::restoration::{
     self, Dims, RestorationOptions, RestorationPlan, RestorationResources, TileGeometry,
 };
-use gen_core::{CancelFlag, InputSizing, TargetSize, TransformRequest};
 use sceneworks_core::image_restoration::{IrisRestoreParams, RestoreInputSizing};
 use serde::Serialize;
 
@@ -37,16 +37,16 @@ use crate::{Settings, WorkerError, WorkerResult};
 /// The registered transform id (and catalog entry id) — one name for both, asserted in the tests.
 pub const IRIS_RESTORE_MODEL_ID: &str = restoration::MODEL_ID;
 /// The upstream weights repo and the exact revision the `iris_3b_restore` catalog entry installs.
-pub(crate) const IRIS_RESTORE_REPO: &str = gen_core::iris::UPSTREAM_WEIGHTS_REPO;
-pub(crate) const IRIS_RESTORE_REVISION: &str = gen_core::iris::UPSTREAM_WEIGHTS_REVISION;
+pub(crate) const IRIS_RESTORE_REPO: &str = gen_core_iris::UPSTREAM_WEIGHTS_REPO;
+pub(crate) const IRIS_RESTORE_REVISION: &str = gen_core_iris::UPSTREAM_WEIGHTS_REVISION;
 /// The restoration task's export folder inside the repo.
 pub(crate) fn restore_subdir() -> &'static str {
-    gen_core::iris::IrisTask::Restoration.backbone_subdir()
+    gen_core_iris::IrisTask::Restoration.backbone_subdir()
 }
 /// The three files of the export — the task's whole resource closure.
 pub(crate) const RESTORE_EXPORT_FILES: [&str; 3] = [
-    gen_core::iris::BACKBONE_CONFIG_FILE,
-    gen_core::iris::BACKBONE_WEIGHTS_FILE,
+    gen_core_iris::BACKBONE_CONFIG_FILE,
+    gen_core_iris::BACKBONE_WEIGHTS_FILE,
     restoration::EMPTY_PROMPT_FILE,
 ];
 
@@ -320,7 +320,7 @@ pub fn restore_plan_geometry(
     let dir = crate::iris_task_training::trained_task_export_dir(
         data_dir,
         model,
-        gen_core::iris::IrisTask::Restoration,
+        gen_core_iris::IrisTask::Restoration,
     )
     .map_err(|detail| format!("Iris restoration: {detail}"))?;
     let resources = RestorationResources::from_dir(&dir, IRIS_RESTORE_MODEL_ID)
@@ -469,15 +469,15 @@ pub(crate) const MLX_FLOOR_GB: f64 = 14.0;
 pub(crate) const CANDLE_FLOOR_GB: f64 = 12.0;
 /// The reserve each lane's gate keeps free on top of the floor (the legacy unified foreign-resident
 /// reserve on MLX, the dedicated-VRAM allocator slack on CUDA — both 2 GiB in this worker).
-pub(crate) const MLX_RESERVE_GB: f64 = 2.0;
-pub(crate) const CANDLE_RESERVE_GB: f64 = 2.0;
+pub(crate) const MLX_RESERVE_GB: f64 = crate::fit_gate::LEGACY_UNIFIED_FALLBACK_RESERVE_GB;
+pub(crate) const CANDLE_RESERVE_GB: f64 = crate::fit_gate::dedicated_vram_reserve().gb;
 /// Peak host bytes per pixel of the patch-padded processing canvas: the f32 bicubic reference, the
 /// padded model input, the fused output and its weight plane during tiling, then the colour fix's
 /// per-channel wavelet planes and the restored planes after it — 96 B/px is a conservative bound.
 pub(crate) const CANVAS_BYTES_PER_PIXEL: u64 = 96;
 /// The processing canvas the floors' evidence covered (2048×1536).
 pub(crate) const REFERENCE_CANVAS_PIXELS: u64 = 2048 * 1536;
-const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+const BYTES_PER_GIB: f64 = crate::fit_gate::BYTES_PER_GIB;
 
 /// Predicted peak (GiB) of `plan` on `lane`. On unified memory the output canvas beyond the
 /// reference geometry is added on top of the floor (host buffers draw from the same pool as the
@@ -542,23 +542,16 @@ pub(crate) fn admission_error(
 /// (or capped) VRAM of this worker's card on CUDA. Both honour the existing small-device emulation
 /// caps (`SCENEWORKS_MLX_MEMORY_CAP_GB` / `SCENEWORKS_CUDA_VRAM_CAP_GB`).
 #[cfg(target_os = "macos")]
-pub(crate) async fn live_total_gb(_settings: &Settings) -> Option<f64> {
-    let real = crate::mlx_fit_gate::probe_total_unified_memory_bytes()
-        .map(|bytes| bytes as f64 / BYTES_PER_GIB);
-    crate::mlx_fit_gate::resolve_budget(real, crate::mlx_fit_gate::mlx_memory_cap_gb())
-        .map(|budget| budget.total_gb)
+pub(crate) async fn live_total_gb(settings: &Settings) -> Option<f64> {
+    crate::fit_gate::lane_total_gb(&settings.gpu_id).await
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(crate) async fn live_total_gb(settings: &Settings) -> Option<f64> {
-    crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    )
-    .map(|budget| budget.total_gb)
+    crate::fit_gate::lane_total_gb(&settings.gpu_id).await
 }
 
-#[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 pub(crate) async fn live_total_gb(_settings: &Settings) -> Option<f64> {
     None
 }

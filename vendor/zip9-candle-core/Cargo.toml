@@ -1,0 +1,100 @@
+# Vendored candle-core (sc-24441) - see VENDORED.md.
+#
+# Upstream's manifest inherits every field and dependency from the candle workspace
+# (`*.workspace = true`). This copy lives outside that workspace, so each inherited entry is
+# spelled out here with exactly the value upstream's root Cargo.toml @1e6aa85e declares; the
+# three sibling crates upstream reaches by path (candle-kernels, candle-metal-kernels, candle-ug)
+# are the same crates at the same git revision the pin resolves today (candle-kernels is then
+# redirected to the vendored multi-arch copy by the workspace [patch], as before). Nothing else
+# differs from upstream's Cargo.toml: features, targets, dev-dependencies, benches and examples
+# are upstream's.
+[package]
+name = "candle-core"
+version = "0.10.2"
+edition = "2021"
+description = "Minimalist ML framework."
+repository = "https://github.com/huggingface/candle"
+keywords = ["blas", "tensor", "machine-learning"]
+categories = ["science"]
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+
+[dependencies]
+accelerate-src = { version = "0.3.2", optional = true }
+byteorder = "1.4.3"
+candle-kernels = { git = "https://github.com/huggingface/candle", rev = "1e6aa85e867eb007cba1b8bae517a10d1aaf0c0d", version = "0.10.2", optional = true }
+candle-metal-kernels = { git = "https://github.com/huggingface/candle", rev = "1e6aa85e867eb007cba1b8bae517a10d1aaf0c0d", version = "0.10.2", optional = true }
+objc2-metal = { version = "0.3.1", optional = true }
+objc2-foundation = { version = "0.3.1", optional = true }
+cudarc = { version = "0.19.4", features = [
+    "std",
+    "cublas",
+    "cublaslt",
+    "curand",
+    "driver",
+    "nvrtc",
+    "f16",
+    "f8",
+    "cuda-version-from-build-system",
+    "dynamic-linking",
+], default-features = false, optional = true }
+gemm = { version = "0.19.0", features = ["wasm-simd128-enable"] }
+half = { version = "2.5.0", features = [
+    "num-traits",
+    "use-intrinsics",
+    "rand_distr",
+] }
+float8 = { version = "0.7.0", features = ["num-traits", "rand_distr"] }
+intel-mkl-src = { version = "0.8.1", features = ["mkl-static-lp64-iomp"], optional = true }
+libc = { version = "0.2.147", optional = true }
+libm = { version = "0.2.15" }
+memmap2 = { version = "0.9.3", features = ["stable_deref_trait"] }
+num-traits = "0.2.15"
+num_cpus = "1.15.0"
+rand = "0.9.0"
+rand_distr = "0.5.1"
+rayon = "1.7.0"
+safetensors = "0.7.0"
+thiserror = "2"
+yoke = { version = "0.8.1", features = ["derive"] }
+zip = { version = "9.0.5", default-features = false }
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokenizers = { version = "0.22.0", default-features = false, features = ["onig"] }
+
+[target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))'.dependencies]
+candle-ug = { git = "https://github.com/huggingface/candle", rev = "1e6aa85e867eb007cba1b8bae517a10d1aaf0c0d", version = "0.10.2", optional = true }
+
+[dev-dependencies]
+anyhow = { version = "1", features = ["backtrace"] }
+clap = { version = "4.2.4", features = ["derive"] }
+criterion = { version = "0.8", default-features = false }
+
+[features]
+default = []
+cuda = ["cudarc", "dep:candle-kernels", "candle-ug?/cuda"]
+cudnn = ["cuda", "cudarc/cudnn"]
+nccl = ["cuda", "cudarc/nccl"]
+mkl = ["dep:libc", "dep:intel-mkl-src"]
+accelerate = ["dep:libc", "dep:accelerate-src"]
+metal = [
+    "dep:objc2-metal",
+    "dep:objc2-foundation",
+    "dep:candle-metal-kernels",
+    "candle-ug?/metal",
+]
+ug = ["dep:candle-ug"]
+
+[[bench]]
+name = "bench_main"
+harness = false
+
+[[example]]
+name = "metal_basics"
+required-features = ["metal"]
+
+[[example]]
+name = "cuda_basics"
+required-features = ["cuda"]
+
+# Keep this dependency leaf isolated even inside nested application worktrees.
+[workspace]

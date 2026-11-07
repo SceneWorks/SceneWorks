@@ -1,21 +1,16 @@
 #[allow(unused_imports)]
 use super::prelude::*;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use super::wan::{advanced_opt_f32, advanced_opt_u32, generate_video_using, VideoGenInput};
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use runtime_cuda as platform_runtime;
+#[cfg(target_os = "macos")]
+use runtime_macos as platform_runtime;
+#[cfg(native_lane)]
 use sceneworks_core::video_request::{classify_reference_set, ReferenceSetVerdict};
 
 /// Catalog-only optional component staging shared by both native H3 routes. Never fetches.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn resolve_veda_predictor_offline(settings: &Settings) -> Option<WeightsSource> {
     let identity = sceneworks_core::managed_file::builtin_identities()
         .ok()?
@@ -29,6 +24,39 @@ pub(super) fn resolve_veda_predictor_offline(settings: &Settings) -> Option<Weig
         "coRequisite": true, "componentId": "veda_predictor"
     }] });
     crate::model_jobs::resolve_optional_component(&manifest, "veda_predictor", settings)
+}
+
+/// Opt-in validation observes the allocator's continuous high-water counters, including errors.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn record_cuda_proof_pool(job_id: &str, stage: &str) -> WorkerResult<()> {
+    let snapshot = runtime_cuda::media::candle_core::cuda_backend::proof_pool::snapshot(0)
+        .map_err(|error| WorkerError::Engine(format!("H3 CUDA proof pool: {error}")))?;
+    if let Some(pool) = snapshot {
+        let (free, total) =
+            runtime_cuda::media::candle_core::cuda::cudarc::driver::result::mem_get_info()
+                .map_err(|error| {
+                    WorkerError::Engine(format!("H3 CUDA device memory observation: {error}"))
+                })?;
+        let device_used_bytes = total.checked_sub(free).ok_or_else(|| {
+            WorkerError::Engine(
+                "H3 CUDA device memory observation returned free above total".into(),
+            )
+        })? as u64;
+        tracing::info!(
+            event = "h3_cuda_proof_pool_snapshot",
+            jobId = job_id,
+            stage,
+            logical_ordinal = pool.logical_ordinal,
+            cap_bytes = pool.cap_bytes,
+            device_used_bytes,
+            used_bytes = pool.used_bytes,
+            used_high_bytes = pool.used_high_bytes,
+            reserved_bytes = pool.reserved_bytes,
+            reserved_high_bytes = pool.reserved_high_bytes,
+            "observed the bounded CUDA allocator"
+        );
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -107,17 +135,14 @@ const CANDLE_MINIMAX_H3_TIER_REPO: &str = "SceneWorks/minimax-h3-mlx";
 
 /// The ONE registry id both catalog entries load. See fact 1 above — the partition split is a
 /// directory, not a provider.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) const MINIMAX_H3_ENGINE_ID: &str = "minimax_h3";
 
 /// The staged-component key `mlx-gen-minimax-h3::model::DIT_COMPONENT` reads the tiered DiT from.
 /// Named `"transformer"` even when the request will denoise on `transformer_ref/`: the provider
 /// resolves the reference partition as this directory's SIBLING, so the base partition is always
 /// what is staged.
-#[cfg(target_os = "macos")]
+#[cfg(native_lane)]
 pub(super) const MINIMAX_H3_DIT_COMPONENT: &str = "transformer";
 
 // The staged-component key `mlx-gen-minimax-h3::resolve_text_encoder_dir` reads the PACKED, per-tier
@@ -152,10 +177,7 @@ pub(super) const MINIMAX_H3_BASE_DIR_ENV: &str = "SCENEWORKS_MLX_MINIMAX_H3_BASE
 ///
 /// Keyed off `sceneworks_core::video_request::is_minimax_h3_model` rather than a retyped id list so
 /// this cannot drift from the predicate every other MiniMax-H3 gate in the app already uses.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn minimax_h3_engine_id(model: &str) -> Option<&'static str> {
     sceneworks_core::video_request::is_minimax_h3_model(model).then_some(MINIMAX_H3_ENGINE_ID)
 }
@@ -311,11 +333,10 @@ pub(super) fn resolve_minimax_h3_load(
             })?
         }
     };
-    let Some(tier) = order
-        .iter()
-        .copied()
-        .find(|tier| minimax_h3_tier_dir_is_complete(&tier_root.join(tier)))
-    else {
+    let Some(tier) = order.iter().copied().find(|tier| {
+        let dir = tier_root.join(tier);
+        minimax_h3_tier_dir_is_complete(&dir)
+    }) else {
         // Say WHICH half is missing. The two partitions are separate downloads owned by separate
         // catalog entries, so "no complete tier" alone would send a user who installed one of them
         // back to re-download the one they already have.
@@ -422,10 +443,7 @@ pub(super) fn resolve_minimax_h3_load(
 /// Not a duplicate of the API's `reference_limit_error` (sc-17160): that bounds HOW MANY references
 /// each entry accepts (the base entry declares 0/0/0). This bounds the SHAPE, and it is the layer a
 /// job replayed from an older row or produced by any future non-HTTP path passes through.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn minimax_h3_validate_partition(request: &VideoRequest) -> WorkerResult<()> {
     let has_keyframes = request.source_asset_id.is_some() || request.last_frame_asset_id.is_some();
     let image_refs = request.reference_asset_ids.len();
@@ -568,22 +586,16 @@ pub(super) fn ensure_minimax_h3_renderable(
 /// top-level `__metadata__["alpha"]` string, then `DEFAULT_LORA_ALPHA = 8`, never the rank. Nothing
 /// about that fold belongs on this side: `defaultWeight` is the runtime `lora_scale` MULTIPLIER and
 /// the catalog leaves it at 1.0 so the file's own alpha/rank fold lands unmodified.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn resolve_minimax_h3_adapters(
     settings: &Settings,
     request: &VideoRequest,
-) -> WorkerResult<Vec<AdapterSpec>> {
+) -> WorkerResult<PreparedVideoAdapters> {
     super::resolve_dense_adapters(settings, request, MAX_JOB_LORAS)
 }
 
 /// Convert the shared validated wire controls without changing either native route's request.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn requested_h3_veda(
     request: &VideoRequest,
     steps: Option<u32>,
@@ -634,14 +646,9 @@ pub(super) fn requested_h3_veda(
 ///
 /// An explicit `advanced.steps` wins over the variant's own count, exactly as `scail2_sampling`
 /// lets it — upstream's spec table lists the 8-step file as "8 / 4", so a caller who knows the
-/// checkpoint can run it shorter. The shift is NOT overridable the same way: `advanced.schedulerShift`
-/// still reaches the base regime (it is the pre-existing knob this arm already read), but under a
-/// turbo variant the trained shift wins, because a distilled checkpoint sampled at a shift it was
-/// not distilled for is the off-distribution render the recipe exists to prevent.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+/// checkpoint can run it shorter. An explicit `advanced.schedulerShift` likewise wins over the
+/// variant's trained video shift; when omitted, the recipe supplies its trained default.
+#[cfg(native_lane)]
 pub(super) fn minimax_h3_sampling(
     request: &VideoRequest,
 ) -> WorkerResult<(
@@ -664,7 +671,7 @@ pub(super) fn minimax_h3_sampling(
     };
     Ok((
         advanced_opt_u32(request, "steps").or(Some(recipe.steps)),
-        Some(recipe.video_shift),
+        advanced_opt_f32(request, "schedulerShift").or(Some(recipe.video_shift)),
         Some(recipe),
     ))
 }
@@ -706,10 +713,7 @@ pub(super) fn minimax_h3_sampling(
 /// source file rather than from anything the caller sent, so it is invisible in both the payload
 /// and the output. A clip supplied silently without audio and a silent clip are the same render and
 /// should read as the same record; a clip whose soundtrack WAS used is a different one.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn minimax_h3_raw_settings(
     request: &VideoRequest,
     tier: &str,
@@ -722,6 +726,20 @@ pub(super) fn minimax_h3_raw_settings(
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("model".to_owned(), Value::String(request.model.clone()));
+    // sc-26691. The RESOLVED reference resize policy, written whether or not the caller named one:
+    // a request that named none rendered under the engine's `match`, and recording that is what
+    // keeps an asset made today distinguishable from a pre-sc-26691 one (which has no key and was
+    // rendered under the forced short edge, i.e. `diffusers`). The arms refused a malformed value
+    // before this point, so the fallback below is never the recorded answer to a bad request.
+    let resize_mode = sceneworks_core::video_request::effective_reference_image_resize_mode(
+        sceneworks_core::video_request::requested_reference_image_resize_mode(&request.advanced)
+            .ok()
+            .flatten(),
+    );
+    raw.insert(
+        sceneworks_core::video_request::REFERENCE_IMAGE_RESIZE_MODE_KEY.to_owned(),
+        Value::String(resize_mode.as_str().to_owned()),
+    );
     raw.insert("fps".to_owned(), json!(request.fps));
     raw.insert("minimaxH3Tier".to_owned(), Value::String(tier.to_owned()));
     raw.insert("minimaxH3Task".to_owned(), Value::String(task.to_owned()));
@@ -755,6 +773,23 @@ pub(super) fn minimax_h3_raw_settings(
             .unwrap_or(sceneworks_core::minimax_h3_turbo::ENGINE_AUDIO_SIGMA_SHIFT)),
     );
     Value::Object(raw)
+}
+
+/// `advanced.referenceImageResizeMode` mapped onto the engine's own enum (sc-26691), or `None` when
+/// the request named none (gen-core then resolves `match`). Parsed and REFUSED here, like the short
+/// edge beside it, so a typo costs a payload parse rather than a 53 GB text-encoder load.
+#[cfg(native_lane)]
+pub(super) fn minimax_h3_reference_image_resize_mode(
+    advanced: &sceneworks_core::contracts::JsonObject,
+) -> WorkerResult<Option<gen_core::ReferenceImageResizeMode>> {
+    use sceneworks_core::video_request::ReferenceImageResizeMode as Requested;
+    let requested = sceneworks_core::video_request::requested_reference_image_resize_mode(advanced)
+        .map_err(WorkerError::InvalidPayload)?;
+    Ok(requested.map(|mode| match mode {
+        Requested::Match => gen_core::ReferenceImageResizeMode::Match,
+        Requested::Max => gen_core::ReferenceImageResizeMode::Max,
+        Requested::Diffusers => gen_core::ReferenceImageResizeMode::Diffusers,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -812,10 +847,7 @@ pub(super) fn minimax_h3_raw_settings(
 /// Read off the SHARED `MINIMAX_H3_FPS` rather than retyped: the engine resamples every reference
 /// onto `crate::denoise::MINIMAX_H3_FPS`, and the two being the same number is not a coincidence to
 /// be maintained in two places.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) const MINIMAX_H3_REFERENCE_CLIP_FPS: u32 =
     sceneworks_core::video_request::MINIMAX_H3_FPS;
 
@@ -826,10 +858,7 @@ pub(super) const MINIMAX_H3_REFERENCE_CLIP_FPS: u32 =
 /// UP to it (the engine's `resolve_canvas_size` does its own upscale, and doing it twice only
 /// costs), and never pads. Its whole job is to keep a 4K source from being materialized at 25 MB a
 /// frame for a canvas that is about to throw 90% of it away.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) const MINIMAX_H3_CANVAS_SHORT_EDGE: u32 = 768;
 
 /// The audio VAE's rate (`mlx-gen-minimax-h3::audio_config::AUDIO_SAMPLE_RATE`). The engine has no
@@ -839,10 +868,7 @@ pub(super) const MINIMAX_H3_CANVAS_SHORT_EDGE: u32 = 768;
 /// literal: a video reference's own soundtrack (extracted here) and a standalone audio reference
 /// (extracted by `super::reference_audio`, which cannot see this backend-gated module) are checked
 /// against the SAME engine constant, so they can never drift apart.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) const MINIMAX_H3_AUDIO_SAMPLE_RATE: u32 =
     super::reference_audio::REFERENCE_AUDIO_SAMPLE_RATE;
 
@@ -854,10 +880,7 @@ pub(super) const MINIMAX_H3_AUDIO_SAMPLE_RATE: u32 =
 /// refused deep inside the denoise loop. An ALIAS of the ungated
 /// [`super::reference_audio::REFERENCE_AUDIO_CHANNELS`], which records the measurement, for the
 /// same anti-drift reason [`MINIMAX_H3_AUDIO_SAMPLE_RATE`] is one.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) const MINIMAX_H3_REFERENCE_AUDIO_CHANNELS: u32 =
     super::reference_audio::REFERENCE_AUDIO_CHANNELS as u32;
 
@@ -871,10 +894,7 @@ pub(super) const MINIMAX_H3_REFERENCE_AUDIO_CHANNELS: u32 =
 ///
 /// It is re-derived here from its three inputs rather than written as a literal so a fine-tune that
 /// moved either rate would move this with it.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) const MINIMAX_H3_MIN_REFERENCE_CLIP_FRAMES: usize = {
     // `VIDEO_SAMPLE_FPS = 2.0`, `VISION_TEMPORAL_PATCH = 2`.
     let sample_fps = 2usize;
@@ -893,20 +913,14 @@ pub(super) const MINIMAX_H3_MIN_REFERENCE_CLIP_FRAMES: usize = {
 /// cinemascope source is not decoded to a PNG sequence the engine is about to shrink anyway.
 /// Tied to the pinned engine's own const by
 /// `minimax_h3_reference_clip_filter_never_pads_or_upscales`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) const MINIMAX_H3_CANVAS_MAX_PIXELS: u32 = MINIMAX_H3_CANVAS_SHORT_EDGE * 1344;
 
 /// The widest aspect ratio, either way up, that MiniMax-H3 reads a reference at —
 /// `keyframe::MAX_ASPECT_RATIO`, i.e. 1:4 to 4:1. Checked per decoded clip so a panoramic source is
 /// refused from the asset instead of from inside `Ref2VaReferences::new` after the decode has
 /// already been paid for.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) const MINIMAX_H3_MAX_REFERENCE_ASPECT: f64 = 4.0;
 
 /// The `-vf` chain a reference clip is extracted through.
@@ -934,10 +948,7 @@ pub(super) const MINIMAX_H3_MAX_REFERENCE_ASPECT: f64 = 4.0;
 /// satisfy, so the aspect ratio is preserved to the nearest whole pixel rather than the nearest
 /// even one. The engine snaps to a 32 multiple regardless — which is also why the `sqrt` result is
 /// left unsnapped here: this is a materialization bound, not a canvas decision.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn minimax_h3_reference_clip_filter(
     fps: u32,
     short_edge: u32,
@@ -961,17 +972,17 @@ pub(super) fn minimax_h3_reference_clip_filter(
 /// Scoped to the INPUT section on purpose. `Stream #…: Audio:` also appears under `Output #…` when
 /// a command writes audio, and a parser that read the whole buffer would answer a different
 /// question the moment this chain grows an audio output.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(all(test, native_lane))]
 pub(super) fn minimax_h3_clip_input_has_audio(stderr: &str) -> bool {
-    stderr
-        .lines()
-        .skip_while(|line| !line.trim_start().starts_with("Input #"))
-        .take_while(|line| !line.trim_start().starts_with("Output #"))
-        .any(|line| line.contains("Stream #") && line.contains(": Audio:"))
+    let mut input = MinimaxH3InputStreams::default();
+    for line in stderr.lines() {
+        input.read_line(line);
+    }
+    input.audio
 }
+
+#[cfg(native_lane)]
+use crate::media_jobs::FfmpegInputStreams as MinimaxH3InputStreams;
 
 /// Refuse a decoded reference clip whose SHAPE the engine cannot condition on — from the frames
 /// alone, before a single weight is read.
@@ -985,10 +996,7 @@ pub(super) fn minimax_h3_clip_input_has_audio(stderr: &str) -> bool {
 /// What is deliberately NOT refused here: a clip LONGER than the render. The engine truncates it,
 /// that truncation is defined behaviour, and the extraction below has already stopped pulling
 /// frames at the render's own count — so "too long" is not an error shape, it is the normal one.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn minimax_h3_validate_reference_clip(
     model: &str,
     asset_id: &str,
@@ -1039,10 +1047,7 @@ pub(super) fn minimax_h3_validate_reference_clip(
 /// `VideoRequest`), where an empty id would otherwise resolve to the project directory itself
 /// rather than to a clip. Split out of [`resolve_minimax_h3_clip_conditioning`] so the refusal is
 /// callable — and therefore testable — without an `ApiClient`, a `Settings` and a `JobSnapshot`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn minimax_h3_clip_asset_id<'a>(
     model: &str,
     asset_id: &'a str,
@@ -1076,10 +1081,7 @@ pub(super) fn minimax_h3_clip_asset_id<'a>(
 ///
 /// `frames` is the render's own `17n + 5` count, so a clip is never decoded past the point the
 /// engine would truncate it, and the soundtrack is cut to the matching span.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) async fn resolve_minimax_h3_clip_conditioning(
     api: &ApiClient,
     settings: &Settings,
@@ -1120,10 +1122,7 @@ pub(super) async fn resolve_minimax_h3_clip_conditioning(
 /// [`resolve_minimax_h3_clip_conditioning`] only so the caller can drop the scratch directory on
 /// EVERY exit — including the refusals, which are the paths most likely to leave a multi-hundred-MB
 /// PNG sequence behind.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 async fn minimax_h3_decode_reference_clip(
     api: &ApiClient,
@@ -1137,7 +1136,7 @@ async fn minimax_h3_decode_reference_clip(
 ) -> WorkerResult<Conditioning> {
     let pattern = work_dir.join("ref_%05d.png");
     let ctx = FfmpegContext::new(api, settings, &job.id, CANCEL_MESSAGE);
-    let stderr = crate::media_jobs::run_ffmpeg_capture_stderr(
+    let capture = crate::media_jobs::run_ffmpeg_with_stderr(
         vec![
             "ffmpeg".to_owned(),
             "-nostdin".to_owned(),
@@ -1160,13 +1159,20 @@ async fn minimax_h3_decode_reference_clip(
             pattern.display().to_string(),
         ],
         Some(ctx),
+        |pipe| {
+            sceneworks_core::media_process::read_stderr_lines(
+                pipe,
+                MinimaxH3InputStreams::default(),
+                MinimaxH3InputStreams::read_line,
+            )
+        },
     )
     .await?;
 
     let decoded = minimax_h3_load_reference_frames(work_dir.to_path_buf()).await?;
     minimax_h3_validate_reference_clip(&request.model, asset_id, &decoded)?;
 
-    let audio = if minimax_h3_clip_input_has_audio(&stderr) {
+    let audio = if capture.data.audio {
         let wav = work_dir.join("ref_audio.wav");
         let ctx = FfmpegContext::new(api, settings, &job.id, CANCEL_MESSAGE);
         run_ffmpeg(
@@ -1220,14 +1226,11 @@ async fn minimax_h3_decode_reference_clip(
 /// reference that is completely invisible in the rendered output when it is wrong — a shuffled
 /// reference still renders a plausible clip — which is why it is asserted directly by
 /// `minimax_h3_reference_clip_frames_keep_source_order`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) async fn minimax_h3_load_reference_frames(
     work_dir: PathBuf,
 ) -> WorkerResult<Vec<Image>> {
-    tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
+    crate::load_progress::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(&work_dir)?
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
             .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("png"))
@@ -1262,10 +1265,7 @@ pub(super) async fn minimax_h3_load_reference_frames(
 /// Reading the conditioning rather than the request is what makes this honest: if the assembly
 /// below ever drops a reference or a keyframe, the recorded task changes with it instead of
 /// continuing to claim what the payload asked for.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn minimax_h3_task(conditioning: &[Conditioning]) -> &'static str {
     let has_keyframes = conditioning
         .iter()
@@ -1295,10 +1295,17 @@ pub(super) fn minimax_h3_task(conditioning: &[Conditioning]) -> &'static str {
 /// when wrong — the keyframe ANCHOR INDEX and the reference ORDER — are unit-testable without a
 /// GPU, weights, or on-disk assets.
 ///
-/// **Anchor indices.** `frame_idx: 0` is the first frame; the last frame is `-1`, NOT
-/// `frames - 1`. The engine accepts either, but `-1` is independent of the frame count this arm
-/// computed — so a disagreement between our lattice coercion and the engine's can never silently
-/// turn a last-frame anchor into a rejected mid-clip one. `strength: 1.0` fully pins the frame,
+/// **Anchor indices.** `frame_idx: 0` is the first frame; the last frame is the EXPLICIT
+/// `frames - 1` (sc-26691). Both engines now resolve indices through ONE shared contract,
+/// `gen_core_h3::h3_keyframe::resolve_keyframe_slots` (inference #1405): `0` is First,
+/// `num_frames - 1` or `-1` is Last, and anything else is a typed `KeyframeIndexError`. Before
+/// that the Candle engine clamped `-1` to the FIRST frame (`frame_idx.max(0)`) and every CUDA
+/// `first_last_frame` job failed with "both keyframes anchor First". `frames - 1` is kept anyway: it
+/// is the spelling every engine revision has read as Last, and [`validate_minimax_h3_keyframes`]
+/// checks it against the shared contract before the job loads anything. It cannot drift from the
+/// engine's own count: `frames` is exactly the value this arm hands the engine as `VideoGenInput::frames`,
+/// which the shared funnel forwards as `GenerationRequest::frames = Some(frames)` and both engines'
+/// `resolve_request_frames` take verbatim. `strength: 1.0` fully pins the frame,
 /// which is the only meaning first/last-frame conditioning has here (the engine pins anchor rows at
 /// its own conditioning timestep and does not read this value).
 ///
@@ -1314,11 +1321,9 @@ pub(super) fn minimax_h3_task(conditioning: &[Conditioning]) -> &'static str {
 /// pass on that side to agree with. So whatever order this builds is the order that is labelled and
 /// rotary-clocked, which is exactly why the grouping is stated here rather than left incidental.
 /// The caller's order WITHIN each list is preserved exactly.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn minimax_h3_conditioning(
+    frames: u32,
     first_frame: Option<Image>,
     last_frame: Option<Image>,
     reference_images: Vec<Image>,
@@ -1336,7 +1341,7 @@ pub(super) fn minimax_h3_conditioning(
     if let Some(image) = last_frame {
         conditioning.push(Conditioning::Keyframe {
             image,
-            frame_idx: -1,
+            frame_idx: minimax_h3_last_frame_index(frames),
             strength: 1.0,
         });
     }
@@ -1349,6 +1354,33 @@ pub(super) fn minimax_h3_conditioning(
     conditioning.extend(reference_clips);
     conditioning.extend(reference_audio);
     conditioning
+}
+
+/// The explicit index of the LAST output frame for a `frames`-long render — see
+/// [`minimax_h3_conditioning`] for why this is never `-1`. Saturates rather than wrapping: a
+/// zero/oversized count is refused by the engine's own geometry check, and must not turn into an
+/// index that silently means something else.
+#[cfg(native_lane)]
+pub(super) fn minimax_h3_last_frame_index(frames: u32) -> i32 {
+    i32::try_from(frames.saturating_sub(1)).unwrap_or(i32::MAX)
+}
+
+/// Check the keyframe anchors in `conditioning` against the SAME contract both engines resolve them
+/// with (`gen_core_h3::h3_keyframe::resolve_keyframe_slots`), so an index the engine would refuse
+/// is a typed payload error before any model load rather than a mid-load engine failure.
+/// Non-keyframe conditioning is ignored.
+#[cfg(native_lane)]
+pub(super) fn validate_minimax_h3_keyframes(
+    conditioning: &[Conditioning],
+    frames: u32,
+) -> Result<gen_core_h3::h3_keyframe::KeyframeSlots, String> {
+    let frame_idxs = conditioning.iter().filter_map(|c| match c {
+        Conditioning::Keyframe { frame_idx, .. } => Some(*frame_idx),
+        _ => None,
+    });
+    let num_frames = usize::try_from(frames).unwrap_or(usize::MAX);
+    gen_core_h3::h3_keyframe::resolve_keyframe_slots(frame_idxs, num_frames)
+        .map_err(|error| format!("MiniMax-H3 keyframe: {error}"))
 }
 
 /// Resolve a MiniMax-H3 request's supplied media into the engine conditioning.
@@ -1368,10 +1400,7 @@ pub(super) fn minimax_h3_conditioning(
 /// Async since sc-18650: the clip AND audio references decode through ffmpeg (the audio ones to
 /// satisfy `Ref2VaReferences::check_audio`'s rate gate, fact 5 above), and the shared runner that
 /// owns the heartbeat and the cancel poll is async. Only the still-image half stays synchronous.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) async fn resolve_minimax_h3_conditioning(
     api: &ApiClient,
     settings: &Settings,
@@ -1408,13 +1437,16 @@ pub(super) async fn resolve_minimax_h3_conditioning(
     let reference_clips =
         resolve_minimax_h3_clip_conditioning(api, settings, job, request, project_path, frames)
             .await?;
-    Ok(minimax_h3_conditioning(
+    let conditioning = minimax_h3_conditioning(
+        frames,
         first_frame,
         last_frame,
         reference_images,
         reference_clips,
         reference_audio,
-    ))
+    );
+    validate_minimax_h3_keyframes(&conditioning, frames).map_err(WorkerError::InvalidPayload)?;
+    Ok(conditioning)
 }
 
 /// Real MLX MiniMax-H3 generation (epic 17137 / sc-19508): build the [`VideoGenInput`] and run the
@@ -1469,19 +1501,48 @@ pub(super) async fn generate_minimax_h3_using(
         + Send
         + 'static,
 ) -> WorkerResult<(DecodedVideo, Value)> {
+    // An IMPORTED dense DiT (sc-26680) resolves and re-verifies its plan FIRST — a drifted plan, a
+    // stale binding or a builtin id refuses before any media is decoded — and then runs this same
+    // arm with the explicitly declared task's SEMANTICS (`semantics`) while every identity-bearing
+    // record keeps the imported request (`request`).
+    if imported_minimax_h3_checkpoint_id(request).is_some() {
+        tracing::info!(event = "h3_import_load_start", jobId = %job.id, provider = engine_id,
+            backend, native_backend = if cfg!(target_os = "macos") { "mlx" } else { "cuda" },
+            phase = "source-acquisition-through-provider-handle",
+            "Beginning imported H3 acquisition; deferred task components may materialize during generation");
+    }
+    if imported_minimax_h3_checkpoint_id(request).is_some() && !minimax_h3_engine_is_registered() {
+        return Err(WorkerError::Engine(format!(
+            "{} cannot render in this build: the MiniMax-H3 MLX engine is not in the linked inference revision. No output was produced.", request.model
+        )));
+    }
+    let imported = prepare_imported_minimax_h3_dit(api, settings, job, request, backend).await?;
+    let partition = imported
+        .as_ref()
+        .map(|_| imported_minimax_h3_partition_request(request))
+        .transpose()?;
+    let semantics = partition.as_ref().unwrap_or(request);
     // Shape before media: a request aimed at the wrong DiT partition must be refused before it
     // costs an asset decode, and long before it costs a 53 GB text-encoder load.
-    minimax_h3_validate_partition(request)?;
-    let (steps, scheduler_shift, turbo) = minimax_h3_sampling(request)?;
-    let veda = requested_h3_veda(request, steps)?;
+    minimax_h3_validate_partition(semantics)?;
+    let (steps, scheduler_shift, turbo) = minimax_h3_sampling(semantics)?;
+    let veda = requested_h3_veda(semantics, steps)?;
     // Resolved ONCE and passed to both the conditioning resolve and the engine input: a reference
     // clip is truncated to the generated frame count, so the two must be the same number. Deriving
     // it twice from `request` would be one edit away from conditioning a 145-frame render on a
     // 209-frame reference.
-    let frames = video_frame_count(&request.model, request.raw_frame_count());
+    let frames = video_frame_count(&semantics.model, semantics.raw_frame_count());
     let conditioning =
-        resolve_minimax_h3_conditioning(api, settings, job, request, project_path, frames).await?;
-    let load = resolve_minimax_h3_load(settings, request)?;
+        resolve_minimax_h3_conditioning(api, settings, job, semantics, project_path, frames)
+            .await?;
+    let (load, shared_tier) = match imported.as_ref() {
+        Some(dit) => resolve_imported_minimax_h3_load(settings, request, dit)?,
+        None => {
+            let load = resolve_minimax_h3_load(settings, request)?;
+            let tier = load.tier;
+            (load, tier)
+        }
+    };
     let task = minimax_h3_task(&conditioning);
     // The turbo recipe (sc-18726) is resolved BEFORE the adapters so a contradictory pair of
     // accelerators is refused by name rather than after a LoRA file has been opened and classified.
@@ -1491,8 +1552,9 @@ pub(super) async fn generate_minimax_h3_using(
     let reference_image_short_edge =
         sceneworks_core::video_request::requested_reference_image_short_edge(&request.advanced)
             .map_err(WorkerError::InvalidPayload)?;
-    let adapters = resolve_minimax_h3_adapters(settings, request)?;
-    let raw_settings = minimax_h3_raw_settings(
+    let reference_image_resize_mode = minimax_h3_reference_image_resize_mode(&request.advanced)?;
+    let adapters = resolve_minimax_h3_adapters(settings, semantics)?;
+    let mut raw_settings = minimax_h3_raw_settings(
         request,
         load.tier,
         task,
@@ -1501,7 +1563,12 @@ pub(super) async fn generate_minimax_h3_using(
         scheduler_shift,
         turbo,
     );
+    if let Some(dit) = imported.as_ref() {
+        record_imported_minimax_h3_identity(&mut raw_settings, dit, shared_tier);
+    }
     let input = VideoGenInput {
+        imported_h3_identity: imported.as_ref().map(imported_h3_load_identity),
+        imported_h3_authority: imported.as_ref().map(|dit| dit.load_authority.clone()),
         veda,
         sampler: None,
         scheduler: None,
@@ -1547,6 +1614,7 @@ pub(super) async fn generate_minimax_h3_using(
         scheduler_shift,
         seed: resolve_video_seed(request) as u64,
         reference_image_short_edge,
+        reference_image_resize_mode,
         ..VideoGenInput::default()
     };
     let decoded = generate_video_using(
@@ -1566,16 +1634,10 @@ pub(super) async fn generate_minimax_h3_using(
 /// manifest default is q4; non-positive values explicitly select the dense upstream bf16 route.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn candle_minimax_h3_tier(request: &VideoRequest) -> (&'static str, Option<Quant>) {
-    let bits = request.advanced.get("mlxQuantize").and_then(|value| {
-        value
-            .as_i64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    });
-    match bits {
-        Some(bits) if bits <= 0 => ("bf16", None),
-        Some(bits) if bits <= 4 => ("q4", Some(Quant::Q4)),
-        Some(_) => ("q8", Some(Quant::Q8)),
-        None => ("q4", Some(Quant::Q4)),
+    match crate::payload::tier_for_bits(request.quant_bits(), "q4") {
+        "bf16" => ("bf16", None),
+        "q4" => ("q4", Some(Quant::Q4)),
+        _ => ("q8", Some(Quant::Q8)),
     }
 }
 
@@ -1607,6 +1669,10 @@ pub(super) struct CandleMiniMaxH3Load {
     pub(super) root: PathBuf,
     pub(super) dit_dir: Option<PathBuf>,
     pub(super) text_encoder_dir: Option<PathBuf>,
+    /// The EXPLICIT frozen companion directory an import acquired but the direct DiT path does
+    /// not expose as a sibling. Prepared-file acquisition pins it so the frozen component
+    /// closure verifies; the engine itself is untouched (fl2va tasks never read it).
+    pub(super) companion_dir: Option<PathBuf>,
     pub(super) quant: Option<Quant>,
     pub(super) tier: &'static str,
 }
@@ -1649,6 +1715,7 @@ pub(super) fn resolve_candle_minimax_h3_load(
         root,
         dit_dir,
         text_encoder_dir,
+        companion_dir: None,
         quant,
         tier,
     })
@@ -1664,60 +1731,74 @@ pub(super) async fn generate_candle_minimax_h3(
     engine_id: &'static str,
     backend: &str,
 ) -> WorkerResult<(DecodedVideo, Value)> {
-    minimax_h3_validate_partition(request)?;
-    let (steps, scheduler_shift, turbo) = minimax_h3_sampling(request)?;
-    let veda = requested_h3_veda(request, steps)?;
-    let frames = video_frame_count(&request.model, request.raw_frame_count());
+    generate_candle_minimax_h3_using(
+        api,
+        settings,
+        job,
+        request,
+        project_path,
+        engine_id,
+        backend,
+        crate::inference_runtime::load,
+    )
+    .await
+}
+
+/// [`generate_candle_minimax_h3`] with an injected loader. Both cold and warm requests use the
+/// same queued live-budget admission before tensor materialization.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn generate_candle_minimax_h3_using(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+    engine_id: &'static str,
+    backend: &str,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+) -> WorkerResult<(DecodedVideo, Value)> {
+    // Imported weights resolve first; declared task semantics do not replace checkpoint identity.
+    if imported_minimax_h3_checkpoint_id(request).is_some() {
+        tracing::info!(event = "h3_import_load_start", jobId = %job.id, provider = engine_id,
+            backend, native_backend = if cfg!(target_os = "macos") { "mlx" } else { "cuda" },
+            phase = "source-acquisition-through-provider-handle",
+            "Beginning imported H3 acquisition; deferred task components may materialize during generation");
+    }
+    let imported = prepare_imported_minimax_h3_dit(api, settings, job, request, backend).await?;
+    let partition = imported
+        .as_ref()
+        .map(|_| imported_minimax_h3_partition_request(request))
+        .transpose()?;
+    let semantics = partition.as_ref().unwrap_or(request);
+    minimax_h3_validate_partition(semantics)?;
+    let (steps, scheduler_shift, turbo) = minimax_h3_sampling(semantics)?;
+    let veda = requested_h3_veda(semantics, steps)?;
+    let frames = video_frame_count(&semantics.model, semantics.raw_frame_count());
     let conditioning =
-        resolve_minimax_h3_conditioning(api, settings, job, request, project_path, frames).await?;
+        resolve_minimax_h3_conditioning(api, settings, job, semantics, project_path, frames)
+            .await?;
     // sc-23402. Parsed (and RANGE-REFUSED) here rather than left to the engine's own `validate` so a
     // typo costs a payload parse instead of a 53 GB text-encoder load. The engine still refuses it
     // independently — this is the earlier of two gates, not a replacement for it.
     let reference_image_short_edge =
         sceneworks_core::video_request::requested_reference_image_short_edge(&request.advanced)
             .map_err(WorkerError::InvalidPayload)?;
-    let adapters = resolve_minimax_h3_adapters(settings, request)?;
-    let load = resolve_candle_minimax_h3_load(settings, request)?;
-    let adapter_bytes =
-        gen_core::adapter_stack_resident_bytes(&adapters, gen_core::AdapterResidencyMode::Additive)
-            .ok_or_else(|| {
-                WorkerError::InvalidPayload(
-                    "MiniMax-H3 cannot determine the resident size of the requested adapter stack."
-                        .to_owned(),
-                )
-            })?;
-    // Price the cold-load envelope from the same complete parsed controls used by
-    // the queued gate and generation, including budgets and dense overrides.
-    let sparse_bound = gen_core::veda::workspace::for_video_request(
-        gen_core::veda::workspace::Request {
-            veda: veda.as_ref(),
-            width: request.width,
-            height: request.height,
-            frames,
-            count: 1,
-            prompt: &request.prompt,
-            conditioning: &conditioning,
-            reference_image_short_edge,
-        },
-        gen_core::veda::workspace::Backend::Cuda,
-    )
-    .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
-    if let Some(bound) = sparse_bound.as_ref() {
-        crate::video_admission::admit_veda_host_workspace(
-            bound,
-            crate::yue2_admission::host_available_bytes().await,
-        )?;
-    }
-    if let Some(error) = crate::vram_gate::minimax_h3_fit_error_with_sparse(
-        &request.model_manifest_entry,
-        load.tier,
-        adapter_bytes,
-        &settings.gpu_id,
-        super::candle::candle_video_vram_budget(settings).await,
-        sparse_bound.as_ref(),
-    ) {
-        return Err(error);
-    }
+    let reference_image_resize_mode = minimax_h3_reference_image_resize_mode(&request.advanced)?;
+    let adapters = resolve_minimax_h3_adapters(settings, semantics)?;
+    let (load, shared_tier) = match imported.as_ref() {
+        Some(dit) => resolve_candle_imported_minimax_h3_load(settings, request, dit)?,
+        None => {
+            let load = resolve_candle_minimax_h3_load(settings, request)?;
+            let tier = load.tier;
+            (load, tier)
+        }
+    };
+    // Both stock and imported H3 provider handles contain only source metadata and a device
+    // context. The shared request selector runs before conditioning/DiT/VAE tensors materialize.
+    // The historical 124-frame catalog peak cannot price a different request or streamed plan.
     let task = minimax_h3_task(&conditioning);
     let mut raw_settings = minimax_h3_raw_settings(
         request,
@@ -1734,7 +1815,12 @@ pub(super) async fn generate_candle_minimax_h3(
             Value::String(CANDLE_MINIMAX_H3_REPO.to_owned()),
         );
     }
+    if let Some(dit) = imported.as_ref() {
+        record_imported_minimax_h3_identity(&mut raw_settings, dit, shared_tier);
+    }
     let input = VideoGenInput {
+        imported_h3_identity: imported.as_ref().map(imported_h3_load_identity),
+        imported_h3_authority: imported.as_ref().map(|dit| dit.load_authority.clone()),
         veda,
         sampler: None,
         scheduler: None,
@@ -1743,6 +1829,9 @@ pub(super) async fn generate_candle_minimax_h3(
         quant: load.quant,
         dit_component_dir: load.dit_dir,
         text_encoder_component_dir: load.text_encoder_dir,
+        // The explicit frozen companion for direct-path imports; prepared-file acquisition pins
+        // it so the frozen component closure verifies before provider execution.
+        imported_h3_companion_dir: load.companion_dir,
         adapters,
         conditioning,
         prompt: request.prompt.clone(),
@@ -1756,6 +1845,7 @@ pub(super) async fn generate_candle_minimax_h3(
         scheduler_shift,
         seed: resolve_video_seed(request) as u64,
         reference_image_short_edge,
+        reference_image_resize_mode,
         offload_policy: OffloadPolicy::Sequential,
         ..VideoGenInput::default()
     };
@@ -1766,8 +1856,1194 @@ pub(super) async fn generate_candle_minimax_h3(
         backend,
         &request.advanced,
         input,
-        crate::inference_runtime::load,
+        load_generator,
     )
     .await?;
     Ok((decoded, raw_settings))
+}
+
+// ---------------------------------------------------------------------------
+// Imported MiniMax-H3 DiT (sc-26680/sc-26682, epic 26679).
+//
+// The assembly records explicit FL2VA, Ref2VA, or hybrid compatibility, independently of tensor
+// shape. One provider registry id serves both task partitions. Stage imported bytes at every
+// supported task path and bind the opposite resident DiT only as a recorded load-time companion.
+// Request, job, and asset identity always remain the imported model's, never the semantic stock id.
+// ---------------------------------------------------------------------------
+
+/// The plan identity of an imported MiniMax-H3 entry, or `None` for every other request.
+///
+/// Family + plan id, deliberately NOT the stamped assembly: an H3 entry that carries a plan but no
+/// valid binding must reach [`resolve_imported_minimax_h3_dit_with_check`] and be refused BY NAME, rather than
+/// fall through to a lane that would stub or load the builtin weights.
+#[cfg(native_lane)]
+pub(super) fn imported_minimax_h3_checkpoint_id(request: &VideoRequest) -> Option<&str> {
+    let entry = &request.model_manifest_entry;
+    if entry.get("family").and_then(Value::as_str)
+        != Some(sceneworks_core::minimax_h3_import::MINIMAX_H3_IMPORT_FAMILY)
+    {
+        return None;
+    }
+    sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(entry)
+}
+
+/// The imported DiT a request renders with, resolved through the plan store and re-verified.
+#[cfg(native_lane)]
+pub(super) struct ImportedMiniMaxH3Dit {
+    pub(super) checkpoint_id: String,
+    pub(super) plan_id: String,
+    pub(super) semantic_digest: Option<String>,
+    /// The plan's verified transformer component directory — what the provider's `transformer`
+    /// component is staged as.
+    pub(super) transformer_dir: PathBuf,
+    /// The validated binding, recorded verbatim on the asset.
+    pub(super) assembly: Value,
+    pub(super) partition: sceneworks_core::minimax_h3_import::MiniMaxH3Partition,
+    /// Complete source table/basis binding; never inferred from filenames or mutable settings.
+    pub(super) pruning: Option<sceneworks_core::minimax_h3_codec::H3PruningBinding>,
+    component_bindings: Value,
+    pub(super) load_authority: sceneworks_core::minimax_h3_load::H3SourceAuthority,
+    normalization_cache_outcome: &'static str,
+    /// Every plan layer in the directory, pinned for the life of the render so the bytes the store
+    /// just re-proved cannot be retargeted between this resolve and the provider's load (sc-18306).
+    _pins: Vec<gen_core::PinnedWeightsFile>,
+}
+
+/// Content hashes already acquired at the verified source boundary, not an assertion that the
+/// backend executed those tensors. The shared handoff reports its separately prepared load files.
+#[cfg(native_lane)]
+fn imported_h3_load_identity(dit: &ImportedMiniMaxH3Dit) -> Value {
+    json!({
+        "checkpointId": dit.checkpoint_id,
+        "planId": dit.plan_id,
+        "semanticDigest": dit.semantic_digest,
+        "assembly": dit.assembly,
+        "sourceFiles": dit._pins.iter().map(|pin| json!({
+            "path": pin.loader_path(),
+            "sha256": sceneworks_core::hashing::hex(pin.content_sha256()),
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// Bracket all header/payload reads; mutation errors win before derivative publication.
+#[cfg(native_lane)]
+pub(super) fn with_imported_h3_source_seals<T>(
+    pins: &[gen_core::PinnedWeightsFile],
+    read: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let verify = || {
+        pins.iter()
+            .try_for_each(|pin| pin.verify_unchanged().map_err(|e| e.to_string()))
+    };
+    verify()?;
+    let result = read();
+    verify()?;
+    result
+}
+
+#[cfg(native_lane)]
+pub(super) const H3_PREPARATION_CANCELED: &str =
+    sceneworks_core::minimax_h3_load::H3_PREPARATION_CANCELED_MARKER;
+
+#[cfg(native_lane)]
+pub(super) fn h3_preparation_checkpoint(cancel: &gen_core::CancelFlag) -> std::io::Result<()> {
+    if cancel.is_cancelled() {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            H3_PREPARATION_CANCELED,
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// CPU preparation is cooperative, not an abortable GPU operation. The blocking closure owns
+/// every source/derivative lease; even an abandoned async owner cannot release a reader's leases.
+#[cfg(native_lane)]
+pub(super) async fn supervise_h3_preparation<R, P, F>(
+    cancel: gen_core::CancelFlag,
+    task: tokio::task::JoinHandle<WorkerResult<R>>,
+    poll_period: Duration,
+    mut poll: P,
+) -> WorkerResult<R>
+where
+    R: Send + 'static,
+    P: FnMut() -> F,
+    F: std::future::Future<Output = WorkerResult<bool>>,
+{
+    let mut guard = CancelJoinGuard::new(cancel.clone(), task);
+    let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + poll_period, poll_period);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            result = &mut *guard.handle_mut() => {
+                guard.disarm();
+                return result.map_err(|error| task_join_error("H3 checkpoint preparation", error))?;
+            }
+            _ = tick.tick() => {
+                match poll().await {
+                    Ok(false) => {}
+                    Ok(true) => {
+                        cancel.cancel();
+                        guard.cancel_and_join().await;
+                        return Err(WorkerError::Canceled(H3_PREPARATION_CANCELED.into()));
+                    }
+                    Err(error) => {
+                        guard.cancel_and_join().await;
+                        return Err(error);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(native_lane)]
+async fn prepare_imported_minimax_h3_dit(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    backend: &str,
+) -> WorkerResult<Option<ImportedMiniMaxH3Dit>> {
+    if imported_minimax_h3_checkpoint_id(request).is_none() {
+        return Ok(None);
+    }
+    let source_request = request.clone();
+    let source_settings = settings.clone();
+    let cancel = gen_core::CancelFlag::new();
+    let task_cancel = cancel.clone();
+    let preparation_span = tracing::info_span!("h3_import_preparation", jobId = %job.id,
+        checkpointId = imported_minimax_h3_checkpoint_id(request).unwrap_or_default(),
+        phase = "source-and-normalization");
+    let task = crate::load_progress::spawn_blocking(move || {
+        let _entered = preparation_span.enter();
+        let checkpoint = || h3_preparation_checkpoint(&task_cancel);
+        resolve_imported_minimax_h3_dit_with_check(&source_request, &source_settings, &checkpoint)
+            .and_then(|dit| {
+                prestage_imported_minimax_h3_task_paths(
+                    &source_settings,
+                    &source_request,
+                    dit,
+                    &checkpoint,
+                )
+            })
+            .map_err(|error| {
+                if task_cancel.is_cancelled() && error.to_string().contains(H3_PREPARATION_CANCELED)
+                {
+                    WorkerError::Canceled(H3_PREPARATION_CANCELED.into())
+                } else {
+                    error
+                }
+            })
+    });
+    let result = supervise_h3_preparation(cancel.clone(), task, Duration::from_secs(2), || async {
+        if shutdown_requested() {
+            return Ok(true);
+        }
+        // Heartbeats during CPU preparation are best-effort, like `cancel_requested_peek`: the
+        // supervisor keeps awaiting the blocking task either way, so a transient API failure
+        // never becomes a drop-and-run — it only risks the server-side stale sweep, which the
+        // completed render's own writes supersede. Cancel polling stays the authoritative signal.
+        if let Err(error) = heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await {
+            tracing::warn!(event = "h3_preparation_heartbeat_failed", jobId = %job.id,
+                error = %error, "preparation heartbeat failed; supervision continues");
+        }
+        if cancel_requested_peek(api, &job.id).await {
+            cancel.cancel();
+            let _ = update_job(
+                api,
+                &job.id,
+                video_progress(
+                    JobStatus::Running,
+                    ProgressStage::Preparing,
+                    0.0,
+                    "Canceling checkpoint preparation…",
+                    None,
+                    backend,
+                ),
+            )
+            .await;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    })
+    .await;
+    match result {
+        Ok(dit) => {
+            tracing::info!(event = "h3_import_source_prepared", jobId = %job.id,
+                identity = %imported_h3_load_identity(&dit),
+                normalization_cache_outcome = dit.normalization_cache_outcome,
+                derivative_cache_key = ?dit.load_authority.derivative_cache_key(),
+                "Imported source acquisition and any normalization completed; not a resident-weight cache or executed-tensor receipt");
+            Ok(Some(dit))
+        }
+        Err(WorkerError::Canceled(message)) => {
+            crate::mark_job_canceled(api, &job.id, &message).await?;
+            Err(WorkerError::Canceled(message))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Resolve and re-verify an imported MiniMax-H3 entry's DiT, or refuse with a typed
+/// `[checkpoint-plan:*]` reason. Never "not mine": a plan-backed H3 entry that is refused here has
+/// no other lane, and falling through would stub or render the builtin weights.
+#[cfg(all(native_lane, test))]
+pub(super) fn resolve_imported_minimax_h3_dit(
+    request: &VideoRequest,
+    settings: &Settings,
+) -> WorkerResult<ImportedMiniMaxH3Dit> {
+    resolve_imported_minimax_h3_dit_with_check(request, settings, &|| Ok(()))
+}
+
+/// The blocking body of [`prepare_imported_minimax_h3_dit`] without its async supervision: resolve,
+/// then settle the task-path staging the load will reuse. Tests drive the load through this so
+/// they see the same prepared seals production does.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn prepare_imported_minimax_h3_dit_blocking(
+    request: &VideoRequest,
+    settings: &Settings,
+) -> WorkerResult<ImportedMiniMaxH3Dit> {
+    let checkpoint = || -> std::io::Result<()> { Ok(()) };
+    resolve_imported_minimax_h3_dit_with_check(request, settings, &checkpoint).and_then(|dit| {
+        prestage_imported_minimax_h3_task_paths(settings, request, dit, &checkpoint)
+    })
+}
+
+#[cfg(native_lane)]
+fn resolve_imported_minimax_h3_dit_with_check(
+    request: &VideoRequest,
+    settings: &Settings,
+    check: &dyn Fn() -> std::io::Result<()>,
+) -> WorkerResult<ImportedMiniMaxH3Dit> {
+    check().map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let checkpoint_id = imported_minimax_h3_checkpoint_id(request)
+        .unwrap_or_default()
+        .to_owned();
+    let refuse = |code: &str, reason: String| {
+        WorkerError::InvalidPayload(format!(
+            "[checkpoint-plan:{code}] checkpoint {checkpoint_id:?}: {reason}"
+        ))
+    };
+    // A builtin id names the shipped weights. Rendering the imported DiT under it would record one
+    // checkpoint as another; rendering the builtin under it would drop the import. Neither.
+    if matches!(
+        request.model.as_str(),
+        sceneworks_core::minimax_h3_import::MINIMAX_H3_BASE_PARTITION_MODEL
+            | sceneworks_core::minimax_h3_import::MINIMAX_H3_REFERENCE_PARTITION_MODEL
+    ) {
+        return Err(refuse(
+            "no-video-lane",
+            format!(
+                "an imported MiniMax-H3 checkpoint cannot render under the builtin id {:?}",
+                request.model
+            ),
+        ));
+    }
+    let entry = &request.model_manifest_entry;
+    let store =
+        sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
+    let source_lease = store
+        .lease_source(&checkpoint_id)
+        .map_err(|e| refuse("source-in-use", e.to_string()))?;
+    let resolved = store
+        .resolve_with_check(&checkpoint_id, check)
+        .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
+    let assembly = sceneworks_core::minimax_h3_import::verify_entry_assembly(entry, &resolved.plan)
+        .map_err(|reason| refuse("ambiguous-component", reason))?;
+    let pins = resolved
+        .layers
+        .iter()
+        .map(|layer| {
+            // Native-main late consumer delta: the plan layer pins through the typed checked
+            // pin, so a cancelled acquisition stops inside a bounded read and the native layer's
+            // actual acquisition work reaches the active preparation span verbatim.
+            let pin = gen_core::PinnedWeightsFile::pin_with_progress(
+                &layer.path,
+                || match check() {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                        Err(gen_core::Error::Canceled)
+                    }
+                    Err(error) => Err(gen_core::Error::Io(error)),
+                },
+                |progress| {
+                    sceneworks_core::minimax_h3_load::observe_artifact_seal_progress(progress)
+                },
+            )
+            .map_err(|e| match e {
+                gen_core::Error::Canceled => {
+                    refuse("source-acquisition", H3_PREPARATION_CANCELED.to_owned())
+                }
+                other => refuse("source-drift", other.to_string()),
+            })?;
+            let expected = layer
+                .layer
+                .source
+                .content_digest()
+                .map_err(|e| refuse("source-drift", e.to_string()))?;
+            if expected.len() != 64
+                || !(0..32).all(|i| {
+                    u8::from_str_radix(&expected[2 * i..2 * i + 2], 16).ok()
+                        == Some(pin.content_sha256()[i])
+                })
+            {
+                return Err(refuse(
+                    "source-drift",
+                    format!(
+                        "source digest changed before pinning {}",
+                        layer.path.display()
+                    ),
+                ));
+            }
+            Ok(pin)
+        })
+        .collect::<WorkerResult<Vec<_>>>()?;
+    let bound_config = sceneworks_core::minimax_h3_import::bound_config(&resolved.plan.context)
+        .map_err(|reason| refuse("invalid-bound-config", reason))?;
+    let inventory = with_imported_h3_source_seals(&pins, || {
+        sceneworks_core::minimax_h3_codec::H3SourceInventory::from_resolved_with_config_and_check(
+            &resolved,
+            bound_config,
+            check,
+        )
+    })
+    .map_err(|reason| refuse("invalid-tensor-inventory", reason))?;
+    sceneworks_core::minimax_h3_import::verify_imported_pruning(&assembly, &inventory)
+        .map_err(|reason| refuse("pruning-incompatible", reason))?;
+    let mut produced_attestations = None;
+    let (directory, derivative, normalization_cache_outcome) = if inventory.requires_normalization {
+        use sceneworks_core::checkpoint_derivative::{
+            CheckpointDerivativeOutcomeV1, CheckpointDerivativeStore,
+        };
+        let cache = CheckpointDerivativeStore::open(&settings.data_dir)
+            .map_err(|e| refuse("normalization", e.to_string()))?;
+        let normalization = inventory.derivative_request();
+        // A derivative produced here was hashed as it was written; its attestations let the load
+        // seals below redeem that digest instead of re-reading the files (sc-26691).
+        let (cache_outcome, attested) = cache
+            .ensure_resolved_attested_with_check(&resolved, &normalization, check, |outputs| {
+                with_imported_h3_source_seals(&pins, || {
+                    inventory.produce_with_check(outputs, check)
+                })
+            })
+            .map_err(|e| refuse("normalization", e.to_string()))?;
+        produced_attestations = Some(attested);
+        let cache_outcome =
+            match cache_outcome {
+                CheckpointDerivativeOutcomeV1::Contended => return Err(refuse(
+                    "normalization-busy",
+                    "this H3 source is being normalized by another load; retry after it completes"
+                        .into(),
+                )),
+                CheckpointDerivativeOutcomeV1::Produced(_) => "produced",
+                CheckpointDerivativeOutcomeV1::AlreadyPresent(_) => "hit",
+            };
+        let lease = cache
+            .acquire_with_check(&resolved, &normalization, check)
+            .map_err(|e| refuse("normalization", e.to_string()))?
+            .ok_or_else(|| {
+                refuse(
+                    "normalization",
+                    "normalized H3 artifact disappeared before leasing".into(),
+                )
+            })?;
+        let key = cache
+            .cache_key(&resolved, &normalization)
+            .map_err(|e| refuse("normalization", e.to_string()))?;
+        let directory = cache
+            .cache()
+            .bundle_path(&key)
+            .map_err(|e| refuse("normalization", e.to_string()))?;
+        (directory, Some(lease), cache_outcome)
+    } else {
+        let layer = resolved
+            .layers
+            .iter()
+            .find(|layer| layer.layer.layer_id == assembly.transformer_layer_id)
+            .ok_or_else(|| {
+                refuse(
+                    "missing-component",
+                    "bound transformer layer is absent".into(),
+                )
+            })?;
+        (
+            layer
+                .path
+                .parent()
+                .ok_or_else(|| {
+                    refuse(
+                        "missing-component",
+                        "transformer has no component directory".into(),
+                    )
+                })?
+                .to_path_buf(),
+            None,
+            "not_required",
+        )
+    };
+    check().map_err(|error| refuse("source-acquisition", error.to_string()))?;
+    with_imported_h3_source_seals(&pins, || {
+        verify_imported_h3_pruning_directory_with_check(
+            &directory,
+            assembly.pruning.as_ref(),
+            check,
+        )
+    })
+    .map_err(|reason| refuse("pruning-incompatible", reason))?;
+    // Refuse newly added/unplanned siblings: native providers map every visible safetensors in the
+    // directory, so a verified shard set alone cannot authorize a foreign file beside it.
+    let planned: std::collections::BTreeSet<_> = if inventory.requires_normalization {
+        inventory.derivative_request().outputs.into_iter().collect()
+    } else {
+        resolved
+            .layers
+            .iter()
+            .filter_map(|l| l.path.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect()
+    };
+    for entry in
+        std::fs::read_dir(&directory).map_err(|e| refuse("missing-component", e.to_string()))?
+    {
+        let entry = entry.map_err(|e| refuse("missing-component", e.to_string()))?;
+        let path = entry.path();
+        if path
+            .extension()
+            .is_some_and(|e| e == "safetensors" || e == "gguf")
+            && !planned.contains(&entry.file_name().to_string_lossy().into_owned())
+        {
+            return Err(refuse(
+                "unconsumed-layer",
+                format!("unplanned H3 backbone file {}", path.display()),
+            ));
+        }
+    }
+    let mut load_seals = pins.clone();
+    if let Some(lease) = &derivative {
+        // Bind normalized files to the hashes proven by acquire_complete, rather than treating
+        // a fresh pin of whatever now occupies a published derivative as new authority.
+        for member in &lease.artifact().closure.members {
+            for file in &member.files {
+                let relative = member.destination.join(&file.relative_path);
+                let path = directory.join(&relative);
+                let checked = || match check() {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                        Err(gen_core::Error::Canceled)
+                    }
+                    Err(error) => Err(gen_core::Error::Io(error)),
+                };
+                let observe = |progress: &gen_core::runtime::ArtifactSealProgress| {
+                    sceneworks_core::minimax_h3_load::observe_artifact_seal_progress(progress)
+                };
+                // The attestation is redeemed only while gen-core's own fresh capture of the file's
+                // identity matches the one taken when the writer closed; otherwise this is a pin.
+                let attestation = produced_attestations
+                    .as_ref()
+                    .and_then(|attested| attested.get(&relative))
+                    .and_then(|attested| attested.seal_attestation().cloned());
+                let pin = match &attestation {
+                    Some(attestation) => gen_core::PinnedWeightsFile::pin_attested_with_progress(
+                        &path,
+                        attestation,
+                        checked,
+                        observe,
+                    ),
+                    None => gen_core::PinnedWeightsFile::pin_with_progress(&path, checked, observe),
+                }
+                .map_err(|e| match e {
+                    gen_core::Error::Canceled => {
+                        refuse("source-acquisition", H3_PREPARATION_CANCELED.to_owned())
+                    }
+                    other => refuse("source-drift", other.to_string()),
+                })?;
+                let actual = format!(
+                    "sha256:{}",
+                    sceneworks_core::hashing::hex(pin.content_sha256())
+                );
+                if file.sha256.as_deref() != Some(actual.as_str()) {
+                    return Err(refuse(
+                        "source-drift",
+                        format!(
+                            "normalized H3 file changed after acquisition: {}",
+                            path.display()
+                        ),
+                    ));
+                }
+                load_seals.push(pin);
+            }
+        }
+    }
+    let load_authority = sceneworks_core::minimax_h3_load::H3SourceAuthority::new(
+        load_seals,
+        directory.clone(),
+        planned,
+    )
+    .map_err(|e| refuse("source-drift", e))?
+    .with_leases(source_lease, derivative);
+    check().map_err(|error| refuse("source-acquisition", error.to_string()))?;
+    Ok(ImportedMiniMaxH3Dit {
+        load_authority,
+        normalization_cache_outcome,
+        semantic_digest: resolved.plan.semantic_digest().ok(),
+        plan_id: resolved.plan.plan_id.clone(),
+        checkpoint_id,
+        transformer_dir: directory,
+        partition: assembly.partition,
+        pruning: assembly.pruning.clone(),
+        assembly: assembly.to_json(),
+        component_bindings: json!({"tier":entry.get("importComponentTier"),"downloads":entry.get("downloads")}),
+        _pins: pins,
+    })
+}
+
+/// Verify the leased canonical component against the source-bound table and complete reduced basis.
+#[cfg(native_lane)]
+#[cfg(all(native_lane, test))]
+pub(super) fn verify_imported_h3_pruning_directory(
+    directory: &Path,
+    expected: Option<&sceneworks_core::minimax_h3_codec::H3PruningBinding>,
+) -> Result<(), String> {
+    verify_imported_h3_pruning_directory_with_check(directory, expected, &|| Ok(()))
+}
+
+#[cfg(native_lane)]
+fn verify_imported_h3_pruning_directory_with_check(
+    directory: &Path,
+    expected: Option<&sceneworks_core::minimax_h3_codec::H3PruningBinding>,
+    check: &dyn Fn() -> std::io::Result<()>,
+) -> Result<(), String> {
+    check().map_err(|error| error.to_string())?;
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(directory).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| "H3 canonical component filename is not UTF-8")?;
+        if path.is_file()
+            && (path.extension().is_some_and(|ext| ext == "safetensors")
+                || matches!(
+                    name.as_str(),
+                    "config.json" | "diffusion_pytorch_model.safetensors.index.json"
+                ))
+        {
+            files.push((name, path));
+        }
+    }
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    let canonical =
+        sceneworks_core::minimax_h3_codec::H3SourceInventory::from_files_with_config_and_check(
+            &files, None, check,
+        )?;
+    if canonical.pruning.as_ref() != Some(expected) {
+        return Err(
+            "sealed H3 component has a different pruning table/basis identity or source precision"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// The request as its declared task partition sees it — for SEMANTICS only (shape validation, the
+/// frame lattice, sampling defaults, resident tier order). The imported request itself is what
+/// every identity-bearing record is written from.
+#[cfg(native_lane)]
+fn imported_minimax_h3_partition_request(request: &VideoRequest) -> WorkerResult<VideoRequest> {
+    let mut partition = request.clone();
+    partition.model = sceneworks_core::minimax_h3_import::entry_partition_model(
+        &request.model_manifest_entry,
+        request.mode == "reference_to_video",
+    )
+    .map_err(|reason| {
+        WorkerError::InvalidPayload(format!("[checkpoint-plan:unsupported-operation] {reason}"))
+    })?
+    .to_owned();
+    Ok(partition)
+}
+
+/// Record the imported weight identity on the asset's raw settings.
+#[cfg(native_lane)]
+fn record_imported_minimax_h3_identity(
+    raw_settings: &mut Value,
+    dit: &ImportedMiniMaxH3Dit,
+    shared_tier: &str,
+) {
+    if let Value::Object(raw) = raw_settings {
+        // Advanced settings cannot claim a conversion. Only the lease retained through this
+        // render names an actual shared-cache derivative; the API redeems its bound receipt.
+        raw.remove("checkpointDerivative");
+        if let Some(cache_key) = dit.load_authority.derivative_cache_key() {
+            raw.insert(
+                "checkpointDerivative".to_owned(),
+                json!({"cacheKey":cache_key}),
+            );
+        }
+        raw.insert(
+            "importPlan".to_owned(),
+            json!({
+                "checkpointId": dit.checkpoint_id,
+                "planId": dit.plan_id,
+                "semanticDigest": dit.semantic_digest,
+                "assembly": dit.assembly,
+            }),
+        );
+        raw.insert(
+            "minimaxH3Tier".to_owned(),
+            Value::String(IMPORTED_MINIMAX_H3_TIER.to_owned()),
+        );
+        raw.insert(
+            "minimaxH3SharedTier".to_owned(),
+            Value::String(shared_tier.to_owned()),
+        );
+        raw.insert(
+            "minimaxH3ComponentBindings".to_owned(),
+            dit.component_bindings.clone(),
+        );
+    }
+}
+
+/// The tier label an imported dense DiT loads at: not one of the builtin tiers, so it is never
+/// mistaken for (or reconciled against) a resident `q4`/`q8`/`bf16` DiT.
+#[cfg(native_lane)]
+const IMPORTED_MINIMAX_H3_TIER: &str = "imported";
+
+/// Validate shared components with the pinned provider's parsers before provider loading.
+#[cfg(native_lane)]
+fn validate_imported_minimax_h3_shared(root: &Path, encoder: &Path) -> WorkerResult<()> {
+    use platform_runtime::providers::minimax_h3 as engine;
+    let refuse = |reason: String| {
+        WorkerError::InvalidPayload(format!("[checkpoint-plan:incompatible-component] {reason}"))
+    };
+    let read = |path: PathBuf| {
+        std::fs::read_to_string(&path)
+            .map_err(|error| refuse(format!("{}: {error}", path.display())))
+    };
+    let text = read(encoder.join("config.json"))?;
+    let text_json: Value = serde_json::from_str(&text)
+        .map_err(|error| refuse(format!("text_encoder/config.json: {error}")))?;
+    let te = engine::text_encoder::MiniMaxH3TeConfig::from_config_json(&text)
+        .map_err(|error| refuse(format!("text_encoder/config.json: {error}")))?;
+    if text_json.get("model_type").and_then(Value::as_str) != Some("qwen3_vl")
+        || te != engine::text_encoder::MiniMaxH3TeConfig::qwen3_vl_32b()
+    {
+        return Err(refuse(
+            "text_encoder/config.json is not the compatible H3 Qwen3-VL-32B conditioning contract"
+                .to_owned(),
+        ));
+    }
+    let video = engine::config::MiniMaxH3VaeConfig::from_diffusers_json(&read(
+        root.join("vae/config.json"),
+    )?)
+    .map_err(|error| refuse(format!("vae/config.json: {error}")))?;
+    let expected = engine::config::MiniMaxH3VaeConfig::default();
+    if (
+        video.latent_channels,
+        video.in_channels,
+        video.out_channels,
+        video.patch_size,
+        video.patch_size_t,
+        video.clip_length,
+        video.token_drop,
+    ) != (
+        expected.latent_channels,
+        expected.in_channels,
+        expected.out_channels,
+        expected.patch_size,
+        expected.patch_size_t,
+        expected.clip_length,
+        expected.token_drop,
+    ) {
+        return Err(refuse(
+            "vae/config.json is incompatible with H3's video latent/temporal contract".to_owned(),
+        ));
+    }
+    let audio = engine::audio_config::MiniMaxH3AudioVaeConfig::from_source_files(
+        &read(root.join("FL2VA/audio_vae/config.json"))?,
+        &read(root.join("FL2VA/audio_vae/config.yaml"))?,
+        &read(root.join("FL2VA/audio_vae/metadata.json"))?,
+    )
+    .map_err(|error| refuse(format!("FL2VA/audio_vae: {error}")))?;
+    audio
+        .cross_check_diffusers_json(&read(root.join("audio_vae/config.json"))?)
+        .map_err(|error| refuse(format!("audio_vae/config.json: {error}")))?;
+    if audio.sample_rate != 32000 || audio.latent_channels != 32 || audio.output_channels != 2 {
+        return Err(refuse(
+            "audio_vae/config.json must preserve H3's 32kHz stereo/32-channel latent contract"
+                .to_owned(),
+        ));
+    }
+    let tokenizer: Value = serde_json::from_str(&read(root.join("tokenizer/tokenizer.json"))?)
+        .map_err(|error| refuse(format!("tokenizer/tokenizer.json: {error}")))?;
+    if tokenizer
+        .get("model")
+        .and_then(|model| model.get("type"))
+        .and_then(Value::as_str)
+        != Some("BPE")
+    {
+        return Err(refuse(
+            "tokenizer/tokenizer.json has no compatible tokenizer model".to_owned(),
+        ));
+    }
+    let added = tokenizer.get("added_tokens").and_then(Value::as_array);
+    for (token, id) in [
+        ("<|image_pad|>", te.image_token_id),
+        ("<|video_pad|>", te.video_token_id),
+        ("<|vision_start|>", te.vision_start_token_id),
+        ("<|vision_end|>", te.vision_end_token_id),
+    ] {
+        if !added.into_iter().flatten().any(|value| {
+            value.get("content").and_then(Value::as_str) == Some(token)
+                && value.get("id").and_then(Value::as_i64) == Some(i64::from(id))
+        }) {
+            return Err(refuse(format!(
+                "tokenizer/tokenizer.json has incompatible {token} token id; expected {id}"
+            )));
+        }
+    }
+    // The H3 processor lives in the provider, not an external processor_config.json. Its token
+    // presentation requires MiniMax's additions in exactly the published order.
+    let config: Value = serde_json::from_str(&read(root.join("tokenizer/tokenizer_config.json"))?)
+        .map_err(|error| refuse(format!("tokenizer/tokenizer_config.json: {error}")))?;
+    let declared = config
+        .get("additional_special_tokens")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            refuse("tokenizer/tokenizer_config.json has no additional_special_tokens".to_owned())
+        })?;
+    let specials = engine::text_encoder::MINIMAX_ADDED_SPECIALS;
+    if declared.len() < specials.len()
+        || !declared[declared.len() - specials.len()..]
+            .iter()
+            .zip(specials)
+            .all(|(actual, expected)| actual.as_str() == Some(expected))
+    {
+        return Err(refuse("tokenizer/tokenizer_config.json must preserve MiniMax-H3's seven additional special tokens in order".to_owned()));
+    }
+    for token in &declared[..declared.len() - specials.len()] {
+        let known = token.as_str().is_some_and(|token| {
+            tokenizer["model"]["vocab"].get(token).is_some()
+                || added
+                    .into_iter()
+                    .flatten()
+                    .any(|value| value.get("content").and_then(Value::as_str) == Some(token))
+        });
+        if !known {
+            return Err(refuse("tokenizer/tokenizer_config.json assigns unrecognized tokens before H3 specials, changing their ids".to_owned()));
+        }
+    }
+    Ok(())
+}
+
+/// The reference DiT partition directory `mlx-gen-minimax-h3::load` probes as the staged DiT's
+/// SIBLING (`REFERENCE_DIT_PARTITION` in the provider) — the `transformer_ref` row of
+/// `minimax_h3_import::MINIMAX_H3_RESIDENT_COMPONENTS`.
+#[cfg(native_lane)]
+const MINIMAX_H3_REFERENCE_DIT_DIR: &str = "transformer_ref";
+
+#[cfg(native_lane)]
+struct ImportedH3Components {
+    root: PathBuf,
+    encoder: PathBuf,
+    companion: PathBuf,
+    tier: &'static str,
+}
+
+/// Imports consume the admitted component closure, not mutable refs/main or the stock model's
+/// default tier search. Explicit precision controls may confirm this closure, never replace it.
+#[cfg(native_lane)]
+fn resolve_imported_h3_components(
+    settings: &Settings,
+    request: &VideoRequest,
+    dit: &ImportedMiniMaxH3Dit,
+) -> WorkerResult<ImportedH3Components> {
+    let refuse = |reason: String| {
+        WorkerError::InvalidPayload(format!("[checkpoint-plan:missing-component] {reason}"))
+    };
+    let tier = sceneworks_core::minimax_h3_import::selected_import_component_tier(
+        &request.model_manifest_entry,
+    )
+    .map_err(refuse)?;
+    let dit_config: Value =
+        serde_json::from_slice(&std::fs::read(dit.transformer_dir.join("config.json"))?)
+            .map_err(|error| refuse(format!("bound transformer config: {error}")))?;
+    if let Some(value) = request.advanced.get("mlxQuantize") {
+        let bits = crate::payload::quant_int(value).ok_or_else(|| {
+            refuse("explicit mlxQuantize must name the bound shared component precision".into())
+        })?;
+        let explicit = crate::payload::tier_for_bits(Some(bits), "q4");
+        if explicit != tier {
+            return Err(refuse(format!("explicit {explicit} shared precision differs from the imported checkpoint's bound {tier} closure; no component substitution is permitted")));
+        }
+    }
+    let rows = request
+        .model_manifest_entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .filter(|rows| !rows.is_empty())
+        .ok_or_else(|| refuse("the imported checkpoint has no bound component downloads".into()))?;
+    let resolver = sceneworks_core::model_artifacts::ModelArtifactResolver::new(
+        sceneworks_core::hf_home::model_source_library(&settings.data_dir),
+    );
+    let mut components = std::collections::BTreeMap::new();
+    for row in rows {
+        if row.get("coRequisite").and_then(Value::as_bool) != Some(true) {
+            return Err(refuse(
+                "an imported component binding is not a co-requisite".into(),
+            ));
+        }
+        if row
+            .get("variant")
+            .and_then(Value::as_str)
+            .is_some_and(|selected| selected != tier)
+        {
+            return Err(refuse(
+                "component binding disagrees with the selected shared tier".into(),
+            ));
+        }
+        let repo = row
+            .get("repo")
+            .and_then(Value::as_str)
+            .ok_or_else(|| refuse("component binding has no repository".into()))?;
+        let revision = row
+            .get("revision")
+            .and_then(Value::as_str)
+            .ok_or_else(|| refuse(format!("{repo}: component binding has no exact revision")))?;
+        let (_, snapshot) = resolver
+            .discover_source_snapshot(repo, Some(revision))
+            .map_err(|error| refuse(format!("{repo}@{revision}: {error}")))?;
+        if !sceneworks_core::minimax_h3_import::import_component_files_complete(&snapshot, row) {
+            return Err(refuse(format!(
+                "{repo}@{revision}: bound component is incomplete"
+            )));
+        }
+        sceneworks_core::minimax_h3_import::import_component_configuration_compatible(
+            &snapshot,
+            row,
+            &dit_config,
+        )
+        .map_err(|reason| {
+            WorkerError::InvalidPayload(format!(
+                "[checkpoint-plan:incompatible-component] {reason}"
+            ))
+        })?;
+        let files = row
+            .get("files")
+            .and_then(Value::as_array)
+            .ok_or_else(|| refuse("component binding has no files".into()))?;
+        for file in files
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|file| !file.contains(['*', '?', '[']))
+        {
+            if !crate::safe_join(&snapshot, file)?.is_file() {
+                return Err(refuse(format!("{repo}@{revision}: missing {file}")));
+            }
+        }
+        let subdir = row
+            .get("subdir")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                files
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .find_map(|file| file.strip_suffix("/*"))
+            })
+            .ok_or_else(|| {
+                refuse(format!(
+                    "{repo}@{revision}: component binding has no directory"
+                ))
+            })?;
+        let name = row
+            .get("componentId")
+            .and_then(Value::as_str)
+            .or_else(|| subdir.rsplit('/').next())
+            .unwrap_or_default();
+        let name = match name {
+            "video_vae" => "vae",
+            "fl2va_audio_vae_config" => "FL2VA/audio_vae",
+            other => other,
+        };
+        if components
+            .insert(name.to_owned(), crate::safe_join(&snapshot, subdir)?)
+            .is_some()
+        {
+            return Err(refuse(format!("duplicate bound {name} component")));
+        }
+    }
+    let component = |name: &str| {
+        components
+            .get(name)
+            .cloned()
+            .ok_or_else(|| refuse(format!("the imported closure is missing {name}")))
+    };
+    let tokenizer = component("tokenizer")?;
+    let base = tokenizer
+        .parent()
+        .ok_or_else(|| refuse("tokenizer has no snapshot root".into()))?
+        .to_path_buf();
+    let shared = ["tokenizer", "vae", "audio_vae", "FL2VA/audio_vae"];
+    let root = if shared.iter().all(|name| {
+        components
+            .get(*name)
+            .is_some_and(|dir| *dir == base.join(name))
+    }) {
+        base
+    } else {
+        use sha2::{Digest, Sha256};
+        let mut identity = Sha256::new();
+        for name in shared {
+            identity.update(name.as_bytes());
+            identity.update(component(name)?.as_os_str().as_encoded_bytes());
+            identity.update([0]);
+        }
+        let root = settings
+            .data_dir
+            .join("cache/minimax-h3-shared")
+            .join(format!("{:x}", identity.finalize()));
+        std::fs::create_dir_all(&root)?;
+        for name in shared {
+            dit.load_authority
+                .stage_component(
+                    &settings.data_dir,
+                    &dit.assembly,
+                    &root.join(name),
+                    &component(name)?,
+                )
+                .map_err(WorkerError::InvalidPayload)?;
+        }
+        root
+    };
+    let encoder = component("text_encoder")?;
+    validate_imported_minimax_h3_shared(&root, &encoder)?;
+    let companion = match dit.partition {
+        sceneworks_core::minimax_h3_import::MiniMaxH3Partition::Fl2va => {
+            component("transformer_ref")?
+        }
+        sceneworks_core::minimax_h3_import::MiniMaxH3Partition::Ref2va => component("transformer")?,
+        sceneworks_core::minimax_h3_import::MiniMaxH3Partition::Hybrid => {
+            dit.transformer_dir.clone()
+        }
+    };
+    Ok(ImportedH3Components {
+        root,
+        encoder,
+        companion,
+        tier,
+    })
+}
+
+/// Resolve shared components and the explicitly recorded load-only companion. MLX eagerly probes
+/// both task directories, so an explicit hybrid binds the imported DiT at both paths; a single
+/// partition import binds it only at its declared task path. Unsupported operations refuse before
+/// this load can use a resident companion for denoising.
+#[cfg(target_os = "macos")]
+pub(super) fn resolve_imported_minimax_h3_load(
+    settings: &Settings,
+    request: &VideoRequest,
+    dit: &ImportedMiniMaxH3Dit,
+) -> WorkerResult<(MiniMaxH3Load, &'static str)> {
+    let resident = resolve_imported_h3_components(settings, request, dit)?;
+    let companion = resident.companion.clone();
+    let staged = stage_imported_minimax_h3_assembly(settings, dit, &companion)?;
+    Ok((
+        MiniMaxH3Load {
+            root: resident.root,
+            dit_dir: staged.join(MINIMAX_H3_DIT_COMPONENT),
+            text_encoder_dir: Some(resident.encoder),
+            // The imported DiT is DENSE: `spec.quantize` asserts the staged DiT's tier, and a dense
+            // directory carries no quantization marker. The resident reference partition may be
+            // packed; the provider reconciles a packed partition against `None` as agreed.
+            quant: None,
+            tier: IMPORTED_MINIMAX_H3_TIER,
+        },
+        resident.tier,
+    ))
+}
+
+/// Stage both task paths according to the declared compatibility. The key includes plan identity,
+/// semantic digest, partition and source directories; Windows uses snapshot-style file hardlinks
+/// rather than privilege-gated directory links, and Unix uses directory symlinks. No tensor copies.
+/// Stage the Candle load's task paths inside preparation, while its seals can still be settled.
+///
+/// Windows stages them with file hard links, and a new link updates the linked file's ChangeTime,
+/// which the post-load seal check reads as drift: the CUDA campaign's imported Ref2VA render failed
+/// "artifact seal mismatch after load" on a file whose bytes never changed. Staging here and then
+/// re-pinning only the drifted seals against their original digests leaves the load's own staging
+/// call a no-op relink (staging skips a file already linked). Unix stages directory symlinks, which
+/// leave the linked files untouched, so nothing drifts there.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn prestage_imported_minimax_h3_task_paths(
+    settings: &Settings,
+    request: &VideoRequest,
+    mut dit: ImportedMiniMaxH3Dit,
+    check: &dyn Fn() -> std::io::Result<()>,
+) -> WorkerResult<ImportedMiniMaxH3Dit> {
+    if dit.partition != sceneworks_core::minimax_h3_import::MiniMaxH3Partition::Fl2va {
+        let bound = resolve_imported_h3_components(settings, request, &dit)?;
+        stage_imported_minimax_h3_assembly(settings, &dit, &bound.companion)?;
+    }
+    dit.load_authority
+        .reseal_after_link_staging(check)
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "[checkpoint-plan:source-drift] checkpoint {:?}: {error}",
+                dit.checkpoint_id
+            ))
+        })?;
+    Ok(dit)
+}
+
+/// MLX stages imported task paths with directory symlinks after preparation; nothing to settle.
+#[cfg(target_os = "macos")]
+fn prestage_imported_minimax_h3_task_paths(
+    _settings: &Settings,
+    _request: &VideoRequest,
+    dit: ImportedMiniMaxH3Dit,
+    _check: &dyn Fn() -> std::io::Result<()>,
+) -> WorkerResult<ImportedMiniMaxH3Dit> {
+    Ok(dit)
+}
+
+#[cfg(native_lane)]
+fn stage_imported_minimax_h3_assembly(
+    settings: &Settings,
+    dit: &ImportedMiniMaxH3Dit,
+    reference: &Path,
+) -> WorkerResult<PathBuf> {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for part in [
+        dit.checkpoint_id.as_bytes(),
+        dit.plan_id.as_bytes(),
+        dit.semantic_digest
+            .as_deref()
+            .unwrap_or_default()
+            .as_bytes(),
+        dit.partition.as_str().as_bytes(),
+        dit.transformer_dir.as_os_str().as_encoded_bytes(),
+        reference.as_os_str().as_encoded_bytes(),
+    ] {
+        hasher.update(part);
+        hasher.update([0]);
+    }
+    if let Some(pruning) = &dit.pruning {
+        hasher.update(pruning.topology_id.as_bytes());
+        hasher.update([0]);
+        hasher.update(pruning.identity.as_bytes());
+        hasher.update([0]);
+    }
+    let key = format!("{:x}", hasher.finalize());
+    let staged = settings
+        .data_dir
+        .join("cache")
+        .join("minimax-h3-assemblies")
+        .join(&key[..32]);
+    std::fs::create_dir_all(&staged)?;
+    for (name, target) in [
+        (
+            MINIMAX_H3_DIT_COMPONENT,
+            if dit.partition.supports_base() {
+                dit.transformer_dir.as_path()
+            } else {
+                reference
+            },
+        ),
+        (
+            MINIMAX_H3_REFERENCE_DIT_DIR,
+            if dit.partition.supports_references() {
+                dit.transformer_dir.as_path()
+            } else {
+                reference
+            },
+        ),
+    ] {
+        dit.load_authority
+            .stage_component(
+                &settings.data_dir,
+                &dit.assembly,
+                &staged.join(name),
+                target,
+            )
+            .map_err(WorkerError::InvalidPayload)?;
+    }
+    Ok(staged)
+}
+
+/// Candle shares the installed conditioner/VAEs and derives Ref2VA's DiT by the same sibling rule.
+/// Base-only imports need no sibling staging; reference-capable imports stage the declared task
+/// paths, retaining the imported bytes for every admitted operation.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn resolve_candle_imported_minimax_h3_load(
+    settings: &Settings,
+    request: &VideoRequest,
+    dit: &ImportedMiniMaxH3Dit,
+) -> WorkerResult<(CandleMiniMaxH3Load, &'static str)> {
+    let bound = resolve_imported_h3_components(settings, request, dit)?;
+    // Base imports keep their direct path (including linked sources on another Windows volume).
+    // Semantic identity is carried by the supplemental prepared cache context, not by hardlinks.
+    // The frozen companion the import committed is still ACQUIRED explicitly: the direct DiT
+    // directory's sibling is not the library's q4/transformer_ref, so prepared-file acquisition
+    // receives the companion path itself or the frozen component closure would refuse the
+    // render before any provider execution.
+    let (dit_dir, companion_dir) =
+        if dit.partition == sceneworks_core::minimax_h3_import::MiniMaxH3Partition::Fl2va {
+            (dit.transformer_dir.clone(), Some(bound.companion.clone()))
+        } else {
+            (
+                stage_imported_minimax_h3_assembly(settings, dit, &bound.companion)?
+                    .join(MINIMAX_H3_DIT_COMPONENT),
+                // The staged assembly already exposes the companion as the DiT's sibling.
+                None,
+            )
+        };
+    Ok((
+        CandleMiniMaxH3Load {
+            root: bound.root,
+            dit_dir: Some(dit_dir),
+            text_encoder_dir: Some(bound.encoder),
+            companion_dir,
+            quant: None,
+            tier: IMPORTED_MINIMAX_H3_TIER,
+        },
+        bound.tier,
+    ))
+}
+
+#[cfg(all(test, native_lane))]
+mod input_stream_regression {
+    use super::*;
+
+    #[test]
+    fn audio_detection_survives_long_logs_and_ignores_output_only_audio() {
+        for (input_audio, output_audio) in [(true, false), (false, true)] {
+            let mut log =
+                String::from("Input #0, mov, from 'fixture.mp4':\n  Stream #0:0: Video: h264\n");
+            if input_audio {
+                log.push_str("  Stream #0:1: Audio: aac\n");
+            }
+            log.push_str("Output #0, image2, to 'frames':\n");
+            if output_audio {
+                log.push_str("  Stream #0:1: Audio: pcm_s16le\n");
+            }
+            log.push_str(&"diagnostic progress\n".repeat(10_000));
+            let mut capture = sceneworks_core::media_process::ParsedStderr::new(
+                MinimaxH3InputStreams::default(),
+                MinimaxH3InputStreams::read_line,
+            );
+            for bytes in log.as_bytes().chunks(7) {
+                capture.push(bytes);
+            }
+            let capture = capture.complete();
+            assert_eq!(capture.data.audio, input_audio);
+            assert_eq!(minimax_h3_clip_input_has_audio(&log), input_audio);
+            assert!(capture.as_ref().len() <= sceneworks_core::media_process::STDERR_LIMIT);
+        }
+    }
 }

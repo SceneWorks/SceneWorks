@@ -7,6 +7,8 @@
 //! was the only one — it was not); and [`no_value_in_a_built_envelope_is_path_shaped`] seeds the
 //! request with paths on purpose and asserts none of them reach the file.
 
+mod common;
+use common::repo_root;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
@@ -16,19 +18,17 @@ use sceneworks_core::contracts::{Asset, JsonObject};
 use sceneworks_core::jsonc::strip_jsonc_comments;
 use sceneworks_core::workflow_share::{
     advanced_key_rule, build_workflow_share, build_workflow_share_from, is_path_shaped,
-    parse_workflow_share, AdvancedBuilder, AdvancedBuilderShape, AdvancedDisposition,
-    AdvancedKeySource, SeamDisposition, WebBuilderRef, WorkflowAssetFacts, WorkflowShare,
-    ADVANCED_BUILDERS, ADVANCED_KEY_RULES, DEFERRED_ADVANCED_BUILDERS, PERMANENT_EXEMPTION,
-    PRODUCER_URL, PRODUCER_VERSION, WORKFLOW_SHARE_MAX_BYTES, WORKFLOW_SHARE_SCHEMA_VERSION,
-    WORKFLOW_WRITE_SEAMS,
+    parse_workflow_share, AdvancedDisposition, AdvancedKeySource, WorkflowAssetFacts,
+    WorkflowShare, ADVANCED_KEY_RULES, PRODUCER_URL, PRODUCER_VERSION, WORKFLOW_SHARE_MAX_BYTES,
+    WORKFLOW_SHARE_SCHEMA_VERSION,
 };
+#[path = "common/workflow_registry.rs"]
+mod workflow_registry;
 use serde_json::{json, Value};
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-}
+use workflow_registry::{
+    AdvancedBuilder, AdvancedBuilderShape, SeamDisposition, WebBuilderRef, ADVANCED_BUILDERS,
+    DEFERRED_ADVANCED_BUILDERS, PERMANENT_EXEMPTION, WORKFLOW_WRITE_SEAMS,
+};
 
 fn read_repo_file(relative_path: &str) -> String {
     let path = repo_root().join(relative_path);
@@ -95,6 +95,58 @@ fn golden_asset() -> Asset {
         }
     }))
     .expect("golden asset parses")
+}
+
+#[test]
+fn moss_edit_export_counts_semantic_slots_and_never_deduplicates_the_vector() {
+    use sceneworks_core::workflow_resolution::{
+        build_resolution_report, CatalogEntry, StaticCatalogs,
+    };
+    for ids in [json!(["a"]), json!(["a", "b", "a", "c"])] {
+        for aliases in [
+            json!({}),
+            json!({"sourceAssetId":"a"}),
+            json!({"sourceAssetId":"a","referenceAssetId":"a"}),
+        ] {
+            let mut payload = json!({"model":"moss_image_sft","mode":"edit_image","referenceAssetIds":ids,"advanced":{"mossImageEdit":{"reference_max_edge":1024,"use_kv_cache":false}}});
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(aliases.as_object().unwrap().clone());
+            let share = build_workflow_share(&golden_asset(), payload.as_object().unwrap());
+            assert_eq!(share.inputs.len(), 1);
+            assert_eq!(share.inputs[0].kind, "reference");
+            assert_eq!(
+                share.inputs[0].count as usize,
+                ids.as_array().unwrap().len()
+            );
+            let catalogs = StaticCatalogs {
+                models: vec![CatalogEntry::new("moss_image_sft").installed()],
+                conditional_components: vec![
+                    CatalogEntry::new("moss_image_sft:moss_image_edit").installed()
+                ],
+                ..Default::default()
+            };
+            let report = build_resolution_report(&share, &catalogs);
+            assert_eq!(report.input_images_required, share.inputs[0].count);
+            assert!(report.runnable);
+            assert!(!report.one_click_replayable());
+            let missing = build_resolution_report(
+                &share,
+                &StaticCatalogs {
+                    models: catalogs.models,
+                    ..Default::default()
+                },
+            );
+            assert!(!missing.runnable);
+            assert_eq!(missing.components.len(), 1);
+            let mut conflict = payload;
+            conflict["sourceAssetId"] = json!("other");
+            let refused = build_workflow_share(&golden_asset(), conflict.as_object().unwrap());
+            assert!(!build_resolution_report(&refused, &StaticCatalogs::default()).runnable);
+            assert!(refused.omitted.iter().any(|key| key == "inputs"));
+        }
+    }
 }
 
 /// The job row's `payload_json` for that asset — the exact `ImageJobRequest` the API stored,
@@ -687,7 +739,7 @@ const UNACCOUNTED_ADVANCED_ADVICE: &str = "\
     Every place the web app fills `advanced` must be accounted for, because four of those places \
     now feed a lane that embeds the map into the PNG (epic 15945). So either:\n\
     * add the (file, function) pair to `ADVANCED_BUILDERS` in \
-    crates/sceneworks-core/src/workflow_share.rs and classify every key it can emit; or\n\
+    crates/sceneworks-core/tests/common/workflow_registry.rs and classify every key it can emit; or\n\
     * if its lane does not embed yet, add it to `DEFERRED_ADVANCED_BUILDERS` with the story that \
     owns turning it on; or\n\
     * if this is not a job payload at all, RENAME THE LOCAL. This lint reads the name `advanced`, \
@@ -972,6 +1024,11 @@ fn every_image_advanced_key_is_honored_or_refused_by_supra2() {
         "structuredPrompt",
         "styleId",
         "stylePrompt",
+        // Authored recipe metadata; model gating and text composition happen at the API boundary.
+        "appearance",
+        "appearancePrompt",
+        "appearancePromptBatch",
+        "appearanceNegativePrompt",
     ];
     let text = BUILTIN_MANIFESTS
         .iter()
@@ -1309,6 +1366,50 @@ fn the_discovery_scan_still_sees_every_literal_shape() {
     // Never an equality test, and never a method call on the map.
     assert!(signal_shapes("if (advanced == null) return;").is_empty());
     assert!(signal_shapes("const n = advanced.steps;").is_empty());
+}
+
+#[test]
+fn the_image_recipe_replay_only_passes_through_persisted_keys() {
+    let builder = builder_for(AdvancedKeySource::ImageRecipeReplayBuilder);
+    let source = read_repo_file(builder.path);
+    assert!(emitted_keys(builder, &source).is_empty());
+}
+
+#[test]
+fn a_new_image_recipe_replay_key_still_needs_classification() {
+    let builder = builder_for(AdvancedKeySource::ImageRecipeReplayBuilder);
+    let source = read_repo_file(builder.path);
+    for replacement in [
+        "const advanced = { ...raw, replayProbeKnob: true };",
+        "const advanced = { ...raw }; advanced.replayProbeKnob = true;",
+    ] {
+        let mutated = source.replacen("const advanced = { ...raw };", replacement, 1);
+        assert_ne!(
+            mutated, source,
+            "mutation must reach the real replay builder"
+        );
+        assert!(emitted_keys(builder, &mutated).contains("replayProbeKnob"));
+        assert!(!classified_keys().contains("replayProbeKnob"));
+    }
+}
+
+#[test]
+#[should_panic(expected = "spread_of")]
+fn an_undeclared_image_recipe_replay_spread_is_refused() {
+    let builder = builder_for(AdvancedKeySource::ImageRecipeReplayBuilder);
+    let source = read_repo_file(builder.path);
+    let mutated = source.replacen("{ ...raw }", "{ ...raw, ...unaccounted }", 1);
+    assert_ne!(
+        mutated, source,
+        "mutation must reach the real replay builder"
+    );
+    emitted_keys(builder, &mutated);
+}
+
+#[test]
+#[should_panic(expected = "a computed key")]
+fn a_computed_advanced_deletion_remains_refused() {
+    refuse_invisible_advanced_writes(&scannable("delete advanced[key];"), "a probe");
 }
 
 #[test]

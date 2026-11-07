@@ -1,24 +1,17 @@
 //! Backend-neutral engine dispatch table + registry-derived capability advertisement
 //! (sc-3723, epic 3720 Phase 0).
 //!
-//! [`MODEL_TABLE`] is the SceneWorks-id → mlx-gen-registry-id map plus the per-variant
-//! defaults the worker needs that are NOT on the engine descriptor (HF repo, step/guidance
-//! defaults, the asset `adapter` label). It is **all-targets** (no `#[cfg(target_os = …)]`):
-//! the table is pure data, and keeping it neutral lets the registry-derived advertisement run
-//! off-macOS (where the provider crates aren't linked, so the registry is empty and the derived
-//! capability set is correctly empty — "absence, not runtime failure").
+//! [`MODEL_TABLE`] maps SceneWorks image-model ids to provider registry ids and supplies
+//! per-variant worker defaults that are not descriptor capabilities: repository, steps, guidance,
+//! and the asset adapter label. The table is pure data on every target.
 //!
-//! The two descriptor-duplicating flags that used to live on each row
-//! (`supports_guidance` / `supports_negative_prompt`) are gone: they are now read from the
-//! linked gen_core descriptor through [`ResolvedModel`], so a row can never drift from the
-//! engine's own advertised surface. A future candle backend lights up with **zero** worker
-//! changes — it registers its descriptors into the same `inventory` registry and
-//! [`registry_capabilities`] picks them up.
+//! Capability flags such as guidance and negative-prompt support come from the linked provider
+//! descriptor through [`ResolvedModel`]. [`registry_capabilities`] reads the platform's explicitly
+//! composed media and text registries and filters descriptors by the enabled MLX/Candle backends.
+//! An unlinked provider contributes no capability.
 
-/// One engine-backed image family: how a SceneWorks model id maps onto the linked
-/// mlx-gen registry, and the per-variant defaults (all chosen for parity with the
-/// Python `MODEL_TARGETS` + the per-family MLX adapter). Adding a family = one row
-/// here + its provider crate dep + a `use mlx_gen_<x> as _;` in `image_jobs.rs`.
+/// One engine-backed image family and its worker defaults. A row names a provider id;
+/// the platform runtime catalog owns which providers are linked and registered.
 pub(crate) struct ModelRow {
     /// SceneWorks model id (the job payload `model`).
     pub sceneworks_id: &'static str,
@@ -26,11 +19,11 @@ pub(crate) struct ModelRow {
     pub engine_id: &'static str,
     /// Default HuggingFace repo when the manifest entry omits `repo`.
     pub default_repo: &'static str,
-    /// Default denoise steps (Python `MODEL_TARGETS[...]["steps"]`).
+    /// Default denoise steps when the request omits them.
     pub default_steps: u32,
     /// Default guidance when supported and the request omits it.
     pub default_guidance: f32,
-    /// The `adapter` id recorded on generated assets (the Python MLX adapter id).
+    /// The adapter label recorded on generated assets.
     pub adapter_label: &'static str,
 }
 
@@ -233,7 +226,7 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // backbone is the upstream `speridlabs/iris-3b` root; the Qwen3-VL text encoder is a separate
     // catalog co-requisite the descriptor declares (`required_components: ["text_encoder"]`), staged
     // as `LoadSpec::components["text_encoder"]` by the generic `attach_required_components`. Defaults are the release's own
-    // (`gen_core::iris::DEFAULT_STEPS` / `DEFAULT_CFG_SCALE`), pinned by a test below.
+    // (`gen_core_iris::DEFAULT_STEPS` / `DEFAULT_CFG_SCALE`), pinned by a test below.
     ModelRow {
         sceneworks_id: "iris_3b",
         engine_id: "iris_3b",
@@ -242,11 +235,32 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 3.0,
         adapter_label: "mlx_iris",
     },
+    // FLUX 3 Image Klein, distilled (sc-26234, epic sc-26233) — `mlx-gen-flux3` registers
+    // `flux3_klein`. The whole package (DiT + autoencoder + the bundled Qwen3-VL text encoder) is
+    // the one pinned upstream repository root, read by `gen_core_flux3::GenerationResources`; no
+    // co-requisite component. A flow map: 16 steps, no guidance (`gen_core_flux3::DEFAULT_STEPS`).
+    ModelRow {
+        sceneworks_id: "flux3_klein",
+        engine_id: "flux3_klein",
+        default_repo: "black-forest-labs/flux-3-image-klein",
+        default_steps: 16,
+        default_guidance: 0.0,
+        adapter_label: "mlx_flux3",
+    },
+    // S6: separate native CFG checkpoint, default50steps/3.5; never a distilled cache alias.
+    ModelRow {
+        sceneworks_id: "flux3_klein_base",
+        engine_id: "flux3_klein_base",
+        default_repo: "black-forest-labs/flux-3-image-klein-base",
+        default_steps: 50,
+        default_guidance: 3.5,
+        adapter_label: "mlx_flux3",
+    },
     // Supra2-IMG (sc-24213, epic 24212) — `mlx-gen-supra2` registers `supra2_img`. The weights dir
     // is the locally converted bundle (convert-at-install, injected `modelPath`); Flan-T5-Base and
     // SD VAE ft-MSE are catalog co-requisites the descriptor declares (`text_encoder`, `vae`), staged
     // by the generic `attach_required_components`. Defaults are the release's own
-    // (`gen_core::supra2::DEFAULT_STEPS` / `DEFAULT_GUIDANCE`).
+    // (`gen_core_checkpoint::supra2::DEFAULT_STEPS` / `DEFAULT_GUIDANCE`).
     ModelRow {
         sceneworks_id: "supra2_img",
         engine_id: "supra2_img",
@@ -709,11 +723,7 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 3.5,
         adapter_label: "mlx_sd3",
     },
-    // SD3.5 Large Turbo (epic 7841 / sc-7871) — the ADD-distilled few-step, CFG-free sibling: same 8B
-    // MMDiT + triple TE + 16-ch VAE backbone + snapshot layout, distilled checkpoint. 4 steps; guidance
-    // is INERT (the `sd3_5_large_turbo` descriptor advertises supports_guidance=false, so
-    // `resolve_guidance` returns None and never forwards a value — the pipeline's `denoise_cfg` skips the
-    // uncond forward at guidance 1.0). No negative prompt. The z_image_turbo / boogu / krea turbo pattern.
+    // Turbo keeps its single-forward default at CFG 1; Advanced can request experimental CFG.
     ModelRow {
         sceneworks_id: "sd3_5_large_turbo",
         engine_id: "sd3_5_large_turbo",
@@ -721,7 +731,7 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         // standard_tier_subdir. Re-host of the gated Stability source.
         default_repo: "SceneWorks/sd3.5-large-turbo-mlx",
         default_steps: 4,
-        default_guidance: 0.0,
+        default_guidance: 1.0,
         adapter_label: "mlx_sd3",
     },
     // SD3.5 Medium (epic 7841 / sc-7869 M3, wired in sc-7871) — the MMDiT-X variant: 2.5B, 24 joint
@@ -883,19 +893,13 @@ pub(crate) const TRAINER_IDS: &[&str] = &[
 /// backend-neutral (`MODEL_TABLE` row + whichever provider crate registered the engine id), so the
 /// candle `generate_candle_stream` reuses it exactly like the MLX `generate_stream` — `cfg(target_os)`
 /// only decides which provider crate registered the descriptor, not how it is resolved.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) struct ResolvedModel {
     pub row: &'static ModelRow,
     pub descriptor: gen_core::ModelDescriptor,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl ResolvedModel {
     pub fn engine_id(&self) -> &'static str {
         self.row.engine_id
@@ -935,10 +939,7 @@ impl ResolvedModel {
     /// too as of sc-8489 so SANA (the lone generic-MLX family with `supported_quants: &[]`, whose
     /// `load` rejects any quant) loads dense, while every pre-existing family (all Q4/Q8) is
     /// unaffected.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     pub fn supports_quant(&self) -> bool {
         !self.descriptor.capabilities.supported_quants.is_empty()
     }
@@ -962,10 +963,7 @@ impl ResolvedModel {
 /// Backend-neutral despite the `mlx_` name (sc-5096): on the Windows candle lane the registry holds
 /// the candle descriptors, so this resolves the candle engine for `request.model` the same way it
 /// resolves the MLX engine on macOS — the candle `generate_candle_stream` calls it directly.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn mlx_model(sceneworks_id: &str) -> Option<ResolvedModel> {
     let row = MODEL_TABLE
         .iter()
@@ -1007,17 +1005,11 @@ pub(crate) fn engine_id_for_model(sceneworks_id: &str) -> Option<&'static str> {
         .map(|row| row.engine_id)
 }
 
-/// The registry-DERIVED subset of the MLX worker's capabilities (sc-3723): exactly the
-/// capabilities backed by a linked generator/trainer/captioner descriptor whose backend is
-/// enabled in `settings`. Off-macOS the provider crates aren't linked, so the registry is
-/// empty and this returns an empty vec — the capability is *absent*, not a runtime failure.
-/// A future candle backend lights up here with zero worker changes: it registers descriptors
-/// with `backend = "candle"` and (with `backend_candle_enabled`) they are picked up.
+/// Capabilities backed by linked media or text descriptors whose backend is enabled in
+/// `settings`. Both MLX and Candle descriptors are filtered through the same contract.
 ///
-/// The carve-outs the worker advertises that are NOT expressible as a single registered
-/// generator descriptor (ImageEdit/ImageDetail/Vqa/Interleave, the advanced video modes,
-/// pose/kps/upscale/person detect+track) stay hardcoded at the [`crate::gpu::mlx_gpu`] call
-/// site; this function returns only the descriptor-derived core.
+/// Capabilities that cannot be expressed by one registered descriptor, such as specialized
+/// edit/control and video routes, remain owned by the GPU advertisement call sites.
 pub(crate) fn registry_capabilities(
     settings: &crate::Settings,
 ) -> Vec<sceneworks_core::contracts::WorkerCapability> {
@@ -1171,6 +1163,31 @@ mod tests {
     use sceneworks_core::contracts::WorkerCapability as Cap;
 
     #[test]
+    fn flux3_base_defaults_and_engine_identity_are_not_distilled_aliases() {
+        let base = MODEL_TABLE
+            .iter()
+            .find(|row| row.sceneworks_id == "flux3_klein_base")
+            .unwrap();
+        let distilled = MODEL_TABLE
+            .iter()
+            .find(|row| row.sceneworks_id == "flux3_klein")
+            .unwrap();
+        assert_eq!(base.engine_id, "flux3_klein_base");
+        assert_ne!(base.engine_id, distilled.engine_id);
+        assert_eq!(
+            base.default_repo,
+            "black-forest-labs/flux-3-image-klein-base"
+        );
+        assert_ne!(base.default_repo, distilled.default_repo);
+        assert_eq!((base.default_steps, base.default_guidance), (50, 3.5));
+        assert_eq!(
+            (distilled.default_steps, distilled.default_guidance),
+            (16, 0.0)
+        );
+        assert_eq!(base.adapter_label, "mlx_flux3");
+    }
+
+    #[test]
     fn training_inventory_names_every_sc18479_provider_id() {
         for id in [
             "anima_base",
@@ -1190,7 +1207,7 @@ mod tests {
     // (Tests set no backend env vars, so from_env() yields mlx=on / candle=off by default; the
     // helper overrides both explicitly so each case is self-contained regardless of env.)
     fn settings_with_backends(mlx: bool, candle: bool) -> crate::Settings {
-        let mut s = crate::Settings::from_env();
+        let mut s = crate::test_env::offline_settings();
         s.backend_mlx_enabled = mlx;
         s.backend_candle_enabled = candle;
         s
@@ -1316,8 +1333,8 @@ mod tests {
     }
 
     // Guard 1 (was `test_character_image_capability_implies_engine_or_tuning_declaration`, sc-2018): every
-    // builtin that advertises `character_image` must have EITHER a worker identity engine (IP-Adapter /
-    // InstantID / PuLID-FLUX) OR a `ui.variationStrength` declaration. Otherwise the capability flag is
+    // builtin that advertises `character_image` must have a worker identity engine (IP-Adapter /
+    // InstantID / PuLID-FLUX), a native reference-edit route, or a `ui.variationStrength` declaration. Otherwise the capability flag is
     // dishonest — the picker shows the model in "With character" mode but the worker silently ignores the
     // reference (the shape of z_image_turbo's pre-sc-2005 bug). The cross-backbone guard: a future
     // character_image backbone added without engine wiring fails here before it ever reaches a user.
@@ -1338,15 +1355,22 @@ mod tests {
                 .get("ui")
                 .and_then(|ui| ui.get("variationStrength"))
                 .is_some_and(|v| !v.is_null());
-            if !(has_engine || has_variation_ui) {
+            // FLUX.3's native AE-only reference route needs neither an identity overlay nor
+            // an img2img strength control. Bind this category to the live route, not a UI flag.
+            let has_native_reference = sceneworks_core::image_request::flux3::is_model(id) && {
+                let support =
+                    sceneworks_core::jobs_store::model_mac_support(id, "image", Some("flux3"));
+                support.features.reference && support.features.edit
+            };
+            if !(has_engine || has_variation_ui || has_native_reference) {
                 misleading.push(id.to_owned());
             }
         }
         assert!(
             misleading.is_empty(),
             "Models advertise `character_image` without an identity engine (IP-Adapter / InstantID / \
-             PuLID-FLUX in CHARACTER_IMAGE_ENGINE_WIRING) or a `ui.variationStrength` declaration: {misleading:?}. \
-             Wire an identity engine for a reference/face-ID backbone, or declare `ui.variationStrength` \
+             PuLID-FLUX in CHARACTER_IMAGE_ENGINE_WIRING), a native reference-edit route, or a `ui.variationStrength` declaration: {misleading:?}. \
+             Wire a native reference/identity engine, or declare `ui.variationStrength` \
              for an edit-style backbone (sc-2017), or drop the capability flag (the z_image_turbo bug, sc-2005)."
         );
     }
@@ -1419,10 +1443,7 @@ mod tests {
 
     // The effective `limits[key]` list for `backend`: the per-backend `<backend>.limits[key]` override
     // if present, else the base `limits[key]`. `None` => the model advertises no list for that axis.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     fn effective_list(model: &serde_json::Value, backend: &str, key: &str) -> Option<Vec<String>> {
         let pick = |scope: &serde_json::Value| {
             scope
@@ -1445,10 +1466,7 @@ mod tests {
     /// undistilled Candle route failed exact-head CUDA acceptance (sc-18902), so it resolves only the
     /// MLX id. The resolver lists the valid backend ids and picks whichever the active registry holds.
     /// VACE-Fun uses the same dedicated `wan2_2_vace_fun_14b` provider id on both native backends.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     fn video_engine_ids(sceneworks_id: &str) -> &'static [&'static str] {
         match sceneworks_id {
             "wan_2_2" => &["wan2_2_ti2v_5b"],
@@ -1469,10 +1487,7 @@ mod tests {
     /// The linked gen-core descriptor for a video manifest model on the ACTIVE backend, or `None`
     /// when no provider crate registered its engine id here. Mirrors [`mlx_model`]'s registry join
     /// for the video ids that live outside [`MODEL_TABLE`] (the image path).
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     fn video_descriptor(sceneworks_id: &str) -> Option<gen_core::ModelDescriptor> {
         let ids = video_engine_ids(sceneworks_id);
         if ids.is_empty() {
@@ -1497,10 +1512,7 @@ mod tests {
     ///     way a superset of the manifest's `default`+curated menu.
     /// Kolors-conditioned is NOT here: `kolors` IS a `MODEL_TABLE` row, so the loop already resolves it
     /// via `mlx_model` and the existing descriptor check covers its (shared) menu.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     fn bespoke_advertised(sceneworks_id: &str) -> Option<(Vec<String>, Vec<String>)> {
         let curated = || {
             let (samplers, schedulers) = crate::image_jobs::curated_image_menu();
@@ -1538,10 +1550,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn manifest_component_precision_floors_match_active_provider_descriptors() {
         let manifest = parse_builtin_models();
@@ -1594,10 +1603,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn mage_split_tiers_stage_every_provider_required_component() {
         let manifest = parse_builtin_models();
@@ -1641,10 +1647,7 @@ mod tests {
         }
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn manifest_menu_is_subset_of_descriptor() {
         // The active backend's registry: MLX on macOS, candle on the `backend-candle` build.
@@ -1771,10 +1774,7 @@ mod tests {
     // `bespoke_advertised` resolves a menu for them — a `None` would silently skip them and leave the
     // guard vacuously green. Pin that down: both bespoke ids must resolve a non-empty menu that includes
     // the solvers their manifest entries advertise (euler/heun), on whichever backend is active.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn bespoke_models_resolve_a_curated_menu() {
         for id in ["instantid_realvisxl", "pulid_flux_dev"] {
@@ -1801,11 +1801,10 @@ mod tests {
     /// silently ship with its advertised geometry unchecked against its engine (sc-12384 — the image
     /// twin of [`pinned_engine_geometry`]'s `EXPECTED_VIDEO_IDS`). Backend-independent: this is the
     /// full catalog set, and each id is size-checked on whichever backend(s) resolve its engine.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     const EXPECTED_IMAGE_IDS: &[&str] = &[
+        "flux3_klein",
+        "flux3_klein_base",
         "iris_3b",
         "supra2_img",
         "moss_image_base",
@@ -1870,10 +1869,7 @@ mod tests {
     /// The backend-effective default resolution (`<backend>.defaults.resolution` overriding the base
     /// `defaults.resolution`) — the scalar companion to [`effective_list`], which handles the
     /// per-backend list axes. `None` when the model declares no default at all.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     fn effective_default_resolution(model: &serde_json::Value, backend: &str) -> Option<String> {
         let pick = |scope: &serde_json::Value| {
             scope
@@ -1944,9 +1940,11 @@ mod tests {
             "qwen_image_2_1" | "qwen_image_2_1_turbo" => 32,
             "moss_image_base" | "moss_image_sft" => 16,
             // Iris-3B (sc-25679): the backend-neutral contract publishes the patch lattice.
-            "iris_3b" => gen_core::iris::SIZE_MULTIPLE,
+            "iris_3b" => gen_core_iris::SIZE_MULTIPLE,
+            // Both frozen FLUX3 checkpoints share the pinned packed-token grid, not weights.
+            "flux3_klein" | "flux3_klein_base" => gen_core_flux3::DOWNSAMPLING_RATIO,
             // Supra2-IMG (sc-24213) renders exactly one 256x256 geometry (min = max =
-            // gen_core::supra2::IMAGE_SIZE), so its only legal stride is the whole edge.
+            // gen_core_checkpoint::supra2::IMAGE_SIZE), so its only legal stride is the whole edge.
             "supra2_img" => 256,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
@@ -1996,9 +1994,13 @@ mod tests {
             "qwen_image_2_1" | "qwen_image_2_1_turbo" => 32,
             "moss_image_base" | "moss_image_sft" => 16,
             // Iris-3B (sc-25679): the backend-neutral contract publishes the patch lattice.
-            "iris_3b" => gen_core::iris::SIZE_MULTIPLE,
+            "iris_3b" => gen_core_iris::SIZE_MULTIPLE,
+            // FLUX 3 Image Klein (sc-26234): 16 pixels per packed token (8× VAE × 2×2 patchify).
+            // An ASSERTION-only literal on this lane: no Candle provider exists until sc-26235,
+            // which replaces it with that provider's constant.
+            "flux3_klein" | "flux3_klein_base" => 16,
             // Supra2-IMG (sc-24213) renders exactly one 256x256 geometry (min = max =
-            // gen_core::supra2::IMAGE_SIZE), so its only legal stride is the whole edge.
+            // gen_core_checkpoint::supra2::IMAGE_SIZE), so its only legal stride is the whole edge.
             "supra2_img" => 256,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
@@ -2038,10 +2040,7 @@ mod tests {
     /// to a pinned const (as sc-12409 did for the wan-14B family, and sc-12587 tracks for the
     /// remaining VIDEO strides) is a coverage extension tracked in sc-12612 — the image twin — not a
     /// live miss.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn shipped_image_geometry_is_within_the_pinned_engine_envelope() {
         let backend = if cfg!(target_os = "macos") {
@@ -2229,10 +2228,7 @@ mod tests {
     /// or a `runtime-*` pin bump that changes an engine const is RED even while every current bucket
     /// stays on-stride. Values are backend-agnostic except for SDXL and Kolors, whose MLX runtimes
     /// enforce ÷32 while Candle retains ÷8.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn pinned_image_stride_pins_each_engines_lattice() {
         // One representative engine id per family × the exact request-dimension multiple its PINNED
@@ -2264,6 +2260,8 @@ mod tests {
             ("qwen_image_2_1", 32),
             ("qwen_image_2_1_turbo", 32),
             ("iris_3b", 16),
+            ("flux3_klein", 16),
+            ("flux3_klein_base", 16),
             ("supra2_img", 256),
             ("z_image_turbo", 16),
             ("bernini", 16),
@@ -2316,10 +2314,7 @@ mod tests {
     ///
     /// It further pins the descriptor facts the manifest entry is derived from, so a runtime bump
     /// that changes them fails HERE rather than silently making the manifest lie.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn mochi_resolves_one_engine_id_to_the_gen_core_descriptor() {
         assert!(
@@ -2601,10 +2596,7 @@ mod tests {
     // ~50 steps) — proving it is selectable and routes to the base path distinct from `z_image_turbo`
     // (which stays 8-step, CFG-free). Repos are the SceneWorks pre-built quant-matrix turnkeys
     // (sc-8670): base = `SceneWorks/z-image-mlx`, turbo = `SceneWorks/z-image-turbo-mlx`.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn z_image_base_row_is_distinct_from_turbo() {
         let base = MODEL_TABLE
@@ -2659,10 +2651,7 @@ mod tests {
     // sc-8746 (epic 8506, Group-B): the SDXL-family rows point at the SceneWorks pre-built
     // quant-matrix turnkey repos (standard q4/q8/bf16 subdirs), NOT the original dense sources.
     // Each engine still shares the `sdxl` engine id; only the default_repo swings to the turnkey.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn sdxl_family_rows_point_at_sceneworks_turnkeys() {
         for (id, repo) in [

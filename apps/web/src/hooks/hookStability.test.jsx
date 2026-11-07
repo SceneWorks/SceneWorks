@@ -1,3 +1,4 @@
+import { settle } from "../testUtils/dom.js";
 // sc-4194 regression: the data hooks must return useCallback-stable action
 // identities across re-renders that don't change their inputs. Before the fix every
 // action was an inline function recreated each render, so appContextValue (which
@@ -30,7 +31,7 @@ const ACTION_KEYS = {
   // (ref-delegating useCallbacks). With the stable stand-ins below, every action
   // must hold its identity across an unrelated re-render.
   useModelsAndLoras: [
-    "refreshLoras", "deleteModel", "deleteLora", "createModelImportJob", "createLoraImportJob",
+    "refreshModels", "refreshModelAndLoras", "refreshLoras", "deleteModel", "deleteLora", "createModelImportJob", "createLoraImportJob",
     "createModelDownloadJob", "createLoraDownloadJob", "createModelConvertJob",
   ],
   useTraining: [
@@ -53,13 +54,7 @@ const ACTION_KEYS = {
   ],
 };
 
-async function settle() {
-  await act(async () => {
-    for (let i = 0; i < 4; i += 1) {
-      await Promise.resolve();
-    }
-  });
-}
+
 
 describe("data hook action identity stability (sc-4194)", () => {
   let container;
@@ -104,7 +99,7 @@ describe("data hook action identity stability (sc-4194)", () => {
       const [, setN] = useState(0);
       bump = () => setN((n) => n + 1);
       const api = useHook(stableProps);
-      const snapshot = {};
+      const snapshot = { context: api.context };
       actionKeys.forEach((key) => {
         snapshot[key] = api[key];
       });
@@ -130,16 +125,17 @@ describe("data hook action identity stability (sc-4194)", () => {
       await act(async () => {
         root.render(<Harness />);
       });
-      await settle();
+      await settle({ microtasks: 4 });
 
       await act(async () => {
         bumpRef();
       });
-      await settle();
+      await settle({ microtasks: 4 });
 
       expect(captures.length).toBeGreaterThanOrEqual(2);
       const first = captures[0];
       const last = captures[captures.length - 1];
+      expect(last.context).toBe(first.context);
       for (const key of ACTION_KEYS[hookName]) {
         expect(typeof last[key]).toBe("function");
         expect(last[key]).toBe(first[key]); // identity preserved across re-render

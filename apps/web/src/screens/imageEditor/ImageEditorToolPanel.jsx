@@ -1,675 +1,37 @@
+import { useMediaTicket } from "../../hooks/useMediaTicket.js";
 import React from "react";
+import { MossImageEditControls } from "../../components/MossImageEditControls.jsx";
+import { MossReferencePicker } from "../../components/MossReferencePicker.jsx";
 import { EditPromptTemplates } from "../../components/EditPromptTemplates.jsx";
 import { assetDisplayUrl } from "../../components/assetMedia.jsx";
-// sc-24113 — the ordered-reference helpers. Pure and shared with the Studio so the rail, the
-// payload builder and the tests all agree on what "reference 2" means.
 import { moveReference, referenceOrdinalLabel } from "../../imageReferenceLimits.js";
-import {
-  TRANSPARENCY_PROMPT_HINT,
-  showTransparencyToggle,
-  transparencyPromptSuggestion,
-} from "../../qwenAlpha.js";
+import { TRANSPARENCY_PROMPT_HINT, showTransparencyToggle, transparencyPromptSuggestion } from "../../qwenAlpha.js";
+import { UPSCALE_ENGINE_DESC } from "./metadata.jsx";
+
+import { CROP_RATIOS, EDIT_OUTPUT_ASPECTS } from "./geometry.js";
+import { FitModeControl, effectiveFitMode } from "../../components/FitModeControl.jsx";
+import { guidanceDefaultFromModel } from "../../samplerOptions.js";
+import { activeLayerOf, identityTransform } from "../../imageLayers.js";
+import { CurveEditor } from "../../components/CurveEditor.jsx";
+import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../../components/StudioUpdateNotice.jsx";
+import { upscaleEngineIsRestoration, upscaleEngineHasSoftness, upscaleFactorsForEngine } from "../../imageJobs.js";
+import { IrisRestoreControls } from "../../components/IrisRestoreControls.jsx";
+import { COLOR_ADJUSTMENTS } from "./colorGradeMath.js";
+import { BOX_PALETTE, MAX_BOX_PALETTE, addPaletteColor, boxMetadataGaps, removePaletteColor } from "./boxGeometry.js";
+import { maskHasContent } from "./maskShared.js";
+import { EditorLoraPanel } from "./EditorLoraPanel.jsx";
 
 let renderObserverForTests = null;
+export function setImageEditorToolPanelRenderObserverForTests(observer) { renderObserverForTests = observer; }
 
-export function setImageEditorToolPanelRenderObserverForTests(observer) {
-  renderObserverForTests = observer;
-}
+function EditorMovePanel({
+  working,
+  layerCount,
+  fitToView,
+  actualSize
+}) {
 
-export function useStableImageEditorToolPanelScope(scope) {
-  const latestScope = React.useRef(scope);
-  latestScope.current = scope;
-  const stableFunctions = React.useRef(null);
-  if (stableFunctions.current === null) {
-    stableFunctions.current = Object.fromEntries(
-      Object.entries(scope)
-        .filter(([, value]) => typeof value === "function")
-        .map(([key, value]) => [
-          key,
-          /^[A-Z]/.test(key)
-            ? value
-            : (...args) => latestScope.current[key](...args),
-        ]),
-    );
-  }
-  return Object.fromEntries(
-    Object.entries(scope).map(([key, value]) => [
-      key,
-      typeof value === "function" ? stableFunctions.current[key] : value,
-    ]),
-  );
-}
-
-function samePanelProps(previous, next) {
-  if (previous.panelKey !== next.panelKey) return false;
-  const previousScope = previous.scope;
-  const nextScope = next.scope;
-  const keys = Object.keys(previousScope);
-  if (keys.length !== Object.keys(nextScope).length) return false;
-  return keys.every((key) => Object.is(previousScope[key], nextScope[key]));
-}
-
-export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ scope }) {
-  const { EDIT_OUTPUT_ASPECTS, EditorLoraPanel, FitModeControl, maxEditReferences, StudioUpdateBadge, StudioUpdateNotice, aiOp, canMask, clearMask, createLoraDownloadJob, createModelDownloadJob, editAspect, editFitMode, editGuidance, editLora, editLoraDownloadRequested, editLoraInstalled, editLoraRequiredMissing, editLoraSelection, editModel, editModels, editPrompt, editSeed, editorPickerLoras, effectiveFitMode, guidanceDefaultFromModel, imageAssets, maskActive, maskBaseImage, maskBrush, maskErase, maskHasContent, maskLines, maskMode, maskRefineRadius, maskSubTool, multiRefCapable, refAssetIds, refineMask, editTransparent, setEditTransparent, requestEditLoraDownload, requestSmartSelectDownload, runEdit, selectedEditLoras, selectedEditModel, setEditAspect, setEditFitMode, setEditGuidance, setEditModel, setEditPrompt, setEditSeed, setMaskBrush, setMaskErase, setMaskMode, setMaskRefineRadius, setMaskSubTool, setRefAssetIds, setRefPickerOpen, setShowIncompatibleEditLoras, showIncompatibleEditLoras, smartSelectCapabilitySupported, smartSelectDownloadRequested, smartSelectModel, smartSelectSupported, updateOptionLabel } = scope;
-  const renderPanel = () => {
-    if (editModels.length === 0) {
-      return (
-        <div className="ie-section">
-          <p className="ie-note">No edit-capable models installed.</p>
-        </div>
-      );
-    }
-    return (
-      <>
-        <div className="ie-section">
-          <div className="ie-sec-title">Model</div>
-          <select className="ie-select" onChange={(event) => setEditModel(event.target.value)} value={editModel}>
-            {editModels.map((model) => (
-              <option key={model.id} value={model.id}>
-                {updateOptionLabel(model)}
-              </option>
-            ))}
-          </select>
-          <StudioUpdateBadge item={selectedEditModel} />
-          <StudioUpdateNotice item={selectedEditModel} onUpdate={createModelDownloadJob} />
-          <div className="ie-field">
-            <div className="ie-field-top">
-              <span className="ie-field-label">Instruction</span>
-            </div>
-            <textarea
-              className="ie-textarea"
-              onChange={(event) => setEditPrompt(event.target.value)}
-              placeholder="Describe the edit — e.g. “replace the background with a foggy pine forest at dawn”"
-              value={editPrompt}
-            />
-          </div>
-          {/* Built-in edit recipes — the same five the studios offer, so the two Edit
-              surfaces stay in step. Each REPLACES the instruction (see the module note). */}
-          <EditPromptTemplates label="" onApply={setEditPrompt} variant="editor" />
-          {/* sc-24114 — transparency on the editor's edit lane, the same adapter the Studio uses.
-              Shown only for an alpha-capable model; defaults ON when the working image carries
-              alpha (the editor passes that in as the initial value), so an AI edit of a cut-out
-              stays a cut-out. The model has no transparency MODE — the prompt asks for it, which
-              is why the hint below offers the model card's wording as an editable button. */}
-          {showTransparencyToggle(selectedEditModel) ? (
-            <label
-              className="checkline transparency-toggle"
-              title="Keep the model's alpha channel instead of compositing the edit onto white, so a cut-out stays a cut-out. Ask for a transparent background in the instruction; this keeps it."
-            >
-              <input
-                checked={Boolean(editTransparent)}
-                onChange={(event) => setEditTransparent(event.target.checked)}
-                type="checkbox"
-              />
-              Transparent background (RGBA)
-            </label>
-          ) : null}
-          {showTransparencyToggle(selectedEditModel) &&
-          transparencyPromptSuggestion(editPrompt, editTransparent) ? (
-            <p className="transparency-prompt-hint ie-note">
-              This model has no transparency mode — ask for it in the instruction.{" "}
-              <button
-                className="hero-link"
-                onClick={() => setEditPrompt(transparencyPromptSuggestion(editPrompt, editTransparent))}
-                type="button"
-              >
-                Add “{TRANSPARENCY_PROMPT_HINT}”
-              </button>
-            </p>
-          ) : null}
-        </div>
-
-        {/* Managed image-edit LoRA (epic 10871, sc-11069): auto-applied for the user — a status note
-            when installed, a one-click download that gates the run when not. Inert for edit models
-            that need none. Placed right under the model so it reads as part of the edit surface. */}
-        {editLora ? (
-          editLoraInstalled ? (
-            <div className="ie-section">
-              <p className="ie-note">✨ {editLora.name} is applied automatically for editing.</p>
-              <StudioUpdateBadge item={editLora} />
-              <StudioUpdateNotice item={editLora} kind="LoRA" onUpdate={requestEditLoraDownload} />
-              {/* Identity strength (sc-11798): the managed edit LoRA is hidden from the manual
-                  picker, so expose its apply weight here — threaded into buildEditJobBody's
-                  editLoraWeight → the payload edit-LoRA `weight`. Higher = stronger conditioning. */}
-              <div className="lora-slot-weight edit-lora-strength">
-                <label>
-                  <span>Identity strength</span>
-                  <span className="lora-slot-weight-value">
-                    {editLoraSelection.weightFor(editLora).toFixed(2)}
-                  </span>
-                </label>
-                <input
-                  aria-label={`${editLora.name} identity strength`}
-                  max="2"
-                  min="0"
-                  onChange={(event) =>
-                    editLoraSelection.setWeight(editLora.id, Number(event.target.value))
-                  }
-                  step="0.05"
-                  type="range"
-                  value={editLoraSelection.weightFor(editLora)}
-                />
-              </div>
-            </div>
-          ) : (
-            <div className="ie-section">
-              <p className="ie-note">{editLora.name} is required to edit — the base can’t edit without it.</p>
-              <button
-                className="ie-btn block"
-                disabled={editLoraDownloadRequested}
-                onClick={requestEditLoraDownload}
-                type="button"
-              >
-                {editLoraDownloadRequested ? "Downloading…" : `Download ${editLora.name}`}
-              </button>
-            </div>
-          )
-        ) : null}
-
-        <EditorLoraPanel
-          selectedModel={selectedEditModel}
-          selectedLoras={selectedEditLoras}
-          selectedLoraIds={editLoraSelection.selectedLoraIds}
-          toggleLora={editLoraSelection.toggleLora}
-          weightFor={editLoraSelection.weightFor}
-          setWeight={editLoraSelection.setWeight}
-          availableLoras={editorPickerLoras}
-          showIncompatible={showIncompatibleEditLoras}
-          setShowIncompatible={setShowIncompatibleEditLoras}
-          onUpdateLora={createLoraDownloadJob}
-        />
-
-        <div className="ie-section">
-          <div className="ie-sec-title">Output</div>
-          <div className="ie-field">
-            <span className="ie-field-label" style={{ marginBottom: "2px" }}>
-              Aspect
-            </span>
-            <div className="ie-seg wrap four">
-              {EDIT_OUTPUT_ASPECTS.map((aspect) => (
-                <button
-                  className="ie-seg-btn"
-                  data-active={editAspect === aspect.key}
-                  key={aspect.key}
-                  onClick={() => setEditAspect(aspect.key)}
-                  type="button"
-                >
-                  {aspect.label}
-                </button>
-              ))}
-            </div>
-          </div>
-          {editAspect !== "match" ? (
-            <FitModeControl
-              inpaintCapable={canMask}
-              label="Fill new area"
-              onChange={setEditFitMode}
-              value={effectiveFitMode(editFitMode, canMask)}
-            />
-          ) : null}
-        </div>
-
-        {canMask ? (
-          <div className="ie-section">
-            <div className="ie-sec-title">
-              Mask
-              <button
-                className="ie-btn sm ghost"
-                data-active={maskMode}
-                onClick={() => setMaskMode((on) => !on)}
-                style={{ height: "24px" }}
-                type="button"
-              >
-                {maskMode ? "On" : "Off"}
-              </button>
-            </div>
-            {maskMode ? (
-              <>
-                {smartSelectSupported ? (
-                  <div className="ie-seg two" style={{ width: "100%" }}>
-                    <button
-                      className="ie-seg-btn"
-                      data-active={maskSubTool === "brush"}
-                      onClick={() => setMaskSubTool("brush")}
-                      type="button"
-                    >
-                      Brush
-                    </button>
-                    <button
-                      className="ie-seg-btn"
-                      data-active={maskSubTool === "select"}
-                      disabled={aiOp?.label === "smart select"}
-                      onClick={() => {
-                        setMaskSubTool("select");
-                        setMaskErase(false);
-                      }}
-                      type="button"
-                    >
-                      {aiOp?.label === "smart select" ? "Segmenting…" : "Smart select"}
-                    </button>
-                  </div>
-                ) : null}
-                {!smartSelectSupported && smartSelectCapabilitySupported && smartSelectModel ? (
-                  <>
-                    <p className="ie-note">SAM3 Smart Select is not installed. The brush remains available, or install SAM3 now.</p>
-                    <button
-                      className="ie-btn block"
-                      disabled={smartSelectDownloadRequested || !requestSmartSelectDownload}
-                      onClick={requestSmartSelectDownload}
-                      type="button"
-                    >
-                      {smartSelectDownloadRequested ? "Installing SAM3…" : "Install SAM3"}
-                    </button>
-                  </>
-                ) : null}
-                {!smartSelectSupported || maskSubTool === "brush" ? (
-                  <>
-                    <div className="ie-field">
-                      <div className="ie-field-top">
-                        <span className="ie-field-label">Brush size</span>
-                        <span className="ie-field-val">{maskBrush} px</span>
-                      </div>
-                      <input
-                        className="ie-range"
-                        max={300}
-                        min={5}
-                        onChange={(event) => setMaskBrush(Number(event.target.value))}
-                        step={1}
-                        type="range"
-                        value={maskBrush}
-                      />
-                    </div>
-                    <button className="ie-btn block" data-active={maskErase} onClick={() => setMaskErase((on) => !on)} type="button">
-                      Eraser
-                    </button>
-                  </>
-                ) : (
-                  <p className="ie-note">Drag a box around an object on the canvas — SAM3 auto-masks it.</p>
-                )}
-                <div>
-                  <span className="ie-field-label" style={{ display: "block", marginBottom: "7px" }}>
-                    Refine selection
-                  </span>
-                  <div className="ie-field" style={{ marginBottom: "8px" }}>
-                    <div className="ie-field-top">
-                      <span className="ie-field-label" style={{ fontSize: "11.5px", color: "var(--ie-muted)" }}>
-                        Radius
-                      </span>
-                      <span className="ie-field-val">{maskRefineRadius}px</span>
-                    </div>
-                    <input
-                      className="ie-range"
-                      max={40}
-                      min={1}
-                      onChange={(event) => setMaskRefineRadius(Number(event.target.value))}
-                      step={1}
-                      type="range"
-                      value={maskRefineRadius}
-                    />
-                  </div>
-                  <div className="ie-chip-row">
-                    <button
-                      className="ie-chip"
-                      disabled={!maskHasContent(maskLines) && !maskBaseImage}
-                      onClick={() => refineMask("feather")}
-                      type="button"
-                    >
-                      Feather
-                    </button>
-                    <button
-                      className="ie-chip"
-                      disabled={!maskHasContent(maskLines) && !maskBaseImage}
-                      onClick={() => refineMask("grow")}
-                      type="button"
-                    >
-                      Grow
-                    </button>
-                    <button
-                      className="ie-chip"
-                      disabled={!maskHasContent(maskLines) && !maskBaseImage}
-                      onClick={() => refineMask("shrink")}
-                      type="button"
-                    >
-                      Shrink
-                    </button>
-                    <button className="ie-chip" onClick={() => refineMask("invert")} type="button">
-                      Invert
-                    </button>
-                    <button
-                      className="ie-chip"
-                      disabled={!maskLines.length && !maskBaseImage}
-                      onClick={clearMask}
-                      type="button"
-                    >
-                      Clear
-                    </button>
-                  </div>
-                </div>
-              </>
-            ) : (
-              <p className="ie-note">Turn on a mask to confine the edit to a painted or selected region (inpaint).</p>
-            )}
-          </div>
-        ) : null}
-
-        {multiRefCapable ? (
-          <div className="ie-section">
-            <div className="ie-sec-title">Reference images</div>
-            {/* sc-24113 — the reference list is ORDERED, and the order is semantic. The engine's
-                template numbers the images (<image1> …) and its block-causal attention makes each
-                one visible only to what follows, so swapping two references is a different render.
-                Two consequences are visible here:
-
-                  * every reference carries its 1-based ordinal, because the prompt conventions for
-                    this family name images directly ("use the second image as a mask") and a user
-                    who cannot see which one is second cannot write that prompt;
-                  * the arrows move a reference, because the only way to reorder before this was to
-                    remove everything and re-add it in the right order. */}
-            <div className="ie-refs">
-              {/* sc-24114: the WORKING image is the first ordered entry the edit sends
-                  (`editReferenceIds` leads with it), so it IS "Image 1" in the prompt's terms and
-                  the attached references start at "Image 2". Shown as a fixed tile so the user sees
-                  the whole ordered list the engine numbers. */}
-              <div className="ie-ref ie-ref-working" title="The image you are editing is always first">
-                <span className="ie-ref-working-label">Working image</span>
-                <span className="ie-ref-ordinal">{referenceOrdinalLabel(0)}</span>
-              </div>
-              {refAssetIds.map((id, index) => {
-                const asset = imageAssets.find((item) => item.id === id);
-                const ordinal = referenceOrdinalLabel(index + 1);
-                return (
-                  <div className="ie-ref" key={id}>
-                    {asset ? <img alt="" src={assetDisplayUrl(asset)} /> : <span>?</span>}
-                    <span className="ie-ref-ordinal" title="References are sent in this order">
-                      {ordinal}
-                    </span>
-                    <button
-                      aria-label={`Move ${ordinal} earlier`}
-                      className="ie-ref-move"
-                      disabled={index === 0}
-                      onClick={() => setRefAssetIds((prev) => moveReference(prev, index, index - 1))}
-                      type="button"
-                    >
-                      ‹
-                    </button>
-                    <button
-                      aria-label={`Move ${ordinal} later`}
-                      className="ie-ref-move"
-                      disabled={index === refAssetIds.length - 1}
-                      onClick={() => setRefAssetIds((prev) => moveReference(prev, index, index + 1))}
-                      type="button"
-                    >
-                      ›
-                    </button>
-                    <button
-                      aria-label="Remove reference"
-                      className="ie-ref-remove"
-                      onClick={() => setRefAssetIds((prev) => prev.filter((other) => other !== id))}
-                      type="button"
-                    >
-                      ✕
-                    </button>
-                  </div>
-                );
-              })}
-              <button
-                className="ie-ref-add"
-                disabled={refAssetIds.length >= maxEditReferences - 1}
-                onClick={() => setRefPickerOpen(true)}
-                title="Condition the edit on reference image(s)"
-                type="button"
-              >
-                +
-              </button>
-            </div>
-          </div>
-        ) : null}
-
-        <div className="ie-section">
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
-            <div className="ie-field">
-              <span className="ie-field-label" style={{ marginBottom: "2px" }}>
-                Seed
-              </span>
-              <input
-                className="ie-input"
-                min={0}
-                onChange={(event) => setEditSeed(event.target.value)}
-                placeholder="Random"
-                style={{ fontFamily: "var(--ie-mono)" }}
-                type="number"
-                value={editSeed}
-              />
-            </div>
-            <div className="ie-field">
-              <span className="ie-field-label" style={{ marginBottom: "2px" }}>
-                Guidance
-              </span>
-              <input
-                className="ie-input"
-                min={0}
-                onChange={(event) => setEditGuidance(event.target.value)}
-                placeholder={guidanceDefaultFromModel(selectedEditModel)?.toString() ?? "Default"}
-                step={0.1}
-                style={{ fontFamily: "var(--ie-mono)" }}
-                type="number"
-                value={editGuidance}
-              />
-            </div>
-          </div>
-          <button
-            className="ie-btn block primary"
-            disabled={!editPrompt.trim() || !!aiOp || editLoraRequiredMissing}
-            onClick={runEdit}
-            type="button"
-          >
-            {maskActive ? "Inpaint region" : "Generate edit"}
-          </button>
-        </div>
-      </>
-    );
-  };
-  return renderPanel();
-}, samePanelProps);
-
-export const ImageEditorBoxesPanel = React.memo(function ImageEditorBoxesPanel({ scope }) {
-  const { BOX_PALETTE, MAX_BOX_PALETTE, StudioUpdateBadge, StudioUpdateNotice, addPaletteColor, aiOp, boxColor, boxMetadataGaps, boxes, chooseBoxColor, clearBoxes, composedPrompt, createModelDownloadJob, deleteBox, editModel, editModels, editPrompt, removePaletteColor, runBoxEdit, selectedBox, selectedBoxGaps, selectedBoxId, selectedEditModel, setEditModel, setEditPrompt, setSelectedBoxId, updateBox, updateOptionLabel } = scope;
-  const renderPanel = () => (
-    <>
-      <div className="ie-section">
-        <div className="ie-sec-title">Box color</div>
-        <div className="ie-swatches">
-          {BOX_PALETTE.map((entry) => (
-            <button
-              aria-label={entry.name}
-              className="ie-swatch"
-              data-active={boxColor === entry.value}
-              key={entry.value}
-              onClick={() => chooseBoxColor(entry.value)}
-              style={{ background: entry.value }}
-              title={entry.name}
-              type="button"
-            />
-          ))}
-          <label className="ie-swatch ie-swatch-custom" title="Custom color">
-            <input aria-label="Custom box color" onChange={(event) => chooseBoxColor(event.target.value)} type="color" value={boxColor.toLowerCase()} />
-          </label>
-        </div>
-        <p className="ie-note">Drag on the canvas to draw a colored region, then describe what belongs there.</p>
-      </div>
-
-      <div className="ie-section">
-        <div className="ie-sec-title">Regions ({boxes.length})</div>
-        {boxes.length ? (
-          <div className="ie-chip-row">
-            {boxes.map((box, index) => {
-              const incomplete = boxMetadataGaps(box).length > 0;
-              return (
-                <button
-                  className="ie-chip"
-                  data-active={selectedBoxId === box.id}
-                  key={box.id}
-                  onClick={() => setSelectedBoxId(box.id)}
-                  title={box.desc ? `${index + 1}: ${box.desc}` : `Box ${index + 1} — needs a description`}
-                  type="button"
-                >
-                  <span className="ie-dot" style={{ background: box.color }} />
-                  {index + 1}
-                  {incomplete ? <span className="warn">!</span> : null}
-                </button>
-              );
-            })}
-          </div>
-        ) : (
-          <p className="ie-note">Drag on the image to draw a box.</p>
-        )}
-        {boxes.length ? (
-          <div style={{ display: "flex", gap: "8px" }}>
-            <button className="ie-btn sm" disabled={!selectedBoxId} onClick={() => deleteBox(selectedBoxId)} type="button">
-              Delete
-            </button>
-            <button className="ie-btn sm" disabled={!boxes.length} onClick={clearBoxes} type="button">
-              Clear all
-            </button>
-          </div>
-        ) : null}
-      </div>
-
-      {selectedBox ? (
-        <div className="ie-section">
-          <div className="ie-sec-title">
-            Region details
-            <span className="ie-field-val">Box {boxes.indexOf(selectedBox) + 1}</span>
-          </div>
-          <div className="ie-seg two" style={{ width: "100%" }}>
-            <button
-              className="ie-seg-btn"
-              data-active={selectedBox.type === "obj"}
-              onClick={() => updateBox(selectedBox.id, { type: "obj" })}
-              type="button"
-            >
-              Object
-            </button>
-            <button
-              className="ie-seg-btn"
-              data-active={selectedBox.type === "text"}
-              onClick={() => updateBox(selectedBox.id, { type: "text" })}
-              type="button"
-            >
-              Text
-            </button>
-          </div>
-          <div className="ie-field">
-            <span className="ie-field-label" style={{ marginBottom: "2px" }}>
-              Description
-            </span>
-            <input
-              className="ie-input"
-              onChange={(event) => updateBox(selectedBox.id, { desc: event.target.value })}
-              placeholder="What is in this region?"
-              value={selectedBox.desc ?? ""}
-            />
-          </div>
-          {selectedBox.type === "text" ? (
-            <div className="ie-field">
-              <span className="ie-field-label" style={{ marginBottom: "2px" }}>
-                Literal text
-              </span>
-              <input
-                className="ie-input"
-                onChange={(event) => updateBox(selectedBox.id, { text: event.target.value })}
-                placeholder="Text to render"
-                value={selectedBox.text ?? ""}
-              />
-            </div>
-          ) : null}
-          <div className="ie-field">
-            <span className="ie-field-label" style={{ marginBottom: "2px" }}>
-              Element colors ({(selectedBox.colorPalette ?? []).length}/{MAX_BOX_PALETTE})
-            </span>
-            <div className="ie-swatches">
-              {(selectedBox.colorPalette ?? []).map((color) => (
-                <button
-                  aria-label={`Remove ${color}`}
-                  className="ie-swatch"
-                  key={color}
-                  onClick={() => updateBox(selectedBox.id, { colorPalette: removePaletteColor(selectedBox.colorPalette, color) })}
-                  style={{ background: color }}
-                  title={`Remove ${color}`}
-                  type="button"
-                />
-              ))}
-              {(selectedBox.colorPalette ?? []).length < MAX_BOX_PALETTE ? (
-                <label className="ie-swatch ie-swatch-custom" title="Add color">
-                  <input
-                    aria-label="Add element color"
-                    onChange={(event) => updateBox(selectedBox.id, { colorPalette: addPaletteColor(selectedBox.colorPalette, event.target.value) })}
-                    type="color"
-                  />
-                </label>
-              ) : null}
-            </div>
-          </div>
-          {selectedBoxGaps.length ? (
-            <p className="ie-note">For Ideogram layout this box still needs {selectedBoxGaps.join(", ")}. The color-keyed edit path only needs a color + description.</p>
-          ) : (
-            <p className="ie-note" style={{ color: "var(--ie-accent)" }}>
-              Ready for Ideogram layout ✓
-            </p>
-          )}
-        </div>
-      ) : null}
-
-      {boxes.length ? (
-        <div className="ie-section">
-          <div className="ie-sec-title">Generate</div>
-          {editModels.length ? (
-            <>
-              <select className="ie-select" onChange={(event) => setEditModel(event.target.value)} value={editModel}>
-                {editModels.map((model) => (
-                  <option key={model.id} value={model.id}>
-                    {updateOptionLabel(model)}
-                  </option>
-                ))}
-              </select>
-              <StudioUpdateBadge item={selectedEditModel} />
-              <StudioUpdateNotice item={selectedEditModel} onUpdate={createModelDownloadJob} />
-              <input
-                className="ie-input"
-                onChange={(event) => setEditPrompt(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !aiOp && editModel) runBoxEdit();
-                }}
-                placeholder="Prompt (or use Auto-prompt)"
-                value={editPrompt}
-              />
-              <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "8px" }}>
-                <button className="ie-btn" disabled={!composedPrompt} onClick={() => setEditPrompt(composedPrompt)} type="button">
-                  Auto-prompt
-                </button>
-                <button className="ie-btn primary" disabled={!!aiOp || !editModel} onClick={runBoxEdit} type="button">
-                  Generate
-                </button>
-              </div>
-            </>
-          ) : (
-            <p className="ie-note">No edit-capable models installed.</p>
-          )}
-        </div>
-      ) : null}
-    </>
-  );
-  return renderPanel();
-}, samePanelProps);
-
-export const ImageEditorToolPanel = React.memo(function ImageEditorToolPanel({ panelKey, scope }) {
-  renderObserverForTests?.();
-  const { COLOR_ADJUSTMENTS, CROP_RATIOS, CurveEditor, IrisRestoreControls, StudioUpdateBadge, StudioUpdateNotice, UPSCALE_ENGINE_DESC, irisPlanStatus, irisRestore, setIrisPlanStatus, setIrisRestore, token, upscaleEngineIsRestoration, activeGradeIsIdentity, activeLayerOf, actualSize, aiOp, applyColorGrade, applyCrop, applyMaskCutout, availableUpscaleEngines, cancelCrop, channelStroke, chooseRatio, clearMask, colorAdjust, colorChannel, colorKeyGlobal, colorKeySeed, colorKeySoftness, colorKeyTolerance, colorMode, createModelDownloadJob, cropRect, curves, cutoutKeepSelected, detailCnScale, detailModel, detailModels, detailStrength, endTransformGesture, fitToView, flipActiveLayer, histogramRef, identityTransform, layerCount, levels, maskBaseImage, maskBrush, maskErase, maskHasContent, maskLines, maskMode, maskRefineRadius, maskSource, maskSubTool, onTransformSlider, ratioKey, refineMask, requestSmartSelectDownload, requestTileControlNetDownload, resetActiveColorMode, resetActiveLayerTransform, resetAdjust, rotated, runDetail, runUpscale, selectedDetailModel, setActiveTransform, setAdjustValue, setColorChannel, setColorKeyGlobal, setColorKeySeed, setColorKeySoftness, setColorKeyTolerance, setColorMode, setCropDim, setCurves, setCutoutKeepSelected, setDetailCnScale, setDetailModel, setDetailStrength, setLevelsValue, setMaskBrush, setMaskErase, setMaskMode, setMaskRefineRadius, setMaskSubTool, setStraighten, setTool, setUpscaleEngine, setUpscaleFactor, setUpscaleSoftness, smartSelectCapabilitySupported, smartSelectDownloadRequested, smartSelectModel, smartSelectSupported, straighten, tileControlNet, tileControlNetDownloadRequested, tileControlNetReady, toggleRotate, updateOptionLabel, upscaleEngine, upscaleEngineHasSoftness, upscaleFactor, upscaleFactorsForEngine, upscaleSoftness, working } = scope;
-  const renderPanel = (key) => {
-    switch (key) {
-      case "move":
-        return (
-          <>
+  return (<>
             <div className="ie-section">
               <div className="ie-sec-title">Document</div>
               <div className="ie-readout">
@@ -696,16 +58,24 @@ export const ImageEditorToolPanel = React.memo(function ImageEditorToolPanel({ p
                 Actual size (100%)
               </button>
             </div>
-          </>
-        );
-      case "transform": {
-        const tLayer = activeLayerOf(working);
-        const t = tLayer?.transform ?? identityTransform();
-        const scalePct = Math.round(Math.abs(t.scaleX) * 100);
-        const signX = t.scaleX < 0 ? -1 : 1;
-        const signY = t.scaleY < 0 ? -1 : 1;
-        return (
-          <>
+          </>);
+}
+
+function EditorTransformPanel({
+  working,
+  setActiveTransform,
+  endTransformGesture,
+  onTransformSlider,
+  flipActiveLayer,
+  resetActiveLayerTransform,
+  setTool
+}) {
+const tLayer = activeLayerOf(working);
+const t = tLayer?.transform ?? identityTransform();
+const scalePct = Math.round(Math.abs(t.scaleX) * 100);
+const signX = t.scaleX < 0 ? -1 : 1;
+const signY = t.scaleY < 0 ? -1 : 1;
+  return (<>
             <div className="ie-section">
               <div className="ie-sec-title">Position</div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
@@ -790,12 +160,23 @@ export const ImageEditorToolPanel = React.memo(function ImageEditorToolPanel({ p
                 Done
               </button>
             </div>
-          </>
-        );
-      }
-      case "crop":
-        return (
-          <>
+          </>);
+}
+
+function EditorCropPanel({
+  ratioKey,
+  chooseRatio,
+  rotated,
+  toggleRotate,
+  setCropDim,
+  cropRect,
+  straighten,
+  setStraighten,
+  applyCrop,
+  cancelCrop
+}) {
+
+  return (<>
             <div className="ie-section">
               <div className="ie-sec-title">Aspect ratio</div>
               <div className="ie-seg wrap" style={{ gridTemplateColumns: "repeat(3, 1fr)" }}>
@@ -875,11 +256,29 @@ export const ImageEditorToolPanel = React.memo(function ImageEditorToolPanel({ p
                 Cancel
               </button>
             </div>
-          </>
-        );
-      case "upscale":
-        return (
-          <>
+          </>);
+}
+
+function EditorUpscalePanel({
+  availableUpscaleEngines,
+  upscaleEngine,
+  setUpscaleEngine,
+  upscaleFactor,
+  setUpscaleFactor,
+  aiOp,
+  setIrisRestore,
+  setIrisPlanStatus,
+  working,
+  token,
+  irisRestore,
+  upscaleSoftness,
+  setUpscaleSoftness,
+  irisPlanStatus,
+  runUpscale,
+  setTool
+}) {
+
+  return (<>
             <div className="ie-section">
               <div className="ie-sec-title">Engine</div>
               <div className="ie-cards">
@@ -976,10 +375,29 @@ export const ImageEditorToolPanel = React.memo(function ImageEditorToolPanel({ p
                 Cancel
               </button>
             </div>
-          </>
-        );
-      case "detail":
-        return detailModels.length === 0 ? (
+          </>);
+}
+
+function EditorDetailPanel({
+  detailModels,
+  setDetailModel,
+  detailModel,
+  selectedDetailModel,
+  createModelDownloadJob,
+  detailStrength,
+  setDetailStrength,
+  detailCnScale,
+  setDetailCnScale,
+  tileControlNetReady,
+  tileControlNet,
+  tileControlNetDownloadRequested,
+  requestTileControlNetDownload,
+  aiOp,
+  runDetail,
+  setTool
+}) {
+
+  return (detailModels.length === 0 ? (
           <div className="ie-section">
             <p className="ie-note">No detail-capable models installed.</p>
           </div>
@@ -1071,10 +489,29 @@ export const ImageEditorToolPanel = React.memo(function ImageEditorToolPanel({ p
               </button>
             </div>
           </>
-        );
-      case "color":
-        return (
-          <>
+        ));
+}
+
+function EditorColorPanel({
+  colorMode,
+  setColorMode,
+  colorAdjust,
+  setAdjustValue,
+  resetAdjust,
+  setColorChannel,
+  colorChannel,
+  histogramRef,
+  levels,
+  setLevelsValue,
+  setCurves,
+  curves,
+  channelStroke,
+  activeGradeIsIdentity,
+  resetActiveColorMode,
+  applyColorGrade
+}) {
+
+  return (<>
             <div className="ie-section">
               <div className="ie-seg wrap" style={{ gridTemplateColumns: "repeat(3, 1fr)" }}>
                 {[
@@ -1209,11 +646,46 @@ export const ImageEditorToolPanel = React.memo(function ImageEditorToolPanel({ p
                 Apply grade
               </button>
             </div>
-          </>
-        );
-      case "cutout":
-        return (
-          <>
+          </>);
+}
+
+function EditorCutoutPanel({
+  colorKeySeed,
+  colorKeyGlobal,
+  setColorKeyGlobal,
+  colorKeyTolerance,
+  setColorKeyTolerance,
+  colorKeySoftness,
+  setColorKeySoftness,
+  smartSelectSupported,
+  maskMode,
+  maskSubTool,
+  aiOp,
+  setColorKeySeed,
+  clearMask,
+  setCutoutKeepSelected,
+  setMaskMode,
+  setMaskSubTool,
+  setMaskErase,
+  smartSelectCapabilitySupported,
+  smartSelectModel,
+  smartSelectDownloadRequested,
+  requestSmartSelectDownload,
+  maskBrush,
+  setMaskBrush,
+  maskErase,
+  maskRefineRadius,
+  setMaskRefineRadius,
+  maskLines,
+  maskBaseImage,
+  refineMask,
+  cutoutKeepSelected,
+  applyMaskCutout,
+  maskSource,
+  setTool
+}) {
+
+  return (<>
             <div className="ie-section">
               <div className="ie-sec-title">Color key</div>
               <p className="ie-note">
@@ -1389,15 +861,655 @@ export const ImageEditorToolPanel = React.memo(function ImageEditorToolPanel({ p
                 Cancel
               </button>
             </div>
-          </>
-        );
-      case "edit":
-        return <ImageEditorEditPanel scope={scope} />;
-      case "boxes":
-        return <ImageEditorBoxesPanel scope={scope} />;
-      default:
-        return null;
+          </>);
+}
+
+export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel(props) {
+  useMediaTicket();
+  const { mossEdit, mossEditReady, mossEditError, mossImageEdit, setMossImageEdit, mossEditSettings, setMossEditSettings, token, jobs } = props;
+  const { maxEditReferences, aiOp, canMask, clearMask, createLoraDownloadJob, createModelDownloadJob, editAspect, editFitMode, editGuidance, editLora, editLoraDownloadRequested, editLoraInstalled, editLoraRequiredMissing, editLoraSelection, editModel, editModels, editPrompt, editSeed, editorPickerLoras, imageAssets, maskActive, maskBaseImage, maskBrush, maskErase, maskLines, maskMode, maskRefineRadius, maskSubTool, multiRefCapable, refAssetIds, refineMask, editTransparent, setEditTransparent, requestEditLoraDownload, requestSmartSelectDownload, runEdit, selectedEditLoras, selectedEditModel, setEditAspect, setEditFitMode, setEditGuidance, setEditModel, setEditPrompt, setEditSeed, setMaskBrush, setMaskErase, setMaskMode, setMaskRefineRadius, setMaskSubTool, setRefAssetIds, setRefPickerOpen, setShowIncompatibleEditLoras, showIncompatibleEditLoras, smartSelectCapabilitySupported, smartSelectDownloadRequested, smartSelectModel, smartSelectSupported } = props;
+  const renderPanel = () => {
+    if (editModels.length === 0) {
+      return (
+        <div className="ie-section">
+          <p className="ie-note">No edit-capable models installed.</p>
+        </div>
+      );
     }
+    return (
+      <>
+        <div className="ie-section">
+          <div className="ie-sec-title">Model</div>
+          <select className="ie-select" onChange={(event) => setEditModel(event.target.value)} value={editModel}>
+            {editModels.map((model) => (
+              <option key={model.id} value={model.id}>
+                {updateOptionLabel(model)}
+              </option>
+            ))}
+          </select>
+          <StudioUpdateBadge item={selectedEditModel} />
+          <StudioUpdateNotice item={selectedEditModel} onUpdate={createModelDownloadJob} />
+          <div className="ie-field">
+            <div className="ie-field-top">
+              <span className="ie-field-label">Instruction</span>
+            </div>
+            <textarea
+              className="ie-textarea"
+              onChange={(event) => setEditPrompt(event.target.value)}
+              placeholder="Describe the edit — e.g. “replace the background with a foggy pine forest at dawn”"
+              value={editPrompt}
+            />
+          </div>
+          {/* Built-in edit recipes — the same five the studios offer, so the two Edit
+              surfaces stay in step. Each REPLACES the instruction (see the module note). */}
+          <EditPromptTemplates label="" onApply={setEditPrompt} variant="editor" />
+          {/* sc-24114 — transparency on the editor's edit lane, the same adapter the Studio uses.
+              Shown only for an alpha-capable model; defaults ON when the working image carries
+              alpha (the editor passes that in as the initial value), so an AI edit of a cut-out
+              stays a cut-out. The model has no transparency MODE — the prompt asks for it, which
+              is why the hint below offers the model card's wording as an editable button. */}
+          {showTransparencyToggle(selectedEditModel) ? (
+            <label
+              className="checkline transparency-toggle"
+              title="Keep the model's alpha channel instead of compositing the edit onto white, so a cut-out stays a cut-out. Ask for a transparent background in the instruction; this keeps it."
+            >
+              <input
+                checked={Boolean(editTransparent)}
+                onChange={(event) => setEditTransparent(event.target.checked)}
+                type="checkbox"
+              />
+              Transparent background (RGBA)
+            </label>
+          ) : null}
+          {showTransparencyToggle(selectedEditModel) &&
+          transparencyPromptSuggestion(editPrompt, editTransparent) ? (
+            <p className="transparency-prompt-hint ie-note">
+              This model has no transparency mode — ask for it in the instruction.{" "}
+              <button
+                className="hero-link"
+                onClick={() => setEditPrompt(transparencyPromptSuggestion(editPrompt, editTransparent))}
+                type="button"
+              >
+                Add “{TRANSPARENCY_PROMPT_HINT}”
+              </button>
+            </p>
+          ) : null}
+        </div>
+
+        {/* Managed image-edit LoRA (epic 10871, sc-11069): auto-applied for the user — a status note
+            when installed, a one-click download that gates the run when not. Inert for edit models
+            that need none. Placed right under the model so it reads as part of the edit surface. */}
+        {editLora ? (
+          editLoraInstalled ? (
+            <div className="ie-section">
+              <p className="ie-note">✨ {editLora.name} is applied automatically for editing.</p>
+              <StudioUpdateBadge item={editLora} />
+              <StudioUpdateNotice item={editLora} kind="LoRA" onUpdate={requestEditLoraDownload} />
+              {/* Identity strength (sc-11798): the managed edit LoRA is hidden from the manual
+                  picker, so expose its apply weight here — threaded into buildEditJobBody's
+                  editLoraWeight → the payload edit-LoRA `weight`. Higher = stronger conditioning. */}
+              <div className="lora-slot-weight edit-lora-strength">
+                <label>
+                  <span>Identity strength</span>
+                  <span className="lora-slot-weight-value">
+                    {editLoraSelection.weightFor(editLora).toFixed(2)}
+                  </span>
+                </label>
+                <input
+                  aria-label={`${editLora.name} identity strength`}
+                  max="2"
+                  min="0"
+                  onChange={(event) =>
+                    editLoraSelection.setWeight(editLora.id, Number(event.target.value))
+                  }
+                  step="0.05"
+                  type="range"
+                  value={editLoraSelection.weightFor(editLora)}
+                />
+              </div>
+            </div>
+          ) : (
+            <div className="ie-section">
+              <p className="ie-note">{editLora.name} is required to edit — the base can’t edit without it.</p>
+              <button
+                className="ie-btn block"
+                disabled={editLoraDownloadRequested}
+                onClick={requestEditLoraDownload}
+                type="button"
+              >
+                {editLoraDownloadRequested ? "Downloading…" : `Download ${editLora.name}`}
+              </button>
+            </div>
+          )
+        ) : null}
+
+        {mossEdit ? <>
+          <MossImageEditControls model={selectedEditModel} token={token} jobs={jobs} options={mossImageEdit} onChange={setMossImageEdit} generation={mossEditSettings} sharedGuidance onGenerationChange={setMossEditSettings} advanced={mossEditSettings.mossImageAdvanced} onAdvancedChange={(value) => setMossEditSettings({ ...mossEditSettings, mossImageAdvanced: value })} assets={props.tensorAssets} importAsset={props.importTensorAsset} promptBatch={mossEditSettings.promptBatch} onPromptBatchChange={(batch) => { setMossEditSettings({ ...mossEditSettings, promptBatch: batch }); if (batch.length) setEditPrompt(batch[0]); }} />
+          <p>The working image is Image 1. Additional slots follow it in order.</p>
+          <MossReferencePicker assets={imageAssets} characters={props.characters} projectId={props.projectId} importAsset={props.importTensorAsset} assetIds={refAssetIds} onChange={setRefAssetIds} max={maxEditReferences - 1} firstOrdinal={2} />
+          {mossEditError ? <p role="alert">{mossEditError}</p> : null}
+        </> : null}
+        <div hidden={mossEdit}>
+        <EditorLoraPanel
+          selectedModel={selectedEditModel}
+          selectedLoras={selectedEditLoras}
+          selectedLoraIds={editLoraSelection.selectedLoraIds}
+          toggleLora={editLoraSelection.toggleLora}
+          weightFor={editLoraSelection.weightFor}
+          setWeight={editLoraSelection.setWeight}
+          availableLoras={editorPickerLoras}
+          showIncompatible={showIncompatibleEditLoras}
+          setShowIncompatible={setShowIncompatibleEditLoras}
+          onUpdateLora={createLoraDownloadJob}
+        />
+
+        <div className="ie-section">
+          <div className="ie-sec-title">Output</div>
+          <div className="ie-field">
+            <span className="ie-field-label" style={{ marginBottom: "2px" }}>
+              Aspect
+            </span>
+            <div className="ie-seg wrap four">
+              {EDIT_OUTPUT_ASPECTS.map((aspect) => (
+                <button
+                  className="ie-seg-btn"
+                  data-active={editAspect === aspect.key}
+                  key={aspect.key}
+                  onClick={() => setEditAspect(aspect.key)}
+                  type="button"
+                >
+                  {aspect.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          {editAspect !== "match" ? (
+            <FitModeControl
+              inpaintCapable={canMask}
+              label="Fill new area"
+              onChange={setEditFitMode}
+              value={effectiveFitMode(editFitMode, canMask)}
+            />
+          ) : null}
+        </div>
+
+        </div>
+        {canMask ? (
+          <div className="ie-section">
+            <div className="ie-sec-title">
+              Mask
+              <button
+                className="ie-btn sm ghost"
+                data-active={maskMode}
+                onClick={() => setMaskMode((on) => !on)}
+                style={{ height: "24px" }}
+                type="button"
+              >
+                {maskMode ? "On" : "Off"}
+              </button>
+            </div>
+            {maskMode ? (
+              <>
+                {smartSelectSupported ? (
+                  <div className="ie-seg two" style={{ width: "100%" }}>
+                    <button
+                      className="ie-seg-btn"
+                      data-active={maskSubTool === "brush"}
+                      onClick={() => setMaskSubTool("brush")}
+                      type="button"
+                    >
+                      Brush
+                    </button>
+                    <button
+                      className="ie-seg-btn"
+                      data-active={maskSubTool === "select"}
+                      disabled={aiOp?.label === "smart select"}
+                      onClick={() => {
+                        setMaskSubTool("select");
+                        setMaskErase(false);
+                      }}
+                      type="button"
+                    >
+                      {aiOp?.label === "smart select" ? "Segmenting…" : "Smart select"}
+                    </button>
+                  </div>
+                ) : null}
+                {!smartSelectSupported && smartSelectCapabilitySupported && smartSelectModel ? (
+                  <>
+                    <p className="ie-note">SAM3 Smart Select is not installed. The brush remains available, or install SAM3 now.</p>
+                    <button
+                      className="ie-btn block"
+                      disabled={smartSelectDownloadRequested || !requestSmartSelectDownload}
+                      onClick={requestSmartSelectDownload}
+                      type="button"
+                    >
+                      {smartSelectDownloadRequested ? "Installing SAM3…" : "Install SAM3"}
+                    </button>
+                  </>
+                ) : null}
+                {!smartSelectSupported || maskSubTool === "brush" ? (
+                  <>
+                    <div className="ie-field">
+                      <div className="ie-field-top">
+                        <span className="ie-field-label">Brush size</span>
+                        <span className="ie-field-val">{maskBrush} px</span>
+                      </div>
+                      <input
+                        className="ie-range"
+                        max={300}
+                        min={5}
+                        onChange={(event) => setMaskBrush(Number(event.target.value))}
+                        step={1}
+                        type="range"
+                        value={maskBrush}
+                      />
+                    </div>
+                    <button className="ie-btn block" data-active={maskErase} onClick={() => setMaskErase((on) => !on)} type="button">
+                      Eraser
+                    </button>
+                  </>
+                ) : (
+                  <p className="ie-note">Drag a box around an object on the canvas — SAM3 auto-masks it.</p>
+                )}
+                <div>
+                  <span className="ie-field-label" style={{ display: "block", marginBottom: "7px" }}>
+                    Refine selection
+                  </span>
+                  <div className="ie-field" style={{ marginBottom: "8px" }}>
+                    <div className="ie-field-top">
+                      <span className="ie-field-label" style={{ fontSize: "11.5px", color: "var(--ie-muted)" }}>
+                        Radius
+                      </span>
+                      <span className="ie-field-val">{maskRefineRadius}px</span>
+                    </div>
+                    <input
+                      className="ie-range"
+                      max={40}
+                      min={1}
+                      onChange={(event) => setMaskRefineRadius(Number(event.target.value))}
+                      step={1}
+                      type="range"
+                      value={maskRefineRadius}
+                    />
+                  </div>
+                  <div className="ie-chip-row">
+                    <button
+                      className="ie-chip"
+                      disabled={!maskHasContent(maskLines) && !maskBaseImage}
+                      onClick={() => refineMask("feather")}
+                      type="button"
+                    >
+                      Feather
+                    </button>
+                    <button
+                      className="ie-chip"
+                      disabled={!maskHasContent(maskLines) && !maskBaseImage}
+                      onClick={() => refineMask("grow")}
+                      type="button"
+                    >
+                      Grow
+                    </button>
+                    <button
+                      className="ie-chip"
+                      disabled={!maskHasContent(maskLines) && !maskBaseImage}
+                      onClick={() => refineMask("shrink")}
+                      type="button"
+                    >
+                      Shrink
+                    </button>
+                    <button className="ie-chip" onClick={() => refineMask("invert")} type="button">
+                      Invert
+                    </button>
+                    <button
+                      className="ie-chip"
+                      disabled={!maskLines.length && !maskBaseImage}
+                      onClick={clearMask}
+                      type="button"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <p className="ie-note">Turn on a mask to confine the edit to a painted or selected region (inpaint).</p>
+            )}
+          </div>
+        ) : null}
+
+        {multiRefCapable && !mossEdit ? (
+          <div className="ie-section">
+            <div className="ie-sec-title">Reference images</div>
+            {/* sc-24113 — the reference list is ORDERED, and the order is semantic. The engine's
+                template numbers the images (<image1> …) and its block-causal attention makes each
+                one visible only to what follows, so swapping two references is a different render.
+                Two consequences are visible here:
+
+                  * every reference carries its 1-based ordinal, because the prompt conventions for
+                    this family name images directly ("use the second image as a mask") and a user
+                    who cannot see which one is second cannot write that prompt;
+                  * the arrows move a reference, because the only way to reorder before this was to
+                    remove everything and re-add it in the right order. */}
+            <div className="ie-refs">
+              {/* sc-24114: the WORKING image is the first ordered entry the edit sends
+                  (`editReferenceIds` leads with it), so it IS "Image 1" in the prompt's terms and
+                  the attached references start at "Image 2". Shown as a fixed tile so the user sees
+                  the whole ordered list the engine numbers. */}
+              <div className="ie-ref ie-ref-working" title="The image you are editing is always first">
+                <span className="ie-ref-working-label">Working image</span>
+                <span className="ie-ref-ordinal">{referenceOrdinalLabel(0)}</span>
+              </div>
+              {refAssetIds.map((id, index) => {
+                const asset = imageAssets.find((item) => item.id === id);
+                const ordinal = referenceOrdinalLabel(index + 1);
+                return (
+                  <div className="ie-ref" key={id}>
+                    {asset ? <img alt="" src={assetDisplayUrl(asset)} /> : <span>?</span>}
+                    <span className="ie-ref-ordinal" title="References are sent in this order">
+                      {ordinal}
+                    </span>
+                    <button
+                      aria-label={`Move ${ordinal} earlier`}
+                      className="ie-ref-move"
+                      disabled={index === 0}
+                      onClick={() => setRefAssetIds((prev) => moveReference(prev, index, index - 1))}
+                      type="button"
+                    >
+                      ‹
+                    </button>
+                    <button
+                      aria-label={`Move ${ordinal} later`}
+                      className="ie-ref-move"
+                      disabled={index === refAssetIds.length - 1}
+                      onClick={() => setRefAssetIds((prev) => moveReference(prev, index, index + 1))}
+                      type="button"
+                    >
+                      ›
+                    </button>
+                    <button
+                      aria-label="Remove reference"
+                      className="ie-ref-remove"
+                      onClick={() => setRefAssetIds((prev) => prev.filter((other) => other !== id))}
+                      type="button"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                );
+              })}
+              <button
+                className="ie-ref-add"
+                disabled={refAssetIds.length >= maxEditReferences - 1}
+                onClick={() => setRefPickerOpen(true)}
+                title="Condition the edit on reference image(s)"
+                type="button"
+              >
+                +
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        <div className="ie-section">
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
+            <div className="ie-field">
+              <span className="ie-field-label" style={{ marginBottom: "2px" }}>
+                Seed
+              </span>
+              <input
+                className="ie-input"
+                min={0}
+                onChange={(event) => setEditSeed(event.target.value)}
+                placeholder="Random"
+                style={{ fontFamily: "var(--ie-mono)" }}
+                type="number"
+                value={editSeed}
+                disabled={mossEdit && Boolean(mossEditSettings.mossImageAdvanced?.noise)}
+              />
+            </div>
+            <div className="ie-field">
+              <span className="ie-field-label" style={{ marginBottom: "2px" }}>
+                Guidance
+              </span>
+              <input
+                className="ie-input"
+                min={0}
+                onChange={(event) => mossEdit ? setMossEditSettings({ ...mossEditSettings, guidanceScale: Number(event.target.value) }) : setEditGuidance(event.target.value)}
+                placeholder={guidanceDefaultFromModel(selectedEditModel)?.toString() ?? "Default"}
+                step={0.1}
+                style={{ fontFamily: "var(--ie-mono)" }}
+                type="number"
+                value={mossEdit ? mossEditSettings.guidanceScale : editGuidance}
+                aria-label="Guidance"
+              />
+            </div>
+          </div>
+          <button
+            className="ie-btn block primary"
+            disabled={(!editPrompt.trim() && !(mossEdit && mossEditSettings.mossImageAdvanced?.positive)) || !!aiOp || editLoraRequiredMissing || (mossEdit && (!mossEditReady || Boolean(mossEditError)))}
+            onClick={runEdit}
+            type="button"
+          >
+            {maskActive ? "Inpaint region" : "Generate edit"}
+          </button>
+        </div>
+      </>
+    );
   };
-  return renderPanel(panelKey);
-}, samePanelProps);
+  return renderPanel();
+});
+
+export const ImageEditorBoxesPanel = React.memo(function ImageEditorBoxesPanel(props) {
+  const { mossEdit, mossEditReady, mossEditError, mossImageEdit, setMossImageEdit, mossEditSettings, setMossEditSettings, token, jobs, imageAssets, refAssetIds, setRefAssetIds, maxEditReferences } = props;
+  const { aiOp, boxColor, boxes, chooseBoxColor, clearBoxes, composedPrompt, createModelDownloadJob, deleteBox, editModel, editModels, editPrompt, runBoxEdit, selectedBox, selectedBoxGaps, selectedBoxId, selectedEditModel, setEditModel, setEditPrompt, setSelectedBoxId, updateBox } = props;
+  const renderPanel = () => (
+    <>
+      <div className="ie-section">
+        <div className="ie-sec-title">Box color</div>
+        <div className="ie-swatches">
+          {BOX_PALETTE.map((entry) => (
+            <button
+              aria-label={entry.name}
+              className="ie-swatch"
+              data-active={boxColor === entry.value}
+              key={entry.value}
+              onClick={() => chooseBoxColor(entry.value)}
+              style={{ background: entry.value }}
+              title={entry.name}
+              type="button"
+            />
+          ))}
+          <label className="ie-swatch ie-swatch-custom" title="Custom color">
+            <input aria-label="Custom box color" onChange={(event) => chooseBoxColor(event.target.value)} type="color" value={boxColor.toLowerCase()} />
+          </label>
+        </div>
+        <p className="ie-note">Drag on the canvas to draw a colored region, then describe what belongs there.</p>
+      </div>
+
+      <div className="ie-section">
+        <div className="ie-sec-title">Regions ({boxes.length})</div>
+        {boxes.length ? (
+          <div className="ie-chip-row">
+            {boxes.map((box, index) => {
+              const incomplete = boxMetadataGaps(box).length > 0;
+              return (
+                <button
+                  className="ie-chip"
+                  data-active={selectedBoxId === box.id}
+                  key={box.id}
+                  onClick={() => setSelectedBoxId(box.id)}
+                  title={box.desc ? `${index + 1}: ${box.desc}` : `Box ${index + 1} — needs a description`}
+                  type="button"
+                >
+                  <span className="ie-dot" style={{ background: box.color }} />
+                  {index + 1}
+                  {incomplete ? <span className="warn">!</span> : null}
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="ie-note">Drag on the image to draw a box.</p>
+        )}
+        {boxes.length ? (
+          <div style={{ display: "flex", gap: "8px" }}>
+            <button className="ie-btn sm" disabled={!selectedBoxId} onClick={() => deleteBox(selectedBoxId)} type="button">
+              Delete
+            </button>
+            <button className="ie-btn sm" disabled={!boxes.length} onClick={clearBoxes} type="button">
+              Clear all
+            </button>
+          </div>
+        ) : null}
+      </div>
+
+      {selectedBox ? (
+        <div className="ie-section">
+          <div className="ie-sec-title">
+            Region details
+            <span className="ie-field-val">Box {boxes.indexOf(selectedBox) + 1}</span>
+          </div>
+          <div className="ie-seg two" style={{ width: "100%" }}>
+            <button
+              className="ie-seg-btn"
+              data-active={selectedBox.type === "obj"}
+              onClick={() => updateBox(selectedBox.id, { type: "obj" })}
+              type="button"
+            >
+              Object
+            </button>
+            <button
+              className="ie-seg-btn"
+              data-active={selectedBox.type === "text"}
+              onClick={() => updateBox(selectedBox.id, { type: "text" })}
+              type="button"
+            >
+              Text
+            </button>
+          </div>
+          <div className="ie-field">
+            <span className="ie-field-label" style={{ marginBottom: "2px" }}>
+              Description
+            </span>
+            <input
+              className="ie-input"
+              onChange={(event) => updateBox(selectedBox.id, { desc: event.target.value })}
+              placeholder="What is in this region?"
+              value={selectedBox.desc ?? ""}
+            />
+          </div>
+          {selectedBox.type === "text" ? (
+            <div className="ie-field">
+              <span className="ie-field-label" style={{ marginBottom: "2px" }}>
+                Literal text
+              </span>
+              <input
+                className="ie-input"
+                onChange={(event) => updateBox(selectedBox.id, { text: event.target.value })}
+                placeholder="Text to render"
+                value={selectedBox.text ?? ""}
+              />
+            </div>
+          ) : null}
+          <div className="ie-field">
+            <span className="ie-field-label" style={{ marginBottom: "2px" }}>
+              Element colors ({(selectedBox.colorPalette ?? []).length}/{MAX_BOX_PALETTE})
+            </span>
+            <div className="ie-swatches">
+              {(selectedBox.colorPalette ?? []).map((color) => (
+                <button
+                  aria-label={`Remove ${color}`}
+                  className="ie-swatch"
+                  key={color}
+                  onClick={() => updateBox(selectedBox.id, { colorPalette: removePaletteColor(selectedBox.colorPalette, color) })}
+                  style={{ background: color }}
+                  title={`Remove ${color}`}
+                  type="button"
+                />
+              ))}
+              {(selectedBox.colorPalette ?? []).length < MAX_BOX_PALETTE ? (
+                <label className="ie-swatch ie-swatch-custom" title="Add color">
+                  <input
+                    aria-label="Add element color"
+                    onChange={(event) => updateBox(selectedBox.id, { colorPalette: addPaletteColor(selectedBox.colorPalette, event.target.value) })}
+                    type="color"
+                  />
+                </label>
+              ) : null}
+            </div>
+          </div>
+          {selectedBoxGaps.length ? (
+            <p className="ie-note">For Ideogram layout this box still needs {selectedBoxGaps.join(", ")}. The color-keyed edit path only needs a color + description.</p>
+          ) : (
+            <p className="ie-note" style={{ color: "var(--ie-accent)" }}>
+              Ready for Ideogram layout ✓
+            </p>
+          )}
+        </div>
+      ) : null}
+
+      {boxes.length ? (
+        <div className="ie-section">
+          <div className="ie-sec-title">Generate</div>
+          {mossEdit ? <>
+            <MossImageEditControls model={selectedEditModel} token={token} jobs={jobs} options={mossImageEdit} onChange={setMossImageEdit} generation={mossEditSettings} onGenerationChange={setMossEditSettings} advanced={mossEditSettings.mossImageAdvanced} onAdvancedChange={(value) => setMossEditSettings({ ...mossEditSettings, mossImageAdvanced: value })} assets={props.tensorAssets} importAsset={props.importTensorAsset} promptBatch={mossEditSettings.promptBatch} onPromptBatchChange={(batch) => { setMossEditSettings({ ...mossEditSettings, promptBatch: batch }); if (batch.length) setEditPrompt(batch[0]); }} />
+            <p>The baked working image is Image 1. Additional slots follow it in order.</p>
+            <MossReferencePicker assets={imageAssets} characters={props.characters} projectId={props.projectId} importAsset={props.importTensorAsset} assetIds={refAssetIds} onChange={setRefAssetIds} max={maxEditReferences - 1} firstOrdinal={2} />
+            {mossEditError ? <p role="alert">{mossEditError}</p> : null}
+          </> : null}
+          {editModels.length ? (
+            <>
+              <select className="ie-select" onChange={(event) => setEditModel(event.target.value)} value={editModel}>
+                {editModels.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {updateOptionLabel(model)}
+                  </option>
+                ))}
+              </select>
+              <StudioUpdateBadge item={selectedEditModel} />
+              <StudioUpdateNotice item={selectedEditModel} onUpdate={createModelDownloadJob} />
+              <input
+                className="ie-input"
+                onChange={(event) => setEditPrompt(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !aiOp && editModel) runBoxEdit();
+                }}
+                placeholder="Prompt (or use Auto-prompt)"
+                value={editPrompt}
+              />
+              <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "8px" }}>
+                <button className="ie-btn" disabled={!composedPrompt} onClick={() => setEditPrompt(composedPrompt)} type="button">
+                  Auto-prompt
+                </button>
+                <button className="ie-btn primary" disabled={!!aiOp || !editModel || (mossEdit && (!mossEditReady || Boolean(mossEditError)))} onClick={runBoxEdit} type="button">
+                  Generate
+                </button>
+              </div>
+            </>
+          ) : (
+            <p className="ie-note">No edit-capable models installed.</p>
+          )}
+        </div>
+      ) : null}
+    </>
+  );
+  return renderPanel();
+});
+
+const toolPanels = {
+  move: EditorMovePanel,
+  transform: EditorTransformPanel,
+  crop: EditorCropPanel,
+  upscale: EditorUpscalePanel,
+  detail: EditorDetailPanel,
+  color: EditorColorPanel,
+  cutout: EditorCutoutPanel,
+  edit: ImageEditorEditPanel,
+  boxes: ImageEditorBoxesPanel
+};
+
+export const ImageEditorToolPanel = React.memo(function ImageEditorToolPanel({ panelKey, ...props }) {
+  renderObserverForTests?.();
+  const Panel = toolPanels[panelKey];
+  return Panel ? <Panel {...props} /> : null;
+});

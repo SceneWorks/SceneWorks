@@ -148,6 +148,23 @@ landed (Z-Image, Qwen-Image, Wan video, FLUX.2); other families are detected and
 listed but marked not-yet-runnable, with a reason, until their loader ships. This
 is an operator opt-in (off by default) on the Windows/Linux/server builds.
 
+MiniMax-H3 DiT imports support dense F16/BF16/F32 and descriptor-validated ConvRot
+INT8 on native MLX and CUDA backends. Select a compatible resident base and declare
+the checkpoint's `fl2va`, `ref2va`, or `hybrid` partition explicitly; tensor shapes
+and filenames do not establish that compatibility. Native and canonical layouts
+retain signed INT8 codes, F32 per-output scales and each layer's rotation-group
+descriptor (64 or 256); this is not affine Q8 or W4A8. Normalization streams byte
+ranges through the shared derivative cache instead of expanding the model to float.
+The source's full configuration is authoritative. A weight-only file requires an
+explicitly bound compatible base configuration; its configuration is fetched without
+downloading stock DiT weights. Missing, contradictory or unsupported quantization
+operands refuse before the imported model becomes ready.
+Configuration reads are capped on one open handle, including growth after its size
+was inspected. A rescan can reconstruct a missing or edited plan only when fresh
+source inspection reproduces its catalog-committed semantic digest. If the plan's
+external configuration authority cannot be recovered, explicitly reimport with the
+original bound context; repair never silently drops it or adopts changed source bytes.
+
 ## Native inference engines
 
 SceneWorks runs a **single native worker** binary behind one HTTP job contract,
@@ -183,14 +200,21 @@ build the Rust lanes with nothing configured. (Two workflows still name a
 
 ## LoRA training
 
-SceneWorks trains LoRAs locally with a native Rust/MLX/candle trainer — no torch.
-Build a captioned dataset in **Data Sets**, validate the plan with a dry run,
-train on the GPU worker, and the result registers as a normal SceneWorks LoRA —
-image LoRAs selectable in Image Studio, video LoRAs in Video Studio.
+SceneWorks trains adapters locally with a native Rust/MLX/candle trainer — no torch.
+Build a captioned dataset in **Data Sets**, choose a target in Training Studio,
+and use **Start training** to launch a real run on the GPU worker. Completed
+adapters register in the library — image adapters are selectable in Image Studio,
+video adapters in Video Studio. API clients can validate a plan with `dryRun: true`
+before submitting a real run.
 
 - **Image LoRAs** — Z-Image-Turbo, SDXL (the generic SDXL-UNet kernel that
   SDXL-family models such as Kolors extend), Lens, Krea 2, and Stable Diffusion
   3.5 (Large/Medium).
+- **MOSS-Image LoRA / LoKr** — explicit Base and SFT targets on Apple Silicon
+  (MLX) and CUDA (candle). Base weights, text encoder and VAE stay frozen.
+  Adapters can be imported on either backend for the same exact parent; Base and
+  SFT are distinct compatibility targets. See the [MOSS training guide](docs/moss-image-integration.md#adapter-training)
+  for controls, checkpoint recovery, memory admission and generation options.
 - **Video LoRAs** — LTX-2.3 and Wan 2.2 (TI2V-5B single-expert, and the A14B
   mixture-of-experts denoisers trained as a high/low-noise LoRA pair).
 - **ControlNet overlays** — train a Krea 2 pose-control overlay from your own
@@ -577,6 +601,8 @@ The exact pre-cutover dependency set, canonical runtime release, validation evid
 rollback procedure are recorded in the
 [Phase 5 consumer cutover](documents/rearchitecture/PHASE_5_CUTOVER.md).
 
+The [Shared Generation Architecture roadmap and CodeGraph handoff](docs/architecture/shared-generation-architecture/README.md) maps the planned engine and application work to its tracked features and items.
+
 ## Development
 
 Build the desktop app or run it in dev:
@@ -624,6 +650,26 @@ Rust-only change can make those stale:
 ```powershell
 npm run rust:check
 ```
+
+Cache-resolving tests must never use an installed model library. The resolver
+checks `HF_HUB_CACHE`, then `HUGGINGFACE_HUB_CACHE`, then `HF_HOME/hub` before a
+fixture's `data_dir`; a temporary data directory alone does not isolate a test.
+Keep all three protections independent: use the existing per-test
+`isolate_hf_cache()` guard, pass all three HF variables to an owned disposable
+cache in the test subprocess, and deny that process filesystem access to real
+model/HF cache roots. Do not merely unset an inherited variable or assume a
+missing fixture is absent from the developer's cache. Each independent fixture
+scenario needs its own cache root. Metadata-only tests need no network;
+networked unit fixtures should reach only owned loopback mocks, not running
+SceneWorks services or external hosts. Native synthetic projection smokes still
+require a separately reserved accelerator token; they are not ordinary unit tests.
+Stub-loader metadata tests supply an explicit admission budget and still exercise
+the real rejection gate; they must not depend on a live hardware probe. Production
+continues to resolve a fresh live budget at admission, and native projection
+fixtures still create the actual backend device rather than using that test budget.
+The CUDA ConvRot projection fixture uses the same validated native INT8 reader as
+the production H3 DiT loader, preserving signed-byte codes and F32 row scales;
+Candle's generic safetensors reader does not support the checkpoint's I8 dtype.
 
 Optionally install local Git hooks that run `npm run rust:fmt` before commits
 touching Rust files:

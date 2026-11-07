@@ -172,7 +172,7 @@ export default function BatchPromptPanel({
             aria-label="Batch prompts"
             className="batch-prompts"
             onChange={(event) => onPromptsTextChange(event.target.value)}
-            placeholder={"{{name}} with {{hair}} hair, front view\n{{name}} in a {{red|blue|green}} coat\n[832x1216] {{name}} full-body portrait\n\nStart with [WxH] for an exact size or [16:9] for the closest model aspect at its largest size · use --- for multi-line prompts"}
+            placeholder={"{{name}} with {{hair}} hair, front view\n{{name}} in a {{red|blue|green}} coat\n[832x1216] {{name}} full-body portrait\n\nStart with [WxH] for an exact size or [16:9] for the largest size near that aspect ratio · use --- for multi-line prompts"}
             value={promptsText}
           />
         </label>
@@ -202,7 +202,7 @@ export default function BatchPromptPanel({
         )}
 
         <p className="batch-hint">
-          Use <code>[16:9]</code>, <code>[4:3]</code>, or <code>[10:8]</code> to choose the closest available model aspect at its largest size.
+          Use <code>[16:9]</code>, <code>[4:3]</code>, or <code>[10:8]</code> to choose the largest available size within 10% of that aspect ratio (or the closest aspect if none qualify).
           {" "}Use <code>[WxH]</code> for an exact size.
         </p>
 

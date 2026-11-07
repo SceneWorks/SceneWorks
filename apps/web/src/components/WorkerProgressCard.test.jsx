@@ -375,13 +375,37 @@ describe("WorkerProgressCard layout", () => {
     expect(onFreshRetry).toHaveBeenCalledWith(resumedJob, { payloadChanges: { downloadAction: "fresh" } });
   });
 
-  it("offers Resume only for a stopped training job with a checkpoint, and Restart from step 0 (sc-25785)", () => {
+  it.each([["running", 0], ["canceled", 0], ["completed", 42], ["completed", 1_000_000_001]])(
+    "shows the persisted MOSS seed for %s rather than a result/default value",
+    (status, seed) => {
+      const job = {
+        id: "moss-seed", type: "lora_train", status, attempts: 1,
+        payload: { plan: { target: { kernel: "moss_image_lora" }, config: { seed } } },
+        result: { seed: 999 },
+      };
+      api = render(<WorkerProgressCard job={job} />, makeContext([]));
+      expect(api.container.querySelector('[aria-label="Persisted MOSS training seed"]').textContent.trim())
+        .toBe(`Training seed: ${seed}`);
+    },
+  );
+
+  it("does not display a rounded unsafe integer as the exact MOSS seed", () => {
+    const job = {
+      id: "moss-large-seed", type: "lora_train", status: "completed", attempts: 1,
+      payload: { plan: { target: { kernel: "moss_image_lora" }, config: { seed: Number.MAX_SAFE_INTEGER + 1 } } },
+    };
+    api = render(<WorkerProgressCard job={job} />, makeContext([]));
+    expect(api.container.querySelector('[aria-label="Persisted MOSS training seed"]').textContent)
+      .toContain("outside this browser's integer range");
+  });
+
+  it.each(["z_image_lora", "flux3_klein_lora", "flux3_klein_edit_lora"])("offers checkpoint Resume and Restart for stopped %s training", (kernel) => {
     const job = {
       id: "t",
       type: "lora_train",
       status: "canceled",
       attempts: 1,
-      payload: {},
+      payload: { plan: { target: { kernel } } },
       result: { resumeCheckpointStep: 150 },
     };
     const onRetry = vi.fn();

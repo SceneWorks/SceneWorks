@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { execFileBounded as execFile } from "./lib/exec.mjs";
+import { sha256 } from "./lib/file-sha256.mjs";
 // YuE2 terminal acceptance driver (sc-23002, epic 22988): runs the epic's acceptance matrix through
 // the REAL app — the source-built API, a worker started from the same binary
 // (`SCENEWORKS_WORKER_ONLY=1`) and the registered `yue2` provider on this host's production device
@@ -52,8 +54,9 @@
 // scripts/yue2-memory-profile.mjs (config/yue2-memory-profile-plan.json), which runs it through the
 // same job path (`yue2_jobs::resolve_load` / `build_request`); the summary names it under
 // `coveredElsewhere`.
-import { spawn, execFile as execFileCallback } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { enterMacMetalExecution, metalChildOptions } from "./lib/apple-metal-execution-lock.mjs";
+import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { copyFile, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -61,7 +64,6 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { promisify } from "node:util";
 
 import { isDeepStrictEqual } from "node:util";
 
@@ -71,7 +73,6 @@ import { fileSha256 } from "./lib/file-sha256.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { generateSilence, generateTestRecording } from "./lib/yue2-test-recording.mjs";
 
-const execFile = promisify(execFileCallback);
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const RECORD_SCHEMA = "sceneworks-yue2-acceptance-record-v1";
@@ -958,7 +959,7 @@ export async function waitForPartialRemoval({ partialPath, exists = existsSync, 
   }
   return outcome;
 }
-const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
+
 const nowIso = () => new Date().toISOString();
 
 async function freePort() {
@@ -1028,7 +1029,7 @@ class Service {
     // the pipe), so the driver holds it the same way; everything else gets no stdin.
     const stdin = role === "worker" && this.options.platform === "cuda" ? "pipe" : "ignore";
     // NOT detached: the child stays in the driver's process group, which the external guard samples.
-    const child = spawn(this.options.apiBin, [], { cwd: ROOT, env: this.env(role), stdio: [stdin, log.fd, log.fd], windowsHide: true });
+    const child = spawn(this.options.apiBin, [], metalChildOptions({ cwd: ROOT, env: this.env(role), stdio: [stdin, log.fd, log.fd], windowsHide: true }));
     await log.close();
     child.spawnError = null;
     child.once("error", (error) => { child.spawnError = error; });
@@ -2418,5 +2419,11 @@ async function runAcceptance(options, completion) {
 }
 
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
-  main().then((code) => { process.exitCode = code; }, (error) => { console.error(error.message); process.exitCode = 1; });
+  const run = async () => {
+    const options = parseArgs(process.argv.slice(2));
+    if (options.platform === "metal" && !options.dryRun && !options.profileInstallOnly
+        && await enterMacMetalExecution(options.jobTimeoutMinutes * 60)) return process.exitCode;
+    return main();
+  };
+  run().then((code) => { process.exitCode = code; }, (error) => { console.error(error.message); process.exitCode = 1; });
 }

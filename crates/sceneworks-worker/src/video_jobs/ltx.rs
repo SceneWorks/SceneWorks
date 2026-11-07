@@ -1,9 +1,6 @@
 #[allow(unused_imports)]
 use super::prelude::*;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use super::vace::{
     load_source_video_frames, replacement_mode_from, replacement_status_value,
     resolve_character_reference_receipts, rgb_image_to_engine, CharacterReferenceReceipt,
@@ -28,20 +25,14 @@ pub(super) const LTX_ADAPTER: &str = "mlx_ltx";
 /// single SceneWorks rehost.  The selector is part of the request contract, not
 /// a display-only model label: absent requests retain the shipped distilled
 /// default and every explicit value is fail-closed.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Ltx25TransformerVariant {
     Distilled,
     Dev,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl Ltx25TransformerVariant {
     pub(super) const fn component_dir(self) -> &'static str {
         match self {
@@ -51,10 +42,7 @@ impl Ltx25TransformerVariant {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn ltx25_transformer_variant(
     request: &VideoRequest,
 ) -> WorkerResult<Ltx25TransformerVariant> {
@@ -88,10 +76,7 @@ pub(super) fn ltx25_transformer_variant(
 /// LTX-2.5 axes and stays `None` — the candle arm shares one `VideoGenInput` literal with Wan,
 /// Mochi and SVD. LTX-2.3 has no transformer-variant axis at all and is recorded as the distilled
 /// shape, which is what the MLX arm has always done.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn ltx_memory_axes(
     request: &VideoRequest,
     use_diffusion_decoder: bool,
@@ -128,10 +113,7 @@ pub(super) fn ltx_memory_axes(
 /// Provider-bound LTX-2.5 controls after model scoping, type validation, and explicit-duration
 /// precedence. The planning frame count is conservative when the duration head owns the real count
 /// so admission never sizes the request below the user's selected maximum.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Ltx25GenerationOptions {
     pub(super) planning_frames: u32,
@@ -140,10 +122,7 @@ pub(super) struct Ltx25GenerationOptions {
     pub(super) use_diffusion_decoder: bool,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn ltx25_generation_options(
     request: &VideoRequest,
 ) -> WorkerResult<Ltx25GenerationOptions> {
@@ -278,27 +257,18 @@ pub(super) fn ltx_available(request: &VideoRequest, settings: &Settings) -> bool
 /// `notapalindrome/ltx23-mlx-av-q4` + `mlx-community/gemma-3-12b-it-bf16` mirrors). One repo with
 /// the LTX `q4/` (default) + `q8/` (opt-in) checkpoint subdirs — each the full audio+I2V component
 /// set — plus the bundled `gemma/` text encoder the engine reads via `$LTX_GEMMA_DIR`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) const LTX_BUNDLE_REPO: &str = "SceneWorks/ltx-2.3-mlx";
 /// The LTX-2.5 rehost contains shared Gemma-4/enhancer components plus nested
 /// `distilled/{q4,q8,bf16}` and `dev/{q4,q8,bf16}` packed transformer roots.
 /// A publishing revision and measured byte receipts are deliberately owned by
 /// SC-18780; this source contract does not manufacture either fact.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) const LTX25_BUNDLE_REPO: &str = "SceneWorks/ltx-2.5-mlx";
 /// Immutable revision of the finalized public LTX-2.5 bundle. The installer, MLX resolver and
 /// Candle resolver all bind this same snapshot so a mutable `refs/main` or a larger cached sibling
 /// can never replace the published artifact at runtime.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) const LTX25_BUNDLE_REVISION: &str = "081658ce6886cacba20817ce0359bbefef706ff2";
 /// Pinned revision for the fixed [`LTX_BUNDLE_REPO`] (sc-9879, F-077 follow-up). The bundle repo is a
 /// hard-coded const (no manifest/payload override reaches the on-demand `q8/*` + `bf16/*` fetches), so
@@ -310,20 +280,14 @@ pub(super) const LTX25_BUNDLE_REVISION: &str = "081658ce6886cacba20817ce0359bbef
 /// Bumped again in sc-18853 to the direct-child revision that adds the dense `bf16/` tier. The old
 /// pin predates that directory, so its `bf16/*` fetch resolved no files. The newer revision changes
 /// no q4/q8/gemma paths and must stay aligned with every `ltx_2_3` manifest download row.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) const LTX_BUNDLE_REVISION: &str = "01df27d308466533aa09d251e3aebdcc627d07eb";
 
 /// The only older LTX bundle snapshot whose contents are allowed to complement the current pin.
 /// [`LTX_BUNDLE_REVISION`] is a proven strict superset of this direct parent: its only additions are
 /// the ten `bf16/` files. Keeping the parent explicit prevents an unrelated cached revision from
 /// bypassing the immutable product pin during the split-cache compatibility scan (sc-18853).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) const LTX_BUNDLE_PRE_BF16_REVISION: &str = "254989c3ca7ee691187647f350b112c0c448789d";
 
 /// Whether `dir` is a converted LTX snapshot **complete for the current engine** — it must
@@ -348,10 +312,7 @@ pub(super) fn ltx_dir_is_complete(dir: &Path) -> bool {
 /// Files the ordinary LTX-2.5 split provider can reach from one selected tier. The 2.5 converter
 /// deliberately does not emit the legacy `upsampler.safetensors`/`quantize_config.json` markers
 /// used by 2.3, so sharing [`ltx_dir_is_complete`] would reject every published 2.5 tier.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) const LTX25_TIER_REQUIRED_FILES: &[&str] = &[
     "split_model.json",
     "transformer.safetensors",
@@ -368,10 +329,7 @@ pub(super) const LTX25_TIER_REQUIRED_FILES: &[&str] = &[
     "duration_head.safetensors",
 ];
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn ltx25_dir_is_complete(dir: &Path) -> bool {
     LTX25_TIER_REQUIRED_FILES
         .iter()
@@ -384,30 +342,16 @@ pub(super) fn ltx25_dir_is_complete(dir: &Path) -> bool {
 /// this same core predicate, so it cannot admit a snapshot the worker rejects. Used so runtime option
 /// discovery and eros provisioning never accept filename-only placeholders, path escapes, or
 /// half-downloaded snapshots.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn ltx_gemma_dir_is_complete(dir: &Path) -> bool {
     sceneworks_core::safetensors::gemma_text_encoder_dir_is_complete(dir)
-}
-
-/// Parse `advanced.mlxQuantize` (int or numeric string) → the requested bit width, if present.
-#[cfg(target_os = "macos")]
-fn ltx_quant_bits(request: &VideoRequest) -> Option<i64> {
-    request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
 }
 
 /// Whether the request opts into the higher-quality Q8 LTX checkpoint (`advanced.mlxQuantize: 8`,
 /// accepted as int or string). The default is Q4 (sc-5608).
 #[cfg(target_os = "macos")]
 pub(super) fn ltx_wants_q8(request: &VideoRequest) -> bool {
-    ltx_quant_bits(request)
-        .map(|bits| bits >= 8)
-        .unwrap_or(false)
+    request.quant_bits().map(|bits| bits >= 8).unwrap_or(false)
 }
 
 /// Whether the request opts into the dense **bf16** LTX checkpoint (`advanced.mlxQuantize <= 0`,
@@ -415,9 +359,7 @@ pub(super) fn ltx_wants_q8(request: &VideoRequest) -> bool {
 /// so the big bf16 bundle is a deliberate opt-in (mirrors [`resolve_mlx_dense_quant`]'s `<= 0` rule).
 #[cfg(target_os = "macos")]
 pub(super) fn ltx_wants_bf16(request: &VideoRequest) -> bool {
-    ltx_quant_bits(request)
-        .map(|bits| bits <= 0)
-        .unwrap_or(false)
+    request.quant_bits().map(|bits| bits <= 0).unwrap_or(false)
 }
 
 /// The SceneWorks LTX bundle tier search order for a request — preferred tier first, then the
@@ -583,10 +525,7 @@ pub(super) fn resolve_ltx_model_dir(
 /// that valid managed layout still resolves one `LoadSpec::text_encoder` (sc-14377). A local/legacy
 /// conversion is not under a `snapshots/` directory and therefore keeps the old sibling-only
 /// behavior.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn bundled_ltx_gemma_dir(model_dir: &Path) -> Option<PathBuf> {
     let selected_snapshot = model_dir.parent()?;
     let gemma = selected_snapshot.join("gemma");
@@ -618,20 +557,14 @@ pub(super) fn bundled_ltx_gemma_dir(model_dir: &Path) -> Option<PathBuf> {
 /// source — so the worker must resolve the override HERE and thread it onto the spec, rather than
 /// returning `None` and deferring to the deleted `$LTX_GEMMA_DIR` / HF-cache fallback. A set-but-incomplete
 /// override yields `None` so a good bundled / cache gemma still wins (a bad override never shadows it).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn ltx_gemma_override_path(raw: Option<std::ffi::OsString>) -> Option<PathBuf> {
     let dir = PathBuf::from(raw?);
     ltx_gemma_dir_is_complete(&dir).then_some(dir)
 }
 
 /// [`ltx_gemma_override_path`] applied to the live `$LTX_GEMMA_DIR`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn ltx_gemma_env_override() -> Option<PathBuf> {
     ltx_gemma_override_path(std::env::var_os("LTX_GEMMA_DIR"))
 }
@@ -648,10 +581,7 @@ fn ltx_gemma_env_override() -> Option<PathBuf> {
 ///
 /// `pub(crate)` so the LoRA trainer path reuses it (sc-9989): training resolves the TE identically to
 /// inference, so a self-contained install trains without a separate `mlx-community/gemma` download.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn resolve_bundled_ltx_gemma_dir(model_dir: &Path) -> Option<PathBuf> {
     ltx_gemma_env_override().or_else(|| bundled_ltx_gemma_dir(model_dir))
 }
@@ -1028,20 +958,18 @@ pub(crate) async fn ensure_ltx_bundle_gemma_present(
 /// video degrades to noise — see [`resolve_ltx_distill_adapter`]. Every user LoRA applies at a
 /// uniform per-pass strength (`pass_scales` left `None` → the engine uses `scale` on every distilled
 /// stage). peft LoKr allowed (engine residual), LyCORIS rejected.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn resolve_ltx_adapters(
     settings: &Settings,
     request: &VideoRequest,
-) -> WorkerResult<Vec<AdapterSpec>> {
-    let mut specs = Vec::with_capacity(request.loras.len() + 1);
+) -> WorkerResult<PreparedVideoAdapters> {
+    let mut specs = PreparedVideoAdapters::default();
     // The auto distill LoRA is the model's base recipe (per-pass 1.0/0.4); user LoRAs stack on top.
-    if let Some(distill) = resolve_ltx_distill_adapter(settings, request)? {
-        specs.push(distill);
+    if let Some((distill, pin)) = resolve_ltx_distill_adapter(settings, request)? {
+        crate::adapter_resolution::retain_adapter_pin(&mut specs.pins, pin)?;
+        specs.specs.push(distill);
     }
-    specs.extend(resolve_ltx_user_adapters(settings, request)?);
+    specs.append(resolve_ltx_user_adapters(settings, request)?)?;
     Ok(specs)
 }
 
@@ -1051,31 +979,22 @@ pub(super) fn resolve_ltx_adapters(
 /// does not route 10Eros after exact-head CUDA acceptance proved that the undistilled checkpoint
 /// collapses to noise and its cond_safe adapter does not fit Candle's single-pass adapter surface
 /// (sc-18902, run 31766800005).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn resolve_ltx_user_adapters(
     settings: &Settings,
     request: &VideoRequest,
-) -> WorkerResult<Vec<AdapterSpec>> {
+) -> WorkerResult<PreparedVideoAdapters> {
     if request.loras.len() > MAX_JOB_LORAS {
         return Err(WorkerError::InvalidPayload(format!(
             "Generation supports at most {MAX_JOB_LORAS} LoRAs per job."
         )));
     }
-    let mut specs = Vec::with_capacity(request.loras.len());
+    let mut specs = PreparedVideoAdapters::default();
     for lora in &request.loras {
-        let path = lora_path(lora).ok_or_else(|| {
-            WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned())
-        })?;
-        let file = resolve_lora_file(
-            settings,
-            path,
-            crate::image_jobs::declared_adapter_file(lora),
-        )?;
-        let kind = classify_adapter(&file)?;
-        specs.push(AdapterSpec::new(file, lora_scale(lora), kind));
+        let (file, kind) = specs.user(settings, lora, &request.model)?;
+        specs
+            .specs
+            .push(AdapterSpec::new(file, lora_scale(lora), kind));
     }
     Ok(specs)
 }
@@ -1096,14 +1015,11 @@ pub(super) fn resolve_ltx_user_adapters(
 ///
 /// Ported from the deleted Python `MlxVideoAdapter` (b821d74e): the injection was lost when video
 /// generation moved to the Rust worker in the sc-3037 cutover, which is why 10Eros regressed to noise.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn resolve_ltx_distill_adapter(
     settings: &Settings,
     request: &VideoRequest,
-) -> WorkerResult<Option<AdapterSpec>> {
+) -> WorkerResult<Option<(AdapterSpec, gen_core::PinnedWeightsFile)>> {
     // LTX-2.5's distilled checkpoint already contains the refinement.  Its dev
     // checkpoint, by contrast, needs the bundled adapter only for stage two;
     // never let an absent selector double-apply it to the default path.
@@ -1236,19 +1152,17 @@ pub(super) fn resolve_ltx_distill_adapter(
              Re-download the model to fetch its co-requisite distill LoRA."
         ))
     })?;
-    let kind = classify_adapter(&path)?;
-    Ok(Some(
-        AdapterSpec::new(path, stage1, kind).with_pass_scales(vec![stage1, stage2]),
-    ))
+    let pin = crate::paths::pin_app_managed_model_file(settings, &path, "LTX distill adapter")?;
+    let kind = crate::image_jobs::classify_prepared_adapter(&pin)?;
+    let spec = AdapterSpec::new(pin.loader_path().to_path_buf(), stage1, kind)
+        .with_pass_scales(vec![stage1, stage2]);
+    Ok(Some((spec, pin)))
 }
 
 /// Optional I2V conditioning for LTX: a `source_asset_id` → a single `Reference` image
 /// (image→video); absent → pure text→video. `first_last_frame` → two `Keyframe`s (sc-3055).
 /// (Audio is produced either way.)
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn resolve_ltx_conditioning(
     settings: &Settings,
     request: &VideoRequest,
@@ -1308,10 +1222,7 @@ pub(super) fn resolve_ltx_conditioning(
 /// A strength with no fitted cell therefore finds no candidate and falls open to the historical
 /// weights-plus-headroom path — the same outcome as any other uncalibrated geometry — instead of
 /// failing the job. The fallback is disclosed rather than silent.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn ltx_i2v_conditioning_strength(request: &VideoRequest) -> WorkerResult<f32> {
     let strength = advanced::f32(&request.advanced, "imageConditioningStrength", 1.0);
     if strength.to_bits() != 1.0f32.to_bits() {
@@ -1337,10 +1248,7 @@ pub(super) fn ltx_i2v_conditioning_strength(request: &VideoRequest) -> WorkerRes
 /// pinned). Shared by LTX (`ltx_2_3`) and Wan TI2V-5B (`wan_2_2`), the engines whose providers
 /// advertise `Keyframe`. `imageFrameIndex` (default 0) is forwarded as the first keyframe's latent
 /// index — for the universal FLF case (0) latent 0 == output 0.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn resolve_keyframe_conditioning(
     settings: &Settings,
     request: &VideoRequest,
@@ -1404,18 +1312,12 @@ pub(super) fn resolve_keyframe_conditioning(
 /// "ic-lora" / "ltx-2-3-ic-" marker anywhere in the id / name / path / file list. The IC-LoRA is a
 /// user-installed LoRA flowing through `request.loras` (not an auto-provisioned fixed repo), so it
 /// rides the existing [`resolve_ltx_adapters`] seam with no new adapter-loading code.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn loras_contain_ic_lora(loras: &[Value]) -> bool {
     loras.iter().any(lora_looks_like_ic_lora)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn lora_looks_like_ic_lora(lora: &Value) -> bool {
     sceneworks_core::video_request::lora_looks_like_ltx_ic_lora(lora)
 }
@@ -1431,10 +1333,7 @@ pub(super) fn lora_looks_like_ic_lora(lora: &Value) -> bool {
 ///   latent-frame math), strength `bridgeRightVideoConditioningStrength`.
 ///
 /// Both strengths default to `1.0` (fully pinned), mirroring the torch `_advanced_float` defaults.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn build_video_clip_conditioning(
     request: &VideoRequest,
     left_frames: Vec<Image>,
@@ -1523,10 +1422,7 @@ pub(crate) fn resolve_clip_media_path(
 /// appends the reference video) into planner `VideoClip` conditioning, so the per-asset-id loader is
 /// gated to both lanes (unlike `load_source_video_frames`, which reads only the request's single
 /// `sourceClipAssetId`).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn extract_clip_frames(
     api: &ApiClient,
@@ -1576,7 +1472,7 @@ pub(super) async fn extract_clip_frames(
     let load = async {
         result?;
         let dir = frames_dir.clone();
-        tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
+        crate::load_progress::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
             let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)?
                 .filter_map(|entry| entry.ok().map(|e| e.path()))
                 .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("png"))
@@ -1621,10 +1517,7 @@ pub(super) async fn extract_clip_frames(
 /// since without it the appended clip tokens are inert. Then decodes each source clip's first
 /// `num_frames` frames and builds the clips. `num_frames` is the generation's snapped frame count,
 /// the same value [`generate_ltx`] passes to the engine.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) async fn resolve_video_clip_conditioning(
     api: &ApiClient,
     settings: &Settings,
@@ -1692,10 +1585,7 @@ pub(super) async fn resolve_video_clip_conditioning(
 /// character-reference carrier. This differs from Wan-VACE's repeated `Reference` layout: LTX
 /// physically composites all identities into its one frame-zero IC-LoRA latent, so repeated
 /// `Reference` values would be rejected (or worse, permit a later backend to ignore all but one).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn build_ltx_replace_conditioning(
     frames: Vec<Image>,
     masks: Vec<image::RgbImage>,
@@ -1731,10 +1621,7 @@ pub(super) fn build_ltx_replace_conditioning(
 /// Extend the generic replacement status with LTX's immutable physical carrier receipt: source
 /// asset ids and order, source image shapes, contact-sheet geometry, exact control geometry, and
 /// the fixed native schedule. This is the data the worker actually passes to both MLX and Candle.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn ltx_replace_status_value(
     mut status: Value,
     request: &VideoRequest,
@@ -1809,10 +1696,7 @@ fn ltx_replace_status_value(
 /// keyframe-append tokens used by this mode; without it the source clip would be accepted but its
 /// replacement conditioning would be inert. This helper is backend-neutral and preserves the
 /// selected LTX model instead of silently substituting the unrelated Wan-VACE checkpoint.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) async fn resolve_ltx_replace_conditioning(
     api: &ApiClient,
     settings: &Settings,

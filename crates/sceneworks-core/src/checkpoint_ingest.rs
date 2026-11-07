@@ -53,8 +53,6 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use sha2::{Digest, Sha256};
-
 use crate::checkpoint_import::ManagedProvenanceV1;
 use crate::checkpoint_plan_store::{
     managed_checkpoint_id, portable_relative_path_parts, CheckpointPlanError, CheckpointPlanStore,
@@ -482,11 +480,20 @@ impl ManagedIngest {
     /// `expectedSha256`, a Civitai file hash). Hashing happens on the STAGED bytes, before the
     /// commit, so a mismatch never produces an install.
     pub fn finalize(
-        mut self,
+        self,
         primary_relative_path: &str,
         expected_sha256: Option<&str>,
     ) -> Result<ManagedInstallV1, ManagedIngestError> {
-        match self.finalize_inner(primary_relative_path, expected_sha256) {
+        self.finalize_with_context(primary_relative_path, expected_sha256, Default::default())
+    }
+
+    pub fn finalize_with_context(
+        mut self,
+        primary_relative_path: &str,
+        expected_sha256: Option<&str>,
+        context: std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> Result<ManagedInstallV1, ManagedIngestError> {
+        match self.finalize_inner(primary_relative_path, expected_sha256, context) {
             Ok(install) => Ok(install),
             Err(error) => {
                 // Anything that refuses after the commit rolls the commit back, so the invariant
@@ -502,6 +509,7 @@ impl ManagedIngest {
         &mut self,
         primary_relative_path: &str,
         expected_sha256: Option<&str>,
+        context: std::collections::BTreeMap<String, serde_json::Value>,
     ) -> Result<ManagedInstallV1, ManagedIngestError> {
         let staging_path = self.staging_dir().to_path_buf();
         let primary_staged = staging_path.join(staged_relative_path(primary_relative_path)?);
@@ -541,10 +549,11 @@ impl ManagedIngest {
         // 3. Full-content validation and publication, against the committed bytes. A refusal here
         //    is rolled back by `finalize`, so an install the inspector will not accept is not left
         //    addressable either.
-        let compiled = self.store.compile_managed(
+        let compiled = self.store.compile_managed_with_context(
             &self.install_id,
             primary_relative_path,
             self.provenance.clone(),
+            context,
         )?;
 
         Ok(ManagedInstallV1 {
@@ -652,17 +661,7 @@ pub fn sweep_staging(
 }
 
 fn sha256_file(path: &Path) -> io::Result<String> {
-    let mut file = fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0_u8; COPY_BUFFER_BYTES];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
+    crate::hashing::sha256_file(path)
 }
 
 #[cfg(test)]

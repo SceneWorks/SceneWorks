@@ -4,8 +4,7 @@
 // SceneWorks is its only consumer, so a formal release does not belong on the critical path between
 // the two repos -- releases stay for durable/shareable snapshots (inference's cut_release.py).
 //
-// The pins live in crates/sceneworks-worker/Cargo.toml and
-// crates/sceneworks-memory-adapter/Cargo.toml. The root Cargo.toml additionally `[patch]`es
+// The pins live in the core, worker and memory-adapter Cargo.toml manifests. The root Cargo.toml additionally `[patch]`es
 // candle-kernels and (after M5) candle-core to the vendored copies inside the same inference
 // revision. Those revs must move in lockstep with the direct crates. This
 // rewrites every `tag = "..."` / `rev = "..."` pin in those manifests and regenerates the lockfile.
@@ -28,6 +27,7 @@
 // since that teardown.
 
 import { execFileSync } from "node:child_process";
+import { SECURITY_BACKPORT } from "./ci/zip9-source-overrides.mjs";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -99,10 +99,7 @@ function inferenceManifests() {
   return found;
 }
 
-const SEMANTIC_PROVENANCE = join(repoRoot, "crates/sceneworks-worker/src/catalog_semantic_jobs.rs");
-const SEMANTIC_PROVENANCE_RE = /(const INFERENCE_RUNTIME_REVISION: &str = ")[0-9a-f]{40}(";)/;
-const MEMORY_PROVENANCE = join(repoRoot, "crates/sceneworks-memory-adapter/src/lib.rs");
-const MEMORY_PROVENANCE_RE = /(pub const INFERENCE_PIN: &str = ")[0-9a-f]{40}(";)/;
+
 // The FLUX.2 compatibility audit's frozen end-of-window (sc-17497 / sc-17524 / sc-17606). Read, never
 // rewritten: unlike the two provenance stamps above, this constant is a claim about what a BUILD
 // proved, so substituting the string would fake the proof — the same reason
@@ -154,6 +151,26 @@ function repin(manifestText, sha, manifestPath = MANIFEST) {
 
 // Before any bump writes, require the root workspace patch to carry every vendored package.
 // Cargo ignores a dependency workspace's [patch], so repinning direct crates alone is unsafe.
+export function prepareInferencePatches(manifestText, sha) {
+  if (sha === SECURITY_BACKPORT.engine_revision) return manifestText;
+  const core = 'candle-core = { path = "vendor/zip9-candle-core" }';
+  if (!manifestText.includes(core)) return manifestText;
+  // The exact-revision ports must never shadow the newer producer. Keep the frozen source
+  // manifest and bytes as historical evidence; only retire their effective Cargo overrides.
+  const marker = '[patch."https://github.com/SceneWorks/inference"]';
+  const section = manifestText.slice(manifestText.indexOf(marker)).trim();
+  const expected = [marker, core,
+    'candle-audio-kokoro = { path = "vendor/zip9-candle-audio-kokoro" }',
+    'mlx-gen = { path = "vendor/zip9-mlx-gen" }'].join("\n");
+  if (section !== expected) throw new Error("review changed inference security overrides before advancing the pin");
+  const comment = manifestText.indexOf('# Exact 91ff leaf source');
+  const retired = `${manifestText.slice(0, comment >= 0 ? comment : manifestText.indexOf(marker)).trimEnd()}\n`;
+  return retired.replace(core,
+    `candle-core = { git = "${INFERENCE_GIT}", rev = "${sha}" }`)
+    .replace(/# inference revision; candle-core is an explicit exact-revision leaf security backport, recorded in\n# vendor\/zip9-source-overrides.json\. The source guard refuses missing, upstream or skewed sources\./,
+      "# inference revision. The retired exact-revision security ports remain preserved as historical\n# source evidence in vendor/zip9-source-overrides.json; they are no longer Cargo overrides.");
+}
+
 function verifyCandlePatches(manifestText, sha) {
   const marker = `[patch."https://github.com/huggingface/candle"]`;
   const lines = manifestText.split("\n");
@@ -166,32 +183,14 @@ function verifyCandlePatches(manifestText, sha) {
   for (const crate of PATCHED_CRATES) {
     const matches = section.filter((line) =>
       new RegExp(`^${crate}\\s*=`).test(line.trim()));
-    if (matches.length !== 1 ||
+    const historicalCore = crate === "candle-core" && sha === SECURITY_BACKPORT.engine_revision &&
+      matches[0]?.trim() === 'candle-core = { path = "vendor/zip9-candle-core" }';
+    if (matches.length !== 1 || (!historicalCore && (
         !matches[0].includes(`git = "${INFERENCE_GIT}"`) ||
-        !matches[0].includes(`rev = "${sha}"`)) {
+        !matches[0].includes(`rev = "${sha}"`)))) {
       throw new Error(`root Candle [patch] must pin exactly one ${crate} at inference ${sha}`);
     }
   }
-}
-
-function repinSemanticProvenance(source, sha) {
-  if (!SEMANTIC_PROVENANCE_RE.test(source)) {
-    throw new Error(
-      `no INFERENCE_RUNTIME_REVISION constant found in ${SEMANTIC_PROVENANCE} -- the semantic ` +
-        "provenance stamp must move with the pin or its lockstep test goes red",
-    );
-  }
-  return source.replace(SEMANTIC_PROVENANCE_RE, `$1${sha}$2`);
-}
-
-function repinMemoryProvenance(source, sha) {
-  if (!MEMORY_PROVENANCE_RE.test(source)) {
-    throw new Error(
-      `no INFERENCE_PIN constant found in ${MEMORY_PROVENANCE} -- the calibration adapter ` +
-        "provenance stamp must move with the pin",
-    );
-  }
-  return source.replace(MEMORY_PROVENANCE_RE, `$1${sha}$2`);
 }
 
 // --- git / cargo orchestration ----------------------------------------------------------------
@@ -233,8 +232,36 @@ function lockHasStaleInferenceRevision(sha, lockText = readFileSync(LOCKFILE, "u
     );
 }
 
+/**
+ * Every inference package a manifest names directly (`<name> = { git = INFERENCE_GIT, ... }`).
+ * sc-26691: inference sc-27252 split gen-core into sibling crates (`sceneworks-gen-core-iris`,
+ * `-checkpoint`, `-h3`, ...) that SceneWorks crates now depend on directly. Each must have its lock
+ * entry refreshed with the pin, and the hand-written INFERENCE_CRATES list would rot the moment the
+ * next sibling is taken. Pure over manifest texts so the self-test drives it.
+ */
+export function directInferenceCrates(manifestTexts) {
+  const names = new Set();
+  const dep = /^\s*([A-Za-z0-9_-]+)\s*=\s*\{[^}]*\bgit\s*=\s*"([^"]+)"/;
+  for (const text of manifestTexts) {
+    for (const line of text.split("\n")) {
+      const match = dep.exec(line);
+      if (match && match[2] === INFERENCE_GIT && !PATCHED_CRATES.includes(match[1])) {
+        names.add(match[1]);
+      }
+    }
+  }
+  return [...names].sort();
+}
+
+function inferenceUpdateCrates() {
+  const discovered = directInferenceCrates(
+    inferenceManifests().map((path) => readFileSync(path, "utf8")),
+  );
+  return [...new Set([...INFERENCE_CRATES, ...discovered])];
+}
+
 function cargoUpdate(sha) {
-  const packages = [...new Set([...INFERENCE_CRATES, ...PATCHED_CRATES])];
+  const packages = [...new Set([...inferenceUpdateCrates(), ...PATCHED_CRATES])];
   const spec = packages.flatMap((crate) =>
     packageSpecsForUpdate(crate, sha).flatMap((packageSpec) => ["-p", packageSpec]),
   );
@@ -310,15 +337,10 @@ function distinctResolutions(crate) {
   );
 }
 
-// `config/inference-third-party-source.json` is ALSO keyed to the pin: check-license-coverage.mjs
-// fails closed when its `inferenceRevision` / `provenanceScan.revision` / `crateCoverage.revision` do
-// not equal the pinned rev. This cannot be regenerated blindly — a bump that brings a NEW crate or a
-// new embedded third-party source needs a human classification decision, and
-// the rescan needs a local inference clone (`--repo`) that this script does not otherwise require. So
-// run the guard and let its own remediation text (which names the exact scanner invocations) speak; the
-// point is that a stale audit surfaces HERE, at bump time, instead of in parity CI ten minutes later.
-// Fail-closed on purpose: the manifests and lockfile are already written by now, so the bump is
-// genuinely incomplete until the audit is refreshed and this passes.
+// The source/license record carries machine-derived inventory identities and historical human
+// classification notes. Verify the derivation's integrity against the actual scanned inventories;
+// classification findings and older pin/population mentions in human prose remain advisory under
+// sc-19751. Never turn historical review currency into a pin gate or fabricate a new human review.
 function verifyLicenseAudit(io = {}) {
   const {
     report = () =>
@@ -377,9 +399,10 @@ function verifyLicenseAudit(io = {}) {
     );
   }
   if (derived.auditSummaryErrors.length > 0) {
-    throw new Error(
-      "the inference source/license audit human _comment is stale after deriveLicenseAudit() ran. " +
-        "Review the pin advance and update the summary without copying historical finding counts.\n" +
+    log(
+      "bump-inference: advisory — the source/license audit human _comment retains historical " +
+        "pin/population context. Machine inventory integrity was verified; no new human review " +
+        "is claimed and historical prose was not rewritten.\n" +
         derived.auditSummaryErrors.map((error) => `  ${error}`).join("\n"),
     );
   }
@@ -1000,29 +1023,8 @@ function selfTest() {
       staleCurrencyAttestations({}, SHA).length === 0,
   );
 
-  // The fixture deliberately carries a DECOY 40-hex constant: the real file declares
-  // CLIP_MODEL_REVISION (an upstream HF model revision) two lines above the stamp, and nothing else
-  // guards it -- it is only ever compared against itself. A loosened SEMANTIC_PROVENANCE_RE would
-  // silently overwrite it on every bump, so the fixture must prove the rewrite is anchored to the
-  // stamp's own name, not merely that the stamp moved.
-  const CLIP_DECOY = `const CLIP_MODEL_REVISION: &str = "32bd64288804d66eefd0ccbe215aa642df71cc41";`;
-  const stampBefore =
-    `${CLIP_DECOY}\nconst CLIP_SPACE: &str = "clip-vit-l14";\nconst INFERENCE_RUNTIME_REVISION: &str = "${"b".repeat(40)}";\nconst DEFAULT_BATCH_SIZE: usize = 16;`;
-  const stampAfter =
-    `${CLIP_DECOY}\nconst CLIP_SPACE: &str = "clip-vit-l14";\nconst INFERENCE_RUNTIME_REVISION: &str = "${SHA}";\nconst DEFAULT_BATCH_SIZE: usize = 16;`;
-  const stampBumped = repinSemanticProvenance(stampBefore, SHA);
-  check("semantic provenance stamp bumps with the pin", stampBumped === stampAfter);
-  check(
-    "neighbouring 40-hex CLIP_MODEL_REVISION is left byte-identical",
-    stampBumped.includes(CLIP_DECOY) && !stampBumped.includes(`CLIP_MODEL_REVISION: &str = "${SHA}"`),
-  );
-  check(
-    "memory-strategy adapter provenance stamp bumps with the pin",
-    repinMemoryProvenance(
-      `pub const INFERENCE_PIN: &str = "${"b".repeat(40)}";`,
-      SHA,
-    ) === `pub const INFERENCE_PIN: &str = "${SHA}";`,
-  );
+  // Runtime and adapter provenance now derive from the neutral core dependency declaration;
+  // only dependency manifests move. Historical producer receipts are not stamp targets.
   const OLD_SHA = "b".repeat(40);
   const OLD_COMMIT = "c".repeat(40);
   const CURRENT_COMMIT = "d".repeat(40);
@@ -1128,14 +1130,6 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
       metadataInvocation?.options.cwd === "/self-test/repo" &&
       !metadataInvocation?.args.includes("--no-deps"),
   );
-  let stampThrew = false;
-  try {
-    repinSemanticProvenance(`const OTHER: &str = "x";`, SHA);
-  } catch {
-    stampThrew = true;
-  }
-  check("throws when the semantic provenance stamp is missing", stampThrew);
-
   // --- engine-capability facts, over a real fixture tree (sc-17593) --------------------------
   //
   // Everything above is text in, text out. This check is here because the facts verification is the
@@ -1545,28 +1539,31 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
     JSON.stringify(stored.includeSites) === JSON.stringify(AUDIT_FIXTURE.includeSites),
   );
 
-  const verifyDrift = (mutate) => {
+  const verifyDrift = (mutate, messages = []) => {
     const audit = mutate(structuredClone(stored));
     try {
       verifyLicenseAudit({
         report: () => {},
         derive: () => fakeDerive(audit),
         readAudit: () => audit,
-        log: () => {},
+        log: (message) => messages.push(message),
       });
       return null;
     } catch (error) {
       return error.message;
     }
   };
-  const staleSummary = verifyDrift((audit) => audit);
+  const summaryMessages = [];
+  const staleSummary = verifyDrift((audit) => audit, summaryMessages);
+  const advisory = summaryMessages.join("\n");
   check(
-    "a restamped audit with stale human prose refuses and names the current pin and population",
-    !!staleSummary &&
-      /human _comment is stale/.test(staleSummary) &&
-      new RegExp(SHA.slice(0, 8)).test(staleSummary) &&
-      /626 provenance candidates/.test(staleSummary) &&
-      /94 production-Rust crate prefixes/.test(staleSummary),
+    "historical human prose is advisory, names the new inventory, and is never rewritten as a new review",
+    staleSummary === null && /advisory/.test(advisory) &&
+      /no new human review is claimed/.test(advisory) &&
+      new RegExp(SHA.slice(0, 8)).test(advisory) &&
+      /626 provenance candidates/.test(advisory) &&
+      /94 production-Rust crate prefixes/.test(advisory) &&
+      stored._comment === AUDIT_FIXTURE._comment,
   );
   stored._comment =
     `Pin ${SHA.slice(0, 8)} records 626 provenance candidates and 94 production-Rust crate prefixes; ` +
@@ -1588,6 +1585,22 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
   check(
     "the crate-prefix population count is graded on the same footing",
     !!skippedCrates && /crateCoverage\.cratePrefixes: wrote 90, checker computes 94/.test(skippedCrates),
+  );
+  const missingPopulation = verifyDrift((audit) => {
+    delete audit.provenanceScan.populationSha256;
+    return audit;
+  });
+  check(
+    "a missing inventory integrity hash remains fatal, independent of historical human prose",
+    !!missingPopulation && /provenanceScan\.populationSha256: wrote undefined/.test(missingPopulation),
+  );
+  const malformedPopulation = verifyDrift((audit) => {
+    audit.provenanceScan.matchedFiles = "626";
+    return audit;
+  });
+  check(
+    "a malformed inventory population type remains fatal",
+    !!malformedPopulation && /provenanceScan\.matchedFiles/.test(malformedPopulation),
   );
   const staleDigest = verifyDrift((audit) => {
     audit.auditDigest = "0".repeat(64);
@@ -1687,14 +1700,9 @@ function main() {
     // three and left one behind. Discovery makes the next such crate correct by default.
     ...inferenceManifests().map((path) => ({
       path,
-      rewrite: (text) => repin(text, sha, path),
+      rewrite: (text) => repin(path === ROOT_MANIFEST ? prepareInferencePatches(text, sha) : text, sha, path),
       updatesCargoLock: true,
     })),
-    { path: SEMANTIC_PROVENANCE, rewrite: (text) => repinSemanticProvenance(text, sha) },
-    {
-      path: MEMORY_PROVENANCE,
-      rewrite: (text) => repinMemoryProvenance(text, sha),
-    },
   ].map(({ path, rewrite, updatesCargoLock = false }) => {
     const current = readFileSync(path, "utf8");
     return { path, current, bumped: rewrite(current), updatesCargoLock };
@@ -1724,7 +1732,7 @@ function main() {
     );
   }
   console.log(
-    `bump-inference: pinning inference (${[...INFERENCE_CRATES, ...PATCHED_CRATES].join(", ")}) -> ${sha}`,
+    `bump-inference: pinning inference (${[...inferenceUpdateCrates(), ...PATCHED_CRATES].join(", ")}) -> ${sha}`,
   );
   // BEFORE anything is written, unlike every other verifier in this script — and that placement is
   // the difference between a guard and a formality. The sibling guards run post-write and still

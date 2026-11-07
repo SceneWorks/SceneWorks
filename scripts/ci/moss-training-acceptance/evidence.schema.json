@@ -1,0 +1,231 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:sceneworks:moss-training-acceptance:evidence:1",
+  "title": "One MOSS-Image terminal acceptance case and its native subruns",
+  "$comment": "This is the acceptance record, not a replacement for raw native receipts or failure logs. Required observations cannot be omitted even when a missing/unproven marker is present. Synthetic schema-test fixtures are explicitly not campaign evidence. Draft 2020-12 validates structure, types, constants and bounds; the named x-semanticChecks MUST also be implemented by the campaign verifier before acceptance, because ordinary JSON Schema cannot compare arbitrary fields or inspect artifact contents. Parse strict JSON and reject NaN/Infinity before validation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "recordKind", "fixtureLabel", "isCampaignEvidence", "acceptanceDisposition", "missing", "unproven", "failureReason", "manifestSha256", "caseId", "identity", "datasetIdentity", "evaluationIdentity", "subruns", "saveReloadGenerate", "crossBackendLoad", "recovery", "memoryRefusal", "cleanup", "productPath", "regression", "inspections"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "recordKind": {"enum": ["campaign-acceptance-evidence", "schema-test-fixture"]},
+    "fixtureLabel": {"type": ["string", "null"]},
+    "isCampaignEvidence": {"type": "boolean"},
+    "acceptanceDisposition": {"enum": ["accepted", "unproven", "missing", "failed", "not-campaign-evidence"]},
+    "missing": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "unproven": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "failureReason": {"type": ["string", "null"]},
+    "manifestSha256": {"const": "c02b05e3c40e6c9666554580ff0636d5853691ffe5f5db5d586d12468c82a0fd"},
+    "caseId": {"enum": ["mlx/base/lora", "mlx/base/lokr", "mlx/sft/lora", "mlx/sft/lokr", "cuda/base/lora", "cuda/base/lokr", "cuda/sft/lora", "cuda/sft/lokr"]},
+    "identity": {"$ref": "#/$defs/identity"},
+    "datasetIdentity": {"$ref": "#/$defs/datasetIdentity"},
+    "evaluationIdentity": {"$ref": "#/$defs/evaluationIdentity"},
+    "subruns": {
+      "type": "object", "additionalProperties": false,
+      "required": ["uninterrupted", "canceled", "resumed"],
+      "properties": {
+        "uninterrupted": {"allOf": [{"$ref": "#/$defs/completeRun"}, {"properties": {"startStep": {"const": 0}, "optimizerUpdatesInThisRun": {"const": 60}}}]},
+        "canceled": {"$ref": "#/$defs/canceledRun"},
+        "resumed": {"allOf": [{"$ref": "#/$defs/completeRun"}, {"properties": {"startStep": {"const": 20}, "optimizerUpdatesInThisRun": {"const": 40}}}]}
+      }
+    },
+    "saveReloadGenerate": {"$ref": "#/$defs/saveReloadGenerate"},
+    "crossBackendLoad": {"$ref": "#/$defs/crossBackendLoad"},
+    "recovery": {"$ref": "#/$defs/recovery"},
+    "memoryRefusal": {"$ref": "#/$defs/memoryRefusal"},
+    "cleanup": {"$ref": "#/$defs/cleanup"},
+    "productPath": {"$ref": "#/$defs/productPath"},
+    "regression": {"$ref": "#/$defs/regression"},
+    "inspections": {"type": "array", "minItems": 3, "items": {"$ref": "#/$defs/inspection"}}
+  },
+  "allOf": [
+    {"if": {"properties": {"recordKind": {"const": "schema-test-fixture"}}}, "then": {"properties": {"fixtureLabel": {"const": "SCHEMA TEST ONLY - NOT CAMPAIGN EVIDENCE"}, "isCampaignEvidence": {"const": false}, "acceptanceDisposition": {"const": "not-campaign-evidence"}}}, "else": {"properties": {"fixtureLabel": {"type": "null"}, "isCampaignEvidence": {"const": true}, "acceptanceDisposition": {"enum": ["accepted", "unproven", "missing", "failed"]}}}},
+    {"if": {"properties": {"acceptanceDisposition": {"const": "accepted"}}}, "then": {"properties": {"recordKind": {"const": "campaign-acceptance-evidence"}, "missing": {"maxItems": 0}, "unproven": {"maxItems": 0}, "failureReason": {"type": "null"}}}},
+    {"if": {"properties": {"acceptanceDisposition": {"const": "missing"}}}, "then": {"properties": {"missing": {"minItems": 1}}}},
+    {"if": {"properties": {"acceptanceDisposition": {"const": "unproven"}}}, "then": {"properties": {"unproven": {"minItems": 1}}}},
+    {"if": {"properties": {"acceptanceDisposition": {"const": "failed"}}}, "then": {"properties": {"failureReason": {"type": "string", "minLength": 1}}}},
+    {"if": {"properties": {"identity": {"properties": {"backend": {"const": "mlx"}}}}}, "then": {"properties": {"identity": {"properties": {"device": {"properties": {"class": {"const": "apple-silicon-unified"}, "gpuMemoryLimitFraction": {"const": 0.60}, "capacityBasis": {"const": "actual-detected-total-unified-memory"}}}}}, "crossBackendLoad": {"properties": {"sourceBackend": {"const": "mlx"}, "importedBackend": {"const": "cuda"}}}}}, "else": {"properties": {"identity": {"properties": {"device": {"properties": {"class": {"const": "nvidia-cuda"}, "gpuMemoryLimitFraction": {"const": 0.85}, "capacityBasis": {"const": "actual-claimed-cuda-context-total-vram"}}}}}, "crossBackendLoad": {"properties": {"sourceBackend": {"const": "cuda"}, "importedBackend": {"const": "mlx"}}}}}},
+    {"if": {"properties": {"identity": {"properties": {"parent": {"const": "sft"}}}}}, "then": {"properties": {"regression": {"properties": {"dmdExecutions": {"minItems": 2, "maxItems": 2, "contains": {"properties": {"selectedMode": {"const": "unmerged_bf16"}}}, "allOf": [{"contains": {"properties": {"selectedMode": {"const": "full_fp32"}}}}]}, "baseDmdRefusals": {"maxItems": 0}}}}}, "else": {"properties": {"regression": {"properties": {"dmdExecutions": {"maxItems": 0}, "baseDmdRefusals": {"minItems": 2, "maxItems": 2, "contains": {"properties": {"selectedMode": {"const": "unmerged_bf16"}}}, "allOf": [{"contains": {"properties": {"selectedMode": {"const": "full_fp32"}}}}]}}}}}}
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "sha40": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "text": {"type": "string", "minLength": 1},
+    "backend": {"enum": ["mlx", "cuda"]},
+    "parent": {"enum": ["base", "sft"]},
+    "method": {"enum": ["lora", "lokr"]},
+    "loss": {"type": "number", "minimum": 0, "maximum": 1.7976931348623157e308},
+    "positiveNumber": {"type": "number", "exclusiveMinimum": 0, "maximum": 1.7976931348623157e308},
+    "positiveInteger": {"type": "integer", "minimum": 1},
+    "nonnegativeInteger": {"type": "integer", "minimum": 0},
+    "artifact": {
+      "type": "object", "additionalProperties": false, "required": ["path", "sha256"],
+      "properties": {"path": {"type": "string", "minLength": 1, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"}, "sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "weightSource": {
+      "type": "object", "additionalProperties": false, "required": ["repository", "revision", "files"],
+      "properties": {"repository": {"$ref": "#/$defs/text"}, "revision": {"$ref": "#/$defs/sha40"}, "files": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/artifact"}}}
+    },
+    "identity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["rulebook", "backend", "parent", "method", "source", "workflow", "toolchain", "device", "weightSources"],
+      "properties": {
+        "rulebook": {"const": "sc-26584/moss-image-training-acceptance/v1"},
+        "backend": {"$ref": "#/$defs/backend"}, "parent": {"$ref": "#/$defs/parent"}, "method": {"$ref": "#/$defs/method"},
+        "source": {"type": "object", "additionalProperties": false, "required": ["sceneWorksSourceSha", "inferencePin", "clean", "finalMergedSource", "dependencyOverridesUsed"], "properties": {"sceneWorksSourceSha": {"$ref": "#/$defs/sha40", "description": "SceneWorks is the source repository named by the sealed campaign; no unrelated CanvasCI provenance is invented."}, "inferencePin": {"$ref": "#/$defs/sha40"}, "clean": {"const": true}, "finalMergedSource": {"const": true}, "dependencyOverridesUsed": {"const": false}}},
+        "workflow": {"type": "object", "additionalProperties": false, "required": ["ref", "sha", "fileSha256", "runId", "attempt", "jobId"], "properties": {"ref": {"$ref": "#/$defs/text"}, "sha": {"$ref": "#/$defs/sha40"}, "fileSha256": {"$ref": "#/$defs/sha256"}, "runId": {"$ref": "#/$defs/text"}, "attempt": {"$ref": "#/$defs/positiveInteger"}, "jobId": {"$ref": "#/$defs/text"}}},
+        "toolchain": {"type": "object", "additionalProperties": false, "required": ["rustc", "cargo", "target", "nativeRuntime", "binarySha256"], "properties": {"rustc": {"$ref": "#/$defs/text"}, "cargo": {"$ref": "#/$defs/text"}, "target": {"$ref": "#/$defs/text"}, "nativeRuntime": {"$ref": "#/$defs/text"}, "binarySha256": {"$ref": "#/$defs/sha256"}}},
+        "device": {"type": "object", "additionalProperties": false, "required": ["class", "claimedIdentity", "observedIdentity", "totalCapacityBytes", "gpuMemoryLimitFraction", "capacityBasis", "resolvedCeilingBytes", "resolvedBeforeWeightsLoad", "projectedDemandBytes", "headerDemandReceipt", "cpuReference"], "properties": {"class": {"enum": ["apple-silicon-unified", "nvidia-cuda"]}, "claimedIdentity": {"$ref": "#/$defs/text"}, "observedIdentity": {"$ref": "#/$defs/text"}, "totalCapacityBytes": {"$ref": "#/$defs/positiveInteger"}, "gpuMemoryLimitFraction": {"type": "number", "enum": [0.60, 0.85]}, "capacityBasis": {"enum": ["actual-detected-total-unified-memory", "actual-claimed-cuda-context-total-vram"]}, "resolvedCeilingBytes": {"$ref": "#/$defs/positiveInteger"}, "resolvedBeforeWeightsLoad": {"const": true}, "projectedDemandBytes": {"$ref": "#/$defs/positiveInteger"}, "headerDemandReceipt": {"$ref": "#/$defs/artifact"}, "cpuReference": {"const": false}}},
+        "weightSources": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/weightSource"}, "description": "Group actual hash-verified files by repository/revision without imposing a fabricated repository count. The complete required file set comes from production selected_components for every mode exercised by the cell and must match frozen native file identities. Base also uses shared SFT encoder/VAE components; SFT DMD uses its accelerator repository."}
+      }
+    },
+    "datasetIdentity": {
+      "type": "object", "additionalProperties": false, "required": ["id", "manifestSha256", "configSha256", "artifact", "sealedBeforeWeightsLoad", "uploadedCount", "uploadedItems"],
+      "properties": {"uploadedCount": {"const": 3}, "uploadedItems": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "object", "additionalProperties": false, "required": ["image", "imageSha256", "caption", "uploadId", "uploadReceipt"], "properties": {"image": {"enum": ["shape-0.png", "shape-1.png", "shape-2.png"]}, "imageSha256": {"$ref": "#/$defs/sha256"}, "caption": {"$ref": "#/$defs/text"}, "uploadId": {"$ref": "#/$defs/text"}, "uploadReceipt": {"$ref": "#/$defs/artifact"}}}}, "id": {"const": "synthetic-moss-v1"}, "manifestSha256": {"$ref": "#/$defs/sha256"}, "configSha256": {"$ref": "#/$defs/sha256"}, "artifact": {"$ref": "#/$defs/artifact"}, "sealedBeforeWeightsLoad": {"const": true}}
+    },
+    "evaluationIdentity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["manifestHash", "computedAtRunTimeBeforeWeightsLoad", "imageSha256", "caption", "maskSha256", "width", "height", "noiseSeedHex", "sigma", "sharedAcrossAllCellsAndSubruns", "crossBackendTensorValuesMayDiffer"],
+      "properties": {"manifestHash": {"$ref": "#/$defs/sha256"}, "computedAtRunTimeBeforeWeightsLoad": {"const": true}, "imageSha256": {"$ref": "#/$defs/sha256"}, "caption": {"const": "sksmoss red circle centered on a pale background"}, "maskSha256": {"type": "null"}, "width": {"const": 256}, "height": {"const": 256}, "noiseSeedHex": {"const": "0x48454c444f555401"}, "sigma": {"const": 0.375}, "sharedAcrossAllCellsAndSubruns": {"const": true}, "crossBackendTensorValuesMayDiffer": {"const": true}}
+    },
+    "tensor": {
+      "type": "object", "additionalProperties": false, "required": ["shape", "dtype", "layout", "sha256", "hashEncoding"],
+      "properties": {"shape": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/positiveInteger"}}, "dtype": {"$ref": "#/$defs/text"}, "layout": {"type": "object", "additionalProperties": false, "required": ["order", "strides", "strideUnit"], "properties": {"order": {"$ref": "#/$defs/text"}, "strides": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/nonnegativeInteger"}}, "strideUnit": {"const": "elements"}}}, "sha256": {"$ref": "#/$defs/sha256"}, "hashEncoding": {"const": "logical-row-major-f32-le-v1"}}
+    },
+    "preparedTensors": {
+      "type": "object", "additionalProperties": false, "required": ["latent", "context", "mask", "noise"],
+      "properties": {"latent": {"$ref": "#/$defs/tensor"}, "context": {"$ref": "#/$defs/tensor"}, "mask": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/tensor"}]}, "noise": {"$ref": "#/$defs/tensor"}}
+    },
+    "evaluationPoint": {
+      "type": "object", "additionalProperties": false, "required": ["loss", "finiteObserved", "prepared"],
+      "properties": {"loss": {"$ref": "#/$defs/loss"}, "finiteObserved": {"const": true}, "prepared": {"$ref": "#/$defs/preparedTensors"}}
+    },
+    "learning": {
+      "type": "object", "additionalProperties": false,
+      "required": ["manifestHash", "before", "after", "criterion", "strictDecreaseVerified", "improvement", "sameActualPreparedPackageVerified", "reencodingBetweenMeasurements", "noiseRegenerationBetweenMeasurements", "nativeReceipt"],
+      "properties": {"manifestHash": {"$ref": "#/$defs/sha256"}, "before": {"$ref": "#/$defs/evaluationPoint"}, "after": {"$ref": "#/$defs/evaluationPoint"}, "criterion": {"const": "after < before"}, "strictDecreaseVerified": {"const": true}, "improvement": {"$ref": "#/$defs/positiveNumber"}, "sameActualPreparedPackageVerified": {"const": true}, "reencodingBetweenMeasurements": {"const": false}, "noiseRegenerationBetweenMeasurements": {"const": false}, "nativeReceipt": {"$ref": "#/$defs/artifact"}}
+    },
+    "gradients": {
+      "type": "object", "additionalProperties": false, "required": ["tensorCount", "allFiniteObserved", "nonzeroObserved", "nativeReceipt"],
+      "properties": {"tensorCount": {"$ref": "#/$defs/positiveInteger"}, "allFiniteObserved": {"const": true}, "nonzeroObserved": {"const": true}, "nativeReceipt": {"$ref": "#/$defs/artifact"}}
+    },
+    "factorDelta": {
+      "type": "object", "additionalProperties": false,
+      "required": ["tensorCount", "elementCount", "changedElements", "maxAbsDelta", "squaredL2Delta", "finiteObserved", "startExport", "finalExport", "layoutIdentity", "alpha", "rank", "parent", "method", "sourceSha", "weightSourceRevision", "nativeReceipt"],
+      "properties": {"tensorCount": {"$ref": "#/$defs/positiveInteger"}, "elementCount": {"$ref": "#/$defs/positiveInteger"}, "changedElements": {"$ref": "#/$defs/positiveInteger"}, "maxAbsDelta": {"$ref": "#/$defs/positiveNumber"}, "squaredL2Delta": {"$ref": "#/$defs/positiveNumber"}, "finiteObserved": {"const": true}, "startExport": {"$ref": "#/$defs/artifact"}, "finalExport": {"$ref": "#/$defs/artifact"}, "layoutIdentity": {"$ref": "#/$defs/sha256"}, "alpha": {"const": 6.0}, "rank": {"const": 4}, "parent": {"$ref": "#/$defs/parent"}, "method": {"$ref": "#/$defs/method"}, "sourceSha": {"$ref": "#/$defs/sha40"}, "weightSourceRevision": {"$ref": "#/$defs/sha40"}, "nativeReceipt": {"$ref": "#/$defs/artifact"}}
+    },
+    "cursor": {
+      "type": "object", "additionalProperties": false, "required": ["epoch", "batchCursor", "sampleCursor", "partialAccumulation", "stateArtifact"],
+      "properties": {"epoch": {"$ref": "#/$defs/nonnegativeInteger"}, "batchCursor": {"$ref": "#/$defs/nonnegativeInteger"}, "sampleCursor": {"$ref": "#/$defs/nonnegativeInteger"}, "partialAccumulation": {"type": "object", "additionalProperties": false, "required": ["microsteps", "tokens", "gradientStateSha256"], "properties": {"microsteps": {"const": 0}, "tokens": {"const": 0}, "gradientStateSha256": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]}}}, "stateArtifact": {"$ref": "#/$defs/artifact"}}
+    },
+    "completeRun": {
+      "type": "object", "additionalProperties": false,
+      "required": ["jobId", "nativeReceipt", "outcome", "originalHorizon", "startStep", "completedStep", "optimizerUpdatesInThisRun", "seed", "datasetManifestSha256", "configSha256", "evaluationManifestHash", "trainingLosses", "allLossesFiniteObserved", "gradients", "learning", "factorDelta", "cursor", "frozenComponentsUnchanged", "frozenReceipt", "runScopeReturned"],
+      "properties": {"jobId": {"$ref": "#/$defs/text"}, "nativeReceipt": {"$ref": "#/$defs/artifact"}, "outcome": {"const": "completed"}, "originalHorizon": {"const": 60}, "startStep": {"enum": [0, 20]}, "completedStep": {"const": 60}, "optimizerUpdatesInThisRun": {"enum": [40, 60]}, "seed": {"const": 1789}, "datasetManifestSha256": {"$ref": "#/$defs/sha256"}, "configSha256": {"$ref": "#/$defs/sha256"}, "evaluationManifestHash": {"$ref": "#/$defs/sha256"}, "trainingLosses": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/loss"}}, "allLossesFiniteObserved": {"const": true}, "gradients": {"$ref": "#/$defs/gradients"}, "learning": {"$ref": "#/$defs/learning"}, "factorDelta": {"$ref": "#/$defs/factorDelta"}, "cursor": {"$ref": "#/$defs/cursor"}, "frozenComponentsUnchanged": {"const": ["backbone", "text-encoder", "vae"]}, "frozenReceipt": {"$ref": "#/$defs/artifact"}, "runScopeReturned": {"const": true}}
+    },
+    "canceledRun": {
+      "type": "object", "additionalProperties": false,
+      "required": ["jobId", "nativeReceipt", "outcome", "originalHorizon", "completedStep", "seed", "datasetManifestSha256", "configSha256", "evaluationManifestHash", "learning", "gradients", "factorDelta", "checkpointDurable", "checkpoint", "cursor", "originalCancelToken", "originalTokenObservedCanceled", "publishedFinalAdapter", "runScopeReturned"],
+      "properties": {"jobId": {"$ref": "#/$defs/text"}, "nativeReceipt": {"$ref": "#/$defs/artifact"}, "outcome": {"const": "canceled"}, "originalHorizon": {"const": 60}, "completedStep": {"const": 20}, "seed": {"const": 1789}, "datasetManifestSha256": {"$ref": "#/$defs/sha256"}, "configSha256": {"$ref": "#/$defs/sha256"}, "evaluationManifestHash": {"$ref": "#/$defs/sha256"}, "learning": {"type": "object", "additionalProperties": false, "required": ["manifestHash", "before", "after", "afterAbsenceReason", "learningClaimed"], "properties": {"manifestHash": {"$ref": "#/$defs/sha256"}, "before": {"$ref": "#/$defs/evaluationPoint"}, "after": {"type": "null"}, "afterAbsenceReason": {"const": "expected-cancellation-before-completion"}, "learningClaimed": {"const": false}}}, "gradients": {"$ref": "#/$defs/gradients"}, "factorDelta": {"$ref": "#/$defs/factorDelta"}, "checkpointDurable": {"const": true}, "checkpoint": {"$ref": "#/$defs/artifact"}, "cursor": {"$ref": "#/$defs/cursor"}, "originalCancelToken": {"$ref": "#/$defs/text"}, "originalTokenObservedCanceled": {"const": true}, "publishedFinalAdapter": {"const": false}, "runScopeReturned": {"const": true}}
+    },
+    "applicationReport": {
+      "type": "object", "additionalProperties": false, "required": ["adapterSha256", "parent", "method", "selectedStrength", "executedStrength", "appliedCount", "skippedCount", "receipt"],
+      "properties": {"adapterSha256": {"$ref": "#/$defs/sha256"}, "parent": {"$ref": "#/$defs/parent"}, "method": {"$ref": "#/$defs/method"}, "selectedStrength": {"enum": [0.0, 1.0]}, "executedStrength": {"enum": [0.0, 1.0]}, "appliedCount": {"$ref": "#/$defs/nonnegativeInteger"}, "skippedCount": {"const": 0}, "receipt": {"$ref": "#/$defs/artifact"}}
+    },
+    "png": {
+      "type": "object", "additionalProperties": false, "required": ["artifact", "mimeType", "width", "height", "prompt", "seed", "adapterStrength", "adapterSha256", "executionReceipt"],
+      "properties": {"artifact": {"$ref": "#/$defs/artifact"}, "mimeType": {"const": "image/png"}, "width": {"const": 256}, "height": {"const": 256}, "prompt": {"const": "sksmoss red circle centered on a pale background"}, "seed": {"const": 1789}, "adapterStrength": {"enum": [0.0, 1.0]}, "adapterSha256": {"$ref": "#/$defs/sha256"}, "executionReceipt": {"$ref": "#/$defs/artifact"}}
+    },
+    "saveReloadGenerate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["adapterPath", "adapterSha256", "libraryId", "resolvedPath", "resolvedSha256", "finalAdapterSelected", "trainerDroppedBeforeReload", "applicationReport", "before", "after", "disableControl", "noAdapterBaseline", "disableMatchesNoAdapterBaseline", "receipt"],
+      "properties": {"adapterPath": {"$ref": "#/$defs/text"}, "adapterSha256": {"$ref": "#/$defs/sha256"}, "libraryId": {"$ref": "#/$defs/text"}, "resolvedPath": {"$ref": "#/$defs/text"}, "resolvedSha256": {"$ref": "#/$defs/sha256"}, "finalAdapterSelected": {"const": true}, "trainerDroppedBeforeReload": {"const": true}, "applicationReport": {"allOf": [{"$ref": "#/$defs/applicationReport"}, {"properties": {"selectedStrength": {"const": 1.0}, "executedStrength": {"const": 1.0}, "appliedCount": {"minimum": 1}}}]}, "before": {"allOf": [{"$ref": "#/$defs/png"}, {"properties": {"adapterStrength": {"const": 1.0}}}]}, "after": {"allOf": [{"$ref": "#/$defs/png"}, {"properties": {"adapterStrength": {"const": 1.0}}}]}, "disableControl": {"allOf": [{"$ref": "#/$defs/png"}, {"properties": {"adapterStrength": {"const": 0.0}}}]}, "noAdapterBaseline": {"$ref": "#/$defs/artifact"}, "disableMatchesNoAdapterBaseline": {"const": true}, "receipt": {"$ref": "#/$defs/artifact"}}
+    },
+    "crossBackendLoad": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sourceCaseId", "phase", "phaseTiming", "resourceGuard", "sourceBackend", "importedBackend", "transferredAdapter", "receivedSha256", "parent", "method", "outcome", "generation", "applicationReport", "unsupportedFormatRefusal", "receipt"],
+      "properties": {"sourceCaseId": {"enum": ["mlx/base/lora", "mlx/base/lokr", "mlx/sft/lora", "mlx/sft/lokr", "cuda/base/lora", "cuda/base/lokr", "cuda/sft/lora", "cuda/sft/lokr"]}, "phase": {"const": "cross-load"}, "phaseTiming": {"$ref": "#/$defs/crossLoadTiming"}, "resourceGuard": {"$ref": "#/$defs/crossLoadGuard"}, "sourceBackend": {"$ref": "#/$defs/backend"}, "importedBackend": {"$ref": "#/$defs/backend"}, "transferredAdapter": {"$ref": "#/$defs/artifact"}, "receivedSha256": {"$ref": "#/$defs/sha256"}, "parent": {"$ref": "#/$defs/parent"}, "method": {"$ref": "#/$defs/method"}, "outcome": {"enum": ["generated", "unsupported-format-refusal"]}, "generation": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/png"}]}, "applicationReport": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/applicationReport"}]}, "unsupportedFormatRefusal": {"type": ["string", "null"]}, "receipt": {"$ref": "#/$defs/artifact"}},
+      "allOf": [{"if": {"properties": {"outcome": {"const": "generated"}}}, "then": {"properties": {"generation": {"$ref": "#/$defs/png"}, "applicationReport": {"allOf": [{"$ref": "#/$defs/applicationReport"}, {"properties": {"selectedStrength": {"const": 1.0}, "executedStrength": {"const": 1.0}, "appliedCount": {"minimum": 1}}}]}, "unsupportedFormatRefusal": {"type": "null"}}}, "else": {"properties": {"generation": {"type": "null"}, "applicationReport": {"type": "null"}, "unsupportedFormatRefusal": {"type": "string", "minLength": 1}}}}]
+    },
+    "crossLoadTiming": {
+      "type": "object", "additionalProperties": false,
+      "required": ["phaseStartedAt", "completedAt", "wallSeconds", "wallLimitSeconds", "clockSource"],
+      "properties": {"phaseStartedAt": {"type": "string", "format": "date-time"}, "completedAt": {"type": "string", "format": "date-time"}, "wallSeconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 3600}, "wallLimitSeconds": {"const": 3600}, "clockSource": {"const": "cross-load-case-start"}}
+    },
+    "crossLoadGuard": {
+      "type": "object", "additionalProperties": false,
+      "required": ["device", "rootProcess", "rootRssSamples", "positiveInitialMeasurement", "telemetryComplete", "missingMeasurementCount", "nativeRootReleased", "releaseReceipt"],
+      "properties": {"device": {"$ref": "#/$defs/identity/properties/device"}, "rootProcess": {"$ref": "#/$defs/cleanup/properties/rootProcess"}, "rootRssSamples": {"$ref": "#/$defs/cleanup/properties/rootRssSamples"}, "positiveInitialMeasurement": {"const": true}, "telemetryComplete": {"const": true}, "missingMeasurementCount": {"const": 0}, "nativeRootReleased": {"const": true}, "releaseReceipt": {"$ref": "#/$defs/artifact"}}
+    },
+    "checkpointStall": {
+      "type": "object", "additionalProperties": false,
+      "required": ["scope", "referenceStallEnabled", "checkpointStep", "enteredAt", "exitedAt", "waitedForTokenId", "timeoutSeconds", "state", "timedOut", "tokenObservedCanceled", "updatesSkippedOrReplayed", "receipt"],
+      "properties": {"scope": {"const": "test-support-only"}, "referenceStallEnabled": {"const": false}, "checkpointStep": {"const": 20}, "enteredAt": {"type": "string", "format": "date-time"}, "exitedAt": {"type": "string", "format": "date-time"}, "waitedForTokenId": {"$ref": "#/$defs/text"}, "timeoutSeconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 3600}, "state": {"const": "released-by-api-cancellation"}, "timedOut": {"const": false}, "tokenObservedCanceled": {"const": true}, "updatesSkippedOrReplayed": {"const": 0}, "receipt": {"$ref": "#/$defs/artifact"}}
+    },
+    "recovery": {
+      "type": "object", "additionalProperties": false,
+      "required": ["originalHorizon", "seed", "datasetManifestSha256", "configSha256", "checkpointStep", "resumedThroughApi", "referenceAndResumedExportsCompared", "exportedStateEqual", "resultsEqual", "assertionsWeakened", "cursorBeforeResume", "cursorAfterResume", "optimizerSchedulerRngState", "originalCancelToken", "resumedCancelToken", "distinctResumedTokenObserved", "originalTokenRemainsCanceled", "checkpointStall", "backendReentryWitness"],
+      "properties": {"originalHorizon": {"const": 60}, "seed": {"const": 1789}, "datasetManifestSha256": {"$ref": "#/$defs/sha256"}, "configSha256": {"$ref": "#/$defs/sha256"}, "checkpointStep": {"const": 20}, "resumedThroughApi": {"const": true}, "referenceAndResumedExportsCompared": {"const": true}, "exportedStateEqual": {"const": true}, "resultsEqual": {"const": true}, "assertionsWeakened": {"const": false}, "cursorBeforeResume": {"$ref": "#/$defs/cursor"}, "cursorAfterResume": {"$ref": "#/$defs/cursor"}, "optimizerSchedulerRngState": {"$ref": "#/$defs/artifact"}, "originalCancelToken": {"$ref": "#/$defs/text"}, "resumedCancelToken": {"$ref": "#/$defs/text"}, "distinctResumedTokenObserved": {"const": true}, "originalTokenRemainsCanceled": {"const": true}, "checkpointStall": {"$ref": "#/$defs/checkpointStall"}, "backendReentryWitness": {"type": "object", "additionalProperties": false, "required": ["scope", "anchorCaseId", "witness", "originalCancelToken", "freshRunCancelToken", "distinctFreshTokenObserved", "freshTokenUncanceled", "freshRunCompletedStep"], "properties": {"scope": {"const": "one-per-backend"}, "anchorCaseId": {"enum": ["mlx/base/lora", "cuda/base/lora"]}, "witness": {"$ref": "#/$defs/artifact"}, "originalCancelToken": {"$ref": "#/$defs/text"}, "freshRunCancelToken": {"$ref": "#/$defs/text"}, "distinctFreshTokenObserved": {"const": true}, "freshTokenUncanceled": {"const": true}, "freshRunCompletedStep": {"const": 60}}}}
+    },
+    "memoryRefusal": {
+      "type": "object", "additionalProperties": false, "required": ["requestedControlCap", "resolvedControlCapBytes", "projectedHeaderDemandBytes", "headerDemandReceipt", "refusedBeforeWeightsLoad", "actionableRefusal", "publishedOutput", "publishedOutputInventory", "campaignCeilingRaised", "receipt"],
+      "properties": {"requestedControlCap": {"type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": {"kind": {"enum": ["bytes", "fraction"]}, "value": {"$ref": "#/$defs/positiveNumber"}}, "allOf": [{"if": {"properties": {"kind": {"const": "bytes"}}}, "then": {"properties": {"value": {"$ref": "#/$defs/positiveInteger"}}}, "else": {"properties": {"value": {"maximum": 1}}}}]}, "resolvedControlCapBytes": {"$ref": "#/$defs/positiveInteger"}, "projectedHeaderDemandBytes": {"$ref": "#/$defs/positiveInteger"}, "headerDemandReceipt": {"$ref": "#/$defs/artifact"}, "refusedBeforeWeightsLoad": {"const": true}, "actionableRefusal": {"$ref": "#/$defs/text"}, "publishedOutput": {"const": false}, "publishedOutputInventory": {"type": "array", "maxItems": 0}, "campaignCeilingRaised": {"const": false}, "receipt": {"$ref": "#/$defs/artifact"}}
+    },
+    "cleanup": {
+      "type": "object", "additionalProperties": false,
+      "required": ["rootProcess", "nativeRootReleased", "releaseReceipt", "rootRssSamples", "positiveInitialMeasurement", "telemetryComplete", "missingMeasurementCount", "resolvedCeilingBytes", "caseStartedAt", "caseEndedAt", "caseWallSeconds", "caseDeadlineSeconds", "buildPreparationWallSeconds", "buildPreparationDeadlineSeconds"],
+      "properties": {
+        "rootProcess": {"type": "object", "additionalProperties": false, "required": ["scope", "pid", "executable", "binarySha256", "releaseObserved", "metadataHelperAbsenceClaim"], "properties": {"scope": {"const": "native-api-worker-root"}, "pid": {"$ref": "#/$defs/positiveInteger"}, "executable": {"$ref": "#/$defs/text"}, "binarySha256": {"$ref": "#/$defs/sha256"}, "releaseObserved": {"const": true}, "metadataHelperAbsenceClaim": {"const": false}}},
+        "nativeRootReleased": {"const": true}, "releaseReceipt": {"$ref": "#/$defs/artifact"},
+        "rootRssSamples": {"type": "array", "minItems": 2, "items": {"type": "object", "additionalProperties": false, "required": ["at", "bytes"], "properties": {"at": {"type": "string", "format": "date-time"}, "bytes": {"$ref": "#/$defs/positiveInteger"}}}},
+        "positiveInitialMeasurement": {"const": true}, "telemetryComplete": {"const": true}, "missingMeasurementCount": {"const": 0}, "resolvedCeilingBytes": {"$ref": "#/$defs/positiveInteger"}, "caseStartedAt": {"type": "string", "format": "date-time"}, "caseEndedAt": {"type": "string", "format": "date-time"}, "caseWallSeconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 3600}, "caseDeadlineSeconds": {"const": 3600}, "buildPreparationWallSeconds": {"type": "number", "minimum": 0, "maximum": 7200}, "buildPreparationDeadlineSeconds": {"const": 7200}
+      }
+    },
+    "apiEvent": {
+      "type": "object", "additionalProperties": false, "required": ["method", "route", "jobOrResourceId", "httpStatus", "requestArtifact", "responseArtifact"],
+      "properties": {"method": {"enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]}, "route": {"type": "string", "pattern": "^/api/v1/"}, "jobOrResourceId": {"$ref": "#/$defs/text"}, "httpStatus": {"type": "integer", "minimum": 200, "maximum": 299}, "requestArtifact": {"$ref": "#/$defs/artifact"}, "responseArtifact": {"$ref": "#/$defs/artifact"}}
+    },
+    "productPath": {
+      "type": "object", "additionalProperties": false, "required": ["datasetUpload", "submit", "claim", "progress", "result", "libraryRegistration", "imageJobExecution"],
+      "properties": {"datasetUpload": {"$ref": "#/$defs/apiEvent"}, "submit": {"$ref": "#/$defs/apiEvent"}, "claim": {"$ref": "#/$defs/apiEvent"}, "progress": {"$ref": "#/$defs/apiEvent"}, "result": {"$ref": "#/$defs/apiEvent"}, "libraryRegistration": {"$ref": "#/$defs/apiEvent"}, "imageJobExecution": {"$ref": "#/$defs/apiEvent"}}
+    },
+    "dmdExecution": {
+      "type": "object", "additionalProperties": false, "required": ["selectedMode", "executedMode", "realWeightSources", "customAdapterRetained", "acceleratorRetained", "generation", "applicationReport", "receipt"],
+      "properties": {"selectedMode": {"enum": ["unmerged_bf16", "full_fp32"]}, "executedMode": {"enum": ["unmerged_bf16", "full_fp32"]}, "realWeightSources": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/weightSource"}}, "customAdapterRetained": {"const": true}, "acceleratorRetained": {"const": true}, "generation": {"$ref": "#/$defs/png"}, "applicationReport": {"allOf": [{"$ref": "#/$defs/applicationReport"}, {"properties": {"selectedStrength": {"const": 1.0}, "executedStrength": {"const": 1.0}, "appliedCount": {"minimum": 1}}}]}, "receipt": {"$ref": "#/$defs/artifact"}},
+      "allOf": [{"if": {"properties": {"selectedMode": {"const": "unmerged_bf16"}}}, "then": {"properties": {"executedMode": {"const": "unmerged_bf16"}}}, "else": {"properties": {"executedMode": {"const": "full_fp32"}}}}]
+    },
+    "baseDmdRefusal": {
+      "type": "object", "additionalProperties": false, "required": ["selectedMode", "executedMode", "httpStatus", "refusal", "producedImage", "receipt"],
+      "properties": {"selectedMode": {"enum": ["unmerged_bf16", "full_fp32"]}, "executedMode": {"type": "null"}, "httpStatus": {"const": 400}, "refusal": {"$ref": "#/$defs/text"}, "producedImage": {"const": false}, "receipt": {"$ref": "#/$defs/artifact"}}
+    },
+    "regression": {
+      "type": "object", "additionalProperties": false, "required": ["ordinary", "dmdExecutions", "baseDmdRefusals"],
+      "properties": {"ordinary": {"type": "object", "additionalProperties": false, "required": ["selectedMode", "executedMode", "beforeNoAdapter", "afterUnload", "sameOutputVerified", "receipt"], "properties": {"selectedMode": {"const": "off"}, "executedMode": {"const": "off"}, "beforeNoAdapter": {"$ref": "#/$defs/artifact"}, "afterUnload": {"$ref": "#/$defs/artifact"}, "sameOutputVerified": {"const": true}, "receipt": {"$ref": "#/$defs/artifact"}}}, "dmdExecutions": {"type": "array", "maxItems": 2, "items": {"$ref": "#/$defs/dmdExecution"}}, "baseDmdRefusals": {"type": "array", "maxItems": 2, "items": {"$ref": "#/$defs/baseDmdRefusal"}}}
+    },
+    "inspection": {
+      "type": "object", "additionalProperties": false, "required": ["reviewer", "reviewedArtifact", "findings", "completedAt", "beforeFinalAcceptance"],
+      "properties": {"reviewer": {"$ref": "#/$defs/text"}, "reviewedArtifact": {"$ref": "#/$defs/artifact"}, "findings": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/text"}}, "completedAt": {"type": "string", "format": "date-time"}, "beforeFinalAcceptance": {"const": true}}
+    }
+  },
+  "x-semanticChecks": [
+    "Reject NaN, Infinity and -Infinity during strict JSON parsing and check every loss, gradient observation and delta is finite.",
+    "Only recordKind=campaign-acceptance-evidence with isCampaignEvidence=true and acceptanceDisposition=accepted is eligible for campaign acceptance; schema-test-fixture records never are.",
+    "For every completed subrun recompute after < before and improvement=before-after; positive flags alone are not proof.",
+    "Within each native run compare before/after prepared package identity, tensor shapes, dtypes, layouts and actual hashes; reject re-encoding or regenerated noise between measurements.",
+    "Across all eight cells and all subruns require the same source image bytes, caption, mask absence, dimensions, noise seed, sigma and evaluationManifestHash; DO NOT require cross-backend prepared tensor hashes to match.",
+    "Bind normalized fields to retained raw native receipts and actual artifacts; recompute factor deltas from retained start/end exports and validate layout, alpha, rank, exact parent/method and source bindings. In a canceled subrun the end export is the durable step-20 checkpoint, not a claimed final step-60 export.",
+    "Check caseId matches identity backend/parent/method and aggregate exactly eight distinct cells. Require precisely one shared fresh-reentry witness per backend, anchored to that backend's Base/LoRA cell.",
+    "Verify source SHA, permanent inference pin, actual workflow ref/hash, clean final source, toolchain, binary, claimed/observed device identity and actual consumed weight file hashes.",
+    "Verify original horizon/seed/dataset/config identity, durable checkpoint 20, optimizer/scheduler/RNG/cursor/partial-accumulation state, exact uninterrupted-versus-resumed exported state/results and distinct observed cancel tokens. Do not weaken assertions.",
+    "Verify actual adapter/library paths and hashes, final-not-intermediate selection, application report, strength 1 controls and strength 0 disable output; inspect actual decoded PNG bytes/dimensions and bind review findings to those artifact hashes.",
+    "Cross-backend transfer must preserve the adapter artifact hash and exact parent/method. If the format permits loading, require successful generation; an unsupported-format refusal must name the actual incompatibility and must not be relabeled a successful load.",
+    "Resolve the product fraction against actual selected-device total before weights load, preserve stricter product safety intersections and reject projected header demand above the ceiling. The low-cap refusal must use a strictly infeasible request and publish no output.",
+    "Verify native current-process RSS samples during the API/worker case have no missing/zero measurements and stay under the resolved ceiling. Bind the native PID to the launched binary and parent-owned child exit/stdio closure; require native/API joins. No metadata-helper absence or kernel lifetime peak is claimed.",
+    "Recompute training-case wall time and verify evaluation, previews, recovery, anchor re-entry and cleanup finish within 3600 seconds; build/preparation alone has a separate 7200-second bound.",
+    "Cross-load has an independent 3600-second phase budget from each import case start after separately bounded preparation, with its own positive fail-closed native-root RSS and owned-root release evidence. Never reuse training caseStartedAt; retain original sourceCaseId and consumed artifact hashes for all eight transfers.",
+    "The checkpoint-20 stall exists only in test support, has its own bounded timeout and retained token/state evidence, never skips/replays updates, and cannot turn a timeout or unverified child release into success.",
+    "Verify real production dataset upload, submit/claim/progress/result, library registration and image execution receipts; no mocked or CPU generated-weight run counts as published-weight GPU evidence.",
+    "For accepted SFT DMD executions selected mode must equal executed mode for BOTH modes and neither accelerator nor custom adapter may be dropped; Base+DMD must be refused before execution with executedMode=null.",
+    "Invalidate observations only when changed behavior, inputs or execution closure affects them; preserve original source/configuration/tool provenance. The current finalizer accepts one exact-source campaign and does not implement cross-run reuse. No missing observation, unproven marker or fabricated/carried evidence may be interpreted as success."
+  ]
+}

@@ -62,6 +62,28 @@ function offState(overrides = {}) {
 }
 
 describe("buildImageJobAdvanced", () => {
+  it.each(["flux3_klein", "flux3_klein_base"])("emits original nondefault layout and ordered attachment ids for %s", (model) => {
+    const flux3Layout = { version: 1, boxes: [
+      { id: "placement", desc: '猫 "vase"', bbox: [0, -0.123456789012345, 1, 1] },
+      { id: "remove", desc: "remove vase", from: "ref_image_1", reference_id: "second", src_bbox: [0, 0, 1, 1], tgt_bbox: null },
+    ] };
+    const flux3ReferenceIds = ["first", "second"];
+    const advanced = buildImageJobAdvanced(offState({ model, flux3Layout, flux3ReferenceIds }));
+    expect(advanced.flux3_layout).toBe(flux3Layout);
+    expect(advanced.flux3_reference_ids).toEqual(flux3ReferenceIds);
+    expect(advanced).not.toHaveProperty("strength");
+  });
+
+  it("omits layout defaults and prevents stale layout leaking to unsupported models", () => {
+    const flux3Layout = { version: 1, boxes: [{ id: "placement", desc: "vase", bbox: [0, 0, 1, 1] }] };
+    for (const model of ["flux2_dev", "flux3_unreleased", undefined]) {
+      const advanced = buildImageJobAdvanced(offState({ model, flux3Layout, flux3ReferenceIds: ["slot"] }));
+      expect(advanced).not.toHaveProperty("flux3_layout");
+      expect(advanced).not.toHaveProperty("flux3_reference_ids");
+    }
+    expect(buildImageJobAdvanced(offState({ model: "flux3_klein", flux3Layout: { version: 1, boxes: [] } })))
+      .toEqual({ resolution: "1024x1024" });
+  });
   it("emits only the always-present keys when every optional knob is at its default", () => {
     const advanced = buildImageJobAdvanced(offState());
     // flashAttn:true (default-on) is omitted; nothing else leaks.
@@ -172,21 +194,24 @@ describe("buildImageJobAdvanced", () => {
     expect(buildImageJobAdvanced(offState({ guidanceMethod: "cfg_pp" })).guidanceMethod).toBe("cfg_pp");
   });
 
-  it("only rides schedulerShift when a curated (non-default) scheduler is active and the value is finite", () => {
-    // Default scheduler → shift omitted even if provided.
+  it("sends explicit finite shift independently of the selected scheduler", () => {
+    // An explicit shift also applies to the native scheduler.
     expect(
-      buildImageJobAdvanced(offState({ scheduler: "default", schedulerShift: "3" })),
-    ).not.toHaveProperty("schedulerShift");
+      buildImageJobAdvanced(offState({ scheduler: "default", schedulerShift: "3" })).schedulerShift,
+    ).toBe(3);
     // Curated scheduler + finite shift → coerced to Number and sent.
     expect(
       buildImageJobAdvanced(offState({ scheduler: "karras", schedulerShift: "3" })).schedulerShift,
     ).toBe(3);
-    // Curated scheduler but a non-finite shift (Number("abc") -> NaN) → omitted. Note the
-    // empty-string case coerces to 0 (Number("") === 0), which IS finite, matching the
-    // original submit() behavior, so it would be sent — we don't assert it away here.
+    // Invalid and cleared overrides are omitted, so the engine retains its own default.
     expect(
       buildImageJobAdvanced(offState({ scheduler: "karras", schedulerShift: "abc" })),
     ).not.toHaveProperty("schedulerShift");
+    for (const schedulerShift of ["", null, undefined]) {
+      expect(buildImageJobAdvanced(offState({ scheduler: "default", schedulerShift }))).not.toHaveProperty("schedulerShift");
+    }
+    expect(buildImageJobAdvanced(offState({ schedulerShift: "18.375" })).schedulerShift).toBe(18.375);
+
   });
 
   it("coerces step/guidance overrides and omits empty strings", () => {
@@ -429,9 +454,9 @@ describe("buildImageJobAdvanced", () => {
 // resolved CFG interval and a non-default caption-overflow policy ride verbatim; and every one of
 // them is absent when not set, so other models' payloads stay byte-identical.
 describe("buildImageJobAdvanced — sc-25681 sampling controls", () => {
-  it("sends the shift on its own for a shift-axis model, never otherwise", () => {
+  it("sends explicit shift without requiring an axis flag or scheduler menu", () => {
     expect(buildImageJobAdvanced(offState({ schedulerShift: 4, supportsSchedulerShift: true })).schedulerShift).toBe(4);
-    expect(buildImageJobAdvanced(offState({ schedulerShift: 4 })).schedulerShift).toBeUndefined();
+    expect(buildImageJobAdvanced(offState({ schedulerShift: 4 })).schedulerShift).toBe(4);
     expect(
       buildImageJobAdvanced(offState({ schedulerShift: 2, scheduler: "karras" })).schedulerShift,
     ).toBe(2);

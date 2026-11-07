@@ -24,12 +24,7 @@ use std::path::PathBuf;
 
 /// The display name a message should use: the catalog `name`, else the model id.
 pub(crate) fn model_display_name<'a>(entry: &'a JsonObject, model_id: &'a str) -> &'a str {
-    entry
-        .get("name")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(model_id)
+    crate::payload::trimmed_string(entry.get("name")).unwrap_or(model_id)
 }
 
 /// The refusal for damaged converted files: what is wrong, and the two remedies in order.
@@ -105,7 +100,7 @@ async fn explain_failed_load_with(
     let Some(bundle) = loaded_bundle_dir(settings, payload) else {
         return error;
     };
-    let diagnosis = tokio::task::spawn_blocking(move || {
+    let diagnosis = crate::load_progress::spawn_blocking(move || {
         // What sits at the bundle path NOW: the marker below lands only if a "Convert again"
         // has not promoted a fresh bundle over this one while it was being hashed.
         let verified = converted_artifacts::bundle_identity(&bundle);
@@ -173,7 +168,7 @@ fn is_engine_load_failure(error: &WorkerError) -> bool {
 /// then the injected entry path, refused outside the data dir). `None` when the job names no
 /// `modelPath` or it does not resolve (the load refused it before any engine load), so nothing
 /// outside the data dir is ever hashed or marked.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn loaded_bundle_dir(settings: &Settings, payload: &JsonObject) -> Option<PathBuf> {
     let request = sceneworks_core::image_request::ImageRequest::from_payload(payload);
     crate::image_jobs::resolve_model_path_dir(&request, settings)
@@ -183,7 +178,7 @@ fn loaded_bundle_dir(settings: &Settings, payload: &JsonObject) -> Option<PathBu
 
 /// A build with no image engine linked loads no bundle (its image jobs stop at the stub gap, never
 /// at an engine load), so there is nothing to diagnose.
-#[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 fn loaded_bundle_dir(_settings: &Settings, _payload: &JsonObject) -> Option<PathBuf> {
     None
 }
@@ -250,7 +245,7 @@ mod entry_point_tests {
 
 // The diagnosis resolves the bundle through the image lane's loader (`resolve_model_path_dir`),
 // which only a build with an image engine links; a build without one never reaches an engine load.
-#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(all(test, native_lane))]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -259,14 +254,6 @@ mod tests {
         let mut settings = crate::tests::test_settings("http://127.0.0.1:0".to_owned(), None);
         settings.data_dir = data_dir.to_path_buf();
         settings
-    }
-
-    fn isolate_hf_cache() -> crate::test_env::EnvVars {
-        crate::test_env::EnvVars::set(&[
-            ("HF_HUB_CACHE", ""),
-            ("HUGGINGFACE_HUB_CACHE", ""),
-            ("HF_HOME", ""),
-        ])
     }
 
     fn payload(bundle: &std::path::Path) -> JsonObject {
@@ -286,7 +273,10 @@ mod tests {
 
     /// Stage `files` at their exact pinned sizes (zeros) in `pin`'s snapshot: present and
     /// size-correct, wrong content — a same-size corruption only the digests see.
-    fn stage_same_size_component(data_dir: &std::path::Path, pin: gen_core::supra2::ComponentPin) {
+    fn stage_same_size_component(
+        data_dir: &std::path::Path,
+        pin: gen_core_checkpoint::supra2::ComponentPin,
+    ) {
         let snapshot = sceneworks_core::hf_home::huggingface_repo_cache_path(data_dir, pin.repo)
             .unwrap()
             .join("snapshots")
@@ -356,12 +346,12 @@ mod tests {
     /// marked (it is not the fault).
     #[tokio::test]
     async fn a_corrupt_component_is_named_with_its_remedy() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().unwrap();
         let bundle = data.path().join("models/mlx/supra2_img");
         converted_artifacts::write_same_size_corrupt_supra2_bundle(&bundle).unwrap();
-        stage_same_size_component(data.path(), gen_core::supra2::FLAN_T5_BASE);
-        stage_same_size_component(data.path(), gen_core::supra2::SD_VAE);
+        stage_same_size_component(data.path(), gen_core_checkpoint::supra2::FLAN_T5_BASE);
+        stage_same_size_component(data.path(), gen_core_checkpoint::supra2::SD_VAE);
         let error = explain_failed_load(
             &settings_at(data.path()),
             &payload(&bundle),
@@ -382,7 +372,7 @@ mod tests {
     /// `modelPath` keep their original error untouched.
     #[tokio::test]
     async fn only_contract_installs_are_explained() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().unwrap();
         let bundle = data.path().join("models/mlx/supra2_img");
         converted_artifacts::write_same_size_corrupt_supra2_bundle(&bundle).unwrap();

@@ -1,5 +1,5 @@
 //! Worker-side seams of Iris-3B curricula, REPA, holdout validation and fp16 (story sc-25689, epic
-//! sc-25678). Everything here reads the ENGINE's own contract (`gen_core::iris::train` at the
+//! sc-25678). Everything here reads the ENGINE's own contract (`gen_core_iris::train` at the
 //! pinned inference revision), so SceneWorks never re-derives what the trainer decides:
 //!
 //! * [`iris_stage_presets`] — the four official stages (`stage1_256 → stage2_512 → stage3_1024 →
@@ -90,8 +90,6 @@ pub fn installed_repa_teacher(data_dir: &Path) -> Option<PathBuf> {
 
 /// The integrity check of a staged teacher file: the exact pinned size, then the pinned sha256.
 pub fn verify_repa_teacher_file(path: &Path) -> Result<(), String> {
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
     let (pinned_size, pinned_sha256) = pinned_teacher_integrity();
     let size = std::fs::metadata(path)
         .map_err(|error| format!("the REPA teacher {} is unreadable: {error}", path.display()))?
@@ -106,18 +104,9 @@ pub fn verify_repa_teacher_file(path: &Path) -> Result<(), String> {
     }
     let mut file = std::fs::File::open(path)
         .map_err(|error| format!("the REPA teacher {} is unreadable: {error}", path.display()))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 1 << 20];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|error| format!("reading the REPA teacher failed: {error}"))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let digest = format!("{:x}", hasher.finalize());
+    let digest = sceneworks_core::hashing::sha256_reader(&mut file)
+        .map_err(|error| format!("reading the REPA teacher failed: {error}"))?
+        .0;
     if digest != pinned_sha256 {
         return Err(format!(
             "the REPA teacher {} has sha256 {digest}, not the pinned {pinned_sha256}; reinstall \
@@ -130,10 +119,7 @@ pub fn verify_repa_teacher_file(path: &Path) -> Result<(), String> {
 
 /// The `repa_teacher` load component of an Iris run that trains with REPA: the verified pinned
 /// teacher snapshot, or a typed refusal naming the Model Manager install. `None` for any other run.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn repa_teacher_component(
     settings: &crate::settings::Settings,
     plan: &TrainingPlan,
@@ -160,10 +146,7 @@ pub(crate) fn repa_teacher_component(
 
 /// The engine `train_dtype` of an Iris run: `fp16` reaches the trainer verbatim (accelerate's
 /// dynamic loss scaling, `MixedPrecision::Fp16`); every other kernel keeps the shared mapping.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn apply_iris_train_dtype(
     mut config: gen_core::TrainingConfig,
     plan: &TrainingPlan,
@@ -200,6 +183,14 @@ impl IrisPlanRefusal {
     }
 }
 
+#[cfg(native_lane)]
+fn training_config_refusal(error: crate::WorkerError) -> IrisPlanRefusal {
+    IrisPlanRefusal {
+        kind: "invalid".to_owned(),
+        message: error.to_string(),
+    }
+}
+
 /// The engine-resolved receipts of an Iris plan.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedIrisPlan(Value);
@@ -211,8 +202,8 @@ impl ResolvedIrisPlan {
 }
 
 /// The kind name of a typed distributed failure.
-pub fn dist_error_kind(error: &gen_core::iris::train::dist::DistError) -> &'static str {
-    use gen_core::iris::train::dist::DistError;
+pub fn dist_error_kind(error: &gen_core_iris::train::dist::DistError) -> &'static str {
+    use gen_core_iris::train::dist::DistError;
     match error {
         DistError::InvalidMesh(_) => "invalid_mesh",
         DistError::GlobalBatchMismatch { .. } => "global_batch_mismatch",
@@ -226,10 +217,7 @@ pub fn dist_error_kind(error: &gen_core::iris::train::dist::DistError) -> &'stat
 /// Resolve a SceneWorks Iris plan with the engine (`IrisTrainPlan::resolve`) against the backbone
 /// in `backbone_dir`. Adapter targets are not resolved (that needs the weights); everything else the
 /// trainer refuses from the request alone is refused here, typed.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub fn resolve_iris_plan(
     backbone_dir: &Path,
     plan: &TrainingPlan,
@@ -252,7 +240,8 @@ pub fn resolve_iris_plan(
                 subject_mask_path: None,
             })
             .collect(),
-        config: crate::training_jobs::engine_training_config(plan),
+        config: crate::training_jobs::engine_training_config(plan)
+            .map_err(training_config_refusal)?,
         output_dir: PathBuf::from(&plan.output.output_dir),
         file_name: plan.output.file_name.clone(),
         trigger_words: plan.output.trigger_words.clone(),
@@ -263,15 +252,13 @@ pub fn resolve_iris_plan(
 
 /// [`resolve_iris_plan`] for a bare SceneWorks config (the Studio's pre-launch check, before a
 /// dataset or a plan exists): the same engine config mapping, no items.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub fn resolve_iris_config(
     backbone_dir: &Path,
     config: &sceneworks_core::training::TrainingConfig,
 ) -> Result<ResolvedIrisPlan, IrisPlanRefusal> {
-    let mut engine = crate::training_jobs::map_engine_config(config);
+    let mut engine =
+        crate::training_jobs::map_engine_config(config).map_err(training_config_refusal)?;
     if config
         .advanced
         .get("mixedPrecision")
@@ -291,17 +278,14 @@ pub fn resolve_iris_config(
     resolve_iris_request(backbone_dir, &request)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn resolve_iris_request(
     backbone_dir: &Path,
     request: &gen_core::TrainingRequest,
 ) -> Result<ResolvedIrisPlan, IrisPlanRefusal> {
-    use gen_core::iris::train::{IrisTrainPlan, TrainFlowDefaults};
+    use gen_core_iris::train::{IrisTrainPlan, TrainFlowDefaults};
     let refuse = |error: gen_core::Error| {
-        let kind = gen_core::iris::train::dist::dist_error(&error)
+        let kind = gen_core_iris::train::dist::dist_error(&error)
             .map(dist_error_kind)
             .unwrap_or("invalid");
         IrisPlanRefusal {
@@ -309,11 +293,11 @@ fn resolve_iris_request(
             message: format!("Iris 3B training refused this configuration: {error}"),
         }
     };
-    let config = gen_core::iris::IrisConfig::from_dir(backbone_dir).map_err(refuse)?;
+    let config = gen_core_iris::IrisConfig::from_dir(backbone_dir).map_err(refuse)?;
     let flow = TrainFlowDefaults::from_dir(backbone_dir).map_err(refuse)?;
     let resolved = IrisTrainPlan::resolve(request, &config, &flow, &[]).map_err(refuse)?;
     let (train, holdout) =
-        gen_core::iris::train::holdout::split_items(&request.items).map_err(refuse)?;
+        gen_core_iris::train::holdout::split_items(&request.items).map_err(refuse)?;
     let global_batch = resolved.batch_size * resolved.dist.world.world_size * resolved.grad_accum;
     let mut dist = resolved.dist.identity();
     if let Some(object) = dist.as_object_mut() {
@@ -511,7 +495,7 @@ fn normalize_preset_options(
 /// from the engine's vendored upstream YAML. The config is the Iris target's defaults overlaid with
 /// the translated stage (a full fine-tune, as upstream trains).
 pub fn iris_stage_presets() -> Result<Vec<Value>, String> {
-    use gen_core::iris::train::upstream::{stage_preset_config, STAGE_PRESETS};
+    use gen_core_iris::train::upstream::{stage_preset_config, STAGE_PRESETS};
     let target = sceneworks_core::training::iris::iris_generation_target();
     STAGE_PRESETS
         .iter()
@@ -594,7 +578,7 @@ mod tests {
     /// The SceneWorks mirror of the engine's closed sets is the engine's, value for value.
     #[test]
     fn the_core_mirror_matches_the_engine_contract() {
-        use gen_core::iris::train::{ac, holdout, repa, shapes};
+        use gen_core_iris::train::{ac, holdout, repa, shapes};
         assert_eq!(core::BUCKET_TABLES, shapes::BUCKET_TABLES);
         let mut policies = core::AC_POLICIES.to_vec();
         let mut engine = ac::POLICIES.to_vec();
@@ -611,9 +595,9 @@ mod tests {
         assert_eq!(core::IRIS_REPA_TEACHER_ENTRYPOINT, repa::DEFAULT_TEACHER);
         assert_eq!(
             core::DEFAULT_DIST_TIMEOUT_SECS,
-            gen_core::iris::train::dist::DEFAULT_TIMEOUT_SECS
+            gen_core_iris::train::dist::DEFAULT_TIMEOUT_SECS
         );
-        let stages: Vec<(&str, Option<&str>)> = gen_core::iris::train::upstream::STAGE_PRESETS
+        let stages: Vec<(&str, Option<&str>)> = gen_core_iris::train::upstream::STAGE_PRESETS
             .iter()
             .map(|preset| (preset.id, preset.parent))
             .collect();
@@ -640,7 +624,7 @@ mod tests {
             config
                 .model_options
                 .insert(IRIS_OPTIONS_KEY.to_owned(), Value::Object(bag));
-            gen_core::iris::train::IrisTrainOptions::from_config(&config)
+            gen_core_iris::train::IrisTrainOptions::from_config(&config)
                 .unwrap_or_else(|error| panic!("{key} is not an engine option: {error}"));
         }
         let mut bag = Map::new();
@@ -648,7 +632,7 @@ mod tests {
         config
             .model_options
             .insert(IRIS_OPTIONS_KEY.to_owned(), Value::Object(bag));
-        assert!(gen_core::iris::train::IrisTrainOptions::from_config(&config).is_err());
+        assert!(gen_core_iris::train::IrisTrainOptions::from_config(&config).is_err());
     }
 
     #[test]

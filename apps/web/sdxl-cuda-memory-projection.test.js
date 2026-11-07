@@ -38,18 +38,42 @@ describe("SDXL CUDA browser evidence projection", () => {
     expect(projection.reserveGb).toBe(Number(reserve[1]));
   });
 
+  it("loads the exact evidence staged by the embedded Docker web builder", () => {
+    const dockerfile = read("docker/rust.Dockerfile");
+    const webStage = dockerfile.split("FROM ").find((stage) => stage.includes(" AS web-builder"));
+    expect(webStage).toMatch(/^COPY config \.\/config$/m);
+    expect(webStage).toMatch(/^COPY scripts \.\/scripts$/m);
+    const config = JSON.parse(read("config/sdxl-cuda-memory-endpoints.json"));
+    const evidence = [config.pair.summary.path, config.pair.resident.source.path, config.pair.sequential.source.path];
+    expect(evidence.every((file) => file.startsWith("config/"))).toBe(true);
+    const temp = mkdtempSync(join(tmpdir(), "sdxl-docker-inputs-"));
+    try {
+      for (const file of ["config/sdxl-cuda-memory-endpoints.json", ...evidence]) {
+        mkdirSync(dirname(join(temp, file)), { recursive: true });
+        writeFileSync(join(temp, file), read(file));
+      }
+      const stagedRoot = pathToFileURL(`${temp}/`);
+      expect(loadSdxlCudaMemoryProjection(stagedRoot, { required: true })).toEqual(loadSdxlCudaMemoryProjection(undefined, { required: true }));
+      rmSync(join(temp, evidence[0]));
+      expect(() => loadSdxlCudaMemoryProjection(stagedRoot, { required: true })).toThrow(/projection unavailable/);
+    } finally {
+      rmSync(temp, { recursive: true, force: true });
+    }
+  });
+
   it("falls back when retained evidence is missing or its authenticated peak is edited", () => {
     const temp = mkdtempSync(join(tmpdir(), "sdxl-ui-evidence-"));
     const url = pathToFileURL(`${temp}/`);
     try {
       expect(loadSdxlCudaMemoryProjection(url)).toBeNull();
+      expect(() => loadSdxlCudaMemoryProjection(url, { required: true })).toThrow(/projection unavailable/);
       const config = JSON.parse(read("config/sdxl-cuda-memory-endpoints.json"));
       mkdirSync(join(temp, "config/sdxl-cuda-memory-endpoint-evidence"), { recursive: true });
       for (const receipt of [config.pair.resident.source, config.pair.sequential.source, config.pair.summary]) {
         writeFileSync(join(temp, receipt.path), read(receipt.path));
       }
       writeFileSync(join(temp, "config/sdxl-cuda-memory-endpoints.json"), JSON.stringify(config));
-      expect(loadSdxlCudaMemoryProjection(url)).not.toBeNull();
+      expect(loadSdxlCudaMemoryProjection(url, { required: true })).not.toBeNull();
       config.pair.sequential.overallAllocatorEnvelopeBytes -= 1024;
       writeFileSync(join(temp, "config/sdxl-cuda-memory-endpoints.json"), JSON.stringify(config));
       expect(loadSdxlCudaMemoryProjection(url)).toBeNull();

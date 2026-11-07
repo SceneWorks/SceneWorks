@@ -95,13 +95,29 @@ function sideOnStride(value, step) {
 // used, and WHY it is invalid split into `outOfRange` / `offStride` so the Studio can surface a precise,
 // user-facing error (never a raw requirement string). `invalid` is the OR of the two — the single flag
 // the Generate gate reads.
-export function evaluateModelDimensions({ model, resolution, widthOverride, heightOverride }) {
+export function isFlux3Model(id) {
+  return id === "flux3_klein" || id === "flux3_klein_base";
+}
+
+export function isFlux3ReferenceRequest(modelId, ids) {
+  return isFlux3Model(modelId) && ids.some((id) => typeof id === "string" && id.trim());
+}
+
+export function evaluateModelDimensions({ model, resolution, widthOverride, heightOverride,
+  referenceRequest = false, dimensionIntent = null }) {
   const constraints = modelDimensionConstraints(model);
-  const { width, height } = resolveEffectiveDimensions({ resolution, widthOverride, heightOverride });
-  const outOfRange = !(sideInRange(width, constraints) && sideInRange(height, constraints));
-  const offStride =
-    constraints.step > 1 && !(sideOnStride(width, constraints.step) && sideOnStride(height, constraints.step));
-  return { width, height, constraints, outOfRange, offStride, invalid: outOfRange || offStride };
+  // FLUX3 reference canvases admit a single 16px patch; plain generation retains its catalog floor.
+  const referenceGeometry = referenceRequest && isFlux3Model(model?.id);
+  if (referenceGeometry) constraints.min = 16;
+  const effective = resolveEffectiveDimensions({ resolution, widthOverride, heightOverride });
+  // Null is an internal deliberate-omission sentinel; accidental undefined geometry stays invalid.
+  const sides = ["width", "height"].map((axis) =>
+    referenceGeometry && dimensionIntent?.[axis] === null ? null : effective[axis]);
+  const outOfRange = sides.some((side) => side !== null && !sideInRange(side, constraints));
+  const offStride = constraints.step > 1 &&
+    sides.some((side) => side !== null && !sideOnStride(side, constraints.step));
+  return { width: sides[0] ?? undefined, height: sides[1] ?? undefined,
+    constraints, outOfRange, offStride, invalid: outOfRange || offStride };
 }
 
 // The user-facing error message for a broken free Width/Height override, or null when the dimensions are

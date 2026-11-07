@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::time::Duration;
 
 use parking_lot::Mutex;
 use rusqlite::{
-    params, params_from_iter, Connection, OptionalExtension, Row, ToSql, TransactionBehavior,
+    params, params_from_iter, Connection, OptionalExtension, Row, ToSql, Transaction,
+    TransactionBehavior,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Number, Value};
@@ -47,7 +47,9 @@ pub use routing::catalog::{
     candle_routed_image_models, checkpoint_plan_checkpoint_id, imported_control_intent_is_material,
     imported_entry_installed_path, imported_entry_loadable_path, imported_entry_source_codec,
     imported_image_model_lora_advertisement, imported_image_request_provider_eligible,
-    imported_pose_control_mode_is_supported, imported_provider_routes, is_builtin_image_model,
+    imported_pose_control_mode_is_supported, imported_provider_routes,
+    imported_video_adapter_surface_claimable, imported_video_lane_claims_with_lora,
+    imported_video_model_candle_support, imported_video_model_mac_support, is_builtin_image_model,
     mac_capabilities, model_candle_support, model_mac_support, training_kernel_is_candle_routed,
     video_job_type_for_mode, ImportedProviderSurface, MacCapabilities, ModelCandleSupport,
     MAC_NOT_AVAILABLE_LABEL, MLX_ROUTED_TRAINING_KERNELS,
@@ -67,23 +69,17 @@ pub use routing::{
     QWEN_IMAGE_2_1_MODEL_IDS,
 };
 
-pub const ACTIVE_STATUSES: &[&str] = &[
-    "preparing",
-    "downloading",
-    "loading_model",
-    "running",
-    "saving",
-];
+pub const ACTIVE_STATUSES: &[&str] = &JobStatus::active_statuses();
 
 const PROGRESS_SIDE_EFFECT_RETRY_BASE_SECONDS: i64 = 5;
 const PROGRESS_SIDE_EFFECT_RETRY_MAX_SECONDS: i64 = 5 * 60;
-pub const TERMINAL_STATUSES: &[&str] = &["completed", "failed", "canceled", "interrupted"];
+pub const TERMINAL_STATUSES: &[&str] = &JobStatus::terminal_statuses();
 /// Pending (accepted-but-not-yet-worker-owned) statuses: a job in one of these is
 /// waiting in the queue with no worker to acknowledge a cancel, so it can be
-/// terminated immediately. Exactly the two statuses the `cancel_job` fast path — and
+/// terminated immediately. These are the statuses the `cancel_job` fast path — and
 /// the bulk [`JobsStore::cancel_pending_jobs`] — flip straight to terminal `canceled`.
 /// Kept in lockstep with that fast-path branch and the web `pendingStatuses` set.
-pub const PENDING_STATUSES: &[&str] = &["queued", "pending_caption", "pending_workflow"];
+pub const PENDING_STATUSES: &[&str] = &JobStatus::pending_statuses();
 /// Ceiling on one jobs listing: `JobsStore::list_jobs` and
 /// `JobsStore::list_jobs_recently_updated` both clamp their caller's `limit` to this.
 ///
@@ -94,24 +90,7 @@ pub const PENDING_STATUSES: &[&str] = &["queued", "pending_caption", "pending_wo
 /// snapshot and the web client's retained-terminal cap) so a fresh load, a reconnect
 /// and a long-lived Queue screen all see the same history.
 pub const MAX_LISTED_JOBS: u32 = 1000;
-pub const JOB_STATUSES: &[&str] = &[
-    "queued",
-    // Accepted-but-not-yet-claimable: awaiting the API-side async payload rewrite (Ideogram 4
-    // auto-caption, sc-9120) before it becomes `queued`. Deliberately absent from both
-    // ACTIVE_STATUSES and TERMINAL_STATUSES (like `queued`) so the claim SELECT ignores it and
-    // the queue summary counts it as an in-flight, non-terminal job. See JobStatus::PendingCaption.
-    "pending_caption",
-    "pending_workflow",
-    "preparing",
-    "downloading",
-    "loading_model",
-    "running",
-    "saving",
-    "completed",
-    "failed",
-    "canceled",
-    "interrupted",
-];
+pub const JOB_STATUSES: &[&str] = JobStatus::known_values();
 pub const NON_GPU_JOB_TYPES: &[&str] = &[
     "model_download",
     "model_import",
@@ -159,6 +138,36 @@ fn platform_reachability_video_job_types_sql() -> &'static str {
     })
 }
 
+/// The sole queued-to-failed sweep transition. Callers own eligibility, grace
+/// windows and diagnostics; this helper owns guarded writes and affected IDs.
+fn fail_queued_jobs(
+    transaction: &Transaction<'_>,
+    now: &str,
+    candidates: impl IntoIterator<Item = (String, &'static str, String)>,
+) -> JobsStoreResult<Vec<String>> {
+    let mut failed_ids = Vec::new();
+    for (id, message, error) in candidates {
+        let changed = transaction.execute(
+            "update jobs set status = 'failed', stage = 'failed', message = ?4,
+                error = ?2, completed_at = ?1, updated_at = ?1, worker_id = null
+              where id = ?3 and status = 'queued'",
+            params![now, error, id, message],
+        )?;
+        if changed != 0 {
+            failed_ids.push(id);
+        }
+    }
+    Ok(failed_ids)
+}
+
+fn status_sql_list(statuses: &[&str]) -> String {
+    statuses
+        .iter()
+        .map(|status| format!("'{}'", status.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// The active (non-terminal, non-queued) statuses as a quoted SQL list for
 /// `status in (...)` stale-sweep / claim-guard filters, derived once from
 /// [`ACTIVE_STATUSES`] — same anti-drift rationale as [`non_gpu_job_types_sql`]
@@ -167,13 +176,7 @@ fn platform_reachability_video_job_types_sql() -> &'static str {
 /// constants, never user input, so direct interpolation is safe.
 fn active_statuses_sql() -> &'static str {
     static SQL: OnceLock<String> = OnceLock::new();
-    SQL.get_or_init(|| {
-        ACTIVE_STATUSES
-            .iter()
-            .map(|status| format!("'{status}'"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    })
+    SQL.get_or_init(|| status_sql_list(ACTIVE_STATUSES))
 }
 
 /// The terminal statuses as a quoted SQL list for `status not in (...)` filters,
@@ -183,13 +186,7 @@ fn active_statuses_sql() -> &'static str {
 /// never user input, so direct interpolation is safe.
 fn terminal_statuses_sql() -> &'static str {
     static SQL: OnceLock<String> = OnceLock::new();
-    SQL.get_or_init(|| {
-        TERMINAL_STATUSES
-            .iter()
-            .map(|status| format!("'{status}'"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    })
+    SQL.get_or_init(|| status_sql_list(TERMINAL_STATUSES))
 }
 
 /// The pending statuses as a quoted SQL list for `status in (...)` filters, derived
@@ -199,13 +196,7 @@ fn terminal_statuses_sql() -> &'static str {
 /// user input, so direct interpolation is safe.
 fn pending_statuses_sql() -> &'static str {
     static SQL: OnceLock<String> = OnceLock::new();
-    SQL.get_or_init(|| {
-        PENDING_STATUSES
-            .iter()
-            .map(|status| format!("'{status}'"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    })
+    SQL.get_or_init(|| status_sql_list(PENDING_STATUSES))
 }
 const DISPATCH_MEMORY_NOT_WORSE_TOLERANCE_MB: f64 = 512.0;
 const DISPATCH_MEMORY_RELIEF_THRESHOLD_MB: f64 = 1024.0;
@@ -268,6 +259,21 @@ pub enum JobsStoreError {
     /// legal pre-worker statuses (`queued` / `pending_caption`), e.g. a
     /// mid-lifecycle or terminal status. A programmer error, not user input.
     InvalidInitialStatus(String),
+}
+
+/// Permit the existing retry freshness control while keeping the authorized source immutable.
+pub fn download_binding_matches_payload(
+    binding: &Value,
+    payload: &serde_json::Map<String, Value>,
+) -> bool {
+    let Some(saved) = binding.get("payload").and_then(Value::as_object) else {
+        return false;
+    };
+    let mut saved = saved.clone();
+    let mut candidate = payload.clone();
+    saved.remove("downloadAction");
+    candidate.remove("downloadAction");
+    saved == candidate
 }
 
 impl std::fmt::Display for JobsStoreError {
@@ -381,6 +387,11 @@ pub struct JobsStore {
     /// Deterministic evidence that the platform-reachability sweep only
     /// hydrated rows its durable headers had already identified as candidates.
     last_platform_reachability_sweep: Mutex<PlatformReachabilitySweepStats>,
+    /// When the owning API process started, as a stored-timestamp string. A stale worker whose
+    /// last heartbeat predates it never reported to this process at all, so the stale sweep can
+    /// say the app (or the machine) stopped mid-job instead of blaming a quiet worker. `None`
+    /// keeps every stale job on the generic "lost contact" wording.
+    session_started_at: Option<String>,
 }
 
 /// Selection work performed by the most recent claim on this store.
@@ -412,7 +423,9 @@ pub struct PlatformReachabilitySweepStats {
 /// Bump this whenever [`ClaimRoutingFacts::from_job`] changes meaning. Startup
 /// backfills every older row before workers can claim it, keeping policy changes
 /// out of the latency-sensitive claim transaction.
-const CLAIM_ROUTING_FACTS_VERSION: i64 = 2;
+// sc-26241: FLUX 3 exact package eligibility and publisher-tier device markers change both
+// eligible flags and required_capability. Recompute persisted pre-tier facts at startup.
+const CLAIM_ROUTING_FACTS_VERSION: i64 = 3;
 
 /// Payload-derived facts needed by worker compatibility and affinity scoring.
 ///
@@ -590,7 +603,15 @@ impl JobsStore {
             lock: Mutex::new(None),
             last_claim_hydration: Mutex::new(ClaimHydrationStats::default()),
             last_platform_reachability_sweep: Mutex::new(PlatformReachabilitySweepStats::default()),
+            session_started_at: None,
         }
+    }
+
+    /// Record when the owning API process started (unix seconds), so the stale sweep can tell a
+    /// job stranded by an app/machine stop apart from a worker that went quiet while the app ran.
+    pub fn with_session_started_at(mut self, unix_seconds: i64) -> Self {
+        self.session_started_at = Some(format_unix_seconds(unix_seconds));
+        self
     }
 
     pub fn db_path(&self) -> &Path {
@@ -670,6 +691,10 @@ impl JobsStore {
             ",
         )?;
         ensure_column(&transaction, "workers", "utilization_json", "text")?;
+        // Unknown historical provenance is NULL, not a reconstruction from today's catalog.
+        // Only the API's validated-plan handoff may freeze this write-once column.
+        ensure_column(&transaction, "jobs", "model_provenance_json", "text")?;
+        ensure_column(&transaction, "jobs", "download_binding_json", "text")?;
         // Durable worker-queue priority. Zero is the normal FIFO lane; positive ranks are
         // assigned monotonically whenever a job jumps to the front. Prompt-refinement jobs get a
         // rank automatically at creation, while the Queue screen can rank any still-pending jobs
@@ -796,14 +821,15 @@ impl JobsStore {
             "progress_side_effects_retry_at",
             "integer not null default 0",
         )?;
-        transaction.execute_batch(
+        transaction.execute_batch(&format!(
             "
             create index if not exists idx_jobs_pending_side_effect_retry
               on jobs(progress_side_effects_retry_at, updated_at, id)
              where progress_side_effects_pending = 1
-               and status in ('completed', 'failed', 'canceled', 'interrupted');
+               and status in ({terminal});
             ",
-        )?;
+            terminal = terminal_statuses_sql(),
+        ))?;
         // Soft-hide marker for the "Clear completed" queue action (sc-12231, issue #1556).
         // A cleared job is dropped from the operator's queue list + counts (see
         // `list_jobs` / `queue_summary`) but the row is deliberately kept: the
@@ -1121,12 +1147,63 @@ impl JobsStore {
     }
 
     pub fn create_job(&self, request: CreateJob) -> JobsStoreResult<JobSnapshot> {
+        self.create_job_with_model_provenance(request, None)
+    }
+
+    /// Enqueue and freeze a SERVER-VALIDATED source projection in one transaction, before a worker
+    /// can claim the row. Raw client payload metadata is never a value for this argument.
+    pub fn create_job_with_model_provenance(
+        &self,
+        request: CreateJob,
+        provenance: Option<&Value>,
+    ) -> JobsStoreResult<JobSnapshot> {
+        self.create_job_with_download_binding(request, provenance, None)
+    }
+
+    /// The binding is a server-validated typed-download selection, never request metadata.
+    pub fn create_job_with_download_binding(
+        &self,
+        request: CreateJob,
+        provenance: Option<&Value>,
+        binding: Option<&Value>,
+    ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let job = self.create_job_on_connection(&transaction, request, None)?;
+        let job = self.create_job_on_connection(&transaction, request, None, provenance)?;
+        Self::write_download_binding(&transaction, &job.id, binding)?;
         transaction.commit()?;
         Ok(job)
+    }
+
+    fn write_download_binding(
+        connection: &Connection,
+        job_id: &str,
+        binding: Option<&Value>,
+    ) -> JobsStoreResult<()> {
+        if let Some(binding) = binding {
+            connection.execute(
+                "update jobs set download_binding_json = ?1 where id = ?2",
+                params![dumps(binding)?, job_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Private authorization context, intentionally excluded from JobSnapshot.
+    pub fn download_binding(&self, job_id: &str) -> JobsStoreResult<Option<Value>> {
+        let connection = self.open_connection()?;
+        let encoded: Option<String> = connection
+            .query_row(
+                "select download_binding_json from jobs where id = ?1",
+                params![job_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| JobsStoreError::NotFound(job_id.to_owned()))?;
+        encoded
+            .map(|value| serde_json::from_str(&value).map_err(Into::into))
+            .transpose()
     }
 
     /// Create a job under a caller-supplied id. Used when the payload must
@@ -1141,9 +1218,25 @@ impl JobsStore {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let job = self.create_job_on_connection(&transaction, request, Some(id))?;
+        let job = self.create_job_on_connection(&transaction, request, Some(id), None)?;
         transaction.commit()?;
         Ok(job)
+    }
+
+    /// Read the immutable handoff after a restart without guessing from mutable model metadata.
+    pub fn model_provenance(&self, job_id: &str) -> JobsStoreResult<Option<Value>> {
+        let connection = self.open_connection()?;
+        let stored: Option<String> = connection
+            .query_row(
+                "select model_provenance_json from jobs where id = ?1",
+                params![job_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| JobsStoreError::NotFound(job_id.to_owned()))?;
+        stored
+            .map(|value| serde_json::from_str(&value).map_err(Into::into))
+            .transpose()
     }
 
     /// Promote a `pending_caption` job to `queued`, optionally rewriting its payload first
@@ -1481,6 +1574,22 @@ impl JobsStore {
         let jobs =
             collect_jobs(statement.query_map(params_from_iter(bindings.iter()), row_to_job)?)?;
         Ok(jobs)
+    }
+
+    /// Retained model-import retry inputs, without the queue UI's 500-row cap. Cleared or
+    /// completed jobs relinquish ownership; failed, canceled and interrupted jobs remain retryable.
+    pub fn model_upload_sources_for_recovery(&self) -> JobsStoreResult<Vec<String>> {
+        let connection = self.open_connection()?;
+        let mut statement = connection.prepare(
+            "select json_extract(payload_json, '$.sourcePath') from jobs
+             where type = 'model_import' and status != 'completed' and cleared_at is null
+               and json_extract(payload_json, '$.uploadedSourcePath') = 1
+               and json_type(payload_json, '$.sourcePath') = 'text'",
+        )?;
+        let sources = statement
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        Ok(sources)
     }
 
     /// Every non-completed Create-from-Prompt parent that an API restart must resume or clean.
@@ -1963,6 +2072,26 @@ impl JobsStore {
     }
 
     pub fn retry_job(&self, job_id: &str, request: RetryJob) -> JobsStoreResult<JobSnapshot> {
+        self.retry_job_with_model_provenance(job_id, request, None)
+    }
+
+    /// Replay with a freshly server-canonical source binding in the same enqueue transaction.
+    pub fn retry_job_with_model_provenance(
+        &self,
+        job_id: &str,
+        request: RetryJob,
+        provenance: Option<&Value>,
+    ) -> JobsStoreResult<JobSnapshot> {
+        self.retry_job_with_download_binding(job_id, request, provenance, None)
+    }
+
+    pub fn retry_job_with_download_binding(
+        &self,
+        job_id: &str,
+        request: RetryJob,
+        provenance: Option<&Value>,
+        binding: Option<&Value>,
+    ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1972,8 +2101,26 @@ impl JobsStore {
                 max_attempts: MAX_JOB_ATTEMPTS,
             });
         }
+        let same_source = !request.payload_changes.contains_key("model")
+            && !request.payload_changes.contains_key("modelManifestEntry");
+        let source_provenance = provenance.cloned().or_else(|| {
+            same_source
+                .then(|| {
+                    job.extra
+                        .get(crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY)
+                        .cloned()
+                })
+                .flatten()
+        });
         let mut payload = job.payload;
         payload.extend(request.payload_changes);
+        if let Some(binding) = binding {
+            if !download_binding_matches_payload(binding, &payload) {
+                return Err(JobsStoreError::InvalidStatus(
+                    "Download binding changed during replay".to_owned(),
+                ));
+            }
+        }
         let job = self.create_job_on_connection(
             &transaction,
             CreateJob {
@@ -1991,7 +2138,9 @@ impl JobsStore {
                 initial_status: None,
             },
             None,
+            source_provenance.as_ref(),
         )?;
+        Self::write_download_binding(&transaction, &job.id, binding)?;
         transaction.commit()?;
         Ok(job)
     }
@@ -2001,12 +2150,75 @@ impl JobsStore {
         job_id: &str,
         request: DuplicateJob,
     ) -> JobsStoreResult<JobSnapshot> {
+        self.duplicate_job_with_options(None, job_id, request, None)
+    }
+
+    /// Duplicate with source authority from canonical admission, never from payload metadata.
+    pub fn duplicate_job_with_model_provenance(
+        &self,
+        job_id: &str,
+        request: DuplicateJob,
+        provenance: Option<&Value>,
+    ) -> JobsStoreResult<JobSnapshot> {
+        self.duplicate_job_with_options(None, job_id, request, provenance)
+    }
+
+    /// Duplicate under a preallocated id when the copied product plan must reference its own new
+    /// job id before it becomes claimable, just like `create_job_with_id` at initial submission.
+    pub fn duplicate_job_with_id(
+        &self,
+        id: String,
+        job_id: &str,
+        request: DuplicateJob,
+    ) -> JobsStoreResult<JobSnapshot> {
+        self.duplicate_job_with_options(Some(id), job_id, request, None)
+    }
+
+    /// The general duplicate: an optional preallocated id (see [`Self::duplicate_job_with_id`])
+    /// and optional source authority from canonical admission (see
+    /// [`Self::duplicate_job_with_model_provenance`]).
+    pub fn duplicate_job_with_options(
+        &self,
+        id: Option<String>,
+        job_id: &str,
+        request: DuplicateJob,
+        provenance: Option<&Value>,
+    ) -> JobsStoreResult<JobSnapshot> {
+        self.duplicate_job_with_download_binding(id, job_id, request, provenance, None)
+    }
+
+    pub fn duplicate_job_with_download_binding(
+        &self,
+        id: Option<String>,
+        job_id: &str,
+        request: DuplicateJob,
+        provenance: Option<&Value>,
+        binding: Option<&Value>,
+    ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let job = self.get_job_on_connection(&transaction, job_id)?;
+        let same_source = !request.payload_changes.contains_key("model")
+            && !request.payload_changes.contains_key("modelManifestEntry");
+        let source_provenance = provenance.cloned().or_else(|| {
+            same_source
+                .then(|| {
+                    job.extra
+                        .get(crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY)
+                        .cloned()
+                })
+                .flatten()
+        });
         let mut payload = job.payload;
         payload.extend(request.payload_changes);
+        if let Some(binding) = binding {
+            if !download_binding_matches_payload(binding, &payload) {
+                return Err(JobsStoreError::InvalidStatus(
+                    "Download binding changed during replay".to_owned(),
+                ));
+            }
+        }
         // A duplicated YuE2 job is a new take with its own run directory (sc-22999).
         crate::yue2_score::jobs::refresh_block_for_duplicate(&mut payload);
         let job = self.create_job_on_connection(
@@ -2024,8 +2236,10 @@ impl JobsStore {
                 // claimable — never `pending_caption` (sc-9120).
                 initial_status: None,
             },
-            None,
+            id,
+            source_provenance.as_ref(),
         )?;
+        Self::write_download_binding(&transaction, &job.id, binding)?;
         transaction.commit()?;
         Ok(job)
     }
@@ -2286,8 +2500,14 @@ impl JobsStore {
             .collect::<Vec<_>>();
         drop(statement);
         let active_jobs = self.active_jobs_for_workers(&transaction, &worker_ids)?;
-        let placeholders = placeholders_from(2, worker_ids.len());
-        let mut job_params = vec![now_text.as_str()];
+        // A worker last seen before this API process started never heartbeated to it: the app
+        // (API and worker together, or the whole machine) stopped while the job ran, and the
+        // job is only being reclaimed now that the app is back. Blaming a quiet worker there
+        // sends the user hunting for worker errors that were never written. An empty start
+        // marker compares below every timestamp, keeping the generic wording.
+        let session_started = self.session_started_at.as_deref().unwrap_or("");
+        let placeholders = placeholders_from(3, worker_ids.len());
+        let mut job_params = vec![now_text.as_str(), session_started];
         job_params.extend(worker_ids.iter().map(String::as_str));
         transaction.execute(
             &format!(
@@ -2295,8 +2515,18 @@ impl JobsStore {
                 update jobs
                    set status = 'interrupted',
                        stage = 'interrupted',
-                       message = 'Lost contact with the worker.',
-                       error = 'No heartbeat from the worker for {timeout_seconds}s. The worker may have crashed, hung, or lost its connection to the app. If it reconnects you can retry the job; if this keeps happening, check System → Logs.',
+                       message = case
+                           when (select last_seen_at from workers where workers.id = jobs.worker_id) < ?2
+                           then 'SceneWorks stopped while this job was running.'
+                           else 'Lost contact with the worker.'
+                       end,
+                       error = case
+                           when (select last_seen_at from workers where workers.id = jobs.worker_id) < ?2
+                           then 'SceneWorks stopped or restarted while this job was running, and its worker never reconnected. The last heartbeat was at '
+                                || (select last_seen_at from workers where workers.id = jobs.worker_id)
+                                || ' (UTC). The app, the worker, or the GPU driver may have crashed, or the app was closed; the app logs usually end at that moment, so check the operating system''s logs from that time. You can retry the job.'
+                           else 'No heartbeat from the worker for {timeout_seconds}s. The worker may have crashed, hung, or lost its connection to the app. If it reconnects you can retry the job; if this keeps happening, check System → Logs.'
+                       end,
                        completed_at = ?1,
                        updated_at = ?1,
                        worker_id = null
@@ -2308,6 +2538,7 @@ impl JobsStore {
             params_from_iter(job_params),
         )?;
 
+        let worker_placeholders = placeholders_from(2, worker_ids.len());
         let mut worker_params = vec![now_text.as_str()];
         worker_params.extend(worker_ids.iter().map(String::as_str));
         transaction.execute(
@@ -2318,7 +2549,7 @@ impl JobsStore {
                        current_job_id = null,
                        status_reason = null,
                        last_seen_at = ?1
-                 where id in ({placeholders})
+                 where id in ({worker_placeholders})
                 "
             ),
             params_from_iter(worker_params),
@@ -2475,29 +2706,17 @@ impl JobsStore {
         let candidates = collect_jobs(statement.query_map(params![cutoff], row_to_job)?)?;
         drop(statement);
 
-        let now_text = format_unix_seconds(now);
-        let mut failed_ids = Vec::new();
-        for job in candidates {
-            if !job_is_any_mlx_eligible(&job) {
-                continue;
-            }
-            let error = mlx_unavailable_error(&job, grace_seconds);
-            transaction.execute(
-                "
-                update jobs
-                   set status = 'failed',
-                       stage = 'failed',
-                       message = 'MLX worker unavailable.',
-                       error = ?2,
-                       completed_at = ?1,
-                       updated_at = ?1,
-                       worker_id = null
-                 where id = ?3 and status = 'queued'
-                ",
-                params![now_text, error, job.id],
-            )?;
-            failed_ids.push(job.id.clone());
-        }
+        let failed_ids = fail_queued_jobs(
+            &transaction,
+            &format_unix_seconds(now),
+            candidates.into_iter().filter_map(|job| {
+                if !job_is_any_mlx_eligible(&job) {
+                    return None;
+                }
+                let error = mlx_unavailable_error(&job, grace_seconds);
+                Some((job.id, "MLX worker unavailable.", error))
+            }),
+        )?;
         let failed = self.jobs_by_ids(&transaction, &failed_ids)?;
         transaction.commit()?;
         Ok(failed)
@@ -2533,32 +2752,25 @@ impl JobsStore {
         let candidates = collect_jobs(statement.query_map([], row_to_job)?)?;
         drop(statement);
 
-        let now_text = format_unix_seconds(now_unix_seconds());
-        let mut failed = Vec::new();
-        for job in candidates {
-            let Err(reason) = mac_rust_supported(&job) else {
-                continue;
-            };
-            transaction.execute(
-                "
-                update jobs
-                   set status = 'failed',
-                       stage = 'failed',
-                       message = 'Not supported by the MLX flow on macOS.',
-                       error = ?2,
-                       completed_at = ?1,
-                       updated_at = ?1,
-                       worker_id = null
-                 where id = ?3 and status = 'queued'
-                ",
-                params![now_text, reason.error_message(), job.id],
-            )?;
-            failed.push((job.id, reason));
-        }
-        let failed_ids = failed
-            .iter()
-            .map(|(job_id, _reason)| job_id.clone())
+        let failed = candidates
+            .into_iter()
+            .filter_map(|job| {
+                mac_rust_supported(&job)
+                    .err()
+                    .map(|reason| (job.id, reason))
+            })
             .collect::<Vec<_>>();
+        let failed_ids = fail_queued_jobs(
+            &transaction,
+            &format_unix_seconds(now_unix_seconds()),
+            failed.iter().map(|(id, reason)| {
+                (
+                    id.clone(),
+                    "Not supported by the MLX flow on macOS.",
+                    reason.error_message(),
+                )
+            }),
+        )?;
         let updated_jobs = self.jobs_by_ids(&transaction, &failed_ids)?;
         transaction.commit()?;
         Ok(updated_jobs
@@ -2631,29 +2843,17 @@ impl JobsStore {
         let candidates = collect_jobs(statement.query_map(params![cutoff], row_to_job)?)?;
         drop(statement);
 
-        let now_text = format_unix_seconds(now);
-        let mut failed_ids = Vec::new();
-        for job in candidates {
-            if !job_is_any_candle_eligible(&job) {
-                continue;
-            }
-            let error = candle_unavailable_error(&job, grace_seconds);
-            transaction.execute(
-                "
-                update jobs
-                   set status = 'failed',
-                       stage = 'failed',
-                       message = 'Candle worker unavailable.',
-                       error = ?2,
-                       completed_at = ?1,
-                       updated_at = ?1,
-                       worker_id = null
-                 where id = ?3 and status = 'queued'
-                ",
-                params![now_text, error, job.id],
-            )?;
-            failed_ids.push(job.id.clone());
-        }
+        let failed_ids = fail_queued_jobs(
+            &transaction,
+            &format_unix_seconds(now),
+            candidates.into_iter().filter_map(|job| {
+                if !job_is_any_candle_eligible(&job) {
+                    return None;
+                }
+                let error = candle_unavailable_error(&job, grace_seconds);
+                Some((job.id, "Candle worker unavailable.", error))
+            }),
+        )?;
         let failed = self.jobs_by_ids(&transaction, &failed_ids)?;
         transaction.commit()?;
         Ok(failed)
@@ -2727,29 +2927,17 @@ impl JobsStore {
             snapshots_hydrated: candidates.len(),
         };
 
-        let now_text = format_unix_seconds(now);
-        let mut failed_ids = Vec::new();
-        for job in candidates {
-            if !video_job_is_platform_unreachable(&job, host_os) {
-                continue;
-            }
-            let error = platform_unreachable_error(&job, host_os);
-            transaction.execute(
-                "
-                update jobs
-                   set status = 'failed',
-                       stage = 'failed',
-                       message = 'This mode has no backend on this platform.',
-                       error = ?2,
-                       completed_at = ?1,
-                       updated_at = ?1,
-                       worker_id = null
-                 where id = ?3 and status = 'queued'
-                ",
-                params![now_text, error, job.id],
-            )?;
-            failed_ids.push(job.id.clone());
-        }
+        let failed_ids = fail_queued_jobs(
+            &transaction,
+            &format_unix_seconds(now),
+            candidates.into_iter().filter_map(|job| {
+                if !video_job_is_platform_unreachable(&job, host_os) {
+                    return None;
+                }
+                let error = platform_unreachable_error(&job, host_os);
+                Some((job.id, "This mode has no backend on this platform.", error))
+            }),
+        )?;
         let failed = self.jobs_by_ids(&transaction, &failed_ids)?;
         transaction.commit()?;
         *self.last_platform_reachability_sweep.lock() = sweep_stats;
@@ -2787,32 +2975,21 @@ impl JobsStore {
         let candidates = collect_jobs(statement.query_map([], row_to_job)?)?;
         drop(statement);
 
-        let now_text = format_unix_seconds(now_unix_seconds());
-        let mut failed = Vec::new();
-        for job in candidates {
-            let Err(reason) = candle_supported(&job) else {
-                continue;
-            };
-            transaction.execute(
-                "
-                update jobs
-                   set status = 'failed',
-                       stage = 'failed',
-                       message = 'Not supported by the candle/CUDA flow off-Mac.',
-                       error = ?2,
-                       completed_at = ?1,
-                       updated_at = ?1,
-                       worker_id = null
-                 where id = ?3 and status = 'queued'
-                ",
-                params![now_text, reason.candle_error_message(), job.id],
-            )?;
-            failed.push((job.id, reason));
-        }
-        let failed_ids = failed
-            .iter()
-            .map(|(job_id, _reason)| job_id.clone())
+        let failed = candidates
+            .into_iter()
+            .filter_map(|job| candle_supported(&job).err().map(|reason| (job.id, reason)))
             .collect::<Vec<_>>();
+        let failed_ids = fail_queued_jobs(
+            &transaction,
+            &format_unix_seconds(now_unix_seconds()),
+            failed.iter().map(|(id, reason)| {
+                (
+                    id.clone(),
+                    "Not supported by the candle/CUDA flow off-Mac.",
+                    reason.candle_error_message(),
+                )
+            }),
+        )?;
         let updated_jobs = self.jobs_by_ids(&transaction, &failed_ids)?;
         transaction.commit()?;
         Ok(updated_jobs
@@ -2968,6 +3145,30 @@ impl JobsStore {
             worker_gpu_id.clone()
         };
         let now = utc_now();
+        // sc-26691: the claim is the execution boundary every render crosses, so the resize mode
+        // the worker is about to render with is stamped onto the persisted job here. A MiniMax-H3
+        // job queued before the key existed then records the `match` it actually renders, and the
+        // only unstamped H3 record left is one claimed and rendered before the upgrade (replayed
+        // as the legacy `diffusers`). The stamp changes no routing fact, so the projected claim
+        // facts stay current with the new payload revision.
+        if matches!(
+            queued.job_type,
+            JobType::VideoGenerate
+                | JobType::VideoExtend
+                | JobType::VideoBridge
+                | JobType::PersonReplace
+        ) {
+            let mut payload = queued.payload.clone();
+            if crate::video_request::stamp_claimed_reference_image_resize_mode(&mut payload) {
+                transaction.execute(
+                    "update jobs
+                        set payload_json = ?1,
+                            claim_payload_revision = payload_revision + 1
+                      where id = ?2 and status = 'queued'",
+                    params![dumps(&payload)?, queued.id],
+                )?;
+            }
+        }
         transaction.execute(
             "
             update jobs
@@ -3112,6 +3313,23 @@ impl JobsStore {
             // Reuse the result we already read above (same transaction/row) rather
             // than re-selecting result_json each update (sc-4274 / F-CORE-14).
             merge_training_sample_history(Some(&current.result), result);
+            // Same wholesale-replace hazard, image lane (sc-8953 follow-through,
+            // 2026-10-27): the worker posts a SLIM result on every denoise step
+            // (`slim_step_result` — the accumulated `assetWrites`/`generationSet`/
+            // `prefixKvCache` ride only the per-image / terminal posts, or the
+            // per-step SSE fan-out OOM-kills the WebView2 renderer mid-batch). A slim
+            // tick omitting them must not blank them off the durable row.
+            merge_progress_result_accumulations(Some(&current.result), result);
+            result.remove(crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY);
+            if let Some(provenance) = current
+                .extra
+                .get(crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY)
+            {
+                result.insert(
+                    crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY.to_owned(),
+                    provenance.clone(),
+                );
+            }
         }
         transaction.execute(
             "
@@ -3233,15 +3451,16 @@ impl JobsStore {
         limit: usize,
     ) -> JobsStoreResult<Vec<String>> {
         let connection = self.open_connection()?;
-        let mut statement = connection.prepare(
+        let mut statement = connection.prepare(&format!(
             "select id
                from jobs
               where progress_side_effects_pending = 1
-                and status in ('completed', 'failed', 'canceled', 'interrupted')
+                and status in ({terminal})
                 and progress_side_effects_retry_at <= ?1
               order by progress_side_effects_retry_at asc, updated_at asc, id asc
               limit ?2",
-        )?;
+            terminal = terminal_statuses_sql(),
+        ))?;
         let ids = statement
             .query_map(
                 params![as_of, i64::try_from(limit).unwrap_or(i64::MAX)],
@@ -3450,36 +3669,12 @@ impl JobsStore {
             fs::create_dir_all(parent)?;
         }
         let connection = Connection::open(&self.db_path)?;
-        // Wait (instead of failing instantly) when another connection/process holds the
-        // database lock. rusqlite's default busy timeout is 0ms, so any cross-process
-        // overlap — e.g. a sidecar restart where the old process hasn't fully released the
-        // db, or a concurrent claim/heartbeat — surfaces as `database is locked` and the
-        // job loses its claim (the job then remains available for another capable worker).
-        // A 5s wait lets the holder finish; paired with BEGIN IMMEDIATE on write
-        // transactions (below), writers queue cleanly rather than deadlocking on lock upgrade.
-        connection.busy_timeout(Duration::from_millis(5000))?;
-        match connection.pragma_update(None, "journal_mode", "wal") {
-            Ok(()) => {}
-            Err(error) => {
-                // WAL almost always succeeds. When it can't be set, do NOT delete
-                // the `-wal`/`-shm` sidecars: they may belong to a live connection
-                // in another process, and removing them can corrupt that
-                // connection's view. Nor do we silently force `delete` mode — the
-                // 5s busy_timeout reasoning above assumes WAL lets writers queue,
-                // so a silent drop to rollback-journal would change concurrency
-                // semantics for the rest of the process with no signal. Leave the
-                // connection in whatever mode it opened with and warn loudly
-                // instead (sc-4275 / F-CORE-16).
-                tracing::warn!(
-                    event = "sqlite_wal_enable_failed",
-                    dbPath = %self.db_path.display(),
-                    error = %error,
-                    "could not enable SQLite WAL mode; continuing in the default rollback-journal \
-                     mode — cross-process write concurrency will be more serialized than usual"
-                );
-            }
-        }
-        connection.pragma_update(None, "foreign_keys", "on")?;
+        crate::store_util::configure_connection(
+            &connection,
+            crate::store_util::Profile::Jobs {
+                database_path: &self.db_path,
+            },
+        )?;
         Ok(connection)
     }
 
@@ -3488,6 +3683,7 @@ impl JobsStore {
         connection: &Connection,
         request: CreateJob,
         job_id: Option<String>,
+        provenance: Option<&Value>,
     ) -> JobsStoreResult<JobSnapshot> {
         let requested_gpu = normalize_requested_gpu(&request.requested_gpu);
         if job_requires_gpu(&request.job_type) && requested_gpu == "cpu" {
@@ -3530,7 +3726,7 @@ impl JobsStore {
               claim_required_capability, claim_real_training, claim_model_key_1,
               claim_model_key_2, claim_model_key_3, claim_model_key_4,
               progress, stage, message, attempts, source_job_id, duplicate_of_job_id,
-              created_at, updated_at
+              created_at, updated_at, model_provenance_json
             ) values (
               ?1, ?2, ?12,
               case when ?13 != 0
@@ -3538,7 +3734,7 @@ impl JobsStore {
                    else 0 end,
               ?3, ?4, ?5, '{}', ?6,
               ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25,
-              0, ?12, ?7, ?8, ?9, ?10, ?11, ?11
+              0, ?12, ?7, ?8, ?9, ?10, ?11, ?11, ?26
             )
             ",
             params![
@@ -3567,6 +3763,7 @@ impl JobsStore {
                 claim_facts.model_key(1),
                 claim_facts.model_key(2),
                 claim_facts.model_key(3),
+                optional_dumps(provenance)?,
             ],
         )?;
         self.get_job_on_connection(connection, &job_id)
@@ -3591,11 +3788,7 @@ impl JobsStore {
         if statuses.is_empty() {
             return Ok(Vec::new());
         }
-        let status_list = statuses
-            .iter()
-            .map(|status| format!("'{status}'"))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let status_list = status_sql_list(statuses);
         let mut statement = connection.prepare(&format!(
             "select * from jobs where status in ({status_list}) order by created_at desc"
         ))?;
@@ -3750,6 +3943,19 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<JobSnapshot> {
     let mut extra = ExtraFields::default();
     extra.insert("revision".to_owned(), Value::from(revision));
     extra.insert("queueRank".to_owned(), Value::from(queue_rank));
+    if let Some(encoded) = row.get::<_, Option<String>>("model_provenance_json")? {
+        let provenance: Value = serde_json::from_str(&encoded).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+        extra.insert(
+            crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY.to_owned(),
+            provenance,
+        );
+    }
     Ok(JobSnapshot {
         id: row.get("id")?,
         job_type,
@@ -4198,6 +4404,43 @@ fn persist_claim_routing_facts(
         ],
     )?;
     Ok(())
+}
+
+/// Progress-result keys whose ABSENCE from an incoming result means "keep the
+/// stored value" rather than "delete it" (the result column is replaced
+/// wholesale, sc-8953 follow-through). These are the image lane's accumulated
+/// fact sets — grown per finished image, streamed on the per-image / terminal
+/// posts, and deliberately omitted from every per-step tick
+/// (`image_jobs::slim_step_result`) so the step cadence stays O(1).
+/// API-materialized `assets`/`assetIds` must survive too: a terminal full/raw post
+/// commits before fallible side effects. Never erase already published assets
+/// while that durable handoff is pending; successful augmentation replaces them.
+const PROGRESS_RESULT_ACCUMULATION_KEYS: [&str; 5] = [
+    "assetWrites",
+    "generationSet",
+    "prefixKvCache",
+    "assets",
+    "assetIds",
+];
+
+/// Merge the image lane's accumulated fact keys into an incoming progress
+/// result, mirroring [`merge_training_sample_history`]: a worker result that
+/// omits an accumulation key keeps the stored value instead of clearing it.
+/// The worker only ever APPENDS to these (one `assetWrites` entry per finished
+/// image; `generationSet` is fixed per job), so the stored value is always at
+/// least as current as anything a slim tick would carry — and the full posts
+/// that DO carry them land after every append, keeping the row in step.
+fn merge_progress_result_accumulations(
+    existing_result: Option<&Map<String, Value>>,
+    incoming: &mut Map<String, Value>,
+) {
+    for key in PROGRESS_RESULT_ACCUMULATION_KEYS {
+        if !incoming.contains_key(key) {
+            if let Some(value) = existing_result.and_then(|result| result.get(key)) {
+                incoming.insert(key.to_owned(), value.clone());
+            }
+        }
+    }
 }
 
 /// Merge accumulated `trainingSamples` history into an incoming progress
@@ -5064,11 +5307,43 @@ fn required_capability(job: &JobSnapshot) -> &str {
         // may claim it. `audio_generate` is advertised exactly when that lane is linked
         // (`inference_runtime::audio()`); the utility worker of a server build without the lane
         // (the Docker image) therefore leaves it queued for the GPU worker instead of failing it.
+        // A FLUX 3 local derivation (sc-26241: the q4/q8 native packages) runs the image lane's
+        // own converter, so only an image worker may claim it.
+        JobType::ModelDownload
+            if job
+                .payload
+                .get("localDerivation")
+                .and_then(|block| block.get("conversion"))
+                .and_then(Value::as_str)
+                .is_some_and(|conversion| conversion.starts_with(FLUX3_CONVERSION_PREFIX)) =>
+        {
+            WorkerCapability::ImageGenerate.as_str()
+        }
         JobType::ModelDownload if job.payload.contains_key("localDerivation") => {
             WorkerCapability::AudioGenerate.as_str()
         }
+        // sc-26241: a FLUX 3 publisher package (FP8R, NVFP4) runs only past its CUDA device floor.
+        // The worker advertises the floor's marker exactly when its GPU clears it, so the job
+        // stays queued for a capable worker instead of being claimed and refused at load.
+        JobType::ImageGenerate | JobType::ImageEdit => {
+            flux3_required_worker_capability(job).unwrap_or_else(|| job.job_type.as_str())
+        }
         _ => job.job_type.as_str(),
     }
+}
+
+/// The `localDerivation.conversion` prefix of every FLUX 3 native conversion (sc-26241).
+pub const FLUX3_CONVERSION_PREFIX: &str = "flux3-";
+
+/// The device-floor marker a FLUX 3 image job's package requires, if any.
+fn flux3_required_worker_capability(job: &JobSnapshot) -> Option<&'static str> {
+    let model = job.payload.get("model").and_then(Value::as_str)?;
+    if !crate::image_request::FLUX3_TIERED_MODEL_IDS.contains(&model) {
+        return None;
+    }
+    routing::mlx::flux3_payload_tier(&job.payload)
+        .ok()?
+        .required_worker_capability()
 }
 
 /// True when a person detection/tracking job explicitly opts into the procedural

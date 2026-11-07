@@ -1,6 +1,65 @@
 //! rust-api training tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
 
+/// Shape errors precede even dataset lookup, for both checkpoints/methods and dry/real submits.
+/// No worker is dispatched and no model fixture is installed by this test.
+#[tokio::test]
+async fn moss_field_shapes_refuse_submission_before_queueing() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let app = create_app(test_settings(&temp_dir)).unwrap();
+    let (status, project) = crate::tests::support::create_project_with_request(
+        app.clone(),
+        &"MOSS shape checks",
+        request,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{project}");
+    let project_id = project["id"].as_str().unwrap();
+    let targets = sceneworks_core::training::builtin_training_targets();
+    for target in targets
+        .targets
+        .iter()
+        .filter(|t| t.kernel == "moss_image_lora")
+    {
+        for network in ["lora", "lokr"] {
+            for dry_run in [false, true] {
+                for (field, invalid, remedy) in [
+                    ("cacheLatents", json!("false"), "true or false"),
+                    ("cacheTextEmbeddings", json!(0), "true or false"),
+                    ("loraTargetModules", json!([7]), "only strings"),
+                    (
+                        "modelOptions",
+                        json!({"vae_posterior":"sample"}),
+                        "posterior_mean_v1",
+                    ),
+                    ("decomposeFactor", json!(0), "-1 or a positive i32"),
+                ] {
+                    let mut config = serde_json::to_value(&target.defaults).unwrap();
+                    config["advanced"]["networkType"] = json!(network);
+                    config["advanced"][field] = invalid;
+                    let (status, error) = request(
+                        app.clone(),
+                        "POST",
+                        &format!("/api/v1/projects/{project_id}/training/jobs"),
+                        json!({
+                            "targetId":target.id, "datasetId":"ds_missing", "config":config,
+                            "outputName":"Rejected before allocation", "dryRun":dry_run
+                        }),
+                    )
+                    .await;
+                    assert_eq!(status, StatusCode::BAD_REQUEST, "{field}: {error}");
+                    assert_eq!(error["code"], "training_field_error", "{error}");
+                    assert_eq!(error["context"]["field"], field, "{error}");
+                    assert!(error.to_string().contains(remedy), "{error}");
+                }
+            }
+        }
+    }
+    let (status, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{jobs}");
+    assert!(jobs.as_array().unwrap().is_empty(), "{jobs}");
+}
+
 fn ltx_prepared_bundle_bytes(schema: &str) -> Vec<u8> {
     let mut header = serde_json::to_vec(&json!({
         "__metadata__": {
@@ -124,7 +183,8 @@ fn platform_effective_training_catalog_advertises_adapter_noise_support() {
         for target in &registry.targets {
             // The Iris-3B trainers declare no epic 2123 technique.
             let adapter = target.id != "krea_2_control"
-                && !sceneworks_core::training::iris::is_iris_training_kernel(&target.kernel);
+                && !sceneworks_core::training::iris::is_iris_training_kernel(&target.kernel)
+                && !sceneworks_core::training::flux3::KERNELS.contains(&target.kernel.as_str());
             assert_eq!(
                 sceneworks_core::training::target_supports_weight_noise(target),
                 adapter,
@@ -142,8 +202,8 @@ fn platform_effective_training_catalog_advertises_adapter_noise_support() {
 }
 
 /// sc-24830: the targets endpoint advertises depth-anchoring support identically on both
-/// platforms — every LoRA target except the Krea ControlNet branch (its trainer cannot decode
-/// x0) — since every other trainer declares it on MLX and Candle alike. Mutation:
+/// platforms — excluding Krea ControlNet, Iris and MOSS, whose trainers do not advertise
+/// this technique. Mutation:
 /// re-introduce a Candle-only removal of the flag (or drop it from one target) ⇒ red.
 #[test]
 fn platform_effective_training_catalog_projects_depth_anchoring_support() {
@@ -167,13 +227,117 @@ fn platform_effective_training_catalog_projects_depth_anchoring_support() {
         .targets
         .iter()
         .map(|target| target.id.clone())
-        .filter(|id| id != "krea_2_control" && !id.starts_with("iris_3b"))
+        .filter(|id| {
+            id != "krea_2_control"
+                && !id.starts_with("iris_3b")
+                && !matches!(id.as_str(), "moss_image_base_lora" | "moss_image_sft_lora")
+                && !id.starts_with("flux3_klein")
+        })
         .collect();
     assert_eq!(mlx, all);
+    for candle in [false, true] {
+        let registry = crate::training::effective_training_targets_for_candle(candle);
+        for id in ["moss_image_base_lora", "moss_image_sft_lora"] {
+            let target = registry
+                .targets
+                .iter()
+                .find(|target| target.id == id)
+                .unwrap();
+            assert_ne!(
+                target.limits.get("supportsDepthAnchoring"),
+                Some(&json!(true))
+            );
+            assert!(
+                !sceneworks_core::training::depth_anchoring::target_supports_depth_anchoring(
+                    target
+                )
+            );
+        }
+    }
     assert!(mlx.iter().any(|id| id == "z_image_turbo_lora"));
     assert!(mlx
         .iter()
         .any(|id| id == "mage_flow_base_lora" || id.starts_with("mage")));
+}
+
+/// MOSS must not advertise or accept depth anchoring through the HTTP training surface.
+#[tokio::test]
+async fn moss_training_catalog_and_submit_refuse_depth_anchoring() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let hub = settings.data_dir.join("cache/huggingface/hub");
+    let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+        settings.data_dir.clone(),
+        hub.clone(),
+    );
+    assert_eq!(
+        sceneworks_core::hf_home::huggingface_hub_cache_dir(&settings.data_dir),
+        hub
+    );
+    let app = create_app(settings.clone()).expect("app creates");
+    let (status, project) = crate::tests::support::create_project_with_request(
+        app.clone(),
+        &"MOSS depth refusal",
+        request,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{project}");
+    let path = format!(
+        "/api/v1/projects/{}/training/jobs",
+        project["id"].as_str().unwrap()
+    );
+    let (status, registry) =
+        request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{registry}");
+    for id in ["moss_image_base_lora", "moss_image_sft_lora"] {
+        let target = registry["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|target| target["id"] == id)
+            .expect("MOSS target advertised");
+        assert_ne!(
+            target["limits"]["supportsDepthAnchoring"],
+            json!(true),
+            "{id}"
+        );
+        for enabled in [false, true] {
+            let mut config = target["defaults"].clone();
+            if enabled {
+                config["advanced"]["depthAnchoringWeight"] = json!(0.01);
+            }
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                &path,
+                json!({"targetId": id, "datasetId": "ds_missing", "config": config,
+                    "outputName": "MOSS depth refusal", "dryRun": true}),
+            )
+            .await;
+            if enabled {
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{id}: {error}");
+                assert_eq!(error["code"], "training_field_error", "{id}: {error}");
+                assert_eq!(
+                    error["context"]["field"], "depthAnchoringWeight",
+                    "{id}: {error}"
+                );
+                assert!(
+                    error["detail"]
+                        .as_str()
+                        .unwrap()
+                        .contains("does not support depth anchoring"),
+                    "{id}: {error}"
+                );
+            } else {
+                // The same config without depth passes validation and reaches dataset lookup.
+                assert_eq!(status, StatusCode::NOT_FOUND, "{id}: {error}");
+                assert_eq!(
+                    error["detail"], "Training dataset not found",
+                    "{id}: {error}"
+                );
+            }
+        }
+    }
 }
 
 /// sc-24832: the targets endpoint advertises each body loss identically on both platforms, on
@@ -394,14 +558,21 @@ async fn training_presets_route_returns_builtin_registry() {
 
 #[tokio::test]
 async fn parquet_import_job_queues_for_empty_dataset_and_finalizes_staged_items() {
+    async fn request(
+        app: axum::Router,
+        method: &str,
+        uri: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        request_with_peer(app, method, uri, body, "127.0.0.1:50000").await
+    }
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Parquet Import Project" }),
+        &"Parquet Import Project",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id");
@@ -525,13 +696,9 @@ async fn caption_job_modes_validate_and_the_stored_caption_records_the_mode() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Caption Modes" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project_with_request(app.clone(), &"Caption Modes", request)
+            .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let mut asset_ids = Vec::new();
     for (name, bytes) in [
@@ -699,11 +866,10 @@ async fn caption_job_request_trigger_words_fill_items_and_caption_mode_is_valida
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Caption Trigger Words" }),
+        &"Caption Trigger Words",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -891,11 +1057,10 @@ async fn training_dataset_routes_persist_and_validate_project_assets() {
     let settings = test_settings(&temp_dir);
     let app = create_app(settings.clone()).expect("app creates");
 
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Training Project" }),
+        &"Training Project",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -1255,11 +1420,10 @@ async fn training_dataset_routes_persist_and_validate_project_assets() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(error["detail"], "Training dataset item IDs must be unique");
 
-    let (_, other_project) = request(
+    let (_, other_project) = crate::tests::support::create_project_with_request(
         reloaded_app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Other Training Project" }),
+        &"Other Training Project",
+        request,
     )
     .await;
     let other_project_id = other_project["id"].as_str().expect("project id").to_owned();
@@ -1316,11 +1480,10 @@ async fn training_datasets_associate_with_a_character() {
     let settings = test_settings(&temp_dir);
     let app = create_app(settings.clone()).expect("app creates");
 
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Character Datasets" }),
+        &"Character Datasets",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -1423,11 +1586,10 @@ async fn training_dataset_uploads_are_dataset_owned_not_assets() {
     let settings = test_settings(&temp_dir);
     let app = create_app(settings).expect("app creates");
 
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Dataset Upload Project" }),
+        &"Dataset Upload Project",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -1511,11 +1673,10 @@ async fn training_dataset_uploads_are_dataset_owned_not_assets() {
 async fn ltx_prepared_upload_saves_reopens_and_rejects_wrong_schema() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "LTX prepared project" }),
+        &"LTX prepared project",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().unwrap();
@@ -1678,15 +1839,30 @@ async fn ltx_prepared_upload_saves_reopens_and_rejects_wrong_schema() {
 
 #[tokio::test]
 async fn training_dataset_readiness_reports_and_persists_tier0_cache() {
+    assert!(training_dataset_readiness_fixture(false).await.is_none());
+}
+
+#[cfg(feature = "aesthetic-inference-proof")]
+#[tokio::test]
+#[ignore = "learned CPU MLP execution; explicit aesthetic-cpu manual validation only"]
+async fn training_dataset_aesthetic_readiness_executes_bundled_head() {
+    let score = training_dataset_readiness_fixture(true)
+        .await
+        .expect("aesthetic score");
+    println!(
+        "\nAESTHETIC_BODY_COMPLETED {{\"case\":\"tests::training::training_dataset_aesthetic_readiness_executes_bundled_head\",\"backend\":\"rust-vec-f64\",\"device\":\"cpu\",\"score\":{score}}}"
+    );
+}
+
+async fn training_dataset_readiness_fixture(execute_aesthetic: bool) -> Option<f64> {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings).expect("app creates");
 
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Dataset Readiness Project" }),
+        &"Dataset Readiness Project",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -1780,11 +1956,11 @@ async fn training_dataset_readiness_reports_and_persists_tier0_cache() {
 
     // sc-6535 read-back: once the analysis worker POSTs an embedding sidecar (keyed by content hash),
     // the readiness report folds the Tier-1 diversity sub-score in. This is the seam that lights up
-    // the Variety meter + embedding findings in the UI. A full 768-d embedding also lights up the
-    // sc-6537 aesthetic sub-score (the LAION head is 768-in); a sparse unit vector suffices for the
-    // "is a number" assertions.
+    // the Variety meter + embedding findings in the UI. Ordinary tests use a 2-d vector: the
+    // bundled 768-in head refuses it before any learned layer. Only the ignored manual wrapper
+    // opts into the full 768-d fixture and its aesthetic assertion.
     let embedding: Vec<f64> = {
-        let mut values = vec![0.0; 768];
+        let mut values = vec![0.0; if execute_aesthetic { 768 } else { 2 }];
         values[0] = 0.6;
         values[1] = 0.8;
         values
@@ -1816,12 +1992,18 @@ async fn training_dataset_readiness_reports_and_persists_tier0_cache() {
         report["subScores"]["diversity"].is_number(),
         "the embedding sidecar lights up the Tier-1 diversity sub-score"
     );
-    // sc-6537: the same style sidecar lights up the aesthetic sub-score (LAION head over the persisted
-    // 768-d CLIP embedding); a person/object dataset would leave it null.
-    assert!(
-        report["subScores"]["aesthetic"].is_number(),
-        "a style dataset + embedding sidecar lights up the aesthetic sub-score"
-    );
+    let aesthetic_score = report["subScores"]["aesthetic"].as_f64();
+    if execute_aesthetic {
+        assert!(
+            aesthetic_score.is_some(),
+            "a style dataset + embedding sidecar lights up the aesthetic sub-score"
+        );
+    } else {
+        assert!(
+            aesthetic_score.is_none(),
+            "wrong-dimension refusal executes no learned layer"
+        );
+    }
     assert!(
         report["subScores"]["alignment"].is_null(),
         "image-only sidecars do not pretend caption alignment has run"
@@ -1839,7 +2021,7 @@ async fn training_dataset_readiness_reports_and_persists_tier0_cache() {
                 "contentHash": upload_hash.clone(),
                 "embedding": embedding.clone(),
                 "captionHash": sceneworks_core::dataset_quality::caption_hash("tiny test image"),
-                "textEmbedding": [1.0, 0.0]
+                "textEmbedding": [1.0]
             }]
         }),
     )
@@ -1953,6 +2135,7 @@ async fn training_dataset_readiness_reports_and_persists_tier0_cache() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(ack["captionHash"], current_caption_hash);
     assert_eq!(ack["checks"], json!(["caption_alignment"]));
+    aesthetic_score
 }
 
 /// sc-6538 face stack (slice 2): the worker face pass POSTs a face sidecar; a PERSON readiness report
@@ -1965,11 +2148,10 @@ async fn training_dataset_face_sidecar_folds_into_person_readiness_only() {
     let settings = test_settings(&temp_dir);
     let app = create_app(settings).expect("app creates");
 
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Face Stack Project" }),
+        &"Face Stack Project",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -2085,11 +2267,10 @@ async fn training_dataset_face_sidecar_lights_up_identity_score_when_clustered()
     let settings = test_settings(&temp_dir);
     let app = create_app(settings).expect("app creates");
 
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Identity Score Project" }),
+        &"Identity Score Project",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -2187,11 +2368,10 @@ async fn training_dataset_caption_alignment_requires_current_text_embedding_cove
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Alignment Coverage Project" }),
+        &"Alignment Coverage Project",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -2239,11 +2419,9 @@ async fn training_dataset_caption_alignment_requires_current_text_embedding_cove
     let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
     assert_eq!(dataset["items"].as_array().expect("items").len(), 2);
 
-    let embedding: Vec<f64> = {
-        let mut values = vec![0.0; 768];
-        values[0] = 1.0;
-        values
-    };
+    // Caption-coverage logic needs same-space vectors, not a learned forward pass. The 2-d
+    // fixture is refused by the bundled 768-in head before layer execution.
+    let embedding: Vec<f64> = vec![1.0, 0.0];
     let first_caption_hash = sceneworks_core::dataset_quality::caption_hash("first caption");
     let second_caption_hash = sceneworks_core::dataset_quality::caption_hash("second caption");
 
@@ -2320,11 +2498,10 @@ async fn asset_library_scope_excludes_character_studio_outputs() {
     let settings = test_settings(&temp_dir);
     let app = create_app(settings).expect("app creates");
 
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Library Scope Project" }),
+        &"Library Scope Project",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -2391,11 +2568,10 @@ async fn create_training_job_resolves_plan_and_queues_lora_train() {
     let settings = test_settings(&temp_dir);
     let app = create_app(settings).expect("app creates");
 
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Training Project" }),
+        &"Training Project",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -2585,11 +2761,10 @@ async fn create_training_job_resolves_plan_and_queues_lora_train() {
 async fn create_training_job_rejects_unknown_target_and_missing_dataset() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Training Project" }),
+        &"Training Project",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -2640,11 +2815,10 @@ async fn create_training_job_rejects_unknown_target_and_missing_dataset() {
 async fn create_training_job_returns_typed_target_capability_errors_before_allocation() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Training limit boundary" }),
+        &"Training limit boundary",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id");
@@ -2704,11 +2878,10 @@ async fn create_training_job_returns_typed_target_capability_errors_before_alloc
 async fn create_training_job_rejects_out_of_range_weight_noise_with_a_field_error() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Weight noise boundary" }),
+        &"Weight noise boundary",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id");
@@ -2785,11 +2958,10 @@ async fn create_training_job_rejects_out_of_range_weight_noise_with_a_field_erro
 async fn create_training_job_validates_the_training_adapter_selection() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Training adapter boundary" }),
+        &"Training adapter boundary",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id");
@@ -2855,11 +3027,10 @@ async fn real_run_refuses_an_uninstalled_training_adapter_with_a_field_error() {
     let settings = test_settings(&temp_dir);
     let app = create_app(settings.clone()).expect("app creates");
     seed_installed_base_model(&settings.data_dir);
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Adapter install gate" }),
+        &"Adapter install gate",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -2955,11 +3126,10 @@ async fn create_training_job_rejects_out_of_range_gradient_noise_with_a_field_er
     };
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Gradient noise boundary" }),
+        &"Gradient noise boundary",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id");
@@ -3039,11 +3209,10 @@ async fn create_training_job_rejects_out_of_range_gradient_noise_with_a_field_er
 async fn create_training_job_rejects_malformed_resolution_buckets_with_a_field_error() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Resolution bucket boundary" }),
+        &"Resolution bucket boundary",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id");
@@ -3139,11 +3308,10 @@ async fn create_training_job_rejects_out_of_range_subject_mask_weights_with_a_fi
     use sceneworks_core::training::SUBJECT_MASK_WEIGHT_MAX;
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Subject mask boundary" }),
+        &"Subject mask boundary",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id");
@@ -3275,11 +3443,10 @@ async fn create_training_job_queues_real_run_when_not_dry_run() {
     let app = create_app(settings.clone()).expect("app creates");
     // A real run requires the base model installed (story 1419 guardrail).
     seed_installed_base_model(&settings.data_dir);
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Training Project" }),
+        &"Training Project",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -3355,11 +3522,10 @@ async fn canceled_non_iris_training_job_registers_nothing_even_when_marked_expor
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings.clone()).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Training Project" }),
+        &"Training Project",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -3400,11 +3566,10 @@ async fn completed_training_job_registers_lora_with_provenance() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings.clone()).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Training Project" }),
+        &"Training Project",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -3510,6 +3675,133 @@ async fn completed_training_job_registers_lora_with_provenance() {
             && item["provenance"]["trainingJobId"] == json!(job_id)));
 }
 
+/// A completed MOSS run enters the existing adapter library with the exact checkpoint, method and
+/// serialized product controls intact. Mutation: drop MOSS provenance, register a generic family, or
+/// lose fractional alpha/module selection ⇒ red.
+#[tokio::test]
+async fn completed_moss_lokr_registers_exact_provenance_for_library_selection() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    seed_installed_training_base(&settings.data_dir, "moss_image_base");
+    let app = create_app(settings.clone()).expect("app creates");
+    let (_, project) =
+        crate::tests::support::create_project_with_request(app.clone(), &"MOSS Library", request)
+            .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let (_, asset) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "moss.png",
+        "image/png",
+        b"png-bytes",
+    )
+    .await;
+    let (_, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({
+            "name": "MOSS set",
+            "items": [{ "assetId": asset["id"], "caption": { "text": "mossStyle portrait" } }]
+        }),
+    )
+    .await;
+    let (_, targets) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = targets["targets"]
+        .as_array()
+        .expect("targets")
+        .iter()
+        .find(|target| target["id"] == "moss_image_base_lora")
+        .expect("MOSS Base target");
+    let mut config = target["defaults"].clone();
+    config["alpha"] = json!(0.5);
+    config["triggerWord"] = json!("mossStyle");
+    config["advanced"]["networkType"] = json!("lokr");
+    config["advanced"]["decomposeFactor"] = json!(4);
+    config["advanced"]["loraTargetModules"] = json!(["q", "layers.0.proj.ffn_up_gate"]);
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/jobs"),
+        json!({
+            "targetId": "moss_image_base_lora",
+            "datasetId": dataset["id"],
+            "config": config,
+            "outputName": "MOSS Base LoKr",
+            "dryRun": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let job_id = job["id"].as_str().expect("job id").to_owned();
+    let output_dir = std::path::PathBuf::from(
+        job["payload"]["plan"]["output"]["outputDir"]
+            .as_str()
+            .expect("output dir"),
+    );
+    let adapter_path = output_dir.join(
+        job["payload"]["plan"]["output"]["fileName"]
+            .as_str()
+            .expect("output file"),
+    );
+    claim_training_job_as_mlx_worker(&app, &job_id).await;
+    std::fs::create_dir_all(&output_dir).expect("output dir creates");
+    write_test_safetensors(&adapter_path);
+    let (status, completed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "completed", "stage": "completed", "progress": 1,
+            "message": "MOSS LoKr saved.", "workerId": TEST_TRAINING_WORKER_ID,
+            "result": { "outputPath": adapter_path.display().to_string() }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(completed["result"]["loraRegistered"], true);
+    let (_, loras) = request(
+        app,
+        "GET",
+        &format!("/api/v1/loras?projectId={project_id}"),
+        Value::Null,
+    )
+    .await;
+    let entry = loras
+        .as_array()
+        .expect("library")
+        .iter()
+        .find(|entry| entry["name"] == "MOSS Base LoKr")
+        .expect("completed MOSS adapter appears in the library");
+    // Exercise the campaign's actual library resolver on this real API result.
+    // Windows canonical output paths carry a verbatim prefix while the API's
+    // installed directory can retain its ordinary path and mixed separators.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    assert_eq!(
+        super::moss_training_acceptance::resolve_training_library_adapter(entry, &adapter_path)
+            .unwrap(),
+        std::fs::canonicalize(&adapter_path).unwrap()
+    );
+    assert_eq!(entry["family"], "moss-image");
+    assert_eq!(entry["baseModel"], "moss_image_base");
+    assert_eq!(entry["networkType"], "lokr");
+    assert_eq!(
+        entry["provenance"]["baseModelRepo"],
+        "OpenMOSS-Team/MOSS-Image-Base"
+    );
+    assert_eq!(entry["source"]["provider"], "training");
+    assert_eq!(entry["provenance"]["trainingJobId"], job_id);
+    assert_eq!(entry["provenance"]["configSnapshot"]["alpha"], 0.5);
+    assert_eq!(
+        entry["provenance"]["configSnapshot"]["advanced"]["loraTargetModules"],
+        json!(["q", "layers.0.proj.ffn_up_gate"])
+    );
+}
+
 fn seed_installed_wan_i2v_a14b_training_base(data_dir: &std::path::Path) {
     #[cfg(target_os = "macos")]
     {
@@ -3532,11 +3824,10 @@ async fn wan_a14b_registration_requires_and_registers_both_expert_files() {
     let settings = test_settings(&temp_dir);
     seed_installed_wan_i2v_a14b_training_base(&settings.data_dir);
     let app = create_app(settings).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Wan Experts Project" }),
+        &"Wan Experts Project",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id");
@@ -3717,11 +4008,10 @@ async fn failed_or_unwritten_training_job_registers_no_lora() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings.clone()).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Training Project" }),
+        &"Training Project",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -3793,11 +4083,10 @@ async fn terminal_training_job_completed_report_registers_no_lora_and_409s() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings.clone()).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Training Project" }),
+        &"Training Project",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -3869,11 +4158,10 @@ async fn racing_terminal_training_report_loses_before_lora_side_effects() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let (app, state) = create_app_with_state(settings.clone()).expect("app and state create");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Training Project" }),
+        &"Training Project",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -3883,7 +4171,7 @@ async fn racing_terminal_training_report_loses_before_lora_side_effects() {
     claim_training_job(&app, &job_id).await;
 
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
-    *state.progress_before_accept_once.lock() = Some(barrier.clone());
+    *state.test_hooks.progress_before_accept_once.lock() = Some(barrier.clone());
     let completing_app = app.clone();
     let completing_job_id = job_id.clone();
     let completing_adapter_path = adapter_path.display().to_string();
@@ -3973,11 +4261,10 @@ async fn startup_drain_recovers_accepted_terminal_side_effect_failure_without_su
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let (app, state) = create_app_with_state(settings.clone()).expect("app and state create");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Retry Training Project" }),
+        &"Retry Training Project",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -3995,7 +4282,7 @@ async fn startup_drain_recovers_accepted_terminal_side_effect_failure_without_su
         "result": { "outputPath": adapter_path.display().to_string() }
     });
     let mut failure_events = state.events.subscribe();
-    *state.progress_side_effects_fail_once.lock() = true;
+    *state.test_hooks.progress_side_effects_fail_once.lock() = true;
     let (first_status, _) = request(
         app.clone(),
         "POST",
@@ -4032,7 +4319,7 @@ async fn startup_drain_recovers_accepted_terminal_side_effect_failure_without_su
     // Keep the handoff pending for startup recovery and prove the retry emits
     // neither a duplicate terminal snapshot nor a duplicate queue refresh.
     let mut retry_events = state.events.subscribe();
-    *state.progress_side_effects_fail_once.lock() = true;
+    *state.test_hooks.progress_side_effects_fail_once.lock() = true;
     let (retry_status, _) = request(
         app.clone(),
         "POST",
@@ -4312,6 +4599,7 @@ async fn terminal_side_effect_recovery_backoff_prevents_poison_batch_starvation(
         "fixture must poison one complete production batch"
     );
     state
+        .test_hooks
         .progress_side_effects_fail_job_ids
         .lock()
         .extend(poison_ids.iter().cloned());
@@ -4332,7 +4620,11 @@ async fn terminal_side_effect_recovery_backoff_prevents_poison_batch_starvation(
             .expect("poison batch recovery returns"),
         0
     );
-    let first_attempts = state.progress_side_effects_attempts.lock().clone();
+    let first_attempts = state
+        .test_hooks
+        .progress_side_effects_attempts
+        .lock()
+        .clone();
     assert!(
         poison_ids
             .iter()
@@ -4348,6 +4640,7 @@ async fn terminal_side_effect_recovery_backoff_prevents_poison_batch_starvation(
     let (_, restarted_state) =
         create_app_with_state(settings).expect("restarted app and state create");
     restarted_state
+        .test_hooks
         .progress_side_effects_fail_job_ids
         .lock()
         .extend(poison_ids.iter().cloned());
@@ -4371,7 +4664,10 @@ async fn terminal_side_effect_recovery_backoff_prevents_poison_batch_starvation(
         0
     );
     assert_eq!(
-        *restarted_state.progress_side_effects_attempts.lock(),
+        *restarted_state
+            .test_hooks
+            .progress_side_effects_attempts
+            .lock(),
         std::collections::HashMap::new(),
         "poison rows must stay out of the due set across restart until durable backoff expires"
     );
@@ -4401,6 +4697,7 @@ async fn terminal_side_effect_recovery_backoff_prevents_poison_batch_starvation(
         "the poison rows still fail, so none of them recovers"
     );
     let expired_attempts = restarted_state
+        .test_hooks
         .progress_side_effects_attempts
         .lock()
         .clone();
@@ -4422,11 +4719,10 @@ async fn non_owner_completed_report_registers_no_lora_and_409s() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings.clone()).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Training Project" }),
+        &"Training Project",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -4517,11 +4813,10 @@ async fn winning_completed_report_still_registers_lora() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings.clone()).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Training Project" }),
+        &"Training Project",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -4572,11 +4867,10 @@ async fn winning_completed_report_still_registers_lora() {
 async fn crafted_training_job_cannot_register_outside_canonical_manifest() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Training Project" }),
+        &"Training Project",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -4772,13 +5066,23 @@ async fn crafted_training_job_cannot_register_outside_canonical_manifest() {
 
 #[tokio::test]
 async fn real_training_job_rejected_when_base_model_missing() {
+    let _env = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
+    let settings = test_settings(&temp_dir);
+    let hub = settings.data_dir.join("cache/huggingface/hub");
+    let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+        settings.data_dir.clone(),
+        hub.clone(),
+    );
+    assert_eq!(
+        sceneworks_core::hf_home::huggingface_hub_cache_dir(&settings.data_dir),
+        hub
+    );
+    let app = create_app(settings.clone()).expect("app creates");
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Training Project" }),
+        &"Training Project",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -4851,11 +5155,10 @@ async fn real_training_job_rejected_when_base_model_missing() {
 async fn training_job_rejects_cpu_target() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Training Project" }),
+        &"Training Project",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -6333,11 +6636,10 @@ async fn completed_full_finetune_registers_a_selectable_model_not_a_lora() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings.clone()).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Training Project" }),
+        &"Training Project",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -6581,11 +6883,10 @@ async fn a_torn_full_finetune_checkpoint_is_refused_with_a_reason() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings.clone()).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Training Project" }),
+        &"Training Project",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -6648,11 +6949,10 @@ async fn a_torn_full_finetune_checkpoint_is_refused_with_a_reason() {
 async fn create_training_job_reports_each_aux_section_on_its_weight_key() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Aux field errors" }),
+        &"Aux field errors",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id");
@@ -6779,11 +7079,10 @@ async fn create_training_job_reports_each_aux_section_on_its_weight_key() {
 async fn create_training_job_treats_null_technique_keys_as_absent() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Null technique keys" }),
+        &"Null technique keys",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id");
@@ -6858,6 +7157,317 @@ fn seed_hf_snapshot(data_dir: &std::path::Path, repo: &str, revision: &str) -> s
     std::fs::create_dir_all(repo_root.join("refs")).expect("refs dir");
     std::fs::write(repo_root.join("refs").join("main"), revision).expect("refs/main");
     snapshot
+}
+
+#[test]
+fn flux3_training_base_requires_exact_publisher_revision_and_receipt() {
+    use sceneworks_core::training::flux3::{BASE_ID, BASE_REPO, BASE_REVISION};
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let target = sceneworks_core::training::flux3::target(false);
+    let wrong = seed_hf_snapshot(temp.path(), BASE_REPO, "different-revision");
+    std::fs::write(wrong.join("config.json"), "{}").unwrap();
+    let pin = seed_hf_snapshot(temp.path(), BASE_REPO, BASE_REVISION);
+    std::fs::write(pin.join("config.json"), "{}").unwrap();
+    let converted = temp.path().join("models").join("mlx").join(BASE_ID);
+    std::fs::create_dir_all(&converted).unwrap();
+    std::fs::write(converted.join("config.json"), "{}").unwrap();
+    let placeholder = temp.path().join("models").join(BASE_ID);
+    std::fs::create_dir_all(&placeholder).unwrap();
+    std::fs::write(placeholder.join("config.json"), "{}").unwrap();
+    assert_eq!(
+        crate::training::resolve_base_model_path(&target, temp.path()),
+        placeholder.display().to_string()
+    );
+    assert_ne!(placeholder, pin, "unreceipted HF bytes are never selected");
+    assert!(matches!(
+        crate::training::training_base_model_status(temp.path(), &target),
+        crate::training::TrainingBaseStatus::Missing
+    ));
+    let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .unwrap()
+        .1;
+    let catalog: Value =
+        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw)).unwrap();
+    let base = catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == BASE_ID)
+        .unwrap();
+    assert_eq!(base["downloads"][0]["repo"], BASE_REPO);
+    assert_eq!(base["downloads"][0]["revision"], BASE_REVISION);
+}
+
+#[tokio::test]
+async fn flux3_training_surface_preserves_both_targets_and_adapter_identity() {
+    async fn duplicate_isolated(
+        app: &axum::Router,
+        source_id: &str,
+        checkpoint: &std::path::Path,
+    ) -> Value {
+        let (_, before) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/jobs/{source_id}"),
+            Value::Null,
+        )
+        .await;
+        assert!(
+            ["running", "queued"].contains(&before["status"].as_str().unwrap()),
+            "{before}"
+        );
+        let source_plan = &before["payload"]["plan"];
+        let bytes = std::fs::read(checkpoint).unwrap();
+        // Explicitly resend the old bindings and a resume request: server-owned duplicate bindings
+        // must win in the ACTUALLY STORED job, not just in a pre-validation temporary value.
+        let mut requested_plan = source_plan.clone();
+        requested_plan["config"]["advanced"]["resume"] = json!(true);
+        let (status, duplicate) = request(app.clone(), "POST", &format!("/api/v1/jobs/{source_id}/duplicate"), json!({"payloadChanges":{"plan":requested_plan,"manifestEntry":before["payload"]["manifestEntry"]}})).await;
+        assert_eq!(status, StatusCode::CREATED, "{duplicate}");
+        let duplicate_id = duplicate["id"].as_str().unwrap();
+        assert_ne!(duplicate_id, source_id);
+        let (_, stored) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/jobs/{duplicate_id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(stored["payload"], duplicate["payload"]);
+        let plan = &stored["payload"]["plan"];
+        let entry = &stored["payload"]["manifestEntry"];
+        let id = entry["id"].as_str().unwrap();
+        assert_ne!(
+            id,
+            before["payload"]["manifestEntry"]["id"].as_str().unwrap()
+        );
+        assert_eq!(plan["jobId"], duplicate_id);
+        assert_eq!(plan["provenance"]["sourceJobId"], duplicate_id);
+        assert_eq!(entry["provenance"]["trainingJobId"], duplicate_id);
+        assert_eq!(plan["output"]["loraId"], id);
+        assert_eq!(plan["provenance"]["outputLoraId"], id);
+        assert_ne!(
+            plan["output"]["outputDir"],
+            source_plan["output"]["outputDir"]
+        );
+        assert_eq!(
+            std::path::Path::new(plan["output"]["outputDir"].as_str().unwrap())
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            id
+        );
+        assert_eq!(
+            plan["output"]["fileName"],
+            source_plan["output"]["fileName"]
+        );
+        assert_eq!(entry["files"][0], plan["output"]["fileName"]);
+        assert_eq!(entry["source"]["path"], format!("loras/{id}"));
+        assert_eq!(plan["target"], source_plan["target"]);
+        assert_eq!(plan["dataset"], source_plan["dataset"]);
+        let mut expected_config = source_plan["config"].clone();
+        expected_config["advanced"]["resume"] = json!(false);
+        assert_eq!(plan["config"], expected_config);
+        assert_eq!(plan["provenance"]["configSnapshot"], expected_config);
+        assert_eq!(entry["provenance"]["configSnapshot"], expected_config);
+        assert!(stored["result"].get("resumeCheckpointStep").is_none());
+        assert!(
+            !std::path::Path::new(plan["output"]["outputDir"].as_str().unwrap())
+                .join(checkpoint.file_name().unwrap())
+                .exists()
+        );
+        assert_eq!(std::fs::read(checkpoint).unwrap(), bytes);
+        let (_, after) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/jobs/{source_id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(after["payload"], before["payload"]);
+        assert_eq!(after["result"], before["result"]);
+        let (status, _) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{duplicate_id}/cancel"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        stored
+    }
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let settings = test_settings(&temp);
+    let placeholder = settings.data_dir.join("models").join("flux3_klein_base");
+    std::fs::create_dir_all(&placeholder).unwrap();
+    std::fs::write(placeholder.join("config.json"), "{}").unwrap();
+    let app = create_app(settings).unwrap();
+    let (_, project) =
+        crate::tests::support::create_project_with_request(app.clone(), &"Flux3 Training", request)
+            .await;
+    let project = project["id"].as_str().unwrap();
+    let (_, asset) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project}/assets"),
+        "target.png",
+        "image/png",
+        b"declared synthetic fixture, not model evidence",
+    )
+    .await;
+    let asset = asset["id"].as_str().unwrap();
+    for edit in [false, true] {
+        let mut item = json!({"assetId":asset,"caption":{"text":"make the wall blue"}});
+        if edit {
+            item["references"] = json!([{"assetId":asset}]);
+        }
+        let (_, dataset) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project}/training/datasets"),
+            json!({"name":"synthetic fixture", "items":[item]}),
+        )
+        .await;
+        let target = sceneworks_core::training::flux3::target(edit);
+        let mut config = target.defaults.clone();
+        config.rank = 8;
+        config.alpha = 12.into();
+        config
+            .advanced
+            .get_mut("flux3")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("caption_dropout".into(), json!(0.25));
+        let mut body = json!({"targetId":target.id, "datasetId":dataset["id"], "config":config, "outputName":"Flux3 Adapter", "dryRun":true});
+        let path = format!("/api/v1/projects/{project}/training/jobs");
+        let mut ordinary = body.clone();
+        ordinary["dryRun"] = json!(false);
+        let (status, missing) = request(app.clone(), "POST", &path, ordinary).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{missing}");
+        assert!(
+            missing.to_string().contains("not installed"),
+            "a dry-plan placeholder must not authorize training: {missing}"
+        );
+        let (status, job) = request(app.clone(), "POST", &path, body.clone()).await;
+        assert_eq!(status, StatusCode::CREATED, "{job}");
+        let plan = &job["payload"]["plan"];
+        assert_eq!(plan["target"]["baseModel"], "flux3_klein_base");
+        assert_eq!(plan["target"]["kernel"], target.kernel);
+        assert_eq!(plan["config"]["rank"], 8);
+        assert_eq!(plan["config"]["alpha"], 12);
+        assert_eq!(plan["config"]["advanced"]["flux3"]["caption_dropout"], 0.25);
+        assert_eq!(
+            plan["dataset"]["items"][0]
+                .get("referenceImagePaths")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len),
+            usize::from(edit)
+        );
+        let entry = &job["payload"]["manifestEntry"];
+        assert_eq!(entry["baseModel"], "flux3_klein_base");
+        assert_eq!(entry["family"], "flux3");
+        assert_eq!(entry["files"][0], plan["output"]["fileName"]);
+        body["config"]["advanced"]["flux3"]["not_a_source_option"] = json!(true);
+        let (status, _) = request(app.clone(), "POST", &path, body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        body["config"]["advanced"]["flux3"]
+            .as_object_mut()
+            .unwrap()
+            .remove("not_a_source_option");
+        body["config"]["advanced"]["resume"] = json!(true);
+        let (status, error) = request(app.clone(), "POST", &path, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(error.to_string().contains("queue entry"), "{error}");
+        let id = job["id"].as_str().unwrap();
+        claim_training_job_as_mlx_worker(&app, id).await;
+        // Declared synthetic host checkpoint: no real model/training claim is made by this API
+        // filename-discovery fixture. The worker test covers native identity/admission separately.
+        let output = std::path::Path::new(plan["output"]["outputDir"].as_str().unwrap());
+        std::fs::create_dir_all(output).unwrap();
+        let stem =
+            sceneworks_worker::training_resume_stem(plan["output"]["fileName"].as_str().unwrap());
+        let checkpoint = output.join(format!("{stem}-step000100.resume.safetensors"));
+        write_test_safetensors(&checkpoint);
+        let checkpoint_bytes = std::fs::read(&checkpoint).unwrap();
+        let (status, progress) = request(app.clone(), "POST", &format!("/api/v1/jobs/{id}/progress"), json!({"status":"running","stage":"training","progress":0.1,"message":"Synthetic checkpoint saved","workerId":TEST_TRAINING_WORKER_ID,"result":{"resumeCheckpointStep":100}})).await;
+        assert_eq!(status, StatusCode::OK, "{progress}");
+        let active_duplicate = duplicate_isolated(&app, id, &checkpoint).await;
+        let (status, _) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{id}/progress"),
+            json!({
+                "status":"canceled", "stage":"canceled", "progress":1,
+                "workerId":TEST_TRAINING_WORKER_ID, "message":"Synthetic stopped run"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        {
+            for (pointer, changed) in [
+                ("/target/baseModel", json!("flux3_klein")),
+                ("/config/advanced/flux3/caption_dropout", json!(0.6)),
+                ("/dataset/items/0/caption", json!("different instruction")),
+                ("/output/fileName", json!("different.safetensors")),
+            ] {
+                let mut altered = plan.clone();
+                *altered.pointer_mut(pointer).unwrap() = changed;
+                let (status, error) = request(
+                    app.clone(),
+                    "POST",
+                    &format!("/api/v1/jobs/{id}/retry"),
+                    json!({"resume":true,"payloadChanges":{"plan":altered}}),
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{pointer}: {error}");
+                assert!(
+                    error.to_string().contains("checkpoint identity mismatch"),
+                    "{error}"
+                );
+                assert_eq!(std::fs::read(&checkpoint).unwrap(), checkpoint_bytes);
+            }
+            let (status, resumed) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{id}/retry"),
+                json!({"resume":true}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{resumed}");
+            let mut expected = plan.clone();
+            expected["config"]["advanced"]["resume"] = json!(true);
+            assert_eq!(resumed["payload"]["plan"], expected);
+            assert_eq!(std::fs::read(&checkpoint).unwrap(), checkpoint_bytes);
+            assert_eq!(
+                resumed["payload"]["manifestEntry"]["baseModel"],
+                "flux3_klein_base"
+            );
+            let resumed_id = resumed["id"].as_str().unwrap();
+            assert_eq!(
+                resumed["payload"]["plan"]["config"]["advanced"]["resume"],
+                true
+            );
+            let resumed_duplicate = duplicate_isolated(&app, resumed_id, &checkpoint).await;
+            assert_ne!(
+                resumed_duplicate["payload"]["plan"]["output"]["loraId"],
+                active_duplicate["payload"]["plan"]["output"]["loraId"]
+            );
+            let (status, _) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{resumed_id}/cancel"),
+                Value::Null,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(std::fs::read(&checkpoint).unwrap(), checkpoint_bytes);
+        }
+    }
 }
 
 fn qwen_image_2_1_training_target() -> sceneworks_core::training::TrainingTarget {
@@ -6967,13 +7577,9 @@ async fn qwen_image_2_1_real_training_requires_the_licence_and_records_it_on_the
     let dense = seed_hf_snapshot(&settings.data_dir, "Qwen/Qwen-Image-2.1", "dense-rev");
     std::fs::write(dense.join("config.json"), "{}").expect("dense snapshot marker");
 
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Qwen Training" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project_with_request(app.clone(), &"Qwen Training", request)
+            .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let (_, asset) = request_multipart_upload(
         app.clone(),
@@ -7271,11 +7877,10 @@ async fn qwen_image_2_1_edit_dataset_round_trips_ordered_references_and_refuses_
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings.clone()).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Qwen Edit Training" }),
+        &"Qwen Edit Training",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -7471,11 +8076,10 @@ async fn training_retry_resume_flag_resumes_or_restarts_without_resending_the_pl
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings.clone()).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Training Project" }),
+        &"Training Project",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -7613,11 +8217,10 @@ async fn training_retry_resume_is_refused_when_there_is_nothing_to_resume() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings.clone()).expect("app creates");
-    let (_, project) = request(
+    let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Training Project" }),
+        &"Training Project",
+        request,
     )
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -7812,4 +8415,135 @@ async fn raw_jobs_route_refuses_qwen_image_2_1_turbo_as_a_training_base() {
         sceneworks_core::training::untrainable_base_model_reason("qwen_image_2_1").is_none(),
         "base 2.1 trains"
     );
+}
+
+struct ParquetFinalizeFixture {
+    _temporary: tempfile::TempDir,
+    app: axum::Router,
+    state: crate::AppState,
+    dataset_route: String,
+    finalize_route: String,
+    payload: Value,
+    staged_path: std::path::PathBuf,
+}
+
+async fn parquet_finalize_fixture() -> ParquetFinalizeFixture {
+    let temporary = tempfile::tempdir().unwrap();
+    let (app, state) = create_app_with_state(test_settings(&temporary)).unwrap();
+    let (status, project) = crate::tests::support::create_project_with_request(
+        app.clone(),
+        &"Finalize ownership",
+        request,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let project_id = project["id"].as_str().unwrap();
+    let (status, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({"name":"Empty import","items":[]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let dataset_id = dataset["id"].as_str().unwrap();
+    let relative =
+        format!("training/datasets/{dataset_id}/parquet-imports/job_finalize_test/pq_item.png");
+    let staged_path = std::path::Path::new(project["path"].as_str().unwrap()).join(&relative);
+    std::fs::create_dir_all(staged_path.parent().unwrap()).unwrap();
+    std::fs::write(&staged_path, b"png-bytes").unwrap();
+    let dataset_route = format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}");
+    ParquetFinalizeFixture {
+        _temporary: temporary,
+        app,
+        state,
+        finalize_route: format!("{dataset_route}/parquet-import-finalize"),
+        dataset_route,
+        payload: json!({"jobId":"job_finalize_test","datasetVersion":dataset["version"],"items":[{"id":"pq_item","path":relative,"displayName":"pq_item.png","width":32,"height":16}]}),
+        staged_path,
+    }
+}
+
+#[tokio::test]
+async fn parquet_finalize_keeps_requests_live_and_rechecks_the_commit_revision() {
+    let fixture = parquet_finalize_fixture().await;
+    let gate = std::sync::Arc::new(crate::test_hooks::BlockingIoTestHook::default());
+    *fixture
+        .state
+        .test_hooks
+        .parquet_finalize_before_validation_once
+        .lock() = Some(gate.clone());
+    let app = fixture.app.clone();
+    let route = fixture.finalize_route.clone();
+    let payload = fixture.payload.clone();
+    let pending = tokio::spawn(async move {
+        request_with_peer(app, "POST", &route, payload, "127.0.0.1:50000").await
+    });
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_reached())
+        .await
+        .unwrap();
+    let (status, _) = tokio::time::timeout(
+        Duration::from_secs(5),
+        request(fixture.app.clone(), "GET", "/api/v1/projects", Value::Null),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, StatusCode::OK);
+    let (status, edited) = request(
+        fixture.app.clone(),
+        "PATCH",
+        &fixture.dataset_route,
+        json!({"name":"Changed meanwhile","items":[]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{edited}");
+    assert_ne!(
+        edited["version"], fixture.payload["datasetVersion"],
+        "the competing write must change the content revision"
+    );
+    gate.release();
+    let (status, refusal) = pending.await.unwrap();
+    assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
+    assert!(refusal["detail"]
+        .as_str()
+        .unwrap()
+        .contains("Dataset changed"));
+    let (_, current) = request(fixture.app, "GET", &fixture.dataset_route, Value::Null).await;
+    assert_eq!(current["name"], "Changed meanwhile");
+    assert_eq!(current["version"], edited["version"]);
+    assert_eq!(current["items"], json!([]));
+    assert!(
+        fixture.staged_path.is_file(),
+        "a stale import must not consume its staged input"
+    );
+}
+
+#[tokio::test]
+async fn canceling_parquet_validation_cannot_commit_a_dataset() {
+    let fixture = parquet_finalize_fixture().await;
+    let gate = std::sync::Arc::new(crate::test_hooks::BlockingIoTestHook::default());
+    *fixture
+        .state
+        .test_hooks
+        .parquet_finalize_before_validation_once
+        .lock() = Some(gate.clone());
+    let app = fixture.app.clone();
+    let route = fixture.finalize_route.clone();
+    let payload = fixture.payload.clone();
+    let pending = tokio::spawn(async move {
+        request_with_peer(app, "POST", &route, payload, "127.0.0.1:50000").await
+    });
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_reached())
+        .await
+        .unwrap();
+    pending.abort();
+    assert!(pending.await.unwrap_err().is_cancelled());
+    gate.release();
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_finished())
+        .await
+        .unwrap();
+    let (_, current) = request(fixture.app, "GET", &fixture.dataset_route, Value::Null).await;
+    assert_eq!(current["version"], fixture.payload["datasetVersion"]);
+    assert_eq!(current["items"], json!([]));
+    assert!(fixture.staged_path.is_file());
 }

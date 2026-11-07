@@ -32,7 +32,7 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64, rw-krea]
     timeout-minutes: 60
     concurrency:
-      group: iris-mlx-real-weights-nax-macos-2
+      group: iris-mlx-real-weights-${{ github.run_id }}-${{ github.run_attempt }}
       cancel-in-progress: false
     defaults:
       run:

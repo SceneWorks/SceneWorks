@@ -68,11 +68,63 @@ const MODEL_IMPORT_DEFAULTS: &str = include_str!("../../lora_family.rs");
 const BASE_WEIGHT_IMPORTS: &str = include_str!("../../base_weights.rs");
 const API_VALIDATION: &str = include_str!("../../../../../apps/rust-api/src/jobs.rs");
 const API_GENERATION: &str = include_str!("../../../../../apps/rust-api/src/generation.rs");
-const API_CONTRACT_ENTRY: &str = include_str!("../../../../../apps/rust-api/src/lib.rs");
+const API_MODEL_CATALOG: &str = concat!(
+    include_str!("../../../../../apps/rust-api/src/models/mod.rs"),
+    include_str!("../../../../../apps/rust-api/src/models/license.rs"),
+    include_str!("../../../../../apps/rust-api/src/models/download.rs"),
+    include_str!("../../../../../apps/rust-api/src/models/convert.rs"),
+    include_str!("../../../../../apps/rust-api/src/models/delete.rs"),
+    include_str!("../../../../../apps/rust-api/src/models/import.rs"),
+    include_str!("../../../../../apps/rust-api/src/models/catalog.rs"),
+    include_str!("../../../../../apps/rust-api/src/models/install_state.rs"),
+    include_str!("../../../../../apps/rust-api/src/models/hf_cache_health.rs"),
+    include_str!("../../../../../apps/rust-api/src/models/size_estimate.rs"),
+);
+const API_CONTRACT_ENTRY: &str = concat!(
+    include_str!("../../../../../apps/rust-api/src/lib.rs"),
+    include_str!("../../../../../apps/rust-api/src/web_assets.rs"),
+    include_str!("../../../../../apps/rust-api/src/project_files.rs"),
+    include_str!("../../../../../apps/rust-api/src/job_redaction.rs"),
+    include_str!("../../../../../apps/rust-api/src/validators.rs"),
+    include_str!("../../../../../apps/rust-api/src/file_serving.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/mod.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/assets.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/audio.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/catalogs.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/characters.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/films.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/generation.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/jobs.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/library.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/models.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/person.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/projects.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/system.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/timelines.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/training.rs"),
+    include_str!("../../../../../apps/rust-api/src/router/workers.rs"),
+);
 const API_DTO: &str = include_str!("../../../../../apps/rust-api/src/dto.rs");
 const WORKER_DISPATCH: &str = include_str!("../../../../sceneworks-worker/src/lib.rs");
-const WORKER_IMAGE_DISPATCH: &str =
-    include_str!("../../../../sceneworks-worker/src/image_jobs/base.rs");
+// Preserve the complete former base compilation unit in this existing source digest.
+// These are its explicit current production owners, rather than a directory scan.
+const WORKER_IMAGE_DISPATCH: &str = concat!(
+    include_str!("../../../../sceneworks-worker/src/image_jobs/geometry.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/routing.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/artifact_resolution.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/quantization.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/load_spec.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/adapters.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/load_policy.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/memory.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/sampling.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/conditioning.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/render.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/mlx.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/candle.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/metrics.rs"),
+    include_str!("../../../../sceneworks-worker/src/image_jobs/events.rs"),
+);
 const WORKER_IMAGE_QWEN_EDIT_CANDLE: &str =
     include_str!("../../../../sceneworks-worker/src/image_jobs/qwen_edit_candle.rs");
 const WORKER_IMAGE_PULID: &str =
@@ -117,7 +169,6 @@ const SCHEDULER: &str = include_str!("../../jobs_store.rs");
 const TRAINING_CATALOG: &str = include_str!("../../training.rs");
 const WEB_IMAGE_REQUEST: &str = include_str!("../../../../../apps/web/src/imageJobRequest.js");
 const WEB_IMAGE_ADVANCED: &str = include_str!("../../../../../apps/web/src/imageJobAdvanced.js");
-const WEB_FALLBACK_CATALOG: &str = include_str!("../../../../../apps/web/src/modelCatalog.js");
 const WEB_MAC_GATING: &str = include_str!("../../../../../apps/web/src/macGating.js");
 const WEB_PREVIEW_GATING: &str = include_str!("../../../../../apps/web/src/previewSupport.js");
 const WEB_SIMPLE_JOBS: &str = include_str!("../../../../../apps/web/src/simple/simpleJobs.js");
@@ -125,12 +176,49 @@ const WEB_SIMPLE_VIDEO: &str =
     include_str!("../../../../../apps/web/src/simple/SimpleVideoStudio.jsx");
 const WEB_VIDEO_VALIDATION: &str =
     include_str!("../../../../../apps/web/src/videoStudioValidation.js");
-const WEB_VIDEO_STUDIO: &str = include_str!("../../../../../apps/web/src/screens/VideoStudio.jsx");
+// The studio owner was split; keep the same provenance key over every moved source.
+const WEB_VIDEO_STUDIO: &str = concat!(
+    include_str!("../../../../../apps/web/src/screens/VideoStudio.jsx"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/VideoAdvancedPanel.jsx"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/VideoGenerationSettings.jsx"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/VideoPromptComposer.jsx"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/VideoReviewPanel.jsx"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/VideoSourcePanel.jsx"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/useLtx25Controls.js"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/useVideoExecutionTier.js"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/useVideoModeSelection.js"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/useVideoModelSelection.js"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/useVideoPresetState.js"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/useVideoRecipeReplay.js"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/useVideoReferences.js"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/useVideoSubmission.js"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/useVideoTurboControls.js"),
+    include_str!("../../../../../apps/web/src/screens/videoStudio/videoTierHelpers.js"),
+    include_str!("../../../../../apps/web/src/components/StudioFields.jsx"),
+    include_str!("../../../../../apps/web/src/hooks/useStudioAdvancedSettings.js"),
+    include_str!("../../../../../apps/web/src/hooks/useStudioPromptGuide.js"),
+);
 const WEB_SIMPLE_AUDIO: &str =
     include_str!("../../../../../apps/web/src/simple/simpleAudioParts.jsx");
 const WEB_SIMPLE_AUDIO_STUDIO: &str =
     include_str!("../../../../../apps/web/src/simple/SimpleAudioStudio.jsx");
-const WEB_AUDIO_STUDIO: &str = include_str!("../../../../../apps/web/src/screens/AudioStudio.jsx");
+// The studio owner was split; keep the same provenance key over every moved source.
+const WEB_AUDIO_STUDIO: &str = concat!(
+    include_str!("../../../../../apps/web/src/screens/AudioStudio.jsx"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/AudioAdvancedPanel.jsx"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/AudioGenerationSettings.jsx"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/AudioPromptComposer.jsx"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/AudioReviewPanel.jsx"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/AudioVoiceReferencePanel.jsx"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/audioStudioHelpers.js"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/useAudioDraft.js"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/useAudioModelDefaults.js"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/useAudioModelSelection.js"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/useAudioScript.js"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/useAudioSettingsWriter.js"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/useAudioSubmission.js"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/useAudioVoiceLibrary.js"),
+);
 const WEB_UPSCALE_ENGINES: &str = include_str!("../../../../../apps/web/src/upscaleEngines.js");
 const WEB_VIDEO_UPSCALE: &str =
     include_str!("../../../../../apps/web/src/screens/VideoUpscalePanel.jsx");
@@ -752,10 +840,19 @@ fn imported_probe_job(
 }
 
 fn source_has_ordered_fragments(source: &str, fragments: &[&str]) -> bool {
-    let source = strip_jsonc_comments(source);
+    // Rustfmt may wrap the same sink-bearing call across lines. Layout must not change a
+    // capability claim; keep the ordered code fragments and all sink-removal mutations strict.
+    let source: String = strip_jsonc_comments(source)
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace())
+        .collect();
     let mut rest = source.as_str();
     for fragment in fragments {
-        let Some(index) = rest.find(fragment) else {
+        let fragment: String = fragment
+            .chars()
+            .filter(|ch| !ch.is_ascii_whitespace())
+            .collect();
+        let Some(index) = rest.find(&fragment) else {
             return false;
         };
         rest = &rest[index + fragment.len()..];
@@ -1056,6 +1153,12 @@ pub(crate) fn expected_backend_local_trainer_id(
         target.base_model.as_str(),
         target.kernel.as_str(),
     ) {
+        ("moss_image_base_lora", "moss_image_base", "moss_image_lora") => {
+            ("moss_image_base", "moss_image_base")
+        }
+        ("moss_image_sft_lora", "moss_image_sft", "moss_image_lora") => {
+            ("moss_image_sft", "moss_image_sft")
+        }
         ("z_image_turbo_lora", "z_image_turbo", "z_image_lora") => {
             ("z_image_turbo", "z_image_turbo")
         }
@@ -1089,6 +1192,10 @@ pub(crate) fn expected_backend_local_trainer_id(
         ("iris_3b_depth", "iris_3b_depth", "iris_train") => ("iris_3b_depth", "iris_3b_depth"),
         ("iris_3b_restore", "iris_3b_restore", "iris_train") => {
             ("iris_3b_restore", "iris_3b_restore")
+        }
+        ("flux3_klein_lora", "flux3_klein_base", "flux3_klein_lora")
+        | ("flux3_klein_edit_lora", "flux3_klein_base", "flux3_klein_edit_lora") => {
+            ("flux3_klein_base", "flux3_klein_base")
         }
         ("qwen_image_2_1_lora", "qwen_image_2_1", "qwen_image_2_1_lora")
         | ("qwen_image_2_1_edit_lora", "qwen_image_2_1", "qwen_image_2_1_edit_lora") => {
@@ -2313,6 +2420,11 @@ fn precision_payload(
         "q4" => Some(json!({ "mlxQuantize": 4 })),
         "q8" => Some(json!({ "mlxQuantize": 8 })),
         "nvfp4" => Some(json!({ "quantTier": "nvfp4" })),
+        // sc-26241: the publisher FP8 rowwise package is named by tier identity, exactly like
+        // NVFP4 — it has no honest `mlxQuantize` bit width.
+        crate::image_request::FP8R_QUANT_TIER => {
+            Some(json!({ "quantTier": crate::image_request::FP8R_QUANT_TIER }))
+        }
         "int8-convrot" => Some(json!({ "convRot": true })),
         other => {
             return Err(format!(
@@ -3783,6 +3895,7 @@ fn source_digests_for_runtime_sources(
         ("baseWeightImports", BASE_WEIGHT_IMPORTS),
         ("apiValidation", API_VALIDATION),
         ("apiGeneration", API_GENERATION),
+        ("apiModelCatalog", API_MODEL_CATALOG),
         ("apiContractEntry", API_CONTRACT_ENTRY),
         ("apiDto", API_DTO),
         ("scheduler", SCHEDULER),
@@ -3819,7 +3932,6 @@ fn source_digests_for_runtime_sources(
         ("descriptorPreviewFacts", PREVIEW),
         ("webImageRequest", WEB_IMAGE_REQUEST),
         ("webImageAdvanced", WEB_IMAGE_ADVANCED),
-        ("webFallbackCatalog", WEB_FALLBACK_CATALOG),
         ("webMacGating", WEB_MAC_GATING),
         ("webPreviewGating", WEB_PREVIEW_GATING),
         ("webSimpleJobs", WEB_SIMPLE_JOBS),
@@ -4949,98 +5061,131 @@ mod tests {
     }
 
     #[test]
+    fn preview_source_layout_cannot_change_the_sink_claim_or_its_order() {
+        let fragments = [
+            "drive_gen_items(tx, work,",
+            "let request = GenerationRequest {",
+            "preview,",
+            "model.generate(&request",
+        ];
+        let formatted = "drive_gen_items(\n    tx,\n    work,\n    move |preview| {\n        let request = GenerationRequest {\n            preview,\n        };\n        model.generate(&request);\n    })";
+        assert!(source_has_ordered_fragments(formatted, &fragments));
+        assert!(!source_has_ordered_fragments(
+            &formatted.replace("preview,", ""),
+            &fragments
+        ));
+        assert!(!source_has_ordered_fragments("model.generate(&request); drive_gen_items(tx, work, let request = GenerationRequest { preview,", &fragments));
+    }
+
+    // Match the real neighboring code fields rather than one rustfmt indentation. Every needle
+    // is ASCII, so its matched start/end bytes are valid UTF-8 boundaries even after Unicode text.
+    fn replace_preview_code_fragment(source: &str, needle: &str, replacement: &str) -> String {
+        assert!(needle.is_ascii());
+        let needle: Vec<_> = needle
+            .bytes()
+            .filter(|byte| !byte.is_ascii_whitespace())
+            .collect();
+        assert!(!needle.is_empty());
+        let offsets: Vec<_> = source
+            .bytes()
+            .enumerate()
+            .filter_map(|(index, byte)| (!byte.is_ascii_whitespace()).then_some(index))
+            .collect();
+        let start = offsets
+            .windows(needle.len())
+            .position(|window| {
+                window
+                    .iter()
+                    .zip(&needle)
+                    .all(|(&index, &byte)| source.as_bytes()[index] == byte)
+            })
+            .expect("production preview code fragment must exist independent of layout");
+        let first = offsets[start];
+        let end = offsets[start + needle.len() - 1] + 1;
+        format!("{}{}{}", &source[..first], replacement, &source[end..])
+    }
+
+    #[test]
+    fn preview_sink_mutations_keep_their_code_anchor_across_layouts_and_utf8_prefixes() {
+        for width in [8, 20, 24, 36] {
+            let indent = " ".repeat(width);
+            let source = format!("// π\nlet request = GenerationRequest {{\n{indent}preview,\n{indent}cancel: cancel.clone(),\n{indent}..Default::default()\n}}");
+            let changed = replace_preview_code_fragment(
+                &source,
+                "preview, cancel: cancel.clone(), ..Default::default()",
+                "cancel: cancel.clone(), ..Default::default()",
+            );
+            assert!(!changed.contains("preview,"));
+            assert!(changed.starts_with("// π\n"));
+            assert!(changed.contains("cancel: cancel.clone()"));
+        }
+    }
+
+    #[test]
     fn imported_preview_rows_fail_closed_when_the_production_sink_is_removed() {
-        // The indent is part of the fixture, not decoration: it is what pins the mutation to the
-        // real request literal instead of some similarly-worded block. Imported Krea builds its
-        // request inside a helper function (8 spaces); the SDXL lane builds it inline in the
-        // per-item closure (20). A mutation that silently fails to apply would make this test pass
-        // while proving nothing, which is why the "mutation must apply" assertion is here.
-        for (family, source, indent) in [
-            ("krea_2", WORKER_IMAGE_KREA_IMPORTED, "        "),
-            ("sdxl", WORKER_IMAGE_SDXL_IMPORTED, "                    "),
+        // Neighboring request fields anchor the mutation to actual request construction. A
+        // missing fragment fails before the negative claim, and all mutations must remove support.
+        for (family, source) in [
+            ("krea_2", WORKER_IMAGE_KREA_IMPORTED),
+            ("sdxl", WORKER_IMAGE_SDXL_IMPORTED),
         ] {
             assert!(imported_preview_sink(family, source));
-            let normalized = source.replace("\r\n", "\n");
-            let without_request_sink = normalized.replacen(
-                &format!(
-                    "{indent}preview,\n{indent}cancel: cancel.clone(),\n{indent}..Default::default()"
-                ),
-                &format!("{indent}cancel: cancel.clone(),\n{indent}..Default::default()"),
-                1,
-            );
-            assert_ne!(
-                without_request_sink, normalized,
-                "{family} mutation must apply"
+            let without_request_sink = replace_preview_code_fragment(
+                source,
+                "preview, cancel: cancel.clone(), ..Default::default()",
+                "cancel: cancel.clone(), ..Default::default()",
             );
             assert!(
                 !imported_preview_sink(family, &without_request_sink),
                 "{family} must not inherit preview from comments or unrelated helpers"
             );
         }
-
         assert!(imported_preview_sink(
             "mage-flow",
             WORKER_IMAGE_MAGE_FINETUNED
         ));
-        let normalized_mage = WORKER_IMAGE_MAGE_FINETUNED.replace("\r\n", "\n");
-        let without_mage_sink = normalized_mage.replacen(
-            "                    guidance,\n                    preview,\n                    &cancel,",
-            "                    guidance,\n                    &cancel,",
-            1,
+        let without_mage_sink = replace_preview_code_fragment(
+            WORKER_IMAGE_MAGE_FINETUNED,
+            "guidance, preview, &cancel,",
+            "guidance, &cancel,",
         );
-        assert_ne!(without_mage_sink, normalized_mage);
         assert!(!imported_preview_sink("mage-flow", &without_mage_sink));
-
-        let without_mage_scope = normalized_mage.replacen(
+        let without_mage_scope = replace_preview_code_fragment(
+            WORKER_IMAGE_MAGE_FINETUNED,
             "crate::memory_strategy::generate_with_scope(",
             "removed_memory_scope(",
-            1,
         );
-        assert_ne!(without_mage_scope, normalized_mage);
         assert!(
             !imported_preview_sink("mage-flow", &without_mage_scope),
-            "Mage preview support must remain bound to the request-scoped production generator",
+            "Mage preview support must remain bound to the request-scoped production generator"
         );
-
-        let crossed_mage_request = normalized_mage.replacen(
-            "crate::memory_strategy::generate_with_scope(\n                    model,\n                    &mut request,",
-            "crate::memory_strategy::generate_with_scope(\n                    model,\n                    &mut unrelated_request,",
-            1,
+        let crossed_mage_request = replace_preview_code_fragment(
+            WORKER_IMAGE_MAGE_FINETUNED,
+            "crate::memory_strategy::generate_with_scope(model, &mut request,",
+            "crate::memory_strategy::generate_with_scope(model, &mut unrelated_request,",
         );
-        assert_ne!(crossed_mage_request, normalized_mage);
         assert!(
             !imported_preview_sink("mage-flow", &crossed_mage_request),
-            "Mage preview support must not borrow a scope that generates another request",
+            "Mage preview support must not borrow a scope that generates another request"
         );
-
-        // flux2 rides the plan-driven route (sc-11045): one shared request literal, two drivers.
-        // Dropping `preview,` from the literal — anchored on its `cancel:` neighbour at the
-        // literal's 12-space indent — must fail the claim; a comment or the drivers' own closure
-        // parameters must not preserve it.
         assert!(imported_preview_sink("flux2", WORKER_IMAGE_CHECKPOINT_PLAN));
-        let normalized_plan = WORKER_IMAGE_CHECKPOINT_PLAN.replace("\r\n", "\n");
-        let without_plan_sink = normalized_plan.replacen(
-            "            preview,\n            cancel: cancel.clone(),",
-            "            cancel: cancel.clone(),",
-            1,
-        );
-        assert_ne!(
-            without_plan_sink, normalized_plan,
-            "flux2 mutation must apply"
+        let without_plan_sink = replace_preview_code_fragment(
+            WORKER_IMAGE_CHECKPOINT_PLAN,
+            "preview, cancel: cancel.clone(),",
+            "cancel: cancel.clone(),",
         );
         assert!(
             !imported_preview_sink("flux2", &without_plan_sink),
             "flux2 must not inherit preview from the drivers' closure parameters"
         );
-        let without_plan_scope = normalized_plan.replacen(
+        let without_plan_scope = replace_preview_code_fragment(
+            WORKER_IMAGE_CHECKPOINT_PLAN,
             "crate::memory_strategy::generate_with_scope(",
             "removed_memory_scope(",
-            1,
         );
-        assert_ne!(without_plan_scope, normalized_plan);
         assert!(
             !imported_preview_sink("flux2", &without_plan_scope),
-            "flux2 preview support must remain bound to the request-scoped production generator",
+            "flux2 preview support must remain bound to the request-scoped production generator"
         );
     }
 
@@ -6633,7 +6778,7 @@ mod tests {
             "workerAudioDispatch",
             "workerUtilityDispatch",
             "webSimpleJobs",
-            "webFallbackCatalog",
+            "apiModelCatalog",
             "webSimpleVideo",
             "webVideoValidation",
             "webVideoStudio",

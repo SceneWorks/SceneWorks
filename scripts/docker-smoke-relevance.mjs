@@ -2,26 +2,11 @@ import { appendFile } from "node:fs/promises";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 
+// Match the build contexts, including Rust include_str! inputs and the web dev image. A UI edit
+// really does affect web.Dockerfile; a native edit really does affect rust.Dockerfile.
+// Endpoint projection adds repository scripts and schema inputs to the web-builder COPY roots.
 const DOCKER_RELEVANT =
-  /^(?:docker\/|vendor\/|config\/|packages\/schemas\/|apps\/web\/(?:vite\.config|sdxl-cuda-memory-projection)\.js$|docker-compose\.yml$|Cargo\.toml$|Cargo\.lock$|\.github\/workflows\/check\.yml$|scripts\/(?:check-(?:docker-api-runtime|docker-web-runtime|compose-config)|docker-smoke-relevance)(?:\.test)?\.mjs$)/;
-
-// The web builder loads this bounded import closure to authenticate the projected endpoints.
-// The test walks actual static imports so a newly added dependency cannot silently skip smoke.
-const WEB_EVIDENCE_INPUTS = new Set([
-  "scripts/package-sdxl-cuda-endpoints.mjs",
-  "scripts/memory-calibration-harness.mjs",
-  "scripts/anchor-loader-closure.mjs",
-  "scripts/extract-memory-anchors.mjs",
-  "scripts/hash-artifact-inventory.mjs",
-  "scripts/inference-closure-digest.mjs",
-  "scripts/generate-memory-matrix.mjs",
-  "scripts/check-tier-integrity.mjs",
-  "scripts/tier-integrity-measurement-receipts.mjs",
-  "scripts/lib/jsonc.mjs",
-  "scripts/lib/manifest-memory-declarations.mjs",
-  "scripts/lib/source-revision.mjs",
-  "scripts/lib/watchdog-completion.mjs",
-]);
+  /^(?:docker\/|vendor\/|config\/|scripts\/|packages\/schemas\/|crates\/|apps\/(?:rust-api|rust-worker|web)\/|apps\/desktop\/(?:licenses\/|(?:Cargo\.toml|build\.rs)$)|docs\/calibration\/|docs\/(?:film-script-writing|film-editor)\.md$|docs\/generated\/(?:memory-calibration-evidence|video-memory-curves|ltx-mlx-[^/]+|krea-candle-five-rung-sc-11045|qwen-candle-five-rung-sc-15817)\.json$|docker-compose\.yml$|\.dockerignore$|Cargo\.(?:toml|lock)$|rust(?:-toolchain\.toml|fmt\.toml)$|\.cargo\/|\.github\/workflows\/check\.yml$|scripts\/(?:check-(?:docker-api-runtime|docker-web-runtime|compose-config)|docker-smoke-relevance)(?:\.test)?\.mjs$)/;
 
 export function dockerSmokeDecision(changedFileCount, files) {
   if (!Number.isSafeInteger(changedFileCount) || changedFileCount < 0) {
@@ -35,7 +20,7 @@ export function dockerSmokeDecision(changedFileCount, files) {
         `${files.length}; running conservatively.`,
     };
   }
-  const relevant = files.find((file) => DOCKER_RELEVANT.test(file) || WEB_EVIDENCE_INPUTS.has(file));
+  const relevant = files.find((file) => DOCKER_RELEVANT.test(file));
   return relevant
     ? { run: true, reason: `Docker-relevant file changed: ${relevant}` }
     : { run: false, reason: "No Docker-relevant files changed." };

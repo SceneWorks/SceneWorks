@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, HashSet};
-use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::fs;
+#[cfg(test)]
+use std::fs::File;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::Arc;
-use std::time::Duration;
 
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{
@@ -624,56 +624,24 @@ pub struct CatalogFacet {
 /// acquire the same lease before changing registry or disk state.
 #[derive(Debug)]
 pub struct CatalogProcessingLease {
-    file: File,
-}
-
-impl Drop for CatalogProcessingLease {
-    /// Releases the advisory lock EXPLICITLY rather than letting `close(2)` do it.
-    ///
-    /// `flock(2)` locks belong to the OPEN FILE DESCRIPTION, not to the descriptor
-    /// or to this process, and `fork(2)` hands a child a reference to that same
-    /// description. Closing our descriptor only drops one reference: while any
-    /// concurrently forked child still holds the inherited one — the window between
-    /// `fork` and `exec` for every `Command` this process spawns (ffmpeg, sips, the
-    /// worker binaries) — the lease keeps reading as HELD to everyone else.
-    ///
-    /// Control routes treat that as "a processor is still running" and refuse
-    /// pause/resume/detach/delete with a 409, so a lease released cleanly by its
-    /// owner could still refuse the very next request (sc-22738: the CI flake in
-    /// `catalog_pause_and_resume_persist_desired_processing_state`, where an
-    /// unrelated concurrent test's child spawn straddled the lease release).
-    ///
-    /// `LOCK_UN` releases the lock on the open file description itself, so it takes
-    /// effect immediately no matter who else references it.
-    fn drop(&mut self) {
-        // Released through the same crate that took the lock, not through std's
-        // inherent `File::unlock`, so acquisition and release cannot drift apart.
-        let _ = fs2::FileExt::unlock(&self.file);
-    }
+    _lock: crate::file_lock::FileLock,
 }
 
 impl CatalogProcessingLease {
     pub fn try_acquire(catalog: &Catalog) -> CatalogResult<Self> {
-        use fs2::FileExt as _;
-
         let lock_path = catalog.root.join(PROCESSING_LEASE_FILE);
-        if let Ok(metadata) = fs::symlink_metadata(&lock_path) {
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err(CatalogError::InvalidCatalog(
+        let file = crate::file_lock::open_regular_lock_file(&lock_path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::InvalidInput {
+                CatalogError::InvalidCatalog(
                     "Catalog processing lock must be a regular file".to_owned(),
-                ));
+                )
+            } else {
+                CatalogError::Io(error)
             }
-        }
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(lock_path)?;
-        let contended = fs2::lock_contended_error().raw_os_error();
-        match file.try_lock_exclusive() {
-            Ok(()) => Ok(Self { file }),
-            Err(error) if error.raw_os_error() == contended => Err(CatalogError::Conflict(
+        })?;
+        match crate::file_lock::FileLock::try_exclusive(file) {
+            Ok(lock) => Ok(Self { _lock: lock }),
+            Err(error) if crate::file_lock::is_contended(&error) => Err(CatalogError::Conflict(
                 "Catalog processing is active".to_owned(),
             )),
             Err(error) => Err(CatalogError::Io(error)),
@@ -685,8 +653,9 @@ impl CatalogProcessingLease {
     /// description, and therefore over the same `flock` lock.
     #[cfg(test)]
     fn inherited_descriptor(&self) -> File {
-        use fs2::FileExt as _;
-        self.file.duplicate().expect("descriptor duplicates")
+        self._lock
+            .inherited_descriptor()
+            .expect("descriptor duplicates")
     }
 
     pub fn is_active(catalog: &Catalog) -> CatalogResult<bool> {
@@ -718,6 +687,30 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    /// Resolve a record's available local image with the same confinement for every consumer.
+    pub fn resolve_local_image(&self, record: &CatalogRecord) -> std::io::Result<PathBuf> {
+        let relative = record
+            .metadata
+            .pointer("/acquisition/cachePath")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                (!record.image_path.contains("://") && !record.image_path.trim().is_empty())
+                    .then_some(record.image_path.as_str())
+            })
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "catalog record has no local image",
+                )
+            })?;
+        Self::resolve_local_image_under(self.root(), relative)
+    }
+
+    /// Resolve an explicitly selected cache image or thumbnail under an attached catalog.
+    pub fn resolve_local_image_under(root: &Path, relative: &str) -> std::io::Result<PathBuf> {
+        crate::safe_path::resolve_local_file(root, &relative.replace('\\', "/"))
+    }
+
     pub fn create(root: impl AsRef<Path>, name: impl Into<String>) -> CatalogResult<Self> {
         let root = root.as_ref();
         let name = validated_name(name.into())?;
@@ -2484,8 +2477,6 @@ fn validate_record(record: &NewCatalogRecord) -> CatalogResult<()> {
 }
 
 fn validate_catalog_relative_path(path: &str, label: &str) -> CatalogResult<()> {
-    use std::path::Component;
-
     if path.trim().is_empty() || path.contains('\0') {
         return Err(CatalogError::InvalidCatalog(format!(
             "Catalog record {label} path is required"
@@ -2494,15 +2485,7 @@ fn validate_catalog_relative_path(path: &str, label: &str) -> CatalogResult<()> 
     // Interpret both separators so a catalog created on Unix cannot persist a
     // Windows traversal (or vice versa) that becomes dangerous after relocation.
     let portable = path.replace('\\', "/");
-    let path = Path::new(&portable);
-    let has_windows_prefix =
-        portable.as_bytes().get(1) == Some(&b':') || portable.starts_with("//");
-    if has_windows_prefix
-        || path.is_absolute()
-        || path
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
+    if crate::safe_path::relative_normal_components(&portable).is_err() {
         return Err(CatalogError::InvalidCatalog(format!(
             "Catalog record {label} path must stay within the catalog root"
         )));
@@ -2576,13 +2559,10 @@ fn metadata_json_path(field: &str) -> CatalogResult<String> {
         ));
     }
     let segments = field.split('.').collect::<Vec<_>>();
-    if segments.iter().any(|segment| {
-        segment.is_empty()
-            || segment.len() > 64
-            || !segment
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    }) {
+    if segments
+        .iter()
+        .any(|segment| segment.is_empty() || segment.len() > 64 || !crate::ids::is_safe_id(segment))
+    {
         return Err(CatalogError::InvalidCatalog(
             "Catalog metadata fields may contain ASCII letters, numbers, '_' and '-'".to_owned(),
         ));
@@ -3404,12 +3384,7 @@ fn validate_saved_view_id(id: &str) -> CatalogResult<()> {
 
 fn normalize_source_config(source: &mut CatalogSourceConfig) -> CatalogResult<()> {
     let kind = source.kind.trim();
-    if kind.is_empty()
-        || kind.len() > 64
-        || !kind
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
+    if kind.is_empty() || kind.len() > 64 || !crate::ids::is_safe_id(kind) {
         return Err(CatalogError::InvalidCatalog(
             "Catalog source kind has an invalid format".to_owned(),
         ));
@@ -3546,39 +3521,13 @@ fn configure_connection(connection: &Connection, database_path: &Path) -> Catalo
             },
         )
         .map_err(|error| map_sqlite_error(database_path, error))?;
-    connection
-        .busy_timeout(Duration::from_secs(5))
-        .map_err(|error| map_sqlite_error(database_path, error))?;
-    let journal_mode: String = connection
-        .pragma_query_value(None, "journal_mode", |row| row.get(0))
-        .map_err(|error| map_sqlite_error(database_path, error))?;
-    if !journal_mode.eq_ignore_ascii_case("wal") {
-        connection
-            .pragma_update(None, "journal_mode", "wal")
-            .map_err(|error| map_sqlite_error(database_path, error))?;
-    }
-    connection
-        .pragma_update(None, "synchronous", "normal")
-        .map_err(|error| map_sqlite_error(database_path, error))?;
-    connection
-        .pragma_update(None, "foreign_keys", true)
-        .map_err(|error| map_sqlite_error(database_path, error))?;
-    connection
-        // A facet may encounter millions of distinct values. Spill SQLite's
-        // transient GROUP BY sorter to disk instead of growing the API heap
-        // with catalog cardinality.
-        .pragma_update(None, "temp_store", "file")
-        .map_err(|error| map_sqlite_error(database_path, error))?;
-    connection
-        .pragma_update(None, "cache_size", -65_536)
-        .map_err(|error| map_sqlite_error(database_path, error))?;
-    connection
-        // Projection-heavy scanner batches dirty several indexes at once.
-        // Keep automatic checkpoints bounded (about 80 MiB at SQLite's
-        // default page size) without forcing checkpoint work into every few
-        // small scanner commits.
-        .pragma_update(None, "wal_autocheckpoint", CATALOG_WAL_AUTOCHECKPOINT_PAGES)
-        .map_err(|error| map_sqlite_error(database_path, error))?;
+    crate::store_util::configure_connection(
+        connection,
+        crate::store_util::Profile::Catalog {
+            wal_autocheckpoint_pages: CATALOG_WAL_AUTOCHECKPOINT_PAGES,
+        },
+    )
+    .map_err(|error| map_sqlite_error(database_path, error))?;
     Ok(())
 }
 
@@ -4317,37 +4266,12 @@ fn write_manifest(root: &Path, descriptor: &CatalogDescriptor) -> CatalogResult<
 }
 
 fn atomic_write(path: &Path, payload: &[u8]) -> CatalogResult<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let token = random_hex(8)?;
-    let extension = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or("json");
-    let temporary = path.with_extension(format!("{extension}.{token}.tmp"));
-    let mut file = fs::File::create(&temporary)?;
-    file.write_all(payload)?;
-    file.sync_all()?;
-    drop(file);
-    if let Err(error) = fs::rename(&temporary, path) {
-        let _ = fs::remove_file(&temporary);
-        return Err(CatalogError::Io(error));
-    }
-    Ok(())
+    Ok(crate::fsutil::write_atomic(path, payload)?)
 }
 
 fn random_hex(bytes: usize) -> CatalogResult<String> {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut buffer = vec![0; bytes];
-    getrandom::fill(&mut buffer)
-        .map_err(|error| CatalogError::Io(std::io::Error::other(error.to_string())))?;
-    let mut output = String::with_capacity(bytes * 2);
-    for byte in buffer {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    Ok(output)
+    crate::hashing::random_hex(bytes)
+        .map_err(|error| CatalogError::Io(std::io::Error::other(error.to_string())))
 }
 
 fn map_sqlite_error(path: &Path, error: rusqlite::Error) -> CatalogError {
@@ -4399,7 +4323,9 @@ fn directory_file_bytes(root: &Path) -> CatalogResult<u64> {
     while let Some(directory) = pending.pop() {
         for entry in fs::read_dir(directory)? {
             let entry = entry?;
-            let metadata = fs::symlink_metadata(entry.path())?;
+            let Some(metadata) = crate::fsutil::payload_entry_metadata(&entry.path())? else {
+                continue;
+            };
             if metadata.file_type().is_symlink() {
                 total = total.saturating_add(metadata.len());
             } else if metadata.is_dir() {
@@ -4414,7 +4340,83 @@ fn directory_file_bytes(root: &Path) -> CatalogResult<u64> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn catalog_local_image_uses_acquisition_cache_then_legacy_record_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = CatalogRegistry::new(temp.path().join("state"));
+        let mut catalog = registry
+            .create_catalog(temp.path().join("catalog"), "local images")
+            .unwrap();
+        fs::create_dir_all(catalog.root().join("images")).unwrap();
+        fs::write(catalog.root().join("images/cached.png"), b"cached").unwrap();
+        fs::write(catalog.root().join("images/original.png"), b"original").unwrap();
+        catalog
+            .append_records(&[NewCatalogRecord {
+                id: "record".to_owned(),
+                image_path: "images/original.png".to_owned(),
+                thumbnail_path: None,
+                embedding_path: None,
+                artifact_path: None,
+                metadata: serde_json::json!({"acquisition":{"cachePath":"images/cached.png"}}),
+            }])
+            .unwrap();
+        let mut record = catalog.record_by_id("record").unwrap();
+        assert_eq!(
+            catalog.resolve_local_image(&record).unwrap(),
+            catalog
+                .root()
+                .join("images/cached.png")
+                .canonicalize()
+                .unwrap()
+        );
+        record.metadata = serde_json::json!({});
+        assert_eq!(
+            catalog.resolve_local_image(&record).unwrap(),
+            catalog
+                .root()
+                .join("images/original.png")
+                .canonicalize()
+                .unwrap()
+        );
+        record.metadata = serde_json::json!({"acquisition":{"cachePath":"../outside"}});
+        assert!(
+            catalog.resolve_local_image(&record).is_err(),
+            "an unsafe explicit cache path cannot fall back to another image"
+        );
+    }
+
+    #[test]
+    fn shared_catalog_image_resolver_preserves_paths_and_rejects_traversal() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join("images")).unwrap();
+        fs::write(temp.path().join("images/image.jpg"), b"image fixture").unwrap();
+        for relative in ["images/image.jpg", "images\\image.jpg"] {
+            assert!(Catalog::resolve_local_image_under(temp.path(), relative).is_ok());
+        }
+        for relative in [
+            "../secret",
+            "/absolute",
+            "C:/absolute",
+            "images/../../secret",
+        ] {
+            assert!(Catalog::resolve_local_image_under(temp.path(), relative).is_err());
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn shared_catalog_image_resolver_rejects_symlink_escape() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("catalog");
+        fs::create_dir(&root).unwrap();
+        let outside = temp.path().join("secret");
+        fs::write(&outside, b"outside").unwrap();
+        std::os::unix::fs::symlink(outside, root.join("escape.jpg")).unwrap();
+        assert!(Catalog::resolve_local_image_under(&root, "escape.jpg").is_err());
+    }
+
     use super::*;
+    use std::time::Duration;
     use tempfile::tempdir;
 
     fn replace_curation_indexes_with_dense_v2(connection: &Connection) {

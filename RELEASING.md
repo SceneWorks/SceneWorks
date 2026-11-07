@@ -36,8 +36,10 @@ into an existing `release/X.Y.Z` branch.
 4. A failed, unpublished candidate is provisional. Its draft, tag, and
    `release/X.Y.Z` branch may be deleted and recreated after fixing
    `release/next`.
-5. Every release-only change is either already present on `main`, explicitly
-   inapplicable to `main`, or forward-ported through a separate PR.
+5. After every published release, including hotfix, patch and version-only
+   releases, merge `release/next` back into `main` through a protected PR and a
+   merge commit. Carry the released version metadata and all release-line
+   changes forward; source-equivalent fixes alone do not satisfy this requirement.
 6. Use a clean checkout. If the normal checkout has unrelated changes, use an
    isolated clone or worktree rather than stashing, discarding, or mixing them
    into release work.
@@ -84,8 +86,10 @@ gh pr create --base release/next --head hotfix/gi-<issue>
 ```
 
 Merge only after the required checks pass. Delete the hotfix branch afterward.
-If the fix did not originate on `main`, open a forward-port PR or record why the
-release-specific adaptation is not applicable there.
+For a fix-only request with no release publication, reconcile the fix on `main`
+with a forward-port PR when needed. When publishing a hotfix in the same delivery,
+use the mandatory post-release merge-back below to carry the fix and version
+bump together rather than adding a duplicate fix-only forward-port PR.
 
 ## Include an inference change
 
@@ -289,22 +293,54 @@ larger feature on `main` is ready for release, promote it into `release/next`
 through a reviewed PR and resolve any release-line differences deliberately.
 Do not bypass `release/next` by tagging the feature branch or `main`.
 
-## Merge the release back into `main`
+## Merge every published release back into `main`
 
-After publication, open a PR from `release/next` into `main`, including the version
-bump and every release-line fix. Resolve conflicts without reverting newer work
-on `main`, wait for current-head CI, and merge using a merge commit. Do not delete
-`release/next` or modify the immutable release refs.
+After publication and post-publication verification, always merge `release/next`
+back into `main`, including after hotfix, patch and version-only releases. This
+keeps main's history and version metadata current with published releases. It is
+part of the release request and needs no additional approval.
 
-Fetch the remote refs and verify that the published release commit is an ancestor
-of `origin/main`:
+Prepare and review conflict resolution locally while release builds run. Fetch
+the remote refs, record the published commit and current `release/next` source
+head, and confirm the latter contains the former. Keep the source stable while
+reconciliation completes; if it advances, review the additional changes and
+validate the actual new PR head. Check integration locally and choose the direct
+or conflict-resolution head before opening a PR. When conflict-free, create or
+reuse one PR directly from `release/next` to `main`:
 
 ```bash
-git merge-base --is-ancestor <published-release-commit> origin/main
+gh pr create --base main --head release/next
 ```
 
-If that ancestry already holds, no redundant PR is needed. Otherwise, publication
-alone is not completion: the merge-back must land and ancestry must be verified.
+Include all release-line changes and version metadata, even when the fix is
+already equivalent on main. Resolve conflicts against main's current
+architecture without reverting newer valid work or version metadata. Batch
+repairs, run affected checks, watch exact-head workflows with `gh run watch`,
+and merge with a merge commit after main's required checks pass. Do not squash,
+rebase or delete `release/next`.
+
+If local integration reveals conflicts, select the reconciliation path before
+opening a PR; replace an existing direct PR only if conflicts arise later. Do
+not merge main into `release/next` merely to resolve them. In an isolated owned
+checkout, create
+`reconcile/release-X.Y.Z-main` from current `origin/main`, merge the recorded
+release source head with a merge commit, resolve conflicts, and review/test that
+combined tree. Create or reuse the single merge-back PR from this reconciliation
+branch directly to main, closing any superseded direct PR. This is the protected
+main conflict-resolution path, not a helper PR back into `release/next`; it
+replaces the direct PR and preserves release ancestry. Merge on green exact-head
+CI, verify both recorded ancestors and version metadata, and remove only the
+short-lived reconciliation branch after success. Keep `release/next` unchanged
+by main-only development.
+
+Fetch again and verify both the published commit and the recorded merge-back
+source head are ancestors of remote main using `git merge-base --is-ancestor`.
+Verify main includes the released version bump, preserving a newer main version
+if one already exists. Record the merge-back PR, merge commit and verified main
+SHA. If that exact history and version metadata are already integrated, retain
+the existing merge evidence rather than creating an empty PR. Matching source
+trees, patch IDs or cherry-picks alone are insufficient. Published release tags
+and versioned branches stay on their original immutable release commit.
 
 ## Success criteria
 
@@ -314,6 +350,6 @@ A release is complete only when:
 - the desktop and RunPod workflows succeeded from that commit;
 - every expected desktop and updater artifact is present;
 - the GitHub Release is published;
-- the versioned release refs are treated as immutable from that point forward; and
-- the release has been merged back into `main`, with published-commit ancestry
-  verified against the fetched remote ref.
+- the post-release merge-back is verified on remote main, including the
+  published/source-head ancestry and released version metadata; and
+- the versioned release refs are treated as immutable from that point forward.

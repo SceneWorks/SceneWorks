@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { rustFacadeSource, rustFacadeSources } from "./lib/rust-facade-source.mjs";
 import { pathToFileURL } from "node:url";
 
 import {
@@ -16,6 +17,7 @@ import {
 import { routedLanes } from "./check-tier-integrity.mjs";
 import { adapterCapturableProviders } from "./stale-lane-report.mjs";
 import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
+import { validateFlux3AnchorPrerequisites } from "./lib/flux3-resource-contract.mjs";
 import {
   ROOT,
   ADAPTER_LIB_PATH,
@@ -23,6 +25,12 @@ import {
   PLAN_PATH,
   PACKAGED_SOURCES_PATH,
   PROVIDER_FAMILIES,
+  FLUX3_REPOSITORY,
+  FLUX3_REVISION,
+  FLUX3_BASE_REPOSITORY,
+  FLUX3_BASE_REVISION,
+  flux3Conversion,
+  hashAnchorInventory,
   SDXL_COMPONENTS,
   SDXL_TIER_MAIN_TENSORS,
   MAGE_COMPONENTS,
@@ -61,6 +69,7 @@ import {
   readSdxlCandleRoutes,
   sdxlCandleRouteDrift,
   parseDeclaredStrategySupport,
+  RuntimeDependentStrategySupport,
   readDeclaredStrategySupport,
   compatibilityDefaultSupport,
   readCompatibilityDefaultSupport,
@@ -155,11 +164,14 @@ import {
   LTX25_LANE_PROVIDERS,
   parseWatchdogHardStop,
   planAnchor,
+  parseAnchorKey,
+  validatePlan,
 } from "./memory-calibration-harness.mjs";
 
 const execFileAsync = promisify(execFile);
 const REVISION = "0123456789abcdef0123456789abcdef01234567";
 const UPSTREAM = "fedcba9876543210fedcba9876543210fedcba98";
+const DOWNLOAD_REVISION = "abcdef0123456789abcdef0123456789abcdef01";
 
 function fakeModels() {
   return [
@@ -666,6 +678,194 @@ test("an Iris cell is runnable only on the files its own task loads", async () =
   }
 });
 
+// Enabling/weights-free tests only: these prove producer reach and artifact binding,
+// NOT MLX execution, measurement quality or any physical memory number.
+test("FLUX3 native producers bind the pinned original and exact local backend packages", async (t) => {
+  assert.equal(flux3Conversion("candle", "q4"), "flux3-candle-ggml-q4_1-v1");
+  assert.equal(flux3Conversion("candle", "q8"), "flux3-candle-ggml-q8_0-v1");
+  assert.equal(flux3Conversion("mlx", "q4"), "flux3-mlx-affine-q4-g64-v1");
+  assert.equal(flux3Conversion("mlx", "q8"), "flux3-mlx-affine-q8-g64-v1");
+  const hub = await fakeHub([[FLUX3_REPOSITORY, FLUX3_REVISION]], { empty: true });
+  const original = snapshotPath(hub, FLUX3_REPOSITORY, FLUX3_REVISION);
+  const data = await mkdtemp(path.join(tmpdir(), "flux3-producer-"));
+  t.after(() => rm(data, { recursive: true, force: true }));
+  const prior = Object.fromEntries(["SCENEWORKS_DATA_DIR", "SCENEWORKS_FLUX3_KLEIN_DERIVED_ROOT"].map(k => [k, process.env[k]]));
+  t.after(() => { for (const [k, value] of Object.entries(prior)) { if (value === undefined) delete process.env[k]; else process.env[k] = value; } });
+  delete process.env.SCENEWORKS_DATA_DIR;
+  delete process.env.SCENEWORKS_FLUX3_KLEIN_DERIVED_ROOT;
+  const models = [{ id: "flux3_klein", downloads: [{ provider: "huggingface", repo: FLUX3_REPOSITORY, revision: FLUX3_REVISION, variant: "bf16", files: [] }] }];
+  const classify = (backend, tier) => classifyAnchor(`flux3_klein:${tier}:${backend}`, { provider: "flux3_klein" }, { models, backend, hubs: [hub], current: new Map(), captured: new Map() });
+  const stage = async (root, files) => { for (const file of files) { await mkdir(path.dirname(path.join(root, file)), { recursive: true }); await writeFile(path.join(root, file), "fixture-not-weights"); } };
+  assert.equal((await classify("mlx", "q4")).status, "weights_missing");
+  await stage(original, ["config.json", "model.safetensors", "ae.safetensors", "text_encoder/config.json", "text_encoder/tokenizer.json", "text_encoder/tokenizer_config.json", "text_encoder/model.safetensors"]);
+  for (const backend of ["candle", "mlx"]) {
+    assert.equal((await classify(backend, "bf16")).status, "runnable");
+    const absent = await classify(backend, "q4");
+    assert.equal(absent.status, "weights_missing");
+    assert.match(absent.reason, /SCENEWORKS_FLUX3_KLEIN_DERIVED_ROOT/);
+  }
+  process.env.SCENEWORKS_DATA_DIR = data;
+  const derived = path.join(data, "models", "derived", "flux3_klein");
+  for (const tier of ["q4", "q8"]) {
+    // A tempting snapshot/<tier> must NOT satisfy the local derivation.
+    await stage(path.join(original, tier), ["config.json", "model.safetensors", "flux3-conversion-receipt.json", "LICENSE.md", "NOTICE.md"]);
+    for (const backend of ["candle", "mlx"]) {
+      assert.equal((await classify(backend, tier)).status, "weights_missing");
+      const conversion = flux3Conversion(backend, tier);
+      const root = path.join(derived, tier, conversion);
+      await stage(root, ["config.json", "model.safetensors", "flux3-conversion-receipt.json", "LICENSE.md", "NOTICE.md"]);
+      const row = await classify(backend, tier);
+      assert.equal(row.status, "runnable", row.reason);
+      assert.equal(row.env.SCENEWORKS_FLUX3_KLEIN_ROOT, root);
+      assert.equal(row.env.SCENEWORKS_FLUX3_KLEIN_ORIGINAL_ROOT, original);
+      assert.equal(row.env.SCENEWORKS_FLUX3_KLEIN_REPOSITORY, FLUX3_REPOSITORY);
+      assert.equal(row.env.SCENEWORKS_FLUX3_KLEIN_REVISION, FLUX3_REVISION);
+      assert.equal(row.artifact.variant, tier);
+      assert.ok(row.inventoryFiles.includes("flux3-conversion-receipt.json"));
+    }
+  }
+  process.env.SCENEWORKS_FLUX3_KLEIN_DERIVED_ROOT = path.join(data, "explicit-missing");
+  assert.equal((await classify("candle", "q4")).status, "weights_missing", "explicit root overrides the data-dir default");
+  delete process.env.SCENEWORKS_FLUX3_KLEIN_DERIVED_ROOT;
+  // Inventory provenance includes real external files, not merely package metadata.
+  const bound = await classify("candle", "q4");
+  const first = await hashAnchorInventory(bound);
+  const reordered = await hashAnchorInventory({ ...bound, externalComponents: [...bound.externalComponents].reverse() });
+  assert.equal(first.sha256, reordered.sha256);
+  assert.equal(first.bytes, reordered.bytes);
+  assert.equal(first.files, 10, "five package files, four encoder files, one AE file");
+  await writeFile(path.join(original, "text_encoder/model.safetensors"), "changed-encoder-bytes");
+  const encoderChanged = await hashAnchorInventory(bound);
+  assert.notEqual(encoderChanged.sha256, first.sha256);
+  await writeFile(path.join(original, "ae.safetensors"), "changed-ae-bytes");
+  assert.notEqual((await hashAnchorInventory(bound)).sha256, encoderChanged.sha256);
+  // External components remain mandatory even for a whole converted package.
+  await rm(path.join(original, "ae.safetensors"));
+  await assert.rejects(hashAnchorInventory(bound), /ENOENT/);
+  const missingAe = await classify("candle", "q4");
+  assert.equal(missingAe.status, "weights_missing");
+  assert.match(missingAe.reason, /ae.safetensors/);
+  await stage(original, ["ae.safetensors"]);
+  await writeFile(path.join(original, "text_encoder/model.safetensors.index.json"), JSON.stringify({ weight_map: { a: "missing-shard.safetensors" } }));
+  const partial = await classify("mlx", "q8");
+  assert.equal(partial.status, "weights_missing");
+  assert.match(partial.reason, /missing-shard/);
+});
+
+test("FLUX3 base probes retain base identity and refuse unpinned conversions on both lanes", async (t) => {
+  const data = await mkdtemp(path.join(tmpdir(), "flux3-base-unverified-"));
+  t.after(() => rm(data, { recursive: true, force: true }));
+  const prior = Object.fromEntries(["SCENEWORKS_DATA_DIR", "SCENEWORKS_FLUX3_KLEIN_DERIVED_ROOT"].map(key => [key, process.env[key]]));
+  t.after(() => { for (const [key, value] of Object.entries(prior)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
+  process.env.SCENEWORKS_DATA_DIR = data;
+  delete process.env.SCENEWORKS_FLUX3_KLEIN_DERIVED_ROOT;
+  const hub = await fakeHub([[FLUX3_REPOSITORY, FLUX3_REVISION]], { empty: true });
+  const models = [{ id: "flux3_klein_base", downloads: [{ provider: "huggingface", repo: FLUX3_BASE_REPOSITORY, revision: FLUX3_BASE_REVISION, variant: "bf16", files: [] }] }];
+  const classify = (backend, tier) => classifyAnchor(`flux3_klein_base:${tier}:${backend}`, { provider: "flux3_klein_base" }, { models, backend, hubs: [hub], current: new Map(), captured: new Map() });
+  const original = snapshotPath(hub, FLUX3_BASE_REPOSITORY, FLUX3_BASE_REVISION);
+  const stage = async (root, files) => { for (const file of files) { await mkdir(path.dirname(path.join(root, file)), { recursive: true }); await writeFile(path.join(root, file), "synthetic-not-weights"); } };
+  for (const backend of ["candle", "mlx"]) {
+    const missing = await classify(backend, "bf16");
+    assert.equal(missing.status, "weights_missing");
+    assert.match(missing.reason, /flux-3-image-klein-base.*403/);
+    assert.ok(missing.roots.some(row => row.path === original));
+  }
+  await stage(original, ["config.json", "model.safetensors", "ae.safetensors", "text_encoder/config.json", "text_encoder/tokenizer.json", "text_encoder/tokenizer_config.json", "text_encoder/model.safetensors"]);
+  for (const backend of ["candle", "mlx"]) {
+    const row = await classify(backend, "bf16");
+    assert.equal(row.status, "runnable", row.reason); // Shape probe only, NOT a render or byte proof.
+    assert.equal(row.env.SCENEWORKS_FLUX3_KLEIN_REPOSITORY, FLUX3_BASE_REPOSITORY);
+    assert.equal(row.env.SCENEWORKS_FLUX3_KLEIN_REVISION, FLUX3_BASE_REVISION);
+    assert.equal(row.env.SCENEWORKS_FLUX3_KLEIN_ORIGINAL_ROOT, original);
+    for (const tier of ["q4", "q8"]) {
+      // A self-reported conversion receipt and plausible files cannot replace independent pins.
+      const unverified = path.join(data, "models", "derived", "flux3_klein_base", tier, flux3Conversion(backend, tier));
+      await stage(unverified, ["config.json", "model.safetensors", "flux3-conversion-receipt.json", "LICENSE.md", "NOTICE.md"]);
+      const missing = await classify(backend, tier);
+      assert.equal(missing.status, "weights_missing");
+      assert.match(missing.reason, /verified conversion output size and SHA-256 pins.*403/);
+    }
+  }
+  for (const tier of ["fp8r", "nvfp4"]) {
+    const root = path.join(original, "variants", tier);
+    await stage(root, ["config.json", "model.safetensors", "hf_quant_config.json"]);
+    const torn = await classify("candle", tier);
+    assert.equal(torn.status, "weights_missing");
+    assert.match(torn.reason, /manifest.json/);
+    await stage(root, ["manifest.json"]);
+    assert.equal((await classify("candle", tier)).status, "runnable"); // Probe only.
+  }
+});
+
+test("FLUX3 producer dispatch: all sixteen canonical anchors are published active rows, still unmeasured", async () => {
+  const plan = await readPlan();
+  const artifactPrerequisites = JSON.parse(await readFile(path.join(ROOT, "docs/testing/sc-26243-terminal-artifact-prerequisites.json"), "utf8"));
+  const classification = validateFlux3AnchorPrerequisites({ models: await readManifestModels(), calibrationPlan: plan, artifactPrerequisites });
+  assert.equal(classification.requiredCanonicalAnchors, 16);
+  assert.equal(classification.activeCanonicalAnchors, 16);
+  assert.equal(classification.blockedArtifactCoordinates.length, 0);
+  assert.equal(classification.terminalAcceptance, "NOT_PROVEN");
+  const blocked = new Map(artifactPrerequisites.obligations.map(row => [row.coordinate, row]));
+  const activated = new Map(artifactPrerequisites.activated.map(row => [row.coordinate, row]));
+  for (const tier of ["fp8r", "nvfp4"]) {
+    const key = `flux3_klein:${tier}:candle`;
+    assert.equal(anchorParts(key).tier, tier);
+    assert.equal(parseAnchorKey(key).tier, tier);
+    assert.equal(planAnchor(plan, key).target.tier, tier);
+  }
+  for (const tier of ["q3", "fp8", "fp8r_extra", "nvfp4_extra", "dense"]) {
+    const key = `flux3_klein:${tier}:candle`;
+    assert.throws(() => anchorParts(key), /not an anchor key/);
+    assert.throws(() => parseAnchorKey(key), /anchor key/);
+    const invalid = { ...plan, anchors: { [key]: plan.anchors["flux3_klein:bf16:candle"] } };
+    assert.throws(() => validatePlan(invalid), /anchor plan is invalid/);
+  }
+  for (const backend of ["candle", "mlx"]) {
+    const relative = `crates/sceneworks-memory-adapter/src/bin/${backend}.rs`;
+    const source = await rustFacadeSource(path.join(ROOT, relative));
+    assert.ok(adapterCapturableProviders(source, relative).includes("flux3_klein"), `${backend} must dispatch to a real modular producer`);
+    const module = await readFile(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${backend}_flux3.rs`), "utf8");
+    assert.match(module, /catalog\.media\(\)|\.media\(\)/);
+    assert.match(module, /\.load\(plan\.checkpoint\.provider, &spec\)/);
+    assert.match(module, /common::render\(&plan, generator\.as_ref\(\)/);
+    assert.ok(adapterCapturableProviders(source, relative).includes("flux3_klein_base"), `${backend} must dispatch the separate base provider`);
+    const base = plan.anchors[`flux3_klein_base:bf16:${backend}`];
+    assert.equal(base.provider, "flux3_klein_base");
+    assert.equal(base.calibrationFingerprint, `flux3-klein-base-${backend}-cfg-source-v1`);
+    assert.equal(base.fixture, `flux3-klein-base-${backend}-bf16-1024-seed26243-step50`);
+    assert.deepEqual(base.geometry, { width: 1024, height: 1024, batch: 1, frames: 1 });
+    assert.equal(base.loadShape, "eager_materialization");
+    for (const tier of ["bf16", "q4", "q8", ...(backend === "candle" ? ["fp8r", "nvfp4"] : [])]) {
+      const row = plan.anchors[`flux3_klein:${tier}:${backend}`];
+      assert.ok(row);
+      assert.equal(row.fixture, `flux3-klein-${backend}-${tier}-1024-seed26243-step16`);
+      assert.deepEqual(row.geometry, { width: 1024, height: 1024, batch: 1, frames: 1 });
+      assert.equal(row.provider, "flux3_klein");
+      assert.equal(row.loadShape, "eager_materialization");
+      const baseKey = `flux3_klein_base:${tier}:${backend}`;
+      const activeBaseTier = plan.anchors[baseKey];
+      const blockedBaseTier = blocked.get(baseKey);
+      assert.notEqual(Boolean(activeBaseTier), Boolean(blockedBaseTier), `${baseKey} must be in exactly one required inventory`);
+      assert.equal(blockedBaseTier, undefined, "every base tier is published");
+      // The base quants were artifact prerequisites; each is activated by its genuine conversion
+      // evidence, which stays unmeasured.
+      assert.equal(activated.has(baseKey), ["q4", "q8"].includes(tier));
+      if (activated.has(baseKey)) assert.equal(activated.get(baseKey).measurement, "NOT_RUN");
+      const baseTier = activeBaseTier ?? blockedBaseTier?.plannedAnchor;
+      assert.ok(baseTier, `base ${backend}:${tier} is a REQUIRED canonical anchor`);
+      assert.equal(baseTier.provider, "flux3_klein_base");
+      assert.equal(baseTier.fixture, `flux3-klein-base-${backend}-${tier}-1024-seed26243-step50`);
+      assert.deepEqual(baseTier.geometry, row.geometry);
+      const suffix = tier === "bf16" ? "" : tier === "q4" || tier === "q8"
+        ? backend === "candle" ? `-ggml-${tier === "q4" ? "q4-1" : "q8-0"}` : `-mlx-affine-${tier}-g64`
+        : `-${tier}`;
+      assert.equal(baseTier.calibrationFingerprint, `flux3-klein-base-${backend}-cfg-source-v1${suffix}`);
+      if (activeBaseTier) assert.equal(planAnchor(plan, baseKey).target.modelId, "flux3_klein_base");
+      else assert.equal(plan.anchors[baseKey], undefined, "blocked artifacts cannot enter the executable anchor plan");
+    }
+  }
+});
+
 // sc-24217. A Supra2 cell binds the pinned upstream snapshot ROOT (the convert's one source file,
 // never a tier folder) and BOTH pinned co-requisites by their exact files; it is runnable on both
 // lanes only when all three are whole, and exports exactly the env family both arms read.
@@ -1140,7 +1340,7 @@ test("a Lightning cell whose distill snapshot lacks the pinned LoRA file is weig
   const refused = await classifyAnchor("qwen_image_edit_2511_lightning:q4:mlx", planned, context(holed));
   assert.equal(refused.status, "weights_missing", refused.reason);
   assert.match(refused.reason, new RegExp(lora.file.replaceAll(".", "\\.")), "the reason names the file the arm opens");
-  assert.match(refused.reason, new RegExp(snapshotPath(holed, lora.repo, lora.revision)), "and the root it looked in");
+  assert.ok(refused.reason.includes(snapshotPath(holed, lora.repo, lora.revision)), "and the literal root it looked in");
   // The base id shares the tier root and attaches no LoRA, so it is untouched by the refusal.
   assert.equal((await classifyAnchor("qwen_image_edit_2511:q4:mlx", planned, context(holed))).status, "runnable");
   // And with the pinned file staged, the same cell is runnable — the probe is the file, not the name.
@@ -1190,7 +1390,8 @@ test("an InstantID cell whose staged identity stack is missing a file is weights
   await stageSdxlTierMainTensors(hub, "SceneWorks/realvisxl-mlx", REVISION, "q4");
   const weights = await mkdtemp(path.join(tmpdir(), "instantid-weights-"));
   const controlnet = await mkdtemp(path.join(tmpdir(), "instantid-controlnet-"));
-  const previous = { ...process.env };
+  const instantIdEnvKeys = ["SCENEWORKS_INSTANTID_WEIGHTS", "SCENEWORKS_INSTANTID_CONTROLNET"];
+  const previous = Object.fromEntries(instantIdEnvKeys.map(key => [key, process.env[key]]));
   process.env.SCENEWORKS_INSTANTID_WEIGHTS = weights;
   process.env.SCENEWORKS_INSTANTID_CONTROLNET = controlnet;
   try {
@@ -1211,7 +1412,11 @@ test("an InstantID cell whose staged identity stack is missing a file is weights
     assert.equal(row.env.SCENEWORKS_INSTANTID_WEIGHTS, weights);
     assert.equal(row.env.SCENEWORKS_INSTANTID_CONTROLNET, controlnet);
   } finally {
-    process.env = previous;
+    // Preserve Windows environment-key semantics; restore only this fixture's overrides.
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 });
 
@@ -1407,7 +1612,7 @@ test("the extra artifacts declared per family are the ones the adapter source na
   assert.ok(instantid.every((entry) => (entry.files ?? []).length > 0), "and each declares what it must carry");
 
   const mlxLtx25 = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/mlx_ltx25.rs"), "utf8");
-  const candle = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/candle.rs"), "utf8");
+  const candle = await rustFacadeSource(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/candle.rs"));
   assert.equal(/const DEV_ADAPTER: &str = "([^"]+)"/.exec(mlxLtx25)?.[1], LTX25_DEV_REFINEMENT_LORA);
   assert.equal(
     /const LTX25_DISTILL_LORA_RELATIVE_PATH: &str =\s*"([^"]+)"/.exec(candle)?.[1],
@@ -1416,13 +1621,19 @@ test("the extra artifacts declared per family are the ones the adapter source na
   );
   assert.match(mlxLtx25, new RegExp(`join\\("${LTX25_ENHANCER_DIR}"\\)`), "the MLX arm still opens the enhancer by that name");
 
-  const mlx = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/mlx.rs"), "utf8");
+  const mlx = await rustFacadeSource(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/mlx.rs"));
   assert.equal(
     /pub const QWEN_EDIT_LIGHTNING_FILE: &str =\s*"([^"]+)"/.exec(lib)?.[1],
     QWEN_EDIT_LIGHTNING_LORA.file,
     "the declared distill LoRA is the file the arm joins",
   );
-  assert.match(mlx, /join\(protocol::QWEN_EDIT_LIGHTNING_FILE\)/);
+  const common = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/adapter_common.rs"), "utf8");
+  assert.match(lib, /mod adapter_common;[\s\S]*pub use adapter_common::\*/);
+  assert.match(common, /join\(crate::QWEN_EDIT_LIGHTNING_FILE\)/);
+  for (const lane of [mlx, candle]) {
+    assert.match(lane, /use protocol::qwen_edit_lightning_adapter;/);
+    assert.match(lane, /qwen_edit_lightning_adapter\(lightning\)\?/);
+  }
 });
 
 // The catalog's `physical` flag and the harness's receipt predicate are two spellings of one rule,
@@ -1508,10 +1719,14 @@ test("every MLX adapter arm that emits a provider sourceCapture is declared, and
   ).sort();
   assert.ok(members.length >= 2, "expected the mlx bin plus its #[path] arm modules");
   const sources = new Map();
+  const facade = await rustFacadeSources(path.join(binDir, "mlx.rs"));
+  const globOwners = new Set(facade.slice(1).map((file) => path.basename(file.path)));
   for (const name of members) {
-    sources.set(name, stripRustTestModules(stripRustCommentsForScan(
-      await readFile(path.join(binDir, name), "utf8"),
-    )));
+    if (globOwners.has(name)) continue;
+    const text = name === "mlx.rs"
+      ? facade.map((file) => file.source).join("\n")
+      : await readFile(path.join(binDir, name), "utf8");
+    sources.set(name, stripRustTestModules(stripRustCommentsForScan(text)));
   }
   // Every sibling is indexed under the module path the bin calls it by, so a NEW arm module that
   // emits is walked rather than silently unreachable.
@@ -1629,7 +1844,7 @@ test("every family's derived env names are read back by each arm it declares", a
   const binFiles = (await readdir(binDir)).filter((name) => name.endsWith(".rs"));
   for (const backend of ["mlx", "candle"]) {
     const members = binFiles.filter(
-      (name) => name === `${backend}.rs` || name.startsWith(`${backend}_`),
+      (name) => name === `${backend}.rs` || name.startsWith(`${backend}_`) || name === "flux3_common.rs",
     );
     assert.ok(members.length >= 2, `${backend}: expected the bin plus its arm modules`);
     lanes.set(
@@ -1639,6 +1854,10 @@ test("every family's derived env names are read back by each arm it declares", a
       ),
     );
   }
+  const common = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/adapter_common.rs"), "utf8");
+  const commonProduction = common.slice(0, common.indexOf("#[cfg(test)]"));
+  assert.ok(commonProduction.includes("fn qwen_edit_artifact_source("));
+  assert.match(commonProduction, /lightning\.then\(qwen_edit_lightning_source\)/);
   let checked = 0;
   for (const [id, family] of Object.entries(PROVIDER_FAMILIES)) {
     // The LTX-2.5 families carry no env family at all: the harness binds their snapshot root
@@ -1681,10 +1900,16 @@ test("every family's derived env names are read back by each arm it declares", a
         ...envFamilies.filter((env) => env !== family.env),
       ];
       for (const env of laneEnvFamilies) {
+        let fieldSource = source;
+        if (["QWEN_IMAGE_EDIT", "QWEN_EDIT_LIGHTNING_LORA"].includes(env)) {
+          assert.match(source, /protocol::qwen_edit_artifact_source\(arm\.lightning\)/,
+            `${arm} must consume the shared Qwen artifact source`);
+          fieldSource = commonProduction;
+        }
         for (const suffix of ["REPOSITORY", "REVISION", "ROOT"]) {
           const name = `SCENEWORKS_${env}_${suffix}`;
           assert.ok(
-            source.includes(`"${name}"`),
+            fieldSource.includes(`"${name}"`),
             `${arm}.rs never reads ${name}, which ${id} exports into it`,
           );
           checked += 1;
@@ -1797,8 +2022,8 @@ test("every sana/chroma env family and repository is the one the adapter binarie
     [...lib.matchAll(/pub const ([A-Z0-9_]+_REPOSITORY): &str =\s*"([^"]+)";/g)].map((match) => [match[2], match[1]]),
   );
   const binaries = {
-    mlx: await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/mlx.rs"), "utf8"),
-    candle: await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/candle.rs"), "utf8"),
+    mlx: await rustFacadeSource(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/mlx.rs")),
+    candle: await rustFacadeSource(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/candle.rs")),
   };
   const family = (id) => PROVIDER_FAMILIES[id];
   const expected = new Set(
@@ -2039,10 +2264,15 @@ async function packagedSourceFixture() {
   await mkdir(path.join(root, path.dirname(PACKAGED_SOURCES_PATH)), { recursive: true });
   const source = await readFile(path.join(ROOT, PACKAGED_SOURCES_PATH), "utf8");
   await writeFile(path.join(root, PACKAGED_SOURCES_PATH), source);
-  // CI_IMPACT: preserve the three existing formatter checks now that memory_anchor has a child
-  // module. This copies source only; it adds no build, test cases or model execution.
-  const endpointModule = "crates/sceneworks-core/src/sdxl_cuda_memory_endpoints.rs";
-  await writeFile(path.join(root, endpointModule), await readFile(path.join(ROOT, endpointModule)));
+  // CI_IMPACT: preserve the three existing formatter checks with the actual module tree.
+  // Copy source only; this adds no builds, test cases or model execution.
+  for (const child of [
+    "crates/sceneworks-core/src/sdxl_cuda_memory_endpoints.rs",
+    "crates/sceneworks-core/src/memory_anchor/tests.rs",
+  ]) {
+    await mkdir(path.join(root, path.dirname(child)), { recursive: true });
+    await writeFile(path.join(root, child), await readFile(path.join(ROOT, child)));
+  }
   await writeFile(
     path.join(root, "rustfmt.toml"),
     await readFile(path.join(ROOT, "rustfmt.toml"), "utf8"),
@@ -3334,7 +3564,7 @@ pub fn load_i2v_14b(spec: &LoadSpec) -> Result<Box<dyn Generator>> {
 // binding a component the engine never sees, so the two lists are proven equal here.
 test("the staged SDXL component env vars agree between the catalog and the candle adapter", async () => {
   const adapterEnvs = async (binary) => {
-    const source = await readFile(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${binary}.rs`), "utf8");
+    const source = await rustFacadeSource(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${binary}.rs`));
     return [...new Set([...source.matchAll(/"(SCENEWORKS_SDXL_COMPONENT_[A-Z0-9_]+)"/g)].map((match) => match[1]))];
   };
   const declared = await adapterEnvs("candle");
@@ -3634,8 +3864,8 @@ test("every sensenova env family and repository is the one the adapter binaries 
     [...lib.matchAll(/pub const ([A-Z0-9_]+_REPOSITORY): &str =\s*"([^"]+)";/g)].map((match) => [match[2], match[1]]),
   );
   const binaries = {
-    mlx: await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/mlx.rs"), "utf8"),
-    candle: await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/candle.rs"), "utf8"),
+    mlx: await rustFacadeSource(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/mlx.rs")),
+    candle: await rustFacadeSource(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/candle.rs")),
   };
   let checked = 0;
   for (const id of SENSENOVA_FAMILY) {
@@ -3676,12 +3906,12 @@ test("every sensenova env family and repository is the one the adapter binaries 
 test("an anchor row plans the lane's default rung unless the manifest exempts it", async (t) => {
   const plan = await readPlan();
   const models = new Map((await readManifestModels()).map((model) => [model.id, model]));
-  // sc-22736: the SECOND derived source. A provider whose contract simply does not IMPLEMENT the
+  // sc-22736: retained concrete surface evidence. A provider whose contract does not IMPLEMENT the
   // lane default — Candle SCAIL-2 publishes `Resident` alone, `Missing` rather than structurally
   // inapplicable, so no manifest exemption is honest — is read off the checked-in engine
   // capability dump, which records every contract's `implementedRungs` per (tier, load shape) at
-  // the pin. Absence from the dump is NOT evidence: a row that overrides a provider the dump does
-  // not know falls through to the third source below, and is refused if that cannot speak either.
+  // dump's recorded pin. Current readable source takes precedence below; the dump can answer when
+  // that declaration depends on a concrete surface. Absence from either is not support evidence.
   const dumps = new Map();
   for (const backend of ["mlx", "candle"]) {
     const dump = JSON.parse(
@@ -3699,8 +3929,8 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
     if (surfaces.length === 0) return null;
     return surfaces.every((surface) => !surface.implementedRungs.includes(fallbackRung));
   };
-  // sc-22736, pin 8a65db2a: the THIRD derived source, consulted only where the dump has no surface
-  // to offer. `candle-gen-scail2` registers a memory strategy WITHOUT a weights-free surface
+  // sc-22736, pin 8a65db2a: the pinned declaration also covers providers with no dump surface.
+  // `candle-gen-scail2` registers a memory strategy WITHOUT a weights-free surface
   // resolver, so `memory_contract_surfaces()` — and therefore capabilities.candle.json — never sees
   // it; no regeneration at any pin would change that. Its `build_contract` does declare the support
   // per rung, and the anchor loader closure already names that file as this (model, lane)'s
@@ -3710,7 +3940,15 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
   const closures = JSON.parse(await readFile(path.join(ROOT, "config/anchor-loader-closures.json"), "utf8"));
   const declaredRefusesDefault = async (backend, modelId, fallbackRung) => {
     const support = await readDeclaredStrategySupport(modelId, backend, closures);
-    return support === null ? null : support(fallbackRung) !== "Implemented";
+    if (support === null) return null;
+    try {
+      return support(fallbackRung) !== "Implemented";
+    } catch (error) {
+      // A parsed condition depending on the concrete surface cannot answer statically.
+      // Unreadable source and every other error still fail closed.
+      if (!(error instanceof RuntimeDependentStrategySupport)) throw error;
+      return null;
+    }
   };
   let overridden = 0;
   let candleExempt = 0;
@@ -3725,11 +3963,14 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
     const manifestExempt = Object.hasOwn(exemptions, "staged_residency");
     const fallbackForDump = ANCHOR_STRATEGY[backend].rung;
     const judged = !manifestExempt && fallbackForDump === "staged_residency";
-    let contractRefusesDefault = judged ? dumpRefusesDefault(backend, anchor, tier, fallbackForDump) : false;
-    if (judged && contractRefusesDefault === null) {
-      const declared = await declaredRefusesDefault(backend, modelId, fallbackForDump);
-      if (declared !== null) declaredEvidence += 1;
-      contractRefusesDefault = declared;
+    // A readable declaration at the pinned source is current contract evidence. Capability
+    // dumps retain their measured source identity and can predate newly implemented rungs.
+    // They remain a fallback when the source has no answer; unreadable declarations still throw.
+    let contractRefusesDefault = false;
+    if (judged) {
+      contractRefusesDefault = await declaredRefusesDefault(backend, modelId, fallbackForDump);
+      if (contractRefusesDefault !== null) declaredEvidence += 1;
+      else contractRefusesDefault = dumpRefusesDefault(backend, anchor, tier, fallbackForDump);
     }
     // sc-24217: the FOURTH source, and only ever a justification for an override that is already
     // planned — never a demand for one. Candle Supra2-IMG registers a resident-only witness (not in
@@ -3870,6 +4111,8 @@ test("the engine's strategy declaration is parsed per rung, and an unreadable sh
   assert.equal(support("resident"), "Implemented");
   assert.equal(support("staged_residency"), "Missing");
   assert.equal(support("bounded_decode"), "Missing");
+  assert.throws(() => parseDeclaredStrategySupport(
+    shipped.replace("            })", "            }.with_support(runtime_flag()))"), "builder.rs"), /cannot\s+read/);
   // No declaration at all: null, never "implements everything".
   assert.equal(parseDeclaredStrategySupport("fn build_contract() {}", "fixture.rs"), null);
   // MUTATION: the same file after an upstream refactor this parser does not know. It must throw —
@@ -4015,7 +4258,8 @@ fn build_contract() -> MemoryContract {
     "guarded.rs",
   );
   assert.equal(guarded("resident"), "Implemented");
-  assert.throws(() => guarded("bounded_transformer_residency"), /runtime condition/);
+  assert.throws(() => guarded("bounded_transformer_residency"), error =>
+    error instanceof RuntimeDependentStrategySupport && /runtime condition/.test(error.message));
 
   // The same for the if/else form with a compound condition (`candle-gen-sdxl`): the rungs the
   // condition decides statically still resolve, and only the gated one refuses.
@@ -4039,7 +4283,79 @@ fn build_contract() -> MemoryContract {
   assert.equal(surfaceGated("bounded_transformer_residency"), "Missing");
   assert.equal(surfaceGated("resident"), "Implemented");
   assert.equal(surfaceGated("bounded_decode"), "Implemented");
-  assert.throws(() => surfaceGated("staged_residency"), /runtime condition|not about the strategy/);
+  assert.throws(() => surfaceGated("staged_residency"), error =>
+    error instanceof RuntimeDependentStrategySupport && /runtime condition|not about the strategy/.test(error.message));
+  assert.throws(() => parseDeclaredStrategySupport(
+    `strategies: MemoryStrategy::ALL.into_iter().map(|strategy| MemoryStrategyCapability {
+      strategy, support: if surface === SdxlSurface::Bespoke {
+        MemoryStrategySupport::Missing
+      } else { MemoryStrategySupport::Implemented },
+      parameters: MemoryParameterRanges::default(),
+    }).collect(),`, "malformed.rs")("staged_residency"), error =>
+    !(error instanceof RuntimeDependentStrategySupport) && /cannot\s+read/.test(error.message));
+});
+
+test("strategy declarations follow transparent helpers and immutable block-local support", () => {
+  const modular = `
+fn strategies_for(streamable: bool) -> Vec<MemoryStrategyCapability> {
+    MemoryStrategy::ALL.into_iter().map(|strategy| {
+        let mut parameters = MemoryParameterRanges::default();
+        let support = match strategy {
+            MemoryStrategy::BoundedTransformerResidency if !streamable => MemoryStrategySupport::Missing,
+            _ => MemoryStrategySupport::Implemented,
+        };
+        match strategy {
+            MemoryStrategy::BoundedTransformerResidency if streamable => {
+                parameters.transformer_window_sizes = vec![1];
+            }
+            _ => {}
+        }
+        MemoryStrategyCapability { strategy, support, parameters }
+    }).collect()
+}
+fn strategies() -> Vec<MemoryStrategyCapability> { strategies_for(false) }
+fn contract() -> MemoryProviderContract { MemoryProviderContract { strategies: strategies() } }
+`;
+  const support = parseDeclaredStrategySupport(modular, "modular.rs");
+  const unreadableError = error => !(error instanceof RuntimeDependentStrategySupport)
+    && /cannot\s+read/.test(error.message);
+  for (const rung of ["resident", "staged_residency", "bounded_decode", "bounded_attention"]) {
+    assert.equal(support(rung), "Implemented");
+  }
+  assert.equal(support("bounded_transformer_residency"), "Missing");
+  assert.equal(parseDeclaredStrategySupport(modular.replace("strategies_for(false)", "strategies_for(true)"), "enabled.rs")("bounded_transformer_residency"), "Implemented");
+  const delegated = modular.replace("{ strategies_for(false) }", "{ delegated(false) }")
+    + "\nfn delegated(enabled: bool) -> Vec<MemoryStrategyCapability> { strategies_for(enabled) }";
+  assert.equal(parseDeclaredStrategySupport(delegated, "delegated.rs")("bounded_transformer_residency"), "Missing");
+  // No local literal decides an external flag: keep the existing explicit ambiguity refusal.
+  assert.throws(() => parseDeclaredStrategySupport(modular.replace("strategies_for(false)", "strategies_for(runtime_flag())"), "runtime.rs")("bounded_transformer_residency"), /runtime condition/);
+  assert.throws(() => parseDeclaredStrategySupport(modular.replace("let mut parameters", "let streamable = runtime_flag();\n        let mut parameters"), "flag-shadow.rs")("bounded_transformer_residency"), /runtime condition/);
+  assert.throws(() => parseDeclaredStrategySupport(modular.replace("let support =", "let mut support ="), "mutable.rs"), /cannot\s+read/);
+  assert.throws(() => parseDeclaredStrategySupport(modular.replace("        match strategy {", "        support = MemoryStrategySupport::Missing;\n        match strategy {"), "assignment.rs"), /cannot\s+read/);
+  assert.throws(() => parseDeclaredStrategySupport(modular.replace("        MemoryStrategyCapability { strategy, support, parameters }", "        let support = MemoryStrategySupport::Missing;\n        MemoryStrategyCapability { strategy, support, parameters }"), "shadow.rs"), /cannot\s+read/);
+  assert.throws(() => parseDeclaredStrategySupport(modular.replace("fn strategies_for(", "fn renamed("), "missing.rs"), unreadableError);
+  assert.throws(() => parseDeclaredStrategySupport(modular.replace("strategies_for(false)", "strategies_for(false, true)"), "arity.rs"), unreadableError);
+  assert.throws(() => parseDeclaredStrategySupport(modular.replace("{ strategies_for(false) }", "{ strategies() }"), "cycle.rs"), unreadableError);
+  assert.throws(() => parseDeclaredStrategySupport(modular.replace("{ strategy, support, parameters }", "{ strategy, support, parameters"), "unbalanced.rs"), unreadableError);
+  assert.throws(() => parseDeclaredStrategySupport(modular.replace("strategy, support, parameters", "strategy, support: absent, parameters"), "unbound.rs"), /cannot\s+read/);
+  assert.throws(() => parseDeclaredStrategySupport(modular.replace("{ strategy, support, parameters }", "{ strategy, support, parameters };\n        runtime_capability()"), "tail.rs"), /cannot\s+read/);
+  assert.throws(() => parseDeclaredStrategySupport(modular.replace("    MemoryStrategy::ALL.into_iter()", "    let advertised = MemoryStrategy::ALL;\n    runtime_strategies().into_iter()"), "wrong-input.rs"), /cannot\s+read/);
+});
+
+test("pinned Candle H3 modular declaration retains its own default support table", async (t) => {
+  if (!process.env.INFERENCE_REPO) {
+    assert.ok(!process.env.CI, "CI must provide the pinned inference checkout");
+    t.diagnostic("no pinned inference checkout; actual declaration not read");
+    return;
+  }
+  const closures = JSON.parse(await readFile(path.join(ROOT, "config/anchor-loader-closures.json"), "utf8"));
+  const support = await readDeclaredStrategySupport("minimax_h3", "candle", closures);
+  assert.ok(support, "the pinned H3 declaration must supply support evidence");
+  assert.equal(support("resident"), "Implemented");
+  assert.equal(support("staged_residency"), "Implemented");
+  assert.equal(support("bounded_decode"), "Implemented");
+  assert.equal(support("bounded_attention"), "Implemented");
+  assert.equal(support("bounded_transformer_residency"), "Missing", "the metadata-only default delegates with streamable=false");
 });
 
 // The fixtures above are shapes; this is the pin. EVERY memory-strategy entry point the anchor
@@ -4070,6 +4386,7 @@ test("the engine's own declaration parses for every provider the override rule c
       try {
         assert.match(support(rung), /^[A-Z]\w+$/, `${key}: ${rung} support`);
       } catch (error) {
+        assert.ok(error instanceof RuntimeDependentStrategySupport, `${key}: ${rung} must be a recognized runtime condition`);
         assert.doesNotMatch(
           error.message,
           /cannot\s+read/s,
@@ -4124,7 +4441,7 @@ test("MAGE_COMPONENT_IDS are the adapter's own component-id constants", async ()
   assert.deepEqual(MAGE_COMPONENT_IDS, declared.map(([, value]) => value));
   // And both adapter arms stage exactly those two components rather than composing a path.
   for (const backend of ["mlx", "candle"]) {
-    const arm = await readFile(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${backend}.rs`), "utf8");
+    const arm = await rustFacadeSource(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${backend}.rs`));
     for (const [name] of declared) {
       assert.ok(arm.includes(`protocol::${name}`), `${backend}.rs never stages ${name}`);
     }
@@ -4401,7 +4718,12 @@ test("the Krea Realtime arm's admitted routes are the pinned engine's own", { sk
   );
   const gate = /pub\(crate\) fn safety_check\(([\s\S]*?)\n\}\n/.exec(engine);
   assert.ok(gate, "the pinned crate still declares a registered safety_check");
-  const routed = /match context\.mode\.as_key\(\) \{([\s\S]*?)\n {4}\};/.exec(gate[1]);
+  // Since inference 354b41cc the registered `safety_check` is a thin wrapper and the mode
+  // routing lives in its `checked_safety` delegate; read the match out of whichever carries it.
+  const checked = /fn checked_safety\(([\s\S]*?)\n\}\n/.exec(engine);
+  const routed = /match context\.mode\.as_key\(\) \{([\s\S]*?)\n {4}\};/.exec(
+    checked?.[1] ?? gate[1],
+  );
   assert.ok(routed, "safety_check no longer routes on the request mode; re-read this derivation");
   const engineRoutes = [...routed[1].matchAll(/^\s*"([a-z_]+)" =>/gm)].map((match) => match[1]).sort();
   assert.ok(engineRoutes.length > 0, "the engine's route arm list parsed empty");
@@ -4411,7 +4733,7 @@ test("the Krea Realtime arm's admitted routes are the pinned engine's own", { sk
       + "rather than record the three scenarios unexecuted",
   );
 
-  const arm = await readFile(path.join(ROOT, ADAPTER_BIN_PATHS.mlx), "utf8");
+  const arm = await rustFacadeSource(path.join(ROOT, ADAPTER_BIN_PATHS.mlx));
   const predicate = /fn krea_realtime_probes_admission\([\s\S]*?\n\}/.exec(arm);
   assert.ok(predicate, "the arm still declares krea_realtime_probes_admission");
   const armRoutes = [...predicate[0].matchAll(/"([a-z_]+)"/g)].map((match) => match[1]).sort();
@@ -4505,7 +4827,7 @@ test("no candle plan row names a superseded version of an identity the pinned en
 // as a receipt they sealed themselves. `wan_2_2_i2v_14b:bf16:mlx` died on the FIRST probe after a
 // 383-second load before the arm mirrored that.
 //
-// The Wan half of the arm asks the engine for its token (`wan_i2v_memory::RECEIPT_VERSION` is
+// The Wan half of the arm asks the engine for its token (`gen_core_memory_wan::RECEIPT_VERSION` is
 // `pub`); the SCAIL-2 half cannot, because `mlx-gen-scail2` compares its token as a bare literal
 // inside `validate_context_revision_shape` and publishes no const for it. Both are bound to the
 // pinned engine source HERE so a rename reds rather than silently widening the arm's skip — and the
@@ -4516,15 +4838,17 @@ test("the Wan/SCAIL-2 arm's receipt tokens are the pinned engines' own, and the 
     "utf8",
   );
 
+  // Inference sc-27316 moved the Wan receipt contract from gen-core's `wan_i2v_memory` module
+  // into the sibling `gen-core-memory-wan` crate, and the arm's import moved with it.
   const wan = await readFile(
-    path.join(process.env.INFERENCE_REPO, "crates/contracts/gen-core/src/wan_i2v_memory.rs"),
+    path.join(process.env.INFERENCE_REPO, "crates/contracts/gen-core-memory-wan/src/receipts.rs"),
     "utf8",
   );
   const wanToken = /pub const RECEIPT_VERSION: &str = "([a-z0-9-]+)";/.exec(wan)?.[1];
-  assert.ok(wanToken, "gen-core's wan_i2v_memory still publishes RECEIPT_VERSION");
+  assert.ok(wanToken, "gen-core-memory-wan still publishes RECEIPT_VERSION");
   assert.match(
     arm,
-    /Some\(_\) => mlx_gen::gen_core::wan_i2v_memory::RECEIPT_VERSION,/,
+    /Some\(_\) => gen_core_memory_wan::RECEIPT_VERSION,/,
     "the Wan half must ASK the engine for its receipt token, never restate it",
   );
   // …and the arm's prose, which is what a record reader sees, names the same shape.
@@ -4822,13 +5146,16 @@ test("every planned turnkey-still fingerprint is one its lane's declaration can 
 // (`validate_artifact_identity`). Editing either alone yields a runner that stages a root the
 // adapter then refuses by name, with every test in both languages still green.
 test("PROVIDER_FAMILIES repos are the adapter's *_REPOSITORY constants", async () => {
-  const lib = await readFile(path.join(ROOT, ADAPTER_LIB_PATH), "utf8");
+  const lib = [
+    await readFile(path.join(ROOT, ADAPTER_LIB_PATH), "utf8"),
+    await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/flux3_common.rs"), "utf8"),
+  ].join("\n");
   const declared = new Set();
   // `\s*` after the `=`, not a space (sc-22734): rustfmt wraps the initializer onto its own line
   // whenever the declaration exceeds the width, which four of the six SenseNova repository consts
   // do. A single-space pattern reads those four as UNDECLARED and fails a lane that is in fact
   // bound — the binding this case exists to check is the const's VALUE, not its line breaks.
-  for (const match of lib.matchAll(/pub const [A-Z0-9_]+_REPOSITORY: &str =\s*"([^"]+)";/g)) {
+  for (const match of lib.matchAll(/pub(?:\(super\))? const [A-Z0-9_]+_REPOSITORY: &str =\s*"([^"]+)";/g)) {
     declared.add(match[1]);
   }
   assert.ok(declared.size > 0, "lib.rs declares repository constants");
@@ -4868,7 +5195,7 @@ function adapterArms() {
         Object.entries(ADAPTER_BIN_PATHS).map(async ([backend, relative]) => [
           backend,
           adapterCapturableProviders(
-            await readFile(path.join(ROOT, relative), "utf8"),
+            await rustFacadeSource(path.join(ROOT, relative)),
             relative,
           ),
         ]),
@@ -4968,7 +5295,7 @@ test("every SCENEWORKS_LTX_* root the adapters require is bound by the LTX-2.3 r
       lanes.map(async ([backend]) => [
         backend,
         requiredLtxEnv(
-          await readFile(path.join(ROOT, ADAPTER_BIN_PATHS[backend]), "utf8"),
+          await rustFacadeSource(path.join(ROOT, ADAPTER_BIN_PATHS[backend])),
           ADAPTER_BIN_PATHS[backend],
         ),
       ]),
@@ -5408,6 +5735,9 @@ async function stubCheckout() {
 function stubContext({ root, workDir }, overrides = {}) {
   return {
     root, workDir, inferencePin: REVISION, campaignDir: "docs/calibration/sc-stub",
+    // These children are scripted JSON/telemetry fixtures, never model execution. Actual kernel
+    // ownership is independently tested in apple-metal-execution-lock.test.mjs on private files.
+    withMetalExecutionLease: async (_budget, work) => work(),
     campaignPrefix: "docs/calibration/sc-stub", state: { commits: [], halt: null },
     args: { adapter: JSON.stringify([process.execPath, "stub-adapter.mjs"]), inferenceRepo: root, commit: true, campaign: "sc-stub" },
     ...overrides,
@@ -5702,7 +6032,7 @@ test("--model selects every tier of one model and refuses a model the plan does 
 // the arm admits them through the production budget and the runner contains them with the same
 // footprint hard stop it puts around every Darwin capture.
 test("the MLX LTX-2.3 cells are ordinary anchors: admitted by the production budget, classified runnable or weights_missing", async () => {
-  const adapter = await readFile(path.join(ROOT, ADAPTER_BIN_PATHS.mlx), "utf8");
+  const adapter = await rustFacadeSource(path.join(ROOT, ADAPTER_BIN_PATHS.mlx));
   const harness = await readFile(path.join(ROOT, "scripts/memory-calibration-harness.mjs"), "utf8");
   // 1. The generic runner still sends exactly one provider action for a capture...
   assert.deepEqual(
@@ -5814,7 +6144,7 @@ test("the watchdog guard's footprint hard stop is the incident and host RAM, nev
 });
 
 test("the runner's incident footprint and unified reserve are the Rust declarations, not second literals", async () => {
-  const adapter = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/mlx.rs"), "utf8");
+  const adapter = await rustFacadeSource(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/mlx.rs"));
   const crash = /const LTX_Q4_F305_CRASH_FOOTPRINT_BYTES: u64 = ([\d_]+);/.exec(adapter);
   assert.ok(crash, "the adapter declares the incident footprint");
   assert.equal(LTX_Q4_F305_CRASH_FOOTPRINT_BYTES, Number(crash[1].replaceAll("_", "")));
@@ -5826,7 +6156,7 @@ test("the runner's incident footprint and unified reserve are the Rust declarati
   // And the worker READS it rather than restating it.
   const fitGate = await readFile(path.join(ROOT, "crates/sceneworks-worker/src/fit_gate.rs"), "utf8");
   assert.match(fitGate, /LEGACY_UNIFIED_FALLBACK_RESERVE_GB: f64 =\s*sceneworks_core::memory_anchor::LEGACY_UNIFIED_FALLBACK_RESERVE_GB;/);
-  const mlxFitGate = await readFile(path.join(ROOT, "crates/sceneworks-worker/src/mlx_fit_gate.rs"), "utf8");
+  const mlxFitGate = await rustFacadeSource(path.join(ROOT, "crates/sceneworks-worker/src/mlx_fit_gate.rs"));
   assert.match(mlxFitGate, /const HEADROOM_GB: f64 = sceneworks_core::memory_anchor::MLX_GENERIC_HEADROOM_GB;/);
 });
 
@@ -7102,8 +7432,6 @@ async function fakePlanRoot(anchors, models) {
   return root;
 }
 
-const DOWNLOAD_REVISION = "abcdef0123456789abcdef0123456789abcdef01";
-
 function downloadFixture() {
   return {
     anchors: {
@@ -7611,26 +7939,25 @@ test("a contaminated GPU is named by process and aborts the walk after a streak,
   assert.match(halt, /contaminated HOST/);
 });
 
-test("the campaign's GPU preflight step runs before the walk and only ever reaps our own binaries", async () => {
-  const workflow = await readFile(path.join(ROOT, ".github/workflows/memory-catalog-campaign.yml"), "utf8");
-  // Scoped to the CANDLE job: the mlx job above it walks with `run.sh` too, and there is no
-  // nvidia-smi on a Mac to census with.
+function assertOwnedCudaWalk(workflow) {
   const candle = workflow.slice(workflow.indexOf("\n  candle:"));
-  assert.ok(candle.includes("self-hosted, Windows, X64, cuda"), "the candle job was located");
-  const preflight = candle.indexOf("scripts/ci/memory-catalog/gpu-preflight.sh");
-  const walk = candle.indexOf("scripts/ci/memory-catalog/run.sh");
-  assert.ok(preflight > -1, "the candle job censuses the GPU before it spends an hour on a dirty one");
-  assert.ok(preflight < walk, "and it does so BEFORE the walk");
-  assert.ok(!workflow.slice(0, workflow.indexOf("\n  candle:")).includes("gpu-preflight.sh"));
-
-  const script = await readFile(path.join(ROOT, "scripts/ci/memory-catalog/gpu-preflight.sh"), "utf8");
-  assert.match(script, /--query-compute-apps=pid,process_name,used_memory/);
-  assert.match(script, /-i "\$CUDA_VISIBLE_DEVICES"/, "the census stays on the profiled device");
-  // Ours BY NAME. Never an arbitrary pid: this box serves other self-hosted lanes.
-  assert.match(script, /\*memory-candle-adapter\* \| \*memory-mlx-adapter\*/);
-  assert.match(script, /::error title=Profiled GPU is not idle/);
-  // The classification the engine makes: type C is contamination, C+G and G are desktop contexts.
-  assert.match(script, /nvidia-smi pmon "\$\{device_args\[@\]\}" -c 1 -s um/);
+  assert.ok(candle.includes("self-hosted, Windows, X64, cuda"), "actual shared Windows job required");
+  assert.doesNotMatch(candle, /gpu-preflight\.sh/, "no name-based reap or CVD-as-NVML-index census before/inside owned walk");
+  assert.match(candle, /windows_cuda_execution\.py --actor memory-catalog-candle --budget-minutes [0-9]+ --cuda-ordinals 0 -- bash scripts\/ci\/memory-catalog\/run\.sh/,
+    "actual inherited CUDA ordinal UUID guard must own the WHOLE unchanged walk");
+  assert.match(candle, /CUDA_VISIBLE_DEVICES: "1"/, "original device choice is not retargeted");
+  assert.doesNotMatch(candle, /--physical-indices 1/, "legacy CUDA ordinal is not guessed as NVML index");
+}
+test("catalog walk uses exact-UUID owned lifetime instead of destructive name-based preflight", async () => {
+  const workflow = await readFile(path.join(ROOT, ".github/workflows/memory-catalog-campaign.yml"), "utf8");
+  assertOwnedCudaWalk(workflow);
+  const beforeWalk = workflow.indexOf("      - name: Walk the catalog\n", workflow.indexOf("\n  candle:"));
+  const broadKill = workflow.slice(0, beforeWalk) + "      - name: unsafe reap\n        run: bash scripts/ci/memory-catalog/gpu-preflight.sh\n" + workflow.slice(beforeWalk);
+  assert.throws(() => assertOwnedCudaWalk(broadKill), /name-based reap/);
+  const unguarded = workflow.replace(/python -I scripts\/ci\/windows_cuda_execution\.py --actor memory-catalog-candle --budget-minutes [0-9]+ --cuda-ordinals 0 -- /, "");
+  assert.throws(() => assertOwnedCudaWalk(unguarded), /WHOLE unchanged walk/);
+  const wrongBinding = workflow.replace("--cuda-ordinals 0 -- bash", "--physical-indices 1 -- bash");
+  assert.throws(() => assertOwnedCudaWalk(wrongBinding), /WHOLE unchanged walk/);
 });
 
 // A fake `nvidia-smi` on PATH, plus the two externals the reap path shells out to. `sleep` and
@@ -7659,7 +7986,7 @@ async function fakeGpuHost({ pmon, apps, pmonAfterReap, appsAfterReap }) {
 }
 
 async function runGpuPreflight(host) {
-  const env = { ...process.env, PATH: `${host.bin}:${process.env.PATH}`, CUDA_VISIBLE_DEVICES: "1" };
+  const env = { ...process.env, PATH: `${host.bin}${path.delimiter}${process.env.PATH}`, CUDA_VISIBLE_DEVICES: "1" };
   try {
     const { stdout } = await execFileAsync("bash", ["scripts/ci/memory-catalog/gpu-preflight.sh"], { cwd: ROOT, env });
     return { code: 0, stdout };
@@ -7804,7 +8131,8 @@ async function runResultsPr({ createStdout = "", createStderr = "", createStatus
   await writeFile(summary, "");
   const env = {
     ...process.env,
-    PATH: `${bin}:${process.env.PATH}`,
+    PATH: `${bin}${path.delimiter}${process.env.PATH}`,
+    CATALOG_TEST_BIN: bin,
     CAMPAIGN: "sc-22738",
     BACKEND: "candle",
     BASE_REF: "feature/sc-22723-memory-anchor-measurability",
@@ -7827,7 +8155,10 @@ async function runResultsPr({ createStdout = "", createStderr = "", createStatus
   let stdout = "";
   let stderr = "";
   try {
-    const result = await execFileAsync("bash", ["scripts/ci/memory-catalog/pr.sh"], { cwd: ROOT, env });
+    // Git Bash's launcher prepends its own Git directory. Reassert the mocks inside
+    // the shell so these tests can never fall through to real git/gh on Windows.
+    const fixtureShell = 'fixture_bin="$CATALOG_TEST_BIN"; if command -v cygpath >/dev/null 2>&1; then fixture_bin="$(cygpath -u "$fixture_bin")"; fi; export PATH="$fixture_bin:$PATH"; [[ "$(command -v git)" == "$fixture_bin/git" && "$(command -v gh)" == "$fixture_bin/gh" ]] || exit 98; source "$0"';
+    const result = await execFileAsync("bash", ["-c", fixtureShell, "scripts/ci/memory-catalog/pr.sh"], { cwd: ROOT, env });
     ({ stdout, stderr } = result);
   } catch (error) {
     code = error.code ?? 1;

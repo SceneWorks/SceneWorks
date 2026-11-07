@@ -1,7 +1,7 @@
 //! Iris-3B restoration pre-submission plan preview (sc-25683, epic 25678).
 //!
 //! `POST /api/v1/image-restoration/plan` runs the engine's own pure planner
-//! (`gen_core::iris::restoration::plan`, through `sceneworks_worker::iris_restore`) with no weights,
+//! (`gen_core_iris::restoration::plan`, through `sceneworks_worker::iris_restore`) with no weights,
 //! so the Image Studio post-processing panel and the Image Editor / Library restore actions can show
 //! the ACTUAL processing and output dimensions before anything is submitted — and label a
 //! budget-downscaled result honestly ("budgeted: 512x384 input → 2048x1536", never "4× of the

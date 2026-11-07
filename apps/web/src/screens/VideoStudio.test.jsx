@@ -2298,14 +2298,14 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
     expect(payload.advanced.lightning).toBe(false);
   });
 
-  it("disables the manual steps/guidance controls while Lightning is on and re-enables them off", async () => {
+  it("keeps experimental guidance editable with Lightning while retaining its step recipe", async () => {
     const context = baseContext({ videoModels: [WAN_T2V_14B] });
     await render(context);
     await openAdvanced();
 
     // On (default): governed by the recipe.
     expect(labeledInput("Steps").disabled).toBe(true);
-    expect(labeledInput("Guidance").disabled).toBe(true);
+    expect(labeledInput("Guidance").disabled).toBe(false);
 
     // Off: the user's steps/guidance controls become active.
     await act(async () => lightningCheckbox().click());
@@ -2328,7 +2328,7 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
     id: "ltx_2_5",
     name: "LTX-2.5",
     adapter: "ltx_video",
-    video: { supportsGuidance: false, supportsNegativePrompt: false },
+    video: { supportsGuidance: false, supportsNegativePrompt: false, supportsSchedulerShift: false },
     defaults: { duration: 6, resolution: "768x512", fps: 25, steps: 8 },
     limits: { steps: [8, 30] },
     hasVariantMatrix: true,
@@ -3002,7 +3002,7 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
     capabilities: KREA_CAPABILITIES,
     // Krea Realtime is CFG-free, so it declares BOTH axes absent (sc-8445). Every other video model
     // declares no `video` block at all, and absent means TRUE — see the supportsGuidance derivation.
-    video: { supportsGuidance: false, supportsNegativePrompt: false },
+    video: { supportsGuidance: false, supportsNegativePrompt: false, supportsSchedulerShift: false },
     defaults: {
       duration: 4,
       fps: 24,
@@ -3023,7 +3023,7 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
       schedulers: ["default"],
     },
     quantization: {},
-    loraCompatibility: { families: ["krea-realtime"], types: ["style", "motion", "character", "enhance"] },
+    loraCompatibility: { sizeClass: "14b", imageConditionedBackbone: false, families: ["krea-realtime"], types: ["style", "motion", "character", "enhance"] },
     ui: {},
     macSupport: {
       supported: true,
@@ -3427,7 +3427,7 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
     adapter: "svd_video",
     capabilities: ["image_to_video"],
     promptless: true,
-    video: { supportsGuidance: false, supportsNegativePrompt: false },
+    video: { supportsGuidance: false, supportsNegativePrompt: false, supportsSchedulerShift: false },
     defaults: { duration: 4, resolution: "1024x576", fps: 7 },
     limits: {},
     quantization: {},

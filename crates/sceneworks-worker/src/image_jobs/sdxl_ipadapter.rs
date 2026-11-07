@@ -1,16 +1,46 @@
-use super::{
-    admit_sdxl_bespoke_memory, candle_certified_hf_artifact_path, consume_gen_events,
-    curated_image_menu, dense_tier_subdir, drive_gen_items_scored, load_reference_image, non_empty,
-    normalize_sampling_knob, pid_effective_dims, pid_output_tier, read_advanced_sampling_knobs,
-    resolve_adapters, resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
-    resolve_character_image_likeness_source, resolve_pid_weights, resolve_sdxl_components,
-    resolve_seed, stage_likeness, standard_tier_subdir, start_gen_stream,
-    uses_standard_tier_layout, ApiClient, Image, ImagePlan, ImageRequest, IpAdapterSdxl,
-    IpAdapterSdxlPaths, IpAdapterSdxlRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings,
-    Value, WorkerError, WorkerResult,
-};
-use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
-use super::{resolve_app_managed_model_dir, DownloadContext};
+use super::adapters::resolve_adapters;
+use super::artifact_resolution::dense_tier_subdir;
+use super::conditioning::load_reference_image;
+use super::conditioning::non_empty;
+use super::conditioning::resolve_character_image_likeness_source;
+use super::conditioning::stage_likeness;
+use super::events::consume_gen_events;
+use super::load_spec::candle_certified_hf_artifact_path;
+use super::load_spec::resolve_sdxl_components;
+use super::memory::admit_sdxl_bespoke_memory;
+use super::pid::pid_effective_dims;
+use super::pid::pid_output_tier;
+use super::pid::resolve_pid_weights;
+use super::resolve_seed;
+use super::sampling::curated_image_menu;
+use super::sampling::normalize_sampling_knob;
+use super::sampling::read_advanced_sampling_knobs;
+use super::sampling::resolve_advanced_or_manifest_f32;
+use super::sampling::resolve_advanced_or_manifest_u32;
+use super::standard_tier_subdir;
+use super::stream::drive_gen_items_scored;
+use super::stream::start_gen_stream;
+use super::uses_standard_tier_layout;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use super::IpAdapterSdxl;
+use super::IpAdapterSdxlPaths;
+use super::IpAdapterSdxlRequest;
+use crate::advanced;
+use crate::ensure_hf_cached_file;
+use crate::huggingface_snapshot_dir;
+use crate::resolve_app_managed_model_dir;
+use crate::ApiClient;
+use crate::DownloadContext;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
 use serde_json::json;
 
 // Candle (Windows/CUDA) SDXL IP-Adapter-Plus reference route (sc-5488, epic 5480) â€” reference-image
@@ -90,20 +120,13 @@ fn resolve_sdxl_ipadapter_base(
         .advanced
         .get("modelPath")
         .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "SDXL IP-Adapter modelPath")
             .map(Some);
     }
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or_else(|| sdxl_ipadapter_default_repo(&request.model));
     // sc-10813: a standard-tier turnkey (`mlx.standardTierLayout`, e.g. `SceneWorks/sdxl-base-mlx`)
     // descends into the request's packed q4/q8 tier (or bf16) via `standard_tier_subdir` â€” the SAME
@@ -327,12 +350,7 @@ pub(super) async fn generate_candle_sdxl_ipadapter_stream(
         &job.id,
         backend,
     );
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or_else(|| sdxl_ipadapter_default_repo(&request.model))
         .to_owned();
     // Per-generation PiD decode (epic 7840, sc-8044): resolve the `sdxl` PiD student + Gemma when

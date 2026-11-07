@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { inferenceRevision } from "./lib/inference-provenance.mjs";
 // Measure every memory anchor the plan declares for ONE backend on THIS host, committing each
 // measurement as it lands so a crash or a cancel loses at most the anchor in flight.
 //
@@ -73,6 +74,7 @@
 // <work-dir>/captures): the harness refuses complete evidence from a dirty checkout, so the first
 // anchor's ingest would leave every later anchor in the same run uncapturable (sc-22724). Ingest a
 // retained bundle by hand with the harness, or run without the flag to land it.
+import { withMacMetalExecutionLease, metalLeaseChildOptions } from "./lib/apple-metal-lease.mjs";
 import process from "node:process";
 import path from "node:path";
 import os from "node:os";
@@ -81,7 +83,9 @@ import { spawn } from "node:child_process";
 import { readFile, writeFile, mkdir, cp, rm, realpath, stat, readdir, open } from "node:fs/promises";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
-import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
+import { FLUX3_CHECKPOINTS, flux3Conversion as nativeFlux3Conversion, bindResourceCaseInputs } from "./lib/flux3-resource-contract.mjs";
+import { hashArtifactInventory, listCachedArtifactFiles } from "./hash-artifact-inventory.mjs";
+import { createHash } from "node:crypto";
 // ONE spelling of the refusal signature, shared with the arm that records it (sc-22738). The runner
 // classifies a failure by it and the harness re-checks the same stderr before writing a bound, so a
 // second transcription here would be a way for the two to disagree about what a refusal even is.
@@ -224,14 +228,14 @@ export function requiredComponentsFor(family, backend) {
 /** The ONE upstream repository all three Iris-3B task routes load from (sc-25690). */
 export const IRIS_REPOSITORY = "speridlabs/iris-3b";
 /**
- * The generation task's files at the snapshot ROOT — `gen_core::iris::CONFIG_FILE` and
+ * The generation task's files at the snapshot ROOT — `gen_core_iris::CONFIG_FILE` and
  * `BACKBONE_WEIGHTS_FILE`, exactly the manifest's `iris_3b` download closure.
  */
 export const IRIS_GENERATION_FILES = Object.freeze(["config.yaml", "model.safetensors"]);
 /**
  * A downstream task export's files inside its folder (`depth/`, `upscaler/`): the fine-tuned
  * backbone, its config (whose `task` section the engine checks) and the shipped empty-prompt
- * conditioning (`gen_core::iris::downstream::EMPTY_PROMPT_FILE`).
+ * conditioning (`gen_core_iris::downstream::EMPTY_PROMPT_FILE`).
  */
 export const IRIS_TASK_EXPORT_FILES = Object.freeze([
   "config.yaml", "model.safetensors", "empty_prompt.safetensors",
@@ -251,13 +255,13 @@ export const IRIS_GENERATION_COMPONENTS = Object.freeze([
   },
 ]);
 
-/** The pinned Supra2-IMG upstream repository (sc-24217) — `gen_core::supra2::SUPRA2_SOURCE.repo`. */
+/** The pinned Supra2-IMG upstream repository (sc-24217) — `gen_core_checkpoint::supra2::SUPRA2_SOURCE.repo`. */
 export const SUPRA2_REPOSITORY = "SupraLabs/Supra2-IMG";
-/** The one upstream file the install converts — `gen_core::supra2::SUPRA2_SOURCE`'s only file. */
+/** The one upstream file the install converts — `gen_core_checkpoint::supra2::SUPRA2_SOURCE`'s only file. */
 export const SUPRA2_SOURCE_FILES = Object.freeze(["model_final_ema.pt"]);
 /**
  * Supra2's two caller-staged co-requisites (`LoadSpec::components["text_encoder"|"vae"]`), in the
- * `{ env, repo, files }` shape: exactly the files `gen_core::supra2::FLAN_T5_BASE` / `SD_VAE` pin
+ * `{ env, repo, files }` shape: exactly the files `gen_core_checkpoint::supra2::FLAN_T5_BASE` / `SD_VAE` pin
  * (and the manifest's co-requisite rows download). Both engines require both, so no `arms`.
  */
 export const SUPRA2_COMPONENTS = Object.freeze([
@@ -414,14 +418,30 @@ export function parseWanMlxSealedProviders(source, sourcePath = WAN_MLX_LOADER_P
  * The sealing routes at `inferenceRepo`, or `null` when no inference checkout is reachable. `null`
  * is NOT a refusal — see `WAN_MLX_SEAL_UNCHECKED`.
  */
+// Since inference 354b41cc the 5B and A14B loader bodies live in `model/{ti2v,a14b}.rs`
+// (`use super::*` keeps the provider-id consts in model.rs), so the seal scan reads whichever
+// of the three files the checkout has and parses them as one text. A pre-split checkout still
+// parses model.rs alone, and the parser's fail-closed guarantees are unchanged: a seal whose
+// const no file declares, or a checkout sealing nothing anywhere, still THROWS.
+export const WAN_MLX_LOADER_PATHS = [
+  WAN_MLX_LOADER_PATH,
+  "crates/media/mlx-gen/mlx-gen-wan/src/model/ti2v.rs",
+  "crates/media/mlx-gen/mlx-gen-wan/src/model/a14b.rs",
+];
+
 export async function readWanMlxSealedProviders(inferenceRepo = process.env.INFERENCE_REPO) {
   if (!inferenceRepo) return null;
-  try {
-    return parseWanMlxSealedProviders(await readFile(path.join(inferenceRepo, WAN_MLX_LOADER_PATH), "utf8"));
-  } catch (error) {
-    if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-    throw error;
+  const sources = [];
+  for (const file of WAN_MLX_LOADER_PATHS) {
+    try {
+      sources.push(await readFile(path.join(inferenceRepo, file), "utf8"));
+    } catch (error) {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") continue;
+      throw error;
+    }
   }
+  if (sources.length === 0) return null;
+  return parseWanMlxSealedProviders(sources.join("\n"));
 }
 
 /** Why the MLX lane cannot capture `provider` at this pin, or `null` when it can. */
@@ -590,7 +610,7 @@ function supportVariant(body, sourcePath) {
  * SdxlSurface::Bespoke`). A conjunct naming a DIFFERENT variant makes its term statically false, so
  * most rungs still resolve; only the rung the runtime term actually gates comes back `null`.
  */
-function evaluateStrategyCondition(condition, variant) {
+function evaluateStrategyCondition(condition, variant, bindings = new Map()) {
   let unknown = false;
   for (const term of condition.split("||")) {
     let text = term.trim();
@@ -602,7 +622,10 @@ function evaluateStrategyCondition(condition, variant) {
       if (named) {
         if (named[1] !== variant) termFalse = true;
       } else {
-        termUnknown = true;
+        const flag = /^\s*(!)?\s*(\w+)\s*$/.exec(conjunct);
+        const value = flag?.[2] === "true" ? true : flag?.[2] === "false" ? false : bindings.get(flag?.[2]);
+        if (typeof value !== "boolean") termUnknown = true;
+        else if (flag[1] ? value : !value) termFalse = true;
       }
     }
     if (termFalse) continue;
@@ -652,10 +675,117 @@ function parseMatchArms(armsText, sourcePath) {
     arms.push({
       variants: catchAll && variants.length === 0 ? null : variants,
       guarded: guard.length > 0,
+      condition: guard.join("if").trim(),
       support: supportVariant(body, sourcePath),
     });
   }
   return arms;
+}
+
+/** Comma-separated Rust values; nested calls/blocks remain a single value. */
+function rustValues(text) {
+  const values = [];
+  let rest = text.trim();
+  while (rest) {
+    const value = scanTo(rest, 0, ",");
+    values.push((value ?? rest).trim());
+    if (value === null) break;
+    rest = rest.slice(value.length + 1).trim();
+  }
+  return values;
+}
+
+/** Follow only file-local helper calls and transparent tail delegation, never execute Rust. */
+function declaredStrategyBody(source, value, sourcePath, bindings = new Map(), seen = new Set()) {
+  if (/^\s*MemoryStrategy::ALL\b/.test(value)) return { body: value, bindings };
+  const call = /^\s*(\w+)\s*\(([\s\S]*)\)\s*$/.exec(value);
+  if (!call) return unreadable(sourcePath, "strategies value is neither MemoryStrategy::ALL nor a local helper call");
+  const name = call[1];
+  if (seen.has(name)) return unreadable(sourcePath, `cyclic strategies helper ${name}`);
+  const helper = new RegExp(`\\bfn\\s+${name}\\s*\\(`).exec(source);
+  if (!helper) return unreadable(sourcePath, `strategies: calls ${name}(…), which this file does not define`);
+  const paramsAt = helper.index + helper[0].length;
+  const parameters = scanTo(source, paramsAt, ")");
+  const body = braceBody(source, paramsAt);
+  if (parameters === null || body === null) return unreadable(sourcePath, `fn ${name} has no readable signature/body`);
+  const params = rustValues(parameters);
+  const args = rustValues(call[2]);
+  if (params.length !== args.length) return unreadable(sourcePath, `fn ${name} argument count does not match its call`);
+  const local = new Map();
+  params.forEach((parameter, index) => {
+    const flag = /^(\w+)\s*:\s*bool$/.exec(parameter);
+    if (!flag) return;
+    const arg = args[index];
+    const known = arg === "true" ? true : arg === "false" ? false : bindings.get(arg);
+    // Assignments, shadowing or a mutable borrow defeat constant propagation.
+    const changed = new RegExp(`\\blet\\s+(?:mut\\s+)?${flag[1]}\\b|\\b${flag[1]}\\s*=(?![=>])|&\\s*mut\\s+${flag[1]}\\b`);
+    if (typeof known === "boolean" && !changed.test(body)) local.set(flag[1], known);
+  });
+  const next = new Set(seen).add(name);
+  const tail = body.trim();
+  if (/^\w+\s*\([\s\S]*\)\s*$/.test(tail)) return declaredStrategyBody(source, tail, sourcePath, local, next);
+  return { body, bindings: local };
+}
+
+/** Find a token at block depth zero; quoted strings cannot manufacture a declaration. */
+function topLevelMatches(text, pattern) {
+  const matches = [];
+  let depth = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] === '"') {
+      for (i += 1; i < text.length && text[i] !== '"'; i += 1) if (text[i] === "\\") i += 1;
+      continue;
+    }
+    if (depth === 0 && (i === 0 || !/\w/.test(text[i - 1]))) {
+      const match = pattern.exec(text.slice(i));
+      if (match) matches.push({ index: i, match });
+    }
+    if ("([{".includes(text[i])) depth += 1;
+    else if (")]}".includes(text[i])) depth -= 1;
+  }
+  return matches;
+}
+
+function declaredSupportExpression(body, sourcePath) {
+  const closure = /\.map\(\s*\|\s*strategy\s*\|\s*/.exec(body);
+  if (!closure || !/\bMemoryStrategy::ALL(?:\s*\.\s*(?:into_iter|iter|copied|cloned)\s*\(\s*\))+\s*$/.test(body.slice(0, closure.index))) {
+    return unreadable(sourcePath, "no .map(|strategy| …) over MemoryStrategy::ALL");
+  }
+  const value = body.slice(closure.index + closure[0].length).trimStart();
+  let fields;
+  let prefix = "";
+  if (/^MemoryStrategyCapability\s*\{/.test(value)) {
+    fields = braceBody(value, 0);
+    const open = value.indexOf("{");
+    if (fields === null || !/^\s*,?\s*\)/.test(value.slice(open + fields.length + 2))) {
+      return unreadable(sourcePath, "capability literal is followed by an unreadable builder/expression");
+    }
+  } else if (value.startsWith("{")) {
+    const block = braceBody(value, 0);
+    if (block === null) return unreadable(sourcePath, "unbalanced capability closure block");
+    const literals = topLevelMatches(block, /^MemoryStrategyCapability\s*\{/);
+    if (literals.length !== 1) return unreadable(sourcePath, "capability block has no single final MemoryStrategyCapability literal");
+    const at = literals[0].index;
+    fields = braceBody(block, at);
+    const open = block.indexOf("{", at);
+    if (fields === null || block.slice(open + fields.length + 2).trim() !== "") {
+      return unreadable(sourcePath, "capability literal is not the closure's final value");
+    }
+    prefix = block.slice(0, at);
+  } else return unreadable(sourcePath, "unreadable capability closure value");
+  const support = rustValues(fields).filter((field) => /^support\b/.test(field));
+  if (support.length !== 1) return unreadable(sourcePath, "capability has no single support field");
+  const expression = support[0].replace(/^support\s*:?\s*/, "").trim() || "support";
+  if (!/^\w+$/.test(expression)) return expression;
+  const declarations = topLevelMatches(prefix, new RegExp(`^let\\s+(mut\\s+)?${expression}\\s*(?::\\s*MemoryStrategySupport\\s*)?=`));
+  if (declarations.length !== 1 || declarations[0].match[1]) return unreadable(sourcePath, "support does not name one immutable closure-local binding");
+  const binding = declarations[0];
+  const start = binding.index + binding.match[0].length;
+  const initializer = scanTo(prefix, start, ";");
+  if (initializer === null || new RegExp(`\\b${expression}\\b`).test(prefix.slice(start + initializer.length + 1))) {
+    return unreadable(sourcePath, "support binding is reassigned, shadowed or used by an unreadable statement");
+  }
+  return initializer.trim();
 }
 
 /**
@@ -665,20 +795,23 @@ function parseMatchArms(armsText, sourcePath) {
  * Throws when a `strategies:` field IS declared in a shape this parser cannot read: an unrecognized
  * declaration is NOT evidence that a rung is unimplemented.
  *
- * Three shapes are read, because all three ship at the pin (sc-22737):
+ * Source-owned declaration shapes read here:
  *
  *   - `strategies: MemoryStrategy::ALL … .map(…)` — the declaration inline in `build_contract`
  *     (`candle-gen-scail2`, `candle-gen-sdxl`, `mlx-gen-krea`, `mlx-gen-z-image`, …);
  *   - `strategies: strategies()` / `strategies(spec)` / `strategies(streamable)` — the SAME
  *     expression hoisted into a file-local helper (`candle-gen-bernini`, both LTX modules, both
  *     MiniMax-H3 modules, both Wan modules). The call is followed to that `fn`'s body; a call whose
- *     helper is not in the file is unreadable, not "no evidence";
+ *     helper is not in the file is unreadable, not "no evidence". Transparent local tail
+ *     delegation is followed, with only unchanged literal boolean arguments propagated;
  *   - inside the closure, `support:` as either the `if strategy == … { … } else { … }` form or a
- *     `match strategy { … }` with `|`-alternatives, `_`, and guarded arms.
+ *     `match strategy { … }` with `|`-alternatives, `_`, and guarded arms;
+ *   - a block closure with one immutable local support initializer and a final capability literal
+ *     using that binding. Parameter-domain statements do not supply or override support evidence.
  *
  * A rung whose FIRST matching arm carries an `if` guard is condition-dependent — `mlx-gen-minimax-h3`
  * declares `BoundedTransformerResidency` `Implemented` only when `streamable` — so asking for it
- * throws rather than picking one side. Guessing either way would state a rung's support as fact when
+ * throws unless the local call chain proves its boolean guard. Guessing either way states support as fact when
  * the source text does not decide it.
  */
 /**
@@ -720,36 +853,33 @@ export async function readCompatibilityDefaultSupport(
   }
 }
 
+// A recognized source condition can require a concrete contract surface. This is distinct from
+// an unreadable declaration: callers may consult surface evidence, but must not guess support.
+export class RuntimeDependentStrategySupport extends Error {}
+
+function readableRuntimeCondition(condition) {
+  let depth = 0;
+  for (const ch of condition) {
+    if (ch === "(") depth += 1;
+    else if (ch === ")" && --depth < 0) return false;
+  }
+  if (depth !== 0) return false;
+  const name = "[A-Za-z_]\\w*(?:(?:::|\\.)[A-Za-z_]\\w*)*";
+  const comparison = new RegExp(`^${name}\\s*(?:==|!=)\\s*${name}$`);
+  return condition.replace(/[()]/g, "").split(/\|\||&&/).every(term => {
+    const text = term.trim();
+    return /^!?\s*[A-Za-z_]\w*$/.test(text) || comparison.test(text);
+  });
+}
+
 export function parseDeclaredStrategySupport(rawSource, sourcePath) {
   const source = stripRustComments(rawSource);
   const field = /\bstrategies:/.exec(source);
   if (!field) return null;
   const valueStart = field.index + field[0].length;
-  const value = scanTo(source, valueStart, ",") ?? source.slice(valueStart);
-  // A helper call (`strategies(spec)`) is followed to the file-local `fn` it names; the inline form
-  // is its own body. Anything else — a const, a method call, a builder — is refused.
-  let body;
-  const call = /^\s*(\w+)\s*\(/.exec(value);
-  if (/^\s*MemoryStrategy::ALL\b/.test(value)) {
-    body = value;
-  } else if (call) {
-    const helper = new RegExp(`\\bfn\\s+${call[1]}\\s*\\(`).exec(source);
-    if (!helper) {
-      return unreadable(sourcePath, `strategies: calls ${call[1]}(…), which this file does not define`);
-    }
-    body = braceBody(source, helper.index + helper[0].length);
-    if (body === null) return unreadable(sourcePath, `fn ${call[1]} has no readable body`);
-  } else {
-    return unreadable(sourcePath, `strategies: value "${value.trim().slice(0, 60)}" is neither MemoryStrategy::ALL nor a local helper call`);
-  }
-
-  const closure = /\.map\(\s*\|\s*strategy\s*\|\s*MemoryStrategyCapability\s*\{/.exec(body);
-  if (!closure) return unreadable(sourcePath, "no .map(|strategy| MemoryStrategyCapability { … }) over MemoryStrategy::ALL");
-  const fields = body.slice(closure.index + closure[0].length);
-  const supportAt = /\bsupport:\s*/.exec(fields);
-  if (!supportAt) return unreadable(sourcePath, "the capability closure declares no support: field");
-  const supportStart = supportAt.index + supportAt[0].length;
-  const supportExpr = (scanTo(fields, supportStart, ",") ?? fields.slice(supportStart)).trim();
+  const value = scanTo(source, valueStart, ",}") ?? source.slice(valueStart);
+  const { body, bindings } = declaredStrategyBody(source, value, sourcePath);
+  const supportExpr = declaredSupportExpression(body, sourcePath);
 
   // The `if <condition over strategy> { A } else { B }` form.
   if (/^if\b/.test(supportExpr)) {
@@ -778,9 +908,10 @@ export function parseDeclaredStrategySupport(rawSource, sourcePath) {
     const elseSupport = supportVariant(elseBody, sourcePath);
     return (rung) => {
       const variant = strategyVariant(rung);
-      const holds = evaluateStrategyCondition(condition, variant);
+      const holds = evaluateStrategyCondition(condition, variant, bindings);
       if (holds === null) {
-        return fail(
+        if (!readableRuntimeCondition(condition)) return unreadable(sourcePath, "unsupported runtime condition syntax");
+        throw new RuntimeDependentStrategySupport(
           `${sourcePath} gates MemoryStrategy::${variant} on a condition that is not about the strategy `
             + "itself, so its support is a runtime value rather than a fact this source text states. Read "
             + "the rung from the engine capability dump instead of guessing which side of the branch holds.",
@@ -796,18 +927,20 @@ export function parseDeclaredStrategySupport(rawSource, sourcePath) {
     const arms = parseMatchArms(armsText, sourcePath);
     return (rung) => {
       const variant = strategyVariant(rung);
-      const arm = arms.find((candidate) => candidate.variants === null || candidate.variants.includes(variant));
-      if (!arm) {
-        return unreadable(sourcePath, `match strategy { … } has no arm for MemoryStrategy::${variant}`);
+      for (const arm of arms) {
+        if (arm.variants !== null && !arm.variants.includes(variant)) continue;
+        const holds = arm.guarded ? evaluateStrategyCondition(arm.condition, variant, bindings) : true;
+        if (holds === null) {
+          if (!readableRuntimeCondition(arm.condition)) return unreadable(sourcePath, "unsupported runtime guard syntax");
+          throw new RuntimeDependentStrategySupport(
+            `${sourcePath} declares MemoryStrategy::${variant} behind an \`if\` guard, so its support is a `
+              + "runtime condition rather than a fact this source text states. Read the rung from the engine "
+              + "capability dump instead of guessing which side of the guard holds.",
+          );
+        }
+        if (holds) return arm.support;
       }
-      if (arm.guarded) {
-        return fail(
-          `${sourcePath} declares MemoryStrategy::${variant} behind an \`if\` guard, so its support is a `
-            + "runtime condition rather than a fact this source text states. Read the rung from the engine "
-            + "capability dump instead of guessing which side of the guard holds.",
-        );
-      }
-      return arm.support;
+      return unreadable(sourcePath, `match strategy { … } has no arm for MemoryStrategy::${variant}`);
     };
   }
 
@@ -1033,7 +1166,44 @@ export const MAGE_COMPONENT_IDS = Object.freeze(["text_encoder", "vae"]);
  * `match provider` arm behind it reds, so `no_adapter_arm` is derived from the adapter and not from
  * this table's spelling.
  */
+// FLUX3 native tiers are separate packages, not snapshot/<tier> folders. The two
+// packed backends deliberately have different conversion IDs (the install contract).
+export const FLUX3_REPOSITORY = FLUX3_CHECKPOINTS.flux3_klein.repository;
+export const FLUX3_REVISION = FLUX3_CHECKPOINTS.flux3_klein.revision;
+export const FLUX3_BASE_REPOSITORY = FLUX3_CHECKPOINTS.flux3_klein_base.repository;
+export const FLUX3_BASE_REVISION = FLUX3_CHECKPOINTS.flux3_klein_base.revision;
+export function flux3Conversion(backend, tier) {
+  if (!["q4", "q8"].includes(tier) || !["candle", "mlx"].includes(backend)) return null;
+  return nativeFlux3Conversion(backend, tier);
+}
+
+/** Prepare only explicitly declared supplemental cases. Never expands a grid, launches an
+ * adapter, writes evidence, or ingests a variant as the cell's plain canonical anchor. */
+export async function prepareFlux3ResourceCases(cases, { root }) {
+  if (!Array.isArray(cases)) throw new Error("FLUX3 resourceCases must be an explicit array");
+  const seen = new Set();
+  const prepared = [];
+  for (const resourceCase of cases) {
+    if (seen.has(resourceCase?.caseId)) throw new Error("duplicate FLUX3 resource case identity");
+    seen.add(resourceCase?.caseId);
+    try {
+      prepared.push({ status: "INPUTS_BOUND", anchorEligible: false, resourceAdmission: "NOT_GRANTED", ...await bindResourceCaseInputs(resourceCase, { root }) });
+    } catch (error) {
+      prepared.push({ status: "BLOCKED", anchorEligible: false, caseId: resourceCase?.caseId, reason: String(error.message ?? error) });
+    }
+  }
+  return prepared;
+}
+
 export const PROVIDER_FAMILIES = Object.freeze({
+  flux3_klein_base: {
+    env: "FLUX3_KLEIN", repo: FLUX3_BASE_REPOSITORY, arms: ["mlx", "candle"],
+    layout: "flat", flux3: true,
+  },
+  flux3_klein: {
+    env: "FLUX3_KLEIN", repo: FLUX3_REPOSITORY, arms: ["mlx", "candle"],
+    layout: "flat", flux3: true,
+  },
   qwen_image: {
     env: "QWEN_IMAGE", repo: "SceneWorks/qwen-image-mlx", arms: ["mlx", "candle"],
     sourceCapture: true, physical: true,
@@ -1378,7 +1548,7 @@ export const PROVIDER_FAMILIES = Object.freeze({
   //
   // Generation alone loads a text encoder — the pinned Qwen3-VL-4B-Instruct snapshot the manifest
   // ships as a `coRequisite` and the worker stages as `LoadSpec::components["text_encoder"]`
-  // (`gen_core::iris::TEXT_ENCODER_COMPONENT`). Depth and restoration run on their export's shipped
+  // (`gen_core_iris::TEXT_ENCODER_COMPONENT`). Depth and restoration run on their export's shipped
   // empty-prompt states and REFUSE a staged text encoder, so they declare none.
   iris_3b: {
     env: "IRIS_3B", repo: IRIS_REPOSITORY, arms: ["mlx", "candle"], layout: "flat",
@@ -1394,7 +1564,7 @@ export const PROVIDER_FAMILIES = Object.freeze({
     requiredTierFiles: IRIS_TASK_EXPORT_FILES,
   },
   // Supra2-IMG (sc-24217, epic 24212). The root this row binds is the pinned UPSTREAM snapshot at
-  // its ROOT, holding the one file the install converts (`gen_core::supra2::SUPRA2_SOURCE`). It is
+  // its ROOT, holding the one file the install converts (`gen_core_checkpoint::supra2::SUPRA2_SOURCE`). It is
   // NOT what the engine loads: both adapter arms convert it into the native bundle in a SEPARATE
   // adapter process before the measured process loads anything (or reuse a bundle that already
   // passes the provider's pin contract), so conversion never sits inside a measured window. The
@@ -1600,7 +1770,7 @@ export function providerFamily(provider, modelId, families = PROVIDER_FAMILIES) 
 }
 
 export function anchorParts(key) {
-  const match = /^([a-z][a-z0-9_]*):(q4|q8|bf16):(mlx|candle)$/.exec(key);
+  const match = /^([a-z][a-z0-9_]*):(q4|q8|bf16|fp8r|nvfp4):(mlx|candle)$/.exec(key);
   if (!match) fail(`not an anchor key: ${key}`);
   return { modelId: match[1], tier: match[2], backend: match[3] };
 }
@@ -1861,10 +2031,7 @@ export async function readExceededBounds(root = ROOT) {
 }
 
 export async function compiledInferencePin(root = ROOT) {
-  const source = await readFile(path.join(root, ADAPTER_LIB_PATH), "utf8");
-  const match = /^pub const INFERENCE_PIN: &str = "([0-9a-f]{40})";/m.exec(source);
-  if (!match) fail(`${ADAPTER_LIB_PATH} declares no INFERENCE_PIN`);
-  return match[1];
+  return inferenceRevision(root);
 }
 
 /** The manifest download that ships `tier` of `repo` for `modelId` — its revision names the snapshot. */
@@ -2249,6 +2416,125 @@ export async function missingIndexedShards(tierRoot) {
  * Decide what the run can do with one plan anchor: which adapter arm serves it, which weights
  * root it loads, and why it would be skipped. Pure apart from the directory probes.
  */
+// Resolve only caller-provisioned local installs; never download or convert during a
+// probe. Missing originals and missing derivations are host conditions, not missing arms.
+async function classifyFlux3Anchor(row, parts, models, hubs) {
+  const { backend, tier } = parts;
+  const base = parts.modelId === "flux3_klein_base";
+  const repository = base ? FLUX3_BASE_REPOSITORY : FLUX3_REPOSITORY;
+  const revision = base ? FLUX3_BASE_REVISION : FLUX3_REVISION;
+  const conversion = flux3Conversion(backend, tier);
+  if (!["bf16", "q4", "q8", ...(backend === "candle" ? ["fp8r", "nvfp4"] : [])].includes(tier)) {
+    return { ...row, status: "harness_unsupported", reason: `FLUX3 ${backend} has no native ${tier} producer` };
+  }
+  const download = tierDownload(models, parts.modelId, repository, "bf16");
+  if (download.revision !== revision) {
+    return { ...row, status: "harness_unsupported", reason: "FLUX3 original revision differs from the pinned native provider" };
+  }
+  if (base && conversion) {
+    const rows = models.find(model => model.id === parts.modelId)?.downloads ?? [];
+    const pinned = rows.some(entry => entry.variant === tier
+      && entry.repo === repository && entry.revision === revision
+      && (!entry.platforms || entry.platforms.includes(backend === "mlx" ? "macos" : "windows") || (backend === "candle" && entry.platforms.includes("linux")))
+      && entry.localDerivation?.conversion === conversion
+      && Number.isSafeInteger(entry.localDerivation?.weightsBytes) && entry.localDerivation.weightsBytes > 0
+      && /^[0-9a-f]{64}$/.test(entry.localDerivation?.weightsSha256 ?? ""));
+    if (!pinned) {
+      row.roots.push({ label: "FLUX3 base required pinned original (unverified/unavailable)", path: snapshotPath(hubs[0], repository, revision) });
+      return { ...row, status: "weights_missing", reason: `base ${backend}:${tier} requires verified conversion output size and SHA-256 pins; base file access is HTTP 403. Distilled pins, self-reported receipts and dense fallback are not substitutes` };
+    }
+  }
+  const expected = snapshotPath(hubs[0], repository, revision);
+  const original = await firstExistingDirectory(hubs.map(hub => snapshotPath(hub, repository, revision)));
+  row.roots.push({ label: "FLUX3 pinned original (external TE/AE)", path: original ?? expected });
+  if (!original) return { ...row, status: "weights_missing", reason: `no ${repository}@${revision} original snapshot; provision the pinned original including text_encoder/ and ae.safetensors${base ? "; base file access is HTTP 403 and requires user authorization" : ""}` };
+  const originals = ["config.json", "ae.safetensors", "text_encoder/config.json", "text_encoder/tokenizer.json", "text_encoder/tokenizer_config.json"];
+  const missing = [];
+  for (const file of originals) if (!(await isFile(path.join(original, file)))) missing.push(file);
+  if (!(await hasComponentWeights(path.join(original, "text_encoder")))) missing.push("text_encoder/*.safetensors");
+  if (!(await isFile(path.join(original, "text_encoder/model.safetensors")))
+    && !(await isFile(path.join(original, "text_encoder/model.safetensors.index.json")))) {
+    missing.push("text_encoder/model.safetensors or model.safetensors.index.json");
+  }
+  missing.push(...await missingIndexedShards(path.join(original, "text_encoder")));
+  if (missing.length) return { ...row, status: "weights_missing", reason: `FLUX3 original snapshot is missing external component files: ${missing.join(", ")}` };
+  let root = original;
+  if (conversion) {
+    const data = process.env.SCENEWORKS_DATA_DIR;
+    const derived = process.env.SCENEWORKS_FLUX3_KLEIN_DERIVED_ROOT
+      ?? (data ? path.join(data, "models", "derived", parts.modelId) : null);
+    if (!derived) return { ...row, status: "weights_missing", reason: `FLUX3 ${backend}:${tier} requires a local ${conversion} package; set SCENEWORKS_FLUX3_KLEIN_DERIVED_ROOT to models/derived/${parts.modelId} or provide SCENEWORKS_DATA_DIR (no snapshot tier-directory fallback)` };
+    root = path.resolve(derived, tier, conversion);
+  } else if (tier !== "bf16") root = path.join(original, "variants", tier);
+  row.roots.push({ label: `FLUX3 ${backend}:${tier} native package`, path: root });
+  const required = ["config.json", "model.safetensors", ...(conversion ? ["flux3-conversion-receipt.json", "LICENSE.md", "NOTICE.md"] : tier === "bf16" ? [] : ["hf_quant_config.json", "manifest.json"])];
+  const absent = [];
+  for (const file of required) if (!(await isFile(path.join(root, file)))) absent.push(file);
+  if (absent.length) return { ...row, status: "weights_missing", reason: `FLUX3 ${backend}:${tier} package ${root} is missing ${absent.join(", ")}; install/derive this exact native tier, never substitute dense weights` };
+  // This binding is not an integrity attestation: the native loader full-hash verifies
+  // the conversion receipt AND its external components before loading any tensors.
+  row.tierRoot = root;
+  row.inventoryFiles = required;
+  const trustedOriginal = path.dirname(path.dirname(original));
+  row.externalComponents = [
+    { label: "text_encoder", root: path.join(original, "text_encoder"), trustedRoot: trustedOriginal },
+    { label: "autoencoder", root: original, files: ["ae.safetensors"], trustedRoot: trustedOriginal },
+  ];
+  row.env.SCENEWORKS_FLUX3_KLEIN_REPOSITORY = repository;
+  row.env.SCENEWORKS_FLUX3_KLEIN_REVISION = revision;
+  row.env.SCENEWORKS_FLUX3_KLEIN_ROOT = root;
+  row.env.SCENEWORKS_FLUX3_KLEIN_ORIGINAL_ROOT = original;
+  row.artifact = { repository: repository, resolvedRevision: revision, variant: tier };
+  return row;
+}
+
+// Existing families keep their byte-for-byte inventory semantics. FLUX3's split
+// packages additionally bind the external components actually opened by the loader.
+export async function hashAnchorInventory(row) {
+  const packageOptions = row.inventoryFiles
+    ? { includeFiles: row.inventoryFiles, trustedRoot: path.dirname(path.dirname(row.tierRoot)) }
+    : {};
+  if (!row.externalComponents) return hashArtifactInventory(row.tierRoot, packageOptions);
+  if (!["flux3_klein", "flux3_klein_base"].includes(row.modelId) || row.externalComponents.length !== 2
+    || new Set(row.externalComponents.map(c => c.label)).size !== 2
+    || row.externalComponents.some(c => !["text_encoder", "autoencoder"].includes(c.label))) {
+    throw new Error("ambiguous FLUX3 external component inventory");
+  }
+  const original = row.env?.SCENEWORKS_FLUX3_KLEIN_ORIGINAL_ROOT;
+  if (!original) throw new Error("FLUX3 external inventory has no pinned original root");
+  for (const component of row.externalComponents) {
+    const expected = component.label === "text_encoder" ? path.join(original, "text_encoder") : original;
+    if (path.resolve(component.root) !== path.resolve(expected)
+      || (component.label === "autoencoder" && JSON.stringify(component.files) !== '["ae.safetensors"]')
+      || (component.label === "text_encoder" && component.files !== undefined)) {
+      throw new Error(`ambiguous FLUX3 ${component.label} component path`);
+    }
+  }
+  const components = [
+    { label: "package", root: row.tierRoot, files: row.inventoryFiles, trustedRoot: packageOptions.trustedRoot },
+    ...row.externalComponents,
+  ].sort((a, b) => a.label.localeCompare(b.label));
+  const hash = createHash("sha256").update("sceneworks-flux3-external-inventory-v1\0");
+  const seen = new Map();
+  let bytes = 0;
+  let files = 0;
+  for (const component of components) {
+    const names = component.files ?? await listCachedArtifactFiles(component.root, component.trustedRoot);
+    if (names.length === 0 || new Set(names).size !== names.length) throw new Error(`empty or ambiguous ${component.label} inventory`);
+    for (const name of [...names].sort()) {
+      const canonical = await realpath(path.join(component.root, name));
+      // HashArtifactInventory enforces confinement, nonempty files and safe relative
+      // names. Realpath deduplication avoids counting an overlapping blob twice.
+      const inventory = await hashArtifactInventory(component.root, { includeFiles: [name], trustedRoot: component.trustedRoot });
+      const previous = seen.get(canonical);
+      if (previous && previous !== inventory.bytes) throw new Error("component file changed during inventory");
+      if (!previous) { seen.set(canonical, inventory.bytes); bytes += inventory.bytes; files += 1; }
+      hash.update(`${component.label}\0${name}\0${inventory.bytes}\0${inventory.sha256}\n`);
+    }
+  }
+  return { root: row.tierRoot, files, bytes, sha256: hash.digest("hex") };
+}
+
 export async function classifyAnchor(key, planned, { models, backend, hubs, current, captured, bounds = new Map(), declaredLanes, declaredProviders, sdxlRoutes = null, wanMlxSealed = null, families = PROVIDER_FAMILIES }) {
   const parts = anchorParts(key);
   const row = {
@@ -2337,6 +2623,8 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
     };
   }
   if (current.get(key) === true) row.current = true;
+
+  if (family.flux3) return classifyFlux3Anchor(row, parts, models, hubs);
 
   if (family.ltx25) {
     const download = tierDownload(models, parts.modelId, family.repo, parts.tier);
@@ -3262,7 +3550,7 @@ export function stopProcessTree(child, signal, { detached = false, platform = pr
  */
 export function run(command, args, { cwd = ROOT, env = process.env, log = null, detached = false, input = null, timeoutMs = null } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, env, stdio: [input === null ? "ignore" : "pipe", "pipe", "pipe"], detached });
+    const child = spawn(command, args, metalLeaseChildOptions({ cwd, env, stdio: [input === null ? "ignore" : "pipe", "pipe", "pipe"], detached }));
     if (input !== null) child.stdin.end(input);
     let stdout = "";
     let stderr = "";
@@ -4105,7 +4393,7 @@ export async function measureAnchor(row, context) {
   // parameter at all: the candle campaign runs on Windows and the MLX one on a Mac, so the
   // UNGUARDED branch below is a branch no developer machine and no macOS lane ever takes — which
   // is exactly how it shipped for months with no wall-clock bound on it (sc-22738).
-  const { args, inferencePin, campaignDir, campaignPrefix, workDir, state, root = ROOT, platform = process.platform } = context;
+  const { args, inferencePin, campaignDir, campaignPrefix, workDir, state, root = ROOT, platform = process.platform, withMetalExecutionLease = withMacMetalExecutionLease } = context;
   const slug = anchorSlug(row.key);
   const log = new Log(path.join(workDir, "logs", `${slug}.log`));
   const captureOutput = path.join(workDir, "captures", `${slug}.json`);
@@ -4144,15 +4432,7 @@ export async function measureAnchor(row, context) {
     // every anchor the run has not reached yet, which is exactly what it did at cell 61 of 132.
     let inventory;
     try {
-      inventory = await hashArtifactInventory(
-        row.tierRoot,
-        // A hub snapshot's files are symlinks into the repository's `blobs/` beside `snapshots/`,
-        // and an explicit file list is confined to its root unless told otherwise — so the trusted
-        // root is the repository directory two levels above the snapshot root.
-        row.inventoryFiles
-          ? { includeFiles: row.inventoryFiles, trustedRoot: path.dirname(path.dirname(row.tierRoot)) }
-          : {},
-      );
+      inventory = await hashAnchorInventory(row);
     } catch (error) {
       return finish("weights_missing", inventoryUnusableReason(row.tierRoot, error));
     }
@@ -4265,6 +4545,7 @@ export async function measureAnchor(row, context) {
   // `probeTimeoutMs` for the run it was written for.
   const timeoutMs = probeTimeoutMs(budgetMinutes, guarded);
   try {
+    await withMetalExecutionLease(budgetMinutes * 60, async () => {
     if (guarded) {
       // sc-22738: every Darwin capture runs inside the footprint hard stop, with ceilings derived
       // from the adapter's own probe for this host and the incident — see `watchdogGuard`.
@@ -4281,6 +4562,7 @@ export async function measureAnchor(row, context) {
       log.write(`$ node ${captureArgs.join(" ")}\n`);
       await exec(process.execPath, captureArgs, { env, log, detached: true, timeoutMs });
     }
+    });
   } catch (error) {
     // A hard stop is recorded in the guard's event log, not on stderr: name it on the row.
     const hardStop = await watchdogHardStop(watchdogEvents);

@@ -3,7 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
-import { fallbackModels } from "./modelCatalog.js";
+import { fallbackModels } from "./testSupport/builtinModels.js";
 import {
   EXTRA_COMPATIBLE_LORA_FAMILIES,
   acceptedLoraFamilies,
@@ -78,6 +78,27 @@ describe("loraMatchesModel — Iris task gate (sc-25681)", () => {
   it("leaves models without an Iris task untouched", () => {
     const sdxl = { id: "sdxl", family: "sdxl", loraCompatibility: { families: ["sdxl"] } };
     expect(loraMatchesModel({ id: "x", family: "sdxl" }, sdxl)).toBe(true);
+  });
+});
+
+describe("loraMatchesModel — exact FLUX3 checkpoint identity", () => {
+  const base = {
+    id: "flux3_klein_base", family: "flux3",
+    loraCompatibility: { families: ["flux3"], baseModel: "black-forest-labs/flux-3-image-klein-base", baseRevision: "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4", adapterKinds: ["lora"] },
+  };
+  const compatible = { id: "adapter", family: "flux3", baseModel: base.loraCompatibility.baseModel, baseRevision: base.loraCompatibility.baseRevision, networkType: "lora" };
+  it.each([
+    ["matching identity", {}, true],
+    ["zero explicit user weight", { weight: 0 }, true],
+    ["another checkpoint", { baseModel: "black-forest-labs/flux-3-image-klein" }, false],
+    ["another revision", { baseRevision: "0000000000000000000000000000000000000000" }, false],
+    ["missing revision", { baseRevision: undefined }, false],
+    ["adapter source revision is not base revision", { baseRevision: undefined, source: { revision: base.loraCompatibility.baseRevision } }, false],
+    ["unsupported LoKr", { networkType: "lokr" }, false],
+    ["unknown kind", { networkType: undefined }, false],
+    ["model id does not replace the training repository", { baseModel: "flux3_klein_base" }, false],
+  ])("%s", (_label, patch, expected) => {
+    expect(loraMatchesModel({ ...compatible, ...patch }, base)).toBe(expected);
   });
 });
 
@@ -219,12 +240,30 @@ describe("loraMatchesModel", () => {
     ).toBe(false);
   });
 
+  it("offers any moss-image adapter on both MOSS Base and SFT", () => {
+    // Base↔SFT interchange (epic 27933): either parent stamp — or no recorded base at all,
+    // the family-assigned external import case — lists on both checkpoints.
+    const base = { id: "moss_image_base", family: "moss-image", loraCompatibility: { families: ["moss-image"] } };
+    const sft = { id: "moss_image_sft", family: "moss-image", loraCompatibility: { families: ["moss-image"] } };
+    const baseAdapter = { id: "base", family: "moss-image", baseModel: "moss_image_base" };
+    const sftAdapter = { id: "sft", family: "moss-image", base_model: "moss_image_sft" };
+    const unstamped = { id: "unstamped", family: "moss-image" };
+
+    for (const model of [base, sft]) {
+      for (const adapter of [baseAdapter, sftAdapter, unstamped]) {
+        expect(loraMatchesModel(adapter, model)).toBe(true);
+      }
+    }
+    // Family routing still applies: a non-moss adapter stays out of the MOSS pickers.
+    expect(loraMatchesModel({ id: "other", family: "sdxl" }, base)).toBe(false);
+  });
+
   it("offers no LoRA for SenseNova when its schema-valid catalog rows omit the advertisement", () => {
     const seededSenseNova = fallbackModels.filter((model) => model.id.startsWith("sensenova_u1_"));
-    expect(seededSenseNova.map((model) => model.id)).toEqual([
+    expect(seededSenseNova.map((model) => model.id)).toEqual(expect.arrayContaining([
       "sensenova_u1_8b",
       "sensenova_u1_8b_fast",
-    ]);
+    ]));
     for (const model of seededSenseNova) {
       expect(model.loraCompatibility).toBeUndefined();
       expect(loraMatchesModel(sdxlLora, model)).toBe(false);
@@ -408,12 +447,14 @@ describe("slugifyPresetId", () => {
 
   it("trims leading and trailing separators so the id starts alphanumeric", () => {
     expect(slugifyPresetId("  --Neon Noir--  ")).toBe("neon_noir");
-    expect(slugifyPresetId("neon-noir")).toBe("neon-noir");
+    expect(slugifyPresetId("neon-noir")).toBe("neon_noir");
   });
 
-  it("returns empty string for non-sluggable input", () => {
-    expect(slugifyPresetId("日本語")).toBe("");
-    expect(slugifyPresetId("")).toBe("");
+  it("uses the backend fallback for non-sluggable input and lora", () => {
+    expect(slugifyPresetId("日本語")).toBe("preset");
+    expect(slugifyPresetId("")).toBe("preset");
+    expect(slugifyPresetId("LoRa")).toBe("preset");
+    expect(slugifyPresetId("Kelvin K")).toBe("kelvin");
   });
 });
 

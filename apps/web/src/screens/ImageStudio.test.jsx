@@ -13,6 +13,9 @@ vi.mock("../api.js", async (importOriginal) => {
 });
 
 import { AppContext } from "../context/AppContext.js";
+import { apiFetch } from "../api.js";
+import { CREATE_JOB_DEFINITIONS, makeCreateJob } from "../createJob.js";
+import { createModelLibraryGate, setModelLibraryHandler, MODEL_LIBRARY_UNAVAILABLE_CODE } from "../modelLibrary.js";
 import {
   buildStructuredPromptRecipe,
   parseMagicPromptCaption,
@@ -114,19 +117,19 @@ describe("ImageStudio Save as Preset", () => {
   it("previews and submits ratio batches at the largest closest model bucket", async () => {
     window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
       model: Z_IMAGE.id, count: 1, batchMode: true,
-      batchPromptsText: "[10:8] first prompt\n[16:9] second prompt\n[832x1216] exact prompt",
+      batchPromptsText: "[10:8] first prompt\n[16:9] second prompt\n[832x1216] exact prompt\n[3:4] large portrait",
     }));
     let sequence = 0;
     const createImageJob = vi.fn(async () => ({ id: `ratio-${sequence++}` }));
     await render(baseContext({ createImageJob, imageModels: [{ ...Z_IMAGE, limits: {
-      resolutions: ["1024x1024", "1280x1024", "1600x1280", "1920x1080"],
+      resolutions: ["1024x1024", "1280x1024", "1600x1280", "1920x1080", "768x1024", "896x1152", "1408x2048"],
     } }] }));
     expect(container.querySelector(".batch-preview-res")?.textContent).toBe("1600×1280");
     expect(container.querySelector(".batch-preview-text")?.textContent).toBe("first prompt");
     await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
-    expect(createImageJob).toHaveBeenCalledTimes(3);
+    expect(createImageJob).toHaveBeenCalledTimes(4);
     expect(createImageJob.mock.calls.map(([payload]) => [payload.prompt, payload.width, payload.height]))
-      .toEqual([["first prompt", 1600, 1280], ["second prompt", 1920, 1080], ["exact prompt", 832, 1216]]);
+      .toEqual([["first prompt", 1600, 1280], ["second prompt", 1920, 1080], ["exact prompt", 832, 1216], ["large portrait", 1408, 2048]]);
   });
 
   // The Advanced disclosure belongs INSIDE the work-panel, not floating beneath it:
@@ -236,6 +239,7 @@ describe("Image Studio batch cardinality admission", () => {
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     window.localStorage.clear();
+    vi.mocked(apiFetch).mockReset().mockResolvedValue({});
     ({ container, root } = mountRoot());
   });
 
@@ -323,13 +327,32 @@ describe("Image Studio batch cardinality admission", () => {
 
     // The first bounded preflight slice has yielded with the run rendered; the old
     // synchronous walk could not expose Stop until all ten million prompts were read.
-    await vi.waitFor(() => expect(container.querySelector(".batch-run-progress")?.textContent).toContain("Queued 0/10000000"));
+    await vi.waitFor(() => expect(container.querySelector(".batch-run-progress")?.textContent).toContain("Processed 0/10000000"));
     expect(container.querySelector(".batch-run-progress button")?.textContent).toBe("Stop");
     expect(createImageJob).not.toHaveBeenCalled();
 
     await click(container.querySelector(".batch-run-progress button"));
     await vi.waitFor(() => expect(container.querySelector(".batch-run-progress")?.textContent).toContain("0/10000000 done"));
     expect(createImageJob).not.toHaveBeenCalled();
+  });
+
+  it("abandons streaming preflight on project switch", async () => {
+    const values = Array.from({ length: 10 }, (_, index) => String(index));
+    const keys = ["a", "b", "c", "d", "e", "f", "g"];
+    window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
+      model: Z_IMAGE.id, count: 1, styleId: "ghibli-style", batchMode: true,
+      batchPromptsText: keys.map((key) => `{{${key}}}`).join(" "),
+      batchVariableValues: Object.fromEntries(keys.map((key) => [key, values])),
+    }));
+    const createImageJob = vi.fn();
+    const context = baseContext({ createImageJob });
+    await render(context);
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+    await click(container.querySelector(".batch-confirm .prompt-cta"));
+    await render({ ...context, activeProject: { id: "project_2", name: "Other" } });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+    expect(createImageJob).not.toHaveBeenCalled();
+    expect(container.querySelector(".batch-run-progress")).toBeNull();
   });
 
   // The in-flight window must not throttle an ordinary confirmed run: every resolved
@@ -361,6 +384,157 @@ describe("Image Studio batch cardinality admission", () => {
     expect(container.querySelector(".batch-run-progress")?.textContent).toContain("0/101 done");
   });
 
+  it("shows first and last enqueue errors and counts failed submissions", async () => {
+    window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
+      model: Z_IMAGE.id, count: 1, batchMode: true, batchPromptsText: "one\ntwo\nthree",
+    }));
+    const createImageJob = vi.fn().mockRejectedValueOnce(new Error("first failure"))
+      .mockResolvedValueOnce({ id: "ok", status: "queued" })
+      .mockRejectedValueOnce(new Error("last failure"));
+    await render(baseContext({ createImageJob }));
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+    await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(3));
+    expect(container.querySelector(".batch-run-progress").textContent).toContain("2/3 done · 2 failed");
+    expect(container.querySelector(".batch-run-progress").textContent).toContain("first failure");
+    expect(container.querySelector(".batch-run-progress").textContent).toContain("last failure");
+  });
+
+  it("retains actual creator errors across a successful submission", async () => {
+    window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
+      model: Z_IMAGE.id, count: 1, batchMode: true, batchPromptsText: "one\ntwo\nthree",
+    }));
+    let posts = 0;
+    vi.mocked(apiFetch).mockImplementation(async (path) => {
+      if (path !== "/api/v1/image/jobs") return {};
+      posts += 1;
+      if (posts === 1) throw new Error("admission rejected");
+      if (posts === 3) throw new Error("network unavailable");
+      return { id: "ok", status: "queued" };
+    });
+    const setError = vi.fn();
+    const createImageJob = makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.image,
+      project: { id: "project_1", name: "My Project" }, token: "token", requestedGpu: "",
+      setJobs: vi.fn(), setError });
+    await render(baseContext({ createImageJob }));
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+    await vi.waitFor(() => expect(posts).toBe(3));
+    expect(setError.mock.calls.map(([message]) => message)).toEqual(["admission rejected", "", "network unavailable"]);
+    expect(container.querySelector(".batch-run-progress").textContent).toContain("2/3 done · 2 failed");
+    expect(container.querySelector(".batch-run-progress").textContent).toContain("admission rejected");
+    expect(container.querySelector(".batch-run-progress").textContent).toContain("network unavailable");
+  });
+
+  it.each(["resume", "stop", "project switch", "unmount"])("keeps the failed batch chunk owned through library recovery: %s", async (action) => {
+    window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
+      model: Z_IMAGE.id, count: 1, batchMode: true, batchPromptsText: "one\ntwo\nthree",
+    }));
+    const rejection = { code: MODEL_LIBRARY_UNAVAILABLE_CODE, message: "Library disconnected",
+      context: { availability: "installed_external_unavailable", modelId: "z_image" } };
+    const prompts = [];
+    vi.mocked(apiFetch).mockImplementation(async (path, _token, options) => {
+      if (path !== "/api/v1/image/jobs") return {};
+      const { prompt } = JSON.parse(options.body);
+      prompts.push(prompt);
+      if (prompts.length === 2) throw rejection;
+      return { id: `job-${prompts.length}`, status: "queued" };
+    });
+    const gate = createModelLibraryGate({ probe: async () => ({ available: true }) });
+    const unregister = setModelLibraryHandler(gate.block);
+    try {
+      const createImageJob = makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.image,
+        project: { id: "project_1", name: "My Project" }, token: "token", requestedGpu: "",
+        setJobs: vi.fn(), setError: vi.fn() });
+      const context = baseContext({ createImageJob });
+      await render(context);
+      await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+      await vi.waitFor(() => expect(gate.getState().status).toBe("blocked"));
+      expect(prompts).toEqual(["one", "two"]);
+      if (action === "stop") await click(container.querySelector(".batch-run-progress button"));
+      if (action === "project switch") await render({ ...context, activeProject: { id: "project_2", name: "Other" } });
+      if (action === "unmount") await act(async () => root.render(null));
+      await act(async () => { await Promise.all([gate.retry(), gate.retry()]); });
+      if (action === "resume") {
+        await vi.waitFor(() => expect(prompts).toEqual(["one", "two", "two", "three"]));
+        expect(container.querySelector(".batch-run-progress").textContent).toContain("0/3 done");
+      } else {
+        expect(prompts).toEqual(["one", "two"]);
+      }
+    } finally {
+      unregister();
+      vi.mocked(apiFetch).mockReset().mockResolvedValue({});
+    }
+  });
+
+  it("does not post after a project switch while creator confirmation is pending", async () => {
+    window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
+      model: Z_IMAGE.id, count: 1, batchMode: true, batchPromptsText: "one\ntwo",
+    }));
+    let confirm;
+    const beforeCreate = vi.fn(() => new Promise((resolve) => { confirm = resolve; }));
+    const createImageJob = makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.image,
+      project: { id: "project_1", name: "My Project" }, token: "token", requestedGpu: "",
+      setJobs: vi.fn(), setError: vi.fn(), beforeCreate });
+    const context = baseContext({ createImageJob });
+    await render(context);
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+    expect(beforeCreate).toHaveBeenCalledTimes(1);
+    await render({ ...context, activeProject: { id: "project_2", name: "Other" } });
+    await act(async () => confirm(true));
+    expect(vi.mocked(apiFetch).mock.calls.filter(([path]) => path === "/api/v1/image/jobs")).toHaveLength(0);
+  });
+
+  it("accounts for and cancels a job returned after Stop", async () => {
+    window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
+      model: Z_IMAGE.id, count: 1, batchMode: true, batchPromptsText: "one\ntwo",
+    }));
+    let resolvePost;
+    const createImageJob = vi.fn(() => new Promise((resolve) => { resolvePost = resolve; }));
+    const jobAction = vi.fn();
+    await render(baseContext({ createImageJob, jobAction }));
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+    await click(container.querySelector(".batch-run-progress button"));
+    await act(async () => { resolvePost({ id: "late", status: "queued" }); });
+    expect(createImageJob).toHaveBeenCalledTimes(1);
+    expect(jobAction).toHaveBeenCalledWith({ id: "late", status: "queued" }, "cancel");
+    expect(container.querySelector(".batch-run-progress").textContent).toContain("1 not queued");
+  });
+
+  it.each(["unmount", "project switch"])("stops an outstanding post on %s and cancels the returned job", async (action) => {
+    window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
+      model: Z_IMAGE.id, count: 1, batchMode: true, batchPromptsText: "one\ntwo",
+    }));
+    let resolvePost;
+    const createImageJob = vi.fn(() => new Promise((resolve) => { resolvePost = resolve; }));
+    const jobAction = vi.fn();
+    const context = baseContext({ createImageJob, jobAction });
+    await render(context);
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+    expect(createImageJob).toHaveBeenCalledTimes(1);
+    if (action === "unmount") await act(async () => root.render(null));
+    else await render({ ...context, activeProject: { id: "project_2", name: "Other" } });
+    await act(async () => { resolvePost({ id: "late", status: "queued" }); });
+    expect(createImageJob).toHaveBeenCalledTimes(1);
+    expect(jobAction).toHaveBeenCalledWith({ id: "late", status: "queued" }, "cancel");
+  });
+
+  it("releases a slot waiter on project switch without posting the tail", async () => {
+    const values = Array.from({ length: MAX_LISTED_JOBS + 1 }, (_, index) => String(index));
+    window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
+      model: Z_IMAGE.id, count: 1, batchMode: true, batchPromptsText: "{{value}}", batchVariableValues: { value: values },
+    }));
+    let sequence = 0;
+    const createImageJob = vi.fn(async () => ({ id: `job-${sequence++}`, status: "queued" }));
+    const jobAction = vi.fn();
+    const context = baseContext({ createImageJob, jobAction });
+    await render(context);
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+    await click(container.querySelector(".batch-confirm .prompt-cta"));
+    await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(MAX_LISTED_JOBS));
+    await render({ ...context, activeProject: { id: "project_2", name: "Other" } });
+    expect(createImageJob).toHaveBeenCalledTimes(MAX_LISTED_JOBS);
+    expect(jobAction).toHaveBeenCalledTimes(MAX_LISTED_JOBS);
+  });
+
   // The window is still a real bound for a run far past the queue depth — it feeds that
   // many jobs at a time rather than posting a huge product in one burst.
   it("windows a confirmed run larger than the in-flight limit", async () => {
@@ -385,7 +559,7 @@ describe("Image Studio batch cardinality admission", () => {
     await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(MAX_LISTED_JOBS));
 
     expect(container.querySelector(".batch-run-progress")?.textContent).toContain(
-      `Queued ${MAX_LISTED_JOBS}/${total}`,
+      `Processed ${MAX_LISTED_JOBS}/${total}`,
     );
     await click(
       [...container.querySelectorAll(".batch-run-progress button")].find((button) => button.textContent === "Stop"),
@@ -422,7 +596,7 @@ describe("ImageStudio advanced model defaults", () => {
     await act(async () => {});
   }
 
-  it("resets advanced overrides to the newly selected model defaults", async () => {
+  it("preserves supported resolution while resetting model-specific advanced overrides", async () => {
     const createImageJob = vi.fn(async () => ({ id: "job-1" }));
     await render(
       baseContext({
@@ -492,13 +666,65 @@ describe("ImageStudio advanced model defaults", () => {
     const payload = createImageJob.mock.calls[0][0];
     expect(payload.model).toBe("qwen_image");
     expect(payload.advanced).toMatchObject({
-      resolution: "1536x1024",
+      resolution: "1024x1024",
       sampler: "unipc",
       scheduler: "shift",
       schedulerShift: 4.2,
     });
     expect(payload.advanced).not.toHaveProperty("steps");
     expect(payload.advanced).not.toHaveProperty("guidanceScale");
+  });
+});
+
+describe("ImageStudio resolution continuity", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  it.each([
+    ["exact 2K landscape", "2048x1408", ["1024x1024", "2048x1408"], "2048x1408"],
+    ["nearby 2K landscape", "2048x1408", ["1024x1024", "1536x1024", "2048x1440"], "2048x1440"],
+    ["smaller landscape", "2048x1408", ["1024x1024", "1536x1024", "1024x1536"], "1536x1024"],
+    ["portrait", "1408x2048", ["1024x1024", "1024x1536", "1536x1024"], "1024x1536"],
+    ["closest square size", "2048x2048", ["1024x1024", "1536x1536"], "1536x1536"],
+  ])("keeps the %s composition through switching and submission", async (_, previous, options, expected) => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    const source = { ...Z_IMAGE, limits: { resolutions: ["1024x1024", previous] } };
+    const destination = {
+      ...Z_IMAGE,
+      id: "destination",
+      name: "Destination",
+      limits: { resolutions: options },
+    };
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={baseContext({ createImageJob, imageModels: [source, destination] })}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    const resolutionSelect = () => field(container, "Aspect");
+    await act(async () => setSelect(resolutionSelect(), previous));
+    await act(async () => setSelect(field(container, "Model"), destination.id));
+    expect(resolutionSelect().value).toBe(expected);
+
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent === "Generate"));
+    expect(createImageJob.mock.calls[0][0].advanced.resolution).toBe(expected);
+
+    // Returning to the source preserves the current choice when possible, rather than
+    // restoring an old per-model preference or resetting to the square default.
+    await act(async () => setSelect(field(container, "Model"), source.id));
+    expect(resolutionSelect().value).toBe(previous);
   });
 });
 
@@ -3194,6 +3420,53 @@ describe("ImageStudio CFG-free axis gating (sc-15299)", () => {
     const payload = createImageJob.mock.calls[0][0];
     expect(payload.negativePrompt).toBe("blurry, low quality");
     expect(payload.advanced.guidanceScale).toBe(6.5);
+  });
+
+  it("lets Turbo users enable negatives and shift independently of a default-only scheduler", async () => {
+    const turbo = { ...GUIDED, id: "mage_flow_turbo", family: "mage-flow",
+      image: { supportsGuidance: true, supportsNegativePrompt: true, negativePromptRequiresGuidance: true, supportsSchedulerShift: true },
+      defaults: { ...GUIDED.defaults, guidanceScale: 1, schedulerShift: 6 },
+      limits: { ...GUIDED.limits, samplers: ["default"], schedulers: ["default"] } };
+    window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({ model: turbo.id, schedulerShift: 3 }));
+    const createImageJob = vi.fn(async () => ({ id: "turbo-job" }));
+    await render(baseContext({ imageModels: [turbo], createImageJob }));
+    await openAdvanced();
+    expect(labelStartingWith("Sampler")?.querySelector("select")).toBeTruthy();
+    expect(labelStartingWith("Scheduler")?.querySelector("select")).toBeTruthy();
+    const negative = labelStartingWith("Negative prompt").querySelector("textarea");
+    expect(negative.disabled).toBe(true);
+    await generate();
+    expect(createImageJob.mock.calls[0][0].advanced.schedulerShift).toBeUndefined();
+    await act(async () => setInput(field(container, "Guidance"), "1.5"));
+    expect(negative.disabled).toBe(false);
+    await setTextarea(negative, "blurry");
+    const shift = field(container, "Schedule shift");
+    expect(shift.getAttribute("max")).toBeNull();
+    await act(async () => setInput(shift, "18.375"));
+    await generate();
+    const payload = createImageJob.mock.calls.at(-1)[0];
+    expect(payload.advanced.guidanceScale).toBe(1.5);
+    expect(payload.negativePrompt).toBe("blurry");
+    expect(payload.advanced.schedulerShift).toBe(18.375);
+    expect(payload.advanced.scheduler).toBeUndefined();
+    await act(async () => setInput(shift, ""));
+    await generate();
+    expect(createImageJob.mock.calls.at(-1)[0].advanced.schedulerShift).toBeUndefined();
+  });
+
+  it("keeps unsupported Shift disabled and omits a replayed override", async () => {
+    const unsupported = { ...GUIDED, image: { ...GUIDED.image, supportsSchedulerShift: false } };
+    window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
+      model: unsupported.id, schedulerShift: 33.375, schedulerShiftExplicit: true,
+    }));
+    const createImageJob = vi.fn(async () => ({ id: "job-with-native-default" }));
+    await render(baseContext({ imageModels: [unsupported], createImageJob }));
+    await openAdvanced();
+    expect(labelStartingWith("Sampler")?.querySelector("select")).toBeTruthy();
+    expect(labelStartingWith("Scheduler")?.querySelector("select")).toBeTruthy();
+    expect(field(container, "Schedule shift").disabled).toBe(true);
+    await generate();
+    expect(createImageJob.mock.calls[0][0].advanced.schedulerShift).toBeUndefined();
   });
 
   it("hides both controls for a CFG-free engine and sends neither, even from a replayed recipe", async () => {

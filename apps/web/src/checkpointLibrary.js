@@ -1,4 +1,5 @@
-import { apiFetch } from "./api.js";
+import { modelsApi } from "./api/modelsResources.js";
+
 
 // The client half of the universal checkpoint-import seam (epic 20398, sc-20650).
 //
@@ -73,11 +74,11 @@ export const LINKED_NEEDS_RESCAN = "needs_rescan";
 // ---------------------------------------------------------------------------------------------
 
 export function fetchLibraryRoots(token, options) {
-  return apiFetch("/api/v1/models/library-roots", token, options);
+  return modelsApi.libraryRoots(token, options);
 }
 
 export function approveLibraryRoot(token, { path, label } = {}) {
-  return apiFetch("/api/v1/models/library-roots", token, {
+  return modelsApi.libraryRoots(token, {
     method: "POST",
     body: JSON.stringify(label ? { path, label } : { path }),
   });
@@ -89,24 +90,24 @@ export function updateLibraryRoot(token, rootId, { label, path } = {}) {
   const body = {};
   if (label != null) body.label = label;
   if (path != null) body.path = path;
-  return apiFetch(`/api/v1/models/library-roots/${encodeURIComponent(rootId)}`, token, {
+  return modelsApi.libraryRoot(rootId, token, {
     method: "PATCH",
     body: JSON.stringify(body),
   });
 }
 
 export function removeLibraryRoot(token, rootId) {
-  return apiFetch(`/api/v1/models/library-roots/${encodeURIComponent(rootId)}`, token, {
+  return modelsApi.libraryRoot(rootId, token, {
     method: "DELETE",
   });
 }
 
 export function scanLibraryRoot(token, rootId, options) {
-  return apiFetch(`/api/v1/models/library-roots/${encodeURIComponent(rootId)}/scan`, token, options);
+  return modelsApi.scanLibraryRoot(rootId, token, options);
 }
 
 export function rescanLibraryCheckpoint(token, rootId, relativePath) {
-  return apiFetch(`/api/v1/models/library-roots/${encodeURIComponent(rootId)}/rescan`, token, {
+  return modelsApi.rescanLibraryRoot(rootId, token, {
     method: "POST",
     body: JSON.stringify({ relativePath }),
   });
@@ -116,14 +117,16 @@ export function rescanLibraryCheckpoint(token, rootId, relativePath) {
 // Request bodies
 // ---------------------------------------------------------------------------------------------
 
-// A linked import names its checkpoint by `(rootId, relativePath)` and NOTHING else. It must not
-// carry `ownershipMode` — the served enum has only `managed`, and `"linked"` is deliberately
+// A linked import names its source only by `(rootId, relativePath)`, plus catalog compatibility.
+// It must not carry `ownershipMode` — the served enum has only `managed`, and `"linked"` is deliberately
 // refused there (dto.rs `OwnershipModeV1`) — nor a repo/URL/path/discriminated source, which the
 // route rejects outright.
-export function linkedImportBody({ rootId, relativePath, name, type = "image", family } = {}) {
+export function linkedImportBody({ rootId, relativePath, name, type = "image", family, baseModel, minimaxH3Partition } = {}) {
   const body = { linkedRootId: rootId, linkedRelativePath: relativePath, type };
   if (name) body.name = name;
   if (family) body.family = family;
+  if (baseModel) body.baseModel = baseModel;
+  if (minimaxH3Partition) body.minimaxH3Partition = minimaxH3Partition;
   return body;
 }
 
@@ -136,6 +139,8 @@ export function managedImportBody(input = {}) {
   const body = { ownershipMode: OWNERSHIP_MANAGED, type };
   if (name) body.name = name;
   if (family) body.family = family;
+  if (input.baseModel) body.baseModel = input.baseModel;
+  if (input.minimaxH3Partition) body.minimaxH3Partition = input.minimaxH3Partition;
   switch (kind) {
     case "upload":
       body.source = { kind: "upload" };
@@ -164,9 +169,24 @@ export function managedImportBody(input = {}) {
   return body;
 }
 
-// What the submit button must not let through, stated per source so the user is told WHICH field is
-// missing instead of watching a disabled button and guessing. Returns "" when the form can be sent.
+// Both ownerships require explicit H3 compatibility; architecture is not a partition declaration.
+export function modelCompatibilityProblem(input = {}) {
+  if (input.family === "minimax-h3" || input.minimaxH3Partition || ["minimax_h3", "minimax_h3_ref"].includes(input.baseModel)) {
+    if (!["fl2va", "ref2va", "hybrid"].includes(input.minimaxH3Partition)) {
+      return "Choose minimaxH3Partition: fl2va, ref2va, or hybrid. Tensor shapes cannot determine it.";
+    }
+    const expectedBase = input.minimaxH3Partition === "ref2va" ? "minimax_h3_ref" : "minimax_h3";
+    if (input.baseModel !== expectedBase) {
+      return `minimaxH3Partition ${input.minimaxH3Partition} requires baseModel ${expectedBase}.`;
+    }
+  }
+  return "";
+}
+
+// Name the missing source field rather than leaving the user with a disabled button and no reason.
 export function managedSourceProblem(input = {}) {
+  const compatibilityProblem = modelCompatibilityProblem(input);
+  if (compatibilityProblem) return compatibilityProblem;
   switch (input.kind) {
     case "upload":
       return input.file ? "" : "Choose a checkpoint file to upload.";

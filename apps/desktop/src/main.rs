@@ -11,9 +11,8 @@ mod cred_ipc;
 mod cuda_provision;
 #[cfg(any(target_os = "linux", all(test, target_os = "windows")))]
 mod linux_cuda_provision;
-// Pure, cross-platform filesystem predicates for `cuda_provision` (marker + sentinel
-// checks). NOT `cfg`-gated so the retry-skip guard (sc-13614) is unit-tested on any
-// host, not only the Windows-only lane where `cuda_provision` compiles.
+// Shared Windows/Linux download, verification, markers and archive extraction.
+// Offline shared fixtures run on every host; shipping Mac startup does not use it.
 mod cuda_provision_check;
 // Likely-LAN-address discovery for the remote-access URL (epic 4484, story 5).
 mod net;
@@ -29,7 +28,13 @@ mod temp_fixture_guard;
 mod update;
 #[cfg(any(target_os = "linux", test))]
 mod webkitgtk;
+// WebView2 renderer-death recovery (Windows): the COM wiring is cfg(windows); the
+// decision logic is pure and compiled in tests on every host.
+#[cfg(any(windows, test))]
+mod webview_resilience;
 
+#[cfg(windows)]
+use tauri::Manager;
 use tauri::RunEvent;
 
 fn main() {
@@ -54,7 +59,16 @@ fn main() {
     // Install the tracing backbone for the desktop shell's own logs. The sidecars
     // are separate processes; their stdout is captured into the multi-source ring
     // buffer in `setup.rs` (and re-classified there), independent of this subscriber.
-    sceneworks_core::observability::init_logging();
+    // On Windows the GUI build (`windows_subsystem = "windows`) has no console —
+    // stdout is a discarded handle — so the shell ALSO writes to a log file or its
+    // lines vanish (2026-10 incidents: the WebView2 resilience handler's kill /
+    // reload diagnostics were all silently lost, leaving the recurring white
+    // screen undiagnosable).
+    let desktop_log_path = setup::logs_dir().join("desktop.log");
+    if let Some(parent) = desktop_log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    sceneworks_core::observability::init_logging_with_file(&desktop_log_path);
 
     // Kill any sidecars orphaned by a prior crash/force-quit before spawning
     // fresh ones, so API processes don't accumulate and contend on jobs.db.
@@ -96,7 +110,10 @@ fn main() {
             // Save an asset to a user-chosen destination + resolve an asset's
             // project-relative path to its absolute on-disk path (sc-8726).
             settings::save_asset_as,
+            settings::begin_image_export,
             settings::save_image_export,
+            settings::finish_image_export,
+            settings::cancel_image_export,
             settings::resolve_asset_path,
             settings::list_credentials,
             settings::set_credential,
@@ -117,6 +134,15 @@ fn main() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building the SceneWorks desktop shell");
+
+    // Windows/WebView2: if Chromium kills the webview's render process (OOM under
+    // commit pressure, hang watchdog, crash), the window would otherwise paint
+    // white for the rest of the session while jobs keep running blind. Reload
+    // the webview instead (2026-10-22 incident; see webview_resilience.rs).
+    #[cfg(windows)]
+    if let Some(window) = app.get_webview_window("main") {
+        webview_resilience::install_process_failed_recovery(&window);
+    }
 
     app.run(|app_handle, event| {
         // Stop the Python worker then the API sidecar gracefully, holding the

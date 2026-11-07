@@ -316,6 +316,7 @@ impl ManagedCheckpointVariantV1 {
             version_id: Some(self.revision.clone()),
             file_id: Some(self.repo_file.clone()),
             credential_host: None,
+            ..Default::default()
         }
     }
 

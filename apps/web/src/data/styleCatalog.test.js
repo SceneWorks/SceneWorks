@@ -68,7 +68,7 @@ describe("style catalog: structural invariants", () => {
 
   it("carries the two-field prompt template", () => {
     expect(styles.promptTemplate).toBe(PROMPT_TEMPLATE);
-    expect(styles.promptTemplate).toBe("Subject: {subject}\nStyle: {style}");
+    expect(styles.promptTemplate).toBe("Description: {subject}\nStyle: {style}");
   });
 
   it("every group has a non-empty id, name, and description", () => {

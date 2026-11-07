@@ -1,3 +1,5 @@
+//! API assembly and compatibility facade. New helper implementations belong to an area owner;
+//! `api_lib_does_not_gain_helper_implementations` enforces the existing root boundary.
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::io::SeekFrom;
@@ -28,7 +30,9 @@ use sceneworks_core::contracts::{
     QueueSummary, RetryJobRequest, WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest,
     WorkerSnapshot, WorkerStatus, WorkerTerminationRequest,
 };
-use sceneworks_core::hf_home::{huggingface_hub_cache_dir, huggingface_repo_cache_path};
+#[cfg(test)]
+use sceneworks_core::hf_home::huggingface_hub_cache_dir;
+use sceneworks_core::hf_home::huggingface_repo_cache_path;
 use sceneworks_core::image_request::{
     default_count as image_default_count, default_resolution as image_default_resolution,
 };
@@ -39,6 +43,7 @@ use sceneworks_core::jobs_store::{
     RetryJob, RouteDecision, StaleSweep, UnsupportedReason, WorkerHeartbeat, JOB_STATUSES,
     MAX_LISTED_JOBS,
 };
+use sceneworks_core::limits::{requested_steps, steps_limit_error};
 use sceneworks_core::lora_family::{
     accepted_lora_families, apply_adapter_metadata_to_manifest_entry,
     apply_model_manifest_defaults, canonical_lora_family, detect_lora_family, detect_model_family,
@@ -54,7 +59,7 @@ use sceneworks_core::project_store::{
     FilmReferenceInput, ProjectStore, ProjectStoreError, UploadAsset, KEYPOINT_UPLOADS_CACHE_DIR,
     POSE_UPLOADS_CACHE_DIR,
 };
-use sceneworks_core::time::{format_unix_seconds, now_unix_seconds};
+use sceneworks_core::time::now_unix_seconds;
 use sceneworks_core::training::{
     build_training_plan, builtin_training_presets, builtin_training_targets, BuildTrainingPlan,
     LoraTrainingRequest, TrainingDataset, TrainingPresetProvenance, TrainingTarget,
@@ -67,9 +72,8 @@ use sceneworks_core::training_store::{
 };
 use sceneworks_core::video_request::{
     classify_reference_set, default_resolution, duration_limit_error, fps_limit_error,
-    reference_limit_error, requested_auto_duration, requested_ltx25_vae_decoder, requested_steps,
-    requested_temporal_upsample_rounds, resolve_duration, resolve_fps, steps_limit_error,
-    ReferenceSetVerdict,
+    reference_limit_error, requested_auto_duration, requested_ltx25_vae_decoder,
+    requested_temporal_upsample_rounds, resolve_duration, resolve_fps, ReferenceSetVerdict,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -90,7 +94,17 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use uuid::Uuid;
 
 mod auth;
+mod file_serving;
+mod job_redaction;
+mod project_files;
+mod router;
+mod uploads;
+use file_serving::*;
+mod validators;
 use auth::{access_control, cors_layer, is_authorized, AuthThrottle};
+use job_redaction::*;
+use project_files::*;
+use validators::*;
 mod catalog_scan_supervisor;
 mod startup;
 use startup::{StartupCriticality, StartupMaintenance, StartupPhaseTimer};
@@ -141,7 +155,7 @@ mod assets;
 use assets::{
     delete_asset, get_asset, get_asset_poster, import_asset, list_assets, move_asset_to_character,
     move_asset_to_library, purge_asset, sweep_stale_asset_uploads, update_asset_status,
-    update_asset_tags, write_upload_field_to_dir, write_upload_field_to_temp_file,
+    update_asset_tags, write_upload_field_to_temp_file,
 };
 mod workflows;
 use workflows::{get_asset_workflow, inspect_workflow, max_inspect_multipart_body_bytes};
@@ -174,8 +188,8 @@ use training::{
 };
 mod generation;
 use generation::{
-    create_audio_job, create_image_job, create_interleave_job, create_vector_job,
-    create_vector_prompt_workflow, create_video_job, create_vqa_job,
+    create_audio_job, create_generation_job_with_binding, create_image_job, create_interleave_job,
+    create_vector_job, create_vector_prompt_workflow, create_video_job, create_vqa_job,
     parse_recipe_preset_resolution, typed_generation_route, JobCatalogSnapshot,
 };
 #[cfg(test)]
@@ -195,6 +209,7 @@ use workers::{
 };
 mod events;
 use events::{create_event_ticket, job_events, EventHub, EventMessage};
+mod http_boundary;
 mod tickets;
 use tickets::{create_media_ticket, EventTicketContext, TicketResponse, TicketStore};
 mod dto;
@@ -243,8 +258,9 @@ mod models;
 use models::{
     create_conditional_components_download_jobs, create_model_convert_job,
     create_model_download_job, create_model_import_job, delete_model, delete_model_variant,
-    list_models, model_catalog, model_is_installed, resolve_model_manifest_entry,
-    resolve_selected_image_text_encoder, ModelCatalogCache, ModelSizeCache,
+    list_models, model_catalog, model_is_installed, repair_model_import_job,
+    resolve_model_manifest_entry, resolve_selected_image_text_encoder, ModelCatalogCache,
+    ModelSizeCache,
 };
 #[cfg(test)]
 use models::{
@@ -279,7 +295,7 @@ use prompt_batches::{
     list_prompt_batches, update_prompt_batch,
 };
 mod styles;
-use styles::list_styles;
+use styles::{list_appearance, list_styles};
 mod credentials;
 use credentials::{delete_credential, list_credentials, set_credential};
 mod preferences;
@@ -348,6 +364,8 @@ pub(crate) use defaults::*;
 // `main.rs` (`run`/`run_worker`), the handler modules' `use super::*` (`AppState`),
 // and `tests.rs` (`Settings`) keep resolving these paths unchanged.
 mod server;
+#[cfg(test)]
+mod test_hooks;
 pub use server::{run, run_worker, AppState, Settings};
 
 // The theme-preferences route. Its GET (the pre-auth theme read) is public, but its
@@ -461,59 +479,6 @@ pub(crate) use sceneworks_core::MAX_PROMPT_CHARS;
 // pass-through bag threaded to the worker, so it has no per-key schema — bound its total
 // serialized size instead. 64 KiB is generous for legitimate advanced settings.
 const MAX_ADVANCED_JSON_BYTES: usize = 64 * 1024;
-// Thread-local (not a process-global atomic) so a test overriding the cap to
-// exercise the size limit can't leak that value into other LoRA-upload tests
-// running concurrently on sibling threads. `#[tokio::test]` uses a current-thread
-// runtime, so the upload handler runs on the same thread that sets the override.
-#[cfg(test)]
-thread_local! {
-    static TEST_MAX_LORA_UPLOAD_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    // sc-15950: same override, same reasoning, for `POST /api/v1/workflows/inspect`. The real cap
-    // is `MAX_UPLOAD_BYTES` (2 GiB), which no test can send, so the oversized-body branch is only
-    // reachable through a lowered cap.
-    static TEST_MAX_WORKFLOW_INSPECT_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-#[cfg(test)]
-static TEST_MAX_MODEL_UPLOAD_BYTES: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-// sc-8819 (F-017): count how many times the model/LoRA catalogs are assembled (which
-// each trigger the whole per-model filesystem install-state probe sweep) so a test can
-// assert a preset job-create builds each catalog once, not 2–3×. Thread-local, and the
-// counter is bumped on the caller's async task thread (before the catalog's inner
-// `spawn_blocking`), so under the `#[tokio::test]` current-thread runtime the count is
-// observed on the test thread and is immune to parallel tests on sibling threads.
-#[cfg(test)]
-thread_local! {
-    static TEST_MODEL_CATALOG_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static TEST_LORA_CATALOG_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn test_reset_catalog_build_counters() {
-    TEST_MODEL_CATALOG_BUILDS.with(|cell| cell.set(0));
-    TEST_LORA_CATALOG_BUILDS.with(|cell| cell.set(0));
-}
-
-#[cfg(test)]
-pub(crate) fn test_model_catalog_builds() -> usize {
-    TEST_MODEL_CATALOG_BUILDS.with(std::cell::Cell::get)
-}
-
-#[cfg(test)]
-pub(crate) fn test_lora_catalog_builds() -> usize {
-    TEST_LORA_CATALOG_BUILDS.with(std::cell::Cell::get)
-}
-
-#[cfg(test)]
-pub(crate) fn test_note_model_catalog_build() {
-    TEST_MODEL_CATALOG_BUILDS.with(|cell| cell.set(cell.get() + 1));
-}
-
-#[cfg(test)]
-pub(crate) fn test_note_lora_catalog_build() {
-    TEST_LORA_CATALOG_BUILDS.with(|cell| cell.set(cell.get() + 1));
-}
 
 struct ApiJson<T>(T);
 
@@ -544,7 +509,7 @@ fn should_warn_open_bind(access_token: &str, ip: std::net::IpAddr) -> bool {
 // bind (e.g. a trusted-network deployment that fronts its own auth) by setting
 // `SCENEWORKS_ALLOW_OPEN_BIND=1`. Pure + tested alongside `should_warn_open_bind`.
 fn open_bind_override_enabled(value: &str) -> bool {
-    matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES")
+    sceneworks_core::env_util::flag_value("SCENEWORKS_ALLOW_OPEN_BIND", Some(value), false)
 }
 
 /// Choose the builtin-manifest seed mode from the raw `SCENEWORKS_CONFIG_DIR` and
@@ -585,9 +550,8 @@ fn seed_mode_for_config_dir(
     if !explicit_config_dir {
         return SeedMode::Overwrite;
     }
-    let own_manifests = own_manifests_env
-        .map(str::trim)
-        .is_some_and(|value| matches!(value, "1" | "true" | "TRUE" | "yes" | "YES"));
+    let own_manifests =
+        sceneworks_core::env_util::flag_value("SCENEWORKS_OWN_MANIFESTS", own_manifests_env, false);
     if own_manifests {
         SeedMode::IfMissing
     } else {
@@ -633,6 +597,20 @@ pub(crate) fn json_decode_error_response(detail: String) -> Response {
         })),
     )
         .into_response()
+}
+
+/// The HTTP API's Tokio runtime.
+///
+/// With `SCENEWORKS_RUN_UTILITY_INPROCESS` (the desktop default) the API's runtime threads poll the
+/// in-process utility workers' complete dispatch future, the same future the standalone worker
+/// gives an explicitly sized thread ([`sceneworks_worker::WORKER_ENTRY_STACK_BYTES`]). Tokio's
+/// default worker stack is 2 MiB, and a claimed MiniMax-H3 model import overflowed it, aborting
+/// the whole API. Size every runtime thread the same as the worker entry thread.
+pub fn api_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(sceneworks_worker::WORKER_ENTRY_STACK_BYTES)
+        .build()
 }
 
 /// Run this binary as a standalone worker process instead of the HTTP API.
@@ -690,7 +668,7 @@ async fn spawn_inprocess_utility_worker(
     port: u16,
     data_dir: PathBuf,
 ) -> Result<InProcessUtilityWorker, sceneworks_worker::WorkerError> {
-    let mut worker_settings = sceneworks_worker::Settings::from_env();
+    let mut worker_settings = sceneworks_worker::Settings::try_from_env()?;
     worker_settings.api_url = format!("http://127.0.0.1:{port}");
     worker_settings.data_dir = data_dir;
     worker_settings.gpu_id =
@@ -780,9 +758,11 @@ impl InProcessUtilityWorker {
         let InProcessUtilityWorker { handles, grace } = self;
         // The loops observe the shared shutdown signal concurrently, so awaiting them
         // in sequence just collects results — each is already stopping (or stopped) by
-        // the time we reach it. The per-handle timeout bounds a stuck loop.
+        // the time we reach it. ONE deadline bounds the whole pool (sc-26691): a
+        // per-handle timeout let N stuck loops hold shutdown for N × grace.
+        let deadline = tokio::time::Instant::now() + grace;
         for handle in handles {
-            match tokio::time::timeout(grace, handle).await {
+            match tokio::time::timeout_at(deadline, handle).await {
                 Ok(Ok(Ok(()))) => {}
                 Ok(Ok(Err(error))) => tracing::error!(
                     event = "in_process_worker_exited_error",
@@ -820,36 +800,7 @@ fn parent_pid_to_watch() -> Option<i32> {
     (pid > 1 && pid <= i64::from(i32::MAX)).then_some(pid as i32)
 }
 
-/// True while `pid` names a live process. `kill(pid, None)` checks for the
-/// process without delivering a signal: `Ok` means it's alive; `EPERM` means it
-/// exists but we may not signal it (still alive); `ESRCH` is the only "gone"
-/// case and yields false.
-#[cfg(unix)]
-fn pid_alive(pid: i32) -> bool {
-    match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None) {
-        Ok(()) => true,
-        Err(errno) => errno == nix::errno::Errno::EPERM,
-    }
-}
-
-/// True while `pid` names a live process. The workspace forbids `unsafe`, so we
-/// can't `OpenProcess`/`WaitForSingleObject` directly; instead we shell out to
-/// `tasklist` (the same liveness probe the desktop shell uses to reap sidecars).
-/// `tasklist /FO CSV` quotes every field, so a live PID appears as `"<pid>"` in a
-/// data row while the no-match case prints only an `INFO:` banner — anchoring on
-/// the quoted PID is locale-proof and immune to the digits colliding with another
-/// column. A probe we can't even launch is treated as "alive" so a transient
-/// failure never makes the worker self-terminate spuriously.
-#[cfg(windows)]
-fn pid_alive(pid: i32) -> bool {
-    let Ok(output) = std::process::Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-        .output()
-    else {
-        return true;
-    };
-    String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\""))
-}
+use sceneworks_core::process::pid_alive;
 
 /// Resolves once the watched parent process disappears, polling every
 /// [`PARENT_POLL_INTERVAL`]. With no parent to watch (`None`) it stays pending
@@ -907,6 +858,11 @@ async fn shutdown_signal(
     // therefore exit as soon as the listener closes; their lease Drop must already distinguish
     // process shutdown from an ordinary handled controller error.
     film_controller_shutdown.request();
+    // sc-26691: the in-process utility loops call `run_worker_loop` directly and only hear OS
+    // signals on their own. Whatever stopped THIS process — Ctrl-C, SIGTERM or the parent dying
+    // (the campaign harness closing the guardian's stdin) — must stop them too, or
+    // `InProcessUtilityWorker::shutdown` waits out its whole grace for loops never told to stop.
+    sceneworks_worker::request_shutdown();
     // Axum stops accepting connections when this future returns, but waits for existing
     // connections indefinitely. End app-owned long-lived streams immediately and wake the
     // server's finite drain deadline before returning control to Axum.
@@ -992,6 +948,50 @@ pub(crate) fn sweep_stale_uploads_cancellable(
     cutoff: SystemTime,
     should_continue: impl Fn() -> bool,
 ) -> std::io::Result<usize> {
+    sweep_stale_uploads_retaining(data_dir, subdir, cutoff, should_continue, &[])
+}
+
+pub(crate) fn sweep_stale_model_uploads(
+    data_dir: &FsPath,
+    jobs: &JobsStore,
+    cutoff: SystemTime,
+    should_continue: impl Fn() -> bool,
+) -> std::io::Result<usize> {
+    // A database failure must never turn an owned retry input into abandoned cache data.
+    let root = data_dir.join("cache/model-uploads");
+    let canonical_root = match root.canonicalize() {
+        Ok(root) => root,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let mut retained = Vec::new();
+    for source in jobs
+        .model_upload_sources_for_recovery()
+        .map_err(|error| std::io::Error::other(error.to_string()))?
+    {
+        match PathBuf::from(source).canonicalize() {
+            Ok(source) if source.starts_with(&canonical_root) => retained.push(source),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    sweep_stale_uploads_retaining(
+        data_dir,
+        "model-uploads",
+        cutoff,
+        should_continue,
+        &retained,
+    )
+}
+
+fn sweep_stale_uploads_retaining(
+    data_dir: &FsPath,
+    subdir: &str,
+    cutoff: SystemTime,
+    should_continue: impl Fn() -> bool,
+    retained: &[PathBuf],
+) -> std::io::Result<usize> {
     let upload_root = data_dir.join("cache").join(subdir);
     let entries = match std::fs::read_dir(upload_root) {
         Ok(entries) => entries,
@@ -1016,6 +1016,13 @@ pub(crate) fn sweep_stale_uploads_cancellable(
             }
         };
         if !entry.file_name().to_string_lossy().starts_with("upload-") {
+            continue;
+        }
+        if entry
+            .path()
+            .canonicalize()
+            .is_ok_and(|path| retained.iter().any(|source| source.starts_with(&path)))
+        {
             continue;
         }
         if !should_continue() {
@@ -1157,11 +1164,20 @@ fn normalized_api_route(path: &str, matched_path: Option<&str>) -> Option<String
 /// Worker claim is a one-second idle poll, so logging every successful sub-millisecond response
 /// floods the session ring buffer and pushes actionable events out of the Logs screen. Keep the
 /// Server-Timing header on every response, but emit the duration event for this route only when the
-/// request fails or is unexpectedly slow. All other API/MCP routes retain per-request timing logs.
+/// request fails or is unexpectedly slow. Worker heartbeats are the same kind of liveness traffic,
+/// and a successful one is never logged at all; only failures surface. All other API/MCP routes
+/// retain per-request timing logs.
 const SLOW_CLAIM_REQUEST_MS: f64 = 1_000.0;
 
 fn should_log_api_request_duration(route: &str, status: StatusCode, elapsed_ms: f64) -> bool {
-    route != "/api/v1/jobs/claim" || !status.is_success() || elapsed_ms >= SLOW_CLAIM_REQUEST_MS
+    if !status.is_success() {
+        return true;
+    }
+    match route {
+        "/api/v1/workers/:worker_id/heartbeat" => false,
+        "/api/v1/jobs/claim" => elapsed_ms >= SLOW_CLAIM_REQUEST_MS,
+        _ => true,
+    }
 }
 
 async fn api_request_timing(request: AxumRequest, next: Next) -> Response {
@@ -1263,9 +1279,11 @@ pub(crate) fn create_app_with_deferred_startup_maintenance(
     timeout: Duration,
 ) -> Result<(Router, AppState), JobsStoreError> {
     let (router, state) = create_app_with_pending_startup_maintenance(settings)?;
-    state
-        .startup_maintenance
-        .start(state.settings.data_dir.clone(), timeout);
+    state.startup_maintenance.start(
+        state.settings.data_dir.clone(),
+        state.jobs_store.clone(),
+        timeout,
+    );
     Ok((router, state))
 }
 
@@ -1338,7 +1356,9 @@ fn create_app_with_state_mode(
             "jobs_retention_recovery",
             StartupCriticality::ReadinessCritical,
         );
-        let jobs_store = Arc::new(JobsStore::new(&settings.jobs_db_path));
+        let jobs_store = Arc::new(
+            JobsStore::new(&settings.jobs_db_path).with_session_started_at(now_unix_seconds()),
+        );
         jobs_store.initialize()?;
         let purged_terminal_jobs =
             jobs_store.purge_terminal_jobs_older_than(settings.jobs_retention_days)?;
@@ -1351,6 +1371,17 @@ fn create_app_with_state_mode(
         let interrupted_jobs_on_startup = jobs_store.mark_interrupted_on_startup()?.len();
         (jobs_store, interrupted_jobs_on_startup)
     };
+    if !defer_upload_sweeps {
+        warn_on_sweep_err(
+            "model",
+            sweep_stale_model_uploads(
+                &settings.data_dir,
+                &jobs_store,
+                SystemTime::now() - Duration::from_secs(STALE_UPLOAD_SECONDS),
+                || true,
+            ),
+        );
+    }
     let project_store = Arc::new(ProjectStore::new(
         settings.data_dir.clone(),
         settings.app_version.clone(),
@@ -1404,7 +1435,21 @@ fn create_app_with_state_mode(
             ),
         }
     }
+    // The configured self-call URL can name a stable LAN/proxy hostname even
+    // when the listener itself binds all interfaces.
+    let mut configured_hosts = settings.mcp_allowed_hosts_extra.clone();
+    if let Ok(url) = settings.mcp_api_url.parse::<axum::http::Uri>() {
+        if let Some(authority) = url.authority() {
+            configured_hosts.push(authority.as_str().to_owned());
+        }
+    }
+    let allowed_hosts = Arc::new(sceneworks_mcp::discovered_allowed_hosts(
+        &settings.host,
+        settings.port,
+        &configured_hosts,
+    ));
     let state = AppState {
+        allowed_hosts,
         settings,
         jobs_store,
         project_store,
@@ -1414,7 +1459,7 @@ fn create_app_with_state_mode(
             EVENT_TICKET_TTL_SECONDS,
             MAX_OUTSTANDING_EVENT_TICKETS,
         )),
-        media_tickets: Arc::new(TicketStore::new(MEDIA_TICKET_TTL_SECONDS)),
+        media_tickets: Arc::new(TicketStore::media(MEDIA_TICKET_TTL_SECONDS, 24 * 60 * 60)),
         thumbnail_generation_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         workflow_strip_slots: Arc::new(tokio::sync::Semaphore::new(WORKFLOW_STRIP_SLOTS)),
         auth_throttle: Arc::new(AuthThrottle::default()),
@@ -1424,16 +1469,16 @@ fn create_app_with_state_mode(
         model_catalog_cache: Arc::new(ModelCatalogCache::default()),
         model_size_cache: Arc::new(Mutex::new(ModelSizeCache::default())),
         #[cfg(test)]
-        model_size_estimate_test_hook: Arc::new(Mutex::new(None)),
-        #[cfg(test)]
-        model_size_estimate_disabled_override: Arc::new(Mutex::new(None)),
-        #[cfg(test)]
-        video_platform_override: Arc::new(Mutex::new(None)),
+        test_hooks: Arc::default(),
+
         external_lora_cache: Arc::new(Mutex::new(external_loras::ExternalLoraCache::default())),
         external_base_model_cache: Arc::new(Mutex::new(
             external_base_models::ExternalBaseModelCache::default(),
         )),
-        http_client: reqwest::Client::new(),
+        http_client: http_boundary::outbound_client()
+            .map_err(|error| JobsStoreError::Io(std::io::Error::other(error)))?,
+        planner_http_client: http_boundary::planner_client()
+            .map_err(|error| JobsStoreError::Io(std::io::Error::other(error)))?,
         interrupted_jobs_on_startup,
         startup_maintenance: if defer_upload_sweeps {
             StartupMaintenance::pending()
@@ -1449,40 +1494,6 @@ fn create_app_with_state_mode(
         )),
         catalog_scan_preflight_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         catalog_scan_work_slots: Arc::new(tokio::sync::Semaphore::new(2)),
-        #[cfg(test)]
-        catalog_scan_before_driver_start_once: Arc::new(Mutex::new(None)),
-        #[cfg(test)]
-        catalog_scan_stop_after_pass_once: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        #[cfg(test)]
-        catalog_scan_before_terminal_exit_once: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        #[cfg(test)]
-        catalog_scan_terminal_exit_reached: Arc::new(tokio::sync::Notify::new()),
-        #[cfg(test)]
-        catalog_scan_terminal_exit_release: Arc::new(tokio::sync::Notify::new()),
-        #[cfg(test)]
-        catalog_scan_preflight_delay_ms_once: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        #[cfg(test)]
-        catalog_scan_preflight_started: Arc::new(tokio::sync::Notify::new()),
-        #[cfg(test)]
-        catalog_scan_preflight_admission_timeout_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        #[cfg(test)]
-        catalog_scan_preflight_execution_timeout_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        #[cfg(test)]
-        catalog_scan_preflight_test_ticks: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        #[cfg(test)]
-        catalog_scan_injected_sqlite_busy_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        #[cfg(test)]
-        catalog_scan_contention_backoff_started: Arc::new(tokio::sync::Notify::new()),
-        #[cfg(test)]
-        progress_before_accept_once: Arc::new(Mutex::new(None)),
-        #[cfg(test)]
-        sse_snapshot_before_subscribe_once: Arc::new(Mutex::new(None)),
-        #[cfg(test)]
-        progress_side_effects_fail_once: Arc::new(Mutex::new(false)),
-        #[cfg(test)]
-        progress_side_effects_fail_job_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
-        #[cfg(test)]
-        progress_side_effects_attempts: Arc::new(Mutex::new(HashMap::new())),
     };
     let cors = cors_layer(&state.settings);
     let returned_state = state.clone();
@@ -1497,20 +1508,9 @@ fn create_app_with_state_mode(
     // port) carrying the access token, so there is no second engine/DB path.
     // Blocking-job wait policy comes from Settings (sc-10277: SCENEWORKS_MCP_JOB_*
     // env knobs), clamped to the invariants the poll loop needs.
-    // F-040 (sc-11236): restore the transport's Host-header (DNS-rebinding)
-    // defense. `/mcp` rides `access_control`, but that gate performs NO
-    // Host/Origin validation, so in the loopback/loopback-trust/no-token desktop
-    // posture a malicious page could DNS-rebind a browser onto `/mcp`. Derive the
-    // allowed Host set from the SAME bind config that decides where the API
-    // listens: loopback is always allowed; a concrete interface host adds itself;
-    // a wildcard LAN bind honors `SCENEWORKS_MCP_ALLOWED_HOSTS` (and otherwise
-    // disables the check, relying on the mandatory LAN access token).
-    let mcp_allowed_hosts = sceneworks_mcp::mcp_allowed_hosts(
-        &state.settings.host,
-        state.settings.port,
-        &state.settings.mcp_allowed_hosts_extra,
-    );
-    let mcp_service = sceneworks_mcp::streamable_http_service_with_hosts(
+    // Both API and MCP use the same concrete Host allow-list, including LAN interfaces.
+    let mcp_allowed_hosts = state.allowed_hosts.as_ref().clone();
+    let mcp_service = sceneworks_mcp::streamable_http_service_with_origins(
         sceneworks_mcp::ApiClientConfig {
             base_url: state.settings.mcp_api_url.clone(),
             access_token: Some(state.settings.access_token.clone()),
@@ -1520,757 +1520,12 @@ fn create_app_with_state_mode(
             state.settings.mcp_job_timeout,
         ),
         mcp_allowed_hosts,
+        state.settings.cors_origins.clone(),
     );
 
     let router = Router::new()
         .nest_service("/mcp", mcp_service)
-        .route("/api/v1/health", get(health))
-        .route("/api/v1/access", get(access))
-        .route("/api/v1/auth/verify", post(verify_access))
-        .route("/api/v1/training/targets", get(list_training_targets))
-        .route("/api/v1/training/presets", get(list_training_presets))
-        .route(
-            "/api/v1/training/data-walk",
-            get(iris_training::training_data_walk),
-        )
-        .route(
-            "/api/v1/training/iris/stage-presets",
-            get(iris_curricula::iris_stage_presets),
-        )
-        .route(
-            "/api/v1/training/iris/plan-check",
-            post(iris_curricula::iris_plan_check),
-        )
-        .route("/api/v1/catalogs", get(list_catalogs).post(create_catalog))
-        .route("/api/v1/catalogs/attach", post(attach_catalog))
-        .route(
-            "/api/v1/catalogs/:catalog_id",
-            get(get_catalog).delete(detach_catalog),
-        )
-        .route(
-            "/api/v1/catalogs/:catalog_id/status",
-            get(get_catalog_status),
-        )
-        .route("/api/v1/catalogs/:catalog_id/query", post(query_catalog))
-        .route(
-            "/api/v1/catalogs/:catalog_id/curation/query",
-            post(curate_catalog),
-        )
-        .route(
-            "/api/v1/catalogs/:catalog_id/curation/facets",
-            post(catalog_curation_facets),
-        )
-        .route("/api/v1/catalogs/:catalog_id/facets", post(catalog_facets))
-        .route(
-            "/api/v1/catalogs/:catalog_id/saved-views",
-            get(list_catalog_saved_views).post(create_catalog_saved_view),
-        )
-        .route(
-            "/api/v1/catalogs/:catalog_id/saved-views/:view_id",
-            put(update_catalog_saved_view).delete(delete_catalog_saved_view),
-        )
-        .route(
-            "/api/v1/catalogs/:catalog_id/records/:record_id/review",
-            put(review_catalog_record),
-        )
-        .route(
-            "/api/v1/catalogs/:catalog_id/records/:record_id/thumbnail",
-            get(catalog_record_thumbnail),
-        )
-        .route(
-            "/api/v1/catalogs/:catalog_id/analyzer-config",
-            put(update_catalog_analyzer_config),
-        )
-        .route("/api/v1/catalogs/:catalog_id/pause", post(pause_catalog))
-        .route("/api/v1/catalogs/:catalog_id/resume", post(resume_catalog))
-        .route(
-            "/api/v1/catalogs/:catalog_id/analyze",
-            post(run_catalog_analysis),
-        )
-        .route(
-            "/api/v1/catalogs/:catalog_id/on-disk",
-            delete(delete_catalog_on_disk),
-        )
-        .route("/api/v1/projects", get(list_projects).post(create_project))
-        .route("/api/v1/projects/:project_id", get(get_project))
-        .route(
-            "/api/v1/projects/:project_id/reindex",
-            post(reindex_project_endpoint),
-        )
-        .route(
-            "/api/v1/projects/:project_id/assets",
-            get(list_assets)
-                .post(import_asset)
-                // sc-8812 (F-010): streaming multipart asset upload needs the large
-                // limit; re-attach it per-route since the router default is now the
-                // small JSON cap. GET has no body, so this is harmless for listing.
-                .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
-        )
-        // sc-15950: read a shared image's embedded workflow WITHOUT creating an asset. Registered
-        // beside the asset routes because it shares their multipart shape and staging area, but it
-        // is deliberately not project-scoped — it mutates nothing, so there is nothing to scope.
-        // Same auth posture as the upload route above; a larger-than-JSON per-route limit is
-        // re-attached for the same reason (the router default is the small JSON cap), but it is
-        // this route's OWN cap plus framing headroom rather than the 2 GiB asset ceiling — see
-        // `MAX_WORKFLOW_INSPECT_BYTES` for why both numbers are what they are.
-        .route(
-            "/api/v1/workflows/inspect",
-            post(inspect_workflow).layer(DefaultBodyLimit::max(max_inspect_multipart_body_bytes())),
-        )
-        .route(
-            "/api/v1/projects/:project_id/assets/:asset_id",
-            get(get_asset).delete(delete_asset),
-        )
-        // sc-15952: the resolution report for the envelope an IMPORTED asset is already carrying
-        // at `extra.importedWorkflow`. The envelope needs no route — it rides on the asset — but
-        // the report is computed against catalogs that live behind this API, and it goes stale the
-        // moment a download finishes, so re-resolving after an install is a plain refetch of this.
-        .route(
-            "/api/v1/projects/:project_id/assets/:asset_id/workflow",
-            get(get_asset_workflow),
-        )
-        .route(
-            "/api/v1/projects/:project_id/assets/:asset_id/poster/:poster_sha256",
-            get(get_asset_poster),
-        )
-        .route(
-            "/api/v1/projects/:project_id/assets/:asset_id/purge",
-            delete(purge_asset),
-        )
-        .route(
-            "/api/v1/projects/:project_id/assets/:asset_id/move-to-library",
-            post(move_asset_to_library),
-        )
-        .route(
-            "/api/v1/projects/:project_id/assets/:asset_id/move-to-character",
-            post(move_asset_to_character),
-        )
-        .route(
-            "/api/v1/projects/:project_id/assets/:asset_id/status",
-            patch(update_asset_status),
-        )
-        .route(
-            "/api/v1/projects/:project_id/assets/:asset_id/tags",
-            patch(update_asset_tags),
-        )
-        .route(
-            "/api/v1/projects/:project_id/training/datasets",
-            get(list_training_datasets).post(create_training_dataset),
-        )
-        .route(
-            "/api/v1/catalogs/:catalog_id/materialize",
-            post(materialize_catalog_results),
-        )
-        .route(
-            "/api/v1/projects/:project_id/training/uploads",
-            // sc-8812 (F-010): streaming multipart training-dataset upload; needs the
-            // large per-route limit against the small JSON router default.
-            post(upload_training_dataset_item).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
-        )
-        .route(
-            "/api/v1/projects/:project_id/training/datasets/:dataset_id",
-            get(get_training_dataset)
-                .patch(update_training_dataset)
-                .delete(delete_training_dataset),
-        )
-        .route(
-            "/api/v1/projects/:project_id/training/datasets/:dataset_id/readiness",
-            get(get_training_dataset_readiness),
-        )
-        .route(
-            "/api/v1/projects/:project_id/training/datasets/:dataset_id/items/:item_id/quality-ack",
-            post(set_training_dataset_item_quality_ack),
-        )
-        .route(
-            "/api/v1/projects/:project_id/training/datasets/:dataset_id/items/:item_id/ltx-prepared-bundle",
-            post(upload_ltx_prepared_bundle).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
-        )
-        // Iris depth / restoration dataset sidecars + the pre-launch dataset check (sc-25687/8).
-        .route(
-            "/api/v1/projects/:project_id/training/datasets/:dataset_id/items/:item_id/iris-sidecar/:kind",
-            post(iris_task_training::upload_iris_item_sidecar)
-                .delete(iris_task_training::delete_iris_item_sidecar)
-                .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
-        )
-        .route(
-            "/api/v1/projects/:project_id/training/datasets/:dataset_id/iris-check",
-            post(iris_task_training::check_iris_task_dataset),
-        )
-        .route(
-            "/api/v1/projects/:project_id/training/datasets/:dataset_id/batch-rename",
-            post(batch_rename_training_dataset_items),
-        )
-        .route(
-            "/api/v1/projects/:project_id/training/datasets/:dataset_id/caption-sidecars",
-            post(write_training_dataset_caption_sidecars),
-        )
-        .route(
-            "/api/v1/projects/:project_id/training/datasets/:dataset_id/caption-jobs",
-            post(create_training_dataset_caption_job),
-        )
-        .route(
-            "/api/v1/projects/:project_id/training/datasets/:dataset_id/parquet-import-jobs",
-            post(create_training_dataset_parquet_import_job),
-        )
-        .route(
-            "/api/v1/projects/:project_id/training/datasets/:dataset_id/parquet-import-finalize",
-            post(finalize_training_dataset_parquet_import)
-                .layer(DefaultBodyLimit::max(MAX_PARQUET_FINALIZE_BODY_BYTES)),
-        )
-        .route(
-            "/api/v1/projects/:project_id/training/datasets/:dataset_id/analysis-jobs",
-            post(create_training_dataset_analysis_job),
-        )
-        .route(
-            "/api/v1/projects/:project_id/training/datasets/:dataset_id/face-analysis-jobs",
-            post(create_training_dataset_face_analysis_job),
-        )
-        .route(
-            "/api/v1/projects/:project_id/training/datasets/:dataset_id/subject-mask-jobs",
-            post(create_training_dataset_subject_mask_job),
-        )
-        .route(
-            "/api/v1/projects/:project_id/training/datasets/:dataset_id/subject-masks",
-            // The worker POSTs generated masks (base64 PNG) in chunks of up to 64 MiB, beyond the
-            // small JSON router default, so this route gets its own bounded limit.
-            get(get_training_dataset_subject_masks)
-                .post(write_training_dataset_subject_masks)
-                .layer(DefaultBodyLimit::max(MAX_SUBJECT_MASKS_BODY_BYTES)),
-        )
-        .route(
-            "/api/v1/projects/:project_id/training/datasets/:dataset_id/items/:item_id/subject-mask",
-            post(upload_training_dataset_subject_mask)
-                .layer(DefaultBodyLimit::max(MAX_SUBJECT_MASK_MULTIPART_BODY_BYTES)),
-        )
-        .route(
-            "/api/v1/projects/:project_id/training/datasets/:dataset_id/analysis-embeddings",
-            post(write_training_dataset_analysis_embeddings),
-        )
-        .route(
-            "/api/v1/projects/:project_id/training/datasets/:dataset_id/face-embeddings",
-            post(write_training_dataset_face_embeddings),
-        )
-        .route(
-            "/api/v1/projects/:project_id/training/datasets/:dataset_id/upscale-jobs",
-            post(create_training_dataset_upscale_job),
-        )
-        .route(
-            "/api/v1/projects/:project_id/training/datasets/:dataset_id/repoint",
-            post(repoint_training_dataset_items),
-        )
-        .route(
-            "/api/v1/projects/:project_id/training/datasets/:dataset_id/smart-crop",
-            post(smart_crop_training_dataset_items),
-        )
-        .route(
-            "/api/v1/projects/:project_id/training/datasets/:dataset_id/strip-exif",
-            post(strip_exif_training_dataset_items),
-        )
-        .route(
-            "/api/v1/projects/:project_id/training/jobs",
-            post(create_training_job),
-        )
-        .route(
-            "/api/v1/training/jobs/:job_id/iris-metrics",
-            get(iris_curricula::iris_training_metrics),
-        )
-        .route(
-            "/api/v1/projects/:project_id/files/*relative_path",
-            get(get_project_file),
-        )
-        .route(
-            "/api/v1/projects/:project_id/voices",
-            get(list_saved_voices).post(create_saved_voice),
-        )
-        .route(
-            "/api/v1/projects/:project_id/voices/:voice_id",
-            delete(delete_saved_voice),
-        )
-        // YuE2 score inspection, bounded edits, renders and listening comparisons (sc-22997).
-        .route("/api/v1/yue2/score/inspect", post(inspect_yue2_score))
-        .route(
-            "/api/v1/projects/:project_id/yue2/score-versions",
-            get(list_yue2_score_versions).post(create_yue2_score_version),
-        )
-        .route(
-            "/api/v1/projects/:project_id/yue2/score-versions/:version_id",
-            get(get_yue2_score_version),
-        )
-        .route(
-            "/api/v1/projects/:project_id/yue2/score-versions/:version_id/inspection",
-            get(inspect_yue2_score_version),
-        )
-        .route(
-            "/api/v1/projects/:project_id/yue2/score-versions/:version_id/edits",
-            post(edit_yue2_score_version),
-        )
-        .route(
-            "/api/v1/projects/:project_id/yue2/score-versions/:version_id/renders",
-            get(list_yue2_score_renders).post(record_yue2_score_render),
-        )
-        .route(
-            "/api/v1/projects/:project_id/yue2/comparisons",
-            get(list_yue2_comparisons).post(create_yue2_comparison),
-        )
-        // Recording transcriptions (sc-23002): the review artifact's record, scores and exports.
-        .route(
-            "/api/v1/projects/:project_id/yue2/transcriptions",
-            get(list_yue2_transcriptions),
-        )
-        .route(
-            "/api/v1/projects/:project_id/yue2/transcriptions/:transcription_id",
-            get(get_yue2_transcription),
-        )
-        .route(
-            "/api/v1/projects/:project_id/yue2/transcriptions/:transcription_id/files/*file",
-            get(get_yue2_transcription_file),
-        )
-        // YuE2 song jobs (sc-22999 / sc-23002): create / plan / fromPlan / cover / renderVersion /
-        // decode / transcribe.
-        .route(
-            "/api/v1/projects/:project_id/yue2/jobs",
-            post(create_yue2_jobs),
-        )
-        .route(
-            "/api/v1/jobs/:job_id/yue2-eligibility",
-            get(get_job_yue2_eligibility),
-        )
-        .route(
-            "/api/v1/models/:model_id/license-acknowledgment",
-            get(get_license_acknowledgment)
-                .put(put_license_acknowledgment)
-                .delete(delete_license_acknowledgment),
-        )
-        .route(
-            "/api/v1/projects/:project_id/yue2/comparisons/:comparison_id",
-            get(get_yue2_comparison),
-        )
-        .route(
-            "/api/v1/projects/:project_id/characters",
-            get(list_characters).post(create_character),
-        )
-        .route(
-            "/api/v1/projects/:project_id/characters/:character_id",
-            get(get_character)
-                .patch(update_character)
-                .delete(archive_character),
-        )
-        .route(
-            "/api/v1/projects/:project_id/characters/:character_id/archive",
-            post(archive_character),
-        )
-        .route(
-            "/api/v1/projects/:project_id/characters/:character_id/purge",
-            delete(purge_character),
-        )
-        .route(
-            "/api/v1/projects/:project_id/characters/:character_id/references",
-            post(add_character_reference),
-        )
-        .route(
-            "/api/v1/projects/:project_id/characters/:character_id/references/:asset_id",
-            patch(update_character_reference).delete(remove_character_reference),
-        )
-        .route(
-            "/api/v1/projects/:project_id/characters/:character_id/looks",
-            post(create_character_look),
-        )
-        .route(
-            "/api/v1/projects/:project_id/characters/:character_id/looks/:look_id",
-            patch(update_character_look).delete(delete_character_look),
-        )
-        .route(
-            "/api/v1/projects/:project_id/characters/:character_id/loras",
-            post(attach_character_lora),
-        )
-        .route(
-            "/api/v1/projects/:project_id/characters/:character_id/loras/:link_id",
-            patch(update_character_lora).delete(detach_character_lora),
-        )
-        .route(
-            "/api/v1/projects/:project_id/characters/:character_id/test-jobs",
-            post(create_character_test_job),
-        )
-        .route(
-            "/api/v1/projects/:project_id/timelines",
-            get(list_timelines).post(create_timeline),
-        )
-        .route(
-            "/api/v1/projects/:project_id/films",
-            get(list_film_drafts).post(create_film_draft),
-        )
-        .route(
-            "/api/v1/projects/:project_id/films/:draft_id",
-            get(get_film_draft).put(update_film_draft),
-        )
-        .route(
-            "/api/v1/projects/:project_id/films/:draft_id/reference-pack",
-            get(get_reference_pack).put(update_reference_pack),
-        )
-        .route(
-            "/api/v1/projects/:project_id/films/:draft_id/references",
-            post(add_film_reference),
-        )
-        .route(
-            "/api/v1/projects/:project_id/films/:draft_id/sound",
-            post(add_film_sound),
-        )
-        .route(
-            "/api/v1/projects/:project_id/films/:draft_id/runs",
-            post(create_film_run),
-        )
-        .route(
-            "/api/v1/projects/:project_id/films/:draft_id/preflight",
-            post(preflight_film_draft),
-        )
-        .route(
-            "/api/v1/projects/:project_id/films/:draft_id/render-options",
-            get(get_film_render_options).post(preview_film_render_options),
-        )
-        .route(
-            "/api/v1/projects/:project_id/films/:draft_id/brief/parse",
-            post(parse_film_draft_script),
-        )
-        .route(
-            "/api/v1/projects/:project_id/films/:draft_id/planners",
-            get(film_planner_availability),
-        )
-        .route(
-            "/api/v1/projects/:project_id/films/:draft_id/planning",
-            get(get_film_planning_operation).post(start_film_planning),
-        )
-        .route(
-            "/api/v1/projects/:project_id/films/:draft_id/planning/cancel",
-            post(cancel_film_planning),
-        )
-        .route(
-            "/api/v1/projects/:project_id/films/:draft_id/planning/apply",
-            post(apply_film_planning_candidate),
-        )
-        .route(
-            "/api/v1/film-planner-connections",
-            get(list_film_planner_connections),
-        )
-        .route(
-            "/api/v1/film-planner-connections/:connection_id",
-            put(save_film_planner_connection),
-        )
-        .route(
-            "/api/v1/film-planner-connections/:connection_id/test",
-            post(test_film_planner_connection),
-        )
-        .route(
-            "/api/v1/projects/:project_id/film-runs/:run_id",
-            get(get_film_run),
-        )
-        .route(
-            "/api/v1/projects/:project_id/film-runs",
-            get(list_film_runs),
-        )
-        .route(
-            "/api/v1/projects/:project_id/film-runs/:run_id/progress",
-            get(get_film_run_progress),
-        )
-        .route(
-            "/api/v1/projects/:project_id/film-runs/:run_id/start",
-            post(start_film_run),
-        )
-        .route(
-            "/api/v1/projects/:project_id/film-runs/:run_id/resume",
-            post(resume_film_run),
-        )
-        .route(
-            "/api/v1/projects/:project_id/film-runs/:run_id/cancel",
-            post(cancel_film_run),
-        )
-        .route(
-            "/api/v1/projects/:project_id/film-runs/:run_id/export",
-            post(export_film_run),
-        )
-        .route(
-            "/api/v1/projects/:project_id/film-runs/:run_id/review",
-            get(get_film_review).post(analyze_film_take),
-        )
-        .route(
-            "/api/v1/projects/:project_id/film-runs/:run_id/review/decision",
-            post(decide_film_take),
-        )
-        .route(
-            "/api/v1/projects/:project_id/film-runs/:run_id/review/swap",
-            post(swap_film_take),
-        )
-        .route(
-            "/api/v1/projects/:project_id/film-runs/:run_id/review/replace",
-            post(replace_film_take),
-        )
-        .route(
-            "/api/v1/projects/:project_id/film-runs/:run_id/review/repair",
-            post(repair_film_take),
-        )
-        .route(
-            "/api/v1/projects/:project_id/timelines/:timeline_id",
-            get(get_timeline).put(update_timeline),
-        )
-        .route(
-            "/api/v1/projects/:project_id/timelines/:timeline_id/film-deliveries",
-            post(timelines::deliver_film_timeline),
-        )
-        .route(
-            "/api/v1/projects/:project_id/timelines/:timeline_id/exports",
-            post(create_timeline_export),
-        )
-        .route(
-            "/api/v1/projects/:project_id/timelines/:timeline_id/items/:item_id/frames",
-            post(extract_timeline_frame),
-        )
-        .route(
-            "/api/v1/projects/:project_id/person-tracks",
-            get(list_person_tracks),
-        )
-        .route(
-            "/api/v1/projects/:project_id/person-tracks/detections",
-            post(create_person_detection_job),
-        )
-        .route(
-            "/api/v1/projects/:project_id/person-tracks/jobs",
-            post(create_person_track_job),
-        )
-        .route(
-            "/api/v1/projects/:project_id/person-tracks/:track_id",
-            get(get_person_track),
-        )
-        .route(
-            "/api/v1/projects/:project_id/person-tracks/:track_id/corrections",
-            post(save_person_track_corrections),
-        )
-        .route("/api/v1/image/jobs", post(create_image_job))
-        .route("/api/v1/image/vectorize/jobs", post(create_vector_job))
-        .route(
-            "/api/v1/image/vectorize/prompt/jobs",
-            post(create_vector_prompt_workflow),
-        )
-        .route("/api/v1/image/depth/jobs", post(create_image_depth_job))
-        .route("/api/v1/image/vqa/jobs", post(create_vqa_job))
-        .route("/api/v1/image/interleave/jobs", post(create_interleave_job))
-        .route("/api/v1/video/jobs", post(create_video_job))
-        .route("/api/v1/audio/jobs", post(create_audio_job))
-        .route("/api/v1/prompts/refine", post(create_prompt_refine_job))
-        .route(
-            "/api/v1/face-likeness/compare",
-            post(create_face_likeness_compare_job),
-        )
-        .route("/api/v1/poses", post(create_poses))
-        .route(
-            "/api/v1/poses/sources",
-            // sc-8812 (F-010): multipart pose-source image upload; large per-route limit.
-            post(create_pose_sources).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
-        )
-        .route(
-            "/api/v1/poses/preview/:job_id/:file_name",
-            get(get_pose_preview),
-        )
-        .route("/api/v1/keypoints", post(create_keypoint))
-        .route(
-            "/api/v1/keypoints/sources",
-            // sc-8812 (F-010): multipart keypoint-source image upload; large per-route limit.
-            post(create_keypoint_sources).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
-        )
-        .route("/api/v1/keypoints/presets", get(list_keypoint_presets))
-        .route(
-            "/api/v1/keypoints/collections",
-            get(list_keypoint_collections).post(upsert_keypoint_collection),
-        )
-        .route(
-            "/api/v1/keypoints/collections/:collection_id",
-            delete(delete_keypoint_collection),
-        )
-        .route(
-            "/api/v1/keypoints/collections/:collection_id/default",
-            put(set_default_keypoint_collection),
-        )
-        .route(
-            "/api/v1/credentials",
-            get(list_credentials).put(set_credential),
-        )
-        .route("/api/v1/credentials/:host", delete(delete_credential))
-        .route(
-            UI_PREFERENCES_PATH,
-            get(get_ui_preferences).put(set_ui_preferences),
-        )
-        // The model source library's live status + relocation seam (sc-19709). Its own path
-        // prefix, not `/models/...`, so a library operation can never collide with a model id.
-        .route(
-            "/api/v1/model-library",
-            get(model_library::get_model_library),
-        )
-        .route(
-            "/api/v1/model-library/relocate",
-            post(model_library::relocate_model_library),
-        )
-        .route("/api/v1/models", get(list_models))
-        // The curated managed NVFP4 variants (sc-11043, epic 11037). A STATIC sibling of
-        // `/api/v1/models/:model_id` for the same reason the library routes are.
-        .route(
-            "/api/v1/models/managed-variants",
-            get(checkpoint_library::list_managed_variants),
-        )
-        // Linked checkpoint libraries (epic 20398, sc-20635). A STATIC sibling of
-        // `/api/v1/models/:model_id`, exactly like `/api/v1/models/import`, so a library
-        // operation is never mistaken for a model id.
-        .route(
-            "/api/v1/models/library-roots",
-            get(checkpoint_library::list_library_roots)
-                .post(checkpoint_library::approve_library_root),
-        )
-        .route(
-            "/api/v1/models/library-roots/:root_id",
-            patch(checkpoint_library::update_library_root)
-                .delete(checkpoint_library::remove_library_root),
-        )
-        .route(
-            "/api/v1/models/library-roots/:root_id/scan",
-            get(checkpoint_library::scan_library_root),
-        )
-        .route(
-            "/api/v1/models/library-roots/:root_id/rescan",
-            post(checkpoint_library::rescan_library_checkpoint),
-        )
-        .route("/api/v1/models/:model_id", delete(delete_model))
-        .route(
-            "/api/v1/models/:model_id/variants/:variant",
-            delete(delete_model_variant),
-        )
-        .route(
-            "/api/v1/models/:model_id/download",
-            post(create_model_download_job),
-        )
-        .route(
-            "/api/v1/models/:model_id/conditional-components/:purpose/download",
-            post(create_conditional_components_download_jobs),
-        )
-        .route(
-            "/api/v1/models/:model_id/convert",
-            post(create_model_convert_job),
-        )
-        .route(
-            "/api/v1/models/import",
-            post(create_model_import_job)
-                .layer(DefaultBodyLimit::max(MAX_MODEL_MULTIPART_BODY_BYTES)),
-        )
-        // Resolved-model hot cache (sc-19711). The GET is UI-polled, so it is deliberately one
-        // cheap write-free listing; the three POSTs are single deliberate user actions.
-        .route("/api/v1/model-cache", get(get_model_cache))
-        .route(
-            "/api/v1/model-cache/removal-preview",
-            post(preview_model_cache_removal),
-        )
-        .route("/api/v1/model-cache/remove", post(remove_model_cache_entry))
-        .route("/api/v1/model-cache/pin", post(set_model_cache_pin))
-        .route("/api/v1/control-overlays", get(list_control_overlays))
-        .route("/api/v1/styles", get(list_styles))
-        .route("/api/v1/loras", get(list_loras))
-        .route(
-            "/api/v1/loras/:lora_id",
-            delete(delete_lora).patch(update_lora),
-        )
-        .route(
-            "/api/v1/loras/:lora_id/embedded-tags",
-            get(lora_embedded_tags),
-        )
-        .route(
-            "/api/v1/loras/:lora_id/download",
-            post(create_lora_download_job),
-        )
-        .route(
-            "/api/v1/loras/import",
-            post(create_lora_import_job)
-                .layer(DefaultBodyLimit::max(MAX_LORA_MULTIPART_BODY_BYTES)),
-        )
-        .route(
-            "/api/v1/recipe-presets",
-            get(list_recipe_presets).post(create_recipe_preset),
-        )
-        .route(
-            "/api/v1/recipe-presets/:preset_id",
-            get(get_recipe_preset)
-                .patch(update_recipe_preset)
-                .delete(delete_recipe_preset),
-        )
-        .route(
-            "/api/v1/recipe-presets/:preset_id/duplicate",
-            post(duplicate_recipe_preset),
-        )
-        .route(
-            "/api/v1/prompt-batches",
-            get(list_prompt_batches).post(create_prompt_batch),
-        )
-        .route(
-            "/api/v1/prompt-batches/:batch_id",
-            get(get_prompt_batch)
-                .patch(update_prompt_batch)
-                .delete(delete_prompt_batch),
-        )
-        .route(
-            "/api/v1/prompt-batches/:batch_id/duplicate",
-            post(duplicate_prompt_batch),
-        )
-        .route(
-            "/api/v1/image-restoration/plan",
-            post(plan_image_restoration),
-        )
-        .route("/api/v1/jobs", get(list_jobs).post(create_job))
-        .route("/api/v1/jobs/claim", post(claim_job))
-        // Clear completed items from the queue (sc-12231, issue #1556). A static
-        // segment like `/claim`, so it takes priority over `/jobs/:job_id`.
-        .route("/api/v1/jobs/clear", post(clear_jobs))
-        // Cancel every pending (queued / pending_caption) item at once (sc-13448).
-        // Static segment like `/clear`, so it takes priority over `/jobs/:job_id`.
-        .route("/api/v1/jobs/cancel-pending", post(cancel_pending_jobs))
-        // Move selected not-yet-started jobs to the front. This is a static segment and must be
-        // registered before the per-job routes below.
-        .route("/api/v1/jobs/prioritize", post(prioritize_jobs))
-        .route("/api/v1/jobs/events", get(job_events))
-        .route("/api/v1/jobs/events/ticket", post(create_event_ticket))
-        // Media ticket (sc-8810): auth-protected mint endpoint; the ticket is honored
-        // as a query param by the project-files and pose-preview GETs (see auth.rs).
-        .route("/api/v1/files/ticket", post(create_media_ticket))
-        .route("/api/v1/jobs/:job_id", get(get_job))
-        .route("/api/v1/jobs/:job_id/cancel", post(cancel_job))
-        // Per-job "clear" (sc-12231, issue #1556) — the per-card × dismiss. Distinct
-        // from the bulk `/api/v1/jobs/clear` above (2 segments vs 3, no conflict).
-        .route("/api/v1/jobs/:job_id/clear", post(clear_job))
-        .route("/api/v1/jobs/:job_id/retry", post(retry_job))
-        .route("/api/v1/jobs/:job_id/duplicate", post(duplicate_job))
-        .route("/api/v1/jobs/:job_id/progress", post(update_job_progress))
-        // Per-run generation metrics (epic 10402): worker POSTs on completion;
-        // GET returns a single job's block; the aggregate feed powers the
-        // Generation Stats comparison charts.
-        .route(
-            "/api/v1/jobs/:job_id/metrics",
-            get(get_job_metrics).post(upsert_job_metrics),
-        )
-        .route("/api/v1/metrics", get(list_metrics))
-        .route("/api/v1/queue", get(queue_summary))
-        .route("/api/v1/logs", get(list_logs))
-        .route("/api/v1/workers", get(list_workers))
-        .route(
-            "/api/v1/capabilities/person",
-            get(person_capability_readiness),
-        )
-        .route("/api/v1/capabilities/mac", get(mac_capability_support))
-        // Host memory for remote-browser model gating (epic 4484 story 9).
-        .route("/api/v1/host-capabilities", get(host_capabilities))
-        // Remote-admin GPU worker restart (epic 4484 story 12).
-        .route("/api/v1/worker/restart", post(request_worker_restart))
-        .route("/api/v1/workers/register", post(register_worker))
-        .route(
-            "/api/v1/workers/:worker_id/heartbeat",
-            post(heartbeat_worker),
-        )
-        .route(
-            "/api/v1/workers/:worker_id/terminated",
-            post(worker_terminated),
-        )
+        .merge(router::routes())
         .fallback(app_fallback)
         .with_state(state.clone())
         // sc-8812 (F-010): small router-wide default so JSON routes can't buffer
@@ -2278,8 +1533,15 @@ fn create_app_with_state_mode(
         // route (asset import, training uploads, pose/keypoint sources, and the
         // model/lora import routes above).
         .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
-        .layer(middleware::from_fn_with_state(state, access_control))
+        .layer(middleware::from_fn(
+            http_boundary::request_body_idle_timeout,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            access_control,
+        ))
         .layer(cors)
+        .layer(middleware::from_fn_with_state(state, auth::browser_control))
         // Marking is inside CompressionLayer on the response path. This keeps
         // dynamic compression API-only even when `embed-web` serves a JSON
         // file through the same router.
@@ -2298,7 +1560,11 @@ fn create_app_with_state_mode(
         )
         // Outermost so auth failures, CORS responses, and handler responses are
         // all timed. Non-API frontend traffic is ignored by the middleware.
-        .layer(middleware::from_fn(api_request_timing));
+        .layer(middleware::from_fn(api_request_timing))
+        .layer(tower::limit::GlobalConcurrencyLimitLayer::new(
+            http_boundary::MAX_CONCURRENT_REQUESTS,
+        ))
+        .layer(middleware::from_fn(http_boundary::no_referrer));
     Ok((router, returned_state))
 }
 
@@ -2372,1016 +1638,10 @@ async fn verify_access(
     Json(VerifyResponse { ok })
 }
 
-const GRID_THUMBNAIL_SIZE: u32 = 384;
-const PROJECT_MEDIA_CACHE_CONTROL: &str = "private, max-age=31536000, immutable";
-
-/// How many `?stripWorkflow=true` downloads may be in flight at once (sc-15953).
-///
-/// Two, mirroring `thumbnail_generation_slots` — the other derived representation of this same
-/// route, and the precedent for gating one. A strip is not CPU-bound the way a thumbnail is; what
-/// it holds is MEMORY, for as long as the response body is being written to a client that may be
-/// on a slow link. Ungated, the ceiling was the product of the file size and the number of
-/// simultaneous callers, with nothing in the path to say no.
-const WORKFLOW_STRIP_SLOTS: usize = 2;
-
-/// Largest PNG this route will rewrite in memory to remove a workflow chunk. 128 MiB.
-///
-/// The walk needs the tail of the file, so the whole thing is read; the cost therefore follows the
-/// asset. A generated image is nowhere near this — measured through the repo's own writer on an
-/// INCOMPRESSIBLE render, the worst case for a PNG, 1024² is 3.0 MiB, 2048² is 12.0 MiB and 4096²
-/// is 48.0 MiB, and 4096² is the largest thing SceneWorks renders. An IMPORTED asset is bounded
-/// only by `MAX_UPLOAD_BYTES` = 2 GiB, which is what this exists to refuse. 128 MiB is ~2.7× the
-/// largest file the writer produces, so nothing SceneWorks made is ever turned away, and with
-/// [`WORKFLOW_STRIP_SLOTS`] it bounds the route at 256 MiB rather than at multiple gigabytes.
-///
-/// Refused rather than silently served whole: "here is your copy without the workflow" answered
-/// with the original file is the one outcome this feature must never produce, so an image too
-/// large to rewrite gets a 413 that says why.
-const MAX_WORKFLOW_STRIP_BYTES: u64 = 128 * 1024 * 1024;
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ProjectFileQuery {
-    thumbnail: Option<u32>,
-    /// Serve the file with any embedded `sceneworks:workflow` chunk removed (sc-15953).
-    ///
-    /// A query param on the existing route rather than a new endpoint, because the browser
-    /// "Save As without the workflow" is a bare `<a download>` and cannot transform bytes or set
-    /// headers. That constraint also decides the shape: in remote/LAN mode the anchor authenticates
-    /// with a `?ticket=` media ticket, whose allow-list (`auth::is_ticketed_media_path`) matches on
-    /// the PATH and is GET-only — so keeping the strip on this path means the download works
-    /// remotely with no change to the ticket rules at all. A separate endpoint would have needed a
-    /// new entry in that allow-list, which is the surface hardest to widen safely.
-    strip_workflow: Option<bool>,
-}
-
-async fn get_project_file(
-    State(state): State<AppState>,
-    Path((project_id, relative_path)): Path<(String, String)>,
-    Query(query): Query<ProjectFileQuery>,
-    headers: HeaderMap,
-) -> Result<Response, ApiError> {
-    let project_file = project_call(state.clone(), {
-        let project_id = project_id.clone();
-        let relative_path = relative_path.clone();
-        move |store| store.project_file(&project_id, &relative_path)
-    })
-    .await
-    .inspect_err(|error| {
-        // The generic 4xx logger (error.rs) records only `status` + `detail`, so a
-        // bare "File not found" line can't be traced back to a file. Name the missing
-        // resource here — mirroring the `auth_rejected`/`auth_throttled` structured
-        // logs — so operators can see which asset the web UI requested. The common
-        // startup culprits are a video's `<name>.poster.jpg` that was never generated
-        // and an asset purged from disk but still referenced by the project; the web
-        // UI degrades both to a placeholder (assetMedia.jsx), so the only trace is here.
-        if error.status == StatusCode::NOT_FOUND {
-            tracing::debug!(
-                event = "project_file_missing",
-                project_id = %project_id,
-                relative_path = %relative_path,
-                status = error.status.as_u16(),
-                "requested project file not found"
-            );
-        }
-    })?;
-
-    // "Download without the workflow" (sc-15953). Answered here, before the thumbnail and
-    // streaming branches, because it is the one variant whose body is not the file on disk.
-    if query.strip_workflow.unwrap_or(false) {
-        if query.thumbnail.is_some() {
-            return Err(ApiError::bad_request(
-                "stripWorkflow cannot be combined with thumbnail",
-            ));
-        }
-        return stripped_project_file_response(&state, &project_file, &headers).await;
-    }
-
-    // One fixed representation prevents unbounded cache variants. Derivatives
-    // are generated on first use, so assets written before this route existed
-    // backfill without a migration.
-    let force_download = project_file
-        .content_type
-        .eq_ignore_ascii_case("image/svg+xml");
-    if force_download && query.thumbnail.is_some() {
-        // Do not let the generic thumbnail branch become a second inline SVG preview route. Vector
-        // sidecars point at the worker-rendered PNG instead.
-        return Err(ApiError::bad_request(
-            "SVG thumbnails are not supported; use the vector PNG preview",
-        ));
-    }
-    let (served_path, content_type) = if let Some(size) = query.thumbnail {
-        if size != GRID_THUMBNAIL_SIZE {
-            return Err(ApiError::bad_request(format!(
-                "thumbnail must be {GRID_THUMBNAIL_SIZE}"
-            )));
-        }
-        if !project_file.content_type.starts_with("image/") {
-            return Err(ApiError::bad_request(
-                "thumbnail is only available for image media",
-            ));
-        }
-        let permit = state
-            .thumbnail_generation_slots
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|error| ApiError::internal(error.to_string()))?;
-        let source_path = project_file.path.clone();
-        let cache_root = state
-            .settings
-            .data_dir
-            .join("cache")
-            .join("media-thumbnails")
-            .join("v1");
-        let thumbnail_path = tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            ensure_grid_thumbnail(&source_path, &cache_root)
-        })
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))?
-        .map_err(|error| {
-            tracing::debug!(
-                event = "project_thumbnail_unavailable",
-                project_id = %project_id,
-                relative_path = %relative_path,
-                error = %error,
-                "could not create bounded project thumbnail"
-            );
-            ApiError::bad_request("Thumbnail unavailable for this media")
-        })?;
-        (thumbnail_path, "image/png".to_owned())
-    } else {
-        (project_file.path, project_file.content_type)
-    };
-
-    let mut file = tokio::fs::File::open(&served_path)
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
-    let metadata = file
-        .metadata()
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
-    let total = metadata.len();
-    let etag = project_file_etag(&metadata);
-    let last_modified = metadata.modified().ok();
-    let base_headers = project_file_response_headers(&content_type, total, &etag, last_modified)?;
-
-    if project_file_is_not_modified(&headers, &etag, last_modified) {
-        let mut response = Response::new(Body::empty());
-        *response.status_mut() = StatusCode::NOT_MODIFIED;
-        *response.headers_mut() = base_headers;
-        response.headers_mut().remove(header::CONTENT_LENGTH);
-        return Ok(response);
-    }
-
-    // WebKit/WKWebView (the macOS desktop webview) requires HTTP byte-range
-    // responses to play <video>: it probes with `Range: bytes=0-1` and treats
-    // any 200 reply as a non-seekable source it won't play. Honor a single
-    // range with 206 Partial Content; advertise Accept-Ranges otherwise.
-    if let Some(range_header) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()) {
-        match parse_single_byte_range(range_header, total) {
-            Some((start, end)) => {
-                let len = end - start + 1;
-                file.seek(SeekFrom::Start(start))
-                    .await
-                    .map_err(|error| ApiError::internal(error.to_string()))?;
-                let stream = ReaderStream::new(file.take(len));
-                let mut response = (
-                    StatusCode::PARTIAL_CONTENT,
-                    [
-                        (header::CONTENT_TYPE, content_type.clone()),
-                        (header::ACCEPT_RANGES, "bytes".to_string()),
-                        (
-                            header::CONTENT_RANGE,
-                            format!("bytes {start}-{end}/{total}"),
-                        ),
-                        (header::CONTENT_LENGTH, len.to_string()),
-                        // sc-9674 (sc-8872 follow-up): forbid MIME sniffing so a
-                        // user-controlled project file can't be reinterpreted by the
-                        // browser as a different (e.g. active) content type than the
-                        // Content-Type we derived. Kept inline (no attachment
-                        // disposition) so <img>/<video> preview and byte-range
-                        // playback still work — the assets are served for inline
-                        // display, not forced download.
-                        (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
-                    ],
-                    Body::from_stream(stream),
-                )
-                    .into_response();
-                response.headers_mut().extend(base_headers);
-                response.headers_mut().insert(
-                    header::CONTENT_LENGTH,
-                    HeaderValue::from_str(&len.to_string())
-                        .map_err(|error| ApiError::internal(error.to_string()))?,
-                );
-                return Ok(response);
-            }
-            None => {
-                let mut response = (
-                    StatusCode::RANGE_NOT_SATISFIABLE,
-                    [(header::CONTENT_RANGE, format!("bytes */{total}"))],
-                )
-                    .into_response();
-                response.headers_mut().extend(base_headers);
-                response.headers_mut().remove(header::CONTENT_LENGTH);
-                return Ok(response);
-            }
-        }
-    }
-
-    let stream = ReaderStream::new(file);
-    let mut response = (
-        [
-            (header::CONTENT_TYPE, content_type),
-            (header::ACCEPT_RANGES, "bytes".to_string()),
-            (header::CONTENT_LENGTH, total.to_string()),
-            // sc-9674: forbid MIME sniffing (see the range branch above). Inline
-            // disposition is kept intentionally so image/video preview still works.
-            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
-        ],
-        Body::from_stream(stream),
-    )
-        .into_response();
-    response.headers_mut().extend(base_headers);
-    Ok(response)
-}
-
-fn ensure_grid_thumbnail(source_path: &FsPath, cache_root: &FsPath) -> Result<PathBuf, String> {
-    let metadata = std::fs::metadata(source_path).map_err(|error| error.to_string())?;
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-        .unwrap_or_default();
-    let mut hash = Sha256::new();
-    hash.update(source_path.to_string_lossy().as_bytes());
-    hash.update(metadata.len().to_le_bytes());
-    hash.update(modified.as_nanos().to_le_bytes());
-    hash.update(GRID_THUMBNAIL_SIZE.to_le_bytes());
-    let key = format!("{:x}", hash.finalize());
-    let target = cache_root.join(format!("{key}.png"));
-    if target.is_file() {
-        return Ok(target);
-    }
-
-    std::fs::create_dir_all(cache_root).map_err(|error| error.to_string())?;
-    let decoded = match image::open(source_path) {
-        Ok(decoded) => decoded,
-        Err(decode_error) => {
-            // Project imports normalize these formats today, but old projects
-            // can still contain AVIF/HEIC/HEIF (and other platform-decodable
-            // raster files). Reuse the worker's cross-platform compatibility
-            // path before declaring the thumbnail unavailable.
-            let converted =
-                cache_root.join(format!("{key}.{}.converted.png", Uuid::new_v4().simple()));
-            let transcode_result =
-                sceneworks_core::media_convert::transcode_to_png(source_path, &converted);
-            let decoded = transcode_result
-                .map_err(|error| format!("{decode_error}; {error}"))
-                .and_then(|()| image::open(&converted).map_err(|error| error.to_string()));
-            let _ = std::fs::remove_file(&converted);
-            decoded?
-        }
-    };
-    let thumbnail = decoded.thumbnail(GRID_THUMBNAIL_SIZE, GRID_THUMBNAIL_SIZE);
-    let temporary = cache_root.join(format!("{key}.{}.tmp", Uuid::new_v4().simple()));
-    thumbnail
-        .save_with_format(&temporary, image::ImageFormat::Png)
-        .map_err(|error| error.to_string())?;
-    if let Err(error) = std::fs::rename(&temporary, &target) {
-        if target.is_file() {
-            let _ = std::fs::remove_file(&temporary);
-        } else {
-            let _ = std::fs::remove_file(&temporary);
-            return Err(error.to_string());
-        }
-    }
-    Ok(target)
-}
-
-/// Serve a project file with any embedded workflow chunk excised (sc-15953).
-///
-/// The stripping itself is `sceneworks_core::workflow_png::strip_workflow_chunk` — a byte-level
-/// walk of the PNG chunk framing that copies IHDR, every IDAT and IEND through unchanged, so the
-/// served body is the file minus one slice rather than a re-encode. Nothing here decodes a pixel.
-///
-/// Five things this branch has to get right that the streaming path does not:
-///
-/// * **Only a PNG is read into memory.** The workflow chunk only ever exists in a PNG, so anything
-///   else is served by the ordinary path — a video does not get buffered because someone appended
-///   the flag to its URL. A non-PNG asked for stripped is not an error either: it genuinely carries
-///   no workflow, and saying so by serving it is the honest answer.
-/// * **The ETag must differ from the full file's.** `project_file_etag` is derived from the source
-///   metadata, and the route sets `immutable` caching — so reusing it would let a cache answer a
-///   strip request with the unstripped body it already holds. The variant tag is folded in.
-/// * **Revalidation is ETag-ONLY.** The distinct ETag is half a fix on its own, and the missing
-///   half was a live hole: both representations are derived from the same file, so they carry the
-///   same `Last-Modified`, and a client that had done a plain GET could hand that date back on a
-///   strip request and be told `304 Not Modified` — reusing the full body, workflow intact. The
-///   date cannot distinguish the two representations, so it does not get a vote here; only the
-///   variant tag does. `project_file_is_not_modified` still owns the ordinary path, where one URL
-///   means one body and a date is a sound answer.
-/// * **No byte ranges.** The body is a rewritten buffer whose offsets do not match the file on
-///   disk, so `Accept-Ranges: none` and a `Range` header is ignored rather than answered against
-///   the wrong length. This is a download, not a `<video src>`.
-/// * **The memory is bounded, twice over.** The whole file is read at once — a walk of the chunk
-///   framing has to see the tail — so the cost scales with the asset, and an imported PNG is
-///   bounded only by `MAX_UPLOAD_BYTES` = 2 GiB. [`WORKFLOW_STRIP_SLOTS`] caps the concurrency
-///   the way `thumbnail_generation_slots` does for the sibling derived representation on this same
-///   route, and [`MAX_WORKFLOW_STRIP_BYTES`] caps the per-request size. Between them the route's
-///   ceiling is a fixed number rather than "however many clients ask at once".
-///
-/// The body is assembled without a second copy. `strip_workflow_chunk` would build a new buffer
-/// of its own — ~2N peak for a file of N bytes — so this calls the walk that underlies it
-/// (`workflow_chunk_spans`) and serves the KEPT spans as `Bytes` slices of the one buffer already
-/// read. `Bytes` slices are refcounted views, so the peak is N and the excision costs nothing.
-async fn stripped_project_file_response(
-    state: &AppState,
-    project_file: &sceneworks_core::project_store::ProjectFile,
-    request_headers: &HeaderMap,
-) -> Result<Response, ApiError> {
-    let path = project_file.path.clone();
-    let metadata = tokio::fs::metadata(&path)
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
-    let last_modified = metadata.modified().ok();
-
-    if project_file.content_type != "image/png" {
-        // Nothing of ours can be in it. Fall back to the ordinary streaming response so a video or
-        // a JPEG is served exactly as it always was, under its own ETag — and under the ordinary
-        // revalidation rules too, because this is not a variant: the bytes are the file's.
-        let etag = project_file_etag(&metadata);
-        let headers = project_file_response_headers(
-            &project_file.content_type,
-            metadata.len(),
-            &etag,
-            last_modified,
-        )?;
-        if project_file_is_not_modified(request_headers, &etag, last_modified) {
-            return Ok(not_modified_response(headers));
-        }
-        let file = tokio::fs::File::open(&path)
-            .await
-            .map_err(|error| ApiError::internal(error.to_string()))?;
-        let mut response = Body::from_stream(ReaderStream::new(file)).into_response();
-        response.headers_mut().extend(headers);
-        return Ok(response);
-    }
-
-    let etag = variant_etag(&project_file_etag(&metadata), "nw");
-    if if_none_match_matches(request_headers, &etag) {
-        let headers = project_file_response_headers(
-            &project_file.content_type,
-            metadata.len(),
-            &etag,
-            last_modified,
-        )?;
-        return Ok(not_modified_response(headers));
-    }
-
-    if metadata.len() > MAX_WORKFLOW_STRIP_BYTES {
-        return Err(ApiError::payload_too_large(format!(
-            "This image is {} MiB, over the {} MiB SceneWorks will rewrite in memory to remove a \
-             workflow. Save it normally and remove the block with another tool.",
-            metadata.len() / (1024 * 1024),
-            MAX_WORKFLOW_STRIP_BYTES / (1024 * 1024)
-        )));
-    }
-
-    let permit = state
-        .workflow_strip_slots
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|error| ApiError::internal(error.to_string()))?;
-
-    let (bytes, spans) = tokio::task::spawn_blocking(move || {
-        let original = std::fs::read(&path)?;
-        // A PNG that cannot be accounted for chunk by chunk is an ERROR, never the original bytes:
-        // "here is your copy without the workflow" must not be answered with a file that may still
-        // carry one. An empty span list is the honest "nothing of ours is in it".
-        let spans = sceneworks_core::workflow_png::workflow_chunk_spans(&original)
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
-        Ok::<_, std::io::Error>((original, spans))
-    })
-    .await
-    .map_err(|error| ApiError::internal(error.to_string()))?
-    .map_err(|error| {
-        tracing::debug!(
-            event = "project_file_strip_failed",
-            error = %error,
-            "could not serve a project file without its workflow"
-        );
-        ApiError::bad_request("This image could not be rewritten without its workflow.")
-    })?;
-
-    // One allocation for the whole response: `Bytes::from` takes the read buffer over, and every
-    // slice below is a refcounted view into it rather than a copy.
-    let bytes = axum::body::Bytes::from(bytes);
-    let kept = sceneworks_core::workflow_png::kept_spans(bytes.len(), &spans);
-    let served: Vec<axum::body::Bytes> = kept
-        .iter()
-        .map(|span| bytes.slice(span.start..span.end))
-        .collect();
-    let served_len: u64 = served.iter().map(|slice| slice.len() as u64).sum();
-
-    let mut headers = project_file_response_headers(
-        &project_file.content_type,
-        served_len,
-        &etag,
-        last_modified,
-    )?;
-    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("none"));
-    // The permit rides with the stream rather than being dropped here: the buffer is alive until
-    // the last slice has been written, so releasing the slot at this line would let the next
-    // request in while this one's memory is still held.
-    let mut response = Body::from_stream(stream::iter(served.into_iter().map(move |slice| {
-        let _permit = &permit;
-        Ok::<_, std::convert::Infallible>(slice)
-    })))
-    .into_response();
-    response.headers_mut().extend(headers);
-    Ok(response)
-}
-
-/// Whether `If-None-Match` names `etag` (or `*`).
-///
-/// The ETag half of [`project_file_is_not_modified`], on its own, for the derived representations
-/// whose `Last-Modified` is the source file's and therefore cannot tell one representation from
-/// another.
-fn if_none_match_matches(request_headers: &HeaderMap, etag: &str) -> bool {
-    request_headers
-        .get(header::IF_NONE_MATCH)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            value
-                .split(',')
-                .map(str::trim)
-                .any(|candidate| candidate == "*" || candidate == etag)
-        })
-}
-
-/// A 304 carrying `headers` minus the content length, which a body-less response must not declare.
-fn not_modified_response(headers: HeaderMap) -> Response {
-    let mut response = Response::new(Body::empty());
-    *response.status_mut() = StatusCode::NOT_MODIFIED;
-    *response.headers_mut() = headers;
-    response.headers_mut().remove(header::CONTENT_LENGTH);
-    response
-}
-
-/// Distinguish a derived representation's ETag from the source file's.
-///
-/// The route caches `immutable`, so two representations of one URL sharing a tag is a correctness
-/// bug and not a missed optimization: a client holding the full file would revalidate a strip
-/// request as `304 Not Modified` and reuse the body with the workflow still in it.
-fn variant_etag(base: &str, variant: &str) -> String {
-    match base.strip_suffix('"') {
-        Some(head) => format!("{head}-{variant}\""),
-        None => format!("{base}-{variant}"),
-    }
-}
-
-fn project_file_etag(metadata: &std::fs::Metadata) -> String {
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-        .unwrap_or_default();
-    // Weak avoids reading and hashing a multi-gigabyte original before it can
-    // stream; project media is immutable after publication.
-    format!(
-        "W/\"{:x}-{:x}-{:x}\"",
-        metadata.len(),
-        modified.as_secs(),
-        modified.subsec_nanos()
-    )
-}
-
-fn project_file_response_headers(
-    content_type: &str,
-    total: u64,
-    etag: &str,
-    last_modified: Option<SystemTime>,
-) -> Result<HeaderMap, ApiError> {
-    let mut headers = HeaderMap::new();
-    // Every representation, including stripWorkflow, ranges and 304 responses, shares this
-    // boundary. SVG source is download-only; only the worker-rendered PNG is inline media.
-    let content_type = if content_type.eq_ignore_ascii_case("image/svg+xml") {
-        headers.insert(
-            header::CONTENT_DISPOSITION,
-            HeaderValue::from_static("attachment"),
-        );
-        "application/octet-stream"
-    } else {
-        content_type
-    };
-    for (name, value) in [
-        (header::CONTENT_TYPE, content_type.to_owned()),
-        (header::ACCEPT_RANGES, "bytes".to_owned()),
-        (header::CONTENT_LENGTH, total.to_string()),
-        (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_owned()),
-        (
-            header::CACHE_CONTROL,
-            PROJECT_MEDIA_CACHE_CONTROL.to_owned(),
-        ),
-        (header::ETAG, etag.to_owned()),
-    ] {
-        headers.insert(
-            name,
-            HeaderValue::from_str(&value).map_err(|error| ApiError::internal(error.to_string()))?,
-        );
-    }
-    if let Some(modified) = last_modified {
-        headers.insert(
-            header::LAST_MODIFIED,
-            HeaderValue::from_str(&httpdate::fmt_http_date(modified))
-                .map_err(|error| ApiError::internal(error.to_string()))?,
-        );
-    }
-    Ok(headers)
-}
-
-/// Ordinary revalidation for a representation whose bytes ARE the file's: the ETag when the client
-/// sent one, the modification date otherwise.
-///
-/// Deliberately not used by the strip variant. `If-Modified-Since` is an answer about the FILE, and
-/// a derived representation shares its file with the original — see
-/// [`stripped_project_file_response`], which revalidates on the tag alone.
-fn project_file_is_not_modified(
-    request_headers: &HeaderMap,
-    etag: &str,
-    last_modified: Option<SystemTime>,
-) -> bool {
-    if request_headers.contains_key(header::IF_NONE_MATCH) {
-        return if_none_match_matches(request_headers, etag);
-    }
-    let Some(modified) = last_modified else {
-        return false;
-    };
-    request_headers
-        .get(header::IF_MODIFIED_SINCE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| httpdate::parse_http_date(value).ok())
-        .is_some_and(|since| {
-            modified
-                .duration_since(since)
-                .map_or(true, |delta| delta < Duration::from_secs(1))
-        })
-}
-
-/// Parse a single HTTP byte range (`bytes=start-end`, `bytes=start-`, or
-/// `bytes=-suffix`) against a known total size, returning an inclusive
-/// `(start, end)` clamped to the file. Returns `None` for unsatisfiable or
-/// multi-range requests (callers answer 416).
-fn parse_single_byte_range(value: &str, total: u64) -> Option<(u64, u64)> {
-    let spec = value.strip_prefix("bytes=")?.trim();
-    if spec.is_empty() || spec.contains(',') || total == 0 {
-        return None;
-    }
-    let (start_str, end_str) = spec.split_once('-')?;
-    let (start, end) = if start_str.is_empty() {
-        // Suffix range: last `suffix` bytes.
-        let suffix: u64 = end_str.parse().ok()?;
-        if suffix == 0 {
-            return None;
-        }
-        let start = total.saturating_sub(suffix);
-        (start, total - 1)
-    } else {
-        let start: u64 = start_str.parse().ok()?;
-        let end = if end_str.is_empty() {
-            total - 1
-        } else {
-            end_str.parse::<u64>().ok()?.min(total - 1)
-        };
-        (start, end)
-    };
-    if start > end || start >= total {
-        return None;
-    }
-    Some((start, end))
-}
-
 /// Embedded production web bundle (apps/web/dist), compiled in only under the
 /// `embed-web` feature so default/server/test builds need no web build.
 #[cfg(feature = "embed-web")]
-mod web_assets {
-    use std::collections::HashSet;
-    use std::sync::OnceLock;
-
-    use axum::body::Body;
-    use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
-    use axum::response::{IntoResponse, Response};
-    use rust_embed::RustEmbed;
-
-    #[derive(RustEmbed)]
-    #[folder = "../web/dist"]
-    struct WebAssets;
-
-    #[cfg(test)]
-    pub(super) fn first_static_asset_path() -> String {
-        WebAssets::iter()
-            .find(|path| {
-                path.starts_with("assets/") && !path.ends_with(".br") && !path.ends_with(".gz")
-            })
-            .expect("production web bundle contains a static asset")
-            .into_owned()
-    }
-
-    #[cfg(test)]
-    pub(super) fn first_compressible_static_asset_path() -> String {
-        WebAssets::iter()
-            .find(|path| {
-                path.starts_with("assets/")
-                    && !path.ends_with(".br")
-                    && !path.ends_with(".gz")
-                    && WebAssets::get(&format!("{path}.br")).is_some()
-                    && WebAssets::get(&format!("{path}.gz")).is_some()
-            })
-            .expect("production web bundle contains a precompressed static asset")
-            .into_owned()
-    }
-
-    #[cfg(test)]
-    pub(super) fn first_uncompressed_static_asset_path() -> String {
-        WebAssets::iter()
-            .find(|path| {
-                !path.ends_with(".br")
-                    && !path.ends_with(".gz")
-                    && path.as_ref() != IMMUTABLE_ASSET_MANIFEST
-                    && WebAssets::get(&format!("{path}.br")).is_none()
-                    && WebAssets::get(&format!("{path}.gz")).is_none()
-            })
-            .expect("production web bundle contains an uncompressed static asset")
-            .into_owned()
-    }
-
-    // The desktop shell navigates its privileged webview to this server, so the embedded
-    // UI runs from this origin and its CSP must come from here (tauri.conf.json only
-    // governs the bundled setup screen). Kept narrow: scripts only from this origin (the
-    // theme bootstrap was moved to /theme-init.js so no inline script is needed), fonts
-    // self-hosted from this origin (no third-party font host — sc-8956), images/media as
-    // self/data/blob, IPC for the Tauri webview. Same-origin API + SSE are covered by
-    // connect-src 'self'.
-    pub(super) const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
-script-src 'self'; \
-style-src 'self' 'unsafe-inline'; \
-font-src 'self'; \
-img-src 'self' data: blob:; \
-media-src 'self' data: blob:; \
-connect-src 'self' ipc: http://ipc.localhost; \
-object-src 'none'; \
-base-uri 'self'; \
-frame-ancestors 'none'; \
-form-action 'self'";
-
-    const IMMUTABLE_CACHE: &str = "public, max-age=31536000, immutable";
-    const REVALIDATE_CACHE: &str = "no-cache";
-    const IMMUTABLE_ASSET_MANIFEST: &str = ".sceneworks-immutable-assets";
-
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    enum Encoding {
-        Brotli,
-        Gzip,
-        Identity,
-    }
-
-    impl Encoding {
-        fn suffix(self) -> &'static str {
-            match self {
-                Self::Brotli => ".br",
-                Self::Gzip => ".gz",
-                Self::Identity => "",
-            }
-        }
-
-        fn header_value(self) -> Option<&'static str> {
-            match self {
-                Self::Brotli => Some("br"),
-                Self::Gzip => Some("gzip"),
-                Self::Identity => None,
-            }
-        }
-    }
-
-    #[derive(Default)]
-    struct EncodingPreferences {
-        header_present: bool,
-        brotli: Option<f32>,
-        gzip: Option<f32>,
-        identity: Option<f32>,
-        wildcard: Option<f32>,
-    }
-
-    impl EncodingPreferences {
-        fn parse(headers: &HeaderMap) -> Self {
-            let mut preferences = Self::default();
-            for value in headers.get_all(header::ACCEPT_ENCODING) {
-                preferences.header_present = true;
-                let Ok(value) = value.to_str() else {
-                    continue;
-                };
-                for item in value.split(',') {
-                    let mut parts = item.trim().split(';');
-                    let name = parts.next().unwrap_or_default().trim();
-                    if name.is_empty() {
-                        continue;
-                    }
-                    let mut quality = 1.0;
-                    for parameter in parts {
-                        let Some((key, value)) = parameter.trim().split_once('=') else {
-                            continue;
-                        };
-                        if key.trim().eq_ignore_ascii_case("q") {
-                            quality = value
-                                .trim()
-                                .parse::<f32>()
-                                .ok()
-                                .filter(|quality| (0.0..=1.0).contains(quality))
-                                .unwrap_or(0.0);
-                        }
-                    }
-                    if name.eq_ignore_ascii_case("br") {
-                        preferences.brotli = Some(quality);
-                    } else if name.eq_ignore_ascii_case("gzip") {
-                        preferences.gzip = Some(quality);
-                    } else if name.eq_ignore_ascii_case("identity") {
-                        preferences.identity = Some(quality);
-                    } else if name == "*" {
-                        preferences.wildcard = Some(quality);
-                    }
-                }
-            }
-            preferences
-        }
-
-        fn quality(&self, encoding: Encoding) -> f32 {
-            if !self.header_present {
-                return if encoding == Encoding::Identity {
-                    1.0
-                } else {
-                    0.0
-                };
-            }
-            match encoding {
-                Encoding::Brotli => self.brotli.or(self.wildcard).unwrap_or(0.0),
-                Encoding::Gzip => self.gzip.or(self.wildcard).unwrap_or(0.0),
-                // RFC 9110: identity is acceptable by default unless it is
-                // explicitly excluded, or a wildcard q=0 excludes every
-                // unlisted coding.
-                Encoding::Identity => match self.identity {
-                    Some(quality) => quality,
-                    None if self.wildcard == Some(0.0) => 0.0,
-                    None => 1.0,
-                },
-            }
-        }
-    }
-
-    fn select_encoding(headers: &HeaderMap, requested: &str) -> Option<Encoding> {
-        let preferences = EncodingPreferences::parse(headers);
-        // Deterministic tie-break: Brotli, then gzip, then identity. A client
-        // advertising a coding at q=1 therefore receives compression rather
-        // than an equally acceptable identity response.
-        let candidates = [
-            (
-                Encoding::Brotli,
-                WebAssets::get(&format!("{requested}.br")).is_some(),
-            ),
-            (
-                Encoding::Gzip,
-                WebAssets::get(&format!("{requested}.gz")).is_some(),
-            ),
-            (Encoding::Identity, WebAssets::get(requested).is_some()),
-        ];
-        let mut selected = None;
-        for (encoding, available) in candidates {
-            let quality = preferences.quality(encoding);
-            let is_better = match selected {
-                Some((_, best_quality)) => quality > best_quality,
-                None => true,
-            };
-            if available && quality > 0.0 && is_better {
-                selected = Some((encoding, quality));
-            }
-        }
-        selected.map(|(encoding, _)| encoding)
-    }
-
-    fn immutable_assets() -> &'static HashSet<String> {
-        static ASSETS: OnceLock<HashSet<String>> = OnceLock::new();
-        ASSETS.get_or_init(|| {
-            WebAssets::get(IMMUTABLE_ASSET_MANIFEST)
-                .map(|manifest| {
-                    String::from_utf8_lossy(&manifest.data)
-                        .lines()
-                        .map(str::trim)
-                        .filter(|path| !path.is_empty())
-                        .map(str::to_owned)
-                        .collect()
-                })
-                .unwrap_or_default()
-        })
-    }
-
-    fn is_immutable_asset(path: &str) -> bool {
-        immutable_assets().contains(path)
-    }
-
-    #[cfg(test)]
-    pub(super) fn immutable_asset_manifest_path() -> &'static str {
-        IMMUTABLE_ASSET_MANIFEST
-    }
-
-    fn apply_common_headers(
-        response: &mut axum::http::response::Builder,
-        mime: &str,
-        cache_control: &'static str,
-    ) {
-        let headers = response
-            .headers_mut()
-            .expect("embedded response headers are available");
-        headers.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_str(mime).expect("embedded MIME type is a valid header"),
-        );
-        headers.insert(
-            header::CONTENT_SECURITY_POLICY,
-            HeaderValue::from_static(CONTENT_SECURITY_POLICY),
-        );
-        headers.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
-        headers.insert(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static(cache_control),
-        );
-    }
-
-    fn not_acceptable_response(mime: &str, cache_control: &'static str) -> Response {
-        let mut response = Response::builder().status(StatusCode::NOT_ACCEPTABLE);
-        apply_common_headers(&mut response, mime, cache_control);
-        response
-            .body(Body::empty())
-            .expect("not-acceptable embedded response constructs")
-    }
-
-    fn etag(hash: [u8; 32]) -> String {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut value = String::with_capacity(66);
-        value.push('"');
-        for byte in hash {
-            value.push(HEX[(byte >> 4) as usize] as char);
-            value.push(HEX[(byte & 0x0f) as usize] as char);
-        }
-        value.push('"');
-        value
-    }
-
-    fn if_none_match(headers: &HeaderMap, current: &str) -> bool {
-        headers
-            .get_all(header::IF_NONE_MATCH)
-            .iter()
-            .filter_map(|value| value.to_str().ok())
-            .flat_map(|value| value.split(','))
-            .map(str::trim)
-            .any(|candidate| {
-                candidate == "*"
-                    || candidate == current
-                    || candidate
-                        .strip_prefix("W/")
-                        .is_some_and(|candidate| candidate == current)
-            })
-    }
-
-    fn embedded_response(
-        requested: &str,
-        mime: &str,
-        fallback: bool,
-        request_headers: &HeaderMap,
-    ) -> Option<Response> {
-        let cache_control = if !fallback && is_immutable_asset(requested) {
-            IMMUTABLE_CACHE
-        } else {
-            REVALIDATE_CACHE
-        };
-        let Some(encoding) = select_encoding(request_headers, requested) else {
-            return Some(not_acceptable_response(mime, cache_control));
-        };
-        let representation_path = format!("{requested}{}", encoding.suffix());
-        let file = WebAssets::get(&representation_path)?;
-        let etag = etag(file.metadata.sha256_hash());
-        let status = if if_none_match(request_headers, &etag) {
-            StatusCode::NOT_MODIFIED
-        } else {
-            StatusCode::OK
-        };
-        let mut response = Response::builder().status(status);
-        apply_common_headers(&mut response, mime, cache_control);
-        let headers = response
-            .headers_mut()
-            .expect("embedded response headers are available");
-        headers.insert(
-            header::ETAG,
-            HeaderValue::from_str(&etag).expect("SHA-256 ETag is a valid header"),
-        );
-        if let Some(content_encoding) = encoding.header_value() {
-            headers.insert(
-                header::CONTENT_ENCODING,
-                HeaderValue::from_static(content_encoding),
-            );
-        }
-        let body = if status == StatusCode::NOT_MODIFIED {
-            Body::empty()
-        } else {
-            Body::from(file.data.into_owned())
-        };
-        Some(
-            response
-                .body(body)
-                .expect("embedded response body constructs"),
-        )
-    }
-
-    pub(super) async fn serve(uri: &Uri, request_headers: &HeaderMap) -> Response {
-        let requested = uri.path().trim_start_matches('/');
-        let requested = if requested.is_empty() {
-            "index.html"
-        } else {
-            requested
-        };
-        // Encoded siblings and the cache allowlist are internal build
-        // metadata, never public paths.
-        if !requested.ends_with(".br")
-            && !requested.ends_with(".gz")
-            && requested != IMMUTABLE_ASSET_MANIFEST
-            && WebAssets::get(requested).is_some()
-        {
-            let mime = mime_guess::from_path(requested).first_or_octet_stream();
-            if let Some(response) =
-                embedded_response(requested, mime.as_ref(), false, request_headers)
-            {
-                return response;
-            }
-        }
-        // Single-page app: unknown non-API paths resolve to index.html so
-        // client-side deep links (e.g. project routes) load correctly.
-        embedded_response(
-            "index.html",
-            "text/html; charset=utf-8",
-            true,
-            request_headers,
-        )
-        .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response())
-    }
-}
-
-/// Router fallback. With `embed-web`, non-API paths are served from the embedded
-/// web bundle (SPA fallback); API paths and all default-feature builds keep the
-/// existing JSON not-found behavior.
-async fn app_fallback(request: Request<axum::body::Body>) -> Response {
-    #[cfg(feature = "embed-web")]
-    {
-        if !request.uri().path().starts_with("/api/") {
-            return web_assets::serve(request.uri(), request.headers()).await;
-        }
-    }
-    route_not_found(request).await
-}
-
-async fn route_not_found(request: Request<axum::body::Body>) -> Response {
-    let path = request.uri().path();
-    let lower_path = path.to_ascii_lowercase();
-    if path.contains("/files/")
-        && (path.contains("..")
-            || lower_path.contains("%2e")
-            || lower_path.contains("%2f")
-            || lower_path.contains("%5c"))
-    {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "detail": "Invalid project file path" })),
-        )
-            .into_response();
-    }
-    if path.contains("/person-tracks/")
-        && (path.contains("..")
-            || lower_path.contains("%2e")
-            || lower_path.contains("%2f")
-            || lower_path.contains("%5c"))
-    {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "detail": "Invalid person track ID" })),
-        )
-            .into_response();
-    }
-    (
-        StatusCode::NOT_FOUND,
-        Json(json!({ "detail": "Not Found" })),
-    )
-        .into_response()
-}
+mod web_assets;
 
 async fn store_call<T, F>(state: AppState, operation: F) -> Result<T, ApiError>
 where
@@ -3406,506 +1666,6 @@ where
         .await
         .map_err(|error| ApiError::internal(error.to_string()))?
         .map_err(Into::into)
-}
-
-/// Project a stored/worker-owned job into the public HTTP/SSE shape.
-///
-/// A selected image text encoder is resolved to an exact filesystem source only after the API has
-/// accepted the client's opaque option id. That resolution must remain available to the worker
-/// claim, but it is never browser state: exposing it in a job response would turn the otherwise
-/// opaque option back into a host path and would let replay clients persist server-private
-/// metadata. Keep the stored row intact and remove only that private resolution from public clones.
-fn public_job_snapshot(mut job: JobSnapshot) -> JobSnapshot {
-    let private_resolution = job
-        .payload
-        .get_mut("modelManifestEntry")
-        .and_then(Value::as_object_mut)
-        .and_then(|manifest_entry| manifest_entry.remove("resolvedTextEncoder"));
-    if let Some(selected_path) = private_resolution
-        .as_ref()
-        .and_then(|resolution| resolution.get("path"))
-        .and_then(Value::as_str)
-    {
-        let source_kind = private_resolution
-            .as_ref()
-            .and_then(|resolution| resolution.get("sourceKind"))
-            .and_then(Value::as_str);
-        let selected_paths = private_text_encoder_path_spellings(selected_path, source_kind);
-        redact_private_text_encoder_diagnostic(&mut job.message);
-        if let Some(error) = job.error.as_mut() {
-            redact_private_text_encoder_diagnostic(error);
-        }
-        if let Some(title) = job.title.as_mut() {
-            redact_selected_text_encoder_paths(title, &selected_paths);
-        }
-        redact_selected_text_encoder_paths_in_map(&mut job.payload, &selected_paths);
-        redact_selected_text_encoder_paths_in_map(&mut job.result, &selected_paths);
-        redact_selected_text_encoder_paths_in_btree_map(&mut job.extra, &selected_paths);
-    }
-    job
-}
-
-#[derive(Clone, Debug)]
-struct PrivatePathSpelling {
-    value: String,
-    directory: bool,
-    case_insensitive: bool,
-}
-
-fn private_text_encoder_path_spellings(
-    path: &str,
-    source_kind: Option<&str>,
-) -> Vec<PrivatePathSpelling> {
-    // Missing/unknown private metadata is not expected, but public projection must fail closed:
-    // directory semantics are the safe superset because they also scrub admitted descendants.
-    let directory = source_kind != Some("file");
-    let path_bytes = path.as_bytes();
-    let case_insensitive = (path_bytes.first().is_some_and(u8::is_ascii_alphabetic)
-        && path_bytes.get(1) == Some(&b':')
-        && path_bytes
-            .get(2)
-            .is_some_and(|separator| matches!(separator, b'/' | b'\\')))
-        || path.starts_with("\\\\");
-    let mut spellings = vec![path.to_owned()];
-    if case_insensitive {
-        spellings.push(path.replace('\\', "/"));
-        spellings.push(path.replace('/', "\\"));
-    }
-    if directory {
-        for spelling in &mut spellings {
-            while spelling.len() > 1
-                && spelling.ends_with(['/', '\\'])
-                && !spelling.trim_matches(['/', '\\']).is_empty()
-                && !(spelling.len() == 3 && spelling.as_bytes().get(1) == Some(&b':'))
-            {
-                spelling.pop();
-            }
-        }
-    }
-    spellings.retain(|spelling| !spelling.is_empty());
-    spellings.sort_by_key(|spelling| std::cmp::Reverse(spelling.len()));
-    spellings.dedup();
-    spellings
-        .into_iter()
-        .map(|value| PrivatePathSpelling {
-            value,
-            directory,
-            case_insensitive,
-        })
-        .collect()
-}
-
-fn redact_private_text_encoder_diagnostic(value: &mut String) {
-    redact_absolute_paths(value);
-}
-
-/// Redact only the admitted selected source spelling from public contract data.
-///
-/// Payload/result/extra can legitimately contain unrelated filesystem fields (for example an
-/// installed LoRA or generated output). They must remain stable when a text encoder is selected.
-/// HTTP(S) and scheme-relative URL spans are skipped so a URL whose path happens to contain the
-/// same spelling is not rewritten.
-fn redact_selected_text_encoder_paths(value: &mut String, spellings: &[PrivatePathSpelling]) {
-    const REDACTED: &str = "[selected text encoder]";
-    let original = value.as_bytes();
-    let is_url_end = |byte: u8| {
-        byte.is_ascii_whitespace()
-            || matches!(
-                byte,
-                b'"' | b'\'' | b'`' | b'<' | b'>' | b'|' | b')' | b']' | b'}' | b',' | b';'
-            )
-    };
-    let starts_with_ignore_ascii_case = |index: usize, needle: &[u8]| {
-        original
-            .get(index..index.saturating_add(needle.len()))
-            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(needle))
-    };
-    let url_boundary = |index: usize| {
-        index == 0
-            || original[index - 1].is_ascii_whitespace()
-            || matches!(
-                original[index - 1],
-                b'(' | b'[' | b'{' | b'=' | b',' | b';' | b'\'' | b'"' | b'`' | b'<'
-            )
-    };
-    let is_web_url = |index: usize| {
-        (url_boundary(index)
-            && (starts_with_ignore_ascii_case(index, b"http://")
-                || starts_with_ignore_ascii_case(index, b"https://")))
-            || ((index == 0 || url_boundary(index))
-                && original.get(index..index + 2) == Some(b"//")
-                && original
-                    .get(index + 2)
-                    .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'['))
-    };
-    let is_file_url = |index: usize| {
-        url_boundary(index)
-            && starts_with_ignore_ascii_case(index, b"file:")
-            && original
-                .get(index + 5)
-                .is_some_and(|separator| matches!(separator, b'/' | b'\\'))
-    };
-
-    let mut output = String::with_capacity(value.len());
-    let mut copied_through = 0;
-    let mut index = 0;
-    while index < original.len() {
-        if is_file_url(index) {
-            output.push_str(&value[copied_through..index]);
-            output.push_str(REDACTED);
-            index += 5;
-            while index < original.len() && !is_url_end(original[index]) {
-                index += 1;
-            }
-            copied_through = index;
-            continue;
-        }
-        let after_scheme_slashes = || {
-            let mut cursor = index;
-            while cursor > 0 && matches!(original[cursor - 1], b'/' | b'\\') {
-                cursor -= 1;
-            }
-            cursor > 0 && original[cursor - 1] == b':'
-        };
-        let Some(spelling) = spellings.iter().find(|spelling| {
-            (index == 0
-                || after_scheme_slashes()
-                || !matches!(
-                    original[index - 1],
-                    b'.' | b'-' | b'_' | b'/' | b'\\' | b'0'..=b'9' | b'A'..=b'Z'
-                        | b'a'..=b'z'
-                ))
-                && original
-                    .get(index..index.saturating_add(spelling.value.len()))
-                    .is_some_and(|candidate| {
-                        if spelling.case_insensitive {
-                            candidate.eq_ignore_ascii_case(spelling.value.as_bytes())
-                        } else {
-                            candidate == spelling.value.as_bytes()
-                        }
-                    })
-                && original
-                    .get(index + spelling.value.len())
-                    .is_none_or(|next| {
-                        if spelling.directory {
-                            matches!(next, b'/' | b'\\')
-                                || next.is_ascii_whitespace()
-                                || matches!(
-                                    next,
-                                    b'"' | b'\''
-                                        | b'`'
-                                        | b'<'
-                                        | b'>'
-                                        | b'|'
-                                        | b')'
-                                        | b']'
-                                        | b'}'
-                                        | b','
-                                        | b';'
-                                        | b':'
-                                        | b'='
-                                        | b'?'
-                                        | b'#'
-                                        | b'&'
-                                )
-                        } else if *next == b'.' {
-                            original
-                                .get(index + spelling.value.len() + 1)
-                                .is_none_or(|after| {
-                                    after.is_ascii_whitespace()
-                                        || matches!(
-                                            after,
-                                            b'"' | b'\''
-                                                | b'`'
-                                                | b'<'
-                                                | b'>'
-                                                | b'|'
-                                                | b')'
-                                                | b']'
-                                                | b'}'
-                                                | b','
-                                                | b';'
-                                        )
-                                })
-                        } else {
-                            next.is_ascii_whitespace()
-                                || matches!(
-                                    next,
-                                    b'"' | b'\''
-                                        | b'`'
-                                        | b'<'
-                                        | b'>'
-                                        | b'|'
-                                        | b')'
-                                        | b']'
-                                        | b'}'
-                                        | b','
-                                        | b';'
-                                        | b':'
-                                        | b'='
-                                        | b'?'
-                                        | b'#'
-                                        | b'&'
-                                        | b'!'
-                                )
-                        }
-                    })
-        }) else {
-            if is_web_url(index) {
-                index += 1;
-                while index < original.len() && !is_url_end(original[index]) {
-                    index += 1;
-                }
-                continue;
-            }
-            index += 1;
-            continue;
-        };
-        output.push_str(&value[copied_through..index]);
-        output.push_str(REDACTED);
-        index += spelling.value.len();
-        copied_through = index;
-    }
-    if copied_through != 0 {
-        output.push_str(&value[copied_through..]);
-        *value = output;
-    }
-}
-
-/// Remove any remaining absolute filesystem token from a selected-encoder job's public clone.
-///
-/// A confinement error can enumerate unrelated allowed roots and a later symlink error can name a
-/// target that no longer matches the selected source. This pure lexical pass is deliberately
-/// scoped to jobs carrying the server-private encoder resolution; it performs no filesystem I/O
-/// while projecting an HTTP/SSE response. Once a filesystem location is found, the remainder is
-/// dropped rather than guessing where an unquoted `Path::display()` value containing spaces ends.
-/// Web URLs and relative paths remain intact, while `file://` URLs are filesystem locations and
-/// are therefore private.
-fn redact_absolute_paths(value: &mut String) {
-    const REDACTED: &str = "[selected text encoder]";
-    let bytes = value.as_bytes();
-    let boundary = |index: usize| match index.checked_sub(1).and_then(|i| bytes.get(i)) {
-        None => true,
-        Some(previous) => {
-            !previous.is_ascii_alphanumeric()
-                && !matches!(previous, b'_' | b'.' | b'-' | b'/' | b'\\')
-        }
-    };
-    let starts_with_ignore_ascii_case = |index: usize, needle: &[u8]| {
-        bytes
-            .get(index..index.saturating_add(needle.len()))
-            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(needle))
-    };
-    let is_web_url = |index: usize| {
-        boundary(index)
-            && (starts_with_ignore_ascii_case(index, b"http://")
-                || starts_with_ignore_ascii_case(index, b"https://")
-                || (bytes.get(index..index + 2) == Some(b"//")
-                    && bytes
-                        .get(index + 2)
-                        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'[')))
-    };
-    let is_file_url =
-        |index: usize| boundary(index) && starts_with_ignore_ascii_case(index, b"file://");
-    let is_home_relative = |index: usize| {
-        if bytes.get(index.wrapping_sub(1)) == Some(&b'~') {
-            return true;
-        }
-        if bytes.get(index.wrapping_sub(1)) != Some(&b'}') {
-            return false;
-        }
-        bytes[..index]
-            .iter()
-            .rposition(|byte| *byte == b'{')
-            .is_some_and(|open| {
-                open > 0
-                    && bytes[open - 1] == b'$'
-                    && bytes[open + 1..index - 1]
-                        .iter()
-                        .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-            })
-    };
-    let is_absolute_path = |index: usize, require_boundary: bool| {
-        if require_boundary && !boundary(index) {
-            return false;
-        }
-        let starts_component = |byte: &u8| {
-            !byte.is_ascii_whitespace()
-                && !matches!(
-                    byte,
-                    b'/' | b'\\'
-                        | b'"'
-                        | b'\''
-                        | b'`'
-                        | b'<'
-                        | b'>'
-                        | b'|'
-                        | b')'
-                        | b']'
-                        | b'}'
-                        | b','
-                        | b';'
-                )
-        };
-        let unix = !is_home_relative(index)
-            && bytes.get(index) == Some(&b'/')
-            && bytes.get(index + 1).is_some_and(starts_component);
-        let drive = bytes.get(index).is_some_and(u8::is_ascii_alphabetic)
-            && bytes.get(index + 1) == Some(&b':')
-            && bytes
-                .get(index + 2)
-                .is_some_and(|separator| matches!(separator, b'/' | b'\\'))
-            && bytes.get(index + 3).is_some_and(starts_component);
-        let unc = bytes.get(index..index + 2) == Some(b"\\\\")
-            && bytes.get(index + 2).is_some_and(starts_component);
-        unix || drive || unc
-    };
-    let is_url_end = |byte: u8| {
-        byte.is_ascii_whitespace()
-            || matches!(
-                byte,
-                b'"' | b'\'' | b'`' | b'<' | b'>' | b'|' | b')' | b']' | b'}' | b',' | b';'
-            )
-    };
-    let web_token_end = |start: usize| {
-        let mut end = start;
-        while end < bytes.len() && !is_url_end(bytes[end]) {
-            end += 1;
-        }
-        end
-    };
-    let mut index = 0;
-    while index < bytes.len() {
-        if is_web_url(index) {
-            index = web_token_end(index);
-            continue;
-        }
-        let file_url = is_file_url(index);
-        if !file_url && !is_absolute_path(index, true) {
-            index += 1;
-            continue;
-        }
-
-        let prefix_end = index
-            .checked_sub(1)
-            .filter(|previous| matches!(bytes[*previous], b'"' | b'\'' | b'`' | b'<'));
-        value.truncate(prefix_end.unwrap_or(index));
-        value.push_str(REDACTED);
-        return;
-    }
-}
-
-fn redact_selected_text_encoder_paths_in_map(
-    object: &mut serde_json::Map<String, Value>,
-    spellings: &[PrivatePathSpelling],
-) {
-    let original = std::mem::take(object);
-    let mut redacted = serde_json::Map::with_capacity(original.len());
-    let mut collisions = std::collections::HashSet::new();
-    for (mut key, mut value) in original {
-        redact_selected_text_encoder_paths(&mut key, spellings);
-        redact_selected_text_encoder_paths_in_value(&mut value, spellings);
-        if collisions.contains(&key) {
-            continue;
-        }
-        if redacted.contains_key(&key) {
-            redacted.insert(
-                key.clone(),
-                Value::String("[redacted collision]".to_owned()),
-            );
-            collisions.insert(key);
-        } else {
-            redacted.insert(key, value);
-        }
-    }
-    *object = redacted;
-}
-
-fn redact_selected_text_encoder_paths_in_btree_map(
-    object: &mut std::collections::BTreeMap<String, Value>,
-    spellings: &[PrivatePathSpelling],
-) {
-    let original = std::mem::take(object);
-    let mut redacted = std::collections::BTreeMap::new();
-    let mut collisions = std::collections::HashSet::new();
-    for (mut key, mut value) in original {
-        redact_selected_text_encoder_paths(&mut key, spellings);
-        redact_selected_text_encoder_paths_in_value(&mut value, spellings);
-        if collisions.contains(&key) {
-            continue;
-        }
-        if redacted.contains_key(&key) {
-            redacted.insert(
-                key.clone(),
-                Value::String("[redacted collision]".to_owned()),
-            );
-            collisions.insert(key);
-        } else {
-            redacted.insert(key, value);
-        }
-    }
-    *object = redacted;
-}
-
-fn redact_selected_text_encoder_paths_in_value(
-    value: &mut Value,
-    spellings: &[PrivatePathSpelling],
-) {
-    match value {
-        Value::String(value) => redact_selected_text_encoder_paths(value, spellings),
-        Value::Array(values) => {
-            for value in values {
-                redact_selected_text_encoder_paths_in_value(value, spellings);
-            }
-        }
-        Value::Object(object) => redact_selected_text_encoder_paths_in_map(object, spellings),
-        Value::Null | Value::Bool(_) | Value::Number(_) => {}
-    }
-}
-
-fn public_job_snapshots(jobs: Vec<JobSnapshot>) -> Vec<JobSnapshot> {
-    jobs.into_iter().map(public_job_snapshot).collect()
-}
-
-fn public_queue_summary(mut summary: QueueSummary) -> QueueSummary {
-    summary.active_jobs = public_job_snapshots(summary.active_jobs);
-    summary
-}
-
-/// Defense in depth for live publications. Most producers already pass typed public projections,
-/// but `job.updated` also originates at worker/stale-sweep seams that intentionally retain the raw
-/// job for lifecycle work. Redact at the serialization boundary so no new producer can accidentally
-/// publish the worker-private selection receipt. `jobs.snapshot` is currently built directly in the
-/// SSE bootstrap; supporting it here keeps this boundary safe if that snapshot becomes live later.
-fn redact_private_job_metadata_from_event(event: &str, value: &mut Value) {
-    fn redact_job(value: &mut Value) {
-        let Ok(job) = serde_json::from_value::<JobSnapshot>(value.clone()) else {
-            // A job event that cannot be projected through the public typed contract is not safe to
-            // publish. Clear it so the caller's serialization remains path-free and fail-closed.
-            *value = Value::Null;
-            return;
-        };
-        *value = serde_json::to_value(public_job_snapshot(job)).unwrap_or(Value::Null);
-    }
-
-    match event {
-        "job.updated" => redact_job(value),
-        "queue.updated" => {
-            if let Some(jobs) = value.get_mut("activeJobs").and_then(Value::as_array_mut) {
-                for job in jobs {
-                    redact_job(job);
-                }
-            }
-        }
-        "jobs.snapshot" => {
-            if let Some(jobs) = value.get_mut("jobs").and_then(Value::as_array_mut) {
-                for job in jobs {
-                    redact_job(job);
-                }
-            }
-        }
-        _ => {}
-    }
 }
 
 async fn queue_summary_snapshot(state: AppState) -> Result<QueueSummary, ApiError> {
@@ -3983,6 +1743,72 @@ async fn create_generation_job(
     .await
 }
 
+/// Compact replay handle projected ONLY from S11's validated immutable plan provenance. The
+/// checkpoint id selects its persisted record; a display/catalog model id alone is not identity.
+fn imported_reference_from_provenance(
+    entry: &JsonObject,
+    provenance: Option<&Value>,
+) -> Option<Value> {
+    let checkpoint_id = sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(entry)?;
+    let provenance = provenance?;
+    let mut reference = json!({
+        "modelId": provenance.get("modelId")?,
+        "checkpointId": checkpoint_id,
+        "planId": provenance.pointer("/plan/planId")?,
+        "semanticDigest": provenance.pointer("/plan/semanticDigest")?,
+        "sourceBindingIdentity": provenance.pointer("/plan/sourceBindingIdentity")?,
+    });
+    for (key, path) in [
+        ("family", "/family"),
+        ("baseModel", "/baseLineage/baseModel"),
+        ("declaredPartition", "/declaredSemantics/minimaxH3Partition"),
+    ] {
+        if let Some(value) = provenance.pointer(path) {
+            reference[key] = value.clone();
+        }
+    }
+    Some(reference)
+}
+
+fn validate_expected_imported_model_reference(
+    payload: &JsonObject,
+    entry: &JsonObject,
+    provenance: Option<&Value>,
+) -> Result<(), ApiError> {
+    let Some(expected) = payload
+        .get("expectedImportedModelRef")
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(());
+    };
+    let actual = imported_reference_from_provenance(entry, provenance);
+    sceneworks_core::checkpoint_import::validate_replay_import_reference(expected, actual.as_ref())
+        .map_err(ApiError::bad_request)
+}
+
+/// Called immediately after canonical model resolution as well as at atomic enqueue. Never
+/// resolve a caller's modelManifestEntry or silently replay using today's different checkpoint.
+pub(crate) fn ensure_expected_imported_model_reference(
+    state: &AppState,
+    payload: &JsonObject,
+    entry: &Value,
+) -> Result<(), ApiError> {
+    if payload
+        .get("expectedImportedModelRef")
+        .is_none_or(Value::is_null)
+    {
+        return Ok(());
+    }
+    let empty = JsonObject::new();
+    let entry = entry.as_object().unwrap_or(&empty);
+    let provenance = sceneworks_core::model_artifacts::provenance::resolved_model_provenance(
+        &state.settings.data_dir, entry,
+    ).map_err(|error| ApiError::bad_request(format!(
+        "Cannot verify imported replay identity: {error}. Reimport or relink the original checkpoint; no replacement weights were queued."
+    )))?;
+    validate_expected_imported_model_reference(payload, entry, provenance.as_ref())
+}
+
 /// Like [`create_generation_job`], but creates the job in an explicit initial status.
 /// `None` is the default `queued` (immediately claimable); `Some(JobStatus::PendingCaption)`
 /// creates the job NON-claimable so an API-side async pre-step can rewrite its payload and
@@ -3994,28 +1820,20 @@ async fn create_generation_job_with_status(
     job_type: JobType,
     project_id: Option<String>,
     project_name: Option<String>,
-    mut payload: JsonObject,
+    payload: JsonObject,
     requested_gpu: String,
     initial_status: Option<JobStatus>,
 ) -> Result<JobSnapshot, ApiError> {
-    model_sources::ensure_runtime_model_sources(&state, &job_type, &mut payload).await?;
-    let job = store_call(state.clone(), move |store, _timeout| {
-        store.create_job(CreateJob {
-            job_type,
-            project_id,
-            project_name,
-            payload,
-            requested_gpu,
-            source_job_id: None,
-            duplicate_of_job_id: None,
-            attempts: 1,
-            initial_status,
-        })
-    })
-    .await?;
-    publish(&state, "job.updated", &job);
-    publish_queue(&state).await?;
-    Ok(job)
+    create_generation_job_with_binding(
+        state,
+        job_type,
+        project_id,
+        project_name,
+        payload,
+        requested_gpu,
+        (initial_status, None),
+    )
+    .await
 }
 
 async fn publish_queue(state: &AppState) -> Result<(), ApiError> {
@@ -4056,51 +1874,11 @@ fn publish<T: Serialize>(state: &AppState, event: &str, data: &T) {
     }
 }
 
-async fn project_path_for_id(state: AppState, project_id: &str) -> Result<PathBuf, ApiError> {
-    let project_id = project_id.to_owned();
-    let project = project_call(state, move |store| store.get_project(&project_id)).await?;
-    Ok(PathBuf::from(project.path))
-}
-
-/// Resolve a project asset record to an on-disk path without allowing absolute
-/// paths or traversal outside the owning project.
-async fn resolve_project_confined_asset_path(
-    state: AppState,
-    project_id: &str,
-    asset_id: &str,
-    project_path: &FsPath,
-) -> Result<PathBuf, ApiError> {
-    let project_id = project_id.to_owned();
-    let asset_id = asset_id.to_owned();
-    let asset = project_call(state, move |store| store.get_asset(&project_id, &asset_id)).await?;
-    let relative_path = asset
-        .get("file")
-        .and_then(|file| file.get("path"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| ApiError::bad_request("Asset has no file path"))?;
-    let mut resolved = project_path.to_path_buf();
-    for component in FsPath::new(relative_path).components() {
-        match component {
-            std::path::Component::Normal(value) => resolved.push(value),
-            _ => {
-                return Err(ApiError::bad_request(
-                    "Asset path must stay inside the project directory",
-                ))
-            }
-        }
-    }
-    if !resolved.exists() {
-        return Err(ApiError::bad_request("Asset file not found on disk"));
-    }
-    Ok(resolved)
-}
-
 fn model_lora_families(model: &Value) -> Vec<String> {
-    families_from_value_chain(
-        model,
-        &["families", "compatibleFamilies", "modelFamilies"],
-        Some("loraCompatibility"),
-    )
+    model
+        .as_object()
+        .map(sceneworks_core::lora_family::declared_model_lora_families)
+        .unwrap_or_default()
 }
 
 /// Every LoRA family this model can load: the families it DECLARES plus each one's
@@ -4122,16 +1900,10 @@ fn model_lora_families(model: &Value) -> Vec<String> {
 /// `validate_lora_specs_for_model` are in the canonical form, so skipping this re-normalization
 /// silently un-does sc-8185 and falsely rejects a Krea 2 LoRA.
 fn accepted_model_lora_families(model: &Value) -> Vec<String> {
-    let mut accepted: Vec<String> = Vec::new();
-    for declared in model_lora_families(model) {
-        for family in sceneworks_core::lora_family::accepted_lora_families(&declared) {
-            let family = normalize_lora_family(&family);
-            if !accepted.contains(&family) {
-                accepted.push(family);
-            }
-        }
-    }
-    accepted
+    model
+        .as_object()
+        .map(sceneworks_core::lora_family::accepted_model_lora_families)
+        .unwrap_or_default()
 }
 
 fn families_from_value_chain(
@@ -4344,56 +2116,15 @@ fn normalize_inline_job_lora(lora: &Value, lora_id: &str) -> Value {
     }
 }
 
-fn json_size_to_u64(value: &Value) -> Option<u64> {
-    if let Some(value) = value.as_u64() {
-        return Some(value);
-    }
-    value.as_str().and_then(|value| value.parse::<u64>().ok())
-}
+use sceneworks_core::payload_util::json_size_to_u64;
 
-fn allow_pattern_matches(path: &str, patterns: &[String]) -> bool {
-    if patterns.is_empty() {
-        return true;
-    }
-    patterns
-        .iter()
-        .any(|pattern| pattern_matches(pattern, path))
-}
+use sceneworks_core::model_artifacts::artifact_selection::allow_pattern_matches;
 
-fn pattern_matches(pattern: &str, value: &str) -> bool {
-    let (pattern, value) = if cfg!(windows) {
-        (pattern.to_ascii_lowercase(), value.to_ascii_lowercase())
-    } else {
-        (pattern.to_owned(), value.to_owned())
-    };
-    glob::Pattern::new(&pattern).is_ok_and(|pattern| pattern.matches(&value))
-}
+use sceneworks_core::model_artifacts::artifact_selection::pattern_matches;
 
-fn quote_huggingface_repo(repo: &str) -> String {
-    let mut output = String::new();
-    for byte in repo.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
-            output.push(char::from(byte));
-        } else {
-            output.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    output
-}
+use sceneworks_core::display_util::quote_path as quote_huggingface_repo;
 
-fn format_bytes(value: u64) -> String {
-    let mut size = value as f64;
-    for unit in ["B", "KB", "MB", "GB", "TB"] {
-        if size < 1024.0 || unit == "TB" {
-            if unit == "B" {
-                return format!("{} {unit}", size as u64);
-            }
-            return format!("{size:.1} {unit}");
-        }
-        size /= 1024.0;
-    }
-    format!("{size:.1} TB")
-}
+use sceneworks_core::display_util::format_bytes;
 
 fn string_array_field(payload: &Value, field: &str) -> Vec<String> {
     payload
@@ -4409,25 +2140,7 @@ fn string_array_field(payload: &Value, field: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn safe_download_dir(repo: &str) -> String {
-    let mut output = String::new();
-    let mut in_replacement = false;
-    for character in repo.chars() {
-        if character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-') {
-            output.push(character);
-            in_replacement = false;
-        } else if !in_replacement {
-            output.push_str("__");
-            in_replacement = true;
-        }
-    }
-    let output = output.trim_matches('_').to_owned();
-    if output.is_empty() {
-        "download".to_owned()
-    } else {
-        output
-    }
-}
+use sceneworks_core::model_artifacts::artifact_selection::safe_download_dir;
 
 fn sanitized_upload_filename(filename: &str) -> String {
     let filename = filename
@@ -4443,33 +2156,28 @@ fn sanitized_upload_filename(filename: &str) -> String {
     }
 }
 
-fn validate_lora_import_source_path(
+fn validate_import_source_path(
     source_path: &str,
     allowed_roots: &[PathBuf],
 ) -> Result<(), ApiError> {
+    let rejected = || ApiError::bad_request("sourcePath must be inside an approved folder");
     let source = FsPath::new(source_path);
     if !source.is_absolute() {
-        return Err(ApiError::bad_request("LoRA sourcePath must be absolute"));
+        return Err(rejected());
     }
-    let source = std::fs::canonicalize(source)
-        .map_err(|_| ApiError::bad_request(format!("LoRA sourcePath not found: {source_path}")))?;
-    let metadata = std::fs::metadata(&source)
-        .map_err(|error| ApiError::bad_request(format!("Invalid LoRA sourcePath: {error}")))?;
+    let source = std::fs::canonicalize(source).map_err(|_| rejected())?;
+    let metadata = std::fs::metadata(&source).map_err(|_| rejected())?;
     if !metadata.is_file() && !metadata.is_dir() {
-        return Err(ApiError::bad_request(
-            "LoRA sourcePath must point to a file or directory",
-        ));
+        return Err(rejected());
     }
-    for root in allowed_roots {
-        if let Ok(root) = std::fs::canonicalize(root) {
-            if source.starts_with(root) {
-                return Ok(());
-            }
-        }
+    if allowed_roots
+        .iter()
+        .filter_map(|root| std::fs::canonicalize(root).ok())
+        .any(|root| source.starts_with(root))
+    {
+        return Ok(());
     }
-    Err(ApiError::bad_request(
-        "LoRA sourcePath must be inside app-managed data/loras, project/loras, or staged upload folders",
-    ))
+    Err(rejected())
 }
 
 fn validate_source_url(source_url: &str) -> Result<(), ApiError> {
@@ -4527,30 +2235,10 @@ async fn known_lora_families_from_manifests(state: &AppState) -> Result<Vec<Stri
 }
 
 fn slugify_lora_id(value: &str) -> String {
-    let mut output = String::new();
-    let mut previous_separator = false;
-    for character in value.trim().chars() {
-        if character.is_ascii_alphanumeric() {
-            output.push(character.to_ascii_lowercase());
-            previous_separator = false;
-        } else if !previous_separator && !output.is_empty() {
-            output.push('_');
-            previous_separator = true;
-        }
-    }
-    while output.ends_with('_') {
-        output.pop();
-    }
-    if output.is_empty() {
-        "lora".to_owned()
-    } else {
-        output
-    }
+    sceneworks_core::slug::slugify_with(value, "lora", None, '_')
 }
 
-fn now_rfc3339() -> String {
-    format_unix_seconds(now_unix_seconds())
-}
+use sceneworks_core::time::utc_now as now_rfc3339;
 
 fn huggingface_repo_cache_exists(path: &FsPath) -> bool {
     path.join("snapshots").is_dir() || path.join("blobs").is_dir()
@@ -4638,45 +2326,6 @@ struct ArtifactRemoval {
     /// unsupported volume, item too large, …). Nothing was deleted for these, so the
     /// caller can prompt the user before falling back to a permanent delete.
     trash_failed_paths: Vec<String>,
-}
-
-#[cfg(test)]
-static TEST_TRASH_OUTCOMES: std::sync::OnceLock<Mutex<HashMap<PathBuf, bool>>> =
-    std::sync::OnceLock::new();
-
-#[cfg(test)]
-pub(crate) struct TestTrashOutcomesGuard {
-    paths: Vec<PathBuf>,
-}
-
-#[cfg(test)]
-impl Drop for TestTrashOutcomesGuard {
-    fn drop(&mut self) {
-        let mut outcomes = TEST_TRASH_OUTCOMES.get_or_init(Default::default).lock();
-        for path in &self.paths {
-            outcomes.remove(path);
-        }
-    }
-}
-
-/// Install one-shot deterministic OS-trash outcomes for route tests. A `true`
-/// outcome removes the path as if the trash move succeeded; `false` leaves it
-/// in place and reports the same recoverable failure as `trash::delete`.
-#[cfg(test)]
-pub(crate) fn test_trash_outcomes(
-    entries: impl IntoIterator<Item = (PathBuf, bool)>,
-) -> TestTrashOutcomesGuard {
-    let mut outcomes = TEST_TRASH_OUTCOMES.get_or_init(Default::default).lock();
-    let mut paths = Vec::new();
-    for (path, succeeds) in entries {
-        assert!(
-            outcomes.insert(path.clone(), succeeds).is_none(),
-            "test trash outcome already registered for {}",
-            path.display()
-        );
-        paths.push(path);
-    }
-    TestTrashOutcomesGuard { paths }
 }
 
 /// Move a single path to the operating-system trash (Windows Recycle Bin / macOS
@@ -4801,1410 +2450,6 @@ async fn remove_owned_artifact_path(
     Ok(())
 }
 
-fn requested_gpu_or_auto(value: String) -> String {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        "auto".to_owned()
-    } else {
-        trimmed.to_owned()
-    }
-}
-
-fn option_str_is_empty(value: Option<&str>) -> bool {
-    value.map(str::trim).unwrap_or_default().is_empty()
-}
-
-fn number_to_f64(number: &serde_json::Number, field: &'static str) -> Result<f64, ApiError> {
-    number
-        .as_f64()
-        .ok_or_else(|| ApiError::bad_request(format!("Invalid numeric value for {field}")))
-}
-
-fn optional_number_to_f64(
-    number: Option<&serde_json::Number>,
-    field: &'static str,
-) -> Result<Option<f64>, ApiError> {
-    number.map(|value| number_to_f64(value, field)).transpose()
-}
-
-/// The only output heights `POST /api/v1/projects/:id/timelines/:id/exports` admits. One
-/// declaration (sc-22710): the film harness picks an export resolution before it dispatches, and a
-/// second hand-copied list would turn a pre-dispatch diagnostic into a 400 at enqueue on drift.
-pub(crate) const TIMELINE_EXPORT_RESOLUTIONS: &[u32] = &[640, 720, 1024, 1280];
-
-fn validate_timeline_export(payload: &TimelineExportRequest) -> Result<(), ApiError> {
-    if !TIMELINE_EXPORT_RESOLUTIONS.contains(&payload.resolution) {
-        return Err(ApiError::bad_request(
-            "Resolution must be one of 640, 720, 1024, or 1280.",
-        ));
-    }
-    if !(1..=60).contains(&payload.fps) {
-        return Err(ApiError::bad_request("FPS must be between 1 and 60"));
-    }
-    Ok(())
-}
-
-fn validate_frame_extract(payload: &FrameExtractRequest) -> Result<(), ApiError> {
-    if !payload.playhead_seconds.is_finite() || payload.playhead_seconds < 0.0 {
-        return Err(ApiError::bad_request(
-            "playheadSeconds must be greater than or equal to 0",
-        ));
-    }
-    if ![
-        "reuse",
-        "first_frame",
-        "last_frame",
-        "video_studio",
-        "image_studio",
-        "bridge",
-        "extension",
-    ]
-    .contains(&payload.intended_use.as_str())
-    {
-        return Err(ApiError::bad_request("Unsupported intendedUse"));
-    }
-    Ok(())
-}
-
-fn validate_person_detection_job(payload: &PersonDetectionJobRequest) -> Result<(), ApiError> {
-    if payload.source_asset_id.is_empty() {
-        return Err(ApiError::bad_request("Source clip is required"));
-    }
-    if payload
-        .source_timestamp
-        .is_some_and(|timestamp| !timestamp.is_finite() || timestamp < 0.0)
-    {
-        return Err(ApiError::bad_request(
-            "sourceTimestamp must be greater than or equal to 0",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_person_track_job(payload: &PersonTrackJobRequest) -> Result<(), ApiError> {
-    if payload.source_asset_id.is_empty() {
-        return Err(ApiError::bad_request("Source clip is required"));
-    }
-    if payload.representative_frame_asset_id.is_empty() {
-        return Err(ApiError::bad_request(
-            "Representative frame asset is required",
-        ));
-    }
-    if payload.track_name.is_empty() || payload.track_name.chars().count() > 120 {
-        return Err(ApiError::bad_request(
-            "trackName must be between 1 and 120 characters",
-        ));
-    }
-    if !payload.detection.contains_key("id") {
-        return Err(ApiError::bad_request(
-            "Selected detection metadata is required",
-        ));
-    }
-    Ok(())
-}
-
-/// sc-8884 (F-082): `negativePrompt` and the free-form `advanced` bag previously escaped
-/// all length validation (only `prompt` was capped), so an oversized field was persisted
-/// to jobs.db and re-serialized to every SSE subscriber on each status change. Cap the
-/// negative prompt at the same char limit as `prompt` and bound `advanced`'s serialized
-/// size. Shared by `validate_image_job` / `validate_video_job`.
-fn validate_prompt_extras(negative_prompt: &str, advanced: &JsonObject) -> Result<(), ApiError> {
-    if negative_prompt.chars().count() > MAX_PROMPT_CHARS {
-        return Err(ApiError::bad_request(format!(
-            "negativePrompt must be at most {MAX_PROMPT_CHARS} characters"
-        )));
-    }
-    // Serialize once to measure the on-the-wire size of the pass-through bag.
-    let advanced_bytes = serde_json::to_vec(advanced)
-        .map(|bytes| bytes.len())
-        .unwrap_or(0);
-    if advanced_bytes > MAX_ADVANCED_JSON_BYTES {
-        return Err(ApiError::bad_request(format!(
-            "advanced settings must serialize to at most {MAX_ADVANCED_JSON_BYTES} bytes"
-        )));
-    }
-    Ok(())
-}
-
-const PROMPT_ENHANCE_MAX_TOKENS: u64 = 2048;
-const PROMPT_ENHANCE_MAX_TEMPERATURE: f64 = 2.0;
-const PROMPT_ENHANCEMENT_FACT_KEY: &str = "promptEnhancement";
-
-/// Validate the typed, bounded part of the FLUX.2 prompt-enhancement request at every image enqueue
-/// boundary. `advanced` is otherwise intentionally extensible, but these fields cross into a native
-/// LLM sampler and must never inherit the old truthy/coercing behavior.
-fn validate_prompt_enhancement_fields(advanced: &JsonObject) -> Result<bool, ApiError> {
-    if advanced.contains_key(PROMPT_ENHANCEMENT_FACT_KEY) {
-        return Err(ApiError::bad_request(format!(
-            "advanced.{PROMPT_ENHANCEMENT_FACT_KEY} is worker-owned and cannot be supplied by a client"
-        )));
-    }
-    let enabled = match advanced.get("enhancePrompt") {
-        None => false,
-        Some(Value::Bool(enabled)) => *enabled,
-        Some(_) => {
-            return Err(ApiError::bad_request(
-                "advanced.enhancePrompt must be a boolean",
-            ));
-        }
-    };
-    if let Some(value) = advanced.get("enhanceTemperature") {
-        let temperature = value
-            .as_f64()
-            .filter(|value| value.is_finite())
-            .ok_or_else(|| {
-                ApiError::bad_request("advanced.enhanceTemperature must be a finite number")
-            })?;
-        if !(0.0..=PROMPT_ENHANCE_MAX_TEMPERATURE).contains(&temperature) {
-            return Err(ApiError::bad_request(format!(
-                "advanced.enhanceTemperature must be between 0 and {PROMPT_ENHANCE_MAX_TEMPERATURE}"
-            )));
-        }
-        if !enabled {
-            return Err(ApiError::bad_request(
-                "advanced.enhanceTemperature requires advanced.enhancePrompt=true",
-            ));
-        }
-    }
-    if let Some(value) = advanced.get("enhanceMaxTokens") {
-        let tokens = value
-            .as_u64()
-            .ok_or_else(|| ApiError::bad_request("advanced.enhanceMaxTokens must be an integer"))?;
-        if !(1..=PROMPT_ENHANCE_MAX_TOKENS).contains(&tokens) {
-            return Err(ApiError::bad_request(format!(
-                "advanced.enhanceMaxTokens must be between 1 and {PROMPT_ENHANCE_MAX_TOKENS}"
-            )));
-        }
-        if !enabled {
-            return Err(ApiError::bad_request(
-                "advanced.enhanceMaxTokens requires advanced.enhancePrompt=true",
-            ));
-        }
-    }
-    Ok(enabled)
-}
-
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-fn prompt_enhancement_payload_string(payload: &JsonObject, key: &str) -> bool {
-    payload
-        .get(key)
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
-}
-
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-fn prompt_enhancement_payload_references(payload: &JsonObject) -> bool {
-    prompt_enhancement_payload_string(payload, "referenceAssetId")
-        || payload
-            .get("referenceAssetIds")
-            .and_then(Value::as_array)
-            .is_some_and(|values| {
-                values
-                    .iter()
-                    .any(|value| value.as_str().is_some_and(|value| !value.trim().is_empty()))
-            })
-}
-
-fn validate_prompt_enhancement_route(payload: &JsonObject) -> Result<(), ApiError> {
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
-    let mode = payload
-        .get("mode")
-        .and_then(Value::as_str)
-        .unwrap_or("text_to_image");
-
-    #[cfg(target_os = "macos")]
-    if !matches!(
-        mode,
-        "text_to_image" | "edit_image" | "character_image" | "style_variations"
-    ) {
-        return Err(ApiError::bad_request(format!(
-            "advanced.enhancePrompt on MLX does not support image mode {mode}"
-        )));
-    }
-
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    if !matches!(mode, "text_to_image" | "edit_image") {
-        return Err(ApiError::bad_request(format!(
-            "advanced.enhancePrompt on Candle supports only text_to_image and edit_image; mode {mode} is unsupported"
-        )));
-    }
-
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
-    {
-        let _ = payload;
-        Err(ApiError::bad_request(
-            "advanced.enhancePrompt requires a native MLX or Candle image backend",
-        ))
-    }
-
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
-    {
-        let has_references = prompt_enhancement_payload_references(payload);
-        let has_edit_input =
-            has_references || prompt_enhancement_payload_string(payload, "sourceAssetId");
-        if mode == "text_to_image" && has_edit_input {
-            return Err(ApiError::bad_request(
-                "advanced.enhancePrompt text_to_image cannot include source or reference image assets",
-            ));
-        }
-        if mode == "edit_image" && !has_edit_input {
-            return Err(ApiError::bad_request(
-                "advanced.enhancePrompt edit_image requires a source or reference image asset",
-            ));
-        }
-        if matches!(mode, "character_image" | "style_variations") && !has_references {
-            return Err(ApiError::bad_request(format!(
-                "advanced.enhancePrompt {mode} requires a reference image asset"
-            )));
-        }
-        Ok(())
-    }
-}
-
-/// Validate the canonical, post-preset image payload. Enhancement is deliberately scoped to the
-/// actual native backend route: MLX owns base/edit/character plus the defensive legacy style alias,
-/// while Candle owns only base and its bespoke `edit_image` lane. It is not inherited by Klein,
-/// strict control, backendless builds,
-/// or a reference-bearing mode that would fall through to a plain base render. Keeping this check
-/// on the final payload also covers presets and retry/duplicate's shallow-merged canonical payload.
-fn validate_prompt_enhancement_payload(payload: &JsonObject) -> Result<(), ApiError> {
-    let empty = JsonObject::new();
-    let advanced = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .unwrap_or(&empty);
-    if !validate_prompt_enhancement_fields(advanced)? {
-        return Ok(());
-    }
-    let model = payload
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if model != "flux2_dev" {
-        return Err(ApiError::bad_request(
-            "advanced.enhancePrompt is supported only by FLUX.2-dev; FLUX.2-Klein and other models reject it",
-        ));
-    }
-    let strict_control = advanced
-        .get("poses")
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty())
-        || advanced.contains_key("controlWeights")
-        || advanced.contains_key("controlImage")
-        || advanced.contains_key("controlMode");
-    if strict_control {
-        return Err(ApiError::bad_request(
-            "advanced.enhancePrompt cannot be combined with FLUX.2-dev strict control",
-        ));
-    }
-    validate_prompt_enhancement_route(payload)
-}
-
-/// Reject a `model` id that is not a safe single path component (F-003 / sc-11159).
-///
-/// The id flows verbatim from the untrusted job payload into the worker's asset
-/// filename — `write_image_asset` / `write_upscaled_asset` / `VideoPlan::new` each
-/// `format!(".._{model}_..")` a project-relative path, then `create_dir_all` +
-/// atomic-rename the file into place. A `model` containing `../`, `..\`, or an
-/// absolute path would therefore traverse out of the project dir and hand a remote
-/// caller an arbitrary-write primitive. The worker now slugifies the id as a last
-/// line of defense, but the API is the first gate and rejects such ids outright,
-/// mirroring the worker's `safe_weight_filename` posture for payload-supplied
-/// filename components.
-///
-/// SCOPE (sc-11159): this enforces *path-safety only*, NOT catalog membership. The
-/// worker's stub lane deliberately serves uncatalogued model ids for dev/testing,
-/// and the API test harness (which does not seed the shipped model manifests)
-/// routinely enqueues real-but-uncatalogued ids and expects success, so a catalog
-/// rejection here would break that legitimate lane. Path-safety alone fully closes
-/// the traversal/arbitrary-write vulnerability: an uncatalogued-but-path-safe id
-/// can never escape the project dir.
-fn validate_model_id(model: &str) -> Result<(), ApiError> {
-    let trimmed = model.trim();
-    if trimmed.is_empty() {
-        return Err(ApiError::bad_request("model is required"));
-    }
-    let mut components = std::path::Path::new(trimmed).components();
-    let single_normal = matches!(components.next(), Some(std::path::Component::Normal(_)))
-        && components.next().is_none();
-    if !single_normal || trimmed.contains('/') || trimmed.contains('\\') {
-        return Err(ApiError::bad_request(
-            "model must be a plain model id (no path separators or '..')",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
-    if payload.project_id.is_empty() {
-        return Err(ApiError::bad_request("projectId is required"));
-    }
-    validate_model_id(&payload.model)?;
-    if payload.prompt.is_empty() || payload.prompt.chars().count() > MAX_PROMPT_CHARS {
-        return Err(ApiError::bad_request(
-            "prompt must be between 1 and 4000 characters",
-        ));
-    }
-    // A native prompt batch (sc-25681): every prompt obeys the single prompt's length bound. Its
-    // shape against the model (declared cap, `prompt == prompts[0]`, `prompts × count`) is judged
-    // in `create_image_job` against the canonical catalog entry.
-    if payload
-        .prompts
-        .iter()
-        .any(|prompt| prompt.is_empty() || prompt.chars().count() > MAX_PROMPT_CHARS)
-    {
-        return Err(ApiError::bad_request(
-            "each of prompts must be between 1 and 4000 characters",
-        ));
-    }
-    validate_prompt_extras(&payload.negative_prompt, &payload.advanced)?;
-    validate_prompt_enhancement_fields(&payload.advanced)?;
-    validate_image_pose_count(&payload.advanced)?;
-    if payload.loras.len() > sceneworks_core::lora_family::MAX_JOB_LORAS {
-        return Err(ApiError::bad_request(format!(
-            "loras must contain at most {} entries",
-            sceneworks_core::lora_family::MAX_JOB_LORAS
-        )));
-    }
-    if ![
-        "text_to_image",
-        "edit_image",
-        "character_image",
-        "style_variations",
-    ]
-    .contains(&payload.mode.as_str())
-    {
-        return Err(ApiError::bad_request("Unsupported image mode"));
-    }
-    // Only a *named* count is bounded here: an omitted one resolves to the model's declared
-    // `defaults.count` in `create_image_job`, like the size below.
-    if let Some(count) = payload.count {
-        if !(1..=8).contains(&count) {
-            return Err(ApiError::bad_request("count must be between 1 and 8"));
-        }
-    }
-    // Only a *named* dimension is bounded here: an omitted side is resolved from the model's
-    // declared `defaults.resolution` in `create_image_job` (sc-12400), the same shape as the video
-    // route's duration/fps/size.
-    //
-    // sc-24113 lowers the FLOOR of this shape check from 256 to 32 and nothing else. This gate runs
-    // before the model is known, so — exactly like the video route's `1..=30` duration blanket — it
-    // is a payload-sanity outer bound, not the model's envelope. It had to widen because
-    // Qwen-Image 2.1 genuinely renders from 32 px per side, which the old blanket refused outright
-    // with no model ever getting a say.
-    //
-    // Nothing is loosened for any other model: `create_image_job` immediately re-checks the
-    // resolved geometry against the model's own `limits.minDimension` / `maxDimension` /
-    // `requiresDimensionsMultipleOf`, and an image model that declares NO floor falls back to
-    // `HISTORICAL_MIN_IMAGE_DIMENSION` — the same 256 this line used to enforce. So a 64-px request
-    // to any pre-existing model still 400s, just one layer down and with the model named.
-    if let Some(width) = payload.width {
-        validate_dimension_in(
-            width,
-            "width",
-            SHAPE_MIN_IMAGE_DIMENSION,
-            MAX_IMAGE_DIMENSION,
-        )?;
-    }
-    if let Some(height) = payload.height {
-        validate_dimension_in(
-            height,
-            "height",
-            SHAPE_MIN_IMAGE_DIMENSION,
-            MAX_IMAGE_DIMENSION,
-        )?;
-    }
-    if payload.upscale.enabled {
-        if payload.upscale.engine.trim().is_empty() {
-            return Err(ApiError::bad_request("upscale.engine is required"));
-        }
-        if payload.upscale.is_iris() {
-            // Iris restoration (sc-25683) is sized by `upscale.scale` (default 4×, any positive
-            // factor), not `factor`; a non-default `factor` would be silently ignored, so refuse it.
-            if payload.upscale.factor != sceneworks_core::contracts::default_image_upscale_factor()
-            {
-                return Err(ApiError::bad_request(
-                    "upscale.factor is not a control of the Iris restoration engine; use upscale.scale",
-                ));
-            }
-            if payload.upscale.extra.contains_key("softness") {
-                return Err(ApiError::bad_request(
-                    "upscale.softness is not a control of the Iris restoration engine",
-                ));
-            }
-            payload
-                .upscale
-                .iris_params()
-                .map_err(|error| ApiError::bad_request(format!("upscale.{error}")))?;
-        } else {
-            if ![2, 4].contains(&payload.upscale.factor) {
-                return Err(ApiError::bad_request("upscale.factor must be 2 or 4"));
-            }
-            sceneworks_core::image_restoration::reject_iris_only_keys(
-                &payload.upscale.iris_controls(),
-                &payload.upscale.engine,
-            )
-            .map_err(|error| ApiError::bad_request(format!("upscale.{error}")))?;
-        }
-    }
-    Ok(())
-}
-
-/// Bound strict-pose fan-out at the image-job creation boundary. Each `advanced.poses` entry
-/// renders one image, so this is an output-count contract rather than a JSON-size guard.
-///
-/// Existing stored jobs are immutable and remain readable. Retry/duplicate pass their merged
-/// payload through this same helper in `jobs.rs`, so a legacy over-limit job must be reduced before
-/// it can create new work instead of silently reproducing the old unbounded behavior.
-fn validate_image_pose_count(advanced: &JsonObject) -> Result<(), ApiError> {
-    let Some(poses) = advanced.get("poses").and_then(Value::as_array) else {
-        return Ok(());
-    };
-    if poses.len() > sceneworks_core::image_request::MAX_JOB_POSES {
-        return Err(ApiError::bad_request(format!(
-            "advanced.poses must contain at most {} entries; each pose renders one image",
-            sceneworks_core::image_request::MAX_JOB_POSES
-        )));
-    }
-    Ok(())
-}
-
-fn validate_character_test_job(payload: &CharacterTestRequest) -> Result<(), ApiError> {
-    if payload.prompt.is_empty() || payload.prompt.chars().count() > MAX_PROMPT_CHARS {
-        return Err(ApiError::bad_request(format!(
-            "prompt must be between 1 and {MAX_PROMPT_CHARS} characters"
-        )));
-    }
-    if !(1..=8).contains(&payload.count) {
-        return Err(ApiError::bad_request("count must be between 1 and 8"));
-    }
-    validate_dimension(payload.width, "width", MAX_IMAGE_DIMENSION)?;
-    validate_dimension(payload.height, "height", MAX_IMAGE_DIMENSION)?;
-    Ok(())
-}
-
-/// Every `mode` a `POST /api/v1/video/jobs` request may name — the enqueue allow-list, and a
-/// SEPARATE reachability gate from the catalog: a mode absent HERE 400s with "Unsupported video
-/// mode" no matter what the model's manifest `capabilities` declare, what `VIDEO_UI_MODES` offers,
-/// or what the worker can render.
-///
-/// It is a named `const` rather than the inline array literal it was so a test can enumerate the
-/// REAL list. A guard that retypes the modes asserts against its own copy and stays green while
-/// this list drifts — the false-green shape that let GH #2074 ship. `every_declared_video_capability_is_submittable`
-/// (tests/jobs.rs) reads this constant and the shipped manifest, so a new family's capability that
-/// is not admitted here is RED at the source.
-///
-/// ⚠️ Adding a family means checking SIX surfaces, not one (sc-17159): manifest `capabilities`,
-/// [`sceneworks_core::jobs_store::routing`]'s `VIDEO_UI_MODES`, `video_mode_is_mlx_eligible` +
-/// `VIDEO_MODEL_CAPS`, the candle claim gate, THIS list plus the per-mode required-asset `match`
-/// below it, and the worker's dispatch arm.
-pub(crate) const VIDEO_JOB_MODES: &[&str] = &[
-    "image_to_video",
-    "text_to_video",
-    "first_last_frame",
-    "extend_clip",
-    "video_bridge",
-    "replace_person",
-    // Bernini editing / reference-driven video modes (sc-4703).
-    "video_to_video",
-    "reference_to_video",
-    "reference_video_to_video",
-    // Bernini multi-source-video modes (sc-5425): mv2v (multiple source clips)
-    // and ads2v (source video + reference video + reference images).
-    "multi_video_to_video",
-    "ads2v",
-    // SCAIL-2 standalone character animation (sc-5448 / sc-5449, epic 5439): reference
-    // character image + driving video → animated clip. It was wired end-to-end — catalog
-    // `capabilities`, `VIDEO_UI_MODES`, `video_mode_is_mlx_eligible`, the candle claim gate,
-    // the worker's `generate_scail2` — and offered in the Video Studio, but never added
-    // HERE, so every submission 400'd on "Unsupported video mode" and the mode was
-    // unreachable from the moment it shipped (GH #2074).
-    "animate_character",
-];
-
-fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
-    if payload.project_id.is_empty() {
-        return Err(ApiError::bad_request("projectId is required"));
-    }
-    validate_model_id(&payload.model)?;
-    if payload.prompt.is_empty() || payload.prompt.chars().count() > MAX_PROMPT_CHARS {
-        return Err(ApiError::bad_request(
-            "prompt must be between 1 and 4000 characters",
-        ));
-    }
-    validate_prompt_extras(&payload.negative_prompt, &payload.advanced)?;
-    if payload.loras.len() > sceneworks_core::lora_family::MAX_JOB_LORAS {
-        return Err(ApiError::bad_request(format!(
-            "loras must contain at most {} entries",
-            sceneworks_core::lora_family::MAX_JOB_LORAS
-        )));
-    }
-    if !VIDEO_JOB_MODES.contains(&payload.mode.as_str()) {
-        return Err(ApiError::bad_request("Unsupported video mode"));
-    }
-    if payload
-        .reference_asset_ids
-        .iter()
-        .any(|id| id.trim().is_empty())
-    {
-        return Err(ApiError::bad_request(
-            "referenceAssetIds must not contain blank ids",
-        ));
-    }
-    if payload.reference_asset_ids.len() > MAX_VIDEO_REFERENCE_ASSET_IDS {
-        return Err(ApiError::bad_request(format!(
-            "referenceAssetIds must contain at most {MAX_VIDEO_REFERENCE_ASSET_IDS} ids"
-        )));
-    }
-    if payload
-        .source_clip_asset_ids
-        .iter()
-        .any(|id| id.trim().is_empty())
-    {
-        return Err(ApiError::bad_request(
-            "sourceClipAssetIds must not contain blank ids",
-        ));
-    }
-    if payload.source_clip_asset_ids.len() > MAX_VIDEO_SOURCE_CLIP_ASSET_IDS {
-        return Err(ApiError::bad_request(format!(
-            "sourceClipAssetIds must contain at most {MAX_VIDEO_SOURCE_CLIP_ASSET_IDS} ids"
-        )));
-    }
-    // The audio references (sc-17160), rejected blank-first and bounded exactly like the two
-    // id lists above — same order, same wording — because "consistent with the existing lists"
-    // is the contract a caller reads off one list and applies to the next.
-    if payload
-        .reference_audio_asset_ids
-        .iter()
-        .any(|id| id.trim().is_empty())
-    {
-        return Err(ApiError::bad_request(
-            "referenceAudioAssetIds must not contain blank ids",
-        ));
-    }
-    if payload.reference_audio_asset_ids.len() > MAX_VIDEO_REFERENCE_AUDIO_ASSET_IDS {
-        return Err(ApiError::bad_request(format!(
-            "referenceAudioAssetIds must contain at most {MAX_VIDEO_REFERENCE_AUDIO_ASSET_IDS} ids"
-        )));
-    }
-    // There is deliberately NO combined blanket here, only the three per-list ones above. 12 is
-    // MiniMax-H3's number, not a product-wide truth: today's caps admit 8 images AND 8 clips on
-    // one request, so a blanket 12 would refuse a 16-file shape this route accepts right now —
-    // narrowing every existing video model, which is precisely what the cap change must not do.
-    // The combined budget is a per-model fact and lives with the model, as
-    // `limits.maxCombinedReferenceAssets` (see `create_video_job`).
-    // Only a *named* duration is bounded here, for the same reason as fps below: an omitted one is
-    // resolved from the model's declared `defaults.duration` in `create_video_job`. This blanket
-    // stays a payload-sanity check; the model's own `limits.hardMaxDuration` is enforced there
-    // (sc-12297 / sc-12400).
-    if let Some(duration) = payload.duration.as_ref() {
-        let duration = duration
-            .as_f64()
-            .ok_or_else(|| ApiError::bad_request("duration must be a number between 1 and 30"))?;
-        if !duration.is_finite() || !(1.0..=30.0).contains(&duration) {
-            return Err(ApiError::bad_request("duration must be between 1 and 30"));
-        }
-    }
-    // Only a *named* fps is bounded here: an omitted one is resolved from the model's declared
-    // `defaults.fps` in `create_video_job`, which is the first point that knows the model (this
-    // runs before preset expansion, so the model here may be stale — sc-12300). This blanket stays
-    // a payload-sanity check; the model's own `limits.fps` menu is enforced there (sc-12347).
-    if let Some(fps) = payload.fps {
-        if !(1..=60).contains(&fps) {
-            return Err(ApiError::bad_request("fps must be between 1 and 60"));
-        }
-    }
-    // Only a *named* dimension is bounded here, like duration and fps above: an omitted side is
-    // resolved from the model's declared `defaults.resolution` in `create_video_job` (sc-12400).
-    if let Some(width) = payload.width {
-        validate_dimension(width, "width", MAX_VIDEO_DIMENSION)?;
-    }
-    if let Some(height) = payload.height {
-        validate_dimension(height, "height", MAX_VIDEO_DIMENSION)?;
-    }
-    match payload.mode.as_str() {
-        "image_to_video"
-            if payload.source_asset_id.is_none()
-                && !sceneworks_core::h3_keyframes::accepts_last_only_image_to_video(
-                    &payload.model,
-                    &payload.mode,
-                    payload
-                        .last_frame_asset_id
-                        .as_deref()
-                        .is_some_and(|id| !id.trim().is_empty()),
-                ) =>
-        {
-            Err(ApiError::bad_request(
-                "Image to Video requires a source image.",
-            ))
-        }
-        "first_last_frame"
-            if payload.source_asset_id.is_none() || payload.last_frame_asset_id.is_none() =>
-        {
-            Err(ApiError::bad_request(
-                "First/Last Frame requires first and last image assets.",
-            ))
-        }
-        "extend_clip" if payload.source_clip_asset_id.is_none() => {
-            Err(ApiError::bad_request("Extend Clip requires a source clip."))
-        }
-        "video_bridge"
-            if payload.source_clip_asset_id.is_none()
-                || payload.bridge_right_clip_asset_id.is_none() =>
-        {
-            Err(ApiError::bad_request(
-                "Bridge generation requires left and right source clips.",
-            ))
-        }
-        "replace_person" if payload.source_clip_asset_id.is_none() => Err(ApiError::bad_request(
-            "Replace Person requires a source clip.",
-        )),
-        "replace_person" if payload.person_track_id.is_none() => Err(ApiError::bad_request(
-            "Replace Person requires a selected person track.",
-        )),
-        "replace_person" if payload.character_id.is_none() => Err(ApiError::bad_request(
-            "Replace Person requires a Character.",
-        )),
-        // Bernini editing / reference-driven video modes (sc-4703): each requires its
-        // source media so the worker never falls through to an unconditioned t2v render.
-        "video_to_video" if payload.source_clip_asset_id.is_none() => Err(ApiError::bad_request(
-            "Video to Video requires a source clip.",
-        )),
-        // `reference_to_video` requires at least one VISUAL reference — an image or a video clip.
-        // Audio references are admitted alongside them and never instead of them.
-        //
-        // Two corrections in one line. sc-17159 widened this from `reference_asset_ids.is_empty()`
-        // because Bernini, the only r2v model at the time, takes images alone, so "at least one
-        // reference image" and "at least one reference" were the same sentence — true for the
-        // clips MiniMax-H3 Ref2VA added, and WRONG for the audio it added at the same time.
-        //
-        // sc-19574 settled it against the reference implementation rather than by argument.
-        // diffusers `MiniMaxH3` (upstream PR #14355, `0.40.0.dev0 @ 7564fb01`) states the rule on
-        // `MiniMaxH3AudioReference` — "never on its own — an audio reference has to be paired with
-        // at least one image or video reference. It never reaches the conditioner and is encoded by
-        // the audio VAE alone" — and ENFORCES it in `before_encoder.py`:
-        //
-        //     if set(kinds) == {"audio"}:
-        //         raise ValueError("An audio reference has to be paired with at least one image or
-        //                           video reference and cannot be used on its own.")
-        //
-        // So the engine was right and this layer was wrong: an audio-only set leaves the visual
-        // conditioner with nothing to read, and the render it would produce is unconditioned. The
-        // worker refuses it too (sc-19508, `minimax_h3_validate_partition`); refusing it HERE is
-        // what makes the user find out at submission instead of after a queued job fails.
-        //
-        // The rule itself is `sceneworks_core::video_request::classify_reference_set`, which the
-        // MCP tool and the worker call too — one predicate, three layers, so they cannot drift back
-        // into disagreement. Only the WORDING is this layer's. It does NOT loosen Bernini: its own
-        // conditioning assembly (`resolve_bernini_conditioning`, both lanes) still refuses an r2v
-        // with no `referenceAssetIds`, naming bernini — the model-specific half of the requirement
-        // belongs with the model, exactly like `limits.maxReferenceAssets`.
-        "reference_to_video"
-            if classify_reference_set(
-                payload.reference_asset_ids.len(),
-                payload.source_clip_asset_ids.len(),
-                payload.reference_audio_asset_ids.len(),
-            ) != ReferenceSetVerdict::Conditionable =>
-        {
-            Err(ApiError::bad_request(
-                "Reference to Video requires at least one reference image or video clip. Audio \
-                 references condition the soundtrack and cannot be the only reference.",
-            ))
-        }
-        "reference_video_to_video" if payload.source_clip_asset_id.is_none() => Err(
-            ApiError::bad_request("Reference + Video requires a source clip."),
-        ),
-        "reference_video_to_video" if payload.reference_asset_ids.is_empty() => Err(
-            ApiError::bad_request("Reference + Video requires at least one reference image."),
-        ),
-        // Bernini multi-source-video modes (sc-5425): mv2v blends multiple source clips;
-        // ads2v edits a source clip using a reference video + reference images. Each
-        // requires its full media set so the worker never falls through to an
-        // unconditioned render.
-        "multi_video_to_video" if payload.source_clip_asset_ids.len() < 2 => Err(
-            ApiError::bad_request("Multi-Clip → Video requires at least two source clips."),
-        ),
-        "ads2v" if payload.source_clip_asset_id.is_none() => Err(ApiError::bad_request(
-            "Source + Reference Video requires a source clip.",
-        )),
-        "ads2v" if payload.reference_clip_asset_id.is_none() => Err(ApiError::bad_request(
-            "Source + Reference Video requires a reference video.",
-        )),
-        "ads2v" if payload.reference_asset_ids.is_empty() => Err(ApiError::bad_request(
-            "Source + Reference Video requires at least one reference image.",
-        )),
-        // SCAIL-2 standalone character animation (sc-5449): the same required-media contract the
-        // worker's `resolve_scail2_conditioning` enforces — the character is `referenceAssetIds[0]`
-        // (preferred) or the i2v `sourceAssetId`, and the motion comes from `sourceClipAssetId`.
-        // Both are hard engine inputs (`Reference` + `ControlClip`), so a missing one is a rejected
-        // enqueue rather than a job that fails minutes later inside the worker.
-        "animate_character" if payload.source_clip_asset_id.is_none() => Err(
-            ApiError::bad_request("Animate Character requires a driving video."),
-        ),
-        "animate_character"
-            if payload.reference_asset_ids.is_empty() && payload.source_asset_id.is_none() =>
-        {
-            Err(ApiError::bad_request(
-                "Animate Character requires a reference character image.",
-            ))
-        }
-        _ => Ok(()),
-    }
-}
-
-/// Payload-sanity validation for a `POST /api/v1/audio/jobs` request (sc-13404), the audio analogue
-/// of [`validate_video_job`]. Bounds the script prompt + the `advanced` bag exactly as the image/
-/// video validators do; the model's own advertised audio surface (voices / languages / max
-/// duration) is enforced by the shared gen-core validation floor at generate time, so a *named*
-/// duration is only bounded to the sane blanket here (the model's `audio.maxDurationSecs` is the
-/// real cap the worker applies). Voice/language are not allow-listed here — an unknown value is
-/// rejected by the generator's `validate`, which owns the per-model surface.
-fn validate_audio_job(payload: &AudioJobRequest) -> Result<(), ApiError> {
-    if payload.project_id.is_empty() {
-        return Err(ApiError::bad_request("projectId is required"));
-    }
-    validate_model_id(&payload.model)?;
-    // A multi-speaker request (sc-13676) carries the text in its `script`, so the `prompt` may be
-    // empty then; a single-voice request still requires a prompt. The prompt length ceiling always
-    // applies. This keeps a single-voice request (script: None) byte-for-byte on the original path.
-    let has_script = payload
-        .script
-        .as_deref()
-        .is_some_and(|segments| !segments.is_empty());
-    if payload.prompt.chars().count() > MAX_PROMPT_CHARS
-        || (payload.prompt.trim().is_empty() && !has_script)
-    {
-        return Err(ApiError::bad_request(
-            "prompt must be between 1 and 4000 characters (or provide a multi-speaker script)",
-        ));
-    }
-    // Multi-speaker dialogue script (sc-13676): when present, every segment must carry non-empty text,
-    // and the segment text totals plus the speaker/style labels are bounded so a runaway payload can't
-    // slip past the prompt-size floor. The model's advertised `audio.maxSpeakers` is the real
-    // speaker-count gate the generator's `validate` applies at the gen-core floor (a script sent to a
-    // model that does not advertise `supports_multi_speaker` is a typed Unsupported there); this only
-    // rejects a structurally malformed script up front.
-    if let Some(segments) = payload.script.as_deref() {
-        if segments.is_empty() {
-            return Err(ApiError::bad_request(
-                "script must have at least one segment",
-            ));
-        }
-        let mut total = 0usize;
-        for segment in segments {
-            if segment.text.trim().is_empty() {
-                return Err(ApiError::bad_request(
-                    "each script segment must have non-empty text",
-                ));
-            }
-            total += segment.text.chars().count();
-            if segment
-                .speaker
-                .as_deref()
-                .is_some_and(|speaker| speaker.chars().count() > 64)
-            {
-                return Err(ApiError::bad_request(
-                    "script segment speaker label must be at most 64 characters",
-                ));
-            }
-            if segment
-                .style
-                .as_deref()
-                .is_some_and(|style| style.chars().count() > 64)
-            {
-                return Err(ApiError::bad_request(
-                    "script segment style must be at most 64 characters",
-                ));
-            }
-        }
-        if total > MAX_PROMPT_CHARS {
-            return Err(ApiError::bad_request(format!(
-                "script text must total at most {MAX_PROMPT_CHARS} characters"
-            )));
-        }
-    }
-    // Reuse the shared negative-prompt + `advanced`-size guard. Music models (ACE-Step) can carry a
-    // negative prompt when they advertise support; the size guard bounds it exactly like image/video.
-    validate_prompt_extras(
-        payload.negative_prompt.as_deref().unwrap_or(""),
-        &payload.advanced,
-    )?;
-    if let Some(target) = payload.target_duration_secs {
-        if !target.is_finite() || !(0.0..=300.0).contains(&target) {
-            return Err(ApiError::bad_request(
-                "targetDurationSecs must be between 0 and 300",
-            ));
-        }
-    }
-    // Music describe-the-music sub-block (ACE-Step, sc-13410). BPM must be a real positive tempo; the
-    // model's own `validate` re-checks it (finite & > 0), so this is a blanket sanity bound. key/lyrics
-    // are free-form — bound their length so a runaway payload can't slip past the prompt-size floor.
-    if let Some(bpm) = payload.bpm {
-        if !bpm.is_finite() || !(0.0..=1000.0).contains(&bpm) || bpm <= 0.0 {
-            return Err(ApiError::bad_request("bpm must be between 0 and 1000"));
-        }
-    }
-    if payload
-        .musical_key
-        .as_deref()
-        .is_some_and(|key| key.chars().count() > 64)
-    {
-        return Err(ApiError::bad_request(
-            "musicalKey must be at most 64 characters",
-        ));
-    }
-    if payload
-        .lyrics
-        .as_deref()
-        .is_some_and(|lyrics| lyrics.chars().count() > MAX_PROMPT_CHARS)
-    {
-        return Err(ApiError::bad_request(format!(
-            "lyrics must be at most {MAX_PROMPT_CHARS} characters"
-        )));
-    }
-    // Extend/edit source band (Conditioning::AudioEdit, sc-13410). Source id + edit mode are a pair: one
-    // without the other is a malformed edit request. The mode must be a known token (the model's
-    // advertised `audio.editModes` is the real gate the generator's `validate` applies — this only
-    // rejects a garbage token up front). Region seconds must be finite and well-ordered; strength is a
-    // 0..=1 weight.
-    validate_audio_edit_fields(payload)?;
-    // Diffusion-audio sampling knobs (Sound FX / MOSS-SoundEffect, sc-13409). Bounded to a blanket
-    // sane range here — the same "API blanket vs. model's real cap" split the duration uses: the
-    // generator's `validate` owns the per-model guidance range (MOSS: 1.0..=20.0) and step ceiling
-    // (MOSS: 1000), so this only rejects nonsense (NaN / non-positive / absurdly large) up front.
-    if let Some(guidance) = payload.guidance {
-        if !guidance.is_finite() || !(0.0..=100.0).contains(&guidance) {
-            return Err(ApiError::bad_request(
-                "guidance (CFG scale) must be between 0 and 100",
-            ));
-        }
-    }
-    if let Some(steps) = payload.steps {
-        if !(1..=10_000).contains(&steps) {
-            return Err(ApiError::bad_request("steps must be between 1 and 10000"));
-        }
-    }
-    // Voice Clone (sc-13411 C4). The match strength overrides OpenVoice V2's posterior-sampling
-    // temperature τ — bounded to a blanket sane 0..=1 range here (the UI-facing knob range); the
-    // converter re-checks it (finite, >= 0). `baseModel`, when supplied, must be a well-formed model id
-    // (the route additionally asserts it is a `type: "audio"` model). `referenceAudioAssetId` is a plain
-    // library asset id resolved (project-scoped) by the worker; no membership check belongs here.
-    if let Some(strength) = payload.match_strength {
-        if !strength.is_finite() || !(0.0..=1.0).contains(&strength) {
-            return Err(ApiError::bad_request(
-                "matchStrength must be between 0 and 1",
-            ));
-        }
-    }
-    validate_model_id(&payload.base_model)?;
-    validate_audio_song_fields(payload)?;
-    Ok(())
-}
-
-/// The ICL reference modes a YuE `_icl` checkpoint accepts (sc-19384): one mixed clip, or a
-/// vocal + instrumental pair.
-const AUDIO_ICL_MODES: &[&str] = &["single", "dual"];
-/// The weight tiers an audio model can ship as physical per-tier downloads (sc-19384).
-const AUDIO_QUANT_TIERS: &[&str] = &["bf16", "q8", "q4"];
-/// Upstream YuE's `prompt_end_time` default: the ICL window end when only a start is given.
-const AUDIO_ICL_DEFAULT_END_SECS: f32 = 30.0;
-/// The output limiters a segmented-song model applies to its stems (YuE `save_audio`, sc-19384).
-const AUDIO_OUTPUT_LIMITERS: &[&str] = &["clamp", "rescale"];
-
-/// Payload-shape floor for the segmented-song / ICL / tier fields (YuE, sc-19384), before the model
-/// is known: numeric knobs finite and in a sane blanket range, guidance on/off coherent with the
-/// scale, the ICL mode a known token with exactly its own asset ids, and the reference window
-/// well-ordered. [`validate_audio_job_for_model`] then gates each field on the model's declared
-/// capability once the manifest entry is resolved.
-fn validate_audio_song_fields(payload: &AudioJobRequest) -> Result<(), ApiError> {
-    if let Some(segments) = payload.segments {
-        if !(1..=100).contains(&segments) {
-            return Err(ApiError::bad_request("segments must be between 1 and 100"));
-        }
-    }
-    if let Some(tokens) = payload.max_new_tokens_per_segment {
-        // YuE's stage-1 context is 16384 positions and each segment keeps `16384 - budget - 1` of
-        // them for its prompt, which must be at least 1 — so 16382 is the largest budget the engine
-        // accepts. Refused here rather than after admission, the ICL encode and the 7B load.
-        if !(1..=16_382).contains(&tokens) {
-            return Err(ApiError::bad_request(
-                "maxNewTokensPerSegment must be between 1 and 16382",
-            ));
-        }
-    }
-    if let Some(penalty) = payload.repetition_penalty {
-        if !penalty.is_finite() || penalty <= 0.0 || penalty > 10.0 {
-            return Err(ApiError::bad_request(
-                "repetitionPenalty must be greater than 0 and at most 10",
-            ));
-        }
-    }
-    if payload.guidance_enabled == Some(false) && payload.guidance.is_some() {
-        return Err(ApiError::bad_request(
-            "guidance (CFG scale) cannot be set while guidanceEnabled is false",
-        ));
-    }
-    if let Some(tier) = payload.quant_tier.as_deref() {
-        if !AUDIO_QUANT_TIERS.contains(&tier.trim().to_lowercase().as_str()) {
-            return Err(ApiError::bad_request(format!(
-                "quantTier must be one of {AUDIO_QUANT_TIERS:?}"
-            )));
-        }
-    }
-    if let Some(limiter) = payload.output_limiter.as_deref() {
-        if !AUDIO_OUTPUT_LIMITERS.contains(&limiter.trim().to_lowercase().as_str()) {
-            return Err(ApiError::bad_request(format!(
-                "outputLimiter must be one of {AUDIO_OUTPUT_LIMITERS:?}"
-            )));
-        }
-    }
-    let present = |value: &Option<String>| value.as_deref().is_some_and(|id| !id.trim().is_empty());
-    let single = present(&payload.icl_reference_asset_id);
-    let vocal = present(&payload.icl_vocal_asset_id);
-    let instrumental = present(&payload.icl_instrumental_asset_id);
-    let window = payload.icl_start_secs.is_some() || payload.icl_end_secs.is_some();
-    match payload
-        .icl_mode
-        .as_deref()
-        .map(|mode| mode.trim().to_lowercase())
-        .filter(|mode| !mode.is_empty())
-        .as_deref()
-    {
-        None => {
-            if single || vocal || instrumental || window {
-                return Err(ApiError::bad_request(
-                    "ICL reference fields need an iclMode (\"single\" or \"dual\")",
-                ));
-            }
-        }
-        Some("single") => {
-            if !single || vocal || instrumental {
-                return Err(ApiError::bad_request(
-                    "iclMode \"single\" takes exactly iclReferenceAssetId (no vocal/instrumental ids)",
-                ));
-            }
-        }
-        Some("dual") => {
-            if single || !vocal || !instrumental {
-                return Err(ApiError::bad_request(
-                    "iclMode \"dual\" takes both iclVocalAssetId and iclInstrumentalAssetId (no \
-                     iclReferenceAssetId)",
-                ));
-            }
-        }
-        Some(_) => {
-            return Err(ApiError::bad_request(format!(
-                "iclMode must be one of {AUDIO_ICL_MODES:?}"
-            )));
-        }
-    }
-    for (field, value) in [
-        ("iclStartSecs", payload.icl_start_secs),
-        ("iclEndSecs", payload.icl_end_secs),
-    ] {
-        if let Some(secs) = value {
-            if !secs.is_finite() || !(0.0..=3600.0).contains(&secs) {
-                return Err(ApiError::bad_request(format!(
-                    "{field} must be between 0 and 3600"
-                )));
-            }
-        }
-    }
-    // A window with only a start ends at upstream YuE's `prompt_end_time` default (30 s), so a start
-    // at or past 30 s with no end is as ill-ordered as an explicit end <= start.
-    if let Some(start) = payload.icl_start_secs {
-        let end = payload.icl_end_secs.unwrap_or(AUDIO_ICL_DEFAULT_END_SECS);
-        if end <= start {
-            return Err(ApiError::bad_request(format!(
-                "iclEndSecs must be greater than iclStartSecs (the window ends at \
-                 {AUDIO_ICL_DEFAULT_END_SECS} s when iclEndSecs is omitted)"
-            )));
-        }
-    }
-    if payload.icl_mode.is_some()
-        && (present(&payload.reference_audio_asset_id) || present(&payload.source_audio_asset_id))
-    {
-        return Err(ApiError::bad_request(
-            "an ICL reference cannot be combined with referenceAudioAssetId or sourceAudioAssetId",
-        ));
-    }
-    Ok(())
-}
-
-/// Gate the segmented-song / ICL / tier fields on the resolved model's DECLARED audio capabilities
-/// (sc-19384) — the manifest mirrors the engine's `Capabilities` flags, so a request the engine
-/// would refuse is a 400 here instead of a failed job. In particular an ICL mode is reachable only
-/// on an in-context-learning checkpoint (`audio.supportsSegmentedLyrics` + `ReferenceAudio`
-/// conditioning — the YuE `_icl` variants); such a checkpoint may also run WITHOUT one, as a plain
-/// prompt run, as upstream allows. A segmented-lyrics
-/// model also refuses the knobs it does not read (it sings lyrics to genre tags; length follows the
-/// lyrics and `segments`) rather than silently dropping them.
-pub(crate) fn validate_audio_job_for_model(
-    payload: &AudioJobRequest,
-    entry: &Value,
-) -> Result<(), ApiError> {
-    let model = &payload.model;
-    let audio = entry.get("audio");
-    let flag = |key: &str| {
-        audio
-            .and_then(|audio| audio.get(key))
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    };
-    let segmented = flag("supportsSegmentedLyrics");
-    let repetition = flag("supportsRepetitionPenalty");
-    let region = flag("supportsReferenceRegion");
-    let reference_audio = audio
-        .and_then(|audio| audio.get("conditioning"))
-        .and_then(Value::as_array)
-        .is_some_and(|kinds| kinds.iter().any(|kind| kind == "ReferenceAudio"));
-    let icl_model = segmented && reference_audio;
-
-    if (payload.segments.is_some() || payload.max_new_tokens_per_segment.is_some()) && !segmented {
-        return Err(ApiError::bad_request(format!(
-            "{model} does not render segmented lyrics (segments / maxNewTokensPerSegment)"
-        )));
-    }
-    if payload.output_limiter.is_some() && !flag("supportsOutputLimiter") {
-        return Err(ApiError::bad_request(format!(
-            "{model} does not take an outputLimiter"
-        )));
-    }
-    if payload.repetition_penalty.is_some() && !repetition {
-        return Err(ApiError::bad_request(format!(
-            "{model} does not take a repetitionPenalty"
-        )));
-    }
-    if payload.icl_mode.is_some() && !icl_model {
-        return Err(ApiError::bad_request(format!(
-            "iclMode needs an in-context-learning (`_icl`) checkpoint; {model} is not one"
-        )));
-    }
-    if (payload.icl_start_secs.is_some() || payload.icl_end_secs.is_some()) && !region {
-        return Err(ApiError::bad_request(format!(
-            "{model} does not take a reference window (iclStartSecs / iclEndSecs)"
-        )));
-    }
-    // An `_icl` checkpoint WITHOUT a reference is a plain prompt run, exactly as upstream YuE allows
-    // (epic R1); only the reverse — ICL fields on a CoT checkpoint — is refused above.
-    if segmented {
-        if payload
-            .lyrics
-            .as_deref()
-            .is_none_or(|lyrics| lyrics.trim().is_empty())
-        {
-            return Err(ApiError::bad_request(format!(
-                "{model} sings structured lyrics — lyrics are required"
-            )));
-        }
-        let refused = [
-            ("steps", payload.steps.is_some()),
-            ("targetDurationSecs", payload.target_duration_secs.is_some()),
-            ("bpm", payload.bpm.is_some()),
-            ("musicalKey", payload.musical_key.is_some()),
-            ("voice", payload.voice.is_some()),
-            ("script", payload.script.is_some()),
-            (
-                "sourceAudioAssetId",
-                payload.source_audio_asset_id.is_some(),
-            ),
-            (
-                "referenceAudioAssetId",
-                payload.reference_audio_asset_id.is_some(),
-            ),
-        ];
-        if let Some((field, _)) = refused.iter().find(|(_, present)| *present) {
-            return Err(ApiError::bad_request(format!(
-                "{field} is not a control of {model} (put tempo, key and voice in the genre tags; \
-                 song length follows the lyrics and segments)"
-            )));
-        }
-        // A segmented-song model reads a scale in 0..=1 as "guidance off", so an explicit ON scale
-        // must be above 1 — turn guidance off with guidanceEnabled: false instead.
-        if payload.guidance_enabled != Some(false) && payload.guidance.is_some_and(|g| g <= 1.0) {
-            return Err(ApiError::bad_request(format!(
-                "{model}: a guidance scale must be greater than 1 (set guidanceEnabled: false to \
-                 turn guidance off)"
-            )));
-        }
-    } else if payload.guidance_enabled.is_some() {
-        // The on/off switch is the segmented-song contract (a `0.0` scale reads as "no CFG" there);
-        // on any other model a `0.0` scale is a range error, so refuse the switch up front.
-        return Err(ApiError::bad_request(format!(
-            "{model} does not take guidanceEnabled (set a guidance scale instead)"
-        )));
-    }
-    if let Some(tier) = payload.quant_tier.as_deref() {
-        let tier = tier.trim().to_lowercase();
-        let offered = entry
-            .get("downloads")
-            .and_then(Value::as_array)
-            .is_some_and(|downloads| {
-                downloads.iter().any(|download| {
-                    download.get("coRequisite").and_then(Value::as_bool) != Some(true)
-                        && download
-                            .get("variant")
-                            .and_then(Value::as_str)
-                            .is_some_and(|variant| variant.eq_ignore_ascii_case(&tier))
-                })
-            });
-        if !offered {
-            return Err(ApiError::bad_request(format!(
-                "{model} does not ship a {tier} tier"
-            )));
-        }
-    }
-    Ok(())
-}
-
-/// The edit operations the audio route accepts up front (the union across audio models — each model's
-/// advertised `audio.editModes` is the real gate the generator's `validate` applies). Matches the
-/// [`gen_core::AudioEditMode`] variant set.
-const AUDIO_EDIT_MODES: &[&str] = &["inpaint", "repaint", "extend", "cover"];
-
-/// Sanity-bound the extend/edit source-band fields on an [`AudioJobRequest`] (Conditioning::AudioEdit,
-/// sc-13410). This is the API blanket floor: the source id + edit mode must be a well-formed pair, the
-/// mode a known token, the region seconds finite/ordered, and the strength a 0..=1 weight. The
-/// per-model gates (mode ∈ advertised `audio.editModes`, region inside the clip, 48 kHz source) belong
-/// to the worker/provider, which knows the model surface and the loaded clip.
-fn validate_audio_edit_fields(payload: &AudioJobRequest) -> Result<(), ApiError> {
-    let has_source = payload
-        .source_audio_asset_id
-        .as_deref()
-        .is_some_and(|id| !id.trim().is_empty());
-    let has_mode = payload
-        .edit_mode
-        .as_deref()
-        .is_some_and(|mode| !mode.trim().is_empty());
-    // A source without a mode (or vice versa) is a malformed edit request — one names WHAT to edit, the
-    // other HOW. Reject the half-specified pair rather than silently dropping the edit.
-    if has_source != has_mode {
-        return Err(ApiError::bad_request(
-            "an audio edit needs both sourceAudioAssetId and editMode (or neither)",
-        ));
-    }
-    if let Some(mode) = payload
-        .edit_mode
-        .as_deref()
-        .filter(|m| !m.trim().is_empty())
-    {
-        // Match the worker's case handling (`edit_mode.map(|m| m.to_lowercase())` at deserialize,
-        // then `parse_audio_edit_mode`): the token is case-insensitive, so lowercase before the
-        // membership check. Otherwise a mixed-case value like "Extend" is 400'd here even though the
-        // worker would accept it — the two validation seams must agree.
-        if !AUDIO_EDIT_MODES.contains(&mode.to_lowercase().as_str()) {
-            return Err(ApiError::bad_request(format!(
-                "editMode must be one of {AUDIO_EDIT_MODES:?}"
-            )));
-        }
-    }
-    for (field, value) in [
-        ("editRegionStartSecs", payload.edit_region_start_secs),
-        ("editRegionEndSecs", payload.edit_region_end_secs),
-    ] {
-        if let Some(secs) = value {
-            if !secs.is_finite() || !(0.0..=3600.0).contains(&secs) {
-                return Err(ApiError::bad_request(format!(
-                    "{field} must be between 0 and 3600"
-                )));
-            }
-        }
-    }
-    if let (Some(start), Some(end)) = (payload.edit_region_start_secs, payload.edit_region_end_secs)
-    {
-        if end <= start {
-            return Err(ApiError::bad_request(
-                "editRegionEndSecs must be greater than editRegionStartSecs",
-            ));
-        }
-    }
-    if let Some(strength) = payload.edit_strength {
-        if !strength.is_finite() || !(0.0..=1.0).contains(&strength) {
-            return Err(ApiError::bad_request(
-                "editStrength must be between 0 and 1",
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Upper bound for image width/height. A backstop only — per-model resolution is
-/// governed by manifest `limits.resolutions` + the UI. Covers SenseNova-U1's
-/// largest trained bucket (3456) with headroom; video uses its own lower cap.
-const MAX_IMAGE_DIMENSION: u32 = 4096;
-
-/// Payload-sanity FLOOR for a named image width/height, before the model is known (sc-24113).
-///
-/// 16 because MOSS-Image accepts 16 px per side (Qwen-Image 2.1 starts at 32) and this
-/// check runs before preset/model resolution. It is the outer bound only — see
-/// [`HISTORICAL_MIN_IMAGE_DIMENSION`] for the per-model floor that still applies.
-const SHAPE_MIN_IMAGE_DIMENSION: u32 = 16;
-
-/// The per-model fallback floor applied in `create_image_job` to any image model that declares no
-/// `limits.minDimension` (sc-24113).
-///
-/// This is the 256 that `validate_image_job` used to enforce for everything, moved down one layer
-/// so that widening the shape check could not loosen a single already-shipped model: a request
-/// below 256 to a model with no declared floor is refused exactly as before, now naming the model.
-const HISTORICAL_MIN_IMAGE_DIMENSION: u32 = 256;
-
-/// Upper bound for video width/height — a lower backstop than images, matching
-/// the cap enforced when validating a video job request.
-const MAX_VIDEO_DIMENSION: u32 = 1920;
-// ---------------------------------------------------------------------------
-// Reference-media payload-sanity blankets (sc-17160).
-//
-// These three are the OUTER bound — "no video model in the product accepts more than
-// this" — and play exactly the role the `1..=30` duration and `1..=60` fps blankets do
-// a few lines up in `validate_video_job`: they run BEFORE the model is known (a recipe
-// preset can still replace it — sc-12300), so they cannot be the per-model answer.
-//
-// The BINDING per-model cap is `sceneworks_core::video_request::reference_limit_error`,
-// enforced in `create_video_job` against the resolved manifest entry, and mirrored in the
-// worker's `video_preflight`. Its defaults are 8 images / 8 clips / 0 audio / no combined
-// ceiling, so raising the image blanket from 8 to 9 here does NOT hand a 9th reference to
-// any already-shipped model — bernini and every other family still refuse it, one layer
-// down, on `limits.maxReferenceAssets`.
-//
-// The COMBINED cap has no blanket at all, only a per-model declaration, for the same reason
-// in the opposite direction: see the note where the per-list checks end.
-// ---------------------------------------------------------------------------
-
-/// 9 — MiniMax-H3 Ref2VA's image-reference ceiling, the largest of any shipped video model
-/// (every other family stops at [`sceneworks_core::video_request::DEFAULT_MAX_REFERENCE_ASSETS`]).
-const MAX_VIDEO_REFERENCE_ASSET_IDS: usize = 9;
-const MAX_VIDEO_SOURCE_CLIP_ASSET_IDS: usize = 8;
-/// 3 — Ref2VA's audio-reference ceiling. No model declares more; models that declare
-/// nothing take none at all (`DEFAULT_MAX_REFERENCE_AUDIO_ASSETS` is 0).
-const MAX_VIDEO_REFERENCE_AUDIO_ASSET_IDS: usize = 3;
-
-/// Validate the exact model/mode spelling and reference array every video creation boundary will
-/// persist. The typed submit route and retry/duplicate all call this after preset/patch merging and
-/// current manifest resolution, so replay cannot drift into the worker parser's deliberately
-/// tolerant behavior (which trims strings and drops blank/non-string list entries for legacy reads).
-///
-/// This helper is validation-only: it never trims, filters, sorts, or truncates, preserving every
-/// accepted id byte-for-byte and in caller order. SCAIL-2 additionally consumes strict ordered
-/// Reference/Mask pairs, has six source positions, and may expose multiple characters only once the
-/// current server-owned entry says the paired inference descriptor is installed.
-pub(crate) fn validate_video_reference_asset_ids_payload(
-    payload: &JsonObject,
-    model_manifest_entry: &Value,
-) -> Result<(), ApiError> {
-    let reference_asset_ids = match payload.get("referenceAssetIds") {
-        None => &[][..],
-        Some(Value::Array(values)) => values.as_slice(),
-        Some(_) => {
-            return Err(ApiError::bad_request(
-                "referenceAssetIds must be an array of string ids",
-            ));
-        }
-    };
-    for value in reference_asset_ids {
-        let id = value.as_str().ok_or_else(|| {
-            ApiError::bad_request("referenceAssetIds must contain only string ids")
-        })?;
-        if id.trim().is_empty() {
-            return Err(ApiError::bad_request(
-                "referenceAssetIds must not contain blank ids",
-            ));
-        }
-        if id != id.trim() {
-            return Err(ApiError::bad_request(
-                "referenceAssetIds must not contain leading or trailing whitespace",
-            ));
-        }
-    }
-    if reference_asset_ids.len() > MAX_VIDEO_REFERENCE_ASSET_IDS {
-        return Err(ApiError::bad_request(format!(
-            "referenceAssetIds must contain at most {MAX_VIDEO_REFERENCE_ASSET_IDS} ids"
-        )));
-    }
-
-    let model = match payload.get("model") {
-        None => "",
-        Some(Value::String(model)) if model == model.trim() => model.as_str(),
-        Some(Value::String(_)) => {
-            return Err(ApiError::bad_request(
-                "model must not contain leading or trailing whitespace",
-            ));
-        }
-        Some(_) => return Err(ApiError::bad_request("model must be a string")),
-    };
-    let mode = match payload.get("mode") {
-        None => "",
-        Some(Value::String(mode)) if mode == mode.trim() => mode.as_str(),
-        Some(Value::String(_)) => {
-            return Err(ApiError::bad_request(
-                "mode must not contain leading or trailing whitespace",
-            ));
-        }
-        Some(_) => return Err(ApiError::bad_request("mode must be a string")),
-    };
-    let reference_count = reference_asset_ids.len();
-    if model == "scail2_14b"
-        && mode == "animate_character"
-        && reference_count > sceneworks_core::video_request::MAX_SCAIL2_REFERENCE_CHARACTERS
-    {
-        return Err(ApiError::bad_request(format!(
-            "SCAIL-2 Animate Character supports at most {} reference characters.",
-            sceneworks_core::video_request::MAX_SCAIL2_REFERENCE_CHARACTERS
-        )));
-    }
-    if model == "scail2_14b"
-        && mode == "animate_character"
-        && reference_count > 1
-        && !model_manifest_entry
-            .get("ui")
-            .and_then(|ui| ui.get("scail2MultiReference"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    {
-        return Err(ApiError::bad_request(
-            "SCAIL-2 Animate Character multi-reference is unavailable until the paired inference descriptor is installed.",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_dimension(value: u32, field: &'static str, max: u32) -> Result<(), ApiError> {
-    validate_dimension_in(value, field, 256, max)
-}
-
-/// [`validate_dimension`] with an explicit floor (sc-24113).
-///
-/// Every caller but the image-generation shape check passes the historical 256 through the wrapper
-/// above and is byte-identical. The image route passes [`SHAPE_MIN_IMAGE_DIMENSION`] because its
-/// real floor is per-model and is applied once the manifest entry is resolved.
-fn validate_dimension_in(
-    value: u32,
-    field: &'static str,
-    min: u32,
-    max: u32,
-) -> Result<(), ApiError> {
-    if !(min..=max).contains(&value) {
-        return Err(ApiError::bad_request(format!(
-            "{field} must be between {min} and {max}"
-        )));
-    }
-    Ok(())
-}
-
 fn to_json_object<T: Serialize>(payload: &T) -> Result<JsonObject, ApiError> {
     serde_json::to_value(payload)
         .map_err(|error| ApiError::internal(error.to_string()))?
@@ -6255,43 +2500,22 @@ fn source_timestamp_for_item(item: &Value, playhead_seconds: f64) -> Result<f64,
     Ok(source_in + ((clamped - timeline_start) * speed))
 }
 
-fn required_string_field<'a>(payload: &'a Value, field: &str) -> Result<&'a str, ApiError> {
-    payload
-        .get(field)
-        .and_then(Value::as_str)
-        .ok_or_else(|| ApiError::bad_request(format!("Missing required field: {field}")))
-}
+use sceneworks_core::env_util::env_string;
 
-fn optional_f64_field(payload: &Value, field: &str) -> Option<f64> {
-    payload.get(field).and_then(Value::as_f64)
-}
-
-fn required_finite_f64_field(payload: &Value, field: &str) -> Result<f64, ApiError> {
-    let value = optional_f64_field(payload, field)
-        .ok_or_else(|| ApiError::bad_request(format!("Missing required field: {field}")))?;
-    if !value.is_finite() {
-        return Err(ApiError::bad_request(format!(
-            "Invalid numeric value for {field}"
-        )));
-    }
-    Ok(value)
-}
-
-fn env_string(name: &str, default: &str) -> String {
-    std::env::var(name)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| default.to_owned())
-}
-
-fn env_path_or(name: &str, default: &FsPath) -> PathBuf {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| default.to_path_buf())
-}
+use sceneworks_core::env_util::env_path_or;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(crate) use test_hooks::{
+    test_lora_catalog_builds, test_model_catalog_builds, test_note_lora_catalog_build,
+    test_note_model_catalog_build, test_reset_catalog_build_counters, test_trash_outcomes,
+    TestTrashOutcomesGuard,
+};
+#[cfg(test)]
+use test_hooks::{
+    TEST_MAX_LORA_UPLOAD_BYTES, TEST_MAX_MODEL_UPLOAD_BYTES, TEST_MAX_WORKFLOW_INSPECT_BYTES,
+    TEST_TRASH_OUTCOMES,
+};

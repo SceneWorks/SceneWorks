@@ -737,7 +737,12 @@ async fn a_hedged_contradiction_is_uncertain_and_never_an_actionable_flag() {
 
 #[tokio::test]
 async fn a_review_never_writes_intended_state_or_conditioning_and_never_reaches_a_render() {
-    let (harness, before) = rendered_two_shots().await;
+    let (harness, _) = rendered_two_shots().await;
+    // Review consumes the persisted run, not run()'s transient return value. Compare exact
+    // persisted snapshots on both sides; incidental elapsed f64s can change by one ULP when
+    // first decoded from JSON, which is not a review mutation. The helper still checks that
+    // run() completed, and every persisted attempt field remains in the equality below.
+    let before = harness_record(&harness);
     let mut answers = agreeing_answers();
     // Deliberately contradictory readings, so there is plenty of observed text to leak.
     answers.retain(|(key, _)| *key != "sh020_parcel" && *key != "sh020_location");
@@ -750,9 +755,10 @@ async fn a_review_never_writes_intended_state_or_conditioning_and_never_reaches_
         options.poll_interval,
         options.control.clone(),
     );
-    let after = review::review(&harness.transport, &options, &vision)
+    review::review(&harness.transport, &options, &vision)
         .await
         .expect("the review runs");
+    let after = harness_record(&harness);
 
     for shot in &before.shots {
         let reviewed = after.shot(&shot.shot_id).expect("same shots");

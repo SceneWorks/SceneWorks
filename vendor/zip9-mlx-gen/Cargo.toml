@@ -1,0 +1,187 @@
+# Historical dependency rationale retained during migration. Active shared pins
+# live in the repository root Cargo.toml.
+
+# This was the single source of truth for the deps shared across the root and all 31 member crates. The
+# next MLX/fork bump (sc-2517/2772/2781 etc.) is now a one-line edit here instead of dozens of
+# synchronized per-crate ones — a missed crate would otherwise produce two distinct `mlx-rs` builds,
+# cross-crate `Array` type-mismatch errors, and a doubled (very expensive) MLX-from-source build.
+# Members opt in with `<dep> = { workspace = true }`.
+[package.metadata.legacy-workspace-dependencies]
+# mlx-rs fork pinned to our own GitHub copy by commit SHA (supply-chain capture — immune to the
+# upstream fork being yanked/deleted). `pmetal-mlx-rs` is mlx-rs 0.25 whose mlx-sys builds MLX
+# core v0.32.0 (vs upstream mlx-rs 0.25.3, welded to MLX 0.25.1 — 2–3.6× slower Metal kernels).
+# The mlx-c C layer is a submodule of ml-explore/mlx-c (Apple) at v0.6.0; pmetal's delta is
+# additive Rust bindings only. Aliased as `mlx-rs` so `use mlx_rs::…` is unchanged.
+# SHA e59ffd88 = 1f293623 + the sc-2781 MLX 0.31.1->0.31.2 bump (+ a TEMPORARY mlx-c fft FFTNorm patch
+# so mlx-c 0.6.0 compiles against 0.31.2's new fft signature; the submodule stays pristine at Apple
+# upstream v0.6.0, drop the patch once Apple tags a 0.31.2-compatible mlx-c). 1f293623 = ecda3f46
+# (0.31.x bump, sc-2517) + metallib-search-path patch ONLY; the sc-2714/sc-2770 NAX dispatch-gate
+# patches were REMOVED in sc-2772 — their root cause was the metal-kernel deployment target (the NAX
+# matrix-unit `mpp::tensor_ops::matmul2d` is valid only for macOS >= 26.2; compiling at 26.0 miscompiled
+# it to garbage for 16-bit). mlx-gen builds the kernels at 26.2 (.cargo/config.toml) so NAX 16-bit is
+# correct + uses the faster matrix unit. Guarded by mlx-gen-qwen-image/tests/{bf16_matmul_sweep,sdpa_nax_repro}.
+# Through SHA 38e1cc17 the byte-parity target was MLX 0.31.2 (SceneWorks production/golden env). Epic
+# 12742 moved that target to MLX 0.32.0 at SHA 932beb4e; the current eb76c4ba pin descends from it.
+# See sc-2352 / sc-2517 / sc-2714 / sc-2770 / sc-2772 / sc-2781.
+# SHA 44929a00 = b6e4e56 + sc-5009: a Metal command-buffer error (GPU watchdog
+# kIOGPUCommandBufferCallbackErrorTimeout / OOM) is detected inside a MTL completion handler on an
+# internal Metal thread, where MLX's throw escaped a noexcept boundary -> std::terminate -> SIGABRT
+# (non-recoverable worker kill). The new mlx-sys/patches/command-buffer-recoverable.patch records the
+# error and re-throws it synchronously on the waiting thread (eval -> Result::Err) instead. Pure
+# MLX-core-patch change; no Rust API moved, so the worker import surface is unchanged.
+# SHA 38e1cc17 = 44929a00 + sc-7898: the metallib resolver (device.cpp) preferred the shared user
+# cache (~/.cache/pmetal/lib/mlx.metallib) OVER the build's own compiled-in metallib (METAL_PATH), so
+# an older/incomplete pmetal build could clobber that cache and silently shadow a complete build —
+# small-M (bm64) steel-GEMM "not found" panic on every LoRA training step while large-M inference
+# worked (sc-7889). Reordered load_default_library to try the own-build metallib BEFORE the user cache
+# (cargo install still falls through to the cache). Resolver-only change; no Rust API moved. Guarded
+# by mlx-gen-qwen-image/tests/bf16_matmul_sweep.
+# SHA a858aaa1 = P3's exact biased Conv2d/Conv3d, group-aware GroupNorm+affine, packed Q4/Q8
+# matmul+bias, and eager SiLU/tanh-GELU primitives on top of the retained compiled-callable API plus
+# collision-free compiler leases and safe main/worker TLS teardown (sc-18316), with throwing CUDA
+# and no-GPU backend stubs so default non-Metal builds retain complete primitive vtables. Strict admission
+# also mirrors proven dispatcher selection and fails closed before unsupported Metal ABI/index domains can be
+# reported as Applied. It preserves the
+# fork's MLX core v0.32.0 (verified:
+# version.h 32.0 / git describe v0.32.0), carrying (a) the pad/concat >i32::MAX
+# copy-gate fix (sc-12746: copy.cpp dispatch-gate now bases `large` on the addressable span
+# offset+Σ(shape-1)·|stride| so a strided slice-view dst spanning past 2^31 dispatches the int64 copy
+# kernel — pad/concat into a VAE output above the bound is now EXACT instead of int32-overflow-corrupt),
+# and (b) the metallib-search-path + command-buffer-recoverable patches REGENERATED for 0.32.0
+# (sc-12780; command-buffer recovery is now upstream in 0.32.0 so that patch is retired to a test hook).
+# mlx-c stays 0.6.0 with the fft-FFTNorm patch carried forward (0.32.0's fft.h still declares FFTNorm
+# before the stream arg). Parity re-baseline vs 0.31.2 = 1-2 ULP f32 bug-fix drift only (sc-12744/sc-12747);
+# RNG + softmax bit-identical. Guarded by mlx-gen-qwen-image/tests/{bf16_matmul_sweep,sdpa_nax_repro}.
+# SHA bd8f0e3c = 7151a9b2 + the sc-21382 prebuilt seam (PR #27/#28: build.rs can link a prebuilt
+# libmlx from PMETAL_MLX_PREBUILT_DIR after verifying its manifest key, declares
+# rerun-if-env-changed on the deployment target, and the fork publishes per-commit prebuilt
+# releases; libmlx/mlx-c/patch bytes are UNCHANGED, so every measured figure pinned to 7151a9b2
+# still holds). 7151a9b2 = a858aaa1 + PR #26's three tier-3 Apple cross-build fixes, and is the
+# lineage of the rev pinned below. Build/CI only: mlx-sys/build.rs adds `.blocklist_function("^(malloc|realloc)$")` so bindgen
+# stops emitting declarations for the SDK's libc allocators — they are not mlx-c API, and a nightly
+# build-std rustc rejects them on tier-3 Apple targets under
+# `suspicious_runtime_symbol_definitions` even though the ABI width matches — while
+# .github/workflows/cross-apple.yml asserts the emitted metallib triples and selects the completed
+# build output. No Rust API, MLX core, mlx-c, or patch content moved, so every lineage fact above
+# still describes the pinned rev and no parity re-baseline is implied.
+# SHA 105a72fd = d5a7fc01 (sc-23053 recoverable async read errors) + sc-24245's
+# sticky-command-buffer-error.patch (fork PR #30): a Metal command buffer that fails mid-eval now
+# fails that eval instead of returning corrupted arrays as Ok. It changes only error recording and
+# host-wait ordering in metal/device.cpp, metal/event.cpp and array.cpp; no kernel or numeric path
+# moved, so no parity re-baseline is implied.
+# SHA 48ff5e78 = 105a72fd + mlx-rs#32 eval_pending_loads (sc-24245): a new mlx-c entry point that
+# evaluates only a lazy graph's unscheduled safetensors `Load` leaves on the CPU stream; + mlx-rs#33
+# cpu-stream-wait-error: a GPU command-buffer error seen by a CPU-stream wait is carried to the
+# host as Err (it used to throw on the scheduler thread and abort). No kernel/numeric path moved.
+# SHA fe22998b = 48ff5e78 + mlx-rs#34 cpu-conv-border-clamp.patch (sc-25688; upstream
+# ml-explore/mlx af9a5924): the CPU direct conv clamps its border loops to the output, so padding
+# taller/wider than the output no longer writes rows past the output buffer (heap corruption →
+# run-to-run drift of CPU-stream conv gradients, or a segfault). Metal untouched; in-bounds CPU
+# results unchanged, so no parity re-baseline is implied.
+mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/mlx-rs", rev = "fe22998bf73e5e785d7659beb2f24d624b785bda" }
+# The mlx-sys C-binding layer (pmetal-mlx-sys), same git rev as mlx-rs's path dep so cargo unifies on
+# ONE build (two distinct sources would yield two `mlx_sys` crates → link/symbol drift). Added as a
+# direct core dep so core can query MLX device properties not surfaced through mlx-rs (sc-8135: the
+# Metal per-single-buffer cap `maxBufferLength`, via the `device_info` C API).
+mlx-sys = { package = "pmetal-mlx-sys", git = "https://github.com/michaeltrefry/mlx-rs", rev = "fe22998bf73e5e785d7659beb2f24d624b785bda" }
+# Backend-neutral contract layer (epic 3720). Workspace member; mlx-gen re-exports it so the old
+# `mlx_gen::…` paths keep resolving. Family crates depend on it for `gen_core::Result` at the
+# contract boundary.
+sceneworks-gen-core = { "git" = "https://github.com/SceneWorks/inference", "rev" = "91ffb4a819aa2990c652db2d881ba0b9b10126ce" }
+# Contract conformance suite (epic 3720, sc-4481). Zero tensor deps; family crates dev-depend on it
+# to run their real model through the backend-neutral checks (cancel/progress/seed/capabilities).
+sceneworks-gen-core-testkit = { "git" = "https://github.com/SceneWorks/inference", "rev" = "91ffb4a819aa2990c652db2d881ba0b9b10126ce" }
+# The independent LLM-serving contract (epic 7153). The dependency is INVERTED: gen-core CONSUMES
+# core-llm (gen-core re-exports it as `gen_core::core_llm`, mirroring how mlx-gen re-exports gen-core),
+# so the gen-ai side runs its LLM providers through the unified `core_llm::TextLlm` engine instead of
+# the duplicate `gen_core::TextLlm`. core-llm is tensor-free (thiserror/tokenizers/serde_json/
+# minijinja) so this preserves gen-core's zero-tensor invariant. Deliberately `branch = "main"`, NOT
+# a rev pin (F-048): mlx-llm (pinned just below) declares core-llm at `branch = "main"`, and cargo
+# treats `?branch=main` and `?rev=…` as DISTINCT source ids even at the identical commit — a rev pin
+# here would put TWO core-llm packages in the lock, splitting contract type identity between the
+# engine and consumer. The commit is frozen by Cargo.lock + `--locked` in CI instead, so a
+# changed core-llm is still a deliberate, reviewed re-lock rather than silent drift. True rev-pinning
+# requires mlx-llm's own core-llm dep to move off `branch = "main"` upstream first; until then both
+# must stay on the branch source id. See sc-7189 / sc-9109.
+core-llm = { git = "https://github.com/SceneWorks/core-llm", branch = "main" }
+# The shared on-device LLM engine (KV cache + sampler + RoPE): the only MLX-backed LLM decode runtime.
+# Pinned to the SAME rev the SceneWorks worker pins so cargo unifies ONE mlx-llm — one `Array`, one
+# `core-llm` — across the worker dependency graph (the worker also depends on mlx-llm directly for
+# prompt-refine). Both mlx-gen and mlx-llm build the identical pmetal `mlx-rs`, so there is a single
+# MLX build and one `Array` type. Hoisted here (F-049) from the 3 crates that copy-pasted it
+# (joycaption + flux2 + sensenova, sensenova once more as a dev-dep): a single source of truth so a
+# divergent pin — the failure mode workspace.dependencies exists to prevent — cannot reintroduce the
+# two-Array-builds class. Bump in lockstep with core-llm + the worker.
+mlx-llm = { git = "https://github.com/SceneWorks/mlx-llm", rev = "7041411f395e43c542770d1cfb3c3945c8c9a875" }
+thiserror = "2"
+# HF tokenizers (same Rust core `transformers` wraps) — loads tokenizer.json directly.
+# onig only (no progressbar/http): byte-level BPE for Qwen/CLIP/T5 needs just the regex.
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+# Backend-neutral safetensors header/byte-view reader (gen-core weightsmeta, sc-3722) — keys, dtypes,
+# shapes, raw byte ranges WITHOUT a tensor library. Candle reads torch safetensors through this seam;
+# mlx-gen keeps its mlx-rs full-checkpoint loader and uses this for adapter/metadata inspection.
+safetensors = "0.4"
+# JSON parse for the PEFT/diffusers `lora_adapter_metadata` header blob (`lora_alpha`/`r` +
+# per-module `alpha_pattern`/`rank_pattern`) in gen-core's weights-metadata layer (sc-5513). Already
+# in the lock transitively via safetensors; surfaced as a direct dep for the blob parser.
+serde_json = "1"
+# PNG/JPEG decode for the e2e parity tests' visual-dump fixtures (every family test crate dev-depends
+# on it). Hoisted here (F-115): the per-crate pins had drifted to two feature sets (`["png"]` vs
+# `["png","jpeg"]`), so a crate that loads a JPEG fixture would silently need the wider set. The
+# superset `["png","jpeg"]` is the safe default for a dev-only dep (additive; crates that only render
+# PNG pay nothing extra at runtime).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+[package]
+name = "mlx-gen"
+version = "0.0.0"
+edition = "2021"
+description = "Rust-native generative image & video model inference on Apple MLX (work in progress; name reserved)."
+license = "Apache-2.0"
+repository = "https://github.com/michaeltrefry/mlx-gen"
+keywords = ["mlx", "apple-silicon", "diffusion", "inference", "generative"]
+categories = ["science"]
+readme = "README.md"
+autotests = false
+
+[dependencies]
+# Shared pins live in [workspace.dependencies] above (F-151).
+mlx-rs = { "package" = "pmetal-mlx-rs", "git" = "https://github.com/michaeltrefry/mlx-rs", "rev" = "fe22998bf73e5e785d7659beb2f24d624b785bda" }
+mlx-sys = { "package" = "pmetal-mlx-sys", "git" = "https://github.com/michaeltrefry/mlx-rs", "rev" = "fe22998bf73e5e785d7659beb2f24d624b785bda" }
+sceneworks-gen-core = { "git" = "https://github.com/SceneWorks/inference", "rev" = "91ffb4a819aa2990c652db2d881ba0b9b10126ce" }
+# The shared MLX sampler + SplitMix64 the media pipelines' text decode draws through
+# (`text_sample`, epic sc-24432 E8): one implementation, never a crate-local copy.
+mlx-llm = { "git" = "https://github.com/SceneWorks/inference", "rev" = "91ffb4a819aa2990c652db2d881ba0b9b10126ce" }
+thiserror = { "version" = "2" }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+# The hoisted turnkey converter glue (quant::write_quantized_config, F-045) writes the packed
+# snapshot's config.json `"quantization"` marker; the per-crate converters already used serde_json,
+# now the shared core copy does.
+serde_json = { "version" = "1" }
+# SC-20686 Metal-lane campaign observer: runtime-derived model snapshot identity (src/sc20686.rs).
+sha2 = { "version" = "0.10" }
+# Match mlx-rs' safetensors ABI so the opt-in loader can inspect raw E4M3
+# byte views before converting them into MLX's supported bf16 storage dtype.
+safetensors-fp8 = { package = "safetensors", version = "0.4" }
+memmap2 = "0.9"
+# The shared torch `.pth` reader (`pth`, moved from mlx-gen-wan in sc-24833): STORED zip entries only.
+zip = { version = "9.0.5", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# SC-20686 observer: `proc_pid_rusage` reads the process phys_footprint without spawning
+# /usr/bin/footprint (sc-20671).
+libc = { "version" = "0.2" }
+
+[dev-dependencies]
+# RAII fixture roots for the test helpers (sc-17791). A `TempDir` guard removes the tree on
+# `Drop` — including out of a panicking test, which is the only path the old
+# `env::temp_dir().join(..)` + trailing `remove_dir_all` shape ever leaked on.
+tempfile = { "version" = "3" }
+
+# sc-21383: one integration-test binary per crate. `tests/main.rs` is generated by
+# scripts/ci/consolidate_integration_tests.py; add a `tests/<name>.rs` file and run
+# `python3 scripts/ci/consolidate_integration_tests.py regen`. `cargo test --test integration
+# -- <name>::` selects one former per-file target.
+[[test]]
+name = "integration"
+path = "tests/main.rs"

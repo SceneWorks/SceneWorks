@@ -1,3 +1,4 @@
+import { stripJsoncComments as stripJsonc } from "./lib/jsonc.mjs";
 // SceneWorks packaging guard: every shipped model must have an About→Licenses entry (sc-13803).
 //
 // WHY THIS EXISTS
@@ -89,14 +90,6 @@ const UNDETERMINED = new Map([
     "TheDrummer/Anubis-Mini-8B-v1 declares no license; it derives from a Llama-3.3-8B-Instruct finetune, so Meta's Llama 3.3 Community License likely governs — needs confirmation.",
   ],
 ]);
-
-/** Strip `//` and `/* *​/` comments from JSONC without touching string contents. */
-function stripJsonc(source) {
-  return source.replace(
-    /\\"|"(?:\\"|[^"])*"|(\/\/.*|\/\*[\s\S]*?\*\/)/g,
-    (match, comment) => (comment ? "" : match),
-  );
-}
 
 const catalog = JSON.parse(stripJsonc(fs.readFileSync(CATALOG, "utf8")));
 const manifest = JSON.parse(fs.readFileSync(MANIFEST, "utf8"));
@@ -616,7 +609,12 @@ if (process.argv.includes("--self-test")) {
     process.exit(1);
   }
   const comparativeSummary = structuredClone(sourceAudit);
-  comparativeSummary._comment += " Previous pin 26f172e7 had a smaller scanned population.";
+  // This tests the analyzer, not whether the retained real human narrative was rewritten at a
+  // mechanical pin bump. Build an explicitly current comparison fixture from structured facts.
+  comparativeSummary._comment =
+    `Pin ${currentShortRevision} records ${sourceAudit.provenanceScan.matchedFiles} provenance candidates and ` +
+    `${sourceAudit.crateCoverage.cratePrefixes} production-Rust crate prefixes. ` +
+    "Previous pin 26f172e7 had a smaller scanned population.";
   if (validateAuditSummary(comparativeSummary).length !== 0) {
     console.error("self-test: an accurate current summary was rejected for mentioning a prior pin");
     process.exit(1);

@@ -34,31 +34,6 @@ mod tests {
         settings
     }
 
-    fn isolate_hf_cache() -> crate::test_env::EnvVars {
-        crate::test_env::EnvVars::set(&[
-            ("HF_HUB_CACHE", ""),
-            ("HUGGINGFACE_HUB_CACHE", ""),
-            ("HF_HOME", ""),
-        ])
-    }
-
-    fn shipped_supra2_entry() -> JsonObject {
-        let text = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-            .iter()
-            .find(|(name, _)| *name == "builtin.models.jsonc")
-            .expect("builtin.models.jsonc embedded")
-            .1;
-        let manifest: Value =
-            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(text))
-                .expect("parse builtin.models.jsonc");
-        manifest["models"]
-            .as_array()
-            .and_then(|models| models.iter().find(|model| model["id"] == "supra2_img"))
-            .and_then(Value::as_object)
-            .cloned()
-            .expect("supra2_img is in the builtin catalog")
-    }
-
     fn stage(root: &Path, repo: &str, revision: &str, files: &[&str]) -> PathBuf {
         let snapshot = sceneworks_core::hf_home::huggingface_repo_cache_path(root, repo)
             .expect("repo cache path resolves")
@@ -157,20 +132,23 @@ mod tests {
         // generic lane forwards onto the job and the asset like any engine warning.
         assert_eq!(
             descriptor.capabilities.max_prompt_tokens,
-            Some(gen_core::supra2::MAX_PROMPT_TOKENS)
+            Some(gen_core_checkpoint::supra2::MAX_PROMPT_TOKENS)
         );
-        assert_eq!(gen_core::supra2::MAX_PROMPT_TOKENS, 128);
+        assert_eq!(gen_core_checkpoint::supra2::MAX_PROMPT_TOKENS, 128);
         assert_eq!(descriptor.capabilities.min_size, 256);
         assert_eq!(descriptor.capabilities.max_size, 256);
-        let entry = shipped_supra2_entry();
+        let entry = crate::test_env::shipped_catalog_entry("supra2_img");
         assert_eq!(entry["defaults"]["resolution"], "256x256");
-        assert_eq!(entry["defaults"]["steps"], gen_core::supra2::DEFAULT_STEPS);
+        assert_eq!(
+            entry["defaults"]["steps"],
+            gen_core_checkpoint::supra2::DEFAULT_STEPS
+        );
         assert_eq!(
             entry["defaults"]["guidanceScale"],
-            json!(gen_core::supra2::DEFAULT_GUIDANCE)
+            json!(gen_core_checkpoint::supra2::DEFAULT_GUIDANCE)
         );
         let row = crate::engines::mlx_model("supra2_img").expect("MODEL_TABLE row resolves");
-        assert_eq!(row.engine_id(), gen_core::supra2::PROVIDER_ID);
+        assert_eq!(row.engine_id(), gen_core_checkpoint::supra2::PROVIDER_ID);
         assert_eq!(row.backend(), expected_backend);
     }
 
@@ -179,7 +157,7 @@ mod tests {
     /// exists so the fit gate never admits a load blind (`FitDecision::Unknown`).
     #[test]
     fn the_catalog_row_installs_the_same_components_on_every_platform() {
-        let entry = shipped_supra2_entry();
+        let entry = crate::test_env::shipped_catalog_entry("supra2_img");
         assert_eq!(entry["macOnly"], false);
         let downloads = entry["downloads"].as_array().expect("downloads");
         assert_eq!(downloads.len(), 3);
@@ -198,7 +176,7 @@ mod tests {
     /// Generation stages both co-requisites at their EXACT pinned revisions next to the bundle.
     #[test]
     fn generation_stages_the_pinned_text_encoder_and_vae() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().unwrap();
         let t5 = stage(
             data.path(),
@@ -213,10 +191,10 @@ mod tests {
             &["config.json", "diffusion_pytorch_model.safetensors"],
         );
         let bundle = data.path().join("models/mlx/supra2_img");
-        let spec = super::super::attach_required_components(
+        let spec = crate::image_jobs::load_spec::attach_required_components(
             LoadSpec::new(WeightsSource::Dir(bundle.clone())),
             "supra2_img",
-            &shipped_supra2_entry(),
+            &crate::test_env::shipped_catalog_entry("supra2_img"),
             &settings_at(data.path()),
         )
         .expect("installed components stage");
@@ -229,7 +207,7 @@ mod tests {
     /// A missing or torn component is a typed failure before any load — never a download.
     #[test]
     fn a_missing_or_torn_component_is_a_typed_failure_before_load() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().unwrap();
         stage(
             data.path(),
@@ -238,10 +216,10 @@ mod tests {
             &["config.json", "model.safetensors", "tokenizer.json"],
         );
         let attach = |data: &Path| {
-            super::super::attach_required_components(
+            crate::image_jobs::load_spec::attach_required_components(
                 LoadSpec::new(WeightsSource::Dir(data.join("bundle"))),
                 "supra2_img",
-                &shipped_supra2_entry(),
+                &crate::test_env::shipped_catalog_entry("supra2_img"),
                 &settings_at(data),
             )
         };
@@ -262,12 +240,12 @@ mod tests {
     /// stubbed or downloaded fallback — and the dispatch gap surfaces that same message.
     #[test]
     fn a_damaged_converted_bundle_is_refused_with_an_actionable_message() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().unwrap();
         let bundle = data.path().join("models/mlx/supra2_img");
         std::fs::create_dir_all(&bundle).unwrap();
         std::fs::write(bundle.join("model_index.json"), b"{}").unwrap();
-        let mut entry = shipped_supra2_entry();
+        let mut entry = crate::test_env::shipped_catalog_entry("supra2_img");
         entry.insert("modelPath".to_owned(), json!(bundle));
         let payload = json!({
             "model": "supra2_img",
@@ -309,8 +287,8 @@ mod tests {
         use crate::api_client::ApiClient;
         use axum::extract::{Path as AxumPath, State};
         use axum::response::{IntoResponse, Response};
-        use axum::routing::{get, post};
-        use axum::{Json, Router};
+
+        use axum::Json;
         use sceneworks_core::contracts::JobSnapshot;
         use std::sync::{Arc, Mutex};
 
@@ -388,17 +366,15 @@ mod tests {
                 ..JobApi::default()
             };
             let posts = api.posts.clone();
-            let app = Router::new()
-                .route("/api/v1/jobs/:job_id", get(job_route))
-                .route("/api/v1/jobs/:job_id/progress", post(progress_route))
-                .route(
-                    "/api/v1/workers/:worker_id/heartbeat",
-                    post(heartbeat_route),
-                )
-                .with_state(api);
+            let app = crate::test_api_stub::job_progress_heartbeat_routes(
+                job_route,
+                progress_route,
+                heartbeat_route,
+            )
+            .with_state(api);
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
-            tokio::spawn(async move {
+            crate::load_progress::spawn(async move {
                 axum::serve(listener, app).await.unwrap();
             });
             (format!("http://{address}"), posts)
@@ -435,7 +411,7 @@ mod tests {
             ]);
             let data = tempfile::tempdir().unwrap();
             let project = tempfile::tempdir().unwrap();
-            let snapshot = |pin: gen_core::supra2::ComponentPin| {
+            let snapshot = |pin: gen_core_checkpoint::supra2::ComponentPin| {
                 crate::model_jobs::huggingface_pinned_snapshot_dir(
                     data.path(),
                     pin.repo,
@@ -447,16 +423,16 @@ mod tests {
             let bundle = data.path().join("models/mlx/supra2_img");
             let started = std::time::Instant::now();
             crate::model_jobs::convert_supra2_bundle(
-                &snapshot(gen_core::supra2::SUPRA2_SOURCE).join("model_final_ema.pt"),
-                &snapshot(gen_core::supra2::FLAN_T5_BASE),
-                &snapshot(gen_core::supra2::SD_VAE),
+                &snapshot(gen_core_checkpoint::supra2::SUPRA2_SOURCE).join("model_final_ema.pt"),
+                &snapshot(gen_core_checkpoint::supra2::FLAN_T5_BASE),
+                &snapshot(gen_core_checkpoint::supra2::SD_VAE),
                 &bundle,
             )
             .expect("install-time conversion");
             eprintln!("convert: {:.1}s", started.elapsed().as_secs_f32());
 
             // What the API hands the worker once the convert ran: the catalog row + its `modelPath`.
-            let mut entry = shipped_supra2_entry();
+            let mut entry = crate::test_env::shipped_catalog_entry("supra2_img");
             entry.insert("modelPath".to_owned(), json!(bundle));
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
@@ -491,7 +467,7 @@ mod tests {
                     None,
                 );
                 let mut asset_writes = Vec::new();
-                let outcome = super::super::super::generate_stream(
+                let outcome = crate::image_jobs::mlx::generate_stream(
                     &api,
                     &settings,
                     &job,
@@ -564,7 +540,7 @@ mod tests {
             let plan =
                 super::super::super::ImagePlan::with_count(&request, request.image_count(), None);
             let mut asset_writes = Vec::new();
-            let outcome = super::super::super::generate_stream(
+            let outcome = crate::image_jobs::mlx::generate_stream(
                 &api,
                 &settings,
                 &job,
@@ -616,7 +592,7 @@ mod tests {
                 ("HF_HUB_OFFLINE", "1"),
             ]);
             let data = tempfile::tempdir().unwrap();
-            let snapshot = |pin: gen_core::supra2::ComponentPin| {
+            let snapshot = |pin: gen_core_checkpoint::supra2::ComponentPin| {
                 crate::model_jobs::huggingface_pinned_snapshot_dir(
                     data.path(),
                     pin.repo,
@@ -626,9 +602,9 @@ mod tests {
             };
             let bundle = data.path().join("models/mlx/supra2_img");
             crate::model_jobs::convert_supra2_bundle(
-                &snapshot(gen_core::supra2::SUPRA2_SOURCE).join("model_final_ema.pt"),
-                &snapshot(gen_core::supra2::FLAN_T5_BASE),
-                &snapshot(gen_core::supra2::SD_VAE),
+                &snapshot(gen_core_checkpoint::supra2::SUPRA2_SOURCE).join("model_final_ema.pt"),
+                &snapshot(gen_core_checkpoint::supra2::FLAN_T5_BASE),
+                &snapshot(gen_core_checkpoint::supra2::SD_VAE),
                 &bundle,
             )
             .expect("install-time conversion");
@@ -648,7 +624,7 @@ mod tests {
                     "{check:?}"
                 );
             }
-            let mut entry = shipped_supra2_entry();
+            let mut entry = crate::test_env::shipped_catalog_entry("supra2_img");
             entry.insert("modelPath".to_owned(), json!(bundle));
             let mut settings = settings_at(data.path());
             // Offline: a Hub fetch anywhere on the load/generate path would hit a closed port.
@@ -760,8 +736,8 @@ mod tests {
         use super::*;
         use crate::api_client::ApiClient;
         use axum::extract::{Path as AxumPath, State};
-        use axum::routing::{get, post};
-        use axum::{Json, Router};
+        use axum::routing::post;
+        use axum::Json;
         use sceneworks_core::contracts::JobSnapshot;
         use sceneworks_core::project_store::ProjectStore;
         use std::sync::{Arc, Mutex};
@@ -796,9 +772,7 @@ mod tests {
                 }))
             }
             let posts: Posts = Arc::default();
-            let app = Router::new()
-                .route("/api/v1/jobs/:job_id", get(job_route))
-                .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+            let app = crate::test_api_stub::job_progress_routes(job_route, progress_route)
                 .route("/api/v1/jobs/:job_id/metrics", post(metrics_route))
                 .route(
                     "/api/v1/workers/:worker_id/heartbeat",
@@ -807,7 +781,7 @@ mod tests {
                 .with_state(posts.clone());
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
-            tokio::spawn(async move {
+            crate::load_progress::spawn(async move {
                 axum::serve(listener, app).await.unwrap();
             });
             (format!("http://{address}"), posts)
@@ -842,7 +816,7 @@ mod tests {
             settings.backend_candle_enabled = true;
             settings.heartbeat_seconds = 30;
 
-            let snapshot = |pin: gen_core::supra2::ComponentPin| {
+            let snapshot = |pin: gen_core_checkpoint::supra2::ComponentPin| {
                 crate::model_jobs::huggingface_pinned_snapshot_dir(
                     &settings.data_dir,
                     pin.repo,
@@ -858,16 +832,16 @@ mod tests {
             let bundle = settings.data_dir.join("models/mlx/supra2_img");
             let started = std::time::Instant::now();
             crate::model_jobs::convert_supra2_bundle(
-                &snapshot(gen_core::supra2::SUPRA2_SOURCE).join("model_final_ema.pt"),
-                &snapshot(gen_core::supra2::FLAN_T5_BASE),
-                &snapshot(gen_core::supra2::SD_VAE),
+                &snapshot(gen_core_checkpoint::supra2::SUPRA2_SOURCE).join("model_final_ema.pt"),
+                &snapshot(gen_core_checkpoint::supra2::FLAN_T5_BASE),
+                &snapshot(gen_core_checkpoint::supra2::SD_VAE),
                 &bundle,
             )
             .expect("install-time conversion");
             let convert_s = started.elapsed().as_secs_f64();
 
             // What the API hands the worker once the convert ran: the catalog row + its `modelPath`.
-            let mut entry = shipped_supra2_entry();
+            let mut entry = crate::test_env::shipped_catalog_entry("supra2_img");
             entry.insert("modelPath".to_owned(), json!(bundle));
             let project = ProjectStore::new(settings.data_dir.clone(), "supra2-smoke")
                 .create_project("Supra2-IMG CUDA worker smoke")
@@ -1010,9 +984,7 @@ mod tests {
                 ..LifecycleApi::default()
             };
             let posts = api.posts.clone();
-            let app = Router::new()
-                .route("/api/v1/jobs/:job_id", get(job_route))
-                .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+            let app = crate::test_api_stub::job_progress_routes(job_route, progress_route)
                 .route("/api/v1/jobs/:job_id/metrics", post(metrics_route))
                 .route(
                     "/api/v1/workers/:worker_id/heartbeat",
@@ -1021,7 +993,7 @@ mod tests {
                 .with_state(api);
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
-            tokio::spawn(async move {
+            crate::load_progress::spawn(async move {
                 axum::serve(listener, app).await.unwrap();
             });
             (format!("http://{address}"), posts)
@@ -1113,7 +1085,7 @@ mod tests {
             settings.heartbeat_seconds = 30;
             settings.huggingface_base_url = "http://127.0.0.1:9".to_owned();
 
-            let snapshot = |pin: gen_core::supra2::ComponentPin| {
+            let snapshot = |pin: gen_core_checkpoint::supra2::ComponentPin| {
                 crate::model_jobs::huggingface_pinned_snapshot_dir(
                     &settings.data_dir,
                     pin.repo,
@@ -1128,9 +1100,9 @@ mod tests {
             };
             let bundle = settings.data_dir.join("models/mlx/supra2_img");
             crate::model_jobs::convert_supra2_bundle(
-                &snapshot(gen_core::supra2::SUPRA2_SOURCE).join("model_final_ema.pt"),
-                &snapshot(gen_core::supra2::FLAN_T5_BASE),
-                &snapshot(gen_core::supra2::SD_VAE),
+                &snapshot(gen_core_checkpoint::supra2::SUPRA2_SOURCE).join("model_final_ema.pt"),
+                &snapshot(gen_core_checkpoint::supra2::FLAN_T5_BASE),
+                &snapshot(gen_core_checkpoint::supra2::SD_VAE),
                 &bundle,
             )
             .expect("install-time conversion");
@@ -1148,7 +1120,7 @@ mod tests {
                     "{check:?}"
                 );
             }
-            let mut entry = shipped_supra2_entry();
+            let mut entry = crate::test_env::shipped_catalog_entry("supra2_img");
             entry.insert("modelPath".to_owned(), json!(bundle));
 
             // 1. Cancel at the first progress event.
@@ -1214,16 +1186,13 @@ mod tests {
     // the PRODUCTION job path (`run_image_generate_job`) on whichever backend this build links.
     // Driven by one `#[ignore]`d test per backend (`mlx_real_weights` / `candle_real_weights`).
     // ---------------------------------------------------------------------------------------
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     mod acceptance_matrix {
         use super::*;
         use crate::api_client::ApiClient;
         use axum::extract::{Path as AxumPath, State};
-        use axum::routing::{get, post};
-        use axum::{Json, Router};
+        use axum::routing::post;
+        use axum::Json;
         use sceneworks_core::contracts::JobSnapshot;
         use sceneworks_core::project_store::ProjectStore;
         use std::sync::{Arc, Mutex};
@@ -1262,9 +1231,7 @@ mod tests {
                 }))
             }
             let posts: Posts = Arc::default();
-            let app = Router::new()
-                .route("/api/v1/jobs/:job_id", get(job_route))
-                .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+            let app = crate::test_api_stub::job_progress_routes(job_route, progress_route)
                 .route("/api/v1/jobs/:job_id/metrics", post(metrics_route))
                 .route(
                     "/api/v1/workers/:worker_id/heartbeat",
@@ -1273,7 +1240,7 @@ mod tests {
                 .with_state(posts.clone());
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
-            tokio::spawn(async move {
+            crate::load_progress::spawn(async move {
                 axum::serve(listener, app).await.unwrap();
             });
             (format!("http://{address}"), posts)
@@ -1602,7 +1569,7 @@ mod tests {
             }
             // (6) Offline: any Hub fetch anywhere on the path hits a closed port and fails the job.
             settings.huggingface_base_url = "http://127.0.0.1:9".to_owned();
-            let mut entry = shipped_supra2_entry();
+            let mut entry = crate::test_env::shipped_catalog_entry("supra2_img");
             entry.insert("modelPath".to_owned(), json!(bundle));
 
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -1627,8 +1594,8 @@ mod tests {
                         && std > crate::smoke_support::DEGENERATE_STD_FLOOR_DEFAULT
                         && asset["seed"] == json!(SEED)
                         && warnings(asset).is_empty()
-                        && raw["numInferenceSteps"] == json!(gen_core::supra2::DEFAULT_STEPS)
-                        && raw["guidanceScale"] == json!(gen_core::supra2::DEFAULT_GUIDANCE)
+                        && raw["numInferenceSteps"] == json!(gen_core_checkpoint::supra2::DEFAULT_STEPS)
+                        && raw["guidanceScale"] == json!(gen_core_checkpoint::supra2::DEFAULT_GUIDANCE)
                         && raw[sceneworks_core::supra2::UNCONDITIONAL_KEY] == "stored"
                         && raw[sceneworks_core::supra2::BACKEND_KEY] == BACKEND,
                     Some(base.latency_s),
@@ -1697,7 +1664,7 @@ mod tests {
                 let all_truncated = long.assets.iter().all(|asset| {
                     warnings(asset)
                         .iter()
-                        .any(|code| code == gen_core::supra2::PROMPT_TRUNCATED_WARNING)
+                        .any(|code| code == gen_core_checkpoint::supra2::PROMPT_TRUNCATED_WARNING)
                 });
                 let stds: Vec<f64> = long.images.iter().map(rgb_std).collect();
                 summary.check(
@@ -1869,9 +1836,9 @@ mod tests {
                     gen_core::GenerationReport::from_output(self.generate(req, on_progress)?);
                 report
                     .warnings
-                    .extend(gen_core::supra2::prompt_truncated_warning(
+                    .extend(gen_core_checkpoint::supra2::prompt_truncated_warning(
                         140,
-                        gen_core::supra2::MAX_PROMPT_TOKENS as usize,
+                        gen_core_checkpoint::supra2::MAX_PROMPT_TOKENS as usize,
                     ));
                 Ok(report)
             }
@@ -1886,7 +1853,7 @@ mod tests {
                 "width": 256,
                 "height": 256,
                 "count": 1,
-                "modelManifestEntry": Value::Object(shipped_supra2_entry()),
+                "modelManifestEntry": Value::Object(crate::test_env::shipped_catalog_entry("supra2_img")),
             });
             for (key, value) in extra.as_object().cloned().unwrap_or_default() {
                 payload[key] = value;
@@ -1905,7 +1872,7 @@ mod tests {
             request: &ImageRequest,
             canceled: bool,
             seen: Arc<Mutex<Vec<Seen>>>,
-            tx: tokio::sync::mpsc::Sender<lane::GenEvent>,
+            tx: tokio::sync::mpsc::Sender<lane::stream::GenEvent>,
         ) -> crate::error::WorkerResult<()> {
             let model = model();
             let batch = lane::lane_controls::resolve_native_prompt_batch(
@@ -1920,17 +1887,17 @@ mod tests {
                 seen,
             };
             let seed = lane::resolve_seed(request, 0);
-            let steps = lane::resolve_steps(request, &model);
-            let guidance = lane::resolve_guidance(request, &model);
-            let enhance = lane::PromptEnhance::from_advanced(&request.advanced)?;
+            let steps = lane::sampling::resolve_steps(request, &model);
+            let guidance = lane::sampling::resolve_guidance(request, &model);
+            let enhance = lane::PromptEnhance::from_advanced(&request.model, &request.advanced)?;
             let cancel = CancelFlag::new();
-            lane::drive_native_prompt_batch(
+            lane::stream::drive_native_prompt_batch(
                 tx,
                 seed,
                 batch.images() as usize,
                 |preview, on_progress| {
                     let warnings = std::cell::RefCell::new(Vec::new());
-                    let images = lane::render_on_surface(
+                    let images = lane::render::render_on_surface(
                         &probe,
                         "",
                         request.width,
@@ -1986,19 +1953,19 @@ mod tests {
                 "seed": 40, "count": 3, "advanced": { "steps": 12, "guidanceScale": 4.5 }
             }));
             let plan = lane::ImagePlan::with_count(&request, request.image_count(), None);
-            let steps = lane::resolve_steps(&request, &model());
-            let raw_settings = lane::mlx_raw_settings(
+            let steps = lane::sampling::resolve_steps(&request, &model());
+            let raw_settings = lane::sampling::mlx_raw_settings(
                 &request,
                 "SupraLabs/Supra2-IMG",
                 steps,
                 None,
-                lane::resolve_guidance(&request, &model()),
+                lane::sampling::resolve_guidance(&request, &model()),
             );
             let seen = Arc::new(Mutex::new(Vec::new()));
-            let (tx, rx) = tokio::sync::mpsc::channel::<lane::GenEvent>(64);
+            let (tx, rx) = tokio::sync::mpsc::channel::<lane::stream::GenEvent>(64);
             let producer_request = request.clone();
             let producer_seen = Arc::clone(&seen);
-            let blocking = tokio::task::spawn_blocking(move || {
+            let blocking = crate::load_progress::spawn_blocking(move || {
                 produce(&producer_request, false, producer_seen, tx)
             });
             let (base_url, posts) = crate::tests::spawn_no_user_cancel_capture_stub().await;
@@ -2009,7 +1976,7 @@ mod tests {
                 serde_json::from_value(crate::tests::job_snapshot_json("job-supra2", false))
                     .unwrap();
             let mut asset_writes = Vec::new();
-            lane::consume_gen_events(
+            lane::events::consume_gen_events(
                 &api,
                 &settings,
                 &job,
@@ -2054,7 +2021,7 @@ mod tests {
                     (json!(42), json!(2))
                 ]
             );
-            let entry = shipped_supra2_entry();
+            let entry = crate::test_env::shipped_catalog_entry("supra2_img");
             for asset in &asset_writes {
                 assert_eq!(asset["prompt"], "a red fox sitting in fresh snow");
                 let settings = &asset["rawAdapterSettings"];
@@ -2074,7 +2041,7 @@ mod tests {
                 );
                 assert_eq!(
                     settings["generationWarnings"][0]["code"],
-                    gen_core::supra2::PROMPT_TRUNCATED_WARNING,
+                    gen_core_checkpoint::supra2::PROMPT_TRUNCATED_WARNING,
                     "{settings}"
                 );
             }
@@ -2105,14 +2072,14 @@ mod tests {
             let seen = seen.lock().unwrap().clone();
             assert_eq!(seen.len(), 1);
             assert_eq!((seen[0].seed, seen[0].count), (Some(41), 1));
-            assert_eq!(gen_core::supra2::image_seed(40, 1), 41);
+            assert_eq!(gen_core_checkpoint::supra2::image_seed(40, 1), 41);
             let mut seeds = Vec::new();
             while let Ok(event) = rx.try_recv() {
-                if let lane::GenEvent::Image { seed, .. } = event {
+                if let lane::stream::GenEvent::Image { seed, .. } = event {
                     seeds.push(seed);
                 }
             }
-            assert_eq!(seeds, vec![41]);
+            assert_eq!(seeds, vec![Some(41)]);
         }
 
         /// The default API path: no `seed`, a `seeds` batch. The one engine call draws image k's
@@ -2136,11 +2103,14 @@ mod tests {
             );
             let mut published = Vec::new();
             while let Ok(event) = rx.try_recv() {
-                if let lane::GenEvent::Image { index, seed, .. } = event {
+                if let lane::stream::GenEvent::Image { index, seed, .. } = event {
                     published.push((index, seed));
                 }
             }
-            assert_eq!(published, vec![(0, 9000), (1, 9001), (2, 9002)]);
+            assert_eq!(
+                published,
+                vec![(0, Some(9000)), (1, Some(9001)), (2, Some(9002))]
+            );
         }
 
         /// A cancel inside the one call publishes NOTHING.
@@ -2158,7 +2128,7 @@ mod tests {
             assert_eq!(seen.lock().unwrap().len(), 1);
             while let Ok(event) = rx.try_recv() {
                 assert!(
-                    !matches!(event, lane::GenEvent::Image { .. }),
+                    !matches!(event, lane::stream::GenEvent::Image { .. }),
                     "a canceled batch publishes no image"
                 );
             }
@@ -2168,10 +2138,12 @@ mod tests {
         /// exactly that count (the generic 80-step clamp does not apply to Supra2).
         #[test]
         fn a_request_at_the_declared_step_ceiling_runs_exactly_that_count() {
-            let ceiling = sceneworks_core::video_request::hard_max_steps(&shipped_supra2_entry())
-                .expect("supra2_img declares limits.hardMaxSteps");
+            let ceiling = sceneworks_core::video_request::hard_max_steps(
+                &crate::test_env::shipped_catalog_entry("supra2_img"),
+            )
+            .expect("supra2_img declares limits.hardMaxSteps");
             let request = request(json!({ "seed": 1, "advanced": { "steps": ceiling } }));
-            assert_eq!(lane::resolve_steps(&request, &model()), ceiling);
+            assert_eq!(lane::sampling::resolve_steps(&request, &model()), ceiling);
             let seen = Arc::new(Mutex::new(Vec::new()));
             let (tx, _rx) = tokio::sync::mpsc::channel(64);
             produce(&request, false, Arc::clone(&seen), tx).expect("renders");
@@ -2183,7 +2155,7 @@ mod tests {
         /// historical clamp unchanged.
         #[test]
         fn above_the_ceiling_is_refused_and_other_models_keep_their_clamp() {
-            let entry = shipped_supra2_entry();
+            let entry = crate::test_env::shipped_catalog_entry("supra2_img");
             let ceiling = sceneworks_core::video_request::hard_max_steps(&entry).unwrap();
             let payload = |steps: u32| {
                 json!({ "model": "supra2_img", "prompt": "a fox", "advanced": { "steps": steps } })
@@ -2214,7 +2186,7 @@ mod tests {
                     model["id"]
                 );
             }
-            assert_eq!(lane::max_requested_steps(50), 80);
+            assert_eq!(lane::sampling::max_requested_steps(50), 80);
         }
 
         // -----------------------------------------------------------------------------------
@@ -2262,7 +2234,7 @@ mod tests {
         /// pinned file at its pinned size.
         fn stage_component(
             data: &Path,
-            pin: gen_core::supra2::ComponentPin,
+            pin: gen_core_checkpoint::supra2::ComponentPin,
             config: &Value,
             tensor: &str,
         ) {
@@ -2280,7 +2252,7 @@ mod tests {
         /// admission depth): the manifest `convert_pinned_checkpoint` writes for the pinned
         /// checkpoint, and both converted files at their pinned sizes.
         fn stage_priceable_install(data: &Path) -> PathBuf {
-            use gen_core::supra2::{
+            use gen_core_checkpoint::supra2::{
                 BundleComponent, BundleFile, BundleManifest, BundleSource, Supra2Config,
                 FLAN_T5_BASE, PINNED_CONDITIONING, PINNED_DENOISER, SD_VAE, SUPRA2_SOURCE,
             };
@@ -2290,9 +2262,9 @@ mod tests {
                 FLAN_T5_BASE,
                 &json!({
                     "d_model": cfg.ctx_dim,
-                    "num_layers": gen_core::supra2::T5_LAYERS,
-                    "num_heads": gen_core::supra2::T5_HEADS,
-                    "d_kv": gen_core::supra2::T5_D_KV,
+                    "num_layers": gen_core_checkpoint::supra2::T5_LAYERS,
+                    "num_heads": gen_core_checkpoint::supra2::T5_HEADS,
+                    "d_kv": gen_core_checkpoint::supra2::T5_D_KV,
                     "relative_attention_num_buckets": 32,
                     "relative_attention_max_distance": 128,
                     "feed_forward_proj": "gated-gelu"
@@ -2304,29 +2276,30 @@ mod tests {
                 SD_VAE,
                 &json!({
                     "latent_channels": cfg.latent_channels,
-                    "layers_per_block": gen_core::supra2::VAE_LAYERS_PER_BLOCK,
-                    "norm_num_groups": gen_core::supra2::VAE_NORM_GROUPS,
-                    "block_out_channels": gen_core::supra2::VAE_BLOCK_OUT_CHANNELS
+                    "layers_per_block": gen_core_checkpoint::supra2::VAE_LAYERS_PER_BLOCK,
+                    "norm_num_groups": gen_core_checkpoint::supra2::VAE_NORM_GROUPS,
+                    "block_out_channels": gen_core_checkpoint::supra2::VAE_BLOCK_OUT_CHANNELS
                 }),
                 "decoder.weights",
             );
             let bundle = data.join("models/mlx/supra2_img");
-            let file = |pin: gen_core::supra2::PinnedFile| BundleFile {
+            let file = |pin: gen_core_checkpoint::supra2::PinnedFile| BundleFile {
                 file: pin.path.to_owned(),
                 bytes: pin.bytes,
                 sha256: pin.sha256.to_owned(),
             };
             let source = SUPRA2_SOURCE.files[0];
-            let component = |id: &str, pin: gen_core::supra2::ComponentPin| BundleComponent {
-                component: id.to_owned(),
-                repo: pin.repo.to_owned(),
-                revision: pin.revision.to_owned(),
-                license: pin.license.to_owned(),
-                download_bytes: pin.download_bytes(),
-            };
+            let component =
+                |id: &str, pin: gen_core_checkpoint::supra2::ComponentPin| BundleComponent {
+                    component: id.to_owned(),
+                    repo: pin.repo.to_owned(),
+                    revision: pin.revision.to_owned(),
+                    license: pin.license.to_owned(),
+                    download_bytes: pin.download_bytes(),
+                };
             let manifest = BundleManifest {
-                schema: gen_core::supra2::BUNDLE_SCHEMA.to_owned(),
-                provider_id: gen_core::supra2::PROVIDER_ID.to_owned(),
+                schema: gen_core_checkpoint::supra2::BUNDLE_SCHEMA.to_owned(),
+                provider_id: gen_core_checkpoint::supra2::PROVIDER_ID.to_owned(),
                 source: BundleSource {
                     repo: Some(SUPRA2_SOURCE.repo.to_owned()),
                     revision: Some(SUPRA2_SOURCE.revision.to_owned()),
@@ -2336,18 +2309,21 @@ mod tests {
                     weights_key: "ema".to_owned(),
                 },
                 config: cfg,
-                vae_scale: gen_core::supra2::VAE_SCALE,
+                vae_scale: gen_core_checkpoint::supra2::VAE_SCALE,
                 denoiser: file(PINNED_DENOISER),
                 denoiser_tensors: cfg.expected_tensors().len(),
                 conditioning: Some(file(PINNED_CONDITIONING)),
                 components: vec![
-                    component(gen_core::supra2::TEXT_ENCODER_COMPONENT, FLAN_T5_BASE),
-                    component(gen_core::supra2::VAE_COMPONENT, SD_VAE),
+                    component(
+                        gen_core_checkpoint::supra2::TEXT_ENCODER_COMPONENT,
+                        FLAN_T5_BASE,
+                    ),
+                    component(gen_core_checkpoint::supra2::VAE_COMPONENT, SD_VAE),
                 ],
             };
             std::fs::create_dir_all(&bundle).unwrap();
             std::fs::write(
-                bundle.join(gen_core::supra2::BUNDLE_MANIFEST),
+                bundle.join(gen_core_checkpoint::supra2::BUNDLE_MANIFEST),
                 serde_json::to_vec(&manifest).unwrap(),
             )
             .unwrap();
@@ -2387,7 +2363,7 @@ mod tests {
             let data = tempfile::tempdir().unwrap();
             let project = tempfile::tempdir().unwrap();
             let bundle = stage_priceable_install(data.path());
-            let mut entry = shipped_supra2_entry();
+            let mut entry = crate::test_env::shipped_catalog_entry("supra2_img");
             entry.insert("modelPath".to_owned(), json!(bundle));
             let seen = Arc::new(Mutex::new(Vec::new()));
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -2428,7 +2404,7 @@ mod tests {
                 };
                 let mut asset_writes = Vec::new();
                 #[cfg(target_os = "macos")]
-                let arm = lane::generate_stream_using(
+                let arm = lane::mlx::generate_stream_using(
                     &api,
                     &settings,
                     &job,
@@ -2439,7 +2415,7 @@ mod tests {
                     loader,
                 );
                 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-                let arm = lane::generate_candle_stream_using(
+                let arm = lane::candle::generate_candle_stream_using(
                     &api,
                     &settings,
                     &job,
@@ -2448,6 +2424,7 @@ mod tests {
                     "cuda",
                     &mut asset_writes,
                     loader,
+                    Arc::new(lane::moss::NativeMossStreamRuntime),
                 );
                 let outcome = tokio::time::timeout(std::time::Duration::from_secs(120), arm)
                     .await
@@ -2496,7 +2473,13 @@ mod tests {
             let request = request(json!({
                 "advanced": { "guidanceScale": 1.0, "unconditional": "stored", "backend": "x" }
             }));
-            let raw = lane::mlx_raw_settings(&request, "SupraLabs/Supra2-IMG", 50, None, Some(1.0));
+            let raw = lane::sampling::mlx_raw_settings(
+                &request,
+                "SupraLabs/Supra2-IMG",
+                50,
+                None,
+                Some(1.0),
+            );
             assert_eq!(raw[sceneworks_core::supra2::UNCONDITIONAL_KEY], "none");
             assert_ne!(raw[sceneworks_core::supra2::BACKEND_KEY], "x");
         }

@@ -132,9 +132,8 @@ fi
 find "$no_encoder" -maxdepth 1 -exec ls -ld {} + | tee "$out/no-encoder-hub.txt"
 
 # ---- 3. build (run-scoped per source SHA; unstripped, rust-lang/rust#157750) ---------------------
-# Only this lane's own trees: keep the current SHA's, drop any earlier SHA's (~30 GB each).
-find "$HOME/sceneworks-iris-campaign-target" -mindepth 1 -maxdepth 1 -type d ! -name "$sha" \
-  -exec rm -rf {} + 2>/dev/null || true
+# Keep the existing source-SHA cache layout. Never sweep other SHA trees: another owned
+# invocation may still be compiling or reading one. Only the explicit cleanup input is cleanup.
 mkdir -p "$target"
 export CARGO_TARGET_DIR="$target"
 export CARGO_PROFILE_RELEASE_STRIP=none
@@ -142,18 +141,41 @@ export CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none
 build_start=$(date +%s)
 cargo test --locked --release -p sceneworks-worker --lib --no-run
 bin="$(cargo test --locked --release -p sceneworks-worker --lib --no-run --message-format=json \
+  | tee "$out/native-build.jsonl" \
   | python3.12 -c 'import json,sys
 for l in sys.stdin:
     m = json.loads(l)
     if m.get("reason") == "compiler-artifact" and m.get("executable") and m["target"]["name"] == "sceneworks_worker":
         print(m["executable"])' | tail -1)"
 test -x "$bin"
+# The actual selected no-run artifact is copied before any model starts. Both this executable
+# and its selected metallib live outside the uploaded evidence directory; only hashes/receipt
+# are retained there. No new Cargo build/target, directory guess, or shared-cache fallback.
+native_binding_script="$(cd "$(dirname "$0")/.." && pwd)/memory-catalog/bind-metallib.mjs"
+PMETAL_METALLIB_PATH="$(WORK_DIR_NATIVE="$out" node "$native_binding_script" "$out/native-build.jsonl" --iris-test --print-path)"
+export PMETAL_METALLIB_PATH
+bin="$(dirname "$PMETAL_METALLIB_PATH")/sceneworks_worker"
+test -x "$bin"
 echo "build ${SECONDS}s total, $(( $(date +%s) - build_start ))s cargo; binary $bin" | tee "$out/build.txt"
 
 # ---- 4. guarded runs ------------------------------------------------------------------------------
 failed=0
+SCENEWORKS_METAL_ENTRY_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/metal_execution_entry.sh"
+export SCENEWORKS_METAL_ENTRY_SCRIPT out mem_gib bin
+# shellcheck source=scripts/ci/metal_execution_entry.sh
+source "$SCENEWORKS_METAL_ENTRY_SCRIPT"
 run_guarded() { # $1 test path, $2 cap GiB, $3 wall s, $4 hub
   local test=$1 cap_gib=$2 limit_s=$3 hub_dir=$4 name="${1##*::}"
+  if [[ -z "${SCENEWORKS_METAL_EXECUTION_LOCK_FD+x}" ]]; then
+    export -f run_guarded
+    if ! python3.12 -I "$(dirname "$SCENEWORKS_METAL_ENTRY_SCRIPT")/metal_execution_lock.py" \
+      --wait-seconds "${SCENEWORKS_METAL_EXECUTION_WAIT_SECONDS:-$limit_s}" -- \
+      bash -c 'source "$SCENEWORKS_METAL_ENTRY_SCRIPT"; failed=0; run_guarded "$@"; exit "$failed"' _ "$@"; then
+      failed=1
+    fi
+    return
+  fi
+  metal_execution_entry "$limit_s" true
   local log="$out/$name.log" free_pct free_gib
   free_pct="$(/usr/bin/memory_pressure -Q 2>/dev/null | sed -n 's/.*free percentage: \([0-9]*\)%.*/\1/p')"
   free_gib=$(( mem_gib * ${free_pct:-0} / 100 ))

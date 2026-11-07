@@ -5,12 +5,13 @@
 //! evicted; a pinned one is never evicted; and producing one never writes anything under the
 //! linked library.
 
-use std::collections::BTreeMap;
+mod common;
+use common::{tree_snapshot, write_krea_native_file};
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use tempfile::TempDir;
 
 use sceneworks_core::checkpoint_derivative::{
@@ -29,30 +30,6 @@ fn fixture_dir(label: &str) -> TempDir {
         .prefix(&format!("ckpt-derivative-{label}-{}-", std::process::id()))
         .tempdir()
         .unwrap()
-}
-
-/// A minimal single-file Krea 2 native DiT (the same shape `checkpoint_plan_store.rs`'s fixtures
-/// use): the `txtfusion.` marker the family detector keys on, dense bf16, deterministic bytes.
-fn write_krea_native_file(path: &Path, fill: u8) {
-    let mut header = Map::new();
-    let mut offset = 0_u64;
-    for name in [
-        "model.diffusion_model.txtfusion.projector.weight",
-        "model.diffusion_model.blocks.0.attn.wq.weight",
-        "model.diffusion_model.first.weight",
-    ] {
-        header.insert(
-            name.to_owned(),
-            json!({"dtype": "BF16", "shape": [1], "data_offsets": [offset, offset + 2]}),
-        );
-        offset += 2;
-    }
-    let encoded = serde_json::to_vec(&Value::Object(header)).unwrap();
-    let mut bytes = (encoded.len() as u64).to_le_bytes().to_vec();
-    bytes.extend(encoded);
-    bytes.resize(bytes.len() + offset as usize, fill);
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, bytes).unwrap();
 }
 
 struct Fixture {
@@ -119,33 +96,6 @@ fn write_index(
     file.write_all(serde_json::to_string(&payload).unwrap().as_bytes())
         .map_err(|error| error.to_string())?;
     Ok(())
-}
-
-/// Path → (len, modified) for every file under `root`, so a test can prove a whole tree is
-/// byte-for-byte and timestamp-for-timestamp untouched.
-fn tree_snapshot(root: &Path) -> BTreeMap<PathBuf, (u64, std::time::SystemTime, Vec<u8>)> {
-    let mut snapshot = BTreeMap::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(directory) = stack.pop() {
-        for entry in fs::read_dir(&directory).unwrap() {
-            let entry = entry.unwrap();
-            let path = entry.path();
-            let metadata = fs::symlink_metadata(&path).unwrap();
-            if metadata.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            snapshot.insert(
-                path.strip_prefix(root).unwrap().to_path_buf(),
-                (
-                    metadata.len(),
-                    metadata.modified().unwrap(),
-                    fs::read(&path).unwrap_or_default(),
-                ),
-            );
-        }
-    }
-    snapshot
 }
 
 fn now() -> u64 {
@@ -702,6 +652,40 @@ fn an_altered_derivative_bundle_is_refused_at_the_lease_boundary() {
     }
 }
 
+/// sc-26691 end to end: `ensure` hashes each output as the producer writes it, and publication
+/// records the content verdict that stream earned, so the first lease redeems it instead of
+/// re-reading the bundle. The digest recorded in the journal is the real digest of the bytes.
+#[test]
+fn a_produced_derivative_carries_its_write_stream_digest_into_the_first_lease() {
+    use sha2::{Digest, Sha256};
+    let fx = fixture("hash-once");
+    let resolved = resolve(&fx);
+    let produced = match fx
+        .store
+        .ensure(&fx.checkpoint_id, &request(), write_index)
+        .unwrap()
+    {
+        CheckpointDerivativeOutcomeV1::Produced(metadata) => metadata,
+        other => panic!("the fixture derivative must be produced, got {other:?}"),
+    };
+    let cache_key = fx.store.cache_key(&resolved, &request()).unwrap();
+    let entry = fx.store.cache().entry_path(&cache_key).unwrap();
+    assert!(
+        entry.join("content.verification.json").exists(),
+        "publication of a produced bundle records the verdict its write streams earned"
+    );
+    let index = entry.join("bundle").join("index.json");
+    let recorded = produced.artifact.closure.members[0].files[0]
+        .sha256
+        .clone()
+        .unwrap();
+    assert_eq!(
+        recorded,
+        format!("sha256:{:x}", Sha256::digest(fs::read(&index).unwrap()))
+    );
+    assert!(fx.store.acquire(&resolved, &request()).unwrap().is_some());
+}
+
 /// The request validator refuses key material it cannot key on, rather than digesting it and
 /// producing a key two different requests could share.
 #[test]
@@ -938,4 +922,62 @@ fn a_pinned_derivative_holds_a_managed_teardown_instead_of_being_orphaned_by_it(
         !install_dir.exists(),
         "a completed managed teardown removes the SceneWorks-owned install tree"
     );
+}
+
+#[test]
+fn conversion_provenance_receipt_binds_actual_source_codec_and_complete_artifact() {
+    let fx = fixture("provenance-receipt");
+    let source_before = tree_snapshot(&fx.library_dir);
+    let request = request();
+    fx.store
+        .ensure(&fx.checkpoint_id, &request, write_index)
+        .unwrap();
+    let resolved = resolve(&fx);
+    let provenance = sceneworks_core::model_artifacts::provenance::checkpoint_model_provenance(
+        &resolved.plan,
+        "my-krea-import",
+    )
+    .unwrap();
+    let key = fx.store.cache_key(&resolved, &request).unwrap();
+    // A complete older cache entry does not invent historical codec provenance. The producer's
+    // real acquisition supplies the exact request/plan binding before a receipt is redeemable.
+    assert!(fx
+        .store
+        .verified_provenance_receipt(&key, &provenance)
+        .is_err());
+    let lease = fx.store.acquire(&resolved, &request).unwrap().unwrap();
+    let receipt = fx
+        .store
+        .verified_provenance_receipt(&key, &provenance)
+        .unwrap();
+    assert_eq!(receipt["request"]["codecId"], "dense-bf16");
+    assert_eq!(receipt["cacheKey"], key);
+    let mut wrong_source = provenance.clone();
+    wrong_source["sources"][0]["sha256"] = json!("f".repeat(64));
+    assert!(fx
+        .store
+        .verified_provenance_receipt(&key, &wrong_source)
+        .is_err());
+    let mut wrong_plan = provenance.clone();
+    wrong_plan["plan"]["semanticDigest"] = json!(format!("sha256:{}", "f".repeat(64)));
+    assert!(fx
+        .store
+        .verified_provenance_receipt(&key, &wrong_plan)
+        .is_err());
+    drop(lease);
+    let path = fx
+        .store
+        .cache()
+        .entry_path(&key)
+        .unwrap()
+        .join("checkpoint-conversion.receipt.json");
+    let mut tampered: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    tampered["request"]["codecVersion"] = json!("another-codec");
+    fs::write(&path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+    assert!(fx
+        .store
+        .verified_provenance_receipt(&key, &provenance)
+        .is_err());
+    assert_eq!(tree_snapshot(&fx.library_dir), source_before);
+    println!("SC26690_CPU_DERIVATIVE_PROVENANCE_SMOKE: compiled Krea fixture -> produced+leased index -> verified source/plan/codec-bound receipt; source tree unchanged");
 }

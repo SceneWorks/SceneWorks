@@ -162,3 +162,46 @@ fn persisted_claim_projection_matches_full_worker_policy_for_routing_corpus() {
         }
     }
 }
+
+/// The tier-aware policy changes persisted facts, not just new request routing. A pre-S8 FP8R
+/// job must not retain its generic image_generate requirement and be handed to a pre-Ada worker
+/// after upgrading; startup migrates its required marker and eligible lane facts.
+#[test]
+fn startup_reprojects_pre_flux3_tier_claim_facts() {
+    let directory = tempfile::tempdir().unwrap();
+    let db_path = directory.path().join("jobs.db");
+    let store = JobsStore::new(&db_path);
+    store.initialize().unwrap();
+    let job = create_job(
+        &store,
+        JobType::ImageGenerate,
+        json!({
+            "model": "flux3_klein", "prompt": "a lighthouse", "mode": "text_to_image",
+            "advanced": {"quantTier": "fp8r"}
+        }),
+    );
+    let connection = Connection::open(&db_path).unwrap();
+    connection
+        .execute(
+            "update jobs set claim_facts_version = 2, claim_required_capability = 'image_generate',
+         claim_mlx_eligible = 1, claim_candle_eligible = 0 where id = ?1",
+            params![job.id],
+        )
+        .unwrap();
+    store.initialize().unwrap();
+    let (version, capability, mlx, candle): (i64, String, bool, bool) = connection
+        .query_row(
+            "select claim_facts_version, claim_required_capability, claim_mlx_eligible,
+         claim_candle_eligible from jobs where id = ?1",
+            params![job.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(version, CLAIM_ROUTING_FACTS_VERSION);
+    assert!(
+        version > 2,
+        "the version bump is what migrates persisted pre-tier facts"
+    );
+    assert_eq!(capability, "fp8r");
+    assert!(!mlx && candle);
+}

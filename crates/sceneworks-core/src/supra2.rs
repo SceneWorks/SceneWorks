@@ -4,15 +4,15 @@
 //!
 //! The published interface is text-to-image at 256x256 with prompt, seed, guidance, steps and image
 //! count. The backend-neutral rules (native size, `steps >= 1`, finite guidance, at most
-//! [`gen_core::supra2::MAX_IMAGES`] images, no negative prompt / prompt batch / conditioning) are
+//! [`gen_core_checkpoint::supra2::MAX_IMAGES`] images, no negative prompt / prompt batch / conditioning) are
 //! inference's own `Supra2Resolved::resolve`, run here on the request the worker would build.
 //! SceneWorks adds only what the engine never sees because the generic lane would drop or rewrite
 //! it first: an edit/reference mode, a reference/mask/control carrier, LoRAs, a quantization tier, a
 //! hires-fix pass, a sampler/scheduler/guidance-method choice and every other lane knob the engine
 //! has no input for, plus the lane's step ceiling (the worker clamps above it rather than refusing).
 use crate::contracts::JsonObject;
-use gen_core::supra2::{self as s2, Supra2Resolved};
 use gen_core::GenerationRequest;
+use gen_core_checkpoint::supra2::{self as s2, Supra2Resolved};
 use serde_json::Value;
 
 /// Is `model` the Supra2-IMG catalog id?
@@ -59,7 +59,16 @@ const UNSUPPORTED_ADVANCED: &[&str] = &[
     "mlxQuantizeExplicit",
     // MOSS-Image's own wire objects (`imageJobAdvanced.js` / the MCP image tool).
     "mossImage",
+    "mossImageEdit",
+    "mossImageAdvanced",
+    "promptBatch",
     "mossOrdinarySettings",
+    // FLUX.3's authored layout controls (`imageJobAdvanced.js`): the shared studio builder emits
+    // them only for the FLUX 3 models, but the same static key extractor that demands this
+    // classification reads the builder's source, so Supra2 refuses them by wire name like every
+    // other engine-specific object it has no input for.
+    "flux3_layout",
+    "flux3_reference_ids",
     // The character lane's Angle Set / Key Point Library extras (`characterPanels.jsx`).
     "angleSet",
     "keypointCollectionId",
@@ -174,7 +183,7 @@ pub const BACKEND_KEY: &str = "backend";
 
 /// Which unconditional context a render at `guidance` (the resolved value; `None` ⇒ the release
 /// default) steers against, derived deterministically the way the engine decides it: CFG runs iff
-/// `guidance > 1` (`gen_core::supra2::cfg_enabled`), and then uses the bundle's stored conditioning
+/// `guidance > 1` (`gen_core_checkpoint::supra2::cfg_enabled`), and then uses the bundle's stored conditioning
 /// when its manifest records one, else the empty-prompt fallback. The engine's own
 /// `used_stored_unconditional` flag stays inside the provider (the `Generator` report does not carry
 /// it), so the worker reads the same fact off the manifest of `bundle` — the confined directory the
@@ -198,7 +207,7 @@ pub fn unconditional_source(bundle: Option<&std::path::Path>, guidance: Option<f
 /// shipped row declares the provider's own sanity cap, so the published interface is not narrowed),
 /// else the generic lane's clamp. A larger request is refused, never clamped.
 pub fn max_steps(entry: &JsonObject) -> u32 {
-    crate::video_request::hard_max_steps(entry)
+    crate::limits::hard_max_steps(entry)
         .unwrap_or_else(|| s2::DEFAULT_STEPS.max(crate::image_request::BASE_MAX_IMAGE_STEPS))
 }
 

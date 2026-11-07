@@ -1,3 +1,49 @@
+use super::artifact_resolution::resolved_mlx_artifact_tier;
+use super::conditioning::load_reference_image;
+use super::conditioning::non_empty;
+use super::conditioning::stage_likeness;
+use super::events::consume_gen_events;
+use super::instantid::ensure_instantid_file;
+use super::instantid::INSTANTID_ARCFACE_FILE;
+use super::instantid::INSTANTID_MLX_REPO;
+use super::instantid::INSTANTID_SCRFD_FILE;
+use super::load_policy::release_declared_sequential_for_request;
+use super::load_spec::load_spec;
+use super::quantization::reconcile_resolved_tier_quant;
+use super::quantization::resolve_quant;
+use super::resolve_seed;
+use super::sampling::curated_image_menu;
+use super::sampling::normalize_sampling_knob;
+use super::sampling::read_advanced_sampling_knobs;
+use super::sampling::resolve_advanced_or_manifest_f32;
+use super::sampling::resolve_advanced_or_manifest_u32;
+use super::standard_tier_subdir;
+use super::stream::drive_gen_items_scored;
+use super::stream::start_cached_gen_stream_with_request_state;
+use super::uses_standard_tier_layout;
+use super::Conditioning;
+use super::GenerationOutput;
+use super::GenerationRequest;
+use super::IdentityWeights;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use super::LoadSpec;
+use super::WeightsSource;
+use crate::advanced;
+use crate::huggingface_snapshot_dir;
+use crate::resolve_app_managed_model_dir;
+use crate::ApiClient;
+use crate::DownloadContext;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
+use serde_json::json;
 // ---------------------------------------------------------------------------
 // PuLID-FLUX native face-identity character image (macOS, sc-3344 / epic 3069):
 // the `pulid_flux_dev` SceneWorks target on the native `mlx-gen-pulid` engine,
@@ -39,8 +85,8 @@ const PULID_ENGINE_ID: &str = "pulid_flux";
 const PULID_FLUX_REPO: &str = "SceneWorks/flux1-dev-mlx";
 /// The PuLID-FLUX adapter checkpoint (IDFormer + PerceiverAttention CA blocks). Public repo,
 /// downloaded directly (the torch path used the same `guozinan/PuLID` / `v0.9.1` weight).
-const PULID_ADAPTER_REPO: &str = "guozinan/PuLID";
-const PULID_ADAPTER_FILE: &str = "pulid_flux_v0.9.1.safetensors";
+pub(super) const PULID_ADAPTER_REPO: &str = "guozinan/PuLID";
+pub(super) const PULID_ADAPTER_FILE: &str = "pulid_flux_v0.9.1.safetensors";
 /// Converted-weights bundle (download-on-first-use): the EVA02-CLIP-L-336 tower
 /// (`tools/convert_eva_clip.py`) + the BiSeNet face-parsing net (`bisenet_parsing.safetensors`)
 /// the native face stack needs for `face_features_image`. Public repo, mirroring the
@@ -51,9 +97,9 @@ const PULID_ADAPTER_FILE: &str = "pulid_flux_v0.9.1.safetensors";
 /// `bisenet_parsing.safetensors`. PUBLISHED (sc-5045) + validated end-to-end (fresh HF download →
 /// worker-path ArcFace identity 0.6815). The `SCENEWORKS_PULID_WEIGHTS` / explicit-env overrides
 /// below still let an operator (or the parity gate) point at a pre-staged dir.
-const PULID_MLX_REPO: &str = "SceneWorks/pulid-flux-mlx";
-const PULID_EVA_FILE: &str = "eva02_clip_l_336.safetensors";
-const PULID_BISENET_FILE: &str = "bisenet_parsing.safetensors";
+pub(super) const PULID_MLX_REPO: &str = "SceneWorks/pulid-flux-mlx";
+pub(super) const PULID_EVA_FILE: &str = "eva02_clip_l_336.safetensors";
+pub(super) const PULID_BISENET_FILE: &str = "bisenet_parsing.safetensors";
 
 /// Torch-parity defaults (the `pulid_flux_dev` MODEL_TARGETS + the sc-2012 "photoreal" preset):
 /// 30 steps at guidance 4.0, id_weight 1.0, timestep_to_start_cfg 4.
@@ -66,7 +112,7 @@ const PULID_DEFAULT_TIMESTEP_TO_START_CFG: u32 = 4;
 const PULID_MAX_SEQUENCE_LENGTH: u32 = 128;
 /// The adapter label recorded on every PuLID-FLUX asset (parity with the torch `pulidFlux`
 /// recipe; mirrors `mlx_instantid` for the InstantID path).
-const PULID_ADAPTER_LABEL: &str = "mlx_pulid_flux";
+pub(super) const PULID_ADAPTER_LABEL: &str = "mlx_pulid_flux";
 
 /// Resolve the FLUX.1-dev backbone snapshot for PuLID-FLUX: an explicit `modelPath` dir wins (a
 /// pre-staged complete FLUX dir — used as-is, never tier-resolved), else the HF cache snapshot for the
@@ -83,19 +129,12 @@ fn resolve_pulid_flux_base(
         .advanced
         .get("modelPath")
         .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "PuLID-FLUX modelPath").map(Some);
     }
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or(PULID_FLUX_REPO);
     let root = huggingface_snapshot_dir(&settings.data_dir, repo);
     // Quant-matrix turnkey (sc-9947): descend into the selected q4/q8/bf16 tier subdir. A non-turnkey
@@ -113,7 +152,7 @@ fn resolve_pulid_flux_base(
 /// `character_image` mode with a reference face whose FLUX.1-dev base resolves locally. Mirrors
 /// `jobs_store::pulid_flux_mlx_eligible` so the router and worker agree (and mirrors the shape of
 /// `instantid_available`). PuLID-FLUX is text-to-image-with-a-face only — no `edit_image`.
-fn pulid_flux_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn pulid_flux_available(request: &ImageRequest, settings: &Settings) -> bool {
     is_pulid_flux_model(&request.model)
         && request.mode == "character_image"
         && non_empty(&request.reference_asset_id)
@@ -157,14 +196,14 @@ fn pulid_timestep_to_start_cfg(request: &ImageRequest) -> u32 {
 }
 
 /// The resolved engine weight inputs: the three files/dirs the engine reads from its env-var seam.
-struct PulidWeights {
+pub(super) struct PulidWeights {
     /// `pulid_flux_v0.9.1.safetensors` (the IDFormer + PerceiverAttention CA blocks).
-    adapter: PathBuf,
+    pub(super) adapter: PathBuf,
     /// The converted EVA02-CLIP-L-336 safetensors.
-    eva: PathBuf,
+    pub(super) eva: PathBuf,
     /// A dir holding `scrfd_10g.safetensors` + `arcface_iresnet100.safetensors` +
     /// `bisenet_parsing.safetensors` (the native face stack `mlx-gen-face` loads).
-    face_dir: PathBuf,
+    pub(super) face_dir: PathBuf,
 }
 
 /// An operator-/parity-gate-supplied weight preset: if all three engine env vars are ALREADY set
@@ -187,7 +226,7 @@ fn pulid_weights_env_preset() -> Option<PulidWeights> {
 /// worker threads the paths through the spec instead of mutating the process-global `PULID_*` env vars
 /// at job time on the multithreaded tokio runtime (the old `set_var`/`remove_var` seam was unsound —
 /// F-025). The paths travel with the `LoadSpec` into the spawned load task, no env involved.
-fn pulid_identity_weights(weights: &PulidWeights) -> IdentityWeights {
+pub(super) fn pulid_identity_weights(weights: &PulidWeights) -> IdentityWeights {
     IdentityWeights {
         encoder: Some(WeightsSource::File(weights.adapter.clone())),
         eva: Some(WeightsSource::File(weights.eva.clone())),
@@ -311,6 +350,7 @@ fn pulid_memory_inputs(width: u32, height: u32) -> crate::mlx_fit_gate::MlxReque
         conditioning_windows: None,
         negative_branch: false,
         prefix_kv_cache_eligible: false,
+        reference_resources: None,
     }
 }
 
@@ -337,7 +377,7 @@ fn pulid_declared_load_policy(
 /// strength and `timestepToStartCfg` rides `GenerationRequest.timestep_to_start_cfg`. Reuses the
 /// shared streaming seam (`consume_gen_events`) so step/cancel/asset behavior matches every other
 /// MLX family.
-async fn generate_pulid_flux_stream(
+pub(super) async fn generate_pulid_flux_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -413,12 +453,7 @@ async fn generate_pulid_flux_stream(
         &job.id,
         backend,
     );
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or(PULID_FLUX_REPO)
         .to_owned();
 
@@ -433,7 +468,9 @@ async fn generate_pulid_flux_stream(
     );
 
     let count = request.count as usize;
-    let seeds: Vec<i64> = (0..count).map(|index| resolve_seed(request, index)).collect();
+    let seeds: Vec<i64> = (0..count)
+        .map(|index| resolve_seed(request, index))
+        .collect();
     let (width, height) = (request.width, request.height);
     let prompt = request.prompt.clone();
 
@@ -458,8 +495,7 @@ async fn generate_pulid_flux_stream(
     let likeness_source_ref = reference_id.to_owned();
 
     let resolved_tier = resolved_mlx_artifact_tier(&flux_base, recipe_bits);
-    let mut spec = load_spec(flux_base, quant, Vec::new(), None)
-        .with_resolved_route(PULID_MODEL);
+    let mut spec = load_spec(flux_base, quant, Vec::new(), None).with_resolved_route(PULID_MODEL);
     // PuLID identity sub-model paths ride the spec (sc-8827) — the `pulid_flux` loader reads them from
     // `LoadSpec::identity` instead of the process-global `PULID_*` env vars.
     spec.identity = Some(identity);
@@ -674,14 +710,18 @@ mod pulid_tests {
         assert_eq!(inputs.overlay.as_deref(), Some("identity"));
         assert!(inputs.has_reference);
         assert_eq!(inputs.reference_count, 1);
-        assert_eq!(inputs.count, 1, "PuLID scopes each queued output independently");
+        assert_eq!(
+            inputs.count, 1,
+            "PuLID scopes each queued output independently"
+        );
         assert_eq!(inputs.adapter_count, 0);
         assert!(!inputs.use_pid);
         assert!(!inputs.has_phases);
 
         let raw = include_str!("../../../../config/manifests/builtin.models.jsonc");
-        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
-            .expect("builtin manifest parses");
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+                .expect("builtin manifest parses");
         let manifest = manifest["models"]
             .as_array()
             .and_then(|models| models.iter().find(|model| model["id"] == PULID_MODEL))
@@ -709,7 +749,10 @@ mod pulid_tests {
             gen_core::LoadShapeDeclarationResult::Applied
         );
         assert_eq!(applied.offload_policy, gen_core::OffloadPolicy::Sequential);
-        assert_eq!(applied.load_shape, gen_core::LoadShape::DeferredMaterialization);
+        assert_eq!(
+            applied.load_shape,
+            gen_core::LoadShape::DeferredMaterialization
+        );
         let refused = pulid_declared_load_policy(
             Some("q4"),
             manifest,
@@ -717,6 +760,9 @@ mod pulid_tests {
             context,
         );
         assert_eq!(refused.offload_policy, gen_core::OffloadPolicy::Resident);
-        assert_eq!(refused.load_shape, gen_core::LoadShape::EagerMaterialization);
+        assert_eq!(
+            refused.load_shape,
+            gen_core::LoadShape::EagerMaterialization
+        );
     }
 }

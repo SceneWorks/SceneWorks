@@ -7,11 +7,13 @@
 //! directory, no catalog record, no plan document. A partial install that is merely "not selected"
 //! is still a partial install; these tests refuse to accept one existing at all.
 
+mod common;
+use common::{write_krea_native_file, write_safetensors};
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use tempfile::TempDir;
 
 use sceneworks_core::checkpoint_import::{ManagedProvenanceV1, SourceLocatorV1};
@@ -36,44 +38,6 @@ fn fixture_dir(label: &str) -> TempDir {
         .prefix(&format!("ingest-{label}-{}-", std::process::id()))
         .tempdir()
         .unwrap()
-}
-
-/// A minimal single-file Krea 2 native DiT: the `txtfusion.` marker the family detector keys on,
-/// every tensor dense bf16, bytes deterministic. Same shape the plan-store suite uses, so the two
-/// suites compile the same checkpoint through the two ownership modes.
-fn write_krea_native_file(path: &Path, fill: u8) {
-    write_safetensors(
-        path,
-        &[
-            ("model.diffusion_model.txtfusion.projector.weight", "BF16"),
-            ("model.diffusion_model.blocks.0.attn.wq.weight", "BF16"),
-            ("model.diffusion_model.first.weight", "BF16"),
-        ],
-        fill,
-    );
-}
-
-fn write_safetensors(path: &Path, entries: &[(&str, &str)], fill: u8) {
-    let mut header = Map::new();
-    let mut offset = 0_u64;
-    for (name, dtype) in entries {
-        let width = match *dtype {
-            "F16" | "BF16" => 2,
-            "F32" => 4,
-            _ => 1,
-        };
-        header.insert(
-            (*name).to_owned(),
-            json!({"dtype": dtype, "shape": [1], "data_offsets": [offset, offset + width]}),
-        );
-        offset += width;
-    }
-    let encoded = serde_json::to_vec(&Value::Object(header)).unwrap();
-    let mut bytes = (encoded.len() as u64).to_le_bytes().to_vec();
-    bytes.extend(encoded);
-    bytes.resize(bytes.len() + offset as usize, fill);
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, bytes).unwrap();
 }
 
 struct Fixture {
@@ -170,6 +134,7 @@ fn civitai_provenance() -> ManagedProvenanceV1 {
         version_id: Some("9931".to_owned()),
         file_id: Some("40277".to_owned()),
         credential_host: Some("civitai.com".to_owned()),
+        ..Default::default()
     }
 }
 
@@ -568,7 +533,7 @@ fn an_unrunnable_staged_tree_rolls_the_commit_back_and_leaves_no_install() {
     // A structurally valid safetensors file whose tensors carry no family evidence at all: the
     // inspector's full-content validation refuses it, so the committed tree is rolled back.
     let source = fixture.library_dir.join("mystery.safetensors");
-    write_safetensors(&source, &[("some.unknown.weight", "BF16")], 0x11);
+    write_safetensors(&source, &[("some.unknown.weight", "BF16")], None, 0x11);
 
     let ingest = ManagedIngest::begin(&fixture.store, "install-u1", civitai_provenance()).unwrap();
     ingest

@@ -1,3 +1,5 @@
+import { AppearanceSelectors, AppearanceNotes } from "./AppearanceSelectors.jsx";
+import { useDismissOnOutsideOrEscape } from "../hooks/useDismissOnOutsideOrEscape.js";
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { LoraKeywordSummary } from "./LoraKeywordSummary.jsx";
 import { Icon } from "./Icons.jsx";
@@ -49,8 +51,12 @@ export function useQuantTierPicker({
   useGenerationQuality = false,
   reseedOnModelChange = false,
   preferencesHydrated = true,
+  // A recipe's numeric format is authoritative while replay is active. Derive the label,
+  // suggestion, confirmation and sticky writes from the SAME tier as the submitted request.
+  resolvedTier = null,
 }) {
-  const [quantTier, setQuantTier] = useState("");
+  const [pickedTier, setQuantTier] = useState("");
+  const quantTier = resolvedTier ?? pickedTier;
   const [tierSwitching, setTierSwitching] = useState("");
   // Bumped by `confirmTier` so the sticky it writes re-derives `tierExplicit` even though the
   // selected tier itself does not change.
@@ -194,6 +200,7 @@ export function TierPickerField({
 }
 
 export function StyleAxisRow({
+  appearance,
   available,
   groups,
   styleId,
@@ -216,7 +223,7 @@ export function StyleAxisRow({
   return (
     <>
       <div
-        className={`settings-bar-styles settings-bar-style-axis${available ? "" : " settings-bar-style-axis-single"}`}
+        className={`settings-bar-styles settings-bar-style-axis${appearance?.available ? " appearance-bar" : ""}${available ? "" : " settings-bar-style-axis-single"}`}
       >
         {available ? (
           <div className="style-axis-field style-axis-catalog">
@@ -226,6 +233,7 @@ export function StyleAxisRow({
             </div>
           </div>
         ) : null}
+        <AppearanceSelectors control={appearance} />
         <div className="style-axis-field style-axis-presets">
           <span className="settings-bar-label">Style preset</span>
           <div className="style-axis-control preset-chips">
@@ -244,6 +252,7 @@ export function StyleAxisRow({
           selectedPreset={selectedPreset}
         />
       </div>
+      <AppearanceNotes control={appearance} />
       {generalPresets.length ? (
         <div className="settings-bar-styles">
           <span className="settings-bar-label">General</span>
@@ -1076,27 +1085,7 @@ export function SavePresetPanel({
   const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
   const containerRef = useRef(null);
 
-  useEffect(() => {
-    if (!scopeMenuOpen) {
-      return undefined;
-    }
-    function onDocMouseDown(event) {
-      if (!containerRef.current?.contains(event.target)) {
-        setScopeMenuOpen(false);
-      }
-    }
-    function onDocKey(event) {
-      if (event.key === "Escape") {
-        setScopeMenuOpen(false);
-      }
-    }
-    document.addEventListener("mousedown", onDocMouseDown);
-    document.addEventListener("keydown", onDocKey);
-    return () => {
-      document.removeEventListener("mousedown", onDocMouseDown);
-      document.removeEventListener("keydown", onDocKey);
-    };
-  }, [scopeMenuOpen]);
+  useDismissOnOutsideOrEscape(containerRef, scopeMenuOpen, setScopeMenuOpen);
 
   function saveWithScope(scope) {
     setScopeMenuOpen(false);

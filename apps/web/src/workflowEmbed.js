@@ -42,6 +42,10 @@ export const EMBEDDED_PROSE_FIELDS = Object.freeze([
   ["prompt", "the prompt"],
   ["negativePrompt", "the negative prompt"],
   ["advanced.stylePrompt", "the style prompt"],
+  ["advanced.appearancePrompt", "the prompt before appearance recipes"],
+  ["advanced.appearancePromptBatch[]", "the batch prompts before appearance recipes"],
+  ["advanced.promptBatch[]", "the native batch prompts"],
+  ["advanced.appearanceNegativePrompt", "the negative prompt before appearance recipes"],
   ["advanced.systemMessage", "the system message"],
   ["advanced.structuredPrompt.intent", "a structured prompt's intent"],
   ["advanced.structuredPrompt.runtimePrompt", "the structured prompt the model received"],
@@ -105,6 +109,7 @@ const L_ANGLE = "the head angle or turnaround the run asked for";
 const L_POSES =
   "the pose, hand and face coordinates a pose selection produced — landmark arrays derived from a reference photo, facial landmarks included";
 const L_PHASES = "the multi-phase denoise schedule, with each phase's steps, guidance and LoRA weights";
+const L_LAYOUT = "the authored layout labels, placement and source/target boxes, including object removals and reference-slot identities — not input images or asset IDs";
 const L_INPUTS =
   "which kinds of input image or CLIP the recipe needs and how many of each, but never which ones";
 // The video lane (sc-15956). Its knobs are the same CLASS as the image ones — what to make,
@@ -132,6 +137,10 @@ export const WORKFLOW_FIELDS_IN_FILE = Object.freeze([
   ["stylePreset", L_NAMES],
   ["styleId", L_NAMES],
   ["advanced.styleId", L_NAMES],
+  ["advanced.appearance", L_NAMES],
+  ["advanced.appearancePromptBatch", L_PROSE],
+  ["advanced.appearancePrompt", L_PROSE],
+  ["advanced.appearanceNegativePrompt", L_PROSE],
   ["prompt", L_PROSE],
   ["negativePrompt", L_PROSE],
   ["advanced.stylePrompt", L_PROSE],
@@ -156,6 +165,11 @@ export const WORKFLOW_FIELDS_IN_FILE = Object.freeze([
   ["loras[].hash", L_LORAS],
   ["advanced", L_SETTINGS],
   ["advanced.mossImage", L_SETTINGS],
+  ["advanced.mossImageAdvanced", L_SETTINGS],
+  ["advanced.mossImageSampleIndex", L_SETTINGS],
+  ["advanced.promptBatch", L_SETTINGS],
+  ["advanced.mossImageEdit", L_SETTINGS],
+  ["advanced.mossImageEditExecutionReport", L_SETTINGS],
   ["advanced.mossImageExecutionReport", L_SETTINGS],
   ["advanced.sampler", L_SETTINGS],
   ["advanced.scheduler", L_SETTINGS],
@@ -187,6 +201,8 @@ export const WORKFLOW_FIELDS_IN_FILE = Object.freeze([
   ["advanced.angleSet", L_ANGLE],
   ["advanced.poses", L_POSES],
   ["advanced.phases", L_PHASES],
+  ["advanced.flux3_layout", L_LAYOUT],
+  ["advanced.flux3_reference_ids", L_LAYOUT],
   ["inputs[].kind", L_INPUTS],
   ["inputs[].count", L_INPUTS],
   ["inputs[].controlMode", L_INPUTS],

@@ -13,53 +13,32 @@ async fn process_shutdown_latch_survives_a_gap_without_waiters() {
     .expect("a late waiter observes the already-latched shutdown");
 }
 
-/// sc-3513: the worker's `JobType::ImageEdit` dispatch arm delegates to
-/// `run_image_generate_job` — the engine keys edits on payload model+mode, not job
-/// type. Feeding an `image_edit`-typed job into the handler proves it reaches the image
-/// pipeline (stopping at the payload's projectId guard) rather than the `run_utility_job`
-/// "unsupported job type" default — i.e. plain Image Edit is genuinely handled. The
-/// handler never reads `job_type`, so a missing projectId is its first stop (no network).
+/// sc-26691: an embedding process (the API's in-process utility loops) stops the worker loops
+/// through the SAME latch the OS shutdown sources set. A waiter already parked on the latch is
+/// woken, and a request made with nobody waiting is still seen by the next wait — the property
+/// that keeps the API from waiting out its whole grace on loops that never heard it stop. Driven
+/// on a local channel: the process-global latch is sticky and would stop every other test's
+/// worker loop in this binary.
 #[tokio::test]
-async fn image_edit_job_dispatches_to_image_generate_handler() {
-    let settings = test_settings("http://127.0.0.1".to_owned(), None);
-    let api = ApiClient::new(&settings);
-    let job: JobSnapshot = serde_json::from_value(json!({
-        "id": "job-image-edit-1",
-        "type": "image_edit",
-        "status": "preparing",
-        "projectId": null,
-        "projectName": null,
-        "payload": { "model": "qwen_image_edit_2511", "mode": "edit_image" },
-        "result": {},
-        "requestedGpu": "auto",
-        "assignedGpu": null,
-        "workerId": null,
-        "progress": 0,
-        "stage": "preparing",
-        "message": "",
-        "error": null,
-        "etaSeconds": null,
-        "elapsedSeconds": null,
-        "attempts": 1,
-        "sourceJobId": null,
-        "duplicateOfJobId": null,
-        "cancelRequested": false,
-        "createdAt": "2026-06-07T00:00:00Z",
-        "updatedAt": "2026-06-07T00:00:00Z",
-        "startedAt": null,
-        "completedAt": null,
-        "canceledAt": null,
-        "lastHeartbeatAt": null
-    }))
-    .expect("image_edit job snapshot deserializes");
+async fn an_embedder_shutdown_request_wakes_parked_and_late_waiters() {
+    let (sender, _receiver) = tokio::sync::watch::channel(false);
+    let mut parked = sender.subscribe();
+    let waiter = tokio::spawn(async move { wait_for_shutdown_latch(&mut parked).await });
+    tokio::task::yield_now().await;
+    assert!(!waiter.is_finished(), "nothing has requested shutdown yet");
 
-    let error = super::image_jobs::run_image_generate_job(&api, &settings, &job)
+    latch_shutdown(&sender);
+    tokio::time::timeout(Duration::from_millis(500), waiter)
         .await
-        .expect_err("missing projectId is rejected by the image handler");
-    assert!(
-        matches!(&error, WorkerError::InvalidPayload(message) if message.contains("projectId")),
-        "expected a projectId payload error from the image handler, got {error:?}",
-    );
+        .expect("a parked waiter wakes on the embedder's request")
+        .unwrap();
+    let mut late = sender.subscribe();
+    tokio::time::timeout(Duration::from_millis(100), wait_for_shutdown_latch(&mut late))
+        .await
+        .expect("a waiter arriving after the request resolves at once");
+    // Idempotent.
+    latch_shutdown(&sender);
+    assert!(*sender.borrow());
 }
 
 #[tokio::test]

@@ -1,10 +1,10 @@
 import React, { useLayoutEffect, useMemo, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { AssetThumbnail, assetCanRenderAsAudio, assetCanRenderAsVideo } from "../components/assetMedia.jsx";
-import { useAppContext } from "../context/AppContext.js";
+import { useAppStatic } from "../context/AppContext.js";
 import { isLibraryAsset } from "../constants.js";
 import { foldUpscaledAssetVariants } from "../assetVariants.js";
-import { assetMatchesSearch } from "../screens/LibraryScreen.jsx";
+import { assetMatchesSearch } from "../assetSearch.js";
 import { assetGridColumns } from "./breakpoint.js";
 import { SimpleAudioTile } from "./simpleAudioParts.jsx";
 import { useSimpleUi } from "./SimpleUiContext.js";
@@ -28,7 +28,7 @@ export function SimpleAssets() {
     assetsReady = false,
     assetsLoading = false,
     assetsError = "",
-  } = useAppContext();
+  } = useAppStatic();
   const { breakpoint, openPreview, loadedTakeId } = useSimpleUi();
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
@@ -102,15 +102,15 @@ export function SimpleAssets() {
                 asset={asset}
                 key={asset.id}
                 loaded={asset.id === loadedTakeId}
-                onOpen={(target) => openPreview(target)}
-                onToggle={(target) => openPreview(target, { play: true })}
+                onOpen={(target) => openPreview(target, { scope: visible })}
+                onToggle={(target) => openPreview(target, { play: true, scope: visible })}
                 phone={breakpoint === "phone"}
               />
             ) : (
               <button
                 className="su-asset"
                 key={asset.id}
-                onClick={() => openPreview(asset)}
+                onClick={() => openPreview(asset, { scope: visible })}
                 title={asset.displayName ?? asset.id}
                 type="button"
               >

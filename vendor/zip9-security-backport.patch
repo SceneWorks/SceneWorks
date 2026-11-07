@@ -1,0 +1,360 @@
+--- a/vendor/zip9-candle-audio-kokoro/Cargo.toml
++++ b/vendor/zip9-candle-audio-kokoro/Cargo.toml
+@@ -12,26 +12,26 @@
+ # The shared candle audio commons (device seam, pinned-SHA hub resolution, host DSP, WAV encode,
+ # `AudioError → gen_core::Error` bridge). Re-exports `gen_core` and `candle_core`, so this crate
+ # resolves the SAME candle build + gen-core rev as the catalog it registers into.
+-candle-audio = { path = "../candle-audio" }
++candle-audio = { "git" = "https://github.com/SceneWorks/inference", "rev" = "91ffb4a819aa2990c652db2d881ba0b9b10126ce" }
+ # candle-nn at the workspace's pinned candle revision (Conv1d/ConvTranspose1d/LSTM/VarBuilder).
+-candle-nn = { workspace = true }
++candle-nn = { "git" = "https://github.com/huggingface/candle", "rev" = "1e6aa85e867eb007cba1b8bae517a10d1aaf0c0d" }
+ # Snapshot-preparer contract types for the audio lane's Kokoro-aware preparer probe
+ # (`SnapshotPreparerRegistration` lives in core-llm; composed by candle-audio-catalog).
+-core-llm = { workspace = true }
++core-llm = { "git" = "https://github.com/SceneWorks/inference", "rev" = "91ffb4a819aa2990c652db2d881ba0b9b10126ce" }
+ # Pure-Rust misaki G2P (MIT): the embedded gold+silver misaki lexicons + POS tagger, the same
+ # phonemization lineage Kokoro-82M was trained with. `default-features = false` is LOAD-BEARING:
+ # the default `espeak` feature links espeak-ng (GPL) through espeak-rs — never enable it here.
+ misaki-rs = { version = "0.3.0", default-features = false }
+ # config.json parsing (vocab / istftnet / plbert blocks).
+-serde_json = { workspace = true }
++serde_json = { "version" = "1" }
+ # Seeded RNG for the vocoder's harmonic-source noise (the reproducibility law: same request+seed
+ # ⇒ byte-identical samples). Same crate the media providers use for seeded noise draws.
+-rand = { workspace = true }
+-rand_distr = { workspace = true }
++rand = { "version" = "0.9" }
++rand_distr = { "version" = "0.5" }
+ # Voice style-vector `.pt` files are torch zip containers holding ONE bare tensor — a shape the
+ # pinned candle pickle reader does not expose (it reads state-dict zips only), so the raw
+ # little-endian f32 storage entry is read directly. Same zip version candle-core itself uses.
+-zip = { version = "7.2", default-features = false }
++zip = { version = "9.0.5", default-features = false }
+ # CMU Pronouncing Dictionary parser (MIT/Apache-2.0) for the G2P out-of-vocabulary fallback tier
+ # (sc-13038): misaki lexicon → cmudict → letter spell-out. This crate ships ONLY the ARPAbet
+ # parser + typed `Symbol` enum — the dictionary DATA is vendored under `resources/cmudict.dict`
+@@ -43,10 +43,10 @@
+ # RAII fixture roots for the test helpers (sc-17791). A `TempDir` guard removes the tree on
+ # `Drop` — including out of a panicking test, which is the only path the old
+ # `env::temp_dir().join(..)` + trailing `remove_dir_all` shape ever leaked on.
+-tempfile = { workspace = true }
++tempfile = { "version" = "3" }
+ # The backend-neutral generator conformance suite (validate-honesty, progress, typed
+ # cancellation, seed determinism) the real-weight test runs against the loaded provider.
+-sceneworks-gen-core-testkit = { workspace = true }
++sceneworks-gen-core-testkit = { "git" = "https://github.com/SceneWorks/inference", "rev" = "91ffb4a819aa2990c652db2d881ba0b9b10126ce" }
+ 
+ [features]
+ default = []
+--- a/vendor/zip9-candle-audio-kokoro/src/weights.rs
++++ b/vendor/zip9-candle-audio-kokoro/src/weights.rs
+@@ -113,7 +113,11 @@
+             AudioError::Msg(format!("voice {}: not a torch zip: {e}", path.display()))
+         })?;
+ 
+-        let names: Vec<String> = zip.file_names().map(str::to_owned).collect();
++        let names: Vec<String> = zip
++            .file_names()
++            .map(|name| name.map(|name| name.into_owned()))
++            .collect::<zip::result::ZipResult<_>>()
++            .map_err(|e| AudioError::Msg(format!("voice entry name: {e}")))?;
+         if let Some(byteorder) = names.iter().find(|n| n.ends_with("/byteorder")) {
+             let mut s = String::new();
+             zip.by_name(byteorder)
+--- a/vendor/zip9-candle-core/Cargo.toml
++++ b/vendor/zip9-candle-core/Cargo.toml
+@@ -57,7 +57,7 @@
+ safetensors = "0.7.0"
+ thiserror = "2"
+ yoke = { version = "0.8.1", features = ["derive"] }
+-zip = { version = "7.2.0", default-features = false }
++zip = { version = "9.0.5", default-features = false }
+ [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ tokenizers = { version = "0.22.0", default-features = false, features = ["onig"] }
+ 
+@@ -95,3 +95,6 @@
+ [[example]]
+ name = "cuda_basics"
+ required-features = ["cuda"]
++
++# Keep this dependency leaf isolated even inside nested application worktrees.
++[workspace]
+--- a/vendor/zip9-candle-core/src/npy.rs
++++ b/vendor/zip9-candle-core/src/npy.rs
+@@ -286,8 +286,10 @@
+         for i in 0..zip.len() {
+             let mut reader = zip.by_index(i)?;
+             let name = {
+-                let name = reader.name();
+-                name.strip_suffix(NPY_SUFFIX).unwrap_or(name).to_owned()
++                let name = reader.name()?;
++                name.strip_suffix(NPY_SUFFIX)
++                    .unwrap_or(name.as_ref())
++                    .to_owned()
+             };
+             let header = read_header(&mut reader)?;
+             let header = Header::parse(&header)?;
+@@ -383,8 +385,10 @@
+         for i in 0..zip.len() {
+             let file = zip.by_index(i)?;
+             let name = {
+-                let name = file.name();
+-                name.strip_suffix(NPY_SUFFIX).unwrap_or(name).to_owned()
++                let name = file.name()?;
++                name.strip_suffix(NPY_SUFFIX)
++                    .unwrap_or(name.as_ref())
++                    .to_owned()
+             };
+             index_per_name.insert(name, i);
+         }
+--- a/vendor/zip9-candle-core/src/pickle.rs
++++ b/vendor/zip9-candle-core/src/pickle.rs
+@@ -677,8 +677,8 @@
+     let mut zip = zip::ZipArchive::new(zip_reader)?;
+     let zip_file_names = zip
+         .file_names()
+-        .map(|f| f.to_string())
+-        .collect::<Vec<String>>();
++        .map(|name| name.map(|name| name.into_owned()))
++        .collect::<zip::result::ZipResult<Vec<String>>>()?;
+ 
+     let mut tensor_infos = vec![];
+     for file_name in zip_file_names.iter() {
+--- a/vendor/zip9-candle-core/tests/zip9_security_tests.rs
++++ b/vendor/zip9-candle-core/tests/zip9_security_tests.rs
+@@ -0,0 +1,135 @@
++//! Synthetic container compatibility/security checks. No model, GPU, or real weights.
++use candle_core::{Device, Tensor};
++use std::io::{Cursor, Write};
++use std::path::PathBuf;
++use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
++
++struct Scratch(PathBuf);
++impl Scratch {
++    fn new() -> Self {
++        let name = format!(
++            "zip9-security-{}-{}",
++            std::process::id(),
++            std::time::SystemTime::now()
++                .duration_since(std::time::UNIX_EPOCH)
++                .unwrap()
++                .as_nanos()
++        );
++        let root = std::env::temp_dir().join(name);
++        std::fs::create_dir(&root).unwrap();
++        Self(root)
++    }
++}
++impl Drop for Scratch {
++    fn drop(&mut self) {
++        std::fs::remove_dir_all(&self.0).unwrap();
++    }
++}
++fn archive(name: &str, bytes: &[u8]) -> Vec<u8> {
++    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
++    writer
++        .start_file(
++            name,
++            SimpleFileOptions::default().compression_method(CompressionMethod::Stored),
++        )
++        .unwrap();
++    writer.write_all(bytes).unwrap();
++    writer.finish().unwrap().into_inner()
++}
++
++#[test]
++fn unicode_npz_roundtrip_and_lazy_names() {
++    let scratch = Scratch::new();
++    let file = scratch.0.join("unicode.npz");
++    let tensor = Tensor::new(&[1f32, 2f32, 3f32], &Device::Cpu).unwrap();
++    Tensor::write_npz(&[("音声_π", &tensor)], &file).unwrap();
++    let loaded = Tensor::read_npz(&file).unwrap();
++    assert_eq!(loaded[0].0, "音声_π");
++    assert_eq!(loaded[0].1.to_vec1::<f32>().unwrap(), [1., 2., 3.]);
++    let lazy = candle_core::npy::NpzTensors::new(&file).unwrap();
++    assert_eq!(lazy.names(), [&"音声_π".to_string()]);
++    assert_eq!(
++        lazy.get("音声_π")
++            .unwrap()
++            .unwrap()
++            .to_vec1::<f32>()
++            .unwrap(),
++        [1., 2., 3.]
++    );
++}
++
++#[test]
++fn unicode_pth_container_prefix_preserves_tensor_values() {
++    let scratch = Scratch::new();
++    let file = scratch.0.join("unicode.pt");
++    let mut source = ZipArchive::new(Cursor::new(include_bytes!("test.pt"))).unwrap();
++    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
++    for index in 0..source.len() {
++        let mut entry = source.by_index(index).unwrap();
++        let name = format!("π/{name}", name = entry.name().unwrap());
++        writer
++            .start_file(
++                name,
++                SimpleFileOptions::default().compression_method(CompressionMethod::Stored),
++            )
++            .unwrap();
++        std::io::copy(&mut entry, &mut writer).unwrap();
++    }
++    std::fs::write(&file, writer.finish().unwrap().into_inner()).unwrap();
++    let original = candle_core::pickle::PthTensors::new("tests/test.pt", None)
++        .unwrap()
++        .get("test")
++        .unwrap()
++        .unwrap();
++    let loaded = candle_core::pickle::PthTensors::new(&file, None)
++        .unwrap()
++        .get("test")
++        .unwrap()
++        .unwrap();
++    assert_eq!(original.dims(), loaded.dims());
++    assert_eq!(
++        original.flatten_all().unwrap().to_vec1::<i64>().unwrap(),
++        loaded.flatten_all().unwrap().to_vec1::<i64>().unwrap()
++    );
++}
++
++#[test]
++fn legacy_cp437_names_are_preserved_without_lossy_replacement() {
++    let scratch = Scratch::new();
++    let file = scratch.0.join("invalid.npz");
++    let mut bytes = archive("bad.npy", include_bytes!("test.npy"));
++    for (signature, flags, name) in [(b"PK\x03\x04", 6, 30), (b"PK\x01\x02", 8, 46)] {
++        let index = bytes.windows(4).position(|part| part == signature).unwrap();
++        bytes[index + flags + 1] &= !8; // Legacy CP437, not Unicode replacement decoding.
++        bytes[index + name] = 0xff;
++    }
++    std::fs::write(&file, bytes).unwrap();
++    let tensors = Tensor::read_npz(&file).unwrap();
++    assert_eq!(tensors.len(), 1);
++    assert_eq!(tensors[0].0, "\u{a0}ad");
++    let lazy = candle_core::npy::NpzTensors::new(&file).unwrap();
++    assert_eq!(lazy.names(), [&"\u{a0}ad".to_string()]);
++}
++
++#[test]
++fn enclosed_path_and_updater_extract_reject_parent_escape() {
++    let scratch = Scratch::new();
++    let bytes = archive("../outside.dll", b"not an executable");
++    let mut zip = ZipArchive::new(Cursor::new(bytes)).unwrap();
++    assert!(zip.by_index(0).unwrap().enclosed_name().is_none());
++    let destination = scratch.0.join("destination");
++    std::fs::create_dir(&destination).unwrap();
++    assert!(zip.extract(&destination).is_err());
++    assert!(!scratch.0.join("outside.dll").exists());
++}
++
++#[test]
++fn truncated_container_is_an_error_for_npz_and_pth() {
++    let scratch = Scratch::new();
++    let file = scratch.0.join("truncated.zip");
++    let mut bytes = archive("tensor.npy", include_bytes!("test.npy"));
++    bytes.truncate(bytes.len() / 2);
++    std::fs::write(&file, bytes).unwrap();
++    assert!(Tensor::read_npz(&file).is_err());
++    assert!(candle_core::pickle::PthTensors::new(&file, None).is_err());
++}
+--- a/vendor/zip9-mlx-gen/Cargo.toml
++++ b/vendor/zip9-mlx-gen/Cargo.toml
+@@ -87,10 +87,10 @@
+ # Backend-neutral contract layer (epic 3720). Workspace member; mlx-gen re-exports it so the old
+ # `mlx_gen::…` paths keep resolving. Family crates depend on it for `gen_core::Result` at the
+ # contract boundary.
+-sceneworks-gen-core = { path = "../../contracts/gen-core" }
++sceneworks-gen-core = { "git" = "https://github.com/SceneWorks/inference", "rev" = "91ffb4a819aa2990c652db2d881ba0b9b10126ce" }
+ # Contract conformance suite (epic 3720, sc-4481). Zero tensor deps; family crates dev-depend on it
+ # to run their real model through the backend-neutral checks (cancel/progress/seed/capabilities).
+-sceneworks-gen-core-testkit = { path = "../../contracts/gen-core-testkit" }
++sceneworks-gen-core-testkit = { "git" = "https://github.com/SceneWorks/inference", "rev" = "91ffb4a819aa2990c652db2d881ba0b9b10126ce" }
+ # The independent LLM-serving contract (epic 7153). The dependency is INVERTED: gen-core CONSUMES
+ # core-llm (gen-core re-exports it as `gen_core::core_llm`, mirroring how mlx-gen re-exports gen-core),
+ # so the gen-ai side runs its LLM providers through the unified `core_llm::TextLlm` engine instead of
+@@ -146,37 +146,37 @@
+ 
+ [dependencies]
+ # Shared pins live in [workspace.dependencies] above (F-151).
+-mlx-rs = { workspace = true }
+-mlx-sys = { workspace = true }
+-sceneworks-gen-core = { workspace = true }
++mlx-rs = { "package" = "pmetal-mlx-rs", "git" = "https://github.com/michaeltrefry/mlx-rs", "rev" = "fe22998bf73e5e785d7659beb2f24d624b785bda" }
++mlx-sys = { "package" = "pmetal-mlx-sys", "git" = "https://github.com/michaeltrefry/mlx-rs", "rev" = "fe22998bf73e5e785d7659beb2f24d624b785bda" }
++sceneworks-gen-core = { "git" = "https://github.com/SceneWorks/inference", "rev" = "91ffb4a819aa2990c652db2d881ba0b9b10126ce" }
+ # The shared MLX sampler + SplitMix64 the media pipelines' text decode draws through
+ # (`text_sample`, epic sc-24432 E8): one implementation, never a crate-local copy.
+-mlx-llm = { workspace = true }
+-thiserror = { workspace = true }
++mlx-llm = { "git" = "https://github.com/SceneWorks/inference", "rev" = "91ffb4a819aa2990c652db2d881ba0b9b10126ce" }
++thiserror = { "version" = "2" }
+ tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+ # The hoisted turnkey converter glue (quant::write_quantized_config, F-045) writes the packed
+ # snapshot's config.json `"quantization"` marker; the per-crate converters already used serde_json,
+ # now the shared core copy does.
+-serde_json = { workspace = true }
++serde_json = { "version" = "1" }
+ # SC-20686 Metal-lane campaign observer: runtime-derived model snapshot identity (src/sc20686.rs).
+-sha2 = { workspace = true }
++sha2 = { "version" = "0.10" }
+ # Match mlx-rs' safetensors ABI so the opt-in loader can inspect raw E4M3
+ # byte views before converting them into MLX's supported bf16 storage dtype.
+ safetensors-fp8 = { package = "safetensors", version = "0.4" }
+ memmap2 = "0.9"
+ # The shared torch `.pth` reader (`pth`, moved from mlx-gen-wan in sc-24833): STORED zip entries only.
+-zip = { version = "8.6.0", default-features = false }
++zip = { version = "9.0.5", default-features = false }
+ 
+ [target.'cfg(target_os = "macos")'.dependencies]
+ # SC-20686 observer: `proc_pid_rusage` reads the process phys_footprint without spawning
+ # /usr/bin/footprint (sc-20671).
+-libc = { workspace = true }
++libc = { "version" = "0.2" }
+ 
+ [dev-dependencies]
+ # RAII fixture roots for the test helpers (sc-17791). A `TempDir` guard removes the tree on
+ # `Drop` — including out of a panicking test, which is the only path the old
+ # `env::temp_dir().join(..)` + trailing `remove_dir_all` shape ever leaked on.
+-tempfile = { workspace = true }
++tempfile = { "version" = "3" }
+ 
+ # sc-21383: one integration-test binary per crate. `tests/main.rs` is generated by
+ # scripts/ci/consolidate_integration_tests.py; add a `tests/<name>.rs` file and run
+--- a/vendor/zip9-mlx-gen/src/pth.rs
++++ b/vendor/zip9-mlx-gen/src/pth.rs
+@@ -644,7 +644,11 @@
+         .map_err(|e| Error::Msg(format!("read zip {}: {e}", path.display())))?;
+ 
+     // Locate `<prefix>data.pkl` and derive the storage-blob prefix.
+-    let names: Vec<String> = zip.file_names().map(String::from).collect();
++    let names: Vec<String> = zip
++        .file_names()
++        .map(|name| name.map(|name| name.into_owned()))
++        .collect::<zip::result::ZipResult<_>>()
++        .map_err(|e| Error::Msg(format!("read zip names {}: {e}", path.display())))?;
+     let pkl_name = names
+         .iter()
+         .find(|n| n.ends_with("data.pkl"))
+--- a/vendor/zip9-tauri-plugin-updater/Cargo.toml
++++ b/vendor/zip9-tauri-plugin-updater/Cargo.toml
+@@ -185,6 +185,6 @@
+ ]
+ 
+ [target.'cfg(target_os = "windows")'.dependencies.zip]
+-version = "4"
++version = "9.0.5"
+ optional = true
+ default-features = false
+--- a/vendor/zip9-tauri-plugin-updater/Cargo.toml.orig
++++ b/vendor/zip9-tauri-plugin-updater/Cargo.toml.orig
+@@ -57,7 +57,7 @@
+ percent-encoding = "2.3"
+ 
+ [target."cfg(target_os = \"windows\")".dependencies]
+-zip = { version = "4", default-features = false, optional = true }
++zip = { version = "9.0.5", default-features = false, optional = true }
+ windows-sys = { version = "0.60.0", features = [
+   "Win32_Foundation",
+   "Win32_UI_WindowsAndMessaging",

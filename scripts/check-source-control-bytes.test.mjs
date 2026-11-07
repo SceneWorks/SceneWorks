@@ -23,6 +23,9 @@ const REQUIRED_TEXT_EXTENSIONS = [
   ".mts",
   ".orig",
   ".stderr",
+  ".dict",
+  ".patch",
+  ".spdx",
   ".ts",
   ".tsx",
   ".js",
@@ -36,7 +39,9 @@ const REQUIRED_TEXT_EXTENSIONS = [
   ".yaml",
 ];
 
-const REQUIRED_TEXT_BASENAMES = ["COPYRIGHT", ".appimageignore"];
+const REQUIRED_TEXT_BASENAMES = [
+  "COPYRIGHT", ".appimageignore", "LICENSE-CMUDICT", "LICENSE-CEPHES", "LICENSE_APACHE-2.0", "LICENSE_MIT", "NOTICE",
+];
 
 const DECLARED_BINARY_EXTENSIONS = [
   ".bin",
@@ -56,6 +61,9 @@ const DECLARED_BINARY_EXTENSIONS = [
   ".pdf",
   ".png",
   ".pt",
+  ".pth",
+  ".npy",
+  ".npz",
   ".rgb",
   ".safetensors",
   ".ttf",
@@ -178,6 +186,35 @@ test("CLI ignores declared binary assets and rejects a tracked source NUL", (t) 
   });
   assert.equal(mutatedDiagnostic.status, 1);
   assert.match(mutatedDiagnostic.stderr, /fixture\.stderr: byte offset 5: 0x00/);
+});
+
+test("vendored licence dictionary patch and SPDX text stays subject to the NUL policy", (t) => {
+  const repo = mkdtempSync(join(tmpdir(), "sceneworks-vendor-control-bytes-"));
+  t.after(() => removeRepo(repo));
+  initRepo(repo);
+  const files = ["cmudict.dict", "security.patch", "LICENSE.spdx", ...REQUIRED_TEXT_BASENAMES];
+  for (const file of files) writeFileSync(join(repo, file), Buffer.from("source\0payload\n"));
+  git(repo, "add", ".");
+  const result = spawnSync(process.execPath, [CHECKER], { cwd: repo, encoding: "utf8" });
+  assert.equal(result.status, 1);
+  for (const file of files) {
+    assert.match(result.stderr, new RegExp(`${escapeRegExp(file)}: byte offset 6: 0x00`));
+  }
+});
+
+test("declared NumPy and PyTorch fixtures have binary signatures and explicit attributes", () => {
+  const attributes = readFileSync(join(REPO_ROOT, ".gitattributes"), "utf8");
+  for (const [file, magic] of [
+    ["test.npy", Buffer.from([0x93, 0x4e, 0x55, 0x4d, 0x50, 0x59])],
+    ["test.npz", Buffer.from([0x50, 0x4b, 0x03, 0x04])],
+    ["fortran_tensor_3d.pth", Buffer.from([0x50, 0x4b, 0x03, 0x04])],
+  ]) {
+    const bytes = readFileSync(join(REPO_ROOT, "vendor/zip9-candle-core/tests", file));
+    assert.deepEqual(bytes.subarray(0, magic.length), magic);
+    assert.equal(isTrackedSourcePath(file), false);
+    assert(DECLARED_BINARY_EXTENSIONS.includes(extname(file)));
+    assert.match(attributes, new RegExp(`^\\*${escapeRegExp(extname(file))}\\s+binary$`, "m"));
+  }
 });
 
 test("explicit text attributes keep a NUL-bearing source diff textual", (t) => {

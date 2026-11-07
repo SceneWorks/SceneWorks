@@ -32,7 +32,7 @@ use serde_json::{json, Map, Value};
 use crate::jsonc::strip_jsonc_comments;
 use crate::video_request::{
     default_fps, default_resolution, duration_limit_error, fps_limit_error, reference_caps,
-    REFERENCE_IMAGE_SHORT_EDGE_MAX, REFERENCE_IMAGE_SHORT_EDGE_MIN,
+    ReferenceImageResizeMode, REFERENCE_IMAGE_SHORT_EDGE_MAX, REFERENCE_IMAGE_SHORT_EDGE_MIN,
 };
 // Longest prompt the generation routes accept: the route's own declaration, not a copy of it, so
 // this validator cannot bless a prompt length the enqueue would refuse (sc-22710).
@@ -391,6 +391,15 @@ pub struct PlanModelAdvanced {
     /// size, so the knob is not written into its request, its job body or its attempt record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference_image_short_edge: Option<u32>,
+    /// How an image REFERENCE is resized before it is encoded — MiniMax-H3's `ref2va` policy
+    /// (`advanced.referenceImageResizeMode`, sc-26691): `match` (the engine default — scale to the
+    /// target canvas's area, never upscaling), `max` (only downsize a short edge above
+    /// `referenceImageShortEdge`) or `diffusers` (force that short edge, upscaling included — the
+    /// only behaviour before sc-26691). A misspelling is refused when the plan is read.
+    ///
+    /// It reaches exactly the shots `referenceImageShortEdge` reaches, for the same reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_image_resize_mode: Option<ReferenceImageResizeMode>,
     /// Model evaluations (NFE) every shot renders at, overriding whatever the rest of the plan
     /// would have resolved — the plan-level twin of the Video Studio's `advanced.steps` (sc-23406).
     ///
@@ -952,11 +961,7 @@ pub fn parse_reference_pack(text: &str) -> Result<ReferencePack, String> {
 /// `[A-Za-z0-9_-]{1,64}` — the charset every id and role in these documents must satisfy, so an
 /// id can be embedded in file names, tags and job payloads without escaping.
 pub fn is_safe_plan_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    crate::ids::is_safe_id_with_max(value, 64)
 }
 
 /// Parse `"WxH"` into `(width, height)`.
@@ -3078,6 +3083,31 @@ impl<'a> ModelEntries<'a> {
     /// The partition a shot binding `reference_roles` roles resolves to, with its catalog entry.
     /// The entry is `None` exactly when the resolved partition is not one this view holds.
     fn resolve(&self, reference_roles: usize) -> (ShotPartition, Option<&'a Map<String, Value>>) {
+        // Imported task compatibility is an entry contract, not the resident family split. Never
+        // turn a declared imported checkpoint into a stock reference checkpoint, even if a caller
+        // supplies a reference entry alongside it. Unsupported operations have no resolved entry.
+        if self.base.get("family").and_then(Value::as_str)
+            == Some(crate::minimax_h3_import::MINIMAX_H3_IMPORT_FAMILY)
+            && crate::jobs_store::checkpoint_plan_checkpoint_id(self.base).is_some()
+        {
+            let semantics =
+                crate::minimax_h3_import::entry_partition_model(self.base, reference_roles != 0);
+            let valid =
+                semantics.is_ok() && !matches!(self.base_id, "minimax_h3" | "minimax_h3_ref");
+            return (
+                ShotPartition {
+                    model_id: self.base_id.to_owned(),
+                    reason: match semantics {
+                        Ok(task) => format!(
+                            "explicit imported compatibility for {task}; retains checkpoint {}",
+                            self.base_id
+                        ),
+                        Err(reason) => reason,
+                    },
+                },
+                valid.then_some(self.base),
+            );
+        }
         let partition = resolve_shot_partition(self.base_id, reference_roles);
         if partition.model_id == self.base_id {
             return (partition, Some(self.base));
@@ -3162,7 +3192,12 @@ static BUILTIN_PLAN_LORAS: std::sync::OnceLock<Vec<PlanLoraEntry>> = std::sync::
 
 /// Every LoRA in the embedded builtin catalog, in catalog order.
 pub fn builtin_plan_loras() -> &'static [PlanLoraEntry] {
-    BUILTIN_PLAN_LORAS.get_or_init(|| parse_plan_loras(embedded_manifest("builtin.loras.jsonc")))
+    BUILTIN_PLAN_LORAS.get_or_init(|| {
+        plan_loras_from_manifest(
+            crate::builtin_manifests::builtin_manifest("builtin.loras.jsonc")
+                .expect("invalid embedded LoRA catalog"),
+        )
+    })
 }
 
 /// The embedded builtin catalog entry for `id`, or `None` when the id names nothing shipped.
@@ -3170,24 +3205,11 @@ pub fn builtin_plan_lora(id: &str) -> Option<&'static PlanLoraEntry> {
     builtin_plan_loras().iter().find(|lora| lora.id == id)
 }
 
-fn embedded_manifest(name: &str) -> &'static str {
-    crate::builtin_manifests::BUILTIN_MANIFESTS
-        .iter()
-        .find(|(manifest, _)| *manifest == name)
-        .map(|(_, contents)| *contents)
-        .unwrap_or("")
-}
-
-/// Parse a `builtin.loras.jsonc` body. Split out so tests can drive synthetic catalogs; a malformed
-/// manifest yields an EMPTY list rather than a panic, exactly as [`crate::minimax_h3_turbo`] does.
-fn parse_plan_loras(contents: &str) -> Vec<PlanLoraEntry> {
-    let stripped = strip_jsonc_comments(contents);
-    let Ok(manifest) = serde_json::from_str::<Value>(&stripped) else {
-        return Vec::new();
-    };
-    let Some(loras) = manifest.get("loras").and_then(Value::as_array) else {
-        return Vec::new();
-    };
+fn plan_loras_from_manifest(manifest: &Value) -> Vec<PlanLoraEntry> {
+    let loras = manifest
+        .get("loras")
+        .and_then(Value::as_array)
+        .expect("embedded LoRA catalog requires a loras array");
     loras
         .iter()
         .filter_map(|lora| {
@@ -3231,47 +3253,21 @@ fn parse_plan_loras(contents: &str) -> Vec<PlanLoraEntry> {
 /// which makes [`lora_family_matches_model`] permissive there rather than refusing a pairing this
 /// side cannot judge. The video route's own compatibility gate still judges it at enqueue.
 ///
-/// Parsed ONCE ([`builtin_plan_loras`] does the same for the LoRA catalog): the embedded model
-/// manifest is a compile-time constant, and re-parsing it per call put a whole-catalog JSON parse
-/// inside [`plan_loras_for_partition`], which every shot's compile and every envelope offer runs.
+/// Reads the shared parsed builtin catalog; no per-shot JSON parse or independent model cache.
 pub fn model_lora_families(model_id: &str) -> Vec<String> {
-    static MODEL_LORA_FAMILIES: std::sync::OnceLock<BTreeMap<String, Vec<String>>> =
-        std::sync::OnceLock::new();
-    MODEL_LORA_FAMILIES
-        .get_or_init(|| {
-            let stripped = strip_jsonc_comments(embedded_manifest("builtin.models.jsonc"));
-            let Ok(manifest) = serde_json::from_str::<Value>(&stripped) else {
-                return BTreeMap::new();
-            };
-            manifest
-                .get("models")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|model| {
-                    let id = model.get("id").and_then(Value::as_str)?.to_owned();
-                    let families = model
-                        .get("loraCompatibility")?
-                        .get("families")?
-                        .as_array()?
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect();
-                    Some((id, families))
-                })
-                .collect()
-        })
-        .get(model_id)
-        .cloned()
+    crate::builtin_manifests::builtin_model_entry(model_id)
+        .map(crate::lora_family::declared_model_lora_families)
         .unwrap_or_default()
 }
 
-/// Whether `lora`'s family is one catalog model `model_id` declares it can load. Permissive for a
-/// model the embedded catalog does not hold; see [`model_lora_families`].
+/// Apply the enqueue accepted-family gate over canonical families. The embedded catalog cannot
+/// judge custom/user-installed IDs, so those retain the established permissive planning behavior.
 pub fn lora_family_matches_model(lora: &PlanLoraEntry, model_id: &str) -> bool {
-    let families = model_lora_families(model_id);
-    families.is_empty() || families.contains(&lora.family)
+    let Some(model) = crate::builtin_manifests::builtin_model_entry(model_id) else {
+        return true;
+    };
+    let accepted = crate::lora_family::accepted_model_lora_families(model);
+    accepted.contains(&crate::lora_family::canonical_lora_family(&lora.family))
 }
 
 /// The partitions a plan declaring `plan_model_id` may ever dispatch as: the declared model, plus
@@ -3359,7 +3355,7 @@ fn validate_plan_loras(plan: &ProductionPlan) -> Vec<PlanDiagnostic> {
             ));
             continue;
         };
-        if !families.is_empty() && !families.contains(&lora.family) {
+        if !lora_family_matches_model(lora, &plan.model.id) {
             findings.push(PlanDiagnostic::plan(
                 "model.loras",
                 format!(
@@ -3367,7 +3363,11 @@ fn validate_plan_loras(plan: &ProductionPlan) -> Vec<PlanDiagnostic> {
                     lora.id,
                     lora.family,
                     plan.model.id,
-                    families.join(", ")
+                    if families.is_empty() {
+                        "no LoRA families".to_owned()
+                    } else {
+                        families.join(", ")
+                    }
                 ),
             ));
         }
@@ -4093,6 +4093,15 @@ pub struct AttemptRecord {
     /// the rendered one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference_image_short_edge: Option<u32>,
+    /// The EFFECTIVE reference-image resize mode this attempt was dispatched with (sc-26691) —
+    /// present exactly when [`AttemptRecord::reference_image_short_edge`] is.
+    ///
+    /// Absent on a reference attempt only when the record predates sc-26691, and such an attempt
+    /// was rendered under the forced short edge; the harness backfills it as
+    /// [`crate::video_request::REFERENCE_IMAGE_RESIZE_MODE_LEGACY`] (`diffusers`) when it adopts
+    /// one, never as today's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_image_resize_mode: Option<ReferenceImageResizeMode>,
     /// The catalog LoRA ids this attempt was DISPATCHED with, in the order they ride the payload
     /// (sc-23406). Empty means none applied to this attempt's partition — which is a real,
     /// recorded state, not an absence: a mixed plan that declares only the ref2v turbo renders its
@@ -4152,6 +4161,34 @@ impl AttemptRecord {
     /// Whether this attempt produced a take that is still a candidate for selection.
     pub fn has_live_take(&self) -> bool {
         self.take.is_some() && self.rejection.is_none()
+    }
+
+    /// Settle the resize mode of a REFERENCE attempt that carries none (sc-26691) from its job.
+    ///
+    /// Every attempt dispatched since records its effective mode beside its short edge, so only an
+    /// attempt written before sc-26691 lacks one — and that alone does not say what it rendered: its
+    /// job may have been claimed (and rendered `match`) after the upgrade. The job is the authority:
+    ///
+    /// * `job_mode` — the mode the persisted job names (stamped at creation, or at the claim for a
+    ///   job queued before the key existed): what it rendered or will render. Recorded as is.
+    /// * no `job_mode` and `job_rendered` — the job finished without ever being claimed since the
+    ///   upgrade, so it rendered under the forced short edge:
+    ///   [`crate::video_request::REFERENCE_IMAGE_RESIZE_MODE_LEGACY`].
+    /// * otherwise (unclaimed, failed, canceled) — nothing rendered yet; left unset for the
+    ///   controller that observes the claim or the result.
+    ///
+    /// A base-partition attempt (no short edge) never gains a mode, and a recorded mode is final.
+    pub fn settle_reference_image_resize_mode(
+        &mut self,
+        job_mode: Option<crate::video_request::ReferenceImageResizeMode>,
+        job_rendered: bool,
+    ) {
+        if self.reference_image_short_edge.is_none() || self.reference_image_resize_mode.is_some() {
+            return;
+        }
+        self.reference_image_resize_mode = job_mode.or_else(|| {
+            job_rendered.then_some(crate::video_request::REFERENCE_IMAGE_RESIZE_MODE_LEGACY)
+        });
     }
 }
 
@@ -5810,6 +5847,32 @@ mod tests {
     }
 
     #[test]
+    fn imported_h3_film_operations_never_resolve_to_stock_weights() {
+        let reference = reference_model_entry();
+        for (partition, base_model, accepts_base, accepts_refs) in [
+            ("fl2va", "minimax_h3", true, false),
+            ("ref2va", "minimax_h3_ref", false, true),
+            ("hybrid", "minimax_h3", true, true),
+            ("undeclared", "minimax_h3", false, false),
+        ] {
+            let imported = json!({"family":"minimax-h3", "baseModel":base_model, "minimaxH3Partition":partition, "importPlan":{"checkpointId":"managed/import"}}).as_object().unwrap().clone();
+            let entries = ModelEntries::with_reference_partition(
+                "minimax_h3_custom",
+                &imported,
+                Some(("minimax_h3_ref", &reference)),
+            );
+            for (count, accepted) in [(0, accepts_base), (1, accepts_refs)] {
+                let (resolved, entry) = entries.resolve(count);
+                assert_eq!(resolved.model_id, "minimax_h3_custom");
+                assert_eq!(entry.is_some(), accepted, "{partition}, refs={count}");
+                if let Some(entry) = entry {
+                    assert!(std::ptr::eq(entry, &imported));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_reference_filename_that_could_inject_multipart_headers_is_refused() {
         let mut value = pack_json();
         value["references"][0]["file"] = json!("references/plate\r\nX-Injected: 1.png");
@@ -6442,6 +6505,75 @@ mod tests {
         );
     }
 
+    /// sc-26691, legacy replay of a run record. A REFERENCE attempt written before the resize mode
+    /// existed (a short edge, no mode) is settled from its JOB: a job that finished without any
+    /// post-upgrade stamp rendered under the forced short edge (`diffusers`); a job queued before
+    /// the upgrade and claimed after it carries the claim's `match` stamp, which the attempt adopts;
+    /// a job that has not rendered leaves the attempt unset. A recorded mode is final, and a
+    /// base-partition attempt (no short edge) gains no mode.
+    #[test]
+    fn a_pre_resize_mode_reference_attempt_settles_from_what_its_job_rendered() {
+        let attempt = |extra: Value| -> AttemptRecord {
+            let mut record = json!({
+                "attempt": 1,
+                "resolvedModelId": "minimax_h3_ref",
+                "status": "succeeded",
+                "startedAt": "2026-10-01T00:00:00Z",
+                "elapsedSeconds": 1.0,
+            });
+            record
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value(record).unwrap()
+        };
+        // Finished before the upgrade: no stamp on the job, and it rendered.
+        let mut legacy = attempt(json!({ "referenceImageShortEdge": 2048 }));
+        assert_eq!(legacy.reference_image_resize_mode, None);
+        legacy.settle_reference_image_resize_mode(None, true);
+        assert_eq!(
+            legacy.reference_image_resize_mode,
+            Some(ReferenceImageResizeMode::Diffusers)
+        );
+        assert_eq!(
+            serde_json::to_value(&legacy).unwrap()["referenceImageResizeMode"],
+            json!("diffusers")
+        );
+
+        // Pending at the upgrade, dispatched or adopted after it: the claim stamped `match`, which
+        // is what rendered — never the legacy reading.
+        let mut adopted = attempt(json!({ "referenceImageShortEdge": 2048 }));
+        adopted.settle_reference_image_resize_mode(Some(ReferenceImageResizeMode::Match), true);
+        assert_eq!(
+            adopted.reference_image_resize_mode,
+            Some(ReferenceImageResizeMode::Match)
+        );
+        let mut in_flight = attempt(json!({ "referenceImageShortEdge": 2048 }));
+        in_flight.settle_reference_image_resize_mode(Some(ReferenceImageResizeMode::Match), false);
+        assert_eq!(
+            in_flight.reference_image_resize_mode,
+            Some(ReferenceImageResizeMode::Match)
+        );
+        // Not yet claimed, or ended without rendering: nothing to record yet.
+        let mut unclaimed = attempt(json!({ "referenceImageShortEdge": 2048 }));
+        unclaimed.settle_reference_image_resize_mode(None, false);
+        assert_eq!(unclaimed.reference_image_resize_mode, None);
+
+        let mut recorded = attempt(json!({
+            "referenceImageShortEdge": 2048,
+            "referenceImageResizeMode": "max"
+        }));
+        recorded.settle_reference_image_resize_mode(None, true);
+        assert_eq!(
+            recorded.reference_image_resize_mode,
+            Some(ReferenceImageResizeMode::Max)
+        );
+
+        let mut base = attempt(json!({ "resolvedModelId": "minimax_h3" }));
+        base.settle_reference_image_resize_mode(Some(ReferenceImageResizeMode::Match), true);
+        assert_eq!(base.reference_image_resize_mode, None);
+    }
+
     #[test]
     fn take_selection_and_attempt_accounting_ignore_human_requested_attempts() {
         let attempt = |number: u32, human: bool, take: bool| AttemptRecord {
@@ -6450,6 +6582,7 @@ mod tests {
             resolved_model_id: "minimax_h3".into(),
             partition_reason: "no reference roles; renders on the plan's model minimax_h3".into(),
             reference_image_short_edge: None,
+            reference_image_resize_mode: None,
             loras: Vec::new(),
             effective_steps: None,
             turbo_scheduler_shift: None,

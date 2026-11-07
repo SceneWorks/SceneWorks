@@ -1,0 +1,1133 @@
+{
+  "schemaVersion": 1,
+  "recordKind": "schema-test-fixture",
+  "fixtureLabel": "SCHEMA TEST ONLY - NOT CAMPAIGN EVIDENCE",
+  "isCampaignEvidence": false,
+  "acceptanceDisposition": "not-campaign-evidence",
+  "missing": [],
+  "unproven": [],
+  "failureReason": null,
+  "manifestSha256": "c02b05e3c40e6c9666554580ff0636d5853691ffe5f5db5d586d12468c82a0fd",
+  "caseId": "mlx/base/lora",
+  "identity": {
+    "rulebook": "sc-26584/moss-image-training-acceptance/v1",
+    "backend": "mlx",
+    "parent": "base",
+    "method": "lora",
+    "source": {
+      "sceneWorksSourceSha": "0000000000000000000000000000000000000000",
+      "inferencePin": "0000000000000000000000000000000000000000",
+      "clean": true,
+      "finalMergedSource": true,
+      "dependencyOverridesUsed": false
+    },
+    "workflow": {
+      "ref": "SCHEMA_TEST_ONLY_NOT_A_WORKFLOW_REF",
+      "sha": "0000000000000000000000000000000000000000",
+      "fileSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "runId": "SCHEMA_TEST_ONLY_NOT_A_RUN",
+      "attempt": 1,
+      "jobId": "SCHEMA_TEST_ONLY_NOT_A_JOB"
+    },
+    "toolchain": {
+      "rustc": "SCHEMA_TEST_ONLY_NO_RUST_EXECUTED",
+      "cargo": "SCHEMA_TEST_ONLY_NO_CARGO_EXECUTED",
+      "target": "SCHEMA_TEST_ONLY_NOT_A_TARGET",
+      "nativeRuntime": "SCHEMA_TEST_ONLY_NO_NATIVE_RUNTIME",
+      "binarySha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "device": {
+      "class": "apple-silicon-unified",
+      "claimedIdentity": "SCHEMA_TEST_ONLY_NOT_A_DEVICE",
+      "observedIdentity": "SCHEMA_TEST_ONLY_NOT_A_DEVICE",
+      "totalCapacityBytes": 1000,
+      "gpuMemoryLimitFraction": 0.6,
+      "capacityBasis": "actual-detected-total-unified-memory",
+      "resolvedCeilingBytes": 600,
+      "resolvedBeforeWeightsLoad": true,
+      "projectedDemandBytes": 500,
+      "headerDemandReceipt": {
+        "path": "SCHEMA_TEST_ONLY/synthetic-header.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "cpuReference": false
+    },
+    "weightSources": [
+      {
+        "repository": "SCHEMA_TEST_ONLY/NO_BASE_WEIGHTS",
+        "revision": "0000000000000000000000000000000000000000",
+        "files": [
+          {
+            "path": "SCHEMA_TEST_ONLY/not-a-weight-file",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          }
+        ]
+      },
+      {
+        "repository": "SCHEMA_TEST_ONLY/NO_SHARED_WEIGHTS",
+        "revision": "0000000000000000000000000000000000000000",
+        "files": [
+          {
+            "path": "SCHEMA_TEST_ONLY/not-a-shared-weight-file",
+            "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+          }
+        ]
+      }
+    ]
+  },
+  "datasetIdentity": {
+    "id": "synthetic-moss-v1",
+    "manifestSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "configSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "artifact": {
+      "path": "SCHEMA_TEST_ONLY/not-a-dataset.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "sealedBeforeWeightsLoad": true,
+    "uploadedCount": 3,
+    "uploadedItems": [
+      {
+        "image": "shape-0.png",
+        "imageSha256": "6666666666666666666666666666666666666666666666666666666666666666",
+        "caption": "sksmoss red circle centered on a pale background",
+        "uploadId": "SCHEMA_TEST_ONLY_dataset_upload-0",
+        "uploadReceipt": {
+          "path": "SCHEMA_TEST_ONLY/upload-0.json",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      {
+        "image": "shape-1.png",
+        "imageSha256": "6666666666666666666666666666666666666666666666666666666666666666",
+        "caption": "sksmoss blue square centered on a pale background",
+        "uploadId": "SCHEMA_TEST_ONLY_dataset_upload-1",
+        "uploadReceipt": {
+          "path": "SCHEMA_TEST_ONLY/upload-1.json",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      {
+        "image": "shape-2.png",
+        "imageSha256": "6666666666666666666666666666666666666666666666666666666666666666",
+        "caption": "sksmoss green triangle centered on a pale background",
+        "uploadId": "SCHEMA_TEST_ONLY_dataset_upload-2",
+        "uploadReceipt": {
+          "path": "SCHEMA_TEST_ONLY/upload-2.json",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      }
+    ]
+  },
+  "evaluationIdentity": {
+    "manifestHash": "5555555555555555555555555555555555555555555555555555555555555555",
+    "computedAtRunTimeBeforeWeightsLoad": true,
+    "imageSha256": "6666666666666666666666666666666666666666666666666666666666666666",
+    "caption": "sksmoss red circle centered on a pale background",
+    "maskSha256": null,
+    "width": 256,
+    "height": 256,
+    "noiseSeedHex": "0x48454c444f555401",
+    "sigma": 0.375,
+    "sharedAcrossAllCellsAndSubruns": true,
+    "crossBackendTensorValuesMayDiffer": true
+  },
+  "subruns": {
+    "uninterrupted": {
+      "jobId": "SCHEMA_TEST_ONLY_reference",
+      "nativeReceipt": {
+        "path": "SCHEMA_TEST_ONLY/reference-native.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "outcome": "completed",
+      "originalHorizon": 60,
+      "startStep": 0,
+      "completedStep": 60,
+      "optimizerUpdatesInThisRun": 60,
+      "seed": 1789,
+      "datasetManifestSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "configSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "evaluationManifestHash": "5555555555555555555555555555555555555555555555555555555555555555",
+      "trainingLosses": [
+        0.75,
+        0.5
+      ],
+      "allLossesFiniteObserved": true,
+      "gradients": {
+        "tensorCount": 1,
+        "allFiniteObserved": true,
+        "nonzeroObserved": true,
+        "nativeReceipt": {
+          "path": "SCHEMA_TEST_ONLY/reference-native.json",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      "learning": {
+        "manifestHash": "5555555555555555555555555555555555555555555555555555555555555555",
+        "before": {
+          "loss": 0.75,
+          "finiteObserved": true,
+          "prepared": {
+            "latent": {
+              "shape": [
+                1,
+                1
+              ],
+              "dtype": "f32",
+              "layout": {
+                "order": "row-major",
+                "strides": [
+                  1,
+                  1
+                ],
+                "strideUnit": "elements"
+              },
+              "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+              "hashEncoding": "logical-row-major-f32-le-v1"
+            },
+            "context": {
+              "shape": [
+                1,
+                1
+              ],
+              "dtype": "f32",
+              "layout": {
+                "order": "row-major",
+                "strides": [
+                  1,
+                  1
+                ],
+                "strideUnit": "elements"
+              },
+              "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+              "hashEncoding": "logical-row-major-f32-le-v1"
+            },
+            "mask": null,
+            "noise": {
+              "shape": [
+                1,
+                1
+              ],
+              "dtype": "f32",
+              "layout": {
+                "order": "row-major",
+                "strides": [
+                  1,
+                  1
+                ],
+                "strideUnit": "elements"
+              },
+              "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+              "hashEncoding": "logical-row-major-f32-le-v1"
+            }
+          }
+        },
+        "criterion": "after < before",
+        "strictDecreaseVerified": true,
+        "improvement": 0.25,
+        "sameActualPreparedPackageVerified": true,
+        "reencodingBetweenMeasurements": false,
+        "noiseRegenerationBetweenMeasurements": false,
+        "nativeReceipt": {
+          "path": "SCHEMA_TEST_ONLY/reference-native.json",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      "factorDelta": {
+        "tensorCount": 1,
+        "elementCount": 1,
+        "changedElements": 1,
+        "maxAbsDelta": 0.125,
+        "squaredL2Delta": 0.015625,
+        "finiteObserved": true,
+        "startExport": {
+          "path": "SCHEMA_TEST_ONLY/reference-start.safetensors",
+          "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "finalExport": {
+          "path": "SCHEMA_TEST_ONLY/reference-end.safetensors",
+          "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "layoutIdentity": "8888888888888888888888888888888888888888888888888888888888888888",
+        "alpha": 6.0,
+        "rank": 4,
+        "parent": "base",
+        "method": "lora",
+        "sourceSha": "0000000000000000000000000000000000000000",
+        "weightSourceRevision": "0000000000000000000000000000000000000000",
+        "nativeReceipt": {
+          "path": "SCHEMA_TEST_ONLY/reference-native.json",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      "cursor": {
+        "epoch": 0,
+        "batchCursor": 60,
+        "sampleCursor": 60,
+        "partialAccumulation": {
+          "microsteps": 0,
+          "tokens": 0,
+          "gradientStateSha256": null
+        },
+        "stateArtifact": {
+          "path": "SCHEMA_TEST_ONLY/reference-state.json",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      "frozenComponentsUnchanged": [
+        "backbone",
+        "text-encoder",
+        "vae"
+      ],
+      "frozenReceipt": {
+        "path": "SCHEMA_TEST_ONLY/reference-frozen.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "runScopeReturned": true
+    },
+    "canceled": {
+      "jobId": "SCHEMA_TEST_ONLY_canceled",
+      "nativeReceipt": {
+        "path": "SCHEMA_TEST_ONLY/cancel-native.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "outcome": "canceled",
+      "originalHorizon": 60,
+      "completedStep": 20,
+      "seed": 1789,
+      "datasetManifestSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "configSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "evaluationManifestHash": "5555555555555555555555555555555555555555555555555555555555555555",
+      "learning": {
+        "manifestHash": "5555555555555555555555555555555555555555555555555555555555555555",
+        "before": {
+          "loss": 0.75,
+          "finiteObserved": true,
+          "prepared": {
+            "latent": {
+              "shape": [
+                1,
+                1
+              ],
+              "dtype": "f32",
+              "layout": {
+                "order": "row-major",
+                "strides": [
+                  1,
+                  1
+                ],
+                "strideUnit": "elements"
+              },
+              "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+              "hashEncoding": "logical-row-major-f32-le-v1"
+            },
+            "context": {
+              "shape": [
+                1,
+                1
+              ],
+              "dtype": "f32",
+              "layout": {
+                "order": "row-major",
+                "strides": [
+                  1,
+                  1
+                ],
+                "strideUnit": "elements"
+              },
+              "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+              "hashEncoding": "logical-row-major-f32-le-v1"
+            },
+            "mask": null,
+            "noise": {
+              "shape": [
+                1,
+                1
+              ],
+              "dtype": "f32",
+              "layout": {
+                "order": "row-major",
+                "strides": [
+                  1,
+                  1
+                ],
+                "strideUnit": "elements"
+              },
+              "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+              "hashEncoding": "logical-row-major-f32-le-v1"
+            }
+          }
+        },
+        "after": null,
+        "afterAbsenceReason": "expected-cancellation-before-completion",
+        "learningClaimed": false
+      },
+      "gradients": {
+        "tensorCount": 1,
+        "allFiniteObserved": true,
+        "nonzeroObserved": true,
+        "nativeReceipt": {
+          "path": "SCHEMA_TEST_ONLY/canceled-native.json",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      "factorDelta": {
+        "tensorCount": 1,
+        "elementCount": 1,
+        "changedElements": 1,
+        "maxAbsDelta": 0.125,
+        "squaredL2Delta": 0.015625,
+        "finiteObserved": true,
+        "startExport": {
+          "path": "SCHEMA_TEST_ONLY/checkpoint-20-start.safetensors",
+          "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "finalExport": {
+          "path": "SCHEMA_TEST_ONLY/checkpoint-20-end.safetensors",
+          "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "layoutIdentity": "8888888888888888888888888888888888888888888888888888888888888888",
+        "alpha": 6.0,
+        "rank": 4,
+        "parent": "base",
+        "method": "lora",
+        "sourceSha": "0000000000000000000000000000000000000000",
+        "weightSourceRevision": "0000000000000000000000000000000000000000",
+        "nativeReceipt": {
+          "path": "SCHEMA_TEST_ONLY/checkpoint-20-native.json",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      "checkpointDurable": true,
+      "checkpoint": {
+        "path": "SCHEMA_TEST_ONLY/step-20-complete.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "cursor": {
+        "epoch": 0,
+        "batchCursor": 20,
+        "sampleCursor": 20,
+        "partialAccumulation": {
+          "microsteps": 0,
+          "tokens": 0,
+          "gradientStateSha256": null
+        },
+        "stateArtifact": {
+          "path": "SCHEMA_TEST_ONLY/checkpoint-20-state.json",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      "originalCancelToken": "SCHEMA_TEST_ONLY_original-token",
+      "originalTokenObservedCanceled": true,
+      "publishedFinalAdapter": false,
+      "runScopeReturned": true
+    },
+    "resumed": {
+      "jobId": "SCHEMA_TEST_ONLY_resumed",
+      "nativeReceipt": {
+        "path": "SCHEMA_TEST_ONLY/resumed-native.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "outcome": "completed",
+      "originalHorizon": 60,
+      "startStep": 20,
+      "completedStep": 60,
+      "optimizerUpdatesInThisRun": 40,
+      "seed": 1789,
+      "datasetManifestSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "configSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "evaluationManifestHash": "5555555555555555555555555555555555555555555555555555555555555555",
+      "trainingLosses": [
+        0.75,
+        0.5
+      ],
+      "allLossesFiniteObserved": true,
+      "gradients": {
+        "tensorCount": 1,
+        "allFiniteObserved": true,
+        "nonzeroObserved": true,
+        "nativeReceipt": {
+          "path": "SCHEMA_TEST_ONLY/resumed-native.json",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      "learning": {
+        "manifestHash": "5555555555555555555555555555555555555555555555555555555555555555",
+        "before": {
+          "loss": 0.75,
+          "finiteObserved": true,
+          "prepared": {
+            "latent": {
+              "shape": [
+                1,
+                1
+              ],
+              "dtype": "f32",
+              "layout": {
+                "order": "row-major",
+                "strides": [
+                  1,
+                  1
+                ],
+                "strideUnit": "elements"
+              },
+              "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+              "hashEncoding": "logical-row-major-f32-le-v1"
+            },
+            "context": {
+              "shape": [
+                1,
+                1
+              ],
+              "dtype": "f32",
+              "layout": {
+                "order": "row-major",
+                "strides": [
+                  1,
+                  1
+                ],
+                "strideUnit": "elements"
+              },
+              "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+              "hashEncoding": "logical-row-major-f32-le-v1"
+            },
+            "mask": null,
+            "noise": {
+              "shape": [
+                1,
+                1
+              ],
+              "dtype": "f32",
+              "layout": {
+                "order": "row-major",
+                "strides": [
+                  1,
+                  1
+                ],
+                "strideUnit": "elements"
+              },
+              "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+              "hashEncoding": "logical-row-major-f32-le-v1"
+            }
+          }
+        },
+        "after": {
+          "loss": 0.5,
+          "finiteObserved": true,
+          "prepared": {
+            "latent": {
+              "shape": [
+                1,
+                1
+              ],
+              "dtype": "f32",
+              "layout": {
+                "order": "row-major",
+                "strides": [
+                  1,
+                  1
+                ],
+                "strideUnit": "elements"
+              },
+              "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+              "hashEncoding": "logical-row-major-f32-le-v1"
+            },
+            "context": {
+              "shape": [
+                1,
+                1
+              ],
+              "dtype": "f32",
+              "layout": {
+                "order": "row-major",
+                "strides": [
+                  1,
+                  1
+                ],
+                "strideUnit": "elements"
+              },
+              "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+              "hashEncoding": "logical-row-major-f32-le-v1"
+            },
+            "mask": null,
+            "noise": {
+              "shape": [
+                1,
+                1
+              ],
+              "dtype": "f32",
+              "layout": {
+                "order": "row-major",
+                "strides": [
+                  1,
+                  1
+                ],
+                "strideUnit": "elements"
+              },
+              "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+              "hashEncoding": "logical-row-major-f32-le-v1"
+            }
+          }
+        },
+        "criterion": "after < before",
+        "strictDecreaseVerified": true,
+        "improvement": 0.25,
+        "sameActualPreparedPackageVerified": true,
+        "reencodingBetweenMeasurements": false,
+        "noiseRegenerationBetweenMeasurements": false,
+        "nativeReceipt": {
+          "path": "SCHEMA_TEST_ONLY/resumed-native.json",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      "factorDelta": {
+        "tensorCount": 1,
+        "elementCount": 1,
+        "changedElements": 1,
+        "maxAbsDelta": 0.125,
+        "squaredL2Delta": 0.015625,
+        "finiteObserved": true,
+        "startExport": {
+          "path": "SCHEMA_TEST_ONLY/resumed-start.safetensors",
+          "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "finalExport": {
+          "path": "SCHEMA_TEST_ONLY/resumed-end.safetensors",
+          "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "layoutIdentity": "8888888888888888888888888888888888888888888888888888888888888888",
+        "alpha": 6.0,
+        "rank": 4,
+        "parent": "base",
+        "method": "lora",
+        "sourceSha": "0000000000000000000000000000000000000000",
+        "weightSourceRevision": "0000000000000000000000000000000000000000",
+        "nativeReceipt": {
+          "path": "SCHEMA_TEST_ONLY/resumed-native.json",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      "cursor": {
+        "epoch": 0,
+        "batchCursor": 60,
+        "sampleCursor": 60,
+        "partialAccumulation": {
+          "microsteps": 0,
+          "tokens": 0,
+          "gradientStateSha256": null
+        },
+        "stateArtifact": {
+          "path": "SCHEMA_TEST_ONLY/resumed-state.json",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      "frozenComponentsUnchanged": [
+        "backbone",
+        "text-encoder",
+        "vae"
+      ],
+      "frozenReceipt": {
+        "path": "SCHEMA_TEST_ONLY/resumed-frozen.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "runScopeReturned": true
+    }
+  },
+  "saveReloadGenerate": {
+    "adapterPath": "SCHEMA_TEST_ONLY/adapter.safetensors",
+    "adapterSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "libraryId": "SCHEMA_TEST_ONLY_library-entry",
+    "resolvedPath": "SCHEMA_TEST_ONLY/adapter.safetensors",
+    "resolvedSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "finalAdapterSelected": true,
+    "trainerDroppedBeforeReload": true,
+    "applicationReport": {
+      "adapterSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "parent": "base",
+      "method": "lora",
+      "selectedStrength": 1.0,
+      "executedStrength": 1.0,
+      "appliedCount": 1,
+      "skippedCount": 0,
+      "receipt": {
+        "path": "SCHEMA_TEST_ONLY/application.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "before": {
+      "artifact": {
+        "path": "SCHEMA_TEST_ONLY/before.png",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "mimeType": "image/png",
+      "width": 256,
+      "height": 256,
+      "prompt": "sksmoss red circle centered on a pale background",
+      "seed": 1789,
+      "adapterStrength": 1.0,
+      "adapterSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "executionReceipt": {
+        "path": "SCHEMA_TEST_ONLY/before-execution.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "after": {
+      "artifact": {
+        "path": "SCHEMA_TEST_ONLY/after.png",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "mimeType": "image/png",
+      "width": 256,
+      "height": 256,
+      "prompt": "sksmoss red circle centered on a pale background",
+      "seed": 1789,
+      "adapterStrength": 1.0,
+      "adapterSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "executionReceipt": {
+        "path": "SCHEMA_TEST_ONLY/after-execution.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "disableControl": {
+      "artifact": {
+        "path": "SCHEMA_TEST_ONLY/disable.png",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "mimeType": "image/png",
+      "width": 256,
+      "height": 256,
+      "prompt": "sksmoss red circle centered on a pale background",
+      "seed": 1789,
+      "adapterStrength": 0.0,
+      "adapterSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "executionReceipt": {
+        "path": "SCHEMA_TEST_ONLY/disable-execution.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "noAdapterBaseline": {
+      "path": "SCHEMA_TEST_ONLY/baseline.png",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "disableMatchesNoAdapterBaseline": true,
+    "receipt": {
+      "path": "SCHEMA_TEST_ONLY/reload.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  },
+  "crossBackendLoad": {
+    "sourceCaseId": "mlx/base/lora",
+    "phase": "cross-load",
+    "phaseTiming": {
+      "phaseStartedAt": "2000-01-02T00:00:00Z",
+      "completedAt": "2000-01-02T00:00:02Z",
+      "wallSeconds": 2,
+      "wallLimitSeconds": 3600,
+      "clockSource": "cross-load-case-start"
+    },
+    "resourceGuard": {
+      "device": {
+        "class": "nvidia-cuda",
+        "claimedIdentity": "SCHEMA_TEST_ONLY_NOT_A_CUDA_DEVICE",
+        "observedIdentity": "SCHEMA_TEST_ONLY_NOT_A_CUDA_DEVICE",
+        "totalCapacityBytes": 1000,
+        "gpuMemoryLimitFraction": 0.85,
+        "capacityBasis": "actual-claimed-cuda-context-total-vram",
+        "resolvedCeilingBytes": 850,
+        "resolvedBeforeWeightsLoad": true,
+        "projectedDemandBytes": 500,
+        "headerDemandReceipt": {
+          "path": "SCHEMA_TEST_ONLY/cross-header.json",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "cpuReference": false
+      },
+      "rootProcess": {
+        "scope": "native-api-worker-root",
+        "pid": 1,
+        "executable": "SCHEMA_TEST_ONLY_NOT_AN_EXECUTABLE",
+        "binarySha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "releaseObserved": true,
+        "metadataHelperAbsenceClaim": false
+      },
+      "rootRssSamples": [
+        {
+          "at": "2000-01-02T00:00:00Z",
+          "bytes": 200
+        },
+        {
+          "at": "2000-01-02T00:00:01Z",
+          "bytes": 250
+        }
+      ],
+      "positiveInitialMeasurement": true,
+      "telemetryComplete": true,
+      "missingMeasurementCount": 0,
+      "nativeRootReleased": true,
+      "releaseReceipt": {
+        "path": "SCHEMA_TEST_ONLY/cross-release.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "sourceBackend": "mlx",
+    "importedBackend": "cuda",
+    "transferredAdapter": {
+      "path": "SCHEMA_TEST_ONLY/transferred.safetensors",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    "receivedSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "parent": "base",
+    "method": "lora",
+    "outcome": "generated",
+    "generation": {
+      "artifact": {
+        "path": "SCHEMA_TEST_ONLY/after.png",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "mimeType": "image/png",
+      "width": 256,
+      "height": 256,
+      "prompt": "sksmoss red circle centered on a pale background",
+      "seed": 1789,
+      "adapterStrength": 1.0,
+      "adapterSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "executionReceipt": {
+        "path": "SCHEMA_TEST_ONLY/after-execution.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "applicationReport": {
+      "adapterSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "parent": "base",
+      "method": "lora",
+      "selectedStrength": 1.0,
+      "executedStrength": 1.0,
+      "appliedCount": 1,
+      "skippedCount": 0,
+      "receipt": {
+        "path": "SCHEMA_TEST_ONLY/application.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "unsupportedFormatRefusal": null,
+    "receipt": {
+      "path": "SCHEMA_TEST_ONLY/cross-load.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  },
+  "recovery": {
+    "originalHorizon": 60,
+    "seed": 1789,
+    "datasetManifestSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "configSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "checkpointStep": 20,
+    "resumedThroughApi": true,
+    "referenceAndResumedExportsCompared": true,
+    "exportedStateEqual": true,
+    "resultsEqual": true,
+    "assertionsWeakened": false,
+    "cursorBeforeResume": {
+      "epoch": 0,
+      "batchCursor": 20,
+      "sampleCursor": 20,
+      "partialAccumulation": {
+        "microsteps": 0,
+        "tokens": 0,
+        "gradientStateSha256": null
+      },
+      "stateArtifact": {
+        "path": "SCHEMA_TEST_ONLY/before-resume-state.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "cursorAfterResume": {
+      "epoch": 0,
+      "batchCursor": 60,
+      "sampleCursor": 60,
+      "partialAccumulation": {
+        "microsteps": 0,
+        "tokens": 0,
+        "gradientStateSha256": null
+      },
+      "stateArtifact": {
+        "path": "SCHEMA_TEST_ONLY/after-resume-state.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "optimizerSchedulerRngState": {
+      "path": "SCHEMA_TEST_ONLY/recovery-state.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "originalCancelToken": "SCHEMA_TEST_ONLY_original-token",
+    "resumedCancelToken": "SCHEMA_TEST_ONLY_resumed-token",
+    "distinctResumedTokenObserved": true,
+    "originalTokenRemainsCanceled": true,
+    "checkpointStall": {
+      "scope": "test-support-only",
+      "referenceStallEnabled": false,
+      "checkpointStep": 20,
+      "enteredAt": "2000-01-01T00:00:00Z",
+      "exitedAt": "2000-01-01T00:00:01Z",
+      "waitedForTokenId": "SCHEMA_TEST_ONLY_original-token",
+      "timeoutSeconds": 3600,
+      "state": "released-by-api-cancellation",
+      "timedOut": false,
+      "tokenObservedCanceled": true,
+      "updatesSkippedOrReplayed": 0,
+      "receipt": {
+        "path": "SCHEMA_TEST_ONLY/stall.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "backendReentryWitness": {
+      "scope": "one-per-backend",
+      "anchorCaseId": "mlx/base/lora",
+      "witness": {
+        "path": "SCHEMA_TEST_ONLY/mlx-reentry.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "originalCancelToken": "SCHEMA_TEST_ONLY_reentry-canceled-token",
+      "freshRunCancelToken": "SCHEMA_TEST_ONLY_fresh-token",
+      "distinctFreshTokenObserved": true,
+      "freshTokenUncanceled": true,
+      "freshRunCompletedStep": 60
+    }
+  },
+  "memoryRefusal": {
+    "requestedControlCap": {
+      "kind": "bytes",
+      "value": 1
+    },
+    "resolvedControlCapBytes": 1,
+    "projectedHeaderDemandBytes": 500,
+    "headerDemandReceipt": {
+      "path": "SCHEMA_TEST_ONLY/low-cap-header.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "refusedBeforeWeightsLoad": true,
+    "actionableRefusal": "SCHEMA TEST ONLY: illustrative refusal, not a native result",
+    "publishedOutput": false,
+    "publishedOutputInventory": [],
+    "campaignCeilingRaised": false,
+    "receipt": {
+      "path": "SCHEMA_TEST_ONLY/refusal.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  },
+  "cleanup": {
+    "rootProcess": {
+      "scope": "native-api-worker-root",
+      "pid": 1,
+      "executable": "SCHEMA_TEST_ONLY_NOT_AN_EXECUTABLE",
+      "binarySha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "releaseObserved": true,
+      "metadataHelperAbsenceClaim": false
+    },
+    "nativeRootReleased": true,
+    "releaseReceipt": {
+      "path": "SCHEMA_TEST_ONLY/release.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "rootRssSamples": [
+      {
+        "at": "2000-01-01T00:00:00Z",
+        "bytes": 200
+      },
+      {
+        "at": "2000-01-01T00:00:01Z",
+        "bytes": 250
+      }
+    ],
+    "positiveInitialMeasurement": true,
+    "telemetryComplete": true,
+    "missingMeasurementCount": 0,
+    "resolvedCeilingBytes": 600,
+    "caseStartedAt": "2000-01-01T00:00:00Z",
+    "caseEndedAt": "2000-01-01T00:00:02Z",
+    "caseWallSeconds": 2,
+    "caseDeadlineSeconds": 3600,
+    "buildPreparationWallSeconds": 0,
+    "buildPreparationDeadlineSeconds": 7200
+  },
+  "productPath": {
+    "datasetUpload": {
+      "method": "POST",
+      "route": "/api/v1/projects/SCHEMA_TEST_ONLY/training/uploads",
+      "jobOrResourceId": "SCHEMA_TEST_ONLY_upload",
+      "httpStatus": 200,
+      "requestArtifact": {
+        "path": "SCHEMA_TEST_ONLY/upload-request.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "responseArtifact": {
+        "path": "SCHEMA_TEST_ONLY/upload-response.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "submit": {
+      "method": "POST",
+      "route": "/api/v1/projects/SCHEMA_TEST_ONLY/training/jobs",
+      "jobOrResourceId": "SCHEMA_TEST_ONLY_submit",
+      "httpStatus": 200,
+      "requestArtifact": {
+        "path": "SCHEMA_TEST_ONLY/submit-request.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "responseArtifact": {
+        "path": "SCHEMA_TEST_ONLY/submit-response.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "claim": {
+      "method": "POST",
+      "route": "/api/v1/jobs/claim",
+      "jobOrResourceId": "SCHEMA_TEST_ONLY_claim",
+      "httpStatus": 200,
+      "requestArtifact": {
+        "path": "SCHEMA_TEST_ONLY/claim-request.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "responseArtifact": {
+        "path": "SCHEMA_TEST_ONLY/claim-response.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "progress": {
+      "method": "POST",
+      "route": "/api/v1/jobs/SCHEMA_TEST_ONLY/progress",
+      "jobOrResourceId": "SCHEMA_TEST_ONLY_progress",
+      "httpStatus": 200,
+      "requestArtifact": {
+        "path": "SCHEMA_TEST_ONLY/progress-request.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "responseArtifact": {
+        "path": "SCHEMA_TEST_ONLY/progress-response.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "result": {
+      "method": "POST",
+      "route": "/api/v1/jobs/SCHEMA_TEST_ONLY",
+      "jobOrResourceId": "SCHEMA_TEST_ONLY_result",
+      "httpStatus": 200,
+      "requestArtifact": {
+        "path": "SCHEMA_TEST_ONLY/result-request.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "responseArtifact": {
+        "path": "SCHEMA_TEST_ONLY/result-response.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "libraryRegistration": {
+      "method": "POST",
+      "route": "/api/v1/loras",
+      "jobOrResourceId": "SCHEMA_TEST_ONLY_library",
+      "httpStatus": 200,
+      "requestArtifact": {
+        "path": "SCHEMA_TEST_ONLY/library-request.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "responseArtifact": {
+        "path": "SCHEMA_TEST_ONLY/library-response.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "imageJobExecution": {
+      "method": "POST",
+      "route": "/api/v1/image/jobs",
+      "jobOrResourceId": "SCHEMA_TEST_ONLY_image",
+      "httpStatus": 200,
+      "requestArtifact": {
+        "path": "SCHEMA_TEST_ONLY/image-request.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "responseArtifact": {
+        "path": "SCHEMA_TEST_ONLY/image-response.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    }
+  },
+  "regression": {
+    "ordinary": {
+      "selectedMode": "off",
+      "executedMode": "off",
+      "beforeNoAdapter": {
+        "path": "SCHEMA_TEST_ONLY/baseline.png",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "afterUnload": {
+        "path": "SCHEMA_TEST_ONLY/after-unload.png",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "sameOutputVerified": true,
+      "receipt": {
+        "path": "SCHEMA_TEST_ONLY/ordinary.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "dmdExecutions": [],
+    "baseDmdRefusals": [
+      {
+        "selectedMode": "unmerged_bf16",
+        "executedMode": null,
+        "httpStatus": 400,
+        "refusal": "SCHEMA TEST ONLY: illustrative Base+DMD refusal",
+        "producedImage": false,
+        "receipt": {
+          "path": "SCHEMA_TEST_ONLY/refuse-unmerged_bf16.json",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      },
+      {
+        "selectedMode": "full_fp32",
+        "executedMode": null,
+        "httpStatus": 400,
+        "refusal": "SCHEMA TEST ONLY: illustrative Base+DMD refusal",
+        "producedImage": false,
+        "receipt": {
+          "path": "SCHEMA_TEST_ONLY/refuse-full_fp32.json",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      }
+    ]
+  },
+  "inspections": [
+    {
+      "reviewer": "SCHEMA_TEST_ONLY_NOT_AN_INSPECTION",
+      "reviewedArtifact": {
+        "path": "SCHEMA_TEST_ONLY/before.png",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "findings": [
+        "SCHEMA TEST ONLY: no image exists or was inspected"
+      ],
+      "completedAt": "2000-01-01T00:00:01Z",
+      "beforeFinalAcceptance": true
+    },
+    {
+      "reviewer": "SCHEMA_TEST_ONLY_NOT_AN_INSPECTION",
+      "reviewedArtifact": {
+        "path": "SCHEMA_TEST_ONLY/after.png",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "findings": [
+        "SCHEMA TEST ONLY: no image exists or was inspected"
+      ],
+      "completedAt": "2000-01-01T00:00:01Z",
+      "beforeFinalAcceptance": true
+    },
+    {
+      "reviewer": "SCHEMA_TEST_ONLY_NOT_AN_INSPECTION",
+      "reviewedArtifact": {
+        "path": "SCHEMA_TEST_ONLY/disable.png",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "findings": [
+        "SCHEMA TEST ONLY: no image exists or was inspected"
+      ],
+      "completedAt": "2000-01-01T00:00:01Z",
+      "beforeFinalAcceptance": true
+    }
+  ]
+}

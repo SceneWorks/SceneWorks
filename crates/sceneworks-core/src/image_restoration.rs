@@ -10,7 +10,7 @@
 //! This module is the one parse of those three fields, shared by the API (submit-time validation
 //! and the pre-submission plan preview) and the worker (the request it hands the engine), so the
 //! two can never disagree about what a payload means. It carries no engine math: the planner
-//! (`gen_core::iris::restoration::plan`) lives behind the worker crate.
+//! (`gen_core_iris::restoration::plan`) lives behind the worker crate.
 
 use serde_json::{Map, Value};
 
@@ -28,11 +28,7 @@ pub const IRIS_MODEL_KEY: &str = "irisModel";
 
 /// Whether `id` is a well-formed catalog model id (the worker joins it as one directory component).
 pub fn is_plain_model_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 128
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    crate::ids::is_safe_id_with_max(id, 128)
 }
 
 /// The trained restoration model a payload names (`irisModel`), validated; `None` for the release

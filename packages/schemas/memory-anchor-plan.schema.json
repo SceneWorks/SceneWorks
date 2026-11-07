@@ -15,7 +15,7 @@
       "propertyNames": {
         "type": "string",
         "$comment": "`<modelId>:<tier>:<backend>` — the cell identity itself. Object keys are unique by construction, which is what makes a duplicate anchor unexpressible.",
-        "pattern": "^[a-z][a-z0-9_]*:(q4|q8|bf16):(mlx|candle)$"
+        "pattern": "^[a-z][a-z0-9_]*:(q4|q8|bf16|fp8r|nvfp4):(mlx|candle)$"
       },
       "additionalProperties": { "$ref": "#/$defs/anchor" }
     }

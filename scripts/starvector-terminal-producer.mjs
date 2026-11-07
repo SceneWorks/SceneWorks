@@ -1,6 +1,10 @@
 #!/usr/bin/env node
+import { legacyUtf16Json as stable } from "./lib/canonical-json.mjs";
+import { sha256 as sha } from "./lib/file-sha256.mjs";
 // SC-22261 controller: all threshold decisions belong to the pinned inference validator.
-import { createHash, randomUUID } from "node:crypto";
+import { metalChildOptions } from "./lib/apple-metal-execution-lock.mjs";
+import { execFileWithFds } from "./lib/exec-file-with-fds.mjs";
+import { randomUUID } from "node:crypto";
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { lstat, mkdir, open, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
@@ -14,13 +18,13 @@ import { assertTerminalProductWorkerReady } from "./starvector-terminal-product-
 import { claimTerminalAttempt } from "./lib/starvector-terminal-attempt.mjs";
 
 const execFile = promisify(execFileCallback);
-const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
+
 const json = async (file) => JSON.parse(await readFile(file, "utf8"));
 const die = (message) => { throw new Error(`starvector terminal producer: ${message}`); };
 const SHA256 = /^[a-f0-9]{64}$/;
 const REVISION = /^[a-f0-9]{40}$/;
 const TUPLES = ["mlx:1b", "mlx:8b", "candle-cuda:1b", "candle-cuda:8b"];
-const stable = (value) => Array.isArray(value) ? `[${value.map(stable).join(",")}]` : value && typeof value === "object" ? `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}` : JSON.stringify(value);
+
 // Windows cannot create the validator's colon-bearing logical tuple paths. Raw
 // jobs therefore use a reversible portable spelling; the macOS sealing job
 // materializes the exact validator paths in its canonical evidence tree.
@@ -316,7 +320,7 @@ export async function executeTuple({ sceneWorksRoot, planPath, inferenceRoot, we
 
 export function executeNodeRoute(command, options = {}) {
   // Native Windows process creation cannot interpret a JavaScript shebang.
-  return execFile(process.execPath, [command], options);
+  return execFileWithFds(process.execPath, [command], metalChildOptions(options), execFile);
 }
 
 export async function verifyTupleExecution(root, expected) {

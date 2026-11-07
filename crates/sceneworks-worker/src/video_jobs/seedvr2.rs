@@ -1,14 +1,8 @@
 #[allow(unused_imports)]
 use super::prelude::*;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use super::vace::rgb_image_to_engine;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use super::wan::{generate_video, VideoGenInput};
 
 // ---------------------------------------------------------------------------
@@ -40,41 +34,32 @@ pub(super) use runtime_macos::providers::seedvr2::video as seedvr2_video;
 // dir pins and the read-only legacy roots — so the pins cannot drift between the lanes at all,
 // rather than being held together by an agreement test.
 /// The engine registry id wired for video upscale (3B; 7B = sc-5197 / sc-5927).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const SEEDVR2_ENGINE_ID: &str = "seedvr2_3b";
 /// Adapter id recorded on the result asset for provenance (mirrors the other `mlx_*` video adapters;
 /// SeedVR2 itself takes no LoRA — this is metadata only).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const SEEDVR2_ADAPTER: &str = "mlx_seedvr2";
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const SEEDVR2_CANCEL_MESSAGE: &str = "Video upscale canceled by user.";
 
 /// A failed post-encode step must not leave the intermediate, silent output, or derived poster
 /// behind. The API publishes the asset only after the final completion update succeeds.
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 pub(super) async fn cleanup_failed_seedvr2_mux(media_path: &Path, mux_tmp: &Path) {
     let _ = tokio::fs::remove_file(mux_tmp).await;
     let _ = tokio::fs::remove_file(media_path).await;
     let _ = tokio::fs::remove_file(media_path.with_extension("poster.jpg")).await;
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 pub(super) struct Seedvr2OutputGuard {
     media_path: PathBuf,
     mux_tmp: PathBuf,
     armed: bool,
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 impl Seedvr2OutputGuard {
     pub(super) fn new(media_path: &Path, mux_tmp: &Path) -> Self {
         Self {
@@ -89,7 +74,7 @@ impl Seedvr2OutputGuard {
     }
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 impl Drop for Seedvr2OutputGuard {
     fn drop(&mut self) {
         if self.armed {
@@ -102,10 +87,7 @@ impl Drop for Seedvr2OutputGuard {
 
 /// Snap a dimension to the SeedVR2 VAE/patch stride (a multiple of 16, the engine's hard
 /// requirement), rounding to nearest and clamping to the engine's `[16, 4096]` size range.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn snap_seedvr2_dim(value: u32) -> u32 {
     let rounded = value.saturating_add(8) / 16 * 16;
     rounded.clamp(16, 4096)
@@ -126,21 +108,14 @@ fn snap_seedvr2_dim(value: u32) -> u32 {
 /// allowed to occupy. Deliberately generous — the estimate itself uses raw RGB8 per frame (a real
 /// upper bound on PNG-compressed output), and we still leave headroom for the source frames already on
 /// disk, the eventual encoded MP4, and everything else sharing the volume.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const SEEDVR2_DISK_OUTPUT_FRACTION: f64 = 0.8;
 
 /// Estimated peak on-disk bytes for the streamed output: `frame_count` PNG frames at
 /// `out_w × out_h`, sized as raw RGB8 (`w·h·3`) per frame. PNG compression only ever makes the real
 /// footprint SMALLER, so this is a safe upper bound (matching the generous shape of the removed
 /// `seedvr2_estimated_host_bytes`). Pure so the estimate is unit-testable without a filesystem.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn seedvr2_estimated_output_bytes(frame_count: u64, out_w: u64, out_h: u64) -> u64 {
     let per_frame = out_w.saturating_mul(out_h).saturating_mul(3);
     frame_count.saturating_mul(per_frame)
@@ -148,11 +123,7 @@ pub(crate) fn seedvr2_estimated_output_bytes(frame_count: u64, out_w: u64, out_h
 
 /// Peak scratch footprint while SeedVR2 is streaming: the native-resolution source PNG sequence and
 /// the upscaled output sequence coexist until the final encode. Both use a raw-RGB upper bound.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn seedvr2_estimated_scratch_bytes(
     frame_count: u64,
     src_w: u64,
@@ -164,99 +135,14 @@ pub(crate) fn seedvr2_estimated_scratch_bytes(
         .saturating_add(seedvr2_estimated_output_bytes(frame_count, out_w, out_h))
 }
 
-/// Bytes currently AVAILABLE on the volume backing `path`, best-effort and portable with NO new crate
-/// dependency: macOS + Linux run POSIX `df -k -P <path>` and read the 4th column (available 1K
-/// blocks); Windows (candle lane) uses `fs2::available_space` (a safe wrapper over the Win32
-/// `GetDiskFreeSpaceExW`) for the free bytes available to this process. Returns `None` if the probe
-/// fails; the caller then skips the guard rather than falsely rejecting a job.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+/// Available bytes on the scratch volume, honoring quotas. Probe failure retains fail-open admission.
+#[cfg(native_lane)]
 pub(crate) fn available_disk_bytes(path: &Path) -> Option<u64> {
-    #[cfg(unix)]
-    {
-        // `df -k -P` forces POSIX one-line-per-filesystem output in 1024-byte blocks, so the columns
-        // are stable regardless of locale/long device names:
-        //   Filesystem 1024-blocks Used Available Capacity Mounted on
-        let out = std::process::Command::new("df")
-            .args(["-k", "-P"])
-            .arg(path)
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        let text = String::from_utf8_lossy(&out.stdout);
-        // The data row is the 2nd line (after the header); `-P` guarantees it is a single line.
-        let row = text.lines().nth(1)?;
-        let available_kib = row.split_whitespace().nth(3)?.parse::<u64>().ok()?;
-        Some(available_kib.saturating_mul(1024))
-    }
-    #[cfg(not(unix))]
-    {
-        // Windows (candle lane): `fs2::available_space` wraps `GetDiskFreeSpaceExW`, returning the
-        // free bytes available to this process on the volume backing `path` (honoring any per-user
-        // quota — the same figure the old code's "avail" line meant to read). Safe (the crate forbids
-        // `unsafe` and fs2 is already a worker dependency) and — unlike scraping localized `fsutil`
-        // text — locale-independent, so the sc-9646 guard is armed on every Windows install (sc-13585:
-        // the old branch matched an `fsutil` line with both "avail" and "free bytes", which no modern
-        // Windows 11 layout — "Total free bytes" / "Total quota free bytes" — prints, so the probe
-        // returned `None` and the guard silently fail-opened into a no-op). A probe error (e.g. the
-        // path does not exist) becomes `None`, so the guard fail-opens rather than falsely rejecting.
-        fs2::available_space(path).ok()
-    }
+    sceneworks_core::disk::disk_free_bytes(path).ok()
 }
 
-/// Fail loud (before the window loop / before any GPU work) when the estimated streamed-output PNG
-/// footprint would exceed the generous fraction of the scratch volume's currently-available space.
-/// `Ok(())` when it fits, when the frame count / dimensions are unknown (0), or when the free-space
-/// probe is unavailable (we do not falsely reject a job on a probe failure). The error names the
-/// estimate AND the available space so the user knows exactly what to trim. Mirrors the shape of the
-/// removed `check_seedvr2_host_ram` (sc-9646).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-#[allow(dead_code)] // retained as the output-only regression seam for sc-9646/sc-13585 tests
-pub(crate) fn check_seedvr2_output_disk(
-    scratch_dir: &Path,
-    frame_count: u64,
-    out_w: u64,
-    out_h: u64,
-) -> WorkerResult<()> {
-    if frame_count == 0 || out_w == 0 || out_h == 0 {
-        return Ok(());
-    }
-    let Some(available) = available_disk_bytes(scratch_dir) else {
-        // Probe failed (unknown platform / error): skip the guard rather than block a valid job.
-        return Ok(());
-    };
-    let needed = seedvr2_estimated_output_bytes(frame_count, out_w, out_h);
-    let budget = ((available as f64) * SEEDVR2_DISK_OUTPUT_FRACTION) as u64;
-    if needed > budget {
-        const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
-        // Largest frame count that fits the budget, so the message is actionable.
-        let per_frame = seedvr2_estimated_output_bytes(1, out_w, out_h).max(1);
-        let max_frames = budget / per_frame;
-        return Err(WorkerError::InvalidPayload(format!(
-            "Not enough disk space to upscale this clip: {frame_count} output frames at \
-             {out_w}×{out_h} would write ~{needed:.1} GB of PNG frames to the scratch volume, over \
-             the ~{budget:.1} GB usable of ~{available:.1} GB free. Trim the clip to about \
-             {max_frames} frames (or fewer), lower the target resolution, or free up disk space.",
-            needed = needed as f64 / GIB,
-            budget = budget as f64 / GIB,
-            available = available as f64 / GIB,
-        )));
-    }
-    Ok(())
-}
-
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-fn check_seedvr2_scratch_disk(
+#[cfg(native_lane)]
+pub(crate) fn check_seedvr2_scratch_disk(
     scratch_dir: &Path,
     frame_count: u64,
     src_w: u64,
@@ -273,7 +159,7 @@ fn check_seedvr2_scratch_disk(
     let needed = seedvr2_estimated_scratch_bytes(frame_count, src_w, src_h, out_w, out_h);
     let budget = ((available as f64) * SEEDVR2_DISK_OUTPUT_FRACTION) as u64;
     if needed > budget {
-        const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+        const GIB: f64 = crate::fit_gate::BYTES_PER_GIB;
         let per_frame = seedvr2_estimated_scratch_bytes(1, src_w, src_h, out_w, out_h).max(1);
         let max_frames = budget / per_frame;
         return Err(WorkerError::InvalidPayload(format!(
@@ -322,10 +208,7 @@ fn check_seedvr2_scratch_disk(
 /// single chunk) → the streamed output is bit-identical to a whole-clip run. Larger windows mean fewer
 /// worker-window seams and a closer match to whole-clip chunking, traded against a larger per-window
 /// host footprint (≈ `64 · out_w · out_h · 3` bytes of RGB8, ~1.6 GB at 4×-of-1080p — bounded).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) const SEEDVR2_WORKER_CHUNK_FRAMES: i32 = 64;
 
 /// Streaming cross-window assembler (sc-9595): feeds each upscaled worker window into the engine's own
@@ -333,10 +216,7 @@ pub(super) const SEEDVR2_WORKER_CHUNK_FRAMES: i32 = 64;
 /// the current window in memory. The cross-fade at each worker-window boundary is byte-identical to the
 /// engine's internal chunk assembly — proven equivalent to a single whole-clip `assemble_overlap` over
 /// synthetic frames (see `seedvr2_stream_matches_whole_clip_assembly`).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) struct Seedvr2StreamAssembler {
     /// Cross-fade overlap (frames) between adjacent worker windows — the engine's `DEFAULT_OVERLAP`.
     ov: i32,
@@ -351,10 +231,7 @@ pub(super) struct Seedvr2StreamAssembler {
     seeded: bool,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl Seedvr2StreamAssembler {
     pub(super) fn new(n: i32, ov: i32) -> Self {
         Self {
@@ -422,19 +299,14 @@ impl Seedvr2StreamAssembler {
 
 /// Resolve a project-relative asset path safely under `project_path` (reject `..` / absolute
 /// components — same guard as `upscale_jobs::resolve_source`).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn safe_join(project_path: &Path, rel: &str) -> Option<PathBuf> {
-    let mut path = project_path.to_path_buf();
-    for component in Path::new(rel).components() {
-        match component {
-            std::path::Component::Normal(value) => path.push(value),
-            _ => return None,
-        }
-    }
-    Some(path)
+    sceneworks_core::safe_path::confine_under(
+        project_path,
+        rel,
+        sceneworks_core::safe_path::Confinement::SymlinkSafe,
+    )
+    .ok()
 }
 
 /// The source decode command: every frame, in presentation order, to `in_%05d.png` (numbered from
@@ -442,11 +314,7 @@ fn safe_join(project_path: &Path, rel: &str) -> Option<PathBuf> {
 /// art or a thumbnail), and `-fps_mode passthrough` neither drops nor duplicates, so PNG `k` is the
 /// probe's frame `k-1` and the probe's timestamps describe it (sc-24391). Kept pure so tests run
 /// this exact command.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 pub(super) fn seedvr2_source_decode_args(source: &Path, frames_dir: &Path) -> Vec<String> {
     vec![
         "ffmpeg".to_owned(),
@@ -471,10 +339,7 @@ pub(super) fn seedvr2_source_decode_args(source: &Path, frames_dir: &Path) -> Ve
 /// exact source frame count. The caller loads each temporal WINDOW of these paths on demand via
 /// [`load_seedvr2_window`], so host RGB8 RAM is bounded to one window instead of the whole clip. The
 /// returned paths live under a job-scoped temp dir the caller is responsible for removing.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn decode_seedvr2_source_to_disk(
     api: &ApiClient,
     settings: &Settings,
@@ -487,7 +352,7 @@ async fn decode_seedvr2_source_to_disk(
     let ctx = FfmpegContext::new(api, settings, job_id, SEEDVR2_CANCEL_MESSAGE);
     run_ffmpeg(seedvr2_source_decode_args(source, frames_dir), Some(ctx)).await?;
     let dir = frames_dir.to_path_buf();
-    let paths = tokio::task::spawn_blocking(move || -> WorkerResult<Vec<PathBuf>> {
+    let paths = crate::load_progress::spawn_blocking(move || -> WorkerResult<Vec<PathBuf>> {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)?
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
             .filter(|path| path.extension().is_some_and(|ext| ext == "png"))
@@ -505,11 +370,7 @@ async fn decode_seedvr2_source_to_disk(
     Ok(paths)
 }
 
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Seedvr2SourceProbe {
     pub(super) frame_count: u64,
@@ -522,34 +383,39 @@ pub(super) struct Seedvr2SourceProbe {
 /// PNG decode), so the first/input `Video:` line can report the opposite orientation. Kept pure so
 /// the admission plan is tested without real media. We intentionally ignore encoder/status tokens
 /// outside sane dimensions.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(test)]
 pub(super) fn parse_seedvr2_source_probe(stderr: &str) -> Option<Seedvr2SourceProbe> {
-    let frame_count = stderr.rmatch_indices("frame=").find_map(|(idx, _)| {
-        stderr[idx + 6..]
-            .trim_start()
-            .split(|c: char| !c.is_ascii_digit())
-            .next()
-            .filter(|digits| !digits.is_empty())
-            .and_then(|digits| digits.parse::<u64>().ok())
-    })?;
+    let frame_count = seedvr2_frame_count(stderr)?;
     let video_line = stderr.lines().rev().find(|line| line.contains("Video:"))?;
-    let (width, height) = video_line
-        .split(|c: char| c.is_whitespace() || c == ',')
-        .find_map(|token| {
-            let token = token.trim_matches(|c: char| !c.is_ascii_digit() && c != 'x');
-            let (w, h) = token.split_once('x')?;
-            let (w, h) = (w.parse::<u32>().ok()?, h.parse::<u32>().ok()?);
-            (w > 0 && h > 0 && w <= 65_535 && h <= 65_535).then_some((w, h))
-        })?;
+    let (width, height) = seedvr2_video_geometry(video_line)?;
     (frame_count > 0).then_some(Seedvr2SourceProbe {
         frame_count,
         width,
         height,
     })
+}
+
+#[cfg(any(test, native_lane))]
+fn seedvr2_frame_count(stderr: &str) -> Option<u64> {
+    stderr.rmatch_indices("frame=").find_map(|(idx, _)| {
+        stderr[idx + 6..]
+            .trim_start()
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .filter(|digits| !digits.is_empty())
+            .and_then(|digits| digits.parse().ok())
+    })
+}
+
+#[cfg(any(test, native_lane))]
+fn seedvr2_video_geometry(line: &str) -> Option<(u32, u32)> {
+    line.split(|c: char| c.is_whitespace() || c == ',')
+        .find_map(|token| {
+            let token = token.trim_matches(|c: char| !c.is_ascii_digit() && c != 'x');
+            let (w, h) = token.split_once('x')?;
+            let (w, h) = (w.parse::<u32>().ok()?, h.parse::<u32>().ok()?);
+            (w > 0 && h > 0 && w <= 65_535 && h <= 65_535).then_some((w, h))
+        })
 }
 
 /// The probe command: one FFmpeg null-mux pass that decodes every frame of the stream the decode
@@ -558,11 +424,7 @@ pub(super) fn parse_seedvr2_source_probe(stderr: &str) -> Option<Seedvr2SourcePr
 /// sc-24391). `checksum=0` skips the per-plane checksums the filter would otherwise compute on every
 /// frame; the option exists in every FFmpeg the worker ships with (5.1+). Kept pure so tests run
 /// this exact command.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 pub(super) fn seedvr2_source_probe_args(source: &Path) -> Vec<String> {
     vec![
         "ffmpeg".to_owned(),
@@ -583,10 +445,7 @@ pub(super) fn seedvr2_source_probe_args(source: &Path) -> Vec<String> {
 /// VFR-safe source probe using the bundled FFmpeg null mux: frame count, output geometry and the
 /// frame timing the upscaled clip must keep. The shared runner preserves the normal
 /// heartbeat/cancellation lifecycle while FFmpeg walks the source.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn probe_seedvr2_source(
     api: &ApiClient,
     settings: &Settings,
@@ -594,21 +453,84 @@ async fn probe_seedvr2_source(
     source: &Path,
 ) -> WorkerResult<(Seedvr2SourceProbe, Seedvr2SourceTiming)> {
     let ctx = FfmpegContext::new(api, settings, job_id, SEEDVR2_CANCEL_MESSAGE);
-    let stderr =
-        crate::media_jobs::run_ffmpeg_capture_stderr(seedvr2_source_probe_args(source), Some(ctx))
-            .await?;
-    let probe = parse_seedvr2_source_probe(&stderr).ok_or_else(|| {
+    probe_seedvr2_with_context(seedvr2_source_probe_args(source), Some(ctx)).await
+}
+
+#[cfg(any(test, native_lane))]
+pub(super) async fn probe_seedvr2_with_context(
+    args: Vec<String>,
+    context: Option<FfmpegContext<'_>>,
+) -> WorkerResult<(Seedvr2SourceProbe, Seedvr2SourceTiming)> {
+    let output =
+        crate::media_jobs::run_ffmpeg_with_stderr(args, context, read_seedvr2_stderr).await?;
+    let probe = output.data.probe().ok_or_else(|| {
         WorkerError::InvalidPayload(
             "Could not determine the source video's frame count and dimensions before upscale."
                 .to_owned(),
         )
     })?;
-    let timing = parse_seedvr2_source_timing(&stderr, probe.frame_count).ok_or_else(|| {
-        WorkerError::InvalidPayload(
-            "Could not determine the source video's frame timing before upscale.".to_owned(),
-        )
-    })?;
+    let timing = output
+        .data
+        .timing
+        .finish(probe.frame_count)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "Could not determine the source video's frame timing before upscale.".to_owned(),
+            )
+        })?;
     Ok((probe, timing))
+}
+
+/// Only per-frame timestamps grow with the source; the shared reader bounds raw log storage.
+#[cfg(any(test, native_lane))]
+#[derive(Default)]
+pub(super) struct Seedvr2ProbeCollector {
+    frame_count: Option<u64>,
+    geometry: Option<(u32, u32)>,
+    timing: Seedvr2TimingCollector,
+}
+
+#[cfg(any(test, native_lane))]
+impl Seedvr2ProbeCollector {
+    pub(super) fn read_line(&mut self, line: &str) {
+        if let Some(count) = seedvr2_frame_count(line) {
+            self.frame_count = Some(count);
+        }
+        if line.contains("Video:") {
+            self.geometry = seedvr2_video_geometry(line);
+        }
+        self.timing.push_line(line);
+    }
+
+    fn probe(&self) -> Option<Seedvr2SourceProbe> {
+        self.frame_count
+            .zip(self.geometry)
+            .and_then(|(frame_count, (width, height))| {
+                (frame_count > 0).then_some(Seedvr2SourceProbe {
+                    frame_count,
+                    width,
+                    height,
+                })
+            })
+    }
+
+    #[cfg(test)]
+    pub(super) fn result(self) -> Option<(Seedvr2SourceProbe, Seedvr2SourceTiming)> {
+        let probe = self.probe()?;
+        Some((probe, self.timing.finish(probe.frame_count)?))
+    }
+}
+
+#[cfg(any(test, native_lane))]
+async fn read_seedvr2_stderr(
+    pipe: tokio::process::ChildStderr,
+) -> std::io::Result<sceneworks_core::media_process::ParsedStderr<Seedvr2ProbeCollector>> {
+    sceneworks_core::media_process::read_stderr_lines(
+        pipe,
+        Seedvr2ProbeCollector::default(),
+        Seedvr2ProbeCollector::read_line,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -627,33 +549,19 @@ async fn probe_seedvr2_source(
 /// (Matroska) cannot store 30000/1001 exactly, so its "29.97 fps" frames sit up to half a tick off the
 /// ideal grid. A frame further off than this belongs to a genuinely variable clip, which keeps its own
 /// timestamps.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 const SEEDVR2_CFR_TOLERANCE_SECONDS: f64 = 0.001;
 
 /// The finest tick the variable-rate encode carries. FFmpeg's concat demuxer reads each frame's
 /// `duration` in microseconds (`AV_TIME_BASE`), so a finer source time base is rescaled to
 /// microseconds, far below anything a viewer or a soundtrack can resolve.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 const SEEDVR2_MAX_TIMESCALE: u64 = 1_000_000;
 
 /// When the upscaled frames are shown (sc-24391). The upscale is 1:1 in frames, so this is the
 /// source's own timing as measured by [`parse_seedvr2_source_timing`].
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code)
-)]
+#[cfg(any(test, native_lane))]
 pub(super) enum Seedvr2Timing {
     /// Every frame sits on one uniform grid: encode at exactly `num/den` frames per second
     /// (`30000/1001`, never a rounded 30).
@@ -667,13 +575,7 @@ pub(super) enum Seedvr2Timing {
     },
 }
 
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code)
-)]
+#[cfg(any(test, native_lane))]
 impl Seedvr2Timing {
     /// Constant-rate timing at a whole `fps`, clamped to at least 1 fps like the other encode paths.
     #[cfg(test)]
@@ -762,14 +664,7 @@ impl Seedvr2Timing {
 }
 
 /// `num/den` in lowest terms, or `None` for a zero term or a result that does not fit in `u64`.
-#[cfg_attr(
-    not(any(
-        test,
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code)
-)]
+#[cfg(any(test, native_lane))]
 fn reduced_ratio(num: u128, den: u128) -> Option<(u64, u64)> {
     fn gcd(a: u128, b: u128) -> u128 {
         if b == 0 {
@@ -790,11 +685,7 @@ fn reduced_ratio(num: u128, den: u128) -> Option<(u64, u64)> {
 
 /// The measured source timing the upscaled clip keeps (sc-24391): when each frame is shown relative
 /// to the first ([`Seedvr2Timing`]), and how far into the source that first frame is.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Seedvr2SourceTiming {
     pub(super) frames: Seedvr2Timing,
@@ -824,80 +715,97 @@ impl Seedvr2SourceTiming {
 /// `None` when the log does not describe exactly `frame_count` frames, numbered in order, in one time
 /// base; the caller then fails the job rather than guess a rate, because a guessed rate is the bug
 /// this replaces.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(test)]
 pub(super) fn parse_seedvr2_source_timing(
     stderr: &str,
     frame_count: u64,
 ) -> Option<Seedvr2SourceTiming> {
-    fn ratio_after(text: &str, key: &str) -> Option<(u64, u64)> {
-        let value = text.split_once(key)?.1.trim_start();
-        let value = value.split([',', ' ']).next()?;
-        let (num, den) = value.split_once('/')?;
-        Some((num.parse().ok()?, den.parse().ok()?))
+    let mut timing = Seedvr2TimingCollector::default();
+    for line in stderr.lines() {
+        timing.push_line(line);
+    }
+    timing.finish(frame_count)
+}
+
+#[cfg(any(test, native_lane))]
+#[derive(Default)]
+struct Seedvr2TimingCollector {
+    time_base: Option<(u64, u64)>,
+    frame_rate: Option<(u64, u64)>,
+    pts: Vec<Option<i64>>,
+    segment_base: usize,
+    invalid: bool,
+}
+
+#[cfg(any(test, native_lane))]
+impl Seedvr2TimingCollector {
+    fn push_line(&mut self, line: &str) {
+        if !self.invalid && self.read_line(line).is_none() {
+            self.invalid = true;
+        }
     }
 
-    let mut time_base: Option<(u64, u64)> = None;
-    let mut frame_rate: Option<(u64, u64)> = None;
-    let mut pts: Vec<Option<i64>> = Vec::new();
-    // How many frames earlier filter configurations already logged; the current one numbers its
-    // frames from 0 again.
-    let mut segment_base = 0;
-    for line in stderr.lines() {
-        // `[Parsed_showinfo_0 @ 0x…] <body>`; every other line (and showinfo's own side-data and
-        // colour continuation lines) is skipped.
+    fn read_line(&mut self, line: &str) -> Option<()> {
+        fn ratio_after(text: &str, key: &str) -> Option<(u64, u64)> {
+            let value = text
+                .split_once(key)?
+                .1
+                .trim_start()
+                .split([',', ' '])
+                .next()?;
+            let (num, den) = value.split_once('/')?;
+            Some((num.parse().ok()?, den.parse().ok()?))
+        }
         let Some((_, body)) = line.split_once("[Parsed_showinfo_0 @ ") else {
-            continue;
+            return Some(());
         };
         let Some((_, body)) = body.split_once("] ") else {
-            continue;
+            return Some(());
         };
         if let Some(config) = body.strip_prefix("config in ") {
             let base = ratio_after(config, "time_base:")?;
             if base.0 == 0 || base.1 == 0 {
                 return None;
             }
-            match time_base {
-                // A mid-stream reconfiguration onto a different time base would make the pts
-                // before and after it incomparable.
+            match self.time_base {
                 Some(previous) if previous != base => return None,
-                Some(_) => segment_base = pts.len(),
+                Some(_) => self.segment_base = self.pts.len(),
                 None => {
-                    time_base = Some(base);
-                    frame_rate = ratio_after(config, "frame_rate:");
+                    self.time_base = Some(base);
+                    self.frame_rate = ratio_after(config, "frame_rate:");
                 }
             }
         } else if let Some(frame) = body.strip_prefix("n:") {
             let frame = frame.trim_start();
             let index: usize = frame.split_whitespace().next()?.parse().ok()?;
-            if segment_base + index != pts.len() {
+            if self.segment_base.checked_add(index)? != self.pts.len() {
                 return None;
             }
             let value = frame.split_once("pts:")?.1.split_whitespace().next()?;
-            // `NOPTS` (a frame the demuxer could not time) parses as `None`.
-            pts.push(value.parse().ok());
+            self.pts.push(value.parse().ok());
         }
+        Some(())
     }
-    if pts.len() as u64 != frame_count {
-        return None;
-    }
-    let (tb_num, tb_den) = time_base?;
-    let frames = classify_seedvr2_timing((tb_num, tb_den), frame_rate, &pts)?;
-    let start_micros = match pts.first().copied().flatten() {
-        Some(first) if first > 0 => {
-            let scaled = u128::from(first.unsigned_abs()) * u128::from(tb_num) * 1_000_000;
-            let tb_den = u128::from(tb_den);
-            u64::try_from((scaled + tb_den / 2) / tb_den).ok()?
+
+    fn finish(self, frame_count: u64) -> Option<Seedvr2SourceTiming> {
+        if self.invalid || self.pts.len() as u64 != frame_count {
+            return None;
         }
-        _ => 0,
-    };
-    Some(Seedvr2SourceTiming {
-        frames,
-        start_micros,
-    })
+        let (tb_num, tb_den) = self.time_base?;
+        let frames = classify_seedvr2_timing((tb_num, tb_den), self.frame_rate, &self.pts)?;
+        let start_micros = match self.pts.first().copied().flatten() {
+            Some(first) if first > 0 => {
+                let scaled = u128::from(first.unsigned_abs()) * u128::from(tb_num) * 1_000_000;
+                let tb_den = u128::from(tb_den);
+                u64::try_from((scaled + tb_den / 2) / tb_den).ok()?
+            }
+            _ => 0,
+        };
+        Some(Seedvr2SourceTiming {
+            frames,
+            start_micros,
+        })
+    }
 }
 
 /// Decide how the measured frames are laid out in time (sc-24391). Constant-rate when every frame
@@ -907,11 +815,7 @@ pub(super) fn parse_seedvr2_source_timing(
 /// variable-rate and keeps every frame's own timestamp. The declared rate is also the answer when
 /// per-frame timing is unusable (a frame without a timestamp, timestamps that do not increase, or a
 /// single frame).
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 pub(super) fn classify_seedvr2_timing(
     time_base: (u64, u64),
     frame_rate: Option<(u64, u64)>,
@@ -993,13 +897,7 @@ pub(super) fn classify_seedvr2_timing(
 /// the rounding never accumulates: frame `i` lands within half a microsecond of its source time, and
 /// FFmpeg's rescale to `1/timescale` puts it back on the exact source tick. `None` unless `timing`
 /// is variable-rate and describes exactly `frame_count` frames.
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code)
-)]
+#[cfg(any(test, native_lane))]
 pub(super) fn seedvr2_concat_list(timing: &Seedvr2Timing, frame_count: usize) -> Option<String> {
     let Seedvr2Timing::Variable {
         timescale,
@@ -1034,10 +932,7 @@ pub(super) fn seedvr2_concat_list(timing: &Seedvr2Timing, frame_count: usize) ->
 /// [`Image`]s on demand (sc-9595). Real frames only — the engine's `preprocess_chunk` pads a partial
 /// trailing window with last-frame repeats internally, matching the whole-clip path. Runs the blocking
 /// PNG decode off the async runtime.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn load_seedvr2_window(
     paths: &[PathBuf],
     start: usize,
@@ -1045,7 +940,7 @@ async fn load_seedvr2_window(
 ) -> WorkerResult<Vec<Image>> {
     let end = start.saturating_add(len).min(paths.len());
     let window: Vec<PathBuf> = paths.get(start..end).unwrap_or(&[]).to_vec();
-    tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
+    crate::load_progress::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
         let mut frames = Vec::with_capacity(window.len());
         for path in window {
             let image = crate::image_decode::decode_image_any(&path)
@@ -1063,10 +958,7 @@ async fn load_seedvr2_window(
 /// runtime (sc-9595). Returns the next free index. The shared frames dir is later encoded once by
 /// [`encode_seedvr2_stream`] with the exact ffmpeg args the whole-clip `encode_media` used, so the
 /// output is byte-identical while peak host RAM stays bounded to one worker window.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn append_seedvr2_frames(
     frames_dir: &Path,
     next_index: usize,
@@ -1077,7 +969,7 @@ async fn append_seedvr2_frames(
     }
     let dir = frames_dir.to_path_buf();
     let count = frames.len();
-    tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+    crate::load_progress::spawn_blocking(move || -> WorkerResult<()> {
         for (offset, frame) in frames.into_iter().enumerate() {
             let index = next_index + offset;
             let img = image::RgbImage::from_raw(frame.width, frame.height, frame.pixels)
@@ -1119,13 +1011,7 @@ async fn append_seedvr2_frames(
 /// upscaled clip really carries its recipe — behind a platform no CI lane runs `cargo test` on.
 /// The lane that calls it is still gated; the neither build allows the resulting dead code
 /// explicitly rather than by making it unreachable to a test.
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code)
-)]
+#[cfg(any(test, native_lane))]
 pub(super) async fn encode_seedvr2_stream(
     media_path: &Path,
     frames_dir: &Path,
@@ -1269,13 +1155,7 @@ pub(super) async fn encode_seedvr2_stream(
 ///
 /// **Not cfg-gated**, for the reason [`encode_seedvr2_stream`] is not: this is the function whose
 /// OUTPUT the acceptance criterion is about, and a test that cannot call it proves nothing.
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code)
-)]
+#[cfg(any(test, native_lane))]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn seedvr2_workflow_metadata(
     settings: &Settings,
@@ -1354,10 +1234,7 @@ pub(super) fn seedvr2_workflow_metadata(
 /// Result of the streamed SeedVR2 upscale (sc-9595): the metadata the caller needs to build the asset
 /// fact + encode the pre-written PNG sequence. The upscaled frames themselves are already on disk
 /// (`out_frames_dir`), never held whole in RAM.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 struct Seedvr2Stream {
     /// Real output frame count (== source frame count).
     frame_count: usize,
@@ -1377,19 +1254,13 @@ struct Seedvr2Stream {
 /// it on EVERY exit path (success, encode/create_dir_all/update_job failure, cancel, panic) so cleanup
 /// can never be skipped. Call [`ScratchDir::disarm`] after the caller has already removed the dir to
 /// avoid a redundant (harmless) second removal. `Drop` must use the sync `std::fs` API.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) struct ScratchDir {
     path: std::path::PathBuf,
     armed: bool,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl ScratchDir {
     /// Guard `path`. Does not create it — the caller populates it; the guard only guarantees removal.
     pub(super) fn new(path: std::path::PathBuf) -> Self {
@@ -1403,10 +1274,7 @@ impl ScratchDir {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl Drop for ScratchDir {
     fn drop(&mut self) {
         if self.armed {
@@ -1424,10 +1292,7 @@ impl Drop for ScratchDir {
 /// host RGB8 RAM is bounded to ~one worker window + a ≤`ov`-frame tail. Each per-window `generate_video`
 /// call is independently heartbeat-covered + cancellable (the funnel's watchdog), and cancel is polled
 /// between windows too — no long silent blocking span.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 async fn run_seedvr2_stream(
     api: &ApiClient,
@@ -1462,7 +1327,7 @@ async fn run_seedvr2_stream(
             .unwrap_or(out_frames_dir)
             .to_path_buf();
         let p = probe;
-        tokio::task::spawn_blocking(move || {
+        crate::load_progress::spawn_blocking(move || {
             check_seedvr2_scratch_disk(
                 &guard_dir,
                 p.frame_count,
@@ -1606,10 +1471,7 @@ async fn run_seedvr2_stream(
 /// Validate a requested video-upscale factor. SeedVR2 supports only 2x and 4x, so any other value
 /// (3x, 8x, 1x, 0) is rejected with a clear error rather than silently coerced (F-118). Returns the
 /// factor widened to `u32` for the downstream dimension math.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(super) fn resolve_video_upscale_factor(factor: u8) -> WorkerResult<u32> {
     match factor {
         2 | 4 => Ok(u32::from(factor)),
@@ -1653,11 +1515,7 @@ pub(super) fn resolve_video_upscale_factor(factor: u8) -> WorkerResult<u32> {
 /// same span of the source's audio is skipped (`-ss` on input 1) to keep sound on its frames. Input 1
 /// contributes only `0:a` here; its video stream is not mapped. (The sc-19549 measurements above
 /// were taken when the picture was re-timed to a constant rate; the bound policy is unchanged.)
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 pub(super) fn seedvr2_audio_mux_args(
     upscaled: &Path,
     source: &Path,
@@ -1714,10 +1572,7 @@ pub(super) fn seedvr2_audio_mux_args(
 /// Dispatch handler for `JobType::VideoUpscale`: decode the source clip, run the SeedVR2 upscaler
 /// (native MLX on Mac / candle CUDA on Windows, sc-5928), re-encode, pass the source audio through,
 /// and stream a single upscaled video asset.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn run_video_upscale_job(
     api: &ApiClient,
     settings: &Settings,
@@ -1800,7 +1655,7 @@ pub(crate) async fn run_video_upscale_job(
             JobStatus::Preparing,
             ProgressStage::Preparing,
             0.1,
-            "Loading SeedVR2 weights.",
+            crate::load_progress::PREPARING_MODEL,
             None,
             backend,
         ),
@@ -2050,4 +1905,27 @@ pub(crate) async fn run_video_upscale_job(
     .await?;
     output_guard.disarm();
     Ok(())
+}
+
+#[cfg(all(test, native_lane))]
+mod disk_probe_tests {
+    use super::*;
+    #[test]
+    fn production_scratch_guard_uses_portable_probe_and_preserves_fail_open() {
+        let scratch = tempfile::tempdir().unwrap();
+        assert!(available_disk_bytes(scratch.path()).unwrap() > 0);
+        assert!(check_seedvr2_scratch_disk(scratch.path(), 1, 16, 16, 32, 32).is_ok());
+        let error = check_seedvr2_scratch_disk(scratch.path(), u64::MAX, 1920, 1080, 3840, 2160)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("source frames")
+                && error.contains("output frames")
+                && error.contains("disk space")
+        );
+        let missing = scratch.path().join("missing");
+        assert!(available_disk_bytes(&missing).is_none());
+        assert!(check_seedvr2_scratch_disk(&missing, u64::MAX, 1920, 1080, 3840, 2160).is_ok());
+        assert!(check_seedvr2_scratch_disk(&missing, 0, 1920, 1080, 3840, 2160).is_ok());
+    }
 }

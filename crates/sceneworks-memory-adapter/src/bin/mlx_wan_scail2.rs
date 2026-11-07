@@ -12,7 +12,7 @@
 //!
 //! Every geometry, rate and carrier rule is asked of the pinned engine's own symbol:
 //!
-//! * the three Wan routes go through `gen_core::wan_i2v_memory::WanI2vRoute` —
+//! * the three Wan routes go through `gen_core_memory_wan::WanI2vRoute` —
 //!   `public_geometries()` and `accepts_rate()`, the shared authority both Wan lanes seal against;
 //! * SCAIL-2 goes through `mlx_gen_scail2::memory_strategy::{PUBLIC_BUCKETS, PUBLIC_FRAMES}`.
 //!
@@ -20,7 +20,7 @@
 //! any weights are opened, instead of deep inside a multi-gigabyte load.
 
 use super::*;
-use mlx_gen::gen_core::wan_i2v_memory::WanI2vRoute;
+use gen_core_memory_wan::WanI2vRoute;
 use mlx_gen::gen_core::ReplacementMode;
 
 const SEED: u64 = 22_736;
@@ -172,7 +172,7 @@ fn production_fingerprint(arm: Arm, tier: &str) -> Result<String, String> {
             "q8" => "sc-19236-wan2-2-ti2v-5b-mlx-q8-g64-teq8-v1".to_owned(),
             other => return Err(format!("{LABEL}: unsupported TI2V-5B tier {other:?}")),
         },
-        // sc-22736's shared A14B authority (`gen_core::wan_i2v_memory`), whose dense token is
+        // sc-22736's shared A14B authority (`gen_core_memory_wan`), whose dense token is
         // `dense`. The tier is matched by name, never interpolated, so an unrecognized tier is a
         // refusal rather than a plausible-looking identity no engine publishes.
         WAN_T2V_A14B_PROVIDER | WAN_I2V_A14B_PROVIDER => {
@@ -197,13 +197,7 @@ fn production_fingerprint(arm: Arm, tier: &str) -> Result<String, String> {
     })
 }
 
-/// The declared geometry, read as real values.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Geometry {
-    width: u32,
-    height: u32,
-    frames: u32,
-}
+use protocol::Geometry;
 
 /// Resolve the arm from the planned `(provider, modelId)` pair and refuse any other by name.
 ///
@@ -211,18 +205,9 @@ struct Geometry {
 /// family, so a row that pairs one route's provider with another's catalog id would otherwise
 /// measure one checkpoint and file the record against the other.
 fn arm(request: &Value) -> Result<Arm, String> {
-    let target = protocol::planned(request)?
-        .get("target")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "planned.target must be an object".to_owned())?;
-    let provider = target
-        .get("provider")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
-    let model_id = target
-        .get("modelId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    let target = protocol::planned_object(request, "/target")?;
+    let provider = protocol::target_str(target, "provider")?;
+    let model_id = protocol::target_str(target, "modelId")?;
     ARMS.into_iter()
         .find(|arm| arm.provider == provider && arm.model_id == model_id)
         .ok_or_else(|| {
@@ -311,46 +296,14 @@ fn engine_vae(arm: Arm) -> Result<VaeTiling, String> {
         })
 }
 
-/// Read the four declared geometry axes and validate them against the engine.
 fn target_geometry(request: &Value, arm: Arm) -> Result<Geometry, String> {
-    let geometry = protocol::planned(request)?
-        .pointer("/target/geometry")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
-    let axis = |name: &str| {
-        geometry
-            .get(name)
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| format!("planned.target.geometry.{name} must fit u32"))
-    };
-    if axis("batch")? != 1 {
-        return Err(format!(
-            "{LABEL} requires geometry.batch == 1 (these engines render one clip per request)"
-        ));
-    }
-    let resolved = Geometry {
-        width: axis("width")?,
-        height: axis("height")?,
-        frames: axis("frames")?,
-    };
+    let resolved = protocol::wan_target_geometry(request, LABEL)?;
     validate_geometry(arm, resolved)?;
     Ok(resolved)
 }
 
-/// The planned mode must be the one public mode this route is admitted under.
 fn validate_mode(request: &Value, arm: Arm) -> Result<(), String> {
-    let mode = protocol::planned(request)?
-        .pointer("/target/mode")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
-    if mode != arm.mode {
-        return Err(format!(
-            "{} is captured under {:?}; the plan declares {mode:?}",
-            arm.provider, arm.mode
-        ));
-    }
-    Ok(())
+    protocol::validate_captured_mode(request, arm.provider, arm.mode)
 }
 
 /// Bind the fixture to the member, lane, tier, full geometry and cadence, so a bf16 record can
@@ -361,10 +314,7 @@ fn validate_fixture(
     tier: &str,
     geometry: Geometry,
 ) -> Result<(), String> {
-    let fixture = protocol::planned(request)?
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let fixture = protocol::planned_fixture(request)?;
     let expected = format!(
         "{}-mlx-{tier}-{}x{}-f{}-fps{}-seed{SEED}",
         arm.slug, geometry.width, geometry.height, geometry.frames, arm.fps
@@ -472,7 +422,7 @@ fn numeric_quant(arm: Arm, tier: &str) -> Result<Option<Quant>, String> {
 }
 
 /// Whether this cell's production identity is minted by the SEALED-RECEIPT authority
-/// (`gen_core::wan_i2v_memory`), so the capture must seal a receipt before the load to read it —
+/// (`gen_core_memory_wan`), so the capture must seal a receipt before the load to read it —
 /// or by the provider's own `memory_strategy` module, which the loader publishes only for an
 /// unprepared spec, so sealing one would HIDE it (sc-22738).
 ///
@@ -496,9 +446,9 @@ fn receipt_publishes_the_identity(
         quant: numeric_quant(arm, tier)?,
         component_precision_floors: &[],
     };
-    match mlx_gen::gen_core::wan_i2v_memory::production_calibration_fingerprint(
+    match gen_core_memory_wan::production_calibration_fingerprint(
         route,
-        mlx_gen::gen_core::wan_i2v_memory::WanI2vBackend::Mlx,
+        gen_core_memory_wan::WanI2vBackend::Mlx,
         numeric_tier,
     ) {
         None => Ok(false),
@@ -511,28 +461,7 @@ fn receipt_publishes_the_identity(
     }
 }
 
-/// A deterministic, non-degenerate RGB8 plane. Every carrier byte a capture presents is generated
-/// here rather than staged, so the record's request identity is reproducible from this source
-/// alone — the same choice the PuLID and LTX arms make for their synthetic carriers.
-fn plane(width: u32, height: u32, salt: u32) -> Image {
-    let mut pixels = Vec::with_capacity((width as usize) * (height as usize) * 3);
-    for y in 0..height {
-        for x in 0..width {
-            let base = x
-                .wrapping_mul(7)
-                .wrapping_add(y.wrapping_mul(13))
-                .wrapping_add(salt);
-            pixels.push((base % 251) as u8);
-            pixels.push((base.wrapping_mul(3) % 241) as u8);
-            pixels.push((base.wrapping_mul(5) % 239) as u8);
-        }
-    }
-    Image {
-        width,
-        height,
-        pixels,
-    }
-}
+use protocol::wan_reference_plane as plane;
 
 /// The one fresh planned request every capture of this family renders.
 fn generation_request(arm: Arm, geometry: Geometry) -> GenerationRequest {
@@ -596,6 +525,9 @@ fn generation_request(arm: Arm, geometry: Geometry) -> GenerationRequest {
 /// `crates/sceneworks-worker/src/video_admission.rs:1716-1720` — the selected candidate carries the
 /// packaged curve's id, else the resolved decode profile's revision, else this token.
 const WORKER_ESTIMATE_FLOOR_EVIDENCE: &str = "video-estimate-floor-v1";
+/// Another unsealed analytical estimate in the worker's global video vocabulary (H3-only
+/// today), not a measured record or a provider-authenticated admission receipt.
+const WORKER_NATIVE_ALLOCATION_EVIDENCE: &str = "video-native-allocation-estimate-v1";
 
 /// The decode-profile revisions the same site can carry instead (`video_admission.rs`
 /// `packaged_video_decode_profile`: selected carrier, planner-budgeted, conservative single pass).
@@ -619,7 +551,7 @@ const WORKER_ENCODE_PROFILE_EVIDENCE: [&str; 2] = [
 /// A MIRROR, not a read: `mlx-gen-scail2`'s `validate_context_revision_shape`
 /// (`memory_strategy.rs:570-588` at inference `3b922bac`) compares this as a bare literal and the
 /// crate publishes no `pub const` for it, unlike the Wan side's
-/// `gen_core::wan_i2v_memory::RECEIPT_VERSION`. `scripts/measure-memory-catalog.test.mjs` binds
+/// `gen_core_memory_wan::RECEIPT_VERSION`. `scripts/measure-memory-catalog.test.mjs` binds
 /// both tokens to the pinned engine source so a rename reds there rather than silently widening
 /// [`probes_admission`].
 const SCAIL2_RECEIPT_TOKEN: &str = "scail2-resident-v1";
@@ -627,7 +559,7 @@ const SCAIL2_RECEIPT_TOKEN: &str = "scail2-resident-v1";
 /// The receipt token THIS arm's engine gate requires, asked of the engine where it publishes one.
 fn engine_receipt_token(arm: Arm) -> &'static str {
     match arm.route {
-        Some(_) => mlx_gen::gen_core::wan_i2v_memory::RECEIPT_VERSION,
+        Some(_) => gen_core_memory_wan::RECEIPT_VERSION,
         None => SCAIL2_RECEIPT_TOKEN,
     }
 }
@@ -637,7 +569,10 @@ fn engine_receipt_token(arm: Arm) -> &'static str {
 /// promoted for this provider. The curve list is READ from the shipped bundle rather than assumed
 /// empty, so a future promoted Wan or SCAIL-2 curve enters this vocabulary automatically.
 fn worker_context_evidence_identities(arm: Arm) -> Vec<String> {
-    let mut identities = vec![WORKER_ESTIMATE_FLOOR_EVIDENCE.to_owned()];
+    let mut identities = vec![
+        WORKER_ESTIMATE_FLOOR_EVIDENCE.to_owned(),
+        WORKER_NATIVE_ALLOCATION_EVIDENCE.to_owned(),
+    ];
     identities.extend(
         WORKER_DECODE_PROFILE_EVIDENCE
             .iter()
@@ -672,7 +607,7 @@ fn engine_seals_evidence(arm: Arm, identity: &str) -> bool {
 /// `mlx.rs#krea_realtime_probes_admission`, and false for a structurally similar reason.
 ///
 /// THE ENGINE SIDE. Both gates bind admission to a receipt the ENGINE seals over the artifact and
-/// the exact request bytes. `gen_core::wan_i2v_memory::validate_context`
+/// the exact request bytes. `gen_core_memory_wan::validate_context`
 /// (`crates/contracts/gen-core/src/wan_i2v_memory.rs:2897-3040` at inference `3b922bac`) refuses
 /// with `crossed Wan I2V memory context` unless `context.evidence_revision` parses as
 /// `wan-video-structural-v5:<mode>:fps<N>:<artifact_identity>:<selection_receipt>:…` (`:2944`,
@@ -792,11 +727,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     }
     let selection = planned_selection(request)?;
     let expected_fingerprint = production_fingerprint(arm, tier)?;
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?
-        .to_owned();
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?.to_owned();
     if planned_fingerprint != expected_fingerprint {
         return Err(format!(
             "plan/provider calibration mismatch: plan={planned_fingerprint}, the {} {tier} \
@@ -1408,9 +1339,9 @@ mod tests {
     /// filesystem, so these run on any host.
     fn weights_free_a14b_contract(arm: Arm) -> mlx_gen::gen_core::MemoryProviderContract {
         let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/nonexistent/wan-a14b")));
-        mlx_gen::gen_core::wan_i2v_memory::weights_free_contract(
+        gen_core_memory_wan::weights_free_contract(
             arm.provider,
-            mlx_gen::gen_core::wan_i2v_memory::WanI2vBackend::Mlx,
+            gen_core_memory_wan::WanI2vBackend::Mlx,
             &spec,
         )
         .unwrap_or_else(|error| panic!("{}: {error}", arm.provider))
@@ -1570,6 +1501,11 @@ mod tests {
                 "{}: the estimate floor is the identity the worker carries when no curve or \
                  decode profile priced the candidate; it must stay in the vocabulary",
                 arm.provider
+            );
+            assert!(
+                worker_context_evidence_identities(arm)
+                    .contains(&WORKER_NATIVE_ALLOCATION_EVIDENCE.to_owned()),
+                "the native analytical estimate stays unsealed in the worker vocabulary"
             );
             for profile in WORKER_DECODE_PROFILE_EVIDENCE
                 .iter()

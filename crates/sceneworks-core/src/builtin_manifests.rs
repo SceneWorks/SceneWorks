@@ -46,6 +46,100 @@ pub const BUILTIN_MANIFESTS: &[(&str, &str)] = &[
     ),
 ];
 
+/// Return one immutable shipped catalog, parsed once. Files in `config_dir` and user manifests
+/// are deliberately excluded: edits to those remain observable by the normal filesystem loaders.
+/// Missing, malformed or structurally invalid embedded catalogs are errors, never empty policy.
+pub fn builtin_manifest(name: &str) -> Result<&'static serde_json::Value, &'static str> {
+    type ParsedManifest = OnceLock<Result<serde_json::Value, String>>;
+    static PARSED: OnceLock<Vec<ParsedManifest>> = OnceLock::new();
+    let index = BUILTIN_MANIFESTS
+        .iter()
+        .position(|(candidate, _)| *candidate == name)
+        .ok_or("requested builtin manifest is not embedded")?;
+    PARSED.get_or_init(|| BUILTIN_MANIFESTS.iter().map(|_| OnceLock::new()).collect())[index]
+        .get_or_init(|| parse_builtin_manifest(name, BUILTIN_MANIFESTS[index].1))
+        .as_ref()
+        .map_err(String::as_str)
+}
+
+fn parse_builtin_manifest(name: &str, contents: &str) -> Result<serde_json::Value, String> {
+    use serde_json::Value;
+    let field = match name {
+        "builtin.models.jsonc" => "models",
+        "builtin.loras.jsonc" => "loras",
+        "builtin.recipe-presets.jsonc" => "presets",
+        "builtin.styles.jsonc" => "groups",
+        "builtin.control_overlays.jsonc" => "controlOverlays",
+        _ => return Err(format!("unknown builtin manifest {name}")),
+    };
+    let raw = crate::jsonc::strip_jsonc_comments(contents);
+    crate::jsonc::reject_duplicate_keys(&raw).map_err(|error| format!("{name}: {error}"))?;
+    let value: Value = serde_json::from_str(&raw).map_err(|error| format!("{name}: {error}"))?;
+    let entries = value
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{name} must contain a {field} array"))?;
+    for entry in entries {
+        if !entry.is_object() {
+            return Err(format!("{name} {field} entries must be objects"));
+        }
+        // Invalid allowlists must never turn into the absent allowlist's permissive default.
+        if entry.get("modelIds").is_some_and(|ids| {
+            !ids.as_array().is_some_and(|ids| {
+                !ids.is_empty()
+                    && ids
+                        .iter()
+                        .all(|id| id.as_str().is_some_and(|id| !id.trim().is_empty()))
+            })
+        }) {
+            return Err(format!(
+                "{name} modelIds must be a nonempty array of nonempty strings"
+            ));
+        }
+        if entry
+            .get("loraCompatibility")
+            .and_then(|compat| compat.get("families"))
+            .is_some_and(|families| {
+                !families
+                    .as_array()
+                    .is_some_and(|families| families.iter().all(Value::is_string))
+            })
+        {
+            return Err(format!(
+                "{name} compatibility families must be an array of strings"
+            ));
+        }
+        if entry
+            .get("loraCompatibility")
+            .is_some_and(|compat| !compat.is_object())
+        {
+            return Err(format!("{name} loraCompatibility must be an object"));
+        }
+    }
+    Ok(value)
+}
+
+/// Trusted shipped model rows share the validated immutable parser; this is not an imported registry.
+pub fn builtin_model_entries() -> &'static [serde_json::Value] {
+    builtin_manifest("builtin.models.jsonc")
+        .expect("invalid embedded model catalog")
+        .get("models")
+        .and_then(serde_json::Value::as_array)
+        .expect("validated embedded model catalog has a models array")
+        .as_slice()
+}
+
+/// Read one trusted shipped model from the same embedded catalog used to seed installations.
+/// Shared by component semantics and provenance; this is not an imported-model registry.
+pub fn builtin_model_entry(
+    id: &str,
+) -> Option<&'static serde_json::Map<String, serde_json::Value>> {
+    builtin_model_entries()
+        .iter()
+        .find(|entry| entry.get("id").and_then(serde_json::Value::as_str) == Some(id))?
+        .as_object()
+}
+
 /// The immutable Hugging Face location of the Chatterbox voice-encoder weights.
 ///
 /// This is derived from the shipped model manifest so downloads and runtime resolution have one pin
@@ -63,18 +157,22 @@ static CHATTERBOX_VE_PIN: OnceLock<Result<ChatterboxVePin, String>> = OnceLock::
 pub fn chatterbox_ve_pin() -> Result<&'static ChatterboxVePin, &'static str> {
     CHATTERBOX_VE_PIN
         .get_or_init(|| {
-            let contents = BUILTIN_MANIFESTS
-                .iter()
-                .find(|(name, _)| *name == "builtin.models.jsonc")
-                .map(|(_, contents)| *contents)
-                .ok_or_else(|| "builtin.models.jsonc is not embedded".to_owned())?;
-            parse_chatterbox_ve_pin(contents)
+            chatterbox_ve_pin_from_manifest(
+                builtin_manifest("builtin.models.jsonc").map_err(str::to_owned)?,
+            )
         })
         .as_ref()
         .map_err(String::as_str)
 }
 
+#[cfg(test)]
 fn parse_chatterbox_ve_pin(contents: &str) -> Result<ChatterboxVePin, String> {
+    chatterbox_ve_pin_from_manifest(&parse_builtin_manifest("builtin.models.jsonc", contents)?)
+}
+
+fn chatterbox_ve_pin_from_manifest(
+    manifest: &serde_json::Value,
+) -> Result<ChatterboxVePin, String> {
     fn downloads<'a>(
         model: &'a serde_json::Value,
         id: &str,
@@ -95,9 +193,6 @@ fn parse_chatterbox_ve_pin(contents: &str) -> Result<ChatterboxVePin, String> {
         }
     }
 
-    let stripped = crate::jsonc::strip_jsonc_comments(contents);
-    let manifest: serde_json::Value = serde_json::from_str(&stripped)
-        .map_err(|error| format!("builtin.models.jsonc is malformed: {error}"))?;
     let models = manifest["models"]
         .as_array()
         .ok_or_else(|| "builtin.models.jsonc has no models array".to_owned())?;
@@ -266,6 +361,8 @@ pub fn seed_builtin_manifests(config_dir: &Path, mode: SeedMode) -> std::io::Res
         std::io::Error::new(error.kind(), format!("create {}: {error}", dir.display()))
     })?;
     for &(name, contents) in BUILTIN_MANIFESTS {
+        builtin_manifest(name)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         let target = dir.join(name);
         let existing = std::fs::read(&target).ok();
         if !manifest_needs_write(existing.as_deref(), contents.as_bytes(), mode) {
@@ -281,6 +378,45 @@ pub fn seed_builtin_manifests(config_dir: &Path, mode: SeedMode) -> std::io::Res
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn shared_builtin_cache_preserves_all_catalogs_and_errors() {
+        for (name, _) in BUILTIN_MANIFESTS {
+            let first = builtin_manifest(name).expect("every shipped catalog parses");
+            assert!(
+                std::ptr::eq(first, builtin_manifest(name).unwrap()),
+                "{name} is cached"
+            );
+        }
+        let root_rows = builtin_manifest("builtin.models.jsonc").unwrap()["models"]
+            .as_array()
+            .unwrap();
+        assert!(std::ptr::eq(builtin_model_entries(), root_rows.as_slice()),
+            "model facts must borrow the shared parser's rows, never parse or clone a second catalog");
+        assert!(builtin_manifest("not-embedded.jsonc").is_err());
+        for raw in [
+            "not JSON",
+            "[]",
+            "{}",
+            r#"{"models":{}}"#,
+            r#"{"models":[null]}"#,
+            r#"{"models":[],"models":[]}"#,
+            r#"{"models":[{"loraCompatibility":{"families":"all"}}]}"#,
+            r#"{"models":[{"modelIds":[null]}]}"#,
+            r#"{"models":[{"modelIds":[]}]}"#,
+            r#"{"models":[{"modelIds":[" "]}]}"#,
+            r#"{"models":[{"loraCompatibility":false}]}"#,
+        ] {
+            assert!(
+                parse_builtin_manifest("builtin.models.jsonc", raw).is_err(),
+                "invalid policy must fail closed: {raw}"
+            );
+        }
+        assert!(
+            parse_builtin_manifest("builtin.loras.jsonc", r#"{"loras":[]}"#).is_ok(),
+            "an intentional empty catalog remains valid"
+        );
+    }
 
     fn embedded(name: &str) -> &'static str {
         BUILTIN_MANIFESTS

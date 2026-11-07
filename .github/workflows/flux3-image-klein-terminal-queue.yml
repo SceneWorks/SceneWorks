@@ -1,0 +1,67 @@
+# Manual FLUX3 terminal campaign only. Four scheduler slots, NOT a four-model execution matrix.
+# Generic placement avoids deadlock: actual runner identity elects ONE executor + THREE CPU holders.
+name: FLUX3 Image Klein Windows queued reservation
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+        description: Exact clean preserved-tree source SHA; must equal the dispatch event head
+      inference_sha:
+        required: true
+        type: string
+        description: Exact inference SHA already pinned by source_sha
+      control_sha256:
+        required: true
+        type: string
+        description: "sha256 of local D:/tmp/sc26243-run/queue-control.json; sentinel none is refused"
+permissions:
+  contents: read
+  actions: read
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Refuse absent control sentinel or wrong source/event
+        run: node scripts/flux3-terminal-queue.mjs gate
+        env:
+          FLUX3_QUEUE_SOURCE: ${{ inputs.source_sha }}
+          FLUX3_QUEUE_INFERENCE: ${{ inputs.inference_sha }}
+          FLUX3_QUEUE_CONTROL_SHA256: ${{ inputs.control_sha256 }}
+  reserve:
+    needs: gate
+    runs-on: [self-hosted, Windows, X64, cuda]
+    timeout-minutes: 600
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        slot: [1, 2, 3, 4]
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      # No checkout/build/tool install/model access: use the existing clean preserved tree.
+      # Source hash, full roster and job/Worker ancestry are checked by the CPU supervisor.
+      - name: Reserve one slot; run the admitted physical GPU only after the full executor barrier
+        run: |
+          foreach ($tool in @('git.exe', 'gh.exe', 'powershell.exe', 'nvidia-smi.exe')) { Get-Command $tool -ErrorAction Stop | Out-Null }
+          if ((Get-FileHash -LiteralPath 'D:/tmp/sc26242-node20-extract-20261020/node-v20.20.2-win-x64/node.exe' -Algorithm SHA256).Hash -ne '56c1520ee33b801e8bdb92fb321cf2e98529735b6d12bd4a2a6dec0ac0bab937') { throw 'Approved Node interpreter digest mismatch' }
+          & 'D:/tmp/sc26242-node20-extract-20261020/node-v20.20.2-win-x64/node.exe' 'D:/repos/SceneWorks/.claude/worktrees/agent-aafe2575fa619862f/scripts/flux3-terminal-queue.mjs' reserve
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        env:
+          CUDA_VISIBLE_DEVICES: "-1"
+          FLUX3_QUEUE_SOURCE: ${{ inputs.source_sha }}
+          FLUX3_QUEUE_INFERENCE: ${{ inputs.inference_sha }}
+          FLUX3_QUEUE_CONTROL_SHA256: ${{ inputs.control_sha256 }}
+          # Supervisor only; never inherited by the model/API/resource child.
+          GH_TOKEN: ${{ github.token }}

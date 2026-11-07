@@ -76,6 +76,7 @@ export function WorkflowDropPanel({
       substituteModelId: missing.substituteModelId ?? "",
       substituteModelIssue: missing.poseSubstituteDetail ?? "",
       poseReplayIssue,
+      mossReplayIssue: missing.mossReplayIssue ?? "",
       inputPicks: missing.inputPicks ?? {},
     }),
     [
@@ -84,6 +85,7 @@ export function WorkflowDropPanel({
       missing.substituteModelId,
       missing.poseSubstituteDetail,
       poseReplayIssue,
+      missing.mossReplayIssue,
       missing.inputPicks,
     ],
   );
@@ -211,6 +213,7 @@ export function WorkflowDropPanel({
         installing={missing.installing}
         inputPicks={missing.inputPicks}
         models={missing.models}
+        installErrors={missing.installErrors}
         onInstall={missing.onInstall}
         onPickInput={missing.onPickInput}
         onSubstituteModel={missing.onSubstituteModel}
@@ -223,11 +226,12 @@ export function WorkflowDropPanel({
       {/* The count note. The envelope's seed is THIS image's; `count` is what the run asked for,
           so a naive replay would make the shared image the first of an N-image batch. Prefill
           asks for one and says so rather than quietly reproducing the batch. */}
-      {Number.isFinite(batchCount) && batchCount > 1 ? (
+      {Number.isFinite(batchCount) && batchCount > 1 && !share.advanced?.mossImageAdvanced ? (
         <p className="workflow-drop-note">
           Only one of the {batchCount} outputs is replayed.
         </p>
       ) : null}
+      {share.advanced?.mossImageAdvanced ? <p className="workflow-drop-note">Replay retains the original conditioning batch and count ({batchCount || 1}) with exact tensor row order. The original output ordinal is {Number(share.advanced.mossImageSampleIndex ?? 0) + 1}.</p> : null}
       {modelUnresolved ? (
         <p className="workflow-drop-note warn">
           The model did not resolve; the current selection stays.

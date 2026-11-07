@@ -39,6 +39,7 @@ beforeEach(async () => {
   global.IS_REACT_ACT_ENVIRONMENT = true;
   apiFetchMock.mockReset();
   apiFetchMock.mockResolvedValue({ id: "model-import-job-1", type: "model_import", status: "running" });
+  window.localStorage.clear();
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -52,7 +53,29 @@ afterEach(async () => {
   container.remove();
 });
 
+it("downloads conditional components through the model domain API", async () => {
+  apiFetchMock.mockResolvedValueOnce({ jobs: [{ id: "component-job" }] });
+  await expect(hookApi.downloadConditionalComponents("model/id", "purpose name")).resolves.toEqual({ jobs: [{ id: "component-job" }] });
+  expect(apiFetchMock).toHaveBeenCalledWith("/api/v1/models/model%2Fid/conditional-components/purpose%20name/download", "tok", {
+    method: "POST", body: JSON.stringify({}),
+  });
+});
+
 describe("createModelImportJob type-field contract (sc-14020)", () => {
+  it.each(["json", "multipart"])("submits %s managed repair to the original selection, not ordinary create", async (kind) => {
+    const metadata = { repairModelId: "original-selection", modelId: "original-selection", name: "Renamed replacement", type: "image" };
+    const payload = kind === "multipart" ? { ...metadata, file: new File(["fixture"], "replacement.safetensors") }
+      : { ...metadata, source: { kind: "url", url: "https://example.test/replacement.safetensors" } };
+    await act(async () => { await hookApi.createModelImportJob(payload); });
+    const [path, , options] = apiFetchMock.mock.calls[0];
+    expect(path).toBe("/api/v1/models/original-selection/repair");
+    const body = kind === "multipart" ? Object.fromEntries(options.body.entries()) : JSON.parse(options.body);
+    expect(body.modelId).toBe("original-selection");
+    expect(body.name).toBe("Renamed replacement");
+    expect(body).not.toHaveProperty("repairModelId");
+    expect(body).not.toHaveProperty("repairExpectedBinding");
+    expect(body).not.toHaveProperty("licenseAcknowledged");
+  });
   it("multipart upload keys the type as `type` (the field the backend reads), never `modelType`", async () => {
     const file = new File([new Uint8Array([1, 2, 3])], "krea2-checkpoint.safetensors");
 
@@ -88,5 +111,45 @@ describe("createModelImportJob type-field contract (sc-14020)", () => {
     expect(payload.type).toBe("image");
     expect(payload.sourceUrl).toBe("https://example.com/krea2.safetensors");
     expect(payload.name).toBe("krea2");
+  });
+
+  it.each(["fl2va", "ref2va", "hybrid"])("forwards explicit %s metadata in multipart and JSON imports", async (minimaxH3Partition) => {
+    const baseModel = minimaxH3Partition === "ref2va" ? "minimax_h3_ref" : "minimax_h3";
+    const metadata = { type: "video", family: "minimax-h3", baseModel, minimaxH3Partition };
+    await act(async () => {
+      await hookApi.createModelImportJob({ ...metadata, file: new File(["h3"], "h3.safetensors") });
+      await hookApi.createModelImportJob({ ...metadata, sourceUrl: "https://example.com/h3.safetensors" });
+    });
+    const multipart = apiFetchMock.mock.calls[0][2].body;
+    expect(multipart.get("baseModel")).toBe(baseModel);
+    expect(multipart.get("minimaxH3Partition")).toBe(minimaxH3Partition);
+    expect(JSON.parse(apiFetchMock.mock.calls[1][2].body)).toMatchObject(metadata);
+  });
+  it.each(["json", "multipart", "linked"])("reuses selected-base license consent for %s imports without accepting implicitly", async (kind) => {
+    await act(async () => hookApi.setModels([
+      { id: "minimax_h3", name: "MiniMax-H3", requiresLicenseAcknowledgment: true },
+      { id: "minimax_h3_ref", name: "MiniMax-H3 Reference", requiresLicenseAcknowledgment: true },
+    ]));
+    const metadata = { baseModel: "minimax_h3_ref", minimaxH3Partition: "ref2va", type: "video" };
+    const payload = kind === "multipart"
+      ? { ...metadata, file: new File(["h3"], "h3.safetensors") }
+      : kind === "linked" ? { ...metadata, linkedRootId: "root", linkedRelativePath: "h3.safetensors" }
+        : { ...metadata, source: { kind: "url", url: "https://example.com/h3.safetensors" } };
+    let serverAcknowledged = false;
+    apiFetchMock.mockImplementation(async (path) => path.endsWith("/license-acknowledgment")
+      ? { modelId: "minimax_h3_ref", acknowledged: serverAcknowledged }
+      : { id: "model-import-job-1", type: "model_import", status: "running" });
+    // Opposite-card consent and the selected card's stale paint cache authorize nothing.
+    window.localStorage.setItem("sceneworks-license-ack:minimax_h3", "true");
+    await expect(hookApi.createModelImportJob(payload)).rejects.toThrow("MiniMax-H3 Reference requires accepting its license first");
+    expect(apiFetchMock).toHaveBeenCalledWith("/api/v1/models/minimax_h3_ref/license-acknowledgment", "tok");
+    expect(apiFetchMock.mock.calls.some(([, , options]) => options?.method === "POST")).toBe(false);
+    window.localStorage.setItem("sceneworks-license-ack:minimax_h3_ref", "true");
+    await expect(hookApi.createModelImportJob(payload)).rejects.toThrow("MiniMax-H3 Reference requires accepting its license first");
+    serverAcknowledged = true;
+    await act(async () => { await hookApi.createModelImportJob(payload); });
+    const body = apiFetchMock.mock.calls.find(([, , options]) => options?.method === "POST")[2].body;
+    expect(kind === "multipart" ? body.has("licenseAcknowledged") : Object.hasOwn(JSON.parse(body), "licenseAcknowledged")).toBe(false);
+    expect(kind === "multipart" ? body.get("baseModel") : JSON.parse(body).baseModel).toBe("minimax_h3_ref");
   });
 });

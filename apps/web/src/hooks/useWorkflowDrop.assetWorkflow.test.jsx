@@ -615,6 +615,63 @@ describe("useWorkflowDrop — the imported-asset offer", () => {
     expect(hook.missing.inputPicks).toEqual({});
   });
 
+  it.each([["one", ["a"]], ["four", ["a", "b", "a", "c"]]])("reacquires %s MOSS reference slots before launching authored controls", async (_name, ids) => {
+    const body = workflowBody({
+      model: { ...RESOLVED_MODEL, slug: "moss_image_sft", catalogId: "moss_image_sft" },
+      components: [{ purpose: "moss_image_edit", state: "resolved" }],
+      inputs: [{ kind: "reference", count: ids.length, state: "userSupplied" }],
+      inputImagesRequired: ids.length,
+      runnable: false,
+    });
+    body.workflow.model = "moss_image_sft";
+    body.workflow.mode = "edit_image";
+    body.workflow.advanced = {
+      mossImageEdit: { reference_max_edge: 768, use_kv_cache: false },
+      mossImage: { acceleration: "off", max_sequence_length: 1024, uncond_skip_layers: [] },
+      mossImageEditExecutionReport: { referenceAssetIds: ["untrusted-sender-id"] },
+    };
+    fetchAssetWorkflow.mockResolvedValue(body);
+    const launchRecipe = vi.fn().mockResolvedValue({ ok: true });
+    const models = [{ id: "moss_image_sft", type: "image", capabilities: ["text_to_image", "edit_image"] }];
+    const assets = ["a", "b", "c"].map((id) => ({ id, type: "image" }));
+    await render({ launchRecipe, models, assets });
+    await act(async () => hook.offerAssetWorkflow(IMPORTED_ASSET));
+    await act(async () => hook.useWorkflow());
+    expect(launchRecipe).not.toHaveBeenCalled();
+    expect(hook.offer.launchError).toMatch(/reacquire/i);
+    await act(async () => ids.forEach((id, index) => hook.missing.onPickInput(`reference-0-${index}`, id)));
+    await act(async () => hook.useWorkflow());
+    expect(launchRecipe).toHaveBeenCalledTimes(1);
+    const launch = launchRecipe.mock.calls[0][0];
+    expect(launch.sourceAssetId).toBeNull();
+    expect(launch.assetId ?? null).toBeNull();
+    expect(launch.recipe.rawAdapterSettings.referenceAssetIds).toEqual(ids);
+    expect(launch.recipe.rawAdapterSettings.mossImageEdit).toEqual(body.workflow.advanced.mossImageEdit);
+    expect(launch.recipe.rawAdapterSettings.mossImage).toEqual(body.workflow.advanced.mossImage);
+    expect(launch.recipe.rawAdapterSettings).not.toHaveProperty("mossImageEditExecutionReport");
+  });
+
+  it("refuses a picked MOSS replay if its exact local reference disappears before launch", async () => {
+    const body = workflowBody({
+      model: { ...RESOLVED_MODEL, slug: "moss_image_base", catalogId: "moss_image_base" },
+      components: [{ purpose: "moss_image_edit", state: "resolved" }],
+      inputs: [{ kind: "reference", count: 1, state: "userSupplied" }],
+      inputImagesRequired: 1,
+    });
+    body.workflow.model = "moss_image_base";
+    body.workflow.mode = "edit_image";
+    fetchAssetWorkflow.mockResolvedValue(body);
+    const launchRecipe = vi.fn();
+    const models = [{ id: "moss_image_base", type: "image", capabilities: ["edit_image"] }];
+    await render({ launchRecipe, models, assets: [{ id: "a", type: "image" }] });
+    await act(async () => hook.offerAssetWorkflow(IMPORTED_ASSET));
+    await act(async () => hook.missing.onPickInput("reference-0-0", "a"));
+    await render({ launchRecipe, models, assets: [] });
+    await act(async () => hook.useWorkflow());
+    expect(launchRecipe).not.toHaveBeenCalled();
+    expect(hook.offer.launchError).toMatch(/exact slot is missing/i);
+  });
+
   it("aborts an in-flight re-resolution when the panel is dismissed", async () => {
     // A re-resolution belongs to the offer being dismissed, and for a dropped file it is a second
     // POST of that file — up to 512 MiB, still uploading. The effect's own cleanup does not cover

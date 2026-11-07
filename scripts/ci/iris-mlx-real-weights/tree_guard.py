@@ -23,11 +23,28 @@ Two peaks are reported, because a 0.25 s poll can miss a spike:
 """
 
 import ctypes
+from pathlib import Path
 import os
 import signal
 import subprocess
 import sys
 import time
+
+
+def inherited_metal_fds():
+    if sys.platform != "darwin" or "SCENEWORKS_METAL_EXECUTION_LOCK_FD" not in os.environ:
+        return ()
+    import importlib.util
+    source = Path(__file__).resolve().parents[1] / "metal_execution_fds.py"
+    name = "sceneworks_metal_execution_fds"
+    module = sys.modules.get(name)
+    if module is None:
+        spec = importlib.util.spec_from_file_location(name, source)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module.inherited_metal_fds()
+
 
 GIB = 1 << 30
 POLL_SECONDS = 0.25
@@ -82,7 +99,7 @@ def main(argv):
     cap_bytes = int(cap_gib * GIB)
     start = time.time()
     with open(log_path, "wb") as log:
-        child = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
+        child = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, pass_fds=inherited_metal_fds())
     peak_sampled = 0
     lifetime_max = {}
     stopped = None

@@ -1159,16 +1159,20 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     ModelCaps::new("anima_base", true, true, false, true, false),
     ModelCaps::new("anima_aesthetic", true, true, false, true, false),
     ModelCaps::new("anima_turbo", true, true, false, true, false),
+    ModelCaps::new("moss_image_base", true, true, false, true, false),
+    ModelCaps::new("moss_image_sft", true, true, false, true, false),
     // Iris-3B generation (sc-25679 MLX / sc-25680 Candle, epic 25678): the native Candle/CUDA port
     // (`candle-gen-iris`) registers the SAME engine id `iris_3b`, so the one plain text-to-image
     // contract that routes to MLX on a Mac routes off-Mac too, through the generic candle txt2img
-    // lane. No quant tier; generation-task LoRA / LoKr adapters apply on both lanes (sc-25681 —
-    // `candle-gen-iris` advertises `supports_lora` / `supports_lokr` like the MLX twin), and
-    // `CandleImageRefusal::IrisSurface` holds the candle gate to exactly the MLX arm's shape
-    // (`iris_mlx_eligible`).
-    ModelCaps::new("moss_image_base", true, true, false, false, false),
-    ModelCaps::new("moss_image_sft", true, true, false, false, false),
-    ModelCaps::new("iris_3b", true, true, false, true, false),
+    // lane. Both engines support load-time q4/q8 for backbone and text encoder (sc-26266),
+    // including generation-task LoRA / LoKr adapters. `IrisSurface` keeps the request shapes
+    // identical across backends (`iris_mlx_eligible`).
+    ModelCaps::new("iris_3b", true, true, false, false, true),
+    // FLUX 3 Image Klein, distilled (sc-26234/5): the same plain text-to-image request on native
+    // MLX and Candle/CUDA. S6 adds the base checkpoint and exact-identity LoRA; S8 owns
+    // native precision packages. Missing base converted pins never become a dense fallback.
+    ModelCaps::new("flux3_klein", true, true, false, false, true),
+    ModelCaps::new("flux3_klein_base", true, true, false, false, true),
     // Supra2-IMG (sc-24213 MLX / sc-24214 Candle, epic 24212): `candle-gen-supra2` registers the SAME
     // engine id `supra2_img` as `mlx-gen-supra2`, so the one plain text-to-image contract that routes
     // to MLX on a Mac routes off-Mac too, through the generic candle txt2img lane. No quant tier, no
@@ -1511,6 +1515,165 @@ pub(crate) fn checkpoint_plan_checkpoint_id_of_payload_entry(
         .and_then(checkpoint_plan_checkpoint_id)
 }
 
+/// Whether one backend lane claims this plan-backed H3 video probe WITH a compatible adapter.
+/// The catalog's advertisement derives from the same predicates the scheduler consults, so the
+/// UI can never offer an adapter stack no lane will claim.
+pub fn imported_video_lane_claims_with_lora(lane: &str, probe: &Map<String, Value>) -> bool {
+    match lane {
+        "mlx" => super::mlx::video_request_is_mlx_eligible(&JobType::VideoGenerate, probe),
+        "candle" => super::candle::video_request_is_candle_eligible(&JobType::VideoGenerate, probe),
+        _ => false,
+    }
+}
+
+/// Whether ANY valid supported shape of this plan-backed imported H3 entry is claimable WITH a
+/// compatible adapter on the given lane pair. Every UI mode is probed through the SAME
+/// mode-conditioning machinery the support projection uses — a reference-partition (Ref2VA)
+/// import is advertised through the reference shape it actually serves, a hybrid through its
+/// base shape — so a text-only probe can never withdraw an adapter surface the entry genuinely
+/// claims on some other shape.
+pub fn imported_video_adapter_surface_claimable(
+    entry: &Map<String, Value>,
+    mlx_lane_available: bool,
+    candle_lane_available: bool,
+) -> bool {
+    let Some(id) = entry.get("id").and_then(Value::as_str) else {
+        return false;
+    };
+    VIDEO_UI_MODES.iter().any(|mode| {
+        let mut payload = video_mode_probe_payload(id, mode);
+        payload.insert(
+            "modelManifestEntry".to_owned(),
+            Value::Object(entry.clone()),
+        );
+        payload.insert(
+            "loras".to_owned(),
+            Value::Array(vec![json!({ "id": "minimax_h3_turbo_4step_v01" })]),
+        );
+        (mlx_lane_available
+            && super::mlx::video_request_is_mlx_eligible(&JobType::VideoGenerate, &payload))
+            || (candle_lane_available
+                && super::candle::video_request_is_candle_eligible(
+                    &JobType::VideoGenerate,
+                    &payload,
+                ))
+    })
+}
+
+/// The video shapes an IMPORTED dense MiniMax-H3 DiT (sc-26680) is claimable on — on BOTH native
+/// lanes, because both providers load a staged DiT directory through the same `transformer`
+/// component seam.
+///
+/// Keyed on the forwarded `modelManifestEntry` ([`crate::minimax_h3_import::entry_is_imported_minimax_h3`]),
+/// never on the model id, and narrow on every axis because a claim is a promise a worker arm exists:
+/// * **id** — never a builtin video id. A builtin id names the shipped weights; a plan forwarded
+///   under one would render the imported bytes under another checkpoint's name (or, on a lane that
+///   ignored the plan, the shipped bytes under the imported one).
+/// * **shape** — the explicitly declared FL2VA, Ref2VA, or hybrid operation union. Tensor shapes
+///   and model names never imply task compatibility. Builtin predicates validate conditioning,
+///   while the imported entry and plan remain the weight identity.
+/// * **adapters** — the native H3 LoRA/LoKr and turbo surface. The same partition predicate owns
+///   request shape; source topology, target namespace and pruning-basis compatibility are validated
+///   by the native installer against the selected imported task, never by substituting stock weights.
+///
+/// This is a claim, not a load: the worker still resolves and re-verifies the plan, the binding and
+/// the resident components, and refuses by name when it cannot.
+pub(crate) fn plan_backed_minimax_h3_video_eligible(
+    model: &str,
+    payload: &Map<String, Value>,
+) -> bool {
+    let Some(entry) = payload.get("modelManifestEntry").and_then(Value::as_object) else {
+        return false;
+    };
+    if !crate::minimax_h3_import::entry_is_imported_minimax_h3(entry) {
+        return false;
+    }
+    if matches!(
+        model,
+        crate::minimax_h3_import::MINIMAX_H3_BASE_PARTITION_MODEL
+            | crate::minimax_h3_import::MINIMAX_H3_REFERENCE_PARTITION_MODEL
+    ) || VIDEO_MLX_ROUTED_MODELS.contains(&model)
+        || CANDLE_VIDEO_ROUTED_MODELS.contains(&model)
+    {
+        return false;
+    }
+    let has_references = payload.get("mode").and_then(Value::as_str) == Some("reference_to_video");
+    let Ok(partition) = crate::minimax_h3_import::entry_partition_model(entry, has_references)
+    else {
+        return false;
+    };
+    super::candle::video_request_candle_eligible(partition, payload)
+}
+
+/// Per-mode Mac support for an imported, plan-backed video entry (sc-26680) — the
+/// [`video_model_mac_support`] twin that asks the REAL MLX claim predicate with the entry forwarded,
+/// exactly as a submitted job forwards it. The id-keyed form cannot answer for an imported model:
+/// its probe carries no entry, so every plan-backed predicate answers `false` and the Video Studio
+/// would hide a model the lane serves.
+pub fn imported_video_model_mac_support(entry: &Map<String, Value>) -> ModelMacSupport {
+    let model = entry.get("id").and_then(Value::as_str).unwrap_or_default();
+    let video_modes: BTreeMap<String, bool> = VIDEO_UI_MODES
+        .iter()
+        .map(|mode| {
+            let payload = imported_video_mode_probe_payload(model, mode, entry);
+            let job_type = video_job_type_for_mode(mode);
+            (
+                (*mode).to_owned(),
+                super::mlx::video_request_is_mlx_eligible(&job_type, &payload),
+            )
+        })
+        .collect();
+    if video_modes.values().any(|eligible| *eligible) {
+        return ModelMacSupport {
+            supported: true,
+            reason: None,
+            features: ModelMacFeatures {
+                video_modes,
+                ..ModelMacFeatures::default()
+            },
+        };
+    }
+    video_model_mac_support(model)
+}
+
+/// The off-Mac twin of [`imported_video_model_mac_support`].
+pub fn imported_video_model_candle_support(entry: &Map<String, Value>) -> ModelCandleSupport {
+    let model = entry.get("id").and_then(Value::as_str).unwrap_or_default();
+    let video_modes: BTreeMap<String, bool> = VIDEO_UI_MODES
+        .iter()
+        .map(|mode| {
+            let payload = imported_video_mode_probe_payload(model, mode, entry);
+            let job_type = video_job_type_for_mode(mode);
+            (
+                (*mode).to_owned(),
+                super::candle::video_request_is_candle_eligible(&job_type, &payload),
+            )
+        })
+        .collect();
+    if video_modes.values().any(|eligible| *eligible) {
+        return ModelCandleSupport {
+            supported: true,
+            reason: None,
+            features: ModelCandleFeatures { video_modes },
+        };
+    }
+    video_model_candle_support(model)
+}
+
+/// [`video_mode_probe_payload`] with the imported entry forwarded as `modelManifestEntry`.
+fn imported_video_mode_probe_payload(
+    model: &str,
+    mode: &str,
+    entry: &Map<String, Value>,
+) -> Map<String, Value> {
+    let mut payload = video_mode_probe_payload(model, mode);
+    payload.insert(
+        "modelManifestEntry".to_owned(),
+        Value::Object(entry.clone()),
+    );
+    payload
+}
+
 /// The path a bespoke imported lane actually LOADS from, in the order the entry may spell it.
 /// `None` when every spelling is absent or blank.
 ///
@@ -1556,13 +1719,13 @@ pub fn imported_entry_installed_path(entry: &Map<String, Value>) -> Option<&str>
 }
 
 /// The **source codec** an imported manifest entry's weights are stored in — the engine's stable
-/// codec id (`"nvfp4-v1"`, `"int8-per-row-v1"`, `"dense-bf16-v1"`, …), derived from the header
-/// classification the import gate persisted as `importQuantFormat` (sc-21484, epic 11037).
+/// identity (`"nvfp4-v1"`, `"int8-per-row-v1"`, `"convrot-int8-native"`, …). Registered decoders
+/// use the persisted header classification. Native H3 ConvRot instead requires the format stamp
+/// AND matching assembly encoding derived from the strictly validated source inventory.
 ///
-/// One place turns the persisted classification into the codec vocabulary, so admission and the
-/// worker's route cannot drift on what "this checkpoint is stored as NVFP4" means. `None` when the
-/// entry carries no classification, when the string is not one this build knows, or when the
-/// classification has no proved engine codec.
+/// One place turns those persisted source proofs into the codec vocabulary, so admission and the
+/// worker cannot disagree about the source format. `None` means the entry provides no known,
+/// proved codec identity; it never asserts dense storage, dense execution, or a default tier.
 ///
 /// **This is the SOURCE fact only.** It says nothing about how a load would execute the weights: a
 /// checkpoint stored `nvfp4-v1` reports `nvfp4-v1` here on a Mac, on CPU, on datacenter `sm_100`
@@ -1579,6 +1742,20 @@ pub fn imported_entry_source_codec(entry: &Map<String, Value>) -> Option<&'stati
         .and_then(Value::as_str)?
         .trim()
         .to_ascii_lowercase();
+    if matches!(label.as_str(), "convrot_int8" | "asym_w4a8_int8")
+        && crate::minimax_h3_import::entry_is_imported_minimax_h3(entry)
+        && crate::minimax_h3_import::entry_assembly(entry).is_some_and(|assembly| {
+            assembly.get("sourceEncoding").and_then(Value::as_str) == Some(label.as_str())
+        })
+    {
+        // The strict compiled source inventory supplies this assembly stamp. Coarse header
+        // classification or a family name alone never establishes a rotated operand format.
+        return Some(if label == "asym_w4a8_int8" {
+            crate::checkpoint_weight_facts::W4A8_INT8_CODEC_ID
+        } else {
+            crate::checkpoint_weight_facts::CONVROT_INT8_CODEC_ID
+        });
+    }
     crate::base_weights::QuantFormat::from_label(&label)?.source_codec_id()
 }
 
@@ -2203,6 +2380,7 @@ pub(crate) const CANDLE_SCAIL2_VIDEO_MODELS: &[&str] = &["scail2_14b"];
 /// rather than restating it: a kernel that is routed here but has no trainer mapping is claimed by
 /// the mlx worker and then immediately failed, which is exactly how `mage_flow_lora` shipped broken.
 pub const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
+    "moss_image_lora",
     "z_image_lora",
     "sdxl_lora",
     "kolors_lora",
@@ -2225,6 +2403,8 @@ pub const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
     // Qwen Image 2.1 instruction-EDIT LoRA/LoKr (epic 24107 S13, sc-24161): the same MLX trainer in
     // edit mode. The Candle twin (sc-24162) is in the candle set too.
     "qwen_image_2_1_edit_lora",
+    "flux3_klein_lora",
+    "flux3_klein_edit_lora",
 ];
 
 /// SceneWorks training kernels with a native candle trainer that needs no base-model disambiguation
@@ -2237,6 +2417,7 @@ pub const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
 /// like `krea_lora` — it is also in [`MLX_ONLY_TRAINING_KERNELS`] but NOT
 /// [`MLX_ROUTED_TRAINING_KERNELS`] (the MLX control lane is B5/sc-10177).
 pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
+    "moss_image_lora",
     "z_image_lora",
     "sdxl_lora",
     "kolors_lora",
@@ -2258,6 +2439,8 @@ pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
     // Qwen Image 2.1 instruction-EDIT LoRA/LoKr (epic 24107 S14, sc-24162): the same Candle trainer
     // in edit mode (`max_reference_images` 10), base-gated the same way.
     "qwen_image_2_1_edit_lora",
+    "flux3_klein_lora",
+    "flux3_klein_edit_lora",
 ];
 
 /// Whether an off-Mac (candle) worker can run this training kernel at all. A real training run on a
@@ -2265,6 +2448,34 @@ pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
 /// submit path refuses it up front instead of leaving it queued forever (sc-24159).
 pub fn training_kernel_is_candle_routed(kernel: &str) -> bool {
     CANDLE_ROUTED_TRAINING_KERNELS.contains(&kernel)
+}
+
+/// Both native MOSS lanes train adapters for the exact selected Base/SFT checkpoint only.
+pub(crate) fn moss_training_plan_is_supported(plan: &Map<String, Value>) -> bool {
+    let base = plan
+        .get("target")
+        .and_then(Value::as_object)
+        .and_then(|target| target.get("baseModel"))
+        .and_then(Value::as_str);
+    if !matches!(base, Some("moss_image_base" | "moss_image_sft")) {
+        return false;
+    }
+    let advanced = match plan.get("config") {
+        None => None,
+        Some(Value::Object(config)) => match config.get("advanced") {
+            None => None,
+            Some(Value::Object(advanced)) => Some(advanced),
+            _ => return false,
+        },
+        _ => return false,
+    };
+    let method = match advanced.and_then(|advanced| advanced.get("networkType")) {
+        None => "lora",
+        Some(Value::String(value)) if value.trim().is_empty() => "lora",
+        Some(Value::String(value)) => value.trim(),
+        _ => return false,
+    };
+    method.eq_ignore_ascii_case("lora") || method.eq_ignore_ascii_case("lokr")
 }
 
 /// Native-only training kernels — only a Rust worker can run them, so a generic worker descriptor
@@ -2275,6 +2486,7 @@ pub fn training_kernel_is_candle_routed(kernel: &str) -> bool {
 /// [`CANDLE_ROUTED_TRAINING_KERNELS`], while a generic worker remains refused. `krea_control` is the
 /// intentional Candle-only exception; the historical constant name remains for compatibility.
 pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
+    "moss_image_lora",
     "ltx_mlx_lora",
     "krea_lora",
     "sd3_lora",
@@ -2288,6 +2500,8 @@ pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
     // Qwen Image 2.1 edit (sc-24161/sc-24162): native MLX + Candle trainers and no generic one, so
     // a generic worker refuses it while the candle exception admits it (it is candle-routed).
     "qwen_image_2_1_edit_lora",
+    "flux3_klein_lora",
+    "flux3_klein_edit_lora",
 ];
 
 #[cfg(test)]
@@ -2428,12 +2642,16 @@ mod tests {
         "anima_aesthetic",
         "anima_turbo",
         "iris_3b",
+        "flux3_klein",
+        "flux3_klein_base",
         "moss_image_base",
         "moss_image_sft",
         "supra2_img",
     ];
 
     const EXPECTED_CANDLE_ROUTED_MODELS: &[&str] = &[
+        "flux3_klein",
+        "flux3_klein_base",
         "mage_flow_base",
         "mage_flow",
         "mage_flow_turbo",
@@ -2525,6 +2743,9 @@ mod tests {
         "flux2_klein_9b",
         "flux2_klein_9b_kv",
         "flux2_dev",
+        // sc-26239 + sc-26241: additive LoRA on every native FLUX 3 package.
+        "flux3_klein",
+        "flux3_klein_base",
         "sdxl",
         "realvisxl",
         "illustrious_xl_v1",
@@ -2540,6 +2761,7 @@ mod tests {
         "sd3_5_large",
         "sd3_5_large_turbo",
         "sd3_5_medium",
+        "iris_3b",
     ];
 
     // Z-Image Turbo/base select already-packed q4/q8/bf16 directories; this is not on-the-fly quant,
@@ -2589,8 +2811,8 @@ mod tests {
         "anima_base",
         "anima_aesthetic",
         "anima_turbo",
-        // sc-25681: Iris-3B generation-task LoRA / LoKr, no candle quant tier.
-        "iris_3b",
+        "moss_image_base",
+        "moss_image_sft",
     ];
 
     const EXPECTED_CANDLE_VIDEO_ROUTED_MODELS: &[&str] = &[
@@ -2637,6 +2859,7 @@ mod tests {
     ];
 
     const EXPECTED_MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
+        "moss_image_lora",
         "z_image_lora",
         "sdxl_lora",
         "kolors_lora",
@@ -2657,9 +2880,12 @@ mod tests {
         "qwen_image_2_1_lora",
         // sc-24161: Qwen Image 2.1 instruction-edit LoRA/LoKr on the native MLX trainer.
         "qwen_image_2_1_edit_lora",
+        "flux3_klein_lora",
+        "flux3_klein_edit_lora",
     ];
 
     const EXPECTED_CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
+        "moss_image_lora",
         "z_image_lora",
         "sdxl_lora",
         "kolors_lora",
@@ -2678,9 +2904,12 @@ mod tests {
         "qwen_image_2_1_lora",
         // sc-24162: Qwen Image 2.1 instruction-edit LoRA/LoKr on the native Candle trainer.
         "qwen_image_2_1_edit_lora",
+        "flux3_klein_lora",
+        "flux3_klein_edit_lora",
     ];
 
     const EXPECTED_MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
+        "moss_image_lora",
         "ltx_mlx_lora",
         "krea_lora",
         "sd3_lora",
@@ -2693,6 +2922,8 @@ mod tests {
         "qwen_image_2_1_lora",
         // sc-24162: native-Rust-only like its T2I sibling, so it stays here although candle-routed.
         "qwen_image_2_1_edit_lora",
+        "flux3_klein_lora",
+        "flux3_klein_edit_lora",
     ];
 
     #[test]
@@ -3568,7 +3799,7 @@ mod tests {
 
     /// The `models` array of the SHIPPED manifest — the exact bytes the app embeds and seeds, and
     /// the exact bytes the web LoRA picker reads `loraCompatibility` out of.
-    fn builtin_image_models() -> Vec<serde_json::Value> {
+    pub(super) fn builtin_image_models() -> Vec<serde_json::Value> {
         let raw = crate::builtin_manifests::BUILTIN_MANIFESTS
             .iter()
             .find(|(name, _)| *name == "builtin.models.jsonc")
@@ -4241,5 +4472,131 @@ mod tests {
              queues FOREVER with no error and an idle worker (sc-15328). Either make a lane claim \
              it, or stop advertising `loraCompatibility` on the model: {stranded:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod moss_native_training_routing_tests {
+    use super::*;
+    use crate::contracts::{JobSnapshot, JobType};
+    use crate::jobs_store::routing::{candle, mlx};
+
+    fn job(plan: Value) -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id":"moss-routing", "type":"lora_train", "status":"queued",
+            "payload":{"plan":plan}, "result":{}, "requestedGpu":"auto",
+            "progress":0, "stage":"queued", "message":"", "attempts":0,
+            "cancelRequested":false, "createdAt":"", "updatedAt":""
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn moss_exact_checkpoint_adapters_route_to_both_native_lanes_not_generic() {
+        let candle_worker: crate::contracts::WorkerSnapshot = serde_json::from_value(json!({
+            "id":"moss-candle", "gpuId":"0", "gpuName":null, "status":"idle",
+            "currentJobId":null, "capabilities":["image_generate", "candle"],
+            "loadedModels":[], "registeredAt":"", "lastSeenAt":""
+        }))
+        .unwrap();
+        for base in ["moss_image_base", "moss_image_sft"] {
+            let entry = super::tests::builtin_image_models()
+                .iter()
+                .find(|entry| entry.get("id").and_then(Value::as_str) == Some(base))
+                .unwrap()
+                .clone();
+            for method in ["lora", "lokr"] {
+                let mut generation = job(json!({}));
+                generation.job_type = JobType::ImageGenerate;
+                generation.payload = json!({
+                    "model":base, "mode":"text_to_image", "prompt":"a ceramic cup",
+                    "width":64, "height":64, "modelManifestEntry":entry,
+                    "loras":[{"id":"trained-moss", "networkType":method, "weight":0.65}],
+                    "advanced":{"mossImage":{"acceleration":"off"}}
+                })
+                .as_object()
+                .unwrap()
+                .clone();
+                let entry = generation.payload["modelManifestEntry"]
+                    .as_object()
+                    .unwrap();
+                assert!(
+                    crate::moss_image::native_request(&generation.payload, entry)
+                        .unwrap()
+                        .is_some()
+                );
+                assert!(
+                    candle::image_job_is_candle_eligible(&generation),
+                    "{base}/{method}"
+                );
+                assert!(crate::jobs_store::worker_supports_job(
+                    &candle_worker,
+                    &generation
+                ));
+                assert_eq!(generation.payload["loras"][0]["networkType"], method);
+                assert_eq!(generation.payload["loras"][0]["weight"], 0.65);
+                // Admission of custom adapters must not enable packed weights or conditioning.
+                for field in ["sourceAssetId", "referenceAssetId", "maskAssetId"] {
+                    let mut invalid = generation.clone();
+                    invalid
+                        .payload
+                        .insert(field.into(), json!("unsupported-asset"));
+                    assert!(!candle::image_job_is_candle_eligible(&invalid));
+                    assert!(!crate::jobs_store::worker_supports_job(
+                        &candle_worker,
+                        &invalid
+                    ));
+                }
+                let mut edit = generation.clone();
+                edit.payload.insert("mode".into(), json!("edit_image"));
+                assert!(!candle::image_job_is_candle_eligible(&edit));
+                for bits in [4, 8] {
+                    let mut packed = generation.clone();
+                    packed.payload.get_mut("advanced").unwrap()["mlxQuantize"] = json!(bits);
+                    assert!(!candle::image_job_is_candle_eligible(&packed));
+                    assert!(!crate::jobs_store::worker_supports_job(
+                        &candle_worker,
+                        &packed
+                    ));
+                }
+            }
+        }
+        let targets: Vec<_> = crate::training::builtin_training_targets()
+            .targets
+            .into_iter()
+            .filter(|target| target.kernel == "moss_image_lora")
+            .collect();
+        assert!(["moss_image_base", "moss_image_sft"]
+            .iter()
+            .all(|base| targets.iter().any(|target| target.base_model == *base)));
+        for target in targets {
+            let plan = json!({"target":{"kernel":target.kernel,"baseModel":target.base_model},
+                "config":target.defaults});
+            for method in ["lora", "lokr", " LoKR ", ""] {
+                let mut selected = plan.clone();
+                selected["config"]["advanced"]["networkType"] = json!(method);
+                let selected = job(selected);
+                assert!(mlx::training_job_is_mlx_eligible(&selected));
+                assert!(candle::training_job_is_candle_eligible(&selected));
+                assert!(mlx::training_kernel_is_mlx_only(&selected));
+            }
+            for method in [json!("full"), json!("control"), json!("unknown"), json!(42)] {
+                let mut invalid = plan.clone();
+                invalid["config"]["advanced"]["networkType"] = method;
+                let invalid = job(invalid);
+                assert!(!mlx::training_job_is_mlx_eligible(&invalid));
+                assert!(!candle::training_job_is_candle_eligible(&invalid));
+                assert!(mlx::training_kernel_is_mlx_only(&invalid));
+            }
+            let mut foreign = plan.clone();
+            foreign["target"]["baseModel"] = json!("qwen_image_2_1");
+            let foreign = job(foreign);
+            assert!(!mlx::training_job_is_mlx_eligible(&foreign));
+            assert!(!candle::training_job_is_candle_eligible(&foreign));
+            let mut control = job(plan);
+            control.job_type = JobType::ControlTraining;
+            assert!(!mlx::training_job_is_mlx_eligible(&control));
+            assert!(!candle::training_job_is_candle_eligible(&control));
+        }
     }
 }

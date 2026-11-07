@@ -232,7 +232,7 @@ pub(crate) async fn run_image_segment_job(
             JobStatus::Running,
             ProgressStage::Downloading,
             0.25,
-            "Loading SAM3 weights.",
+            crate::load_progress::PREPARING_MODEL,
             None,
             None,
             None,
@@ -286,7 +286,7 @@ pub(crate) async fn run_image_segment_job(
                 "",
                 "smart-select task",
                 crate::no_cancel_ack(),
-                tokio::task::spawn_blocking(move || {
+                crate::load_progress::spawn_blocking(move || {
                     let source_image = crate::image_decode::decode_image_any(&source_path)
                         .map_err(|e| {
                             WorkerError::InvalidPayload(format!(
@@ -311,7 +311,7 @@ pub(crate) async fn run_image_segment_job(
             "",
             "smart-select task",
             crate::no_cancel_ack(),
-            tokio::task::spawn_blocking(move || {
+            crate::load_progress::spawn_blocking(move || {
                 let source_image = crate::image_decode::decode_image_any(&source_path)
                     .map_err(|e| {
                         WorkerError::InvalidPayload(format!(

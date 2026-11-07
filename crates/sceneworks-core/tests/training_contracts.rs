@@ -1,5 +1,7 @@
+mod common;
+use common::fixture_path;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use sceneworks_core::training::target_supports_resolution_buckets;
 use sceneworks_core::training::{
@@ -20,19 +22,8 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-fn fixture_path(relative_path: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("tests")
-        .join("fixtures")
-        .join("rust_migration_contracts")
-        .join("training")
-        .join(relative_path)
-}
-
 fn load_fixture(relative_path: &str) -> Value {
-    let path = fixture_path(relative_path);
+    let path = fixture_path(&format!("training/{relative_path}"));
     let payload = fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
     serde_json::from_str(&payload)
@@ -158,6 +149,8 @@ fn builtin_targets_gate_network_types() {
             "sd3_5_large_lora",
             "sd3_5_medium_lora",
             "anima_base_lora",
+            "moss_image_base_lora",
+            "moss_image_sft_lora",
             // Qwen Image 2.1 (sc-24159): the native MLX trainer builds LoRA and LoKr over the 2.1
             // adapter host, which applies both at inference (sc-24156).
             "qwen_image_2_1_lora",
@@ -379,7 +372,7 @@ fn qwen_image_2_1_edit_target_mirrors_the_t2i_rules_and_caps_references_at_the_m
     for other in registry
         .targets
         .iter()
-        .filter(|target| target.id != edit.id)
+        .filter(|target| target.id != edit.id && target.id != "flux3_klein_edit_lora")
     {
         assert_eq!(
             training_target_max_reference_images(other),
@@ -466,6 +459,34 @@ fn plan_for(target_id: &str, dataset: &TrainingDataset) -> Result<TrainingPlan, 
         file_name: "edit.safetensors".to_owned(),
         created_at: "2026-10-02T00:00:00Z".to_owned(),
     })
+}
+
+#[test]
+fn flux3_plans_preserve_single_reference_edit_and_captioned_intent() {
+    for (target, dataset, references) in [
+        ("flux3_klein_lora", dataset_fixture(), 0),
+        ("flux3_klein_edit_lora", edit_dataset(&[1, 1]), 1),
+    ] {
+        let plan = plan_for(target, &dataset).unwrap();
+        assert_eq!(plan.target.base_model, "flux3_klein_base");
+        assert_eq!(plan.config.rank, 4);
+        assert!(plan
+            .dataset
+            .items
+            .iter()
+            .all(|item| item.reference_image_paths.len() == references));
+        if references == 1 {
+            assert!(plan.dataset.items[0].reference_image_paths[0].ends_with("item_0000_ref0.png"));
+            assert_eq!(
+                plan.dataset.items[0].caption,
+                "replace the sky with image 2"
+            );
+        }
+    }
+    for dataset in [dataset_fixture(), edit_dataset(&[2]), edit_dataset(&[1, 0])] {
+        assert!(plan_for("flux3_klein_edit_lora", &dataset).is_err());
+    }
+    assert!(plan_for("flux3_klein_lora", &edit_dataset(&[1])).is_err());
 }
 
 /// sc-24161: the plan threads every edit item's references into `referenceImagePaths` in STORED
@@ -568,7 +589,8 @@ fn kernel_edit_shape_floor_follows_the_targets_reference_caps() {
         "qwen_image_2_1_edit_lora"
     ));
     for target in builtin_training_targets().targets {
-        if target.kernel != "qwen_image_2_1_edit_lora" {
+        if !["qwen_image_2_1_edit_lora", "flux3_klein_edit_lora"].contains(&target.kernel.as_str())
+        {
             assert!(
                 !training_kernel_trains_edit_pairs(&target.kernel),
                 "{}",
@@ -601,7 +623,7 @@ fn regen_target_registry_fixture() {
     }
     let pretty = serde_json::to_string_pretty(&builtin_training_targets())
         .expect("builtin registry serializes");
-    fs::write(fixture_path("target-registry.json"), pretty + "\n").expect("write fixture");
+    fs::write(fixture_path("training/target-registry.json"), pretty + "\n").expect("write fixture");
 }
 
 #[test]
@@ -613,7 +635,7 @@ fn regen_preset_registry_fixture() {
     let pretty =
         serde_json::to_string_pretty(&sceneworks_core::training::builtin_training_presets())
             .expect("builtin preset registry serializes");
-    fs::write(fixture_path("preset-registry.json"), pretty + "\n").expect("write fixture");
+    fs::write(fixture_path("training/preset-registry.json"), pretty + "\n").expect("write fixture");
 }
 
 #[test]
@@ -1291,7 +1313,7 @@ fn builtin_presets_expose_sdxl_character_default() {
         .find(|preset| preset.id == "sdxl_lora.style.adamw8bit.balanced")
         .expect("sdxl style preset present");
     assert_eq!(style.config.rank, 32);
-    assert_eq!(style.config.alpha, 16);
+    assert_eq!(style.config.alpha, serde_json::Number::from(16));
 }
 
 #[test]
@@ -2064,7 +2086,7 @@ fn build_plan_for_target(
 fn set_training_numeric_field(config: &mut TrainingConfig, field: &str, value: u32) {
     match field {
         "rank" => config.rank = value,
-        "alpha" => config.alpha = value,
+        "alpha" => config.alpha = serde_json::Number::from(value),
         "steps" => config.steps = value,
         "batchSize" => config.batch_size = value,
         "resolutions" => config.resolution = value,
@@ -2609,10 +2631,40 @@ fn web_depth_anchoring_bounds_match_the_api_bounds() {
         serde_json::from_str(&web_training_const("depthAnchoringModelOptions"))
             .expect("depthAnchoringModelOptions is a JSON-compatible string array");
     assert_eq!(models, DEPTH_ANCHORING_MODELS.to_vec());
-    let workflows: Vec<String> =
-        serde_json::from_str(&web_training_const("depthAnchoringNoVideoLtxWorkflows"))
-            .expect("depthAnchoringNoVideoLtxWorkflows is a JSON-compatible string array");
-    assert_eq!(workflows, DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS.to_vec());
+    let registry = builtin_training_targets();
+    let ltx = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "ltx_2_5_video_lora")
+        .unwrap();
+    assert_eq!(
+        ltx.ui.get("noVideoLossWorkflows"),
+        Some(&serde_json::json!(DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS))
+    );
+    let plans = ltx
+        .ui
+        .get("ltxWorkflowPlans")
+        .and_then(serde_json::Value::as_object)
+        .unwrap();
+    let workflows = ltx
+        .limits
+        .get("ltxWorkflows")
+        .and_then(serde_json::Value::as_array)
+        .unwrap();
+    assert_eq!(plans.len(), workflows.len());
+    for workflow in workflows {
+        let name = workflow.as_str().unwrap();
+        let video_generated = plans[name]
+            .get("video")
+            .and_then(|video| video.get("isGenerated"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        assert_eq!(
+            video_generated,
+            !DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS.contains(&name),
+            "{name}"
+        );
+    }
 }
 
 /// sc-24830 review: submit refuses the depth-anchoring combinations the engine refuses even on an
@@ -3038,7 +3090,8 @@ fn adapter_noise_is_gated_on_the_target_flags() {
         .filter(|target| target.output_kind != TrainingOutputKind::ControlBranch)
         .filter(|target| {
             // The Iris-3B trainers declare no epic 2123 technique, so they advertise neither flag.
-            let iris = sceneworks_core::training::iris::is_iris_training_kernel(&target.kernel);
+            let iris = sceneworks_core::training::iris::is_iris_training_kernel(&target.kernel)
+                || sceneworks_core::training::flux3::KERNELS.contains(&target.kernel.as_str());
             if iris {
                 assert!(!target_supports_weight_noise(target), "{}", target.id);
                 assert!(!target_supports_gradient_noise(target), "{}", target.id);
@@ -3115,6 +3168,8 @@ fn resolution_buckets_are_refused_at_submit_on_targets_that_do_not_advertise_the
     assert_eq!(
         withheld,
         [
+            "flux3_klein_lora",
+            "flux3_klein_edit_lora",
             "ltx_2_5_video_lora",
             "iris_3b_generation",
             "iris_3b_depth",
@@ -3186,11 +3241,15 @@ fn depth_anchoring_is_refused_at_submit_on_targets_that_do_not_advertise_it() {
         .filter(|target| !target_supports_depth_anchoring(target))
         .map(|target| target.id.as_str())
         .collect();
-    // The Iris-3B trainers declare no epic 2123 technique.
+    // MOSS and Iris do not advertise this auxiliary loss; keep submit-time refusals explicit.
     assert_eq!(
         unsupported,
         [
             "krea_2_control",
+            "moss_image_base_lora",
+            "moss_image_sft_lora",
+            "flux3_klein_lora",
+            "flux3_klein_edit_lora",
             "iris_3b_generation",
             "iris_3b_depth",
             "iris_3b_restore"
@@ -3243,6 +3302,8 @@ fn subject_mask_loss_is_refused_at_submit_on_targets_that_do_not_advertise_it() 
         unsupported,
         [
             "krea_2_control",
+            "flux3_klein_lora",
+            "flux3_klein_edit_lora",
             "ltx_2_5_video_lora",
             "iris_3b_generation",
             "iris_3b_depth",
@@ -3787,11 +3848,15 @@ fn face_losses_are_refused_at_submit_on_targets_that_do_not_advertise_them() {
             .filter(|target| !supports(target))
             .map(|target| target.id.as_str())
             .collect();
-        // The Iris-3B trainers declare no epic 2123 technique.
+        // MOSS and Iris do not advertise these face losses; retain every refusal assertion.
         assert_eq!(
             unsupported,
             [
                 "krea_2_control",
+                "moss_image_base_lora",
+                "moss_image_sft_lora",
+                "flux3_klein_lora",
+                "flux3_klein_edit_lora",
                 "iris_3b_generation",
                 "iris_3b_depth",
                 "iris_3b_restore"
@@ -4271,6 +4336,195 @@ fn null_technique_keys_mean_absent() {
     }
     assert_eq!(parse_resolution_buckets(advanced).unwrap(), None);
     assert_eq!(subject_mask_loss_weights(advanced).unwrap(), None);
+}
+
+/// The product accepts exactly one bucket wire form: legacy squares retain their semantics while
+/// rectangles preserve ordered WxH geometry. Mutation: accept mixed/duplicate/fractional rows or
+/// collapse portrait into landscape ⇒ red.
+#[test]
+fn rectangular_resolution_buckets_are_strict_and_ordered() {
+    use sceneworks_core::training::{
+        parse_resolution_bucket_config, AspectRatioBucketSpec, ResolutionBucketConfig,
+    };
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "moss_image_base_lora")
+        .expect("MOSS bucket target");
+    let mut config = target.defaults.clone();
+    config.advanced.insert(
+        "resolutionBuckets".to_owned(),
+        json!([
+            {"width": 768, "height": 1024, "repeats": 2},
+            {"width": 1024, "height": 768, "repeats": 1}
+        ]),
+    );
+    assert_eq!(
+        parse_resolution_bucket_config(&config.advanced).unwrap(),
+        Some(ResolutionBucketConfig::AspectRatio(vec![
+            AspectRatioBucketSpec {
+                width: 768,
+                height: 1024,
+                repeats: 2
+            },
+            AspectRatioBucketSpec {
+                width: 1024,
+                height: 768,
+                repeats: 1
+            },
+        ])),
+    );
+    validate_training_config_for_target(target, &config).expect("rectangular bucket config");
+    let legacy_target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "z_image_turbo_lora")
+        .expect("legacy square bucket target");
+    let mut legacy_config = legacy_target.defaults.clone();
+    legacy_config.advanced.insert(
+        "resolutionBuckets".to_owned(),
+        config.advanced["resolutionBuckets"].clone(),
+    );
+    assert!(matches!(
+        validate_training_config_for_target(legacy_target, &legacy_config),
+        Err(TrainingPlanError::InvalidField { field, .. }) if field == "resolutionBuckets"
+    ));
+    legacy_config.advanced.insert(
+        "resolutionBuckets".to_owned(),
+        json!([{"resolution": 1024, "repeats": 2}]),
+    );
+    validate_training_config_for_target(legacy_target, &legacy_config)
+        .expect("legacy square buckets remain supported");
+
+    for rows in [
+        json!([{"resolution": 768, "repeats": 1}, {"width": 768, "height": 1024, "repeats": 1}]),
+        json!([{"width": 768, "repeats": 1}]),
+        json!([{"width": 768.5, "height": 1024, "repeats": 1}]),
+        json!([{"width": 768, "height": 1024, "repeats": 1}, {"width": 768, "height": 1024, "repeats": 2}]),
+    ] {
+        config.advanced.insert("resolutionBuckets".to_owned(), rows);
+        assert!(parse_resolution_bucket_config(&config.advanced).is_err());
+    }
+}
+
+#[test]
+fn moss_seed_contract_preserves_literals_and_rejects_negative_missing_and_overflow() {
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "moss_image_base_lora")
+        .unwrap();
+    assert_eq!(target.defaults.seed, 42);
+    let mut config = target.defaults.clone();
+    for seed in [0, 42, 1_000_000_001, i64::MAX] {
+        config.seed = seed;
+        validate_training_config_for_target(target, &config).unwrap();
+        let restored: TrainingConfig =
+            serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+        assert_eq!(restored.seed, seed);
+    }
+    for seed in [-1, i64::MIN] {
+        config.seed = seed;
+        assert!(
+            matches!(validate_training_config_for_target(target, &config),
+            Err(TrainingPlanError::InvalidField { field, .. }) if field == "seed")
+        );
+    }
+    for invalid in [
+        Value::Null,
+        json!("42"),
+        json!(1.5),
+        json!(9_223_372_036_854_775_808_u64),
+    ] {
+        let mut value = serde_json::to_value(&target.defaults).unwrap();
+        value["seed"] = invalid;
+        assert!(serde_json::from_value::<TrainingConfig>(value).is_err());
+    }
+    let mut missing = serde_json::to_value(&target.defaults).unwrap();
+    missing.as_object_mut().unwrap().remove("seed");
+    assert!(serde_json::from_value::<TrainingConfig>(missing).is_err());
+}
+
+#[test]
+fn moss_saved_plans_preserve_checkpoint_method_dataset_and_supported_controls() {
+    let dataset = dataset_fixture();
+    let registry = builtin_training_targets();
+    for target_id in ["moss_image_base_lora", "moss_image_sft_lora"] {
+        let target = registry
+            .targets
+            .iter()
+            .find(|target| target.id == target_id)
+            .unwrap();
+        for method in ["lora", "lokr"] {
+            let mut config = target.defaults.clone();
+            config.alpha = serde_json::from_value(json!(0.5)).unwrap();
+            config.rank = 8;
+            config.seed = 173;
+            config.batch_size = 2;
+            config.gradient_accumulation = 3;
+            config
+                .advanced
+                .insert("networkType".to_owned(), json!(method));
+            config
+                .advanced
+                .insert("decomposeFactor".to_owned(), json!(4));
+            config.advanced.insert(
+                "loraTargetModules".to_owned(),
+                json!(["q", "layers.0.proj.ffn_up_gate"]),
+            );
+            config
+                .advanced
+                .insert("cacheLatents".to_owned(), json!(false));
+            config
+                .advanced
+                .insert("cacheTextEmbeddings".to_owned(), json!(true));
+            config
+                .advanced
+                .insert("gradientCheckpointing".to_owned(), json!(false));
+            config
+                .advanced
+                .insert("lrScheduler".to_owned(), json!("cosine"));
+            config.advanced.insert("lrWarmupSteps".to_owned(), json!(2));
+            config.advanced.insert(
+                "resolutionBuckets".to_owned(),
+                json!([
+                    {"width": 768, "height": 1024, "repeats": 2},
+                    {"width": 1024, "height": 768, "repeats": 1}
+                ]),
+            );
+            let expected = serde_json::to_value(&config).unwrap();
+            let plan = build_training_plan(BuildTrainingPlan {
+                job_id: "job_moss_saved",
+                target,
+                dataset: &dataset,
+                config,
+                preset: None,
+                lora_id: "lora_moss_saved",
+                base_model_path: format!("/data/models/{}", target.base_model),
+                dataset_root: Path::new("/data/training/ds_abc123"),
+                output_dir: Path::new("/data/loras/lora_moss_saved"),
+                file_name: "moss.safetensors".to_owned(),
+                created_at: "2026-10-22T00:00:00Z".to_owned(),
+            })
+            .unwrap();
+            let restored: TrainingPlan =
+                serde_json::from_value(serde_json::to_value(&plan).unwrap()).unwrap();
+            assert_eq!(serde_json::to_value(&restored.config).unwrap(), expected);
+            assert_eq!(restored.target.target_id, target_id);
+            assert_eq!(restored.target.base_model, target.base_model);
+            assert_eq!(restored.dataset.dataset_id, plan.dataset.dataset_id);
+            assert_eq!(
+                restored.dataset.dataset_version,
+                plan.dataset.dataset_version
+            );
+            assert_eq!(
+                serde_json::to_value(restored.dataset.items).unwrap(),
+                serde_json::to_value(plan.dataset.items).unwrap()
+            );
+        }
+    }
 }
 
 /// sc-25213: every preset's de-distill adapter selection (the presets ship `v2-default`) and both

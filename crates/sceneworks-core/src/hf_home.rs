@@ -67,8 +67,8 @@ fn default_huggingface_home_from_env() -> Option<PathBuf> {
 
 /// CPU integration-fixture cache roots, keyed by the exact app data directory. Unlike an
 /// environment guard, this remains isolated across runtime threads and nested app fixtures.
-/// Absent this opt-in test feature, cache resolution has no override branch or registry.
-#[cfg(feature = "test-support")]
+/// Outside unit tests and the opt-in test feature, cache resolution has no override or registry.
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use super::*;
     use std::collections::HashMap;
@@ -82,6 +82,18 @@ pub mod test_support {
     pub struct CacheRootGuard(PathBuf);
 
     impl CacheRootGuard {
+        /// A shared fixture may be nested in an API fixture that already owns its private root.
+        /// Keep that owner's mapping, otherwise install a scoped private root atomically.
+        pub fn new_if_unregistered(data_dir: PathBuf, hub: PathBuf) -> Option<Self> {
+            assert!(data_dir.is_absolute() && hub.is_absolute());
+            let mut roots = roots().lock();
+            if roots.contains_key(&data_dir) {
+                return None;
+            }
+            roots.insert(data_dir.clone(), hub);
+            Some(Self(data_dir))
+        }
+
         pub fn new(data_dir: PathBuf, hub: PathBuf) -> Self {
             assert!(data_dir.is_absolute() && hub.is_absolute());
             let mut roots = roots().lock();
@@ -110,32 +122,32 @@ pub mod test_support {
 /// by the rust-api and rust-worker so cache-path resolution can't drift between
 /// them (sc-4279 / F-MLXW-15).
 pub fn huggingface_hub_cache_dir(data_dir: &Path) -> PathBuf {
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(root) = test_support::root(data_dir) {
         return root;
     }
-    if let Some(path) = std::env::var("HF_HUB_CACHE")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    {
+    huggingface_hub_cache_dir_or_else(|| data_dir.join("cache").join("huggingface").join("hub"))
+}
+
+/// The same HF override precedence with a caller-owned fallback (CLI smoke caches use HOME/.cache).
+pub fn huggingface_hub_cache_dir_or_else(default: impl FnOnce() -> PathBuf) -> PathBuf {
+    if let Some(path) = env_nonempty("HF_HUB_CACHE") {
         return PathBuf::from(path);
     }
-    if let Some(path) = std::env::var("HUGGINGFACE_HUB_CACHE")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(path) = env_nonempty("HUGGINGFACE_HUB_CACHE") {
         return PathBuf::from(path);
     }
-    if let Some(path) = std::env::var("HF_HOME")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(path) = env_nonempty("HF_HOME") {
         return PathBuf::from(path).join("hub");
     }
-    data_dir.join("cache").join("huggingface").join("hub")
+    default()
+}
+
+fn env_nonempty(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 /// Typed authoritative model source library. Runtime and catalog compatibility helpers delegate
@@ -183,6 +195,28 @@ pub fn huggingface_repo_cache_path(data_dir: &Path, repo: &str) -> Option<PathBu
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn cache_env_uses_trimmed_nonempty_values_in_priority_order() {
+        use crate::test_env::EnvVars;
+        let fallback = || PathBuf::from("fallback");
+        for (values, expected) in [
+            ([" /first ", " /second ", " /home "], "/first"),
+            (["   ", " /second ", " /home "], "/second"),
+            (["", "  ", " /home "], "/home/hub"),
+            (["", "", ""], "fallback"),
+        ] {
+            let _env = EnvVars::set(&[
+                ("HF_HUB_CACHE", values[0]),
+                ("HUGGINGFACE_HUB_CACHE", values[1]),
+                ("HF_HOME", values[2]),
+            ]);
+            assert_eq!(
+                huggingface_hub_cache_dir_or_else(fallback),
+                PathBuf::from(expected)
+            );
+        }
+    }
 
     /// sc-4279 / F-MLXW-15: canonical home for the `repo_slugs.json`
     /// cross-language contract now that `safe_repo_dir_name` lives in core (it was

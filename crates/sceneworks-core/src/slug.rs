@@ -1,4 +1,14 @@
 pub fn slugify(value: &str, fallback: &str, max_length: Option<usize>) -> String {
+    slugify_with(value, fallback, max_length, '-')
+}
+
+/// ASCII lowercase identifiers with explicit fallback, length and separator policy.
+pub fn slugify_with(
+    value: &str,
+    fallback: &str,
+    max_length: Option<usize>,
+    separator: char,
+) -> String {
     let mut slug = String::new();
     let mut previous_dash = false;
     for character in value.trim().chars() {
@@ -6,30 +16,78 @@ pub fn slugify(value: &str, fallback: &str, max_length: Option<usize>) -> String
             slug.push(character.to_ascii_lowercase());
             previous_dash = false;
         } else if !previous_dash && !slug.is_empty() {
-            slug.push('-');
+            slug.push(separator);
             previous_dash = true;
         }
     }
-    while slug.ends_with('-') {
+    while slug.ends_with(separator) {
         slug.pop();
     }
     if slug.is_empty() {
         slug = fallback.to_owned();
     }
     if let Some(max_length) = max_length {
-        slug.truncate(max_length);
+        let mut end = max_length.min(slug.len());
+        while !slug.is_char_boundary(end) {
+            end -= 1;
+        }
+        slug.truncate(end);
         // Truncating can split mid-separator (e.g. "my project"/max 3 -> "my-"), so
         // re-run the trailing-dash trim afterwards to keep the slug clean (sc-8951).
-        while slug.ends_with('-') {
+        while slug.ends_with(separator) {
             slug.pop();
         }
     }
     slug
 }
 
+/// Worker routing identifiers preserve ASCII case, dots and underscores.
+pub fn slugify_worker_id_part(value: &str, fallback: &str) -> String {
+    let mut output = String::new();
+    let mut previous_dash = false;
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-') {
+            output.push(character);
+            previous_dash = false;
+        } else if !previous_dash && !output.is_empty() {
+            output.push('-');
+            previous_dash = true;
+        }
+    }
+    while output.ends_with('-') {
+        output.pop();
+    }
+    if output.is_empty() {
+        fallback.to_owned()
+    } else {
+        output
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::slugify;
+
+    #[test]
+    fn worker_id_slug_policy_preserves_case_dots_and_underscores() {
+        assert_eq!(
+            super::slugify_worker_id_part("GPU_0.1 / device", "fallback"),
+            "GPU_0.1-device"
+        );
+        assert_eq!(super::slugify_worker_id_part("///", "fallback"), "fallback");
+        assert_eq!(
+            slugify("GPU_0.1 / device", "fallback", None),
+            "gpu-0-1-device"
+        );
+    }
+
+    #[test]
+    fn explicit_separator_preserves_existing_identifier_contracts() {
+        assert_eq!(super::slugify_with("a b", "lora", Some(2), '·'), "a");
+        assert_eq!(super::slugify_with(" A-B__C ", "lora", None, '_'), "a_b_c");
+        assert_eq!(super::slugify_with("---", "lora", None, '_'), "lora");
+        assert_eq!(super::slugify_with("ab cd", "lora", Some(3), '_'), "ab");
+    }
 
     #[test]
     fn lowercases_and_collapses_separators() {

@@ -1334,3 +1334,138 @@ fn the_availability_decision_never_re_reads_the_artifact_it_admits() {
         "the probe must be able to see a content read when one happens"
     );
 }
+
+fn memo_key(device: u64, directory_id: u64) -> VolumeIdentityKey {
+    VolumeIdentityKey {
+        canonical_path: PathBuf::from("/Volumes/Models/hub"),
+        device,
+        directory_id,
+    }
+}
+
+/// sc-28037 (GitHub #3235): one probed volume UUID answers every read inside the TTL for the same
+/// path, `st_dev` and inode. A remount (new `st_dev`), a different directory (new inode) and an
+/// expired entry each probe again and return the NEW answer, and a failed probe is never cached.
+#[test]
+fn volume_identity_memo_reuses_only_an_unchanged_fresh_probe() {
+    let memo = VolumeIdentityMemo::default();
+    let start = std::time::Instant::now();
+    let probes = std::cell::Cell::new(0);
+    let probe = |volume: &'static str| {
+        let probes = &probes;
+        move || {
+            probes.set(probes.get() + 1);
+            Ok(volume.to_owned())
+        }
+    };
+
+    assert_eq!(
+        memo.volume_id(memo_key(1, 10), start, probe("a")).unwrap(),
+        "a"
+    );
+    for row in 0..140 {
+        let now = start + std::time::Duration::from_millis(row);
+        assert_eq!(
+            memo.volume_id(memo_key(1, 10), now, probe("never"))
+                .unwrap(),
+            "a"
+        );
+    }
+    assert_eq!(probes.get(), 1, "a 140-row sweep costs one volume probe");
+
+    let remounted = memo.volume_id(memo_key(2, 10), start, probe("b")).unwrap();
+    assert_eq!(
+        remounted, "b",
+        "a new st_dev is a remount and must re-probe"
+    );
+    let replaced = memo.volume_id(memo_key(1, 11), start, probe("c")).unwrap();
+    assert_eq!(replaced, "c", "a new directory inode must re-probe");
+    assert_eq!(probes.get(), 3);
+
+    // Same device node and inode handed to a different disk: only the TTL can catch it.
+    let expired = start + VOLUME_IDENTITY_MEMO_TTL;
+    assert_eq!(
+        memo.volume_id(memo_key(1, 10), expired, probe("d"))
+            .unwrap(),
+        "d"
+    );
+    assert_eq!(probes.get(), 4);
+
+    let failing = || {
+        probes.set(probes.get() + 1);
+        Err(ExternalLibraryError("diskutil unavailable".to_owned()))
+    };
+    assert!(memo.volume_id(memo_key(3, 10), start, failing).is_err());
+    assert_eq!(
+        memo.volume_id(memo_key(3, 10), start, probe("e")).unwrap(),
+        "e"
+    );
+    assert_eq!(probes.get(), 6, "a failed probe must not be cached");
+}
+
+/// sc-28037 (GitHub #3235): a catalog-shaped sweep — `resolve_model_availability` once per row —
+/// spawns `df` + `diskutil` once, not once per row, and the memo still lets the very next sweep
+/// see a disconnect and a different directory mounted at the configured path.
+#[cfg(target_os = "macos")]
+#[test]
+fn one_catalog_sweep_probes_the_volume_once_and_still_sees_disconnect_and_swap() {
+    const ROWS: usize = 24;
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let library = temp.path().join("external-hf");
+    std::fs::create_dir_all(&library).unwrap();
+    let rows = (0..ROWS)
+        .map(|index| {
+            let repo = format!("owner/model-{index}");
+            seed_snapshot(&library, &repo, "model.safetensors");
+            vec![requirement(&repo, "model.safetensors")]
+        })
+        .collect::<Vec<_>>();
+    let sweep = |expected: ModelAvailability| {
+        for requirements in &rows {
+            let resolution = resolve_model_availability(&data, &library, requirements, true, &[]);
+            assert_eq!(resolution.availability, expected);
+        }
+    };
+
+    TEST_MACOS_VOLUME_PROBES.with(|probes| probes.set(0));
+    sweep(ModelAvailability::ExternalReady);
+    // The first row binds the library (two fresh probes around its validation, as before); every
+    // later row is a read and reuses one memoized probe.
+    assert_eq!(
+        TEST_MACOS_VOLUME_PROBES.with(std::cell::Cell::get),
+        3,
+        "a {ROWS}-row sweep must spawn diskutil once beyond the bind's own two probes"
+    );
+
+    TEST_MACOS_VOLUME_PROBES.with(|probes| probes.set(0));
+    sweep(ModelAvailability::ExternalReady);
+    assert_eq!(
+        TEST_MACOS_VOLUME_PROBES.with(std::cell::Cell::get),
+        0,
+        "a warm sweep inside the TTL reuses the memoized volume identity"
+    );
+
+    let detached = temp.path().join("detached");
+    std::fs::rename(&library, &detached).unwrap();
+    sweep(ModelAvailability::InstalledExternalUnavailable);
+
+    // A different directory at the configured path: the fresh inode re-keys the memo, and the
+    // binding comparison fails closed exactly as before.
+    std::fs::create_dir_all(&library).unwrap();
+    for requirements in &rows {
+        seed_snapshot(&library, &requirements[0].repository, "model.safetensors");
+    }
+    for requirements in &rows {
+        let resolution = resolve_model_availability(&data, &library, requirements, true, &[]);
+        assert_eq!(
+            resolution.availability,
+            ModelAvailability::InstalledExternalUnavailable
+        );
+        assert!(resolution.library_present);
+    }
+
+    std::fs::remove_dir_all(&library).unwrap();
+    std::fs::rename(&detached, &library).unwrap();
+    sweep(ModelAvailability::ExternalReady);
+}

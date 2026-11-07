@@ -14,90 +14,16 @@ vi.mock("react-konva", async () => {
 
 import { AppContext } from "../context/AppContext.js";
 import { ScreenActiveContext } from "../context/ScreenActiveContext.js";
-import {
-  ImageEditor,
-  cropRatioForKey,
-  centeredCropRect,
-  upscaleFactorsForEngine,
-  upscaleEngineHasSoftness,
-  buildUpscaleJobBody,
-  editedFilename,
-  buildSaveProvenance,
-  gradePixel,
-  applyColorAdjustments,
-  isIdentityAdjust,
-  IDENTITY_COLOR_ADJUST,
-  editCapableModels,
-  buildEditJobBody,
-  editOutputDims,
-  editOutputAspectRatio,
-  modelIsInpaintCapable,
-  maskHasContent,
-  detailCapableModels,
-  buildDetailJobBody,
-  tileControlNetModel,
-  tileControlNetInstalled,
-  TILE_CONTROLNET_MODEL_ID,
-  sam3SegmentInstalled,
-  sam3SegmentModel,
-  SAM3_SEGMENT_MODEL_ID,
-  rectToBbox,
-  bboxToRect,
-  isValidHexColor,
-  boxPaletteIsValid,
-  documentPalette,
-  documentPaletteIsValid,
-  boxIsValid,
-  BOX_TYPES,
-  MAX_BOX_PALETTE,
-  MAX_DOCUMENT_PALETTE,
-  BOX_PALETTE,
-  MIN_BOX_PX,
-  rectFromPoints,
-  clampRectToCanvas,
-  makeBox,
-  boxFillStyle,
-  addPaletteColor,
-  removePaletteColor,
-  boxMetadataGaps,
-  blankCanvasDims,
-  BLANK_CANVAS_SIZES,
-  boundedEditorCanvasDimensions,
-  EDITOR_CANVAS_MAX_AREA,
-  EDITOR_CANVAS_MAX_SIDE,
-  exportEditorFile,
-  editorDownloadPlan,
-  editorDownloadNote,
-  downloadSizeSentence,
-  MAX_DESKTOP_EXPORT_BYTES,
-  RASTER_REASON_DESKTOP_CAP,
-  paintBoxesOnContext,
-  colorName,
-  composeColorPrompt,
-  boxesToIdeogramElements,
-  HISTORY_LIMIT,
-  emptyHistory,
-  historyCheckpoint,
-  historyUndo,
-  historyRedo,
-  canUndo,
-  canRedo,
-  runGuardedRestore,
-  buildSegmentJobBody,
-  rectToSegmentBox,
-  tintMaskRgbaInPlace,
-  MASK_PREVIEW_RGBA,
-  editReferenceIds,
-  importEditorReferenceFiles,
-  MAX_EDIT_REFERENCES,
-  leaveGuardMessage,
-  leaveGuardArming,
-  closeConfirmMessage,
-  saveStatusIndicator,
-  consumeEditorLaunch,
-  createEditorLaunchGuard,
-  InlineLayerName,
-} from "./ImageEditor.jsx";
+import { ImageEditor, upscaleFactorsForEngine, upscaleEngineHasSoftness, buildUpscaleJobBody, gradePixel, applyColorAdjustments, isIdentityAdjust, IDENTITY_COLOR_ADJUST, editCapableModels, buildEditJobBody, maskHasContent, detailCapableModels, buildDetailJobBody, tileControlNetModel, tileControlNetInstalled, TILE_CONTROLNET_MODEL_ID, sam3SegmentInstalled, sam3SegmentModel, SAM3_SEGMENT_MODEL_ID, rectToBbox, bboxToRect, isValidHexColor, boxPaletteIsValid, documentPalette, documentPaletteIsValid, boxIsValid, BOX_TYPES, MAX_BOX_PALETTE, MAX_DOCUMENT_PALETTE, BOX_PALETTE, MIN_BOX_PX, rectFromPoints, clampRectToCanvas, makeBox, boxFillStyle, addPaletteColor, removePaletteColor, boxMetadataGaps, paintBoxesOnContext, colorName, composeColorPrompt, boxesToIdeogramElements, buildSegmentJobBody, rectToSegmentBox, tintMaskRgbaInPlace, MASK_PREVIEW_RGBA } from "./ImageEditor.jsx";
+import { leaveGuardMessage, leaveGuardArming, closeConfirmMessage, saveStatusIndicator } from "./imageEditor/leaveGuard.js";
+import { createEditorLaunchGuard } from "./imageEditor/launchGuard.js";
+import { modelIsInpaintCapable, editReferenceIds, importEditorReferenceFiles, MAX_EDIT_REFERENCES } from "./imageEditor/references.js";
+import { editedFilename, buildSaveProvenance } from "./imageEditor/provenance.js";
+import { cropRatioForKey, centeredCropRect, editOutputDims, editOutputAspectRatio, blankCanvasDims, BLANK_CANVAS_SIZES } from "./imageEditor/geometry.js";
+import { boundedEditorCanvasDimensions, EDITOR_CANVAS_MAX_AREA, EDITOR_CANVAS_MAX_SIDE, exportEditorFile, editorDownloadPlan, editorDownloadNote, downloadSizeSentence, MAX_DESKTOP_EXPORT_BYTES, RASTER_REASON_DESKTOP_CAP, collectCropLayers } from "./imageEditor/export.js";
+import { HISTORY_LIMIT, emptyHistory, historyCheckpoint, historyUndo, historyRedo, canUndo, canRedo, runGuardedRestore } from "./imageEditor/history.js";
+import { InlineLayerName } from "./imageEditor/InlineLayerName.jsx";
+
 import { verifyCaption, serializeCaption, ELEMENT_KEY_ORDER_OBJ } from "../ideogramCaption.js";
 import { SAVE_WITHOUT_WORKFLOW_LABEL } from "../workflowEmbed.js";
 
@@ -315,6 +241,57 @@ describe("ImageEditor scaffold", () => {
       expect(clearEditorLaunch).not.toHaveBeenCalled();
     });
 
+    it("aborts an older asset fetch when a newer launch opens", async () => {
+      const pending = [];
+      fetchSpy.mockImplementation((_url, options) => new Promise((resolve) => pending.push({ resolve, signal: options.signal })));
+      const nextAsset = { ...IMAGE_ASSET, id: "asset-next", file: { path: "assets/images/next.png" } };
+      const context = baseContext({ assets: [IMAGE_ASSET, nextAsset], editorLaunch: { id: "first", assetId: IMAGE_ASSET.id }, clearEditorLaunch: vi.fn() });
+      await render(context);
+      await render({ ...context, editorLaunch: { id: "second", assetId: nextAsset.id } });
+      expect(pending).toHaveLength(2);
+      expect(pending[0].signal.aborted).toBe(true);
+      expect(pending[1].signal.aborted).toBe(false);
+      await act(async () => pending[0].resolve({ ok: false, status: 500 }));
+      expect(container.textContent).not.toContain("Failed to load asset");
+    });
+
+    it("aborts a pending fetch on project switch and unmount", async () => {
+      const signals = [];
+      fetchSpy.mockImplementation((_url, options) => { signals.push(options.signal); return new Promise(() => {}); });
+      const context = baseContext({ activeProject: { id: "project_1" }, assets: [IMAGE_ASSET], editorLaunch: { id: "first", assetId: IMAGE_ASSET.id }, clearEditorLaunch: vi.fn() });
+      await render(context);
+      await render({ ...context, activeProject: { id: "project_2" }, editorLaunch: null });
+      expect(signals[0].aborted).toBe(true);
+      await render({ ...context, activeProject: { id: "project_2" }, editorLaunch: { id: "second", assetId: IMAGE_ASSET.id } });
+      await act(async () => root.unmount());
+      expect(signals[1].aborted).toBe(true);
+      root = createRoot(container);
+    });
+
+    it("cancels an in-flight decode and releases its URL when a newer image opens", async () => {
+      const images = [];
+      const OriginalImage = global.Image;
+      global.Image = class { constructor() { this.naturalWidth = 20; this.naturalHeight = 20; images.push(this); } };
+      const create = vi.spyOn(URL, "createObjectURL").mockReturnValueOnce("blob:first").mockReturnValueOnce("blob:second");
+      const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+      try {
+        const nextAsset = { ...IMAGE_ASSET, id: "asset-next", file: { path: "assets/images/next.png" } };
+        const context = baseContext({ assets: [IMAGE_ASSET, nextAsset], editorLaunch: { id: "first", assetId: IMAGE_ASSET.id }, clearEditorLaunch: vi.fn() });
+        await render(context);
+        expect(images).toHaveLength(1);
+        await render({ ...context, editorLaunch: { id: "second", assetId: nextAsset.id } });
+        expect(revoke).toHaveBeenCalledWith("blob:first");
+        expect(images[0].src).toBe("");
+        expect(images).toHaveLength(2);
+        await act(async () => images[1].onload());
+        expect(revoke).not.toHaveBeenCalledWith("blob:second");
+      } finally {
+        global.Image = OriginalImage;
+        create.mockRestore();
+        revoke.mockRestore();
+      }
+    });
+
     it("ignores a launch whose asset isn't a renderable image in the project", async () => {
       const clearEditorLaunch = vi.fn();
       await render(
@@ -335,9 +312,11 @@ describe("ImageEditor scaffold", () => {
       const clearLaunch = vi.fn();
       const launch = { id: "launch-dirty", assetId: IMAGE_ASSET.id };
 
+      const guard = createEditorLaunchGuard();
       expect(
-        await consumeEditorLaunch({
+        await guard.consume({
           launch,
+          isCurrent: () => true,
           confirmDiscard: vi.fn(async () => false),
           openAsset,
           clearLaunch,
@@ -347,8 +326,9 @@ describe("ImageEditor scaffold", () => {
       expect(clearLaunch).not.toHaveBeenCalled();
 
       expect(
-        await consumeEditorLaunch({
+        await guard.consume({
           launch,
+          isCurrent: () => true,
           confirmDiscard: vi.fn(async () => true),
           openAsset,
           clearLaunch,
@@ -587,24 +567,24 @@ describe("WebKit-safe editor canvas and export (sc-10380)", () => {
 
   it("routes desktop-generated PNG bytes through the native save command", async () => {
     const file = {
-      name: "shot-edited.png",
-      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+      name: "shot-edited.png", size: 3,
+      slice: () => ({ arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer }),
     };
     const invoke = vi.fn().mockResolvedValue("/tmp/shot-edited.png");
     await expect(
       exportEditorFile(file, { desktop: true, invoke }),
     ).resolves.toBe("/tmp/shot-edited.png");
-    expect(invoke).toHaveBeenCalledWith("save_image_export", {
-      imageBytes: [1, 2, 3],
-      suggestedFilename: "shot-edited.png",
-    });
+    expect(invoke).toHaveBeenCalledWith("begin_image_export", { suggestedFilename: "shot-edited.png", totalBytes: 3 });
+    const [, chunk] = invoke.mock.calls.find(([command]) => command === "save_image_export");
+    expect([...new Uint8Array(chunk)]).toEqual([1, 2, 3]);
   });
 
   it("retains browser download behavior outside the desktop shell", async () => {
     const file = new File(["png"], "shot.png", { type: "image/png" });
+    let clickedAnchor;
     const click = vi
       .spyOn(window.HTMLAnchorElement.prototype, "click")
-      .mockImplementation(() => {});
+      .mockImplementation(function () { clickedAnchor = this; });
     const urlApi = {
       createObjectURL: vi.fn(() => "blob:test"),
       revokeObjectURL: vi.fn(),
@@ -617,8 +597,13 @@ describe("WebKit-safe editor canvas and export (sc-10380)", () => {
       }),
     ).resolves.toBeNull();
     expect(click).toHaveBeenCalledTimes(1);
-    expect(urlApi.revokeObjectURL).toHaveBeenCalledWith("blob:test");
+    expect(urlApi.createObjectURL).toHaveBeenCalledWith(file);
+    expect(clickedAnchor.download).toBe("shot.png");
+    expect(clickedAnchor.href).toBe("blob:test");
     expect(document.querySelector("a[download]")).toBeNull();
+    expect(urlApi.revokeObjectURL).not.toHaveBeenCalled();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(urlApi.revokeObjectURL).toHaveBeenCalledWith("blob:test");
   });
 
   // sc-15954: the two shells must not disagree about what a download contains. The desktop
@@ -629,11 +614,11 @@ describe("WebKit-safe editor canvas and export (sc-10380)", () => {
     const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 250]);
     // jsdom's Blob has no `arrayBuffer()`, so the File stands in for one the same way the desktop
     // test above does. What is under test is that BOTH branches see this one object.
-    const file = { name: "shot.png", arrayBuffer: async () => bytes.buffer };
+    const file = { name: "shot.png", size: bytes.length, slice: () => ({ arrayBuffer: async () => bytes.buffer }), arrayBuffer: async () => bytes.buffer };
 
     const invoke = vi.fn().mockResolvedValue("/tmp/shot.png");
     await exportEditorFile(file, { desktop: true, invoke });
-    const [, payload] = invoke.mock.calls[0];
+    const [, payload] = invoke.mock.calls.find(([command]) => command === "save_image_export");
 
     vi.spyOn(window.HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
     let downloaded = null;
@@ -647,10 +632,37 @@ describe("WebKit-safe editor canvas and export (sc-10380)", () => {
     await exportEditorFile(file, { desktop: false, documentRef: document, urlApi });
 
     expect(downloaded).toBe(file);
-    expect(payload.imageBytes).toEqual([...bytes]);
-    expect([...new Uint8Array(await downloaded.arrayBuffer())]).toEqual(payload.imageBytes);
-    expect(payload.suggestedFilename).toBe(file.name);
+    expect([...new Uint8Array(payload)]).toEqual([...bytes]);
+    expect([...new Uint8Array(await downloaded.arrayBuffer())]).toEqual([...new Uint8Array(payload)]);
+    expect(invoke.mock.calls[0][1].suggestedFilename).toBe(file.name);
     expect(document.querySelector("a[download]")).toBeNull();
+  });
+});
+
+describe("crop decoded URL ownership", () => {
+  it("waits for every decode and revokes successful URLs on partial failure", async () => {
+    let resolveLate;
+    const late = new Promise((resolve) => { resolveLate = resolve; });
+    const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const operation = collectCropLayers([0, 1], (index) => index ? late : Promise.reject(new Error("bad crop")), () => true);
+    resolveLate({ objectUrl: "blob:late" });
+    await expect(operation).rejects.toThrow("bad crop");
+    expect(revoke).toHaveBeenCalledWith("blob:late");
+    revoke.mockRestore();
+  });
+
+  it("drops stale decoded layers and retains current successful layers", async () => {
+    const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    let current = true;
+    let resolve;
+    const operation = collectCropLayers([1], () => new Promise((done) => { resolve = done; }), () => current);
+    current = false;
+    resolve({ objectUrl: "blob:stale" });
+    await expect(operation).resolves.toBeNull();
+    expect(revoke).toHaveBeenCalledWith("blob:stale");
+    await expect(collectCropLayers([1], async () => ({ objectUrl: "blob:current" }), () => true)).resolves.toEqual([{ objectUrl: "blob:current" }]);
+    expect(revoke).not.toHaveBeenCalledWith("blob:current");
+    revoke.mockRestore();
   });
 });
 

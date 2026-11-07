@@ -1,0 +1,697 @@
+{
+ "source": "Trimmed from real MLX H3 terminal anchor cases (sc-26691): each GET /api/v1/jobs poll reduced to the polls where the job status/stage/message changed, result fields id/type/status/stage/message/updatedAt only. execution.json started/completed are the real case receipts.",
+ "cases": {
+  "run41135700602-reference": {
+   "caseId": "mlx.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+   "execution": {
+    "status": "passed",
+    "started": "2026-10-30T23:31:22.806Z",
+    "completed": "2026-10-31T00:37:07.878Z"
+   },
+   "transcript": {
+    "caseId": "mlx.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+    "proof_kind": "campaign_native",
+    "transcript": [
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_674f5de7b9d87625234146399098843a",
+      "status": 200,
+      "result": {
+       "id": "job_674f5de7b9d87625234146399098843a",
+       "type": "model_import",
+       "status": "queued",
+       "stage": "queued",
+       "message": "Waiting for an available worker.",
+       "updatedAt": "2026-10-30T23:53:38Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_674f5de7b9d87625234146399098843a",
+      "status": 200,
+      "result": {
+       "id": "job_674f5de7b9d87625234146399098843a",
+       "type": "model_import",
+       "status": "downloading",
+       "stage": "importing",
+       "message": "Importing model.",
+       "updatedAt": "2026-10-30T23:53:39Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_674f5de7b9d87625234146399098843a",
+      "status": 200,
+      "result": {
+       "id": "job_674f5de7b9d87625234146399098843a",
+       "type": "model_import",
+       "status": "completed",
+       "stage": "completed",
+       "message": "Model import completed.",
+       "updatedAt": "2026-10-30T23:58:40Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_00cc9722c05d070b2c648078dc2b4c68",
+      "status": 200,
+      "result": {
+       "id": "job_00cc9722c05d070b2c648078dc2b4c68",
+       "type": "lora_import",
+       "status": "queued",
+       "stage": "queued",
+       "message": "Waiting for an available worker.",
+       "updatedAt": "2026-10-30T23:58:53Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_00cc9722c05d070b2c648078dc2b4c68",
+      "status": 200,
+      "result": {
+       "id": "job_00cc9722c05d070b2c648078dc2b4c68",
+       "type": "lora_import",
+       "status": "downloading",
+       "stage": "importing",
+       "message": "Importing LoRA.",
+       "updatedAt": "2026-10-30T23:58:55Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_00cc9722c05d070b2c648078dc2b4c68",
+      "status": 200,
+      "result": {
+       "id": "job_00cc9722c05d070b2c648078dc2b4c68",
+       "type": "lora_import",
+       "status": "completed",
+       "stage": "completed",
+       "message": "LoRA import completed.",
+       "updatedAt": "2026-10-30T23:58:59Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_d8fb86df1d6f88a1785cb762f19dbd32",
+      "status": 200,
+      "result": {
+       "id": "job_d8fb86df1d6f88a1785cb762f19dbd32",
+       "type": "video_generate",
+       "status": "running",
+       "stage": "generating",
+       "message": "Rendering frames.",
+       "updatedAt": "2026-10-30T23:59:00Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_d8fb86df1d6f88a1785cb762f19dbd32",
+      "status": 200,
+      "result": {
+       "id": "job_d8fb86df1d6f88a1785cb762f19dbd32",
+       "type": "video_generate",
+       "status": "loading_model",
+       "stage": "loading_model",
+       "message": "Loading text encoder.",
+       "updatedAt": "2026-10-31T00:03:23Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_d8fb86df1d6f88a1785cb762f19dbd32",
+      "status": 200,
+      "result": {
+       "id": "job_d8fb86df1d6f88a1785cb762f19dbd32",
+       "type": "video_generate",
+       "status": "loading_model",
+       "stage": "loading_model",
+       "message": "Loading render components.",
+       "updatedAt": "2026-10-31T00:05:52Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_d8fb86df1d6f88a1785cb762f19dbd32",
+      "status": 200,
+      "result": {
+       "id": "job_d8fb86df1d6f88a1785cb762f19dbd32",
+       "type": "video_generate",
+       "status": "running",
+       "stage": "generating",
+       "message": "Generating frames — step 1/4.",
+       "updatedAt": "2026-10-31T00:11:45Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_d8fb86df1d6f88a1785cb762f19dbd32",
+      "status": 200,
+      "result": {
+       "id": "job_d8fb86df1d6f88a1785cb762f19dbd32",
+       "type": "video_generate",
+       "status": "running",
+       "stage": "generating",
+       "message": "Generating frames — step 2/4.",
+       "updatedAt": "2026-10-31T00:17:08Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_d8fb86df1d6f88a1785cb762f19dbd32",
+      "status": 200,
+      "result": {
+       "id": "job_d8fb86df1d6f88a1785cb762f19dbd32",
+       "type": "video_generate",
+       "status": "running",
+       "stage": "generating",
+       "message": "Generating frames — step 3/4.",
+       "updatedAt": "2026-10-31T00:22:13Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_d8fb86df1d6f88a1785cb762f19dbd32",
+      "status": 200,
+      "result": {
+       "id": "job_d8fb86df1d6f88a1785cb762f19dbd32",
+       "type": "video_generate",
+       "status": "running",
+       "stage": "generating",
+       "message": "Generating frames — step 4/4.",
+       "updatedAt": "2026-10-31T00:27:18Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_d8fb86df1d6f88a1785cb762f19dbd32",
+      "status": 200,
+      "result": {
+       "id": "job_d8fb86df1d6f88a1785cb762f19dbd32",
+       "type": "video_generate",
+       "status": "running",
+       "stage": "generating",
+       "message": "Decoding frames.",
+       "updatedAt": "2026-10-31T00:27:20Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_d8fb86df1d6f88a1785cb762f19dbd32",
+      "status": 200,
+      "result": {
+       "id": "job_d8fb86df1d6f88a1785cb762f19dbd32",
+       "type": "video_generate",
+       "status": "running",
+       "stage": "muxing",
+       "message": "Encoding video.",
+       "updatedAt": "2026-10-31T00:28:23Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_d8fb86df1d6f88a1785cb762f19dbd32",
+      "status": 200,
+      "result": {
+       "id": "job_d8fb86df1d6f88a1785cb762f19dbd32",
+       "type": "video_generate",
+       "status": "completed",
+       "stage": "completed",
+       "message": "Generated video.",
+       "updatedAt": "2026-10-31T00:28:24Z"
+      }
+     }
+    ]
+   }
+  },
+  "run41135700602-prompt": {
+   "caseId": "mlx.reduced.real-hybrid-text",
+   "execution": {
+    "status": "passed",
+    "started": "2026-10-31T00:39:28.114Z",
+    "completed": "2026-10-31T01:06:37.367Z"
+   },
+   "transcript": {
+    "caseId": "mlx.reduced.real-hybrid-text",
+    "proof_kind": "campaign_native",
+    "transcript": [
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_dc7c5f5046b9a3c0d9d116018c6b5859",
+      "status": 200,
+      "result": {
+       "id": "job_dc7c5f5046b9a3c0d9d116018c6b5859",
+       "type": "model_import",
+       "status": "queued",
+       "stage": "queued",
+       "message": "Waiting for an available worker.",
+       "updatedAt": "2026-10-31T00:47:11Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_dc7c5f5046b9a3c0d9d116018c6b5859",
+      "status": 200,
+      "result": {
+       "id": "job_dc7c5f5046b9a3c0d9d116018c6b5859",
+       "type": "model_import",
+       "status": "downloading",
+       "stage": "importing",
+       "message": "Importing model.",
+       "updatedAt": "2026-10-31T00:47:13Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_dc7c5f5046b9a3c0d9d116018c6b5859",
+      "status": 200,
+      "result": {
+       "id": "job_dc7c5f5046b9a3c0d9d116018c6b5859",
+       "type": "model_import",
+       "status": "completed",
+       "stage": "completed",
+       "message": "Model import completed.",
+       "updatedAt": "2026-10-31T00:50:16Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_838c38a508cba1224e0b8dc01a71df06",
+      "status": 200,
+      "result": {
+       "id": "job_838c38a508cba1224e0b8dc01a71df06",
+       "type": "lora_import",
+       "status": "queued",
+       "stage": "queued",
+       "message": "Waiting for an available worker.",
+       "updatedAt": "2026-10-31T00:50:27Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_838c38a508cba1224e0b8dc01a71df06",
+      "status": 200,
+      "result": {
+       "id": "job_838c38a508cba1224e0b8dc01a71df06",
+       "type": "lora_import",
+       "status": "downloading",
+       "stage": "importing",
+       "message": "Importing LoRA.",
+       "updatedAt": "2026-10-31T00:50:28Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_838c38a508cba1224e0b8dc01a71df06",
+      "status": 200,
+      "result": {
+       "id": "job_838c38a508cba1224e0b8dc01a71df06",
+       "type": "lora_import",
+       "status": "completed",
+       "stage": "completed",
+       "message": "LoRA import completed.",
+       "updatedAt": "2026-10-31T00:50:32Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_9ad75ec4516f00889c6350a4da37b0a2",
+      "status": 200,
+      "result": {
+       "id": "job_9ad75ec4516f00889c6350a4da37b0a2",
+       "type": "video_generate",
+       "status": "queued",
+       "stage": "queued",
+       "message": "Waiting for an available worker.",
+       "updatedAt": "2026-10-31T00:50:33Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_9ad75ec4516f00889c6350a4da37b0a2",
+      "status": 200,
+      "result": {
+       "id": "job_9ad75ec4516f00889c6350a4da37b0a2",
+       "type": "video_generate",
+       "status": "running",
+       "stage": "generating",
+       "message": "Rendering frames.",
+       "updatedAt": "2026-10-31T00:50:34Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_9ad75ec4516f00889c6350a4da37b0a2",
+      "status": 200,
+      "result": {
+       "id": "job_9ad75ec4516f00889c6350a4da37b0a2",
+       "type": "video_generate",
+       "status": "loading_model",
+       "stage": "loading_model",
+       "message": "Loading text encoder.",
+       "updatedAt": "2026-10-31T00:52:09Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_9ad75ec4516f00889c6350a4da37b0a2",
+      "status": 200,
+      "result": {
+       "id": "job_9ad75ec4516f00889c6350a4da37b0a2",
+       "type": "video_generate",
+       "status": "loading_model",
+       "stage": "loading_model",
+       "message": "Loading render components.",
+       "updatedAt": "2026-10-31T00:52:11Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_9ad75ec4516f00889c6350a4da37b0a2",
+      "status": 200,
+      "result": {
+       "id": "job_9ad75ec4516f00889c6350a4da37b0a2",
+       "type": "video_generate",
+       "status": "running",
+       "stage": "generating",
+       "message": "Generating frames — step 1/4.",
+       "updatedAt": "2026-10-31T00:53:47Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_9ad75ec4516f00889c6350a4da37b0a2",
+      "status": 200,
+      "result": {
+       "id": "job_9ad75ec4516f00889c6350a4da37b0a2",
+       "type": "video_generate",
+       "status": "running",
+       "stage": "generating",
+       "message": "Generating frames — step 2/4.",
+       "updatedAt": "2026-10-31T00:55:31Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_9ad75ec4516f00889c6350a4da37b0a2",
+      "status": 200,
+      "result": {
+       "id": "job_9ad75ec4516f00889c6350a4da37b0a2",
+       "type": "video_generate",
+       "status": "running",
+       "stage": "generating",
+       "message": "Generating frames — step 3/4.",
+       "updatedAt": "2026-10-31T00:57:17Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_9ad75ec4516f00889c6350a4da37b0a2",
+      "status": 200,
+      "result": {
+       "id": "job_9ad75ec4516f00889c6350a4da37b0a2",
+       "type": "video_generate",
+       "status": "running",
+       "stage": "generating",
+       "message": "Generating frames — step 4/4.",
+       "updatedAt": "2026-10-31T00:58:54Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_9ad75ec4516f00889c6350a4da37b0a2",
+      "status": 200,
+      "result": {
+       "id": "job_9ad75ec4516f00889c6350a4da37b0a2",
+       "type": "video_generate",
+       "status": "running",
+       "stage": "generating",
+       "message": "Decoding frames.",
+       "updatedAt": "2026-10-31T00:58:54Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_9ad75ec4516f00889c6350a4da37b0a2",
+      "status": 200,
+      "result": {
+       "id": "job_9ad75ec4516f00889c6350a4da37b0a2",
+       "type": "video_generate",
+       "status": "running",
+       "stage": "muxing",
+       "message": "Encoding video.",
+       "updatedAt": "2026-10-31T01:00:10Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_9ad75ec4516f00889c6350a4da37b0a2",
+      "status": 200,
+      "result": {
+       "id": "job_9ad75ec4516f00889c6350a4da37b0a2",
+       "type": "video_generate",
+       "status": "completed",
+       "stage": "completed",
+       "message": "Generated video.",
+       "updatedAt": "2026-10-31T01:00:12Z"
+      }
+     }
+    ]
+   }
+  },
+  "run41061562586-reference": {
+   "caseId": "mlx.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+   "execution": {
+    "status": "passed",
+    "started": "2026-10-30T14:47:59.259Z",
+    "completed": "2026-10-30T16:21:58.625Z"
+   },
+   "transcript": {
+    "caseId": "mlx.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+    "proof_kind": "campaign_native",
+    "transcript": [
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_6448cc61b35dc1b32bf7d36cb9717d67",
+      "status": 200,
+      "result": {
+       "id": "job_6448cc61b35dc1b32bf7d36cb9717d67",
+       "type": "model_import",
+       "status": "queued",
+       "stage": "queued",
+       "message": "Waiting for an available worker.",
+       "updatedAt": "2026-10-30T15:29:51Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_6448cc61b35dc1b32bf7d36cb9717d67",
+      "status": 200,
+      "result": {
+       "id": "job_6448cc61b35dc1b32bf7d36cb9717d67",
+       "type": "model_import",
+       "status": "downloading",
+       "stage": "importing",
+       "message": "Importing model.",
+       "updatedAt": "2026-10-30T15:29:53Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_6448cc61b35dc1b32bf7d36cb9717d67",
+      "status": 200,
+      "result": {
+       "id": "job_6448cc61b35dc1b32bf7d36cb9717d67",
+       "type": "model_import",
+       "status": "completed",
+       "stage": "completed",
+       "message": "Model import completed.",
+       "updatedAt": "2026-10-30T15:36:34Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_fcb1bce10f5c52a1422b385731b7153b",
+      "status": 200,
+      "result": {
+       "id": "job_fcb1bce10f5c52a1422b385731b7153b",
+       "type": "lora_import",
+       "status": "queued",
+       "stage": "queued",
+       "message": "Waiting for an available worker.",
+       "updatedAt": "2026-10-30T15:36:51Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_fcb1bce10f5c52a1422b385731b7153b",
+      "status": 200,
+      "result": {
+       "id": "job_fcb1bce10f5c52a1422b385731b7153b",
+       "type": "lora_import",
+       "status": "downloading",
+       "stage": "importing",
+       "message": "Importing LoRA.",
+       "updatedAt": "2026-10-30T15:36:52Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_fcb1bce10f5c52a1422b385731b7153b",
+      "status": 200,
+      "result": {
+       "id": "job_fcb1bce10f5c52a1422b385731b7153b",
+       "type": "lora_import",
+       "status": "completed",
+       "stage": "completed",
+       "message": "LoRA import completed.",
+       "updatedAt": "2026-10-30T15:36:57Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_7a95b8bafcb31b3c44d8e420aae9562e",
+      "status": 200,
+      "result": {
+       "id": "job_7a95b8bafcb31b3c44d8e420aae9562e",
+       "type": "video_generate",
+       "status": "queued",
+       "stage": "queued",
+       "message": "Waiting for an available worker.",
+       "updatedAt": "2026-10-30T15:36:58Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_7a95b8bafcb31b3c44d8e420aae9562e",
+      "status": 200,
+      "result": {
+       "id": "job_7a95b8bafcb31b3c44d8e420aae9562e",
+       "type": "video_generate",
+       "status": "preparing",
+       "stage": "preparing",
+       "message": "Worker claimed job.",
+       "updatedAt": "2026-10-30T15:37:00Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_7a95b8bafcb31b3c44d8e420aae9562e",
+      "status": 200,
+      "result": {
+       "id": "job_7a95b8bafcb31b3c44d8e420aae9562e",
+       "type": "video_generate",
+       "status": "running",
+       "stage": "generating",
+       "message": "Rendering frames.",
+       "updatedAt": "2026-10-30T15:37:00Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_7a95b8bafcb31b3c44d8e420aae9562e",
+      "status": 200,
+      "result": {
+       "id": "job_7a95b8bafcb31b3c44d8e420aae9562e",
+       "type": "video_generate",
+       "status": "loading_model",
+       "stage": "loading_model",
+       "message": "Loading text encoder.",
+       "updatedAt": "2026-10-30T15:41:43Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_7a95b8bafcb31b3c44d8e420aae9562e",
+      "status": 200,
+      "result": {
+       "id": "job_7a95b8bafcb31b3c44d8e420aae9562e",
+       "type": "video_generate",
+       "status": "loading_model",
+       "stage": "loading_model",
+       "message": "Loading render components.",
+       "updatedAt": "2026-10-30T15:44:09Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_7a95b8bafcb31b3c44d8e420aae9562e",
+      "status": 200,
+      "result": {
+       "id": "job_7a95b8bafcb31b3c44d8e420aae9562e",
+       "type": "video_generate",
+       "status": "running",
+       "stage": "generating",
+       "message": "Generating frames — step 1/4.",
+       "updatedAt": "2026-10-30T15:51:18Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_7a95b8bafcb31b3c44d8e420aae9562e",
+      "status": 200,
+      "result": {
+       "id": "job_7a95b8bafcb31b3c44d8e420aae9562e",
+       "type": "video_generate",
+       "status": "running",
+       "stage": "generating",
+       "message": "Generating frames — step 2/4.",
+       "updatedAt": "2026-10-30T15:57:54Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_7a95b8bafcb31b3c44d8e420aae9562e",
+      "status": 200,
+      "result": {
+       "id": "job_7a95b8bafcb31b3c44d8e420aae9562e",
+       "type": "video_generate",
+       "status": "running",
+       "stage": "generating",
+       "message": "Generating frames — step 3/4.",
+       "updatedAt": "2026-10-30T16:03:30Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_7a95b8bafcb31b3c44d8e420aae9562e",
+      "status": 200,
+      "result": {
+       "id": "job_7a95b8bafcb31b3c44d8e420aae9562e",
+       "type": "video_generate",
+       "status": "running",
+       "stage": "generating",
+       "message": "Decoding frames.",
+       "updatedAt": "2026-10-30T16:08:53Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_7a95b8bafcb31b3c44d8e420aae9562e",
+      "status": 200,
+      "result": {
+       "id": "job_7a95b8bafcb31b3c44d8e420aae9562e",
+       "type": "video_generate",
+       "status": "running",
+       "stage": "muxing",
+       "message": "Encoding video.",
+       "updatedAt": "2026-10-30T16:10:02Z"
+      }
+     },
+     {
+      "method": "GET",
+      "route": "/api/v1/jobs/job_7a95b8bafcb31b3c44d8e420aae9562e",
+      "status": 200,
+      "result": {
+       "id": "job_7a95b8bafcb31b3c44d8e420aae9562e",
+       "type": "video_generate",
+       "status": "completed",
+       "stage": "completed",
+       "message": "Generated video.",
+       "updatedAt": "2026-10-30T16:10:04Z"
+      }
+     }
+    ]
+   }
+  }
+ }
+}

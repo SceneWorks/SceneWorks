@@ -126,6 +126,77 @@ pub(crate) fn model_file_identity(path: &Path) -> Option<ModelFileIdentity> {
     })
 }
 
+/// Bind recovery to the server-normalized import request, not just its destination/model ID.
+/// Retry payload edits intentionally require a fresh transaction; they cannot adopt old bytes.
+pub(crate) fn model_import_commitment(payload: &JsonObject) -> String {
+    use sha2::{Digest, Sha256};
+    // Recursively sort object keys even when serde_json's preserve_order feature is enabled.
+    fn canonical(value: &Value) -> Value {
+        match value {
+            Value::Object(object) => {
+                let sorted: std::collections::BTreeMap<_, _> = object
+                    .iter()
+                    .map(|(key, value)| (key.clone(), canonical(value)))
+                    .collect();
+                serde_json::to_value(sorted).expect("JSON map")
+            }
+            Value::Array(values) => Value::Array(values.iter().map(canonical).collect()),
+            value => value.clone(),
+        }
+    }
+    let bytes = serde_json::to_vec(&canonical(&Value::Object(payload.clone())))
+        .expect("JSON import payload");
+    format!("sha256:{:x}", Sha256::digest(bytes))
+}
+
+/// Hosted CPU fixtures emulate the interruption boundary using the SAME managed compiler,
+/// physical transaction binding, and production marker writer. No alternative recovery route.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn seal_import_recovery_fixture(
+    data_dir: &Path,
+    target: &Path,
+    payload: &JsonObject,
+    job_id: &str,
+) -> WorkerResult<sceneworks_core::checkpoint_import::ImportPlanReferenceV1> {
+    let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(data_dir);
+    let install_id = target
+        .file_name()
+        .and_then(|v| v.to_str())
+        .ok_or_else(|| WorkerError::InvalidPayload("fixture install ID missing".into()))?;
+    let checkpoint = sceneworks_core::checkpoint_plan_store::managed_checkpoint_id(install_id);
+    let resolved = store
+        .resolve(&checkpoint)
+        .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
+    let primary = sceneworks_core::base_weights::minimax_h3_import_primary(target)
+        .ok_or_else(|| WorkerError::InvalidPayload("fixture primary missing".into()))?;
+    let mut provenance = match &resolved.plan.layers[0].source {
+        sceneworks_core::checkpoint_import::SourceLocatorV1::Managed { provenance, .. } => {
+            provenance.clone()
+        }
+        _ => {
+            return Err(WorkerError::InvalidPayload(
+                "fixture must be managed".into(),
+            ))
+        }
+    };
+    provenance.import_job_id = Some(job_id.into());
+    provenance.import_commitment = Some(model_import_commitment(payload));
+    let compiled = store
+        .compile_managed_with_context(
+            install_id,
+            primary
+                .strip_prefix(target)
+                .expect("fixture primary in install")
+                .to_str()
+                .expect("UTF8 fixture"),
+            provenance,
+            resolved.plan.context,
+        )
+        .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
+    write_model_install_marker(target, payload, "", job_id, None, None).await?;
+    Ok(compiled.record.plan)
+}
+
 pub(crate) async fn write_model_install_marker(
     target_dir: &Path,
     payload: &JsonObject,
@@ -143,6 +214,7 @@ pub(crate) async fn write_model_install_marker(
         "modelFileBytes": model_file_identity.map(|identity| identity.bytes),
         "modelFileModifiedNanos": model_file_identity.map(|identity| identity.modified_nanos.as_str()),
         "modelFileSha256": model_file_sha256,
+        "importCommitment": model_import_commitment(payload),
         "jobId": job_id,
         "completedAt": now_rfc3339(),
     });
@@ -207,7 +279,7 @@ pub(crate) async fn write_model_download_receipt(
         object.insert("loraFileSha256".to_owned(), Value::String(hash.to_owned()));
     }
     let target_dir = target_dir.to_path_buf();
-    tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+    crate::load_progress::spawn_blocking(move || -> WorkerResult<()> {
         let marker_path = target_dir.join(INSTALL_MARKER);
         let _lock = sceneworks_core::download_receipt::lock(&target_dir)?;
         let mut receipts = match std::fs::read(&marker_path) {
@@ -265,23 +337,9 @@ pub(crate) async fn write_lora_install_marker(
     Ok(())
 }
 
-pub fn allow_pattern_matches(path: &str, patterns: &[String]) -> bool {
-    if patterns.is_empty() {
-        return true;
-    }
-    patterns
-        .iter()
-        .any(|pattern| pattern_matches(pattern, path))
-}
+pub use sceneworks_core::model_artifacts::artifact_selection::allow_pattern_matches;
 
-pub(crate) fn pattern_matches(pattern: &str, value: &str) -> bool {
-    let (pattern, value) = if cfg!(windows) {
-        (pattern.to_ascii_lowercase(), value.to_ascii_lowercase())
-    } else {
-        (pattern.to_owned(), value.to_owned())
-    };
-    glob::Pattern::new(&pattern).is_ok_and(|pattern| pattern.matches(&value))
-}
+pub(crate) use sceneworks_core::model_artifacts::artifact_selection::pattern_matches;
 
 pub(crate) async fn cleanup_uploaded_import_source(
     settings: &Settings,

@@ -65,13 +65,32 @@ pub struct LogQuery {
 
 const DEFAULT_CAPACITY: usize = 5000;
 
-/// A thread-safe bounded ring buffer of [`LogEntry`].
+/// Retention lanes, each its own `capacity`-bounded ring. A single shared ring let
+/// routine traffic (request timings, job polls) evict every warning and error within
+/// a couple of hours, so the Logs screen's Error filter found nothing even though it
+/// re-queried the whole buffer. `error` and `warn` keep their own history; every other
+/// level (`info`, `debug`, anything undeclared) shares the routine lane.
+const LANE_ERROR: usize = 0;
+const LANE_WARN: usize = 1;
+const LANE_ROUTINE: usize = 2;
+const LANE_COUNT: usize = 3;
+
+fn lane_for_level(level: &str) -> usize {
+    match level {
+        "error" => LANE_ERROR,
+        "warn" => LANE_WARN,
+        _ => LANE_ROUTINE,
+    }
+}
+
+/// A thread-safe set of bounded ring buffers of [`LogEntry`], partitioned by
+/// severity (see [`LANE_COUNT`]) and sharing one monotonic seq.
 pub struct SessionLog {
     inner: Mutex<Inner>,
 }
 
 struct Inner {
-    entries: VecDeque<LogEntry>,
+    lanes: [VecDeque<LogEntry>; LANE_COUNT],
     next_seq: u64,
     capacity: usize,
 }
@@ -86,7 +105,7 @@ impl SessionLog {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             inner: Mutex::new(Inner {
-                entries: VecDeque::new(),
+                lanes: Default::default(),
                 next_seq: 0,
                 capacity: capacity.max(1),
             }),
@@ -107,15 +126,18 @@ impl SessionLog {
             guard.next_seq = guard.next_seq.saturating_add(1);
             let line = redact_secrets(line);
             let entry = classify(source, &line, seq);
-            guard.entries.push_back(entry);
             let capacity = guard.capacity;
-            while guard.entries.len() > capacity {
-                guard.entries.pop_front();
+            let lane = &mut guard.lanes[lane_for_level(&entry.level)];
+            lane.push_back(entry);
+            while lane.len() > capacity {
+                lane.pop_front();
             }
         }
     }
 
     /// Return the matching entries, oldest→newest, capped to the newest `limit`.
+    /// A `level` filter reads only that level's lane, so it sees that lane's full
+    /// retained history rather than whatever survived in a shared ring.
     pub fn query(&self, query: &LogQuery) -> Vec<LogEntry> {
         let guard = self.inner.lock().expect("session log lock");
         let limit = query.limit.unwrap_or(500).clamp(1, 5000);
@@ -134,22 +156,24 @@ impl SessionLog {
                     .as_deref()
                     .is_none_or(|needle| entry.raw.to_ascii_lowercase().contains(needle))
         };
-        // F-093: walk newest→oldest and stop after cloning `limit` matches, instead
+        let lanes: Vec<&VecDeque<LogEntry>> = match query.level.as_deref() {
+            Some(level) => vec![&guard.lanes[lane_for_level(level)]],
+            None => guard.lanes.iter().collect(),
+        };
+        // F-093: walk each lane newest→oldest and stop after `limit` matches, instead
         // of cloning every matching entry (up to the full 5000-deep buffer) and then
-        // `split_off`ing down to `limit`. This clones only what's returned and lets
-        // the buffer mutex — contended with `push_line` on the stdout capture threads
-        // — drop far sooner on the hot polling path.
-        let mut matched: Vec<LogEntry> = guard
-            .entries
-            .iter()
-            .rev()
-            .filter(|entry| matches(entry))
-            .take(limit)
-            .cloned()
+        // `split_off`ing down to `limit`. Candidates are gathered by reference and only
+        // the returned `limit` are cloned, so the buffer mutex — contended with
+        // `push_line` on the stdout capture threads — drops far sooner on the hot
+        // polling path.
+        let mut candidates: Vec<&LogEntry> = lanes
+            .into_iter()
+            .flat_map(|lane| lane.iter().rev().filter(|entry| matches(entry)).take(limit))
             .collect();
-        // Collected newest→oldest above; restore the documented oldest→newest order.
-        matched.reverse();
-        matched
+        // Lanes interleave in time; seq is the shared global order.
+        candidates.sort_unstable_by_key(|entry| entry.seq);
+        let skip = candidates.len().saturating_sub(limit);
+        candidates.into_iter().skip(skip).cloned().collect()
     }
 
     /// The next seq that would be assigned — i.e. one past the newest entry.
@@ -685,6 +709,54 @@ mod tests {
         });
         assert_eq!(tail.len(), 1);
         assert_eq!(tail[0].seq, 4);
+    }
+
+    #[test]
+    fn routine_flood_does_not_evict_errors_or_warnings() {
+        let log = SessionLog::with_capacity(3);
+        let line =
+            |level: &str, n: usize| json!({ "event": "e", "n": n, "level": level }).to_string();
+        log.push_line("api", &line("error", 0));
+        log.push_line("api", &line("warn", 1));
+        for n in 2..10 {
+            log.push_line("api", &line("info", n));
+        }
+        log.push_line("worker", &line("debug", 10));
+
+        let errors = log.query(&LogQuery {
+            level: Some("error".to_owned()),
+            ..Default::default()
+        });
+        assert_eq!(errors.len(), 1, "error outlives the info flood");
+        assert_eq!(errors[0].seq, 0);
+
+        let warnings = log.query(&LogQuery {
+            level: Some("warn".to_owned()),
+            ..Default::default()
+        });
+        assert_eq!(warnings.len(), 1, "warning outlives the info flood");
+
+        // The routine lane is still bounded: newest 3 of the info/debug lines.
+        let all = log.query(&LogQuery::default());
+        let seqs: Vec<u64> = all.iter().map(|entry| entry.seq).collect();
+        assert_eq!(seqs, vec![0, 1, 8, 9, 10], "lanes merge in seq order");
+
+        let info = log.query(&LogQuery {
+            level: Some("info".to_owned()),
+            ..Default::default()
+        });
+        assert_eq!(
+            info.len(),
+            2,
+            "debug shares the routine lane but is filtered out"
+        );
+
+        let limited = log.query(&LogQuery {
+            limit: Some(2),
+            ..Default::default()
+        });
+        let seqs: Vec<u64> = limited.iter().map(|entry| entry.seq).collect();
+        assert_eq!(seqs, vec![9, 10], "limit keeps the newest across lanes");
     }
 
     #[test]

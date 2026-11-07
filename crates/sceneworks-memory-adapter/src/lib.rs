@@ -4,13 +4,17 @@
 //! scenario has actually executed. A successful model call is not silently promoted into a complete
 //! calibration record.
 
+mod adapter_common;
+pub use adapter_common::*;
+mod protocol_fields;
+pub use protocol_fields::*;
+
 use serde_json::{json, Map, Value};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const INFERENCE_PIN: &str = "6012abad731c94f6c53428029b8d16e917b0a5b7";
+pub use sceneworks_core::inference_provenance::INFERENCE_REVISION as INFERENCE_PIN;
 pub const QWEN_REPOSITORY: &str = "SceneWorks/qwen-image-mlx";
 /// The Qwen-Image-Edit-2511 tiered rehost (sc-22728). Serves BOTH shipped edit catalog ids —
 /// `qwen_image_edit_2511` and `qwen_image_edit_2511_lightning` — on both lanes, because they are one
@@ -357,18 +361,18 @@ pub fn iris_weights_root_at(
 // Supra2-IMG (sc-24217, epic 24212): the shared half of the `mlx_supra2` / `candle_supra2` arms.
 // ---------------------------------------------------------------------------------------------
 
-/// The pinned upstream repository the install converts (`gen_core::supra2::SUPRA2_SOURCE.repo`).
+/// The pinned upstream repository the install converts (`gen_core_checkpoint::supra2::SUPRA2_SOURCE.repo`).
 pub const SUPRA2_IMG_REPOSITORY: &str = "SupraLabs/Supra2-IMG";
 /// The registry id both engines register, which is also the catalog model id.
-pub const SUPRA2_IMG_PROVIDER: &str = gen_core::supra2::PROVIDER_ID;
+pub const SUPRA2_IMG_PROVIDER: &str = gen_core_checkpoint::supra2::PROVIDER_ID;
 /// The one tier both loaders accept: `LoadSpec::precision` `Bf16` (the f32 checkpoint's default
 /// precision; every override and every quantization is refused), which is what the worker's
 /// `plan_tier_key` and both engines' contract surfaces call `bf16`.
 pub const SUPRA2_IMG_TIER: &str = "bf16";
 /// The published request every capture renders: seed 0, 50 Euler steps, the default CFG 3.0 (the
 /// request leaves guidance unset so the engine's own default applies), at the native 256x256.
-pub const SUPRA2_IMG_SEED: u64 = gen_core::supra2::DEFAULT_SEED;
-pub const SUPRA2_IMG_STEPS: u32 = gen_core::supra2::DEFAULT_STEPS;
+pub const SUPRA2_IMG_SEED: u64 = gen_core_checkpoint::supra2::DEFAULT_SEED;
+pub const SUPRA2_IMG_STEPS: u32 = gen_core_checkpoint::supra2::DEFAULT_STEPS;
 /// The largest image count a SceneWorks Supra2 job renders in one call (`image_request::MAX_COUNT`;
 /// `sceneworks_core::supra2::validate_request` refuses more). The anchor is measured at count 1, the
 /// plan's single-image cell; this product maximum is rendered once more after it on the same loaded
@@ -399,7 +403,7 @@ pub struct Supra2Envs {
 pub fn supra2_fixture(lane: &str) -> String {
     format!(
         "supra2-img-{lane}-{SUPRA2_IMG_TIER}-{}-seed{SUPRA2_IMG_SEED}-step{SUPRA2_IMG_STEPS}",
-        gen_core::supra2::IMAGE_SIZE
+        gen_core_checkpoint::supra2::IMAGE_SIZE
     )
 }
 
@@ -463,7 +467,7 @@ pub fn validate_supra2_plan(request: &Value, lane: &str) -> Result<(u32, u32), S
         }
     }
     let (width, height) = target_geometry(request)?;
-    let native = gen_core::supra2::IMAGE_SIZE;
+    let native = gen_core_checkpoint::supra2::IMAGE_SIZE;
     if (width, height) != (native, native) {
         return Err(format!(
             "{SUPRA2_IMG_PROVIDER} renders its native {native}x{native} only, not {width}x{height}"
@@ -504,7 +508,7 @@ impl Supra2Inputs {
     /// The one upstream file the convert reads.
     pub fn source_file(&self) -> PathBuf {
         self.source_root
-            .join(gen_core::supra2::SUPRA2_SOURCE.files[0].path)
+            .join(gen_core_checkpoint::supra2::SUPRA2_SOURCE.files[0].path)
     }
 
     /// The record's artifact block: the upstream snapshot the bundle was converted from.
@@ -542,7 +546,7 @@ pub fn supra2_inputs_at(
     text_encoder: PathBuf,
     vae: PathBuf,
 ) -> Result<Supra2Inputs, String> {
-    use gen_core::supra2::{FLAN_T5_BASE, SD_VAE, SUPRA2_SOURCE};
+    use gen_core_checkpoint::supra2::{FLAN_T5_BASE, SD_VAE, SUPRA2_SOURCE};
     validate_artifact_identity(&repository, &revision, SUPRA2_IMG_REPOSITORY)?;
     if revision != SUPRA2_SOURCE.revision {
         return Err(format!(
@@ -608,7 +612,11 @@ pub fn supra2_bundle_dir(inputs: &Supra2Inputs) -> PathBuf {
 /// A bundle the measured process may load: present, and passing the provider's own pin contract
 /// with every digest re-verified.
 fn supra2_bundle_is_pinned(dir: &Path) -> bool {
-    gen_core::supra2::read_pinned_bundle(dir, gen_core::supra2::BundleCheck::Digests).is_ok()
+    gen_core_checkpoint::supra2::read_pinned_bundle(
+        dir,
+        gen_core_checkpoint::supra2::BundleCheck::Digests,
+    )
+    .is_ok()
 }
 
 /// How the bundle a capture loads came to exist — recorded in the record's diagnostics.
@@ -687,7 +695,7 @@ pub fn ensure_supra2_bundle(inputs: &Supra2Inputs) -> Result<Supra2Bundle, Strin
 /// verifies the source digest and writes the manifest last), hold the result to the provider's pin
 /// contract, then move it into place — the worker's install-time convert, step for step.
 pub fn supra2_convert(request: &Value) -> Result<Value, String> {
-    use gen_core::supra2::{convert_pinned_checkpoint, FLAN_T5_BASE, SD_VAE};
+    use gen_core_checkpoint::supra2::{convert_pinned_checkpoint, FLAN_T5_BASE, SD_VAE};
     let path = |key: &str| {
         request
             .get(key)
@@ -723,9 +731,12 @@ pub fn supra2_convert(request: &Value) -> Result<Value, String> {
     let converted = convert_pinned_checkpoint(&source, &partial)
         .map_err(|error| format!("Supra2-IMG checkpoint conversion failed: {error}"))
         .and_then(|_| {
-            gen_core::supra2::read_pinned_bundle(&partial, gen_core::supra2::BundleCheck::Digests)
-                .map(|_| ())
-                .map_err(|error| format!("Supra2-IMG bundle failed its pin contract: {error}"))
+            gen_core_checkpoint::supra2::read_pinned_bundle(
+                &partial,
+                gen_core_checkpoint::supra2::BundleCheck::Digests,
+            )
+            .map(|_| ())
+            .map_err(|error| format!("Supra2-IMG bundle failed its pin contract: {error}"))
         });
     if let Err(error) = converted {
         let _ = std::fs::remove_dir_all(&partial);
@@ -770,7 +781,7 @@ mod supra2_tests {
         assert_eq!((SUPRA2_IMG_SEED, SUPRA2_IMG_STEPS), (0, 50));
         assert_eq!(
             SUPRA2_IMG_REPOSITORY,
-            gen_core::supra2::SUPRA2_SOURCE.repo,
+            gen_core_checkpoint::supra2::SUPRA2_SOURCE.repo,
             "the record names the repository the converter pins"
         );
         assert_eq!(
@@ -781,7 +792,7 @@ mod supra2_tests {
             supra2_calibration_fingerprint("candle"),
             "supra2-img-candle-resident-v1"
         );
-        const { assert!(SUPRA2_IMG_PRODUCT_MAX_COUNT <= gen_core::supra2::MAX_IMAGES) };
+        const { assert!(SUPRA2_IMG_PRODUCT_MAX_COUNT <= gen_core_checkpoint::supra2::MAX_IMAGES) };
     }
 
     /// Every row outside the one measurable cell is refused before an env var or a weight is read.
@@ -863,9 +874,9 @@ mod supra2_tests {
     /// the other component's pin.
     #[test]
     fn the_inputs_bind_only_the_pinned_snapshots() {
-        use gen_core::supra2::{FLAN_T5_BASE, SD_VAE, SUPRA2_SOURCE};
-        let scratch =
-            std::env::temp_dir().join(format!("sceneworks-supra2-inputs-{}", std::process::id()));
+        use gen_core_checkpoint::supra2::{FLAN_T5_BASE, SD_VAE, SUPRA2_SOURCE};
+        let temporary = tempfile::tempdir().unwrap();
+        let scratch = temporary.path().to_path_buf();
         let source = snapshot(&scratch, SUPRA2_SOURCE.repo, SUPRA2_SOURCE.revision);
         let te = snapshot(&scratch, FLAN_T5_BASE.repo, FLAN_T5_BASE.revision);
         let vae = snapshot(&scratch, SD_VAE.repo, SD_VAE.revision);
@@ -925,18 +936,16 @@ mod supra2_tests {
             &vae,
         )
         .expect_err("the source is the snapshot root, never a tier folder");
-        std::fs::remove_dir_all(&scratch).unwrap();
     }
 
     /// An absent or unpinned bundle is never loadable, so the arm converts (in a child) instead.
     #[test]
     fn an_empty_bundle_dir_is_not_a_pinned_bundle() {
-        let scratch =
-            std::env::temp_dir().join(format!("sceneworks-supra2-bundle-{}", std::process::id()));
+        let temporary = tempfile::tempdir().unwrap();
+        let scratch = temporary.path().to_path_buf();
         std::fs::create_dir_all(&scratch).unwrap();
         assert!(!supra2_bundle_is_pinned(&scratch));
         assert!(!supra2_bundle_is_pinned(&scratch.join("absent")));
-        std::fs::remove_dir_all(&scratch).unwrap();
         let error = supra2_convert(&json!({ "action": SUPRA2_IMG_CONVERT_ACTION }))
             .expect_err("a convert request names its four paths");
         assert!(error.contains("request.source"), "{error}");
@@ -1495,10 +1504,7 @@ pub fn optional_parameter(request: &Value, name: &str) -> Result<Option<u32>, St
 }
 
 pub fn planned_rung(request: &Value) -> Result<&str, String> {
-    planned(request)?
-        .pointer("/strategy/rung")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.strategy.rung must be a string".to_owned())
+    planned_str(request, "/strategy/rung")
 }
 
 pub fn reference_sweep(request: &Value, result: &str) -> Result<Value, String> {
@@ -2107,13 +2113,11 @@ impl PulidIdentityBundle {
 }
 
 fn sha256_hex_of_file(path: &Path) -> Result<String, String> {
-    use sha2::Digest;
-    let mut file = std::fs::File::open(path)
+    let file = std::fs::File::open(path)
         .map_err(|error| format!("open {} for hashing: {error}", path.display()))?;
-    let mut hasher = sha2::Sha256::new();
-    io::copy(&mut file, &mut hasher)
-        .map_err(|error| format!("hash {}: {error}", path.display()))?;
-    Ok(format!("{:x}", hasher.finalize()))
+    sceneworks_core::hashing::sha256_reader_retry(file)
+        .map(|(digest, _)| digest)
+        .map_err(|error| format!("hash {}: {error}", path.display()))
 }
 
 /// The env-free half of [`pulid_identity_bundle`], so the file contract is unit-testable. Hashes
@@ -2323,37 +2327,7 @@ pub fn diagnostics(
     })
 }
 
-pub fn captured_at() -> String {
-    // UTC conversion without adding a time-formatting dependency to the calibration-only crate.
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let days = (seconds / 86_400) as i64;
-    let day_seconds = seconds % 86_400;
-    let (year, month, day) = civil_from_days(days);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        day_seconds / 3_600,
-        (day_seconds % 3_600) / 60,
-        day_seconds % 60
-    )
-}
-
-fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
-    // Howard Hinnant's proleptic-Gregorian civil_from_days, shifted from 1970-01-01.
-    let z = days_since_epoch + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let mut year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = mp + if mp < 10 { 3 } else { -9 };
-    year += i64::from(month <= 2);
-    (year, month, day)
-}
+pub use sceneworks_core::time::utc_now as captured_at;
 
 pub struct PlainGatedFragment<'a> {
     pub artifact: Value,
@@ -2539,129 +2513,6 @@ pub fn open_resident_phase_window<C: ResidencyCounters>(
         );
     }
     Ok(opening)
-}
-
-/// Test support shared by BOTH adapter binaries (sc-22729 review).
-///
-/// Ordinary public API rather than `#[cfg(test)]`: the binaries are separate compilation units that
-/// merely DEPEND on this crate, so nothing gated on this crate's own `test` cfg is visible to them.
-/// The alternative was the same hundred lines copied into `mlx.rs` and `candle.rs`, where the two
-/// copies would drift — and the whole point of the fixture is that both lanes stage the identity
-/// stack the same way.
-pub mod staging {
-    use super::{
-        INSTANTID_CONTROLNET_ENV, INSTANTID_CONTROLNET_WEIGHT_FILE, INSTANTID_IDENTITY_BUNDLE_ENV,
-        INSTANTID_IDENTITY_BUNDLE_FILES,
-    };
-    use std::path::PathBuf;
-    use std::sync::{Mutex, MutexGuard, PoisonError};
-
-    /// Serializes the process-global `SCENEWORKS_INSTANTID_*` swap. Both `instantid_binding` and
-    /// `instantid_candle_identity` read five environment variables; two tests mutating them
-    /// concurrently would each resolve half of the other's tree.
-    static INSTANTID_ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    pub const INSTANTID_ENV_NAMES: [&str; 5] = [
-        "SCENEWORKS_INSTANTID_REALVISXL_REPOSITORY",
-        "SCENEWORKS_INSTANTID_REALVISXL_REVISION",
-        "SCENEWORKS_INSTANTID_REALVISXL_ROOT",
-        INSTANTID_IDENTITY_BUNDLE_ENV,
-        INSTANTID_CONTROLNET_ENV,
-    ];
-
-    /// A synthetic InstantID staging tree, installed into the process environment for as long as
-    /// this value lives. RAII rather than a restore statement so a panicking assertion cannot leak
-    /// the injected environment into every later test in the process.
-    pub struct StagedInstantId {
-        root: PathBuf,
-        /// The tiered backbone snapshot root, in the exact Hugging Face layout the validators want.
-        pub snapshot: PathBuf,
-        /// The IdentityNet `ControlNetModel` directory. Created EMPTY — call
-        /// [`StagedInstantId::stage_identitynet_weight`] to complete it.
-        pub identitynet: PathBuf,
-        /// The identity bundle root, carrying all three of `INSTANTID_IDENTITY_BUNDLE_FILES`.
-        pub bundle: PathBuf,
-        _guard: MutexGuard<'static, ()>,
-    }
-
-    impl StagedInstantId {
-        /// A well-formed 40-hex revision. Any value works: the validators check SHAPE and the path
-        /// suffix, never that the revision exists anywhere.
-        pub const REVISION: &'static str = "e40202d63baef826c7df95a639a811698c1178d2";
-
-        pub fn install(tag: &str, repository: &str, tier: &str) -> Self {
-            let guard = INSTANTID_ENV_LOCK
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let root = std::env::temp_dir().join(format!(
-                "sc-22729-{tag}-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .expect("the clock is after the epoch")
-                    .as_nanos()
-            ));
-            let snapshot = root
-                .join(format!("models--{}", repository.replace('/', "--")))
-                .join("snapshots")
-                .join(Self::REVISION)
-                .join(tier);
-            let identitynet = root.join("identitynet");
-            let bundle = root.join("bundle");
-            for dir in [&snapshot, &identitynet, &bundle] {
-                std::fs::create_dir_all(dir).expect("create the staged tree");
-            }
-            for file in INSTANTID_IDENTITY_BUNDLE_FILES {
-                std::fs::write(bundle.join(file), b"x").expect("stage a bundle file");
-            }
-            for (name, value) in [
-                (INSTANTID_ENV_NAMES[0], repository.to_owned()),
-                (INSTANTID_ENV_NAMES[1], Self::REVISION.to_owned()),
-                (INSTANTID_ENV_NAMES[2], snapshot.display().to_string()),
-                (INSTANTID_ENV_NAMES[3], bundle.display().to_string()),
-                (INSTANTID_ENV_NAMES[4], identitynet.display().to_string()),
-            ] {
-                std::env::set_var(name, value);
-            }
-            Self {
-                root,
-                snapshot,
-                identitynet,
-                bundle,
-                _guard: guard,
-            }
-        }
-
-        pub fn stage_identitynet_weight(&self) {
-            std::fs::write(
-                self.identitynet.join(INSTANTID_CONTROLNET_WEIGHT_FILE),
-                b"x",
-            )
-            .expect("stage the IdentityNet weight");
-        }
-
-        /// The five artifact paths, canonicalized, in the role order the worker's
-        /// `instantid_artifact_fingerprint` hashes them: backbone, IdentityNet, IP-Adapter, SCRFD,
-        /// ArcFace.
-        pub fn ordered_paths(&self) -> Vec<PathBuf> {
-            let bundle = std::fs::canonicalize(&self.bundle).expect("canonicalize the bundle");
-            let mut paths = vec![
-                std::fs::canonicalize(&self.snapshot).expect("canonicalize the snapshot"),
-                std::fs::canonicalize(&self.identitynet).expect("canonicalize the IdentityNet dir"),
-            ];
-            paths.extend(INSTANTID_IDENTITY_BUNDLE_FILES.map(|file| bundle.join(file)));
-            paths
-        }
-    }
-
-    impl Drop for StagedInstantId {
-        fn drop(&mut self) {
-            for name in INSTANTID_ENV_NAMES {
-                std::env::remove_var(name);
-            }
-            std::fs::remove_dir_all(&self.root).ok();
-        }
-    }
 }
 
 #[cfg(test)]
@@ -2945,8 +2796,14 @@ mod tests {
 
     #[test]
     fn unix_epoch_formats_as_rfc3339() {
-        assert_eq!(civil_from_days(0), (1970, 1, 1));
-        assert_eq!(civil_from_days(20_662), (2026, 7, 28));
+        assert_eq!(
+            sceneworks_core::time::format_unix_seconds(0),
+            "1970-01-01T00:00:00Z"
+        );
+        assert_eq!(
+            sceneworks_core::time::format_unix_seconds(20_662 * 86_400),
+            "2026-07-28T00:00:00Z"
+        );
         assert!(captured_at().ends_with('Z'));
     }
 
@@ -3726,14 +3583,8 @@ mod tests {
     /// the identity stack is told the whole gap once instead of one file per attempt.
     #[test]
     fn instantid_identity_bundle_names_every_missing_file() {
-        let root = std::env::temp_dir().join(format!(
-            "sc-22729-instantid-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().to_path_buf();
         std::fs::create_dir_all(&root).unwrap();
         let error = instantid_identity_bundle_at(root.clone()).unwrap_err();
         for file in INSTANTID_IDENTITY_BUNDLE_FILES {
@@ -3753,7 +3604,6 @@ mod tests {
         assert_eq!(bundle.ip_adapter, root.join(INSTANTID_IP_ADAPTER_FILE));
         assert_eq!(bundle.scrfd, root.join(INSTANTID_SCRFD_FILE));
         assert_eq!(bundle.arcface, root.join(INSTANTID_ARCFACE_FILE));
-        std::fs::remove_dir_all(&root).ok();
     }
 
     /// sc-22724: the edit reference is one interleaved RGB frame at the request geometry, and it

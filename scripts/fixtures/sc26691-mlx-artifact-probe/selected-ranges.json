@@ -1,0 +1,16 @@
+{
+ "selected": [
+  {
+   "name": "model.diffusion_model.adaln_t_table",
+   "dtype": "F32",
+   "shape": [
+    1025,
+    8
+   ],
+   "bytes": 32800,
+   "sha256": "ac8727cdec52137c73878d004de5bd2a0e19227e8311e29ab3b68f328310e34e"
+  }
+ ],
+ "selected_bytes": 1774624,
+ "whole_file_digest_recomputed": false
+}

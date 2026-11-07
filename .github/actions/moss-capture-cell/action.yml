@@ -1,0 +1,69 @@
+name: Capture and publish one exact MOSS cell
+description: Sequential continuation with immutable previews published before the next cell
+inputs:
+  backend:
+    required: true
+    description: mlx or cuda
+  cell:
+    required: true
+    description: Exact sealed cell (base/lora, base/lokr, sft/lora, sft/lokr)
+  preview-name:
+    required: true
+    description: Cell with slash replaced by hyphen, for artifact name and directory
+  output:
+    required: true
+    description: Original backend bundle directory, shared by all four invocations
+  dataset:
+    required: true
+    description: Shared fixed-dataset artifact directory
+runs:
+  using: composite
+  steps:
+    - name: Guarded MLX capture cell
+      if: ${{ inputs.backend == 'mlx' }}
+      shell: bash
+      working-directory: sceneworks-source
+      env:
+        MOSS_CELL: ${{ inputs.cell }}
+        MOSS_OUTPUT: ${{ inputs.output }}
+        MOSS_ACCEPTANCE_DATASET_ROOT: ${{ inputs.dataset }}
+      run: node scripts/moss-training-acceptance.mjs --phase capture --root . --output "$MOSS_OUTPUT" --backend mlx --manifest scripts/ci/moss-training-acceptance/campaign.json --capture-cell "$MOSS_CELL"
+    - name: Guarded CUDA capture cell with native compiler environment
+      if: ${{ inputs.backend == 'cuda' }}
+      shell: cmd
+      working-directory: sceneworks-source
+      env:
+        MOSS_CELL: ${{ inputs.cell }}
+        MOSS_OUTPUT: ${{ inputs.output }}
+        MOSS_ACCEPTANCE_DATASET_ROOT: ${{ inputs.dataset }}
+      run: |
+        call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+        if errorlevel 1 exit /b %errorlevel%
+        set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+        node scripts/moss-training-acceptance.mjs --phase capture --root . --output "%MOSS_OUTPUT%" --backend cuda --manifest scripts/ci/moss-training-acceptance/campaign.json --capture-cell "%MOSS_CELL%"
+    - name: Publish three decoded PNGs and hashbound inspection index now
+      id: preview
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: moss-preview-${{ inputs.backend }}-${{ inputs.preview-name }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ inputs.output }}/previews/${{ inputs.preview-name }}/
+        if-no-files-found: error
+        retention-days: 30
+    - name: Announce immediately accessible live preview inspection artifact
+      if: ${{ inputs.backend == 'mlx' }}
+      shell: bash
+      env:
+        PREVIEW_URL: ${{ steps.preview.outputs.artifact-url }}
+        PREVIEW_CELL: ${{ inputs.cell }}
+        PREVIEW_INSTRUCTION: download now, inspect all three PNGs, then record with scripts/moss-preview-inspection.mjs before final acceptance. Inspection records its actual time and exact PNG hashes.
+      run: |
+        printf '::notice title=MOSS live preview inspection::%s %s — %s\n' "$PREVIEW_CELL" "$PREVIEW_URL" "$PREVIEW_INSTRUCTION"
+    - name: Announce immediately accessible live preview inspection artifact on Windows
+      if: ${{ inputs.backend == 'cuda' }}
+      shell: powershell
+      env:
+        PREVIEW_URL: ${{ steps.preview.outputs.artifact-url }}
+        PREVIEW_CELL: ${{ inputs.cell }}
+        PREVIEW_INSTRUCTION: download now, inspect all three PNGs, then record with scripts/moss-preview-inspection.mjs before final acceptance. Inspection records its actual time and exact PNG hashes.
+      run: |
+        Write-Output ('::notice title=MOSS live preview inspection::{0} {1} — {2}' -f $env:PREVIEW_CELL, $env:PREVIEW_URL, $env:PREVIEW_INSTRUCTION)

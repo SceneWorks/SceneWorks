@@ -1,3 +1,58 @@
+use super::adapters::resolve_adapters;
+use super::artifact_resolution::model_repo;
+use super::artifact_resolution::resolve_weights_dir;
+use super::artifact_resolution::resolved_mlx_artifact_tier;
+use super::conditioning::parse_poses;
+use super::conditioning::pose_entries;
+use super::conditioning::resolve_control_identity_source;
+use super::conditioning::stage_likeness;
+use super::events::consume_gen_events;
+use super::load_policy::release_declared_sequential_for_request;
+#[cfg(test)]
+use super::load_spec::load_control_engine;
+use super::mlx_model;
+use super::quantization::resolve_quant;
+use super::resolve_seed;
+use super::routing::mlx_flux_strict_control_engine_id;
+use super::sampling::resolve_guidance;
+use super::sampling::resolve_steps;
+use super::stream::drive_gen_items_scored;
+use super::stream::start_cached_gen_stream_with_request_state;
+use super::strict_control::build_control_conditioning;
+use super::strict_control::ensure_depth_estimator_dir;
+use super::strict_control::preprocess_control_entry;
+use super::strict_control::requested_control_kind;
+use super::strict_control::resolve_control_source;
+use super::strict_control::resolve_user_control_map;
+use super::strict_control::strict_control_default_repo;
+use super::strict_control::trusted_control_weight_revision;
+use super::strict_control::validate_control_kind;
+use super::AdapterSpec;
+use super::CancelFlag;
+use super::Conditioning;
+use super::ControlKind;
+use super::GenerationOutput;
+use super::GenerationRequest;
+use super::Generator;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use super::LoadSpec;
+use super::Progress;
+use super::Quant;
+use super::WeightsSource;
+use crate::advanced;
+use crate::safe_weight_filename;
+use crate::ApiClient;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
+use serde_json::json;
 // ---------------------------------------------------------------------------
 // FLUX.1-dev strict-control Fun-Controlnet-Union (macOS, sc-8244; engine E2 sc-8239):
 // the `flux1_dev_control` registry generator — the Shakker
@@ -10,11 +65,11 @@
 // ---------------------------------------------------------------------------
 
 /// The engine registry id for the FLUX.1-dev Fun-Controlnet-Union variant (E2 sc-8239).
-const FLUX1_DEV_CONTROL_ENGINE_ID: &str = "flux1_dev_control";
+pub(super) const FLUX1_DEV_CONTROL_ENGINE_ID: &str = "flux1_dev_control";
 /// The Shakker Union-Pro-2.0 control-weights filename — the single `.safetensors` shipped in the repo
 /// (the diffusers checkpoint). The default *repo* is the shared strict-control table (single source of
 /// truth — `STRICT_CONTROL_ENGINES`).
-const FLUX1_CONTROL_FILE: &str = "diffusion_pytorch_model.safetensors";
+pub(super) const FLUX1_CONTROL_FILE: &str = "diffusion_pytorch_model.safetensors";
 /// Pinned revision for the default `Shakker-Labs/FLUX.1-dev-ControlNet-Union-Pro-2.0` control-weights
 /// repo (sc-9879, F-077 follow-up). Fetching the mutable `main` branch means a re-push (or a compromised
 /// token) could silently swap the ControlNet checkpoint we load; pin the exact commit for defense-in-depth
@@ -22,7 +77,7 @@ const FLUX1_CONTROL_FILE: &str = "diffusion_pytorch_model.safetensors";
 /// catalog-authorized immutable revision. HF's tree API still reports the file's `lfs.oid`, which
 /// `ensure_hf_cached_file` verifies against.
 #[cfg(test)]
-const FLUX1_CONTROL_REVISION: &str = "5d700aaad96c5ddcdf8a38ef9b22a82aac2c38e5";
+pub(super) const FLUX1_CONTROL_REVISION: &str = "5d700aaad96c5ddcdf8a38ef9b22a82aac2c38e5";
 /// The asset `adapter` id recorded on FLUX.1-dev strict-control assets (the dev base MLX label —
 /// shared with the plain FLUX.1 path).
 const FLUX1_CONTROL_ADAPTER_LABEL: &str = "mlx_flux";
@@ -34,7 +89,7 @@ const FLUX1_CONTROL_ADAPTER_LABEL: &str = "mlx_flux";
 /// downloads, then errors loudly only on a real failure — never silently drops the poses). The pose
 /// entry is the structural hint carrier for every kind (pose renders a skeleton; canny/depth pair the
 /// pose with `advanced.controlMode` + an input image — the pose set still drives the per-image loop).
-fn flux1_dev_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn flux1_dev_control_available(request: &ImageRequest, settings: &Settings) -> bool {
     mlx_flux_strict_control_engine_id(&request.model) == Some(FLUX1_DEV_CONTROL_ENGINE_ID)
         && request.mode != "edit_image"
         && !pose_entries(request).is_empty()
@@ -44,16 +99,14 @@ fn flux1_dev_control_available(request: &ImageRequest, settings: &Settings) -> b
 /// The (repo, filename) of the FLUX.1-dev control weights — `advanced.controlWeights.{repo,filename}`
 /// overrides, else the Shakker Union-Pro-2.0 default (parity with the FLUX.2 / Z-Image resolvers).
 /// The payload filename must be a plain component (sc-8821 / F-019).
-fn flux1_control_repo_file(request: &ImageRequest) -> WorkerResult<(String, String)> {
+pub(super) fn flux1_control_repo_file(request: &ImageRequest) -> WorkerResult<(String, String)> {
     let cw = request
         .advanced
         .get("controlWeights")
         .and_then(Value::as_object);
     let pick = |key: &str, default: &str| {
         cw.and_then(|m| m.get(key))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
+            .and_then(crate::payload::trimmed_value_str)
             .unwrap_or(default)
             .to_owned()
     };
@@ -69,8 +122,7 @@ fn flux1_control_repo_file(request: &ImageRequest) -> WorkerResult<(String, Stri
     Ok((
         // Default repo from the shared strict-control table (single source of truth); the file stays
         // engine-specific.
-        repo,
-        file,
+        repo, file,
     ))
 }
 
@@ -107,7 +159,8 @@ async fn ensure_flux1_control_weights(
         client: &client,
         settings,
         job_id: &job.id,
-        cancel_message: "FLUX.1-dev strict-control generation canceled while fetching control weights.",
+        cancel_message:
+            "FLUX.1-dev strict-control generation canceled while fetching control weights.",
         fresh_download: false,
     };
     let dst = settings
@@ -132,8 +185,9 @@ fn flux1_control_scale(request: &ImageRequest) -> f32 {
 /// transformer's guidance embedder (no true-CFG). FLUX.1 control has no img2img-init seam (unlike
 /// FLUX.2), so no identity `Reference` is appended.
 #[allow(clippy::too_many_arguments)]
-fn flux1_control_generate_one(
+pub(super) fn flux1_control_generate_one(
     generator: &dyn Generator,
+    sampling: &GenerationRequest,
     prompt: &str,
     width: u32,
     height: u32,
@@ -158,6 +212,9 @@ fn flux1_control_generate_one(
         memory: memory_evaluation.map(|evaluation| evaluation.memory),
         preview,
         cancel: cancel.clone(),
+        sampler: sampling.sampler.clone(),
+        scheduler: sampling.scheduler.clone(),
+        scheduler_shift: sampling.scheduler_shift,
         ..Default::default()
     };
     let output = crate::memory_strategy::generate_with_scope(
@@ -234,7 +291,7 @@ fn flux1_control_spec(
 }
 
 #[cfg(all(target_os = "macos", test))]
-fn flux1_control_load(
+pub(super) fn flux1_control_load(
     weights_dir: PathBuf,
     control_weights: PathBuf,
     quant: Option<Quant>,
@@ -250,7 +307,7 @@ fn flux1_control_load(
 /// control engine loads once on the blocking thread and renders one image per pose (shared seed so only
 /// the control changes across the set). dev keeps its embedded guidance (no CFG). `advanced.controlMode`
 /// (pose | canny | depth) selects the preprocessor; pose is the default (byte-preserved skeleton path).
-async fn generate_flux1_dev_control_stream(
+pub(super) async fn generate_flux1_dev_control_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -260,6 +317,7 @@ async fn generate_flux1_dev_control_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let sampling = super::sampling::explicit_sampling_request(request);
 
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("FLUX.1-dev weights not found".to_owned()))?;
@@ -388,6 +446,7 @@ async fn generate_flux1_dev_control_stream(
         conditioning_windows: None,
         negative_branch: false,
         prefix_kv_cache_eligible: false,
+        reference_resources: None,
     };
     let (spec, memory_plan) = release_declared_sequential_for_request(
         FLUX1_DEV_CONTROL_ENGINE_ID,
@@ -470,6 +529,7 @@ async fn generate_flux1_dev_control_stream(
                     .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                 let (out_w, out_h, pixels) = flux1_control_generate_one(
                     generator,
+                    &sampling,
                     &prompt,
                     width,
                     height,

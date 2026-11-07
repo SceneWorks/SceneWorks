@@ -24,14 +24,25 @@ const server = await createServer({
 });
 
 try {
-  assert.deepEqual(server.config.server.fs.allow, [
+  const approvedRoots = [
     vitePath(webRoot),
     vitePath(path.join(repoRoot, "apps", "desktop", "licenses")),
-  ]);
+  ];
+  // Vite itself adds its installed client directory when node_modules is a worktree junction
+  // outside the web root. Resolve that one trusted directory, never accept arbitrary extra roots.
+  const clientRoot = vitePath(path.join(path.dirname(fileURLToPath(import.meta.resolve("vite/package.json"))), "dist/client"));
+  const clientCovered = approvedRoots.some((root) => {
+    const relative = path.relative(root, clientRoot);
+    return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+  });
+  if (!clientCovered) approvedRoots.push(clientRoot);
+  assert.deepEqual([...server.config.server.fs.allow].sort(), approvedRoots.sort());
   await server.transformRequest("/src/data/bundledLicenses.js");
   await server.listen();
   const address = server.httpServer.address();
   const origin = `http://127.0.0.1:${address.port}`;
+  const client = await fetch(`${origin}/@vite/client`);
+  assert.equal(client.status, 200, "the installed Vite client remains readable");
   const configPath = vitePath(path.join(repoRoot, "config", "manifests", "builtin.styles.jsonc"));
   const deniedPaths = [
     fsUrl(configPath),

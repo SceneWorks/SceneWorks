@@ -42,83 +42,79 @@ pub(crate) use tower::ServiceExt;
 
 pub(crate) const PNG_32X32: &[u8] = include_bytes!("../../../desktop/icons/32x32.png");
 
-/// The single process-global lock every rust-api test that mutates HF-cache env serializes on.
-/// rust-api's `#[test]`s run as threads in ONE binary, so a `set_var`/`remove_var` in one is visible
-/// to all the others; mutual exclusion must therefore be crate-wide — a per-module lock serializes
-/// nothing against the rest (mirrors `sceneworks_worker::test_env::ENV_LOCK`, sc-12380). Do NOT add a
-/// second one.
-static HF_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// The HF-cache env vars neutralized (removed) for as long as this guard lives, restored on drop,
-/// under [`HF_ENV_LOCK`]. `huggingface_repo_cache_path` reads `HF_HUB_CACHE` / `HUGGINGFACE_HUB_CACHE`
-/// / `HF_HOME` BEFORE `data_dir`, so a test that seeds a snapshot under a tempdir `data_dir` writes
-/// into the developer's REAL cache unless these are cleared first — clobbering a real repo's
-/// `refs/main` (the krea-2-raw-mlx pollution, sc-13834). The runner strips `HF_HOME` for `cargo test`,
-/// but that does not cover ad-hoc / IDE runs; this makes the tempdir hermetic regardless. Restoring on
-/// `Drop` (not around a closure) keeps a panicking assertion from leaking a cleared cache var into
-/// every later test in the process.
-#[must_use = "bind to a named `_env` local; dropping it immediately restores the env and pins nothing"]
-pub(crate) struct HfCacheEnvGuard {
-    restore: Vec<(&'static str, Option<String>)>,
-    _guard: std::sync::MutexGuard<'static, ()>,
+/// Persist the same immutable plan/inventory pair admission resolves in production.
+pub(crate) fn persist_checkpoint_plan_fixture(
+    settings: &Settings,
+    checkpoint_id: &str,
+    plan: &sceneworks_core::checkpoint_import::ImportPlanV1,
+) {
+    use sceneworks_core::checkpoint_import::{CheckpointCatalogRecordV1, CheckpointInventoryV1};
+    let record = CheckpointCatalogRecordV1::from_plan(checkpoint_id, plan).unwrap();
+    let plans = settings.data_dir.join("checkpoints/plans");
+    std::fs::create_dir_all(&plans).unwrap();
+    std::fs::write(
+        plans.join(format!("{}.json", plan.plan_id)),
+        plan.canonical_json().unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        settings.data_dir.join("checkpoints/inventory.json"),
+        CheckpointInventoryV1::new(vec![record])
+            .unwrap()
+            .canonical_json()
+            .unwrap(),
+    )
+    .unwrap();
 }
 
-/// Take [`HF_ENV_LOCK`] and clear the HF-cache env vars until the returned guard drops, so
-/// `huggingface_repo_cache_path` / `resolve_base_model_path` resolve under the test's own `data_dir`
-/// instead of the developer's real cache. See [`HfCacheEnvGuard`].
-pub(crate) fn isolate_hf_cache() -> HfCacheEnvGuard {
-    let guard = HF_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let restore = ["HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME"]
-        .into_iter()
-        .map(|key| {
-            let previous = std::env::var(key).ok();
-            std::env::remove_var(key);
-            (key, previous)
-        })
-        .collect();
-    HfCacheEnvGuard {
-        restore,
-        _guard: guard,
-    }
-}
-
-impl Drop for HfCacheEnvGuard {
-    fn drop(&mut self) {
-        for (key, previous) in &self.restore {
-            match previous {
-                Some(prior) => std::env::set_var(key, prior),
-                None => std::env::remove_var(key),
-            }
+/// E6/E8/E9 negative controls for a REAL fresh H3 fixture. Run while its scoped cache guard lives.
+/// Neither missing authority nor an unavailable resident may become fresh load authority.
+/// Uses production validators/capture; never writes or repairs a fixture's committed plan.
+pub(crate) fn assert_h3_component_authority_required(
+    data_dir: &std::path::Path,
+    entry: &serde_json::Map<String, Value>,
+) {
+    use sceneworks_core::minimax_h3_import::verify_entry_assembly;
+    use sceneworks_core::model_artifacts::provenance::{
+        capture_h3_component_closure_with_check, MODEL_DECLARATION_KEY,
+    };
+    let checkpoint = sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(entry).unwrap();
+    let plan = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(data_dir)
+        .resolve(checkpoint)
+        .unwrap()
+        .plan;
+    verify_entry_assembly(entry, &plan).expect("fresh committed fixture has complete authority");
+    for empty in [false, true] {
+        let mut unknown = plan.clone();
+        let declaration = unknown.context.get_mut(MODEL_DECLARATION_KEY).unwrap();
+        if empty {
+            declaration["componentClosure"] = json!([]);
+        } else {
+            declaration
+                .as_object_mut()
+                .unwrap()
+                .remove("componentClosure");
         }
+        let error = verify_entry_assembly(entry, &unknown).unwrap_err();
+        assert!(error.contains("component content is unknown"), "{error}");
     }
+    let mut unavailable = entry.clone();
+    unavailable["downloads"][0]["repo"] = json!("fixture/sc26679-unavailable-components");
+    let error =
+        capture_h3_component_closure_with_check(data_dir, &unavailable, &|| Ok(())).unwrap_err();
+    assert!(error.contains("component unavailable"), "{error}");
+    verify_entry_assembly(entry, &plan).expect("negative controls never rebind the real fixture");
 }
 
-/// Pin `HF_HUB_CACHE` under [`HF_ENV_LOCK`] — the inverse of [`isolate_hf_cache`]. Used by
-/// ignored real-weights tests and CPU fixtures that need an explicitly conflicting ambient cache.
-/// Clears the lower-priority `HUGGINGFACE_HUB_CACHE` / `HF_HOME` so `hub` wins unambiguously;
-/// restores all three on drop. Available on every API-test platform.
+pub(crate) use sceneworks_core::test_env::{isolate_hf_cache, EnvVars as HfCacheEnvGuard};
+
+/// Pin the source cache under the shared test lock, clearing lower-priority overrides.
 pub(crate) fn pin_hf_hub_cache(hub: &std::path::Path) -> HfCacheEnvGuard {
-    let guard = HF_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let restore = ["HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME"]
-        .into_iter()
-        .map(|key| {
-            let previous = std::env::var(key).ok();
-            if key == "HF_HUB_CACHE" {
-                std::env::set_var(key, hub);
-            } else {
-                std::env::remove_var(key);
-            }
-            (key, previous)
-        })
-        .collect();
-    HfCacheEnvGuard {
-        restore,
-        _guard: guard,
-    }
+    sceneworks_core::test_env::EnvVars::set_os(&[
+        ("HF_HUB_CACHE", Some(hub.as_os_str())),
+        ("HUGGINGFACE_HUB_CACHE", None),
+        ("HF_HOME", None),
+    ])
 }
 
 pub(crate) fn readiness_worker(
@@ -299,6 +295,28 @@ pub(crate) fn wan_video_tensor_keys() -> Vec<String> {
         }
     }
     keys
+}
+
+/// Create the same name-only project fixture while callers retain response/status assertions.
+pub(crate) async fn create_project<N: serde::Serialize + ?Sized>(
+    app: axum::Router,
+    name: &N,
+) -> (StatusCode, Value) {
+    create_project_with_request(app, name, request).await
+}
+
+/// Preserve explicit local-peer fixture transports used by catalog/Parquet tests.
+pub(crate) async fn create_project_with_request<N, F, Fut>(
+    app: axum::Router,
+    name: &N,
+    send: F,
+) -> (StatusCode, Value)
+where
+    N: serde::Serialize + ?Sized,
+    F: FnOnce(axum::Router, &'static str, &'static str, Value) -> Fut,
+    Fut: std::future::Future<Output = (StatusCode, Value)>,
+{
+    send(app, "POST", "/api/v1/projects", json!({ "name": name })).await
 }
 
 pub(crate) async fn request(
@@ -1338,4 +1356,27 @@ impl Drop for TestSerializationGuard<'_> {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         drop(self.guard.take());
     }
+}
+
+#[tokio::test]
+async fn project_builder_preserves_transport_and_response() {
+    let name = String::from("quoted \"project\"\nname");
+    let expected_name = name.clone();
+    let (status, body) = create_project_with_request(
+        axum::Router::new(),
+        &name,
+        |_, method, uri, payload| async move {
+            assert_eq!(method, "POST");
+            assert_eq!(uri, "/api/v1/projects");
+            assert_eq!(payload, json!({ "name": expected_name }));
+            (
+                StatusCode::CONFLICT,
+                json!({ "detail": "transport response" }),
+            )
+        },
+    )
+    .await;
+    assert_eq!(name, "quoted \"project\"\nname");
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body, json!({ "detail": "transport response" }));
 }

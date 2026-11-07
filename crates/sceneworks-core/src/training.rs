@@ -27,8 +27,8 @@ use serde_json::{json, Value};
 
 use crate::contracts::{string_enum, ContractNumber, ExtraFields, JsonObject};
 use crate::dataset_quality::{CachedTier0Scalars, QualityAck};
-use crate::store_util::is_safe_relative_path;
 
+pub mod flux3;
 pub mod iris;
 
 /// Schema version stamped on persisted training contracts.
@@ -99,7 +99,7 @@ pub(crate) fn inverted_window_message(
 }
 
 /// Every epic 2123 technique key of `advanced` that [`technique_value`] governs.
-pub const TECHNIQUE_KEYS: [&str; 45] = [
+const BASIC_TECHNIQUE_KEYS: &[&str] = &[
     WEIGHT_NOISE_SIGMA_KEY,
     GRADIENT_NOISE_ETA_KEY,
     GRADIENT_NOISE_GAMMA_KEY,
@@ -107,45 +107,43 @@ pub const TECHNIQUE_KEYS: [&str; 45] = [
     SUBJECT_MASK_LOSS_KEY,
     SUBJECT_MASK_BACKGROUND_WEIGHT_KEY,
     SUBJECT_MASK_SUBJECT_WEIGHT_KEY,
-    depth_anchoring::DEPTH_ANCHORING_WEIGHT_KEY,
-    depth_anchoring::DEPTH_ANCHORING_MODEL_KEY,
-    depth_anchoring::DEPTH_ANCHORING_MIN_T_KEY,
-    depth_anchoring::DEPTH_ANCHORING_MAX_T_KEY,
-    depth_anchoring::DEPTH_ANCHORING_EVERY_KEY,
-    "bodyProportionWeight",
-    "bodyProportionMinT",
-    "bodyProportionMaxT",
-    "bodyProportionEvery",
-    body_losses::BODY_PROPORTION_INCLUDE_HEAD_KEY,
-    "bodyShapeWeight",
-    "bodyShapeMinT",
-    "bodyShapeMaxT",
-    "bodyShapeEvery",
-    body_losses::BODY_SHAPE_MIN_COS_KEY,
-    "normalWeight",
-    "normalMinT",
-    "normalMaxT",
-    "normalEvery",
-    body_losses::NORMAL_RESTRICT_TO_SUBJECT_KEY,
-    face_losses::IDENTITY_LOSS_WEIGHT_KEY,
-    face_losses::IDENTITY_LOSS_MIN_T_KEY,
-    face_losses::IDENTITY_LOSS_MAX_T_KEY,
-    face_losses::IDENTITY_LOSS_EVERY_KEY,
-    face_losses::IDENTITY_LOSS_MIN_COS_KEY,
-    face_losses::IDENTITY_LOSS_REFERENCE_KEY,
-    face_losses::FACE_LANDMARK_LOSS_WEIGHT_KEY,
-    face_losses::FACE_LANDMARK_LOSS_MIN_T_KEY,
-    face_losses::FACE_LANDMARK_LOSS_MAX_T_KEY,
-    face_losses::FACE_LANDMARK_LOSS_EVERY_KEY,
-    latent_perceptual::VAE_ANCHOR.weight_key,
-    latent_perceptual::VAE_ANCHOR.min_t_key,
-    latent_perceptual::VAE_ANCHOR.max_t_key,
-    latent_perceptual::VAE_ANCHOR.every_key,
-    latent_perceptual::LATENT_LPIPS.weight_key,
-    latent_perceptual::LATENT_LPIPS.min_t_key,
-    latent_perceptual::LATENT_LPIPS.max_t_key,
-    latent_perceptual::LATENT_LPIPS.every_key,
 ];
+const TECHNIQUE_KEY_GROUPS: &[&[&str]] = &[
+    BASIC_TECHNIQUE_KEYS,
+    depth_anchoring::TECHNIQUE_KEYS,
+    body_losses::TECHNIQUE_KEYS,
+    face_losses::TECHNIQUE_KEYS,
+    latent_perceptual::TECHNIQUE_KEYS,
+];
+
+const fn technique_key_count() -> usize {
+    let mut count = 0;
+    let mut i = 0;
+    while i < TECHNIQUE_KEY_GROUPS.len() {
+        count += TECHNIQUE_KEY_GROUPS[i].len();
+        i += 1;
+    }
+    count
+}
+
+const fn technique_keys() -> [&'static str; technique_key_count()] {
+    let mut keys = [""; technique_key_count()];
+    let mut index = 0;
+    let mut group = 0;
+    while group < TECHNIQUE_KEY_GROUPS.len() {
+        let mut key = 0;
+        while key < TECHNIQUE_KEY_GROUPS[group].len() {
+            keys[index] = TECHNIQUE_KEY_GROUPS[group][key];
+            index += 1;
+            key += 1;
+        }
+        group += 1;
+    }
+    keys
+}
+
+/// Every technique key, derived from the owning modules in stable parser order.
+pub const TECHNIQUE_KEYS: [&str; technique_key_count()] = technique_keys();
 
 fn target_limit_flag(target: &TrainingTarget, flag: &str) -> bool {
     target.limits.get(flag).and_then(Value::as_bool) == Some(true)
@@ -173,7 +171,9 @@ pub const RESOLUTION_BUCKETS_SUPPORT_LIMIT: &str = "supportsResolutionBuckets";
 /// bucket; the Iris-3B trainers (generation, depth, restoration) declare no epic 2123 technique —
 /// they bucket by their own `shape_policy` / `aspect_ratio_bucket` options instead. Every other
 /// builtin target advertises [`RESOLUTION_BUCKETS_SUPPORT_LIMIT`].
-const RESOLUTION_BUCKETS_UNSUPPORTED_TARGETS: [&str; 4] = [
+const RESOLUTION_BUCKETS_UNSUPPORTED_TARGETS: [&str; 6] = [
+    "flux3_klein_lora",
+    "flux3_klein_edit_lora",
     "ltx_2_5_video_lora",
     "iris_3b_generation",
     "iris_3b_depth",
@@ -210,25 +210,64 @@ pub struct ResolutionBucketSpec {
     pub repeats: u32,
 }
 
-/// Parse and validate `advanced.resolutionBuckets` independent of any target: `Ok(None)` when the
-/// key is absent (off), otherwise a non-empty list of at most [`RESOLUTION_BUCKETS_MAX`] rows, each
-/// with an integer `resolution` (`> 0`, a multiple of [`RESOLUTION_BUCKET_STRIDE`], not repeated)
-/// and an integer `repeats` in `1..=`[`RESOLUTION_BUCKET_REPEATS_MAX`]. The error is a
-/// human-facing message for a field error on [`RESOLUTION_BUCKETS_KEY`]. The API's submit-time
-/// validation and the worker's strict preflight share this one parser.
-pub fn parse_resolution_buckets(
+/// A rectangular aspect-ratio bucket accepted alongside the established square form.
+/// Row order remains meaningful: the native resolver preserves it for tie breaking and schedule
+/// provenance, and portrait geometry is distinct from landscape geometry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AspectRatioBucketSpec {
+    pub width: u32,
+    pub height: u32,
+    pub repeats: u32,
+}
+
+/// The product bucket wire contract. Legacy square rows retain their existing all-items-at-each-row
+/// semantics; rectangular rows are an additive native contract.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResolutionBucketConfig {
+    Legacy(Vec<ResolutionBucketSpec>),
+    AspectRatio(Vec<AspectRatioBucketSpec>),
+}
+
+fn bucket_repeats(row: &serde_json::Map<String, Value>, n: usize) -> Result<u32, String> {
+    row.get("repeats")
+        .and_then(Value::as_u64)
+        .filter(|value| (1..=RESOLUTION_BUCKET_REPEATS_MAX).contains(value))
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| format!(
+            "{RESOLUTION_BUCKETS_KEY} row {n}: repeats must be a whole number between 1 and {RESOLUTION_BUCKET_REPEATS_MAX}."
+        ))
+}
+
+fn bucket_dimension(
+    row: &serde_json::Map<String, Value>,
+    key: &str,
+    n: usize,
+) -> Result<u32, String> {
+    row.get(key)
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0 && *value % RESOLUTION_BUCKET_STRIDE == 0)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| format!(
+            "{RESOLUTION_BUCKETS_KEY} row {n}: {key} must be a positive whole number of pixels divisible by {RESOLUTION_BUCKET_STRIDE}."
+        ))
+}
+
+/// Parse either the legacy square `[{resolution,repeats}]` list or the additive rectangular
+/// `[{width,height,repeats}]` list. Input may use exactly one form: mixed, incomplete, fractional,
+/// duplicate-geometry and present-empty lists refuse rather than being normalized into an altered
+/// training plan.
+pub fn parse_resolution_bucket_config(
     advanced: &serde_json::Map<String, Value>,
-) -> Result<Option<Vec<ResolutionBucketSpec>>, String> {
+) -> Result<Option<ResolutionBucketConfig>, String> {
     let Some(value) = technique_value(advanced, RESOLUTION_BUCKETS_KEY) else {
         return Ok(None);
     };
     let rows = value.as_array().ok_or_else(|| {
-        format!("{RESOLUTION_BUCKETS_KEY} must be a list of {{resolution, repeats}} rows.")
+        format!("{RESOLUTION_BUCKETS_KEY} must be a list of square or rectangular bucket rows.")
     })?;
     if rows.is_empty() {
         return Err(format!(
-            "{RESOLUTION_BUCKETS_KEY} must list at least one resolution bucket (omit it to train \
-             at a single resolution)."
+            "{RESOLUTION_BUCKETS_KEY} must list at least one bucket (omit it to disable bucketing)."
         ));
     }
     if rows.len() > RESOLUTION_BUCKETS_MAX {
@@ -237,47 +276,96 @@ pub fn parse_resolution_buckets(
             rows.len()
         ));
     }
-    let mut buckets: Vec<ResolutionBucketSpec> = Vec::with_capacity(rows.len());
-    for (index, row) in rows.iter().enumerate() {
+
+    let mut legacy = Vec::with_capacity(rows.len());
+    let mut aspect = Vec::with_capacity(rows.len());
+    let mut form: Option<&str> = None;
+    for (index, value) in rows.iter().enumerate() {
         let n = index + 1;
-        let row = row.as_object().ok_or_else(|| {
-            format!(
-                "{RESOLUTION_BUCKETS_KEY} row {n} must be an object with resolution and repeats."
-            )
-        })?;
-        let resolution = row
-            .get("resolution")
-            .and_then(Value::as_u64)
-            .filter(|value| *value > 0 && *value % RESOLUTION_BUCKET_STRIDE == 0)
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| {
-                format!(
-                    "{RESOLUTION_BUCKETS_KEY} row {n}: resolution must be a positive whole number \
-                     of pixels divisible by {RESOLUTION_BUCKET_STRIDE}."
-                )
-            })?;
-        let repeats = row
-            .get("repeats")
-            .and_then(Value::as_u64)
-            .filter(|value| (1..=RESOLUTION_BUCKET_REPEATS_MAX).contains(value))
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| {
-                format!(
-                    "{RESOLUTION_BUCKETS_KEY} row {n}: repeats must be a whole number between 1 \
-                     and {RESOLUTION_BUCKET_REPEATS_MAX}."
-                )
-            })?;
-        if buckets.iter().any(|bucket| bucket.resolution == resolution) {
+        let row = value
+            .as_object()
+            .ok_or_else(|| format!("{RESOLUTION_BUCKETS_KEY} row {n} must be an object."))?;
+        let has_resolution = row.contains_key("resolution");
+        let has_width = row.contains_key("width");
+        let has_height = row.contains_key("height");
+        let row_form = match (has_resolution, has_width, has_height) {
+            (true, false, false) => "legacy",
+            (false, true, true) => "aspect",
+            _ => return Err(format!(
+                "{RESOLUTION_BUCKETS_KEY} row {n} must use exactly {{resolution, repeats}} or {{width, height, repeats}}."
+            )),
+        };
+        if form.is_some_and(|previous| previous != row_form) {
             return Err(format!(
-                "{RESOLUTION_BUCKETS_KEY} lists resolution {resolution} more than once."
+                "{RESOLUTION_BUCKETS_KEY} must not mix square and rectangular bucket rows."
             ));
         }
-        buckets.push(ResolutionBucketSpec {
-            resolution,
-            repeats,
-        });
+        form = Some(row_form);
+        let repeats = bucket_repeats(row, n)?;
+        match row_form {
+            "legacy" => {
+                if row.len() != 2 || !row.contains_key("repeats") {
+                    return Err(format!(
+                        "{RESOLUTION_BUCKETS_KEY} row {n} must contain only resolution and repeats."
+                    ));
+                }
+                let resolution = bucket_dimension(row, "resolution", n)?;
+                if legacy
+                    .iter()
+                    .any(|bucket: &ResolutionBucketSpec| bucket.resolution == resolution)
+                {
+                    return Err(format!(
+                        "{RESOLUTION_BUCKETS_KEY} lists resolution {resolution} more than once."
+                    ));
+                }
+                legacy.push(ResolutionBucketSpec {
+                    resolution,
+                    repeats,
+                });
+            }
+            "aspect" => {
+                if row.len() != 3 || !row.contains_key("repeats") {
+                    return Err(format!(
+                        "{RESOLUTION_BUCKETS_KEY} row {n} must contain only width, height and repeats."
+                    ));
+                }
+                let width = bucket_dimension(row, "width", n)?;
+                let height = bucket_dimension(row, "height", n)?;
+                if aspect.iter().any(|bucket: &AspectRatioBucketSpec| {
+                    bucket.width == width && bucket.height == height
+                }) {
+                    return Err(format!(
+                        "{RESOLUTION_BUCKETS_KEY} lists geometry {width}x{height} more than once."
+                    ));
+                }
+                aspect.push(AspectRatioBucketSpec {
+                    width,
+                    height,
+                    repeats,
+                });
+            }
+            _ => unreachable!("row form is classified above"),
+        }
     }
-    Ok(Some(buckets))
+    Ok(Some(match form {
+        Some("legacy") => ResolutionBucketConfig::Legacy(legacy),
+        Some("aspect") => ResolutionBucketConfig::AspectRatio(aspect),
+        _ => unreachable!("non-empty rows have a form"),
+    }))
+}
+
+/// Backwards-compatible reader for native square-bucket consumers. New rectangular consumers use
+/// [`parse_resolution_bucket_config`] so they receive width and height without lossy projection.
+pub fn parse_resolution_buckets(
+    advanced: &serde_json::Map<String, Value>,
+) -> Result<Option<Vec<ResolutionBucketSpec>>, String> {
+    match parse_resolution_bucket_config(advanced)? {
+        None => Ok(None),
+        Some(ResolutionBucketConfig::Legacy(rows)) => Ok(Some(rows)),
+        Some(ResolutionBucketConfig::AspectRatio(_)) => Err(format!(
+            "{RESOLUTION_BUCKETS_KEY} rectangular rows require a native aspect-ratio bucket trainer."
+        )),
+    }
 }
 
 /// The largest training resolution a config trains at: the largest
@@ -285,10 +373,15 @@ pub fn parse_resolution_buckets(
 /// `resolution`. Memory admission sizes for this (epic 2123 E7). A malformed bucket list falls back
 /// to `resolution` here only because plan validation refuses it before any job is queued.
 pub fn training_max_resolution(config: &TrainingConfig) -> u32 {
-    match parse_resolution_buckets(&config.advanced) {
-        Ok(Some(buckets)) => buckets
+    match parse_resolution_bucket_config(&config.advanced) {
+        Ok(Some(ResolutionBucketConfig::Legacy(buckets))) => buckets
             .iter()
             .map(|bucket| bucket.resolution)
+            .max()
+            .unwrap_or(config.resolution),
+        Ok(Some(ResolutionBucketConfig::AspectRatio(buckets))) => buckets
+            .iter()
+            .flat_map(|bucket| [bucket.width, bucket.height])
             .max()
             .unwrap_or(config.resolution),
         _ => config.resolution,
@@ -662,8 +755,10 @@ pub struct TrainingPresetRegistry {
 pub struct TrainingConfig {
     /// LoRA network rank (dimension).
     pub rank: u32,
-    /// LoRA alpha scaling factor.
-    pub alpha: u32,
+    /// LoRA alpha scaling factor. This stays a JSON number so MOSS can use a
+    /// finite positive fractional scale while legacy targets retain their own
+    /// explicitly advertised integral policies.
+    pub alpha: ContractNumber,
     pub learning_rate: ContractNumber,
     /// Total training steps.
     pub steps: u32,
@@ -674,6 +769,8 @@ pub struct TrainingConfig {
     pub resolution: u32,
     /// Checkpoint cadence, in steps.
     pub save_every: u32,
+    /// MOSS uses a literal nonnegative seed, including zero. Its Studio Randomize
+    /// action persists a concrete value; there is no negative/None Auto sentinel.
     pub seed: i64,
     /// Optimizer name, kept a free string to stay engine-agnostic.
     pub optimizer: String,
@@ -852,6 +949,9 @@ pub struct TrainingProvenance {
     pub dataset_version: u32,
     pub target_id: String,
     pub base_model: String,
+    /// Canonical source repository selected by the target, when it is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_model_repo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -891,8 +991,12 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
             sd3_large_lora_target(),
             sd3_medium_lora_target(),
             anima_base_lora_target(),
+            moss_image_lora_target(false),
+            moss_image_lora_target(true),
             qwen_image_2_1_lora_target(),
             qwen_image_2_1_edit_lora_target(),
+            flux3::target(false),
+            flux3::target(true),
             ltx_video_lora_target(),
             ltx_2_5_video_lora_target(),
             wan_lora_target(),
@@ -928,24 +1032,12 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
         ],
         extra: ExtraFields::new(),
     };
-    // Epic 2123 latent-space perceptual losses (sc-24833): static per-target support flags
-    // (`latent_perceptual::{VAE_ANCHOR_TARGETS, LATENT_LPIPS_TARGETS}`), identical on both platforms.
+    // Stamp static technique support once, after every target has its final identity. Backend
+    // routing and technique descriptors are validated by the metadata-only contract tests.
     for target in &mut registry.targets {
-        latent_perceptual::insert_limits(target);
-    }
-    // Epic 2123 resolution buckets (sc-2127): every builtin target's trainer declares them except
-    // the ones listed in `RESOLUTION_BUCKETS_UNSUPPORTED_TARGETS`.
-    for target in &mut registry.targets {
-        // Epic 2123 face losses (sc-24831): the ArcFace identity and FaceMesh landmark losses ride
-        // the same shared perceptual builder arms and x0 decoder as depth anchoring, and every
-        // trainer that declares depth anchoring declares both — so each target advertising depth
-        // anchoring advertises them too (the worker drift test pins all three to the descriptors).
-        if depth_anchoring::target_supports_depth_anchoring(target) {
-            for key in [
-                face_losses::IDENTITY_LOSS_SUPPORT_LIMIT,
-                face_losses::FACE_LANDMARK_LOSS_SUPPORT_LIMIT,
-            ] {
-                target.limits.insert(key.to_owned(), Value::Bool(true));
+        for &(flag, targets) in TRAINING_SUPPORT_FLAGS {
+            if targets.contains(&target.id.as_str()) {
+                target.limits.insert(flag.to_owned(), Value::Bool(true));
             }
         }
         if !RESOLUTION_BUCKETS_UNSUPPORTED_TARGETS.contains(&target.id.as_str()) {
@@ -954,22 +1046,106 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
                 Value::Bool(true),
             );
         }
-        // Epic 2123: the x0 decoder the decoded-x0 losses use, from the one trainer-keyed mapping
-        // the worker loads it by. Every builtin target has a trainer identity contract (pinned by
-        // the routing matrix tests), and the MLX and Candle trainers of a target share a latent
-        // family, so the MLX identity names the decoder on both platforms (a contract test pins
-        // that too).
-        let trainer = crate::jobs_store::expected_backend_local_trainer_id(target, "mlx")
-            .unwrap_or_else(|error| panic!("builtin training target: {error}"));
-        if let Some(decoder) = depth_anchoring::x0_decoder_for_trainer(trainer) {
-            target.limits.insert(
-                depth_anchoring::X0_DECODER_LIMIT.to_owned(),
-                depth_anchoring::x0_decoder_limit(decoder),
-            );
+        // A malformed static declaration must not panic a production catalog request. Contract
+        // tests require every builtin trainer identity; an unresolved identity has no decoder.
+        if let Ok(trainer) = crate::jobs_store::expected_backend_local_trainer_id(target, "mlx") {
+            if let Some(decoder) = depth_anchoring::x0_decoder_for_trainer(trainer) {
+                target.limits.insert(
+                    depth_anchoring::X0_DECODER_LIMIT.to_owned(),
+                    depth_anchoring::x0_decoder_limit(decoder),
+                );
+            }
         }
     }
     registry
 }
+
+// Decoded-x0 techniques share the existing VAE-anchor support set on both backends. MOSS
+// supports adapter noise and subject masks only. LTX-2.5's prepared bundles cannot carry masks;
+// both LTX generations still decode video x0 through TAELTX2.3 for the decoded-x0 loss group.
+const NOISE_TARGETS: &[&str] = &[
+    "z_image_turbo_lora",
+    "sdxl_lora",
+    "illustrious_xl_v1_lora",
+    "illustrious_xl_v2_lora",
+    "kolors_lora",
+    "sd3_5_large_lora",
+    "sd3_5_medium_lora",
+    "lens_turbo_lora",
+    "krea_2_raw_lora",
+    "anima_base_lora",
+    "wan_lora",
+    "wan_t2v_14b_lora",
+    "wan_i2v_14b_lora",
+    "ltx_video_lora",
+    "ltx_2_5_video_lora",
+    "mage_flow_base_lora",
+    "qwen_image_2_1_lora",
+    "qwen_image_2_1_edit_lora",
+    "moss_image_base_lora",
+    "moss_image_sft_lora",
+];
+const SUBJECT_MASK_TARGETS: &[&str] = &[
+    "z_image_turbo_lora",
+    "sdxl_lora",
+    "illustrious_xl_v1_lora",
+    "illustrious_xl_v2_lora",
+    "kolors_lora",
+    "sd3_5_large_lora",
+    "sd3_5_medium_lora",
+    "lens_turbo_lora",
+    "krea_2_raw_lora",
+    "anima_base_lora",
+    "wan_lora",
+    "wan_t2v_14b_lora",
+    "wan_i2v_14b_lora",
+    "ltx_video_lora",
+    "mage_flow_base_lora",
+    "qwen_image_2_1_lora",
+    "qwen_image_2_1_edit_lora",
+    "moss_image_base_lora",
+    "moss_image_sft_lora",
+];
+const TRAINING_SUPPORT_FLAGS: &[(&str, &[&str])] = &[
+    (WEIGHT_NOISE_SUPPORT_LIMIT, NOISE_TARGETS),
+    (GRADIENT_NOISE_SUPPORT_LIMIT, NOISE_TARGETS),
+    (SUBJECT_MASK_LOSS_SUPPORT_LIMIT, SUBJECT_MASK_TARGETS),
+    (
+        depth_anchoring::DEPTH_ANCHORING_SUPPORT_LIMIT,
+        &latent_perceptual::VAE_ANCHOR_TARGETS,
+    ),
+    (
+        body_losses::BODY_PROPORTION_SUPPORT_LIMIT,
+        &latent_perceptual::VAE_ANCHOR_TARGETS,
+    ),
+    (
+        body_losses::BODY_SHAPE_SUPPORT_LIMIT,
+        &latent_perceptual::VAE_ANCHOR_TARGETS,
+    ),
+    (
+        body_losses::NORMAL_SUPPORT_LIMIT,
+        &latent_perceptual::VAE_ANCHOR_TARGETS,
+    ),
+    (
+        face_losses::IDENTITY_LOSS_SUPPORT_LIMIT,
+        &latent_perceptual::VAE_ANCHOR_TARGETS,
+    ),
+    (
+        face_losses::FACE_LANDMARK_LOSS_SUPPORT_LIMIT,
+        &latent_perceptual::VAE_ANCHOR_TARGETS,
+    ),
+    (
+        latent_perceptual::VAE_ANCHOR.support_limit,
+        &latent_perceptual::VAE_ANCHOR_TARGETS,
+    ),
+    (
+        latent_perceptual::LATENT_LPIPS.support_limit,
+        &latent_perceptual::LATENT_LPIPS_TARGETS,
+    ),
+    // sc-25213: the ostris de-distill adapter selected by Z-Image presets is honored by both
+    // native trainers. No sibling target advertises this training-adapter contract.
+    ("supportsTrainingAdapter", &["z_image_turbo_lora"]),
+];
 
 /// The built-in training presets Rust owns out of the box.
 pub fn builtin_training_presets() -> TrainingPresetRegistry {
@@ -1012,7 +1188,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "conservative"),
                 |mut config| {
                     config.rank = 8;
-                    config.alpha = 8;
+                    config.alpha = ContractNumber::from(8);
                     config.learning_rate = number(0.00005);
                     config.steps = 3000;
                     config
@@ -1069,7 +1245,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "balanced"),
                 |mut config| {
                     config.rank = 32;
-                    config.alpha = 16;
+                    config.alpha = ContractNumber::from(16);
                     config.steps = 3000;
                     config.advanced.insert("sampleEvery".to_owned(), json!(250));
                     config
@@ -1087,7 +1263,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "low_vram"),
                 |mut config| {
                     config.rank = 8;
-                    config.alpha = 8;
+                    config.alpha = ContractNumber::from(8);
                     config.resolution = 768;
                     config.steps = 2000;
                     config.save_every = 250;
@@ -1126,7 +1302,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "conservative"),
                 |mut config| {
                     config.rank = 8;
-                    config.alpha = 8;
+                    config.alpha = ContractNumber::from(8);
                     config.learning_rate = number(0.00005);
                     config
                 },
@@ -1143,7 +1319,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "balanced"),
                 |mut config| {
                     config.rank = 32;
-                    config.alpha = 16;
+                    config.alpha = ContractNumber::from(16);
                     config
                 },
                 object(json!({
@@ -1159,7 +1335,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "low_vram"),
                 |mut config| {
                     config.rank = 8;
-                    config.alpha = 8;
+                    config.alpha = ContractNumber::from(8);
                     config.resolution = 768;
                     config.steps = 1200;
                     config
@@ -1194,7 +1370,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "conservative"),
                 |mut config| {
                     config.rank = 8;
-                    config.alpha = 8;
+                    config.alpha = ContractNumber::from(8);
                     config.learning_rate = number(0.00005);
                     config
                 },
@@ -1211,7 +1387,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "balanced"),
                 |mut config| {
                     config.rank = 32;
-                    config.alpha = 16;
+                    config.alpha = ContractNumber::from(16);
                     config
                 },
                 object(json!({
@@ -1227,7 +1403,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "low_vram"),
                 |mut config| {
                     config.rank = 8;
-                    config.alpha = 8;
+                    config.alpha = ContractNumber::from(8);
                     config.resolution = 768;
                     config.steps = 1200;
                     config
@@ -1258,7 +1434,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "conservative"),
                 |mut config| {
                     config.rank = 8;
-                    config.alpha = 8;
+                    config.alpha = ContractNumber::from(8);
                     config.learning_rate = number(0.00005);
                     config
                 },
@@ -1275,7 +1451,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "balanced"),
                 |mut config| {
                     config.rank = 32;
-                    config.alpha = 16;
+                    config.alpha = ContractNumber::from(16);
                     config
                 },
                 object(json!({
@@ -1291,7 +1467,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "low_vram"),
                 |mut config| {
                     config.rank = 8;
-                    config.alpha = 8;
+                    config.alpha = ContractNumber::from(8);
                     config.resolution = 768;
                     config.steps = 1200;
                     config
@@ -1324,7 +1500,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "conservative"),
                 |mut config| {
                     config.rank = 8;
-                    config.alpha = 8;
+                    config.alpha = ContractNumber::from(8);
                     config.learning_rate = number(0.00005);
                     config
                 },
@@ -1341,7 +1517,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "balanced"),
                 |mut config| {
                     config.rank = 32;
-                    config.alpha = 16;
+                    config.alpha = ContractNumber::from(16);
                     config
                 },
                 object(json!({
@@ -1357,7 +1533,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "low_vram"),
                 |mut config| {
                     config.rank = 8;
-                    config.alpha = 8;
+                    config.alpha = ContractNumber::from(8);
                     config.resolution = 768;
                     config.steps = 1200;
                     config
@@ -1388,7 +1564,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "conservative"),
                 |mut config| {
                     config.rank = 8;
-                    config.alpha = 8;
+                    config.alpha = ContractNumber::from(8);
                     config.learning_rate = number(0.00005);
                     config
                 },
@@ -1405,7 +1581,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "balanced"),
                 |mut config| {
                     config.rank = 32;
-                    config.alpha = 16;
+                    config.alpha = ContractNumber::from(16);
                     config
                 },
                 object(json!({
@@ -1434,7 +1610,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw", "conservative"),
                 |mut config| {
                     config.rank = 16;
-                    config.alpha = 16;
+                    config.alpha = ContractNumber::from(16);
                     config.learning_rate = number(0.00005);
                     config
                 },
@@ -1538,7 +1714,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "conservative"),
                 |mut config| {
                     config.rank = 8;
-                    config.alpha = 8;
+                    config.alpha = ContractNumber::from(8);
                     config.learning_rate = number(0.00005);
                     config.steps = 3000;
                     config
@@ -1556,7 +1732,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "balanced"),
                 |mut config| {
                     config.rank = 32;
-                    config.alpha = 16;
+                    config.alpha = ContractNumber::from(16);
                     config.steps = 3000;
                     config
                 },
@@ -1586,7 +1762,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "conservative"),
                 |mut config| {
                     config.rank = 8;
-                    config.alpha = 8;
+                    config.alpha = ContractNumber::from(8);
                     config.learning_rate = number(0.00005);
                     config
                 },
@@ -1603,7 +1779,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "balanced"),
                 |mut config| {
                     config.rank = 32;
-                    config.alpha = 16;
+                    config.alpha = ContractNumber::from(16);
                     config
                 },
                 object(json!({
@@ -1634,7 +1810,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "conservative"),
                 |mut config| {
                     config.rank = 8;
-                    config.alpha = 8;
+                    config.alpha = ContractNumber::from(8);
                     config.learning_rate = number(0.00005);
                     config
                 },
@@ -1984,7 +2160,7 @@ fn mage_flow_lora_target(
         kernel: "mage_flow_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 3000,
             batch_size: 1,
@@ -2040,21 +2216,6 @@ fn mage_flow_lora_target(
             "networkTypes": ["lora", "lokr", "full"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true,
-            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
-            // Candle alike (pinned per platform by a worker drift test).
-            "supportsDepthAnchoring": true,
-            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
-            // are cataloged).
-            "supportsBodyProportionLoss": true,
-            "supportsBodyShapeLoss": true,
-            "supportsNormalLoss": true,
-            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
-            // both MLX and Candle (pinned per platform by a worker drift test).
-            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": name,
@@ -2085,7 +2246,7 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
         kernel: "z_image_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 3000,
             batch_size: 1,
@@ -2132,22 +2293,6 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123 adapter noise (sc-24826/sc-24827): declared by the trainer on both backends.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true,
-            // Epic 2123 depth anchoring (sc-2125, sc-24830): declared on MLX and Candle alike.
-            "supportsDepthAnchoring": true,
-            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
-            // are cataloged).
-            "supportsBodyProportionLoss": true,
-            "supportsBodyShapeLoss": true,
-            "supportsNormalLoss": true,
-            // Epic 2123 subject-masked loss (sc-24828): declared on MLX and Candle alike.
-            "supportsSubjectMaskLoss": true,
-            // sc-25213: the ostris de-distill training adapter the presets select is honored by
-            // the Z-Image-Turbo trainer on MLX and Candle (pinned by a worker drift test).
-            "supportsTrainingAdapter": true
         })),
         ui: object(json!({
             "label": "Z-Image-Turbo LoRA",
@@ -2198,7 +2343,7 @@ fn lens_turbo_lora_target() -> TrainingTarget {
         kernel: "lens_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 3000,
             batch_size: 1,
@@ -2260,21 +2405,6 @@ fn lens_turbo_lora_target() -> TrainingTarget {
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true,
-            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
-            // Candle alike (pinned per platform by a worker drift test).
-            "supportsDepthAnchoring": true,
-            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
-            // are cataloged).
-            "supportsBodyProportionLoss": true,
-            "supportsBodyShapeLoss": true,
-            "supportsNormalLoss": true,
-            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
-            // both MLX and Candle (pinned per platform by a worker drift test).
-            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Lens LoRA",
@@ -2320,7 +2450,7 @@ fn krea_raw_lora_target() -> TrainingTarget {
         kernel: "krea_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 3000,
             batch_size: 1,
@@ -2377,23 +2507,6 @@ fn krea_raw_lora_target() -> TrainingTarget {
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true,
-            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
-            // Candle alike (pinned per platform by a worker drift test).
-            "supportsDepthAnchoring": true,
-            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
-            // are cataloged).
-            "supportsBodyProportionLoss": true,
-            "supportsBodyShapeLoss": true,
-            "supportsNormalLoss": true,
-            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
-            // both MLX and Candle (pinned per platform by a worker drift test).
-            "supportsSubjectMaskLoss": true
-            // No `requiresBackend`/`appleSiliconOnly` markers: a Rust trainer runs on BOTH backends
-            // (mlx on Apple Silicon, candle on Windows/Linux NVIDIA — sc-8614).
         })),
         ui: object(json!({
             "label": "Krea 2 LoRA",
@@ -2436,7 +2549,7 @@ fn krea_control_target() -> TrainingTarget {
             // control trainer ignores them. Kept at the family default to satisfy the shared config
             // contract (both are validated `> 0`).
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 3000,
             batch_size: 1,
@@ -2523,7 +2636,7 @@ fn sd3_large_lora_target() -> TrainingTarget {
         kernel: "sd3_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 3000,
             batch_size: 1,
@@ -2580,21 +2693,6 @@ fn sd3_large_lora_target() -> TrainingTarget {
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true,
-            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
-            // Candle alike (pinned per platform by a worker drift test).
-            "supportsDepthAnchoring": true,
-            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
-            // are cataloged).
-            "supportsBodyProportionLoss": true,
-            "supportsBodyShapeLoss": true,
-            "supportsNormalLoss": true,
-            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
-            // both MLX and Candle (pinned per platform by a worker drift test).
-            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "SD3.5 Large LoRA",
@@ -2632,7 +2730,7 @@ fn sd3_medium_lora_target() -> TrainingTarget {
         kernel: "sd3_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 3000,
             batch_size: 1,
@@ -2679,21 +2777,6 @@ fn sd3_medium_lora_target() -> TrainingTarget {
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true,
-            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
-            // Candle alike (pinned per platform by a worker drift test).
-            "supportsDepthAnchoring": true,
-            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
-            // are cataloged).
-            "supportsBodyProportionLoss": true,
-            "supportsBodyShapeLoss": true,
-            "supportsNormalLoss": true,
-            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
-            // both MLX and Candle (pinned per platform by a worker drift test).
-            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "SD3.5 Medium LoRA",
@@ -2791,34 +2874,15 @@ fn ltx_lora_target(
         );
     }
     let mut limits = object(json!({
-        "rank": [4, 128],
-        "alpha": [1, 128],
-        "steps": [200, 4000],
-        "resolutions": [512, 768, 1024],
-        "batchSize": [1, 2],
-        "networkTypes": ["lora"],
-        "lrSchedulers": ["constant", "linear", "cosine"],
-        "outputScopes": ["project", "global"],
-            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true
-    }));
-    // Epic 2123 subject-masked loss (sc-24828): the LTX-2.3 trainer declares it on both backends;
-    // LTX-2.5 trains from prepared latent bundles, which no image mask can be aligned with, so its
-    // trainers refuse it and it is not advertised.
-    if !is_ltx_2_5 {
-        limits.insert(SUBJECT_MASK_LOSS_SUPPORT_LIMIT.to_owned(), json!(true));
-    }
-    // Epic 2123 depth anchoring (sc-24830): both LTX-2.3 and LTX-2.5 decode the video latent per
-    // frame through TAELTX2.3 (2.5's prepared bundles carry the clean video latent).
-    limits.insert(
-        depth_anchoring::DEPTH_ANCHORING_SUPPORT_LIMIT.to_owned(),
-        json!(true),
-    );
-    // Epic 2123 body losses (sc-24832): the same decoder arms, on both LTX-2.3 and LTX-2.5.
-    for loss in body_losses::BodyLoss::ALL {
-        limits.insert(loss.support_limit().to_owned(), json!(true));
-    }
+    "rank": [4, 128],
+    "alpha": [1, 128],
+    "steps": [200, 4000],
+    "resolutions": [512, 768, 1024],
+    "batchSize": [1, 2],
+    "networkTypes": ["lora"],
+    "lrSchedulers": ["constant", "linear", "cosine"],
+    "outputScopes": ["project", "global"],
+        }));
     if is_ltx_2_5 {
         limits.insert("preparedBundleSchema".to_owned(), json!("ltx-prepared-v1"));
         limits.insert(
@@ -2842,6 +2906,36 @@ fn ltx_lora_target(
             ]),
         );
     }
+    let mut ui = object(json!({
+        "label": name,
+        "description": description,
+        "recommendedFor": ["character", "style"],
+        "datasetModality": if is_ltx_2_5 { "video" } else { "image" }
+    }));
+    if is_ltx_2_5 {
+        ui.insert("subjectRestrictedNormalLoss".to_owned(), json!(false));
+        ui.insert(
+            "noVideoLossWorkflows".to_owned(),
+            json!(depth_anchoring::DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS),
+        );
+        ui.insert("ltxWorkflowPlans".to_owned(), json!({
+            "i2v_lora": {"video":{"isGenerated":true,"conditions":[{"type":"firstFrame","probability":0.5}]},"audio":{"isGenerated":true,"conditions":[]}},
+            "t2v_lora": {"video":{"isGenerated":true,"conditions":[]},"audio":{"isGenerated":true,"conditions":[]}},
+            "v2a_lora": {"video":{"isGenerated":false,"conditions":[]},"audio":{"isGenerated":true,"conditions":[]}},
+            "a2v_lora": {"video":{"isGenerated":true,"conditions":[]},"audio":{"isGenerated":false,"conditions":[]}},
+            "t2a_lora": {"video":null,"audio":{"isGenerated":true,"conditions":[]}},
+            "video_extend_lora": {"video":{"isGenerated":true,"conditions":[{"type":"prefix","probability":1,"temporalBoundary":8}]},"audio":{"isGenerated":true,"conditions":[]}},
+            "video_inpainting_lora": {"video":{"isGenerated":true,"conditions":[{"type":"mask","probability":1,"tensorKey":"video_mask"}]},"audio":null},
+            "video_outpainting_lora": {"video":{"isGenerated":true,"conditions":[{"type":"spatialCrop","probability":1,"spatialRegion":[0,0,288,576]}]},"audio":null},
+            "video_suffix_lora": {"video":{"isGenerated":true,"conditions":[{"type":"suffix","probability":1,"temporalBoundary":8}]},"audio":{"isGenerated":true,"conditions":[]}},
+            "audio_extend_lora": {"video":null,"audio":{"isGenerated":true,"conditions":[{"type":"prefix","probability":1,"temporalBoundary":8}]}},
+            "audio_inpainting_lora": {"video":null,"audio":{"isGenerated":true,"conditions":[{"type":"mask","probability":1,"tensorKey":"audio_mask"}]}},
+            "audio_suffix_lora": {"video":null,"audio":{"isGenerated":true,"conditions":[{"type":"suffix","probability":1,"temporalBoundary":8}]}},
+            "av2av_ic_lora": {"video":{"isGenerated":true,"conditions":[{"type":"reference","probability":1,"tensorKey":"video_reference"}]},"audio":{"isGenerated":true,"conditions":[{"type":"reference","probability":1,"tensorKey":"audio_reference"}]}},
+            "v2v_ic_lora": {"video":{"isGenerated":true,"conditions":[{"type":"reference","probability":1,"tensorKey":"video_reference"},{"type":"firstFrame","probability":0.2}]},"audio":null},
+            "a2a_ic_lora": {"video":null,"audio":{"isGenerated":true,"conditions":[{"type":"reference","probability":1,"tensorKey":"audio_reference"}]}}
+        }));
+    }
     TrainingTarget {
         id: id.to_owned(),
         name: name.to_owned(),
@@ -2856,7 +2950,7 @@ fn ltx_lora_target(
         kernel: "ltx_mlx_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 32,
-            alpha: 32,
+            alpha: ContractNumber::from(32),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 1500,
             batch_size: 1,
@@ -2871,12 +2965,7 @@ fn ltx_lora_target(
             extra: ExtraFields::new(),
         },
         limits,
-        ui: object(json!({
-            "label": name,
-            "description": description,
-            "recommendedFor": ["character", "style"],
-            "datasetModality": if is_ltx_2_5 { "video" } else { "image" }
-        })),
+        ui,
         extra: ExtraFields::new(),
     }
 }
@@ -2914,7 +3003,7 @@ fn wan_lora_target() -> TrainingTarget {
         kernel: "wan_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 32,
-            alpha: 32,
+            alpha: ContractNumber::from(32),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 1500,
             batch_size: 1,
@@ -2968,21 +3057,6 @@ fn wan_lora_target() -> TrainingTarget {
             "networkTypes": ["lora"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true,
-            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
-            // Candle alike (pinned per platform by a worker drift test).
-            "supportsDepthAnchoring": true,
-            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
-            // are cataloged).
-            "supportsBodyProportionLoss": true,
-            "supportsBodyShapeLoss": true,
-            "supportsNormalLoss": true,
-            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
-            // both MLX and Candle (pinned per platform by a worker drift test).
-            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Wan2.2 Video LoRA",
@@ -3025,7 +3099,7 @@ fn wan_moe_lora_target(
         kernel: "wan_moe_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 32,
-            alpha: 32,
+            alpha: ContractNumber::from(32),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 1500,
             batch_size: 1,
@@ -3069,21 +3143,6 @@ fn wan_moe_lora_target(
             },
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true,
-            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
-            // Candle alike (pinned per platform by a worker drift test).
-            "supportsDepthAnchoring": true,
-            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
-            // are cataloged).
-            "supportsBodyProportionLoss": true,
-            "supportsBodyShapeLoss": true,
-            "supportsNormalLoss": true,
-            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
-            // both MLX and Candle (pinned per platform by a worker drift test).
-            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": name,
@@ -3149,7 +3208,7 @@ fn sdxl_lora_target() -> TrainingTarget {
         kernel: "sdxl_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 1500,
             batch_size: 1,
@@ -3197,21 +3256,6 @@ fn sdxl_lora_target() -> TrainingTarget {
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true,
-            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
-            // Candle alike (pinned per platform by a worker drift test).
-            "supportsDepthAnchoring": true,
-            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
-            // are cataloged).
-            "supportsBodyProportionLoss": true,
-            "supportsBodyShapeLoss": true,
-            "supportsNormalLoss": true,
-            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
-            // both MLX and Candle (pinned per platform by a worker drift test).
-            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Stable Diffusion XL LoRA",
@@ -3249,7 +3293,7 @@ fn illustrious_xl_v1_lora_target() -> TrainingTarget {
         kernel: "sdxl_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 1500,
             batch_size: 1,
@@ -3293,21 +3337,6 @@ fn illustrious_xl_v1_lora_target() -> TrainingTarget {
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true,
-            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
-            // Candle alike (pinned per platform by a worker drift test).
-            "supportsDepthAnchoring": true,
-            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
-            // are cataloged).
-            "supportsBodyProportionLoss": true,
-            "supportsBodyShapeLoss": true,
-            "supportsNormalLoss": true,
-            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
-            // both MLX and Candle (pinned per platform by a worker drift test).
-            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Illustrious-XL v1.0 LoRA",
@@ -3337,7 +3366,7 @@ fn illustrious_xl_v2_lora_target() -> TrainingTarget {
         kernel: "sdxl_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 1500,
             batch_size: 1,
@@ -3379,21 +3408,6 @@ fn illustrious_xl_v2_lora_target() -> TrainingTarget {
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true,
-            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
-            // Candle alike (pinned per platform by a worker drift test).
-            "supportsDepthAnchoring": true,
-            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
-            // are cataloged).
-            "supportsBodyProportionLoss": true,
-            "supportsBodyShapeLoss": true,
-            "supportsNormalLoss": true,
-            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
-            // both MLX and Candle (pinned per platform by a worker drift test).
-            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Illustrious-XL v2.0 LoRA",
@@ -3432,7 +3446,7 @@ fn kolors_lora_target() -> TrainingTarget {
         kernel: "kolors_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 1500,
             batch_size: 1,
@@ -3475,21 +3489,6 @@ fn kolors_lora_target() -> TrainingTarget {
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true,
-            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
-            // Candle alike (pinned per platform by a worker drift test).
-            "supportsDepthAnchoring": true,
-            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
-            // are cataloged).
-            "supportsBodyProportionLoss": true,
-            "supportsBodyShapeLoss": true,
-            "supportsNormalLoss": true,
-            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
-            // both MLX and Candle (pinned per platform by a worker drift test).
-            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Kolors LoRA",
@@ -3798,6 +3797,7 @@ pub fn build_training_plan(
             dataset_version: input.dataset.version,
             target_id: input.target.id.clone(),
             base_model: input.target.base_model.clone(),
+            base_model_repo: input.target.base_model_repo.clone(),
             preset_id: input.preset.as_ref().map(|preset| preset.preset_id.clone()),
             preset_version: input.preset.as_ref().map(|preset| preset.preset_version),
             preset_name: input
@@ -3861,16 +3861,23 @@ fn resolve_item_path(
     dataset_root: &Path,
     relative_path: &str,
 ) -> Result<String, TrainingPlanError> {
-    if !is_safe_relative_path(relative_path) {
+    // Dataset items are portable strings; native export filenames use a separate policy.
+    if crate::safe_path::relative_normal_components(relative_path).is_err() {
         return Err(TrainingPlanError::InvalidConfig(
             "Dataset item path must be relative to the dataset root.".to_owned(),
         ));
     }
-    let mut path = dataset_root.to_path_buf();
-    for component in Path::new(relative_path).components() {
-        path.push(component);
-    }
-    Ok(path.display().to_string())
+    crate::safe_path::confine_under(
+        dataset_root,
+        relative_path,
+        crate::safe_path::Confinement::Lexical,
+    )
+    .map(|path| path.display().to_string())
+    .map_err(|_| {
+        TrainingPlanError::InvalidConfig(
+            "Dataset item path must be relative to the dataset root.".to_owned(),
+        )
+    })
 }
 
 /// The target limit naming how many ORDERED reference images one instruction-edit item may carry
@@ -3949,7 +3956,7 @@ pub fn edit_pair_kernel_shape_error(
 }
 
 /// The dataset-shape floor for a target (sc-24161), mirroring the engine's
-/// `gen_core::train::validate_edit_request` so the API answers before a job is queued:
+/// `gen_core_train::validate_edit_request` so the API answers before a job is queued:
 ///
 /// - a target that cannot train edits refuses any item carrying references (never a text-to-image
 ///   adapter silently trained on the edit targets);
@@ -4026,9 +4033,16 @@ pub fn validate_training_config_for_target(
     target: &TrainingTarget,
     config: &TrainingConfig,
 ) -> Result<(), TrainingPlanError> {
+    if flux3::KERNELS.contains(&target.kernel.as_str()) {
+        flux3::validate(target, config)?;
+    }
     validate_advertised_numeric_limits(target, config)?;
     validate_advertised_optimizer_limit(target, config)?;
     validate_training_config(config)?;
+    if target.kernel == "moss_image_lora" {
+        moss_training_seed(config.seed)?;
+        validate_moss_training_field_shapes(&config.advanced)?;
+    }
     validate_advertised_advanced_choices(target, config)?;
     if iris::is_iris_training_kernel(&target.kernel) {
         iris::validate_iris_training_config(target, config)?;
@@ -4146,7 +4160,18 @@ fn validate_advertised_numeric_limits(
 
         match field.as_str() {
             "rank" => validate_advertised_numeric_range(field, values, u64::from(config.rank))?,
-            "alpha" => validate_advertised_numeric_range(field, values, u64::from(config.alpha))?,
+            // Legacy target limits intentionally describe integral alpha. MOSS has no
+            // `alpha` numeric range so its finite fractional alpha passes through its
+            // native f32 contract; another target must explicitly opt into fractions.
+            "alpha" => validate_advertised_numeric_range(
+                field,
+                values,
+                config.alpha.as_u64().ok_or_else(|| {
+                    TrainingPlanError::InvalidConfig(
+                        "alpha must be a whole number for this training target.".to_owned(),
+                    )
+                })?,
+            )?,
             "steps" => validate_advertised_numeric_range(field, values, u64::from(config.steps))?,
             "batchSize" => {
                 validate_advertised_numeric_range(field, values, u64::from(config.batch_size))?
@@ -4375,6 +4400,80 @@ fn validate_advertised_advanced_choices(
     Ok(())
 }
 
+/// Validate MOSS's JSON controls before submission or native request lowering.
+/// Missing controls retain the worker defaults; present values must match the native
+/// bool/string-array/i32 contract. The native options bag accepts only its deterministic
+/// posterior policy (an empty or absent bag also selects that policy).
+pub fn validate_moss_training_field_shapes(advanced: &JsonObject) -> Result<(), TrainingPlanError> {
+    let invalid = |field: &str, message: &str| TrainingPlanError::InvalidField {
+        field: field.to_owned(),
+        message: format!("MOSS {field} {message}"),
+    };
+    if let Some(options) = advanced.get("modelOptions") {
+        let options = options
+            .as_object()
+            .ok_or_else(|| invalid("modelOptions", "must be an object"))?;
+        if options
+            .iter()
+            .any(|(k, v)| k != "vae_posterior" || v.as_str() != Some("posterior_mean_v1"))
+        {
+            return Err(invalid(
+                "modelOptions",
+                "accepts only vae_posterior=posterior_mean_v1",
+            ));
+        }
+    }
+    if let Some(modules) = advanced.get("loraTargetModules") {
+        let modules = modules
+            .as_array()
+            .ok_or_else(|| invalid("loraTargetModules", "must be an array"))?;
+        if modules.iter().any(|module| !module.is_string()) {
+            return Err(invalid("loraTargetModules", "must contain only strings"));
+        }
+    }
+    if let Some(factor) = advanced.get("decomposeFactor") {
+        let factor = factor
+            .as_i64()
+            .ok_or_else(|| invalid("decomposeFactor", "must be an integer"))?;
+        if factor != -1 && (factor <= 0 || i32::try_from(factor).is_err()) {
+            return Err(invalid("decomposeFactor", "must be -1 or a positive i32"));
+        }
+    }
+    for key in ["cacheLatents", "cacheTextEmbeddings"] {
+        if advanced.get(key).is_some_and(|value| !value.is_boolean()) {
+            return Err(invalid(key, "must be true or false"));
+        }
+    }
+    Ok(())
+}
+
+/// Checked MOSS literal seed lowering. Zero remains zero; negatives are not an
+/// implicit Auto request. Other training families retain their existing policies.
+pub fn moss_training_seed(seed: i64) -> Result<u64, TrainingPlanError> {
+    u64::try_from(seed).map_err(|_| TrainingPlanError::InvalidField {
+        field: "seed".to_owned(),
+        message: "MOSS seed must be a literal nonnegative whole number, including zero.".to_owned(),
+    })
+}
+
+/// Convert a product alpha JSON number into the native f32 contract without letting a
+/// mathematically positive f64 overflow to infinity or underflow to zero at the boundary.
+pub fn training_alpha_f32(alpha: &ContractNumber) -> Result<f32, TrainingPlanError> {
+    let value = alpha.as_f64().unwrap_or(f64::NAN);
+    if !(value.is_finite() && value > 0.0) {
+        return Err(TrainingPlanError::InvalidConfig(
+            "alpha must be a positive finite number.".to_owned(),
+        ));
+    }
+    let native = value as f32;
+    if !(native.is_finite() && native > 0.0) {
+        return Err(TrainingPlanError::InvalidConfig(
+            "alpha must be representable as a positive finite f32.".to_owned(),
+        ));
+    }
+    Ok(native)
+}
+
 fn validate_training_config(config: &TrainingConfig) -> Result<(), TrainingPlanError> {
     let positive = |value: u32, field: &str| {
         if value == 0 {
@@ -4386,7 +4485,7 @@ fn validate_training_config(config: &TrainingConfig) -> Result<(), TrainingPlanE
         }
     };
     positive(config.rank, "rank")?;
-    positive(config.alpha, "alpha")?;
+    training_alpha_f32(&config.alpha)?;
     positive(config.steps, "steps")?;
     positive(config.resolution, "resolution")?;
     positive(config.batch_size, "batchSize")?;
@@ -4400,7 +4499,7 @@ fn validate_training_config(config: &TrainingConfig) -> Result<(), TrainingPlanE
     validate_lr_scheduler(config)?;
     validate_weight_noise(config)?;
     validate_gradient_noise(config)?;
-    parse_resolution_buckets(&config.advanced).map_err(|message| {
+    parse_resolution_bucket_config(&config.advanced).map_err(|message| {
         TrainingPlanError::InvalidField {
             field: RESOLUTION_BUCKETS_KEY.to_owned(),
             message,
@@ -4520,29 +4619,45 @@ fn validate_subject_mask_loss(config: &TrainingConfig) -> Result<(), TrainingPla
     subject_mask_loss_weights(&config.advanced).map(|_| ())
 }
 
-/// Target half of the `advanced.resolutionBuckets` validation (epic 2123 sc-2127, E6): every bucket
-/// resolution must be one the target advertises in `limits.resolutions` (the same menu `resolution`
-/// is held to), as a field error naming [`RESOLUTION_BUCKETS_KEY`]. The structural checks already
-/// ran in [`validate_training_config`].
+/// Target half of the `advanced.resolutionBuckets` validation. Legacy square rows retain the
+/// target's advertised-resolution menu; rectangular rows intentionally have no invented product
+/// maximum beyond the shared positive/u32/stride parser.
 fn validate_resolution_buckets_for_target(
     target: &TrainingTarget,
     config: &TrainingConfig,
 ) -> Result<(), TrainingPlanError> {
-    let Ok(Some(buckets)) = parse_resolution_buckets(&config.advanced) else {
+    let buckets = parse_resolution_bucket_config(&config.advanced).map_err(|message| {
+        TrainingPlanError::InvalidField {
+            field: RESOLUTION_BUCKETS_KEY.to_owned(),
+            message,
+        }
+    })?;
+    let Some(buckets) = buckets else {
         return Ok(());
     };
-    // The target's trainer on this platform must declare buckets (sc-2127 review): refuse here, at
-    // submit, instead of queueing a job the worker preflight then refuses (E3/E6).
+    // The target's trainer on this platform must declare buckets: reject before queueing instead of
+    // allowing a plan to reach native preflight and fail after the product has accepted it.
     if !target_supports_resolution_buckets(target) {
         return Err(TrainingPlanError::InvalidField {
             field: RESOLUTION_BUCKETS_KEY.to_owned(),
             message: format!(
-                "{} does not support multi-resolution buckets ({RESOLUTION_BUCKETS_KEY}) on this \
-                 platform.",
+                "{} does not support multi-resolution buckets ({RESOLUTION_BUCKETS_KEY}) on this platform.",
                 target.name
             ),
         });
     }
+    let ResolutionBucketConfig::Legacy(buckets) = buckets else {
+        if target.kernel != "moss_image_lora" {
+            return Err(TrainingPlanError::InvalidField {
+                field: RESOLUTION_BUCKETS_KEY.to_owned(),
+                message: format!(
+                    "{} supports square resolution buckets only; width/height buckets require a MOSS training target.",
+                    target.name
+                ),
+            });
+        }
+        return Ok(());
+    };
     let Some(allowed) = target.limits.get("resolutions").and_then(Value::as_array) else {
         return Ok(());
     };
@@ -4559,8 +4674,7 @@ fn validate_resolution_buckets_for_target(
         return Err(TrainingPlanError::InvalidField {
             field: RESOLUTION_BUCKETS_KEY.to_owned(),
             message: format!(
-                "{RESOLUTION_BUCKETS_KEY}: {} does not train at {}px. Supported resolutions: \
-                 {allowed}.",
+                "{RESOLUTION_BUCKETS_KEY}: {} does not train at {}px. Supported resolutions: {allowed}.",
                 target.name, bucket.resolution
             ),
         });
@@ -4739,7 +4853,7 @@ fn anima_base_lora_target() -> TrainingTarget {
         kernel: "anima_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 3000,
             batch_size: 1,
@@ -4791,21 +4905,6 @@ fn anima_base_lora_target() -> TrainingTarget {
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true,
-            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
-            // Candle alike (pinned per platform by a worker drift test).
-            "supportsDepthAnchoring": true,
-            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
-            // are cataloged).
-            "supportsBodyProportionLoss": true,
-            "supportsBodyShapeLoss": true,
-            "supportsNormalLoss": true,
-            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
-            // both MLX and Candle (pinned per platform by a worker drift test).
-            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Anima LoRA",
@@ -4868,7 +4967,7 @@ fn qwen_image_2_1_lora_target() -> TrainingTarget {
         kernel: "qwen_image_2_1_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 3000,
             batch_size: 1,
@@ -4918,19 +5017,6 @@ fn qwen_image_2_1_lora_target() -> TrainingTarget {
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123: the Qwen Image 2.1 trainer declares adapter noise, depth anchoring, the
-            // three body losses and subject-masked loss on MLX and Candle alike (pinned per platform
-            // by the worker drift tests); its decoded-x0 losses decode through TAEQI2.1. The face
-            // losses follow depth anchoring, and resolution buckets / the VAE anchor are stamped in
-            // `builtin_training_targets`. No E-LatentLPIPS (no published weights for this latent
-            // family) and no training adapter.
-            "supportsWeightNoise": true,
-            "supportsGradientNoise": true,
-            "supportsDepthAnchoring": true,
-            "supportsBodyProportionLoss": true,
-            "supportsBodyShapeLoss": true,
-            "supportsNormalLoss": true,
-            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Qwen Image 2.1 LoRA",
@@ -5067,6 +5153,10 @@ mod tests {
             resolve_item_path(root, "/absolute.png"),
             Err(TrainingPlanError::InvalidConfig(_))
         ));
+        assert!(
+            resolve_item_path(root, "images\\photo.png").is_err(),
+            "persisted dataset items use portable separators"
+        );
         // A safe relative path resolves under the dataset root using the host separator (the plan is
         // built + consumed on the same machine). Build the expectation the same way so the assertion
         // holds on Windows too — a hardcoded `/dataset/images/photo.png` only matches on `/`-sep hosts.
@@ -5160,5 +5250,255 @@ mod tests {
         );
         // Empty caption yields just the (unique) trigger words.
         assert_eq!(caption_with_trigger_words("", &["tok1".to_owned()]), "tok1");
+    }
+}
+
+/// Exact official MOSS checkpoints; Base is the default MOSS target, SFT is an explicit choice.
+fn moss_image_lora_target(sft: bool) -> TrainingTarget {
+    let (base, repo, name) = if sft {
+        (
+            "moss_image_sft",
+            "OpenMOSS-Team/MOSS-Image-SFT",
+            "MOSS-Image SFT",
+        )
+    } else {
+        (
+            "moss_image_base",
+            "OpenMOSS-Team/MOSS-Image-Base",
+            "MOSS-Image Base",
+        )
+    };
+    TrainingTarget {
+        id: format!("{base}_lora"),
+        name: format!("{name} LoRA / LoKr"),
+        modality: TrainingModality::Image,
+        output_kind: TrainingOutputKind::Lora,
+        family: "moss-image".to_owned(),
+        base_model: base.to_owned(),
+        base_model_repo: Some(repo.to_owned()),
+        kernel: "moss_image_lora".to_owned(),
+        defaults: TrainingConfig {
+            rank: 16,
+            alpha: ContractNumber::from(16),
+            learning_rate: ContractNumber::from_f64(0.0001).expect("finite"),
+            steps: 1000,
+            batch_size: 1,
+            gradient_accumulation: 1,
+            resolution: 1024,
+            save_every: 250,
+            seed: 42,
+            optimizer: "adamw".to_owned(),
+            trigger_word: None,
+            advanced: object(json!({"mixedPrecision":"bf16", "cacheLatents":true,
+                "cacheTextEmbeddings":true,"gradientCheckpointing":true,"networkType":"lora",
+                // [] means all native MOSS projections. Entries remain literal, case-sensitive
+                // native paths rather than UI-invented aliases.
+                "loraTargetModules":[],"decomposeFactor":-1,
+                "timestepType":"moss_stage3_v1","timestepBias":"balanced","lossType":"mse",
+                "lrScheduler":"constant","weightDecay":0.0,
+                "modelOptions":{"vae_posterior":"posterior_mean_v1"},
+                "sampleEvery":0,"sampleSteps":50,"sampleGuidanceScale":3.0,
+                "qualityPreset":"balanced","outputScope":"project","requestedGpu":"auto"})),
+            extra: ExtraFields::new(),
+        },
+        // MOSS alpha is a finite positive f32 at the native boundary, so unlike
+        // legacy targets it deliberately has no arbitrary product range.
+        limits: object(json!({"rank":[1,128],"steps":[1,10000],
+            "resolutions":[256,512,768,1024],"batchSize":[1,4],
+            "optimizers":["adamw","adam","prodigyopt","rose"],"networkTypes":["lora","lokr"],
+            "mixedPrecisions":["bf16","f32"],"timestepTypes":["moss_stage3_v1","sigmoid","linear","uniform","weighted"],
+            "timestepBiases":["balanced","high_noise","low_noise"],"lossTypes":["mse","mae"],
+            "lrSchedulers":["constant","linear","cosine"],"outputScopes":["project","global"]})),
+        ui: object(
+            json!({"label":format!("{name} LoRA / LoKr"),"datasetModality":"image",
+            "description":"Native MLX and CUDA transformer adapters for this exact MOSS checkpoint. Text encoder, VAE and base weights stay frozen. Published final-pretraining Stage3 sampler adapted for adapter training; deterministic posterior-mean VAE caching is a SceneWorks policy.",
+            "recommendedFor":["character","style"]}),
+        ),
+        extra: ExtraFields::new(),
+    }
+}
+
+#[cfg(test)]
+mod moss_training_s1_tests {
+    use super::*;
+    #[test]
+    fn moss_targets_keep_explicit_checkpoint_and_method_choices() {
+        let registry = builtin_training_targets();
+        let moss: Vec<_> = registry
+            .targets
+            .iter()
+            .filter(|t| t.kernel == "moss_image_lora")
+            .collect();
+        assert_eq!(moss.len(), 2);
+        assert_eq!(moss[0].base_model, "moss_image_base");
+        assert_eq!(moss[1].base_model, "moss_image_sft");
+        assert_ne!(moss[0].base_model_repo, moss[1].base_model_repo);
+        for target in moss {
+            assert_eq!(
+                target.defaults.advanced["timestepType"],
+                json!("moss_stage3_v1")
+            );
+            assert_eq!(
+                target.defaults.advanced["modelOptions"]["vae_posterior"],
+                json!("posterior_mean_v1")
+            );
+            assert_eq!(target.limits["networkTypes"], json!(["lora", "lokr"]));
+            assert_eq!(target.limits["mixedPrecisions"], json!(["bf16", "f32"]));
+            assert_eq!(target.defaults.advanced["mixedPrecision"], json!("bf16"));
+            assert_eq!(target.defaults.advanced["loraTargetModules"], json!([]));
+            assert_eq!(target.defaults.advanced["decomposeFactor"], json!(-1));
+            assert!(!target.limits.contains_key("alpha"));
+            for metadata in [&target.limits, &target.ui] {
+                assert!(!metadata.contains_key("appleSiliconOnly"));
+                assert!(!metadata.contains_key("requiresBackend"));
+            }
+        }
+    }
+
+    #[test]
+    fn moss_field_shapes_preserve_defaults_and_native_boundaries() {
+        validate_moss_training_field_shapes(&JsonObject::new()).unwrap();
+        for target in builtin_training_targets()
+            .targets
+            .iter()
+            .filter(|t| t.kernel == "moss_image_lora")
+        {
+            for network in ["lora", "lokr"] {
+                let mut config = target.defaults.clone();
+                config.advanced.insert("networkType".into(), json!(network));
+                validate_training_config_for_target(target, &config).unwrap();
+                for factor in [-1, 1, 4, i32::MAX] {
+                    for cached in [false, true] {
+                        config
+                            .advanced
+                            .insert("decomposeFactor".into(), json!(factor));
+                        config.advanced.insert("cacheLatents".into(), json!(cached));
+                        config
+                            .advanced
+                            .insert("cacheTextEmbeddings".into(), json!(!cached));
+                        config.advanced.insert(
+                            "loraTargetModules".into(),
+                            json!(["q", "layers.0.proj.ffn_up_gate"]),
+                        );
+                        for options in [json!({}), json!({"vae_posterior":"posterior_mean_v1"})] {
+                            config.advanced.insert("modelOptions".into(), options);
+                            validate_training_config_for_target(target, &config).unwrap();
+                        }
+                    }
+                }
+                for key in [
+                    "cacheLatents",
+                    "cacheTextEmbeddings",
+                    "loraTargetModules",
+                    "decomposeFactor",
+                    "modelOptions",
+                ] {
+                    config.advanced.remove(key);
+                }
+                validate_training_config_for_target(target, &config).unwrap();
+            }
+        }
+        for (field, invalid) in [
+            ("cacheLatents", json!("false")),
+            ("cacheTextEmbeddings", json!(0)),
+            ("loraTargetModules", json!([7])),
+            ("loraTargetModules", json!("q")),
+            ("modelOptions", json!({"vae_posterior":"sample"})),
+            ("modelOptions", json!({"unknown":true})),
+            ("modelOptions", json!([])),
+            ("decomposeFactor", json!(0)),
+            ("decomposeFactor", json!(-2)),
+            ("decomposeFactor", json!(2_147_483_648_i64)),
+            ("decomposeFactor", json!(1.5)),
+            ("decomposeFactor", json!("4")),
+        ]
+        .into_iter()
+        .chain(
+            [
+                "cacheLatents",
+                "cacheTextEmbeddings",
+                "loraTargetModules",
+                "decomposeFactor",
+                "modelOptions",
+            ]
+            .map(|key| (key, Value::Null)),
+        ) {
+            let advanced = [(field.to_owned(), invalid)].into_iter().collect();
+            assert!(
+                matches!(validate_moss_training_field_shapes(&advanced), Err(TrainingPlanError::InvalidField { field: actual, .. }) if actual == field)
+            );
+        }
+    }
+
+    #[test]
+    fn moss_alpha_accepts_positive_fractions_without_an_arbitrary_product_cap() {
+        let target = builtin_training_targets()
+            .targets
+            .into_iter()
+            .find(|target| target.id == "moss_image_base_lora")
+            .expect("MOSS Base target");
+        let mut config = target.defaults.clone();
+        config.alpha = number(0.5);
+        validate_training_config_for_target(&target, &config).expect("fractional MOSS alpha");
+
+        for refused in [0.0, 1e-50, 1e39] {
+            config.alpha = number(refused);
+            assert!(
+                validate_training_config_for_target(&target, &config).is_err(),
+                "{refused} must not map into the native f32 contract"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod model_contract_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn static_support_tables_and_trainer_identities_are_valid() {
+        let registry = builtin_training_targets();
+        let ids = registry
+            .targets
+            .iter()
+            .map(|target| target.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            ids.len(),
+            registry.targets.len(),
+            "duplicate target identity"
+        );
+        let mut flags = std::collections::BTreeSet::new();
+        for &(flag, targets) in TRAINING_SUPPORT_FLAGS {
+            assert!(flags.insert(flag), "duplicate support flag {flag}");
+            let mut seen = std::collections::BTreeSet::new();
+            for target in targets {
+                assert!(
+                    ids.contains(target),
+                    "{flag} references absent target {target}"
+                );
+                assert!(seen.insert(target), "duplicate target {target} in {flag}");
+            }
+        }
+        for target in &registry.targets {
+            for backend in ["mlx", "candle"] {
+                crate::jobs_store::expected_backend_local_trainer_id(target, backend)
+                    .unwrap_or_else(|error| panic!("{}/{}: {error}", target.id, backend));
+            }
+        }
+        let keys = TECHNIQUE_KEYS
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            keys.len(),
+            TECHNIQUE_KEYS.len(),
+            "duplicate technique parser key"
+        );
+        assert_eq!(
+            TECHNIQUE_KEYS.len(),
+            45,
+            "existing technique surface changed"
+        );
     }
 }

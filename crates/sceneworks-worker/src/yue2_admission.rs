@@ -200,31 +200,7 @@ const TRANSCRIPTION_WINDOW_SECS: u64 = 300;
 // ---- Tiers, backends, precision ---------------------------------------------------------------------
 
 /// A YuE2 weight tier (`candle_audio_yue2::precision::Tier`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) enum Yue2Tier {
-    Bf16,
-    Q8,
-    Q4,
-}
-
-impl Yue2Tier {
-    /// Every tier, densest first.
-    pub(crate) const ALL: [Yue2Tier; 3] = [Yue2Tier::Bf16, Yue2Tier::Q8, Yue2Tier::Q4];
-
-    pub(crate) fn key(self) -> &'static str {
-        match self {
-            Self::Bf16 => "bf16",
-            Self::Q8 => "q8",
-            Self::Q4 => "q4",
-        }
-    }
-
-    /// The tier a catalog variant names. Anything else is `None`, which every caller refuses — an
-    /// unknown tier is never priced as zero.
-    pub(crate) fn from_key(key: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|tier| tier.key() == key)
-    }
-}
+pub(crate) use crate::fit_gate::AudioWeightTier as Yue2Tier;
 
 /// The Candle backend a render runs on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -274,7 +250,6 @@ pub(crate) enum Yue2Precision {
     StrictBf16,
     /// An explicit F32 load. The audio job loads with the default precision; priced so the
     /// accelerator F32 residency (14.52 GB) is never read as the BF16 one.
-    #[cfg_attr(not(test), allow(dead_code))]
     Fp32,
 }
 
@@ -1007,7 +982,7 @@ impl Yue2Estimate {
     }
 
     /// The largest device-pool residency of any stage.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn device_peak(&self) -> (Yue2Stage, u64) {
         self.stages
             .iter()
@@ -1017,7 +992,7 @@ impl Yue2Estimate {
     }
 
     /// The largest host-pool residency of any stage.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn host_peak(&self) -> (Yue2Stage, u64) {
         self.stages
             .iter()
@@ -1528,7 +1503,11 @@ fn fit(estimate: &Yue2Estimate, budget: &Yue2Budget, other_live: u64) -> Fit {
                     };
                 }
             }
-            let reclaimed = (free_bytes + reclaimable_bytes).min(*total_bytes);
+            let reclaimed = crate::fit_gate::with_reclaimable_bytes(
+                *free_bytes,
+                *total_bytes,
+                *reclaimable_bytes,
+            );
             let short = |available: u64| {
                 estimate
                     .stages
@@ -1984,7 +1963,6 @@ fn decoder_bytes(manifest_entry: &Value, decoder: SongDecoder) -> Result<u64, St
 }
 
 /// SheetSage2 + MERT-v2's weights (the `requiredFor: ["cover"]` conditional components).
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn transcriber_bytes(manifest_entry: &Value) -> Result<u64, String> {
     let rows = manifest_entry
         .get("conditionalComponents")
@@ -2119,11 +2097,9 @@ pub(crate) fn shape_of(
 }
 
 /// The transcription step of a cover from a recording (SheetSage2 + MERT-v2), priced on its own:
-/// the transcriber unloads before the MoT loads, so it is never summed with a render. No job calls
-/// it yet: the native transcriber is gated out of every runtime bundle until the owner records a
-/// basis for its port code (the catalog's `conditionalComponents[].blocked`), and the job that
-/// unblocks it prices its step here.
-#[cfg_attr(not(test), allow(dead_code))]
+/// the transcriber unloads before the MoT loads, so it is never summed with a render. This test
+/// shape exercises estimator arithmetic; production transcription uses `check_transcription`.
+#[cfg(test)]
 pub(crate) fn transcription_shape(
     manifest_entry: &Value,
     tier: Yue2Tier,
@@ -2325,7 +2301,7 @@ pub(crate) async fn transcription_unknown_decode_cap(gpu_id: &str) -> Result<u64
 
 /// `ReviewArtifact::open` replays persisted F32 model input. It reads raw bytes and constructs an
 /// F32 vector, so an existing artifact needs admission too, before replay allocates either copy.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 pub(crate) async fn check_transcription_replay(
     artifact_file_bytes: u64,
     gpu_id: &str,
@@ -2508,14 +2484,16 @@ impl Yue2Lease {
                 }
             }
             Progress::Loading(_) => {}
-            Progress::PromptUpsamplingComplete => {}
+            Progress::PromptEncodingComplete
+            | Progress::PromptUpsamplingComplete
+            | Progress::PostProcessing => {}
             // Image-only prompt enhancement cannot advance an audio resource phase.
             Progress::ConditioningComplete | Progress::Upsampling { .. } => {}
         }
     }
 
     /// The priced render this lease holds.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn estimate(&self) -> &Yue2Estimate {
         &self.estimate
     }
@@ -2572,10 +2550,7 @@ pub(crate) fn budget_probes() -> usize {
 
 /// Let this thread's admissions read the real hardware budget (the profile capture entrypoint).
 #[cfg(test)]
-#[cfg_attr(
-    not(any(target_os = "macos", feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) fn probe_hardware_in_this_test() {
     HARDWARE_PROBE.with(|probe| probe.set(true));
 }
@@ -2648,16 +2623,14 @@ async fn live_budget(gpu_id: &str) -> Option<Yue2Budget> {
 
 #[cfg(target_os = "macos")]
 async fn probe_budget(_gpu_id: &str) -> Option<Yue2Budget> {
-    let working_set = working_set_ceiling_bytes().or_else(|| {
-        // No working-set reading: the unified total less the legacy reserve.
-        let total = crate::mlx_fit_gate::probe_total_unified_memory_bytes()?;
-        let reserve = crate::fit_gate::legacy_unified_reserve(gb(total)).gb * BYTES_PER_GIB;
-        Some(total.saturating_sub(reserve as u64))
-    })?;
-    // The small-Mac emulation cap caps the reading, as for every other unified-memory gate.
-    let capacity_bytes = crate::mlx_fit_gate::mlx_memory_cap_gb().map_or(working_set, |cap| {
-        working_set.min((cap * BYTES_PER_GIB) as u64)
-    });
+    let capacity_bytes = crate::fit_gate::working_set_capacity_bytes(
+        working_set_ceiling_bytes(),
+        || {
+            crate::mlx_fit_gate::probe_total_unified_memory_bytes()
+                .map(crate::fit_gate::unified_available_bytes)
+        },
+        crate::mlx_fit_gate::mlx_memory_cap_gb(),
+    )?;
     // The rest of this process shares the working set: the MLX allocator's live and cached bytes —
     // the image generator the cache keeps warm for 300 s after an image job, the refine model.
     // Evicting the cached generator frees its own load's bytes; clearing the MLX cache frees the
@@ -2693,15 +2666,12 @@ pub(crate) fn unified_budget(
 /// the real ceiling); reading it runs no workload.
 #[cfg(target_os = "macos")]
 fn working_set_ceiling_bytes() -> Option<u64> {
-    Some(crate::generator_cache::device_wired_ceiling_bytes() as u64).filter(|&bytes| bytes > 0)
+    crate::fit_gate::working_set_ceiling_bytes()
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 async fn probe_budget(gpu_id: &str) -> Option<Yue2Budget> {
-    let budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    )?;
+    let budget = crate::vram_gate::live_capped_budget(gpu_id).await?;
     let bytes = |gib: f64| (gib.max(0.0) * BYTES_PER_GIB) as u64;
     let compute_cap = crate::gpu::cached_compute_cap();
     #[cfg(test)]
@@ -2716,7 +2686,7 @@ async fn probe_budget(gpu_id: &str) -> Option<Yue2Budget> {
     })
 }
 
-#[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 async fn probe_budget(_gpu_id: &str) -> Option<Yue2Budget> {
     None
 }
@@ -2793,10 +2763,7 @@ pub(crate) struct Yue2Admitted {
 async fn evict_for_admission(gpu_id: &str) -> Result<(), WorkerError> {
     #[cfg(test)]
     EVICTIONS.with(|evictions| evictions.set(evictions.get() + 1));
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     {
         let evicted = crate::generator_cache::evict_cached_generator().await?;
         tracing::info!(
@@ -2805,10 +2772,7 @@ async fn evict_for_admission(gpu_id: &str) -> Result<(), WorkerError> {
             "YuE2 admission: evicted the resident generator to reclaim its memory (sc-23001)"
         );
     }
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
+    #[cfg(not(native_lane))]
     let _ = gpu_id;
     Ok(())
 }

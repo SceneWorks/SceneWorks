@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# Put a CLEAN inference checkout at the pinned revision in a PERSISTENT per-runner clone (sc-22738).
+# Put a private CLEAN inference worktree at the pin, backed by the persistent object cache.
 #
-# PIN RESOLUTION IS DERIVED, NEVER TYPED. `measure-memory-catalog.mjs` reads the pin out of
-# `crates/sceneworks-memory-adapter/src/lib.rs` (`compiledInferencePin()` -> `pub const
-# INFERENCE_PIN`) and refuses the walk when the inference checkout's HEAD does not equal it. That
-# constant is the one this script reads too, with the identical regex, so the two can never
-# disagree: bumping the pin with `npm run bump:inference` moves both at once and this workflow needs
-# no edit. Nothing here writes to any pin site.
+# PIN RESOLUTION IS DERIVED, NEVER TYPED. Core's build script and the shared tooling reader
+# resolve the contract dependency in `crates/sceneworks-core/Cargo.toml`. The adapter compiles
+# that provenance; this script and `compiledInferencePin()` call the same JavaScript reader.
+# `npm run bump:inference` moves the dependency declaration, with no separate stamps to rewrite.
+# Nothing here writes to any pin site.
 #
 # WHY THIS RUNS BEFORE `cargo fetch`, AND WHY THE CLONE OUTLIVES THE JOB.
 # ---------------------------------------------------------------------------------------------
@@ -46,10 +45,9 @@ source "$(dirname "$0")/common.sh"
 
 INFERENCE_URL="https://github.com/SceneWorks/inference"
 
-PIN="$(sed -n 's/^pub const INFERENCE_PIN: &str = "\([0-9a-f]\{40\}\)";.*/\1/p' \
-  crates/sceneworks-memory-adapter/src/lib.rs | head -n 1)"
+PIN="$(node scripts/lib/inference-provenance.mjs)"
 if [[ ! "$PIN" =~ ^[0-9a-f]{40}$ ]]; then
-  echo "::error title=No INFERENCE_PIN::crates/sceneworks-memory-adapter/src/lib.rs declares no 40-hex INFERENCE_PIN"
+  echo "::error title=No INFERENCE_PIN::crates/sceneworks-core/Cargo.toml declares no 40-hex inference contract pin"
   exit 1
 fi
 echo "pinned inference revision: $PIN"
@@ -69,15 +67,17 @@ fi
 REPO_U="$(unix_path "$INFERENCE_CLONE_DIR")"
 echo "persistent inference clone: $REPO_U"
 
-# REUSE ONLY A CLONE THAT IS ACTUALLY THIS REPO. Anything else -- a half-written directory from a
-# killed job, a clone of some other remote -- is discarded rather than fetched into, which would
-# otherwise fail much later with a confusing "revision not found".
+# REUSE ONLY A CLONE THAT IS ACTUALLY THIS REPO. Anything else is refused, never deleted: another registered
+# worktree may still be reading that object store.
 if [[ -d "$REPO_U/.git" ]] \
   && [[ "$(git -C "$REPO_U" remote get-url origin 2>/dev/null || true)" == "$INFERENCE_URL" ]]; then
   echo "reusing the existing clone"
 else
   echo "no usable clone at $REPO_U; initialising one"
-  rm -rf "$REPO_U"
+  if [[ -e "$REPO_U" ]]; then
+    echo "::error title=Unusable inference cache::refusing to remove an existing unknown directory: $REPO_U"
+    exit 1
+  fi
   mkdir -p "$REPO_U"
   git init --quiet "$REPO_U"
   git -C "$REPO_U" remote add origin "$INFERENCE_URL"
@@ -142,33 +142,24 @@ else
     # again, ignoring what the clone claims to hold.
     tree_reads "$rev" || git -C "$REPO_U" fetch --refetch --depth 1 --no-tags origin "$rev" || true
     if ! tree_reads "$rev"; then
-      echo "::error title=Inference revision is still unreadable::the tree of $rev does not read in $REPO_U after the fetch; remove that clone on the runner and re-dispatch"
+      echo "::error title=Inference revision is still unreadable::the tree of $rev does not read in $REPO_U after the fetch; inspect the cache without deleting active registered worktrees"
       exit 1
     fi
   done
 fi
 
-# A reused clone can carry leftovers from an interrupted earlier run. Reset it hard: the harness
-# refuses a dirty inference checkout, and a "dirty" verdict here would look like a code problem.
-git -C "$REPO_U" checkout --force --detach "$PIN"
-git -C "$REPO_U" reset --hard "$PIN"
-git -C "$REPO_U" clean -ffdx
-
-HEAD_SHA="$(git -C "$REPO_U" rev-parse HEAD)"
-if [[ "$HEAD_SHA" != "$PIN" ]]; then
-  echo "::error title=Inference checkout is not at the pin::HEAD is $HEAD_SHA, expected $PIN"
-  exit 1
-fi
-if [[ -n "$(git -C "$REPO_U" status --porcelain)" ]]; then
-  echo "::error title=Inference checkout is dirty::the harness refuses a dirty inference tree"
-  exit 1
-fi
+# Fetching populates objects only. Keep cache HEAD and every other capture's source untouched.
+# Exact commit refs make the local Cargo transport independent of cache HEAD/FETCH_HEAD too.
+for rev in "${WANTED[@]}"; do
+  git -C "$REPO_U" update-ref "refs/sceneworks/source-pins/$rev" "$rev"
+done
+WORKTREE_U="$(node scripts/ci/memory-catalog/source-worktree.mjs prepare "$REPO_U" "$PIN" "$(unix_path "$RUNNER_TEMP")")"
 
 CLONE_URL="$(file_url "$REPO_U")"
 
 {
   echo "INFERENCE_PIN=$PIN"
-  echo "INFERENCE_REPO=$(native_path "$REPO_U")"
+  echo "INFERENCE_REPO=$(native_path "$WORKTREE_U")"
   echo "INFERENCE_CLONE_DIR=$REPO_U"
   echo "INFERENCE_CLONE_URL=$CLONE_URL"
   # POINT CARGO'S GIT TRANSPORT AT THE CLONE WE JUST FETCHED, for every later step in the job.
@@ -192,8 +183,8 @@ CLONE_URL="$(file_url "$REPO_U")"
 } >> "$GITHUB_ENV"
 
 {
-  echo "Pinned inference revision \`$PIN\`, derived from \`crates/sceneworks-memory-adapter/src/lib.rs\`."
+  echo "Pinned inference revision \`$PIN\`, derived from \`crates/sceneworks-core/Cargo.toml\`."
   echo
-  echo "Persistent shallow clone \`$REPO_U\`; ${MISSING_COUNT} of ${#WANTED[@]} needed revision(s) fetched this run."
+  echo "Persistent object cache \`$REPO_U\`, private capture checkout \`$WORKTREE_U\`; ${MISSING_COUNT} of ${#WANTED[@]} needed revision(s) fetched this run."
   echo
 } >> "$GITHUB_STEP_SUMMARY"

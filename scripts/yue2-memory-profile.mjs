@@ -38,6 +38,7 @@
 //   node scripts/yue2-memory-profile.mjs ingest <record.json ...>
 //
 // `--out` must be OUTSIDE the repository (a capture from a dirty checkout is not evidence).
+import { metalChildOptions, metalExecutionCommand } from "./lib/apple-metal-execution-lock.mjs";
 import { spawn, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { closeSync, fsyncSync, openSync, readFileSync, writeSync } from "node:fs";
@@ -832,7 +833,7 @@ function spawnAndWait(command, args, options) {
   return new Promise((resolve) => {
     const { onSpawn, ...spawnOptions } = options;
     const startedAt = Date.now();
-    const child = spawn(command, args, { stdio: "inherit", ...spawnOptions });
+    const child = spawn(command, args, metalChildOptions({ stdio: "inherit", ...spawnOptions }));
     if (onSpawn) onSpawn(child.pid, startedAt);
     child.on("exit", (code, signal) => resolve({ code, signal }));
     child.on("error", (error) => resolve({ code: -1, signal: null, error }));
@@ -930,7 +931,8 @@ export async function captureCase(options) {
     const boundary = startBoundaryWatcher(path.join(planned.outDir, "boundary"), "metal", planned.guarded.eventFile);
     let boundaryError;
     try {
-      result = await spawnAndWait("python3", [...guard, "--", ...planned.test], { cwd: ROOT, env: planned.env });
+      const leased = metalExecutionCommand("python3", [...guard, "--", ...planned.test], planned.guarded.budgetMinutes * 60);
+      result = await spawnAndWait(leased.command, leased.args, { cwd: ROOT, env: planned.env });
     } finally {
       boundaryError = await boundary.stop();
     }

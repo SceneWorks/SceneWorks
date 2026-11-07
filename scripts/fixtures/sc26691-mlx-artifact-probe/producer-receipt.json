@@ -1,0 +1,107 @@
+{
+ "schema": "sceneworks.h3.actual_checkpoint_oracle_producer_receipt",
+ "schema_version": 1,
+ "status": "ok",
+ "code": null,
+ "detail": null,
+ "spec_path": "/Users/MTrefry/sc26691-campaign/sc26691-private/41331644188-1-bootstrap-ae148c29ad533079cc5bdfde78c8d2ddd220ab83/mlx.reduced.numeric-pruned-artifact/probe-manifest.json",
+ "selected_tensors_path": "/Users/MTrefry/sc26691-campaign/sc26691-private/41331644188-1-bootstrap-ae148c29ad533079cc5bdfde78c8d2ddd220ab83/mlx.reduced.numeric-pruned-artifact/selected-tensors.safetensors",
+ "reference_dir": "/Users/MTrefry/sc26691-campaign/sc26691-private/41331644188-1/bootstrap-inputs/reference",
+ "producer_provenance": [
+  {
+   "script": "scripts/ci/generate_minimax_h3_w4a8_fixture.py",
+   "sha256": "14c05c1dea46dfec0447d97b575a0c6f525e2d41bcc703ad16e1610828ea9676",
+   "source_revision_sha256": "14c05c1dea46dfec0447d97b575a0c6f525e2d41bcc703ad16e1610828ea9676",
+   "upstream_revisions": {
+    "LOADER_REVISION": "ad1d4e072bd2ed5eec1d30d07ec390f327a3af52",
+    "KITCHEN_MAIN": "78b7fe78552944ffc5763d680ba57f023e7ab5f4",
+    "KITCHEN_PR_HEAD": "d908d589fbda44595f6d78d9c47ef42ba4aa8fad",
+    "KITCHEN_MERGED_TREE": "06a261f8917d2e0486eee14fe665b545a4419ca6",
+    "FROZEN_ARTIFACT_TREE": "a56850c870825d6a8ae501a595c4dbbbc77bbc7e"
+   }
+  },
+  {
+   "script": "scripts/h3_convrot_int8_oracle.py",
+   "sha256": "25682137344a8d94bc134585603dd51e22a2edac7a148d5363c48ce0a38dbd82",
+   "source_revision_sha256": "25682137344a8d94bc134585603dd51e22a2edac7a148d5363c48ce0a38dbd82",
+   "upstream_revisions": {
+    "KITCHEN": "f8b7e97a1418d2e529bd5405fbf86312be198ae6",
+    "PRODUCER": "d6797787e6bdb1a1fb0094d588a26f8e71a1c757",
+    "LOADER": "ad1d4e072bd2ed5eec1d30d07ec390f327a3af52",
+    "HF": "a56850c870825d6a8ae501a595c4dbbbc77bbc7e"
+   }
+  },
+  {
+   "script": "scripts/h3_pruned_adaln_oracle.py",
+   "sha256": "f9de6f19c29e9ce4858f74b930f0e9a641fe106333608587d7ce4d8630b16b5b",
+   "source_revision_sha256": "f9de6f19c29e9ce4858f74b930f0e9a641fe106333608587d7ce4d8630b16b5b",
+   "upstream_revisions": {
+    "REVISION": "47b06ff920c16b4b7b36de068367a5de0e0968e9"
+   }
+  }
+ ],
+ "device": "cpu",
+ "network_used": false,
+ "gpu_used": false,
+ "precision": {
+  "packed_activation_dtype": "BF16",
+  "pruned_activation_dtype": "F32",
+  "arithmetic_authority": "scripts/ci/generate_minimax_h3_w4a8_fixture.py",
+  "format_reference_authority": "scripts/h3_convrot_int8_oracle.py",
+  "pinned_functions": [
+   "decode_weight_replay",
+   "quantize_int8_rowwise_convrot_replay",
+   "int_accumulate_replay",
+   "epilogue_replay",
+   "pinned_definitions/_interpolated_table/AdalnProj/FinalLayer"
+  ]
+ },
+ "cases": [
+  {
+   "id": "pruned-timestep-interpolation",
+   "status": "ok",
+   "code": null,
+   "selected": [
+    {
+     "name": "model.diffusion_model.adaln_t_table",
+     "sha256": "ac8727cdec52137c73878d004de5bd2a0e19227e8311e29ab3b68f328310e34e",
+     "dtype": "F32",
+     "shape": [
+      1025,
+      8
+     ],
+     "bytes": 32800
+    }
+   ],
+   "input": {
+    "dtype": "TIMESTEPS",
+    "shape": [
+     4
+    ],
+    "values_sha256": "552a4e647414bb0ceefa46ba5148337c8053838208a2af6ee46347d39e6ea16f"
+   },
+   "tolerance_max_abs": 0.000002,
+   "output_shape": [
+    4,
+    8
+   ],
+   "output_sha256": "6e587cc6d6b9bc670099585620bed71777934fa23ff52dbbcf96147c4f4d60f4"
+  }
+ ],
+ "spec_sha256": "6f38c1e468e115ca24f125d2d71815fb19ceec52d87ec9a024067f4740a7a299",
+ "artifact": {
+  "path": "/Users/MTrefry/sc26691-campaign/sc26691-private/41331644188-1/hf/hub/models--WarmBloodAban--Minimax-h3_Singularity/snapshots/a56850c870825d6a8ae501a595c4dbbbc77bbc7e/Minimax-h3_Singularity_ref2va_Pruned_v1.3_int8.safetensors",
+  "sha256": "412a7b126595a958964193f3b42513d7cf2df4196ef04223a0f05e3622949cce",
+  "bytes": 20967647456,
+  "tensor_count": 932,
+  "whole_file_digest_recomputed": false
+ },
+ "staging": {
+  "receipt_path": "/Users/MTrefry/sc26691-campaign/sc26691-private/41331644188-1-bootstrap-ae148c29ad533079cc5bdfde78c8d2ddd220ab83/mlx.reduced.numeric-pruned-artifact/staging-projection.json",
+  "receipt_sha256": "47b344ead4375fe594c8ada68f7c7d0dafdf332d8f45fafdd123a118402f8ef7",
+  "producer": "scripts/h3-finetune-terminal-artifact-probe.mjs metadata bootstrap",
+  "parent_receipt_path": "/Users/MTrefry/sc26691-campaign/sc26691-private/41331644188-1/h3-stage-receipt.json",
+  "parent_receipt_sha256": "3ceb3f98db0fcaf6052f6c51a13a7a01f60cc6bb949060f34b4d5e789bd2edf7"
+ },
+ "selected_tensors_sha256": "3b9713279c01d2b257ac7836e23c00b73e687d510afc3b787028c58f151c1f18"
+}

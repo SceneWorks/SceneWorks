@@ -25,15 +25,14 @@
 //!   posture) rather than offered as a generation target. `assembly` +
 //!   `components` record what was found so the loader slice and the UI can use it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use sceneworks_core::base_weights::{
     detect_base_weight_file, BaseWeightDetection, ComponentRole, QuantFormat,
 };
 use sceneworks_core::external_roots::comfyui_base_dirs;
-use sceneworks_core::lora_family::is_hidden_file;
+use sceneworks_core::external_roots::{walk_confined, ExternalScanCache};
 use sceneworks_core::slug::slugify;
 use serde_json::{json, Value};
 
@@ -65,58 +64,8 @@ const MAX_FILES_PER_DIR: usize = 4096;
 /// user would pick. `text_encoders/` and `vae/` are component pools, never anchors.
 const ANCHOR_SUBDIRS: &[&str] = &["diffusion_models", "unet", "checkpoints"];
 
-/// Memo of the detection for each file, keyed by path + identity on disk (size +
-/// mtime). `model_catalog` rebuilds on every job-create; classifying a 20 GB base
-/// file means parsing a safetensors header that can be a multi-thousand-entry JSON
-/// blob, so — exactly as [`crate::external_loras::ExternalLoraCache`] does for
-/// adapters — the walk and `stat` always run (added/changed/removed files appear at
-/// once) but the header parse is skipped when size and mtime both match.
-#[derive(Default)]
-pub(crate) struct ExternalBaseModelCache {
-    entries: HashMap<PathBuf, CachedDetection>,
-}
-
-#[derive(Clone)]
-struct CachedDetection {
-    modified: Option<SystemTime>,
-    size: u64,
-    detection: BaseWeightDetection,
-}
-
-impl ExternalBaseModelCache {
-    fn get(
-        &self,
-        path: &Path,
-        modified: Option<SystemTime>,
-        size: u64,
-    ) -> Option<BaseWeightDetection> {
-        let entry = self.entries.get(path)?;
-        let modified = modified?;
-        let cached_modified = entry.modified?;
-        (entry.size == size && cached_modified == modified).then(|| entry.detection.clone())
-    }
-
-    fn insert(
-        &mut self,
-        path: PathBuf,
-        modified: Option<SystemTime>,
-        size: u64,
-        detection: BaseWeightDetection,
-    ) {
-        self.entries.insert(
-            path,
-            CachedDetection {
-                modified,
-                size,
-                detection,
-            },
-        );
-    }
-
-    fn retain_seen(&mut self, seen: &HashSet<PathBuf>) {
-        self.entries.retain(|path, _| seen.contains(path));
-    }
-}
+/// Cached header detections for external files.
+pub(crate) type ExternalBaseModelCache = ExternalScanCache<BaseWeightDetection>;
 
 /// A single classified base-weight file found on disk.
 struct DetectedFile {
@@ -205,41 +154,12 @@ pub(crate) fn scan_external_base_models(
 /// link escaping the root is dropped, since a row the worker would refuse to load
 /// is worse than no row. Mirrors [`crate::external_loras::collect_adapters`].
 fn collect_weight_files(root: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    let mut stack = vec![(root.to_path_buf(), 0_usize)];
-    while let Some((dir, depth)) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            if files.len() >= MAX_FILES_PER_DIR {
-                tracing::warn!(
-                    root = %root.display(),
-                    limit = MAX_FILES_PER_DIR,
-                    "external base-model scan hit its per-dir cap; remaining files ignored"
-                );
-                return files;
-            }
-            let path = entry.path();
-            if is_hidden_file(&path) {
-                continue;
-            }
-            let Ok(canonical) = std::fs::canonicalize(&path) else {
-                continue;
-            };
-            if !canonical.starts_with(root) {
-                continue;
-            }
-            if canonical.is_dir() {
-                if depth < MAX_SCAN_DEPTH {
-                    stack.push((canonical, depth + 1));
-                }
-            } else if has_weight_extension(&canonical) {
-                files.push(canonical);
-            }
-        }
-    }
-    files
+    walk_confined(
+        root,
+        MAX_SCAN_DEPTH,
+        MAX_FILES_PER_DIR,
+        has_weight_extension,
+    )
 }
 
 /// True when `path` names a base-weight container: a `.safetensors` or a `.gguf`
@@ -1213,7 +1133,7 @@ mod tests {
         let mut cache = ExternalBaseModelCache::default();
         let rows = scan_external_base_models(std::slice::from_ref(&root), &mut cache);
         assert_eq!(rows.len(), 1);
-        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.len(), 1);
 
         let again = scan_external_base_models(std::slice::from_ref(&root), &mut cache);
         assert_eq!(
@@ -1223,7 +1143,7 @@ mod tests {
 
         std::fs::remove_file(&anchor).expect("remove");
         assert!(scan_external_base_models(&[root], &mut cache).is_empty());
-        assert!(cache.entries.is_empty(), "vanished files pruned");
+        assert!(cache.is_empty(), "vanished files pruned");
     }
 
     /// Manual smoke against a real ComfyUI tree — the only test over real key

@@ -122,9 +122,6 @@ export const latentPerceptualLosses = [
     everyMax: latentLpipsEveryMax,
   },
 ];
-// The LTX-2.5 workflows that generate no video (API: DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS) — depth
-// anchoring has no video x0 to decode there, so the engine refuses it (sc-24830).
-export const depthAnchoringNoVideoLtxWorkflows = ["v2a_lora", "t2a_lora", "audio_extend_lora", "audio_inpainting_lora", "audio_suffix_lora", "a2a_ic_lora"];
 export const depthAnchoringModelLabels = {
   small: "Small (fast)",
   base: "Base",
@@ -197,7 +194,7 @@ function adapterLossRefusal(target, configDraft, adapterOnly, video) {
     return `${adapterOnly} a LoRA/LoKr adapter only, not a full fine-tune`;
   }
   const workflow = asText(configDraft?.ltxWorkflow).trim();
-  if (video && target?.baseModel === "ltx_2_5" && depthAnchoringNoVideoLtxWorkflows.includes(workflow)) {
+  if (video && target?.ui?.noVideoLossWorkflows?.includes(workflow)) {
     return `${video}; the LTX-2.5 workflow ${workflow} generates none`;
   }
   return null;
@@ -247,7 +244,7 @@ export function subjectMaskConsumerField(configDraft, selectedTarget) {
     return "subjectMaskLoss";
   }
   const normalOn = bodyLosses.some((loss) => loss.prefix === "normal" && bodyLossEnabled(configDraft ?? {}, loss));
-  if (configDraft?.normalRestrictToSubject && normalOn && selectedTarget?.baseModel !== "ltx_2_5") {
+  if (configDraft?.normalRestrictToSubject && normalOn && selectedTarget?.ui?.subjectRestrictedNormalLoss !== false) {
     return "normalRestrictToSubject";
   }
   return null;
@@ -300,8 +297,12 @@ function sameBucketRows(left, right) {
     Array.isArray(left) &&
     Array.isArray(right) &&
     left.length === right.length &&
+    // Only the legacy square ladder follows a changed base resolution. Rectangular
+    // rows are explicit user geometry and must remain untouched.
     left.every(
       (row, index) =>
+        Object.hasOwn(row ?? {}, "resolution") &&
+        Object.hasOwn(right[index] ?? {}, "resolution") &&
         numberFromDraft(row?.resolution) === numberFromDraft(right[index]?.resolution) &&
         numberFromDraft(row?.repeats) === numberFromDraft(right[index]?.repeats),
     )
@@ -323,9 +324,74 @@ export function draftWithResolution(configDraft, target, resolution) {
 
 // Draft rows (string-typed, like every other draft field) from a stored bucket list; null = off.
 export function resolutionBucketsDraft(value) {
-  return Array.isArray(value)
-    ? value.map((row) => ({ resolution: numericDraft(row?.resolution), repeats: numericDraft(row?.repeats) }))
+  return Array.isArray(value) ? value.map((row) => mapResolutionBucket(row, numericDraft)) : null;
+}
+
+// Keep every supplied geometry key, even on an invalid mixed row. Dropping a
+// conflicting key here would silently turn a refused plan into a different plan.
+function mapResolutionBucket(row, convert) {
+  const keys = ["resolution", "width", "height"].filter((key) => Object.hasOwn(row ?? {}, key));
+  return Object.fromEntries([...keys, "repeats"].map((key) => [key, convert(row?.[key], key)]));
+}
+
+// Validate literal whole-number draft text BEFORE Number can round a fraction
+// into an integer. Shared by validation and serialization; invalid values stay
+// null on the wire, never silently becoming a different, accepted bucket.
+function resolutionBucketNumber(value, key) {
+  const text = String(value ?? "").trim();
+  if (!/^\d+$/.test(text)) return null;
+  const number = Number(text);
+  const repeats = key === "repeats";
+  const max = repeats ? resolutionBucketRepeatsMax : 0xffffffff;
+  return Number.isSafeInteger(number) && number >= 1 && number <= max && (repeats || number % resolutionBucketStride === 0)
+    ? number
     : null;
+}
+
+// MOSS target-module paths are native identifiers, not normalized labels: case and
+// dot segments are retained exactly. An empty list explicitly delegates to the
+// native "all projections" default.
+export function loraTargetModulesDraft(value) {
+  return Array.isArray(value)
+    ? value.filter((module) => typeof module === "string").join("\n")
+    : "";
+}
+
+export function loraTargetModulesSnapshot(value) {
+  return String(value ?? "")
+    .split("\n")
+    .map((module) => module.trim())
+    .filter(Boolean);
+}
+
+// Match the editor's existing Randomize convention. This chooses a concrete
+// draft value; it is not an Auto sentinel or a maximum for manually entered seeds.
+export function randomTrainingSeed(random = Math.random) {
+  return String(Math.floor(random() * 1_000_000_000));
+}
+
+// MOSS seeds are literal nonnegative integers. Browser `Number` conversion
+// ROUNDS (`42.0000000000000001` → 42, `9007199254740990.5` → 9007199254740990),
+// so validate the DRAFT TEXT as exact decimal digits before any conversion.
+// Returns the exact safe integer for an accepted seed, NaN when the browser
+// cannot represent the text exactly, and null for empty/fractional/negative
+// text — an actionable error, never a silently rounded submitted seed.
+export function mossSeedDraft(value) {
+  const trimmed = String(value ?? "").trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return null;
+  }
+  const parsed = Number(trimmed);
+  return Number.isSafeInteger(parsed) ? parsed : Number.NaN;
+}
+
+// The serialized snapshot mirrors that validated literal: NaN (unrepresentable)
+// becomes null — the API type contract rejects it, and validation blocks
+// submission — instead of a rounded value. Other families keep their existing
+// `numberFromDraft` coercion.
+export function mossSeedSnapshot(value) {
+  const seed = mossSeedDraft(value);
+  return Number.isNaN(seed) ? null : seed;
 }
 
 // The rows the "Multi-resolution buckets" toggle seeds: every resolution the target trains at up to
@@ -335,6 +401,9 @@ export function seedResolutionBuckets(target, resolution) {
   const current = numberFromDraft(resolution);
   const offered = targetResolutions(target).filter((value) => current === null || value <= current);
   const resolutions = (offered.length ? offered : [current ?? 1024]).slice(-resolutionBucketsMax);
+  // Legacy rows train every image at EACH resolution. Equal-aspect rectangular
+  // rows instead compete for one closest-aspect assignment (ties pick the first),
+  // so an all-square rectangular ladder would train only its smallest row.
   return resolutions.map((value) => ({ resolution: String(value), repeats: "1" }));
 }
 
@@ -452,59 +521,14 @@ export const trainingAdapterVersionLabels = {
   v2: "v2 — experimental (heavier de-distill)",
 };
 
-export const ltx25ValidationDefaults = Object.freeze({
-  width: 960,
-  height: 544,
-  frames: 89,
-  fps: 24,
-  steps: 30,
-  videoCfgScale: 3.0,
-  audioCfgScale: 7.0,
-  videoStgScale: 1.0,
-  audioStgScale: 1.0,
-  stgBlocks: [28],
-  guidanceRescale: 0.7,
-  videoModalityGuidanceScale: 3.0,
-  audioModalityGuidanceScale: 3.0,
-  generateAudio: true,
-});
-
-const condition = (type, probability, extra = {}) => ({ type, probability, ...extra });
-const generated = (conditions = []) => ({ isGenerated: true, conditions });
-const frozen = () => ({ isGenerated: false, conditions: [] });
-const LTX25_WORKFLOW_PLANS = Object.freeze({
-  i2v_lora: { video: generated([condition("firstFrame", 0.5)]), audio: generated() },
-  t2v_lora: { video: generated(), audio: generated() },
-  v2a_lora: { video: frozen(), audio: generated() },
-  a2v_lora: { video: generated(), audio: frozen() },
-  t2a_lora: { video: null, audio: generated() },
-  video_extend_lora: { video: generated([condition("prefix", 1, { temporalBoundary: 8 })]), audio: generated() },
-  video_inpainting_lora: { video: generated([condition("mask", 1, { tensorKey: "video_mask" })]), audio: null },
-  video_outpainting_lora: { video: generated([condition("spatialCrop", 1, { spatialRegion: [0, 0, 288, 576] })]), audio: null },
-  video_suffix_lora: { video: generated([condition("suffix", 1, { temporalBoundary: 8 })]), audio: generated() },
-  audio_extend_lora: { video: null, audio: generated([condition("prefix", 1, { temporalBoundary: 8 })]) },
-  audio_inpainting_lora: { video: null, audio: generated([condition("mask", 1, { tensorKey: "audio_mask" })]) },
-  audio_suffix_lora: { video: null, audio: generated([condition("suffix", 1, { temporalBoundary: 8 })]) },
-  av2av_ic_lora: {
-    video: generated([condition("reference", 1, { tensorKey: "video_reference" })]),
-    audio: generated([condition("reference", 1, { tensorKey: "audio_reference" })]),
-  },
-  v2v_ic_lora: {
-    video: generated([
-      condition("reference", 1, { tensorKey: "video_reference" }),
-      condition("firstFrame", 0.2),
-    ]),
-    audio: null,
-  },
-  a2a_ic_lora: { video: null, audio: generated([condition("reference", 1, { tensorKey: "audio_reference" })]) },
-});
-
 function cloneJson(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
 }
 
-export function ltx25WorkflowPlan(workflow, previousVideo = null, previousAudio = null) {
-  const canonical = LTX25_WORKFLOW_PLANS[workflow] ?? LTX25_WORKFLOW_PLANS.t2v_lora;
+export function ltx25WorkflowPlan(target, workflow, previousVideo = null, previousAudio = null) {
+  const plans = target?.ui?.ltxWorkflowPlans ?? {};
+  const canonical = plans[workflow] ?? plans[target?.defaults?.advanced?.ltxWorkflow];
+  if (!canonical) return null;
   const mergeModality = (next, previous) => {
     if (!next) return null;
     return {
@@ -521,8 +545,8 @@ export function ltx25WorkflowPlan(workflow, previousVideo = null, previousAudio 
   };
 }
 
-function ltxValidationSnapshot(value = {}) {
-  const merged = { ...ltx25ValidationDefaults, ...value };
+function ltxValidationSnapshot(value = {}, defaults = {}) {
+  const merged = { ...defaults, ...value };
   return {
     width: numberFromDraft(merged.width),
     height: numberFromDraft(merged.height),
@@ -543,8 +567,8 @@ function ltxValidationSnapshot(value = {}) {
   };
 }
 
-function validateLtxValidationControls(value, issues) {
-  const validation = ltxValidationSnapshot(value);
+function validateLtxValidationControls(value, issues, defaults) {
+  const validation = ltxValidationSnapshot(value, defaults);
   const integerRange = (field, min, max, label = optionLabel(field)) => {
     const current = validation[field];
     if (!Number.isInteger(current) || current < min || current > max) {
@@ -739,8 +763,8 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
   const firstGpu = gpuOptions[0] ?? "";
   const requestedGpu = asText(advanced.requestedGpu || firstGpu);
   const outputLabel = outputKindLabel(target, advanced.networkType);
-  const ltxWorkflow = asText(advanced.ltxWorkflow || "t2v_lora");
-  const ltxPlan = ltx25WorkflowPlan(ltxWorkflow, advanced.ltxVideo, advanced.ltxAudio);
+  const ltxWorkflow = asText(advanced.ltxWorkflow || target?.defaults?.advanced?.ltxWorkflow);
+  const ltxPlan = ltx25WorkflowPlan(target, ltxWorkflow, advanced.ltxVideo, advanced.ltxAudio);
   const objective = irisObjective(target);
   const taskBag = IRIS_TASK_BAG_KEYS[objective];
   return {
@@ -756,6 +780,9 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
     // LoKr block-decomposition factor; -1 = auto. Only consumed when networkType
     // is lokr (the worker ignores it otherwise).
     decomposeFactor: numericDraft(advanced.decomposeFactor ?? -1),
+    // Line-separated literal native target paths. Empty means the native all-projection
+    // default; no aliases or case folding occur in the Studio.
+    loraTargetModules: loraTargetModulesDraft(advanced.loraTargetModules),
     optimizer: asText(defaults.optimizer),
     learningRate: numericDraft(defaults.learningRate),
     weightDecay: numericDraft(advanced.weightDecay),
@@ -792,6 +819,10 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
     trainingAdapterRepo: asText(advanced.trainingAdapterRepo),
     trainingAdapterVersion: normalizeTrainingAdapterVersion(advanced.trainingAdapterVersion),
     gradientCheckpointing: !gradientCheckpointingUnsupported(target) && advanced.gradientCheckpointing !== false,
+    ...(target?.kernel === "moss_image_lora" ? {
+      cacheLatents: advanced.cacheLatents !== false,
+      cacheTextEmbeddings: advanced.cacheTextEmbeddings !== false,
+    } : {}),
     resolution: numericDraft(defaults.resolution),
     precision: asText(advanced.mixedPrecision),
     saveEvery: numericDraft(defaults.saveEvery),
@@ -814,13 +845,16 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
     batchSize: numericDraft(defaults.batchSize ?? defaultBatchSize),
     gradientAccumulation: numericDraft(defaults.gradientAccumulation ?? defaultGradientAccumulation),
     seed: numericDraft(defaults.seed),
-    ...(target?.baseModel === "ltx_2_5"
+    ...(target?.ui?.ltxWorkflowPlans
       ? {
           ltxWorkflow,
           ltxVideo: ltxPlan.video,
           ltxAudio: ltxPlan.audio,
-          ltxValidation: ltxValidationSnapshot(advanced.ltxValidation),
+          ltxValidation: ltxValidationSnapshot(advanced.ltxValidation, target?.defaults?.advanced?.ltxValidation),
         }
+      : {}),
+    ...(advanced.flux3 !== undefined
+      ? { flux3: JSON.stringify(advanced.flux3, null, 2) }
       : {}),
     // The Iris engine options bag (sc-25685) plus the previous-run pickers. Seeded from the
     // preset's bag when it has one, else the target's.
@@ -846,17 +880,12 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
   };
 }
 
-// Resolution buckets: optional (null = off), but when on the list must hold 1..max rows, each an
-// on-stride resolution the target trains at (not repeated) with a whole repeat count in
-// 1..resolutionBucketRepeatsMax — the API's exact rules (E6), so the button never enables a job
-// the API would refuse.
+// Resolution buckets are optional (null = off). The persisted list is exactly one
+// form: legacy square `{resolution,repeats}` rows or rectangular `{width,height,repeats}` rows.
+// Rectangles intentionally have no UI-invented resolution ceiling; native admission owns fit.
 function validateResolutionBuckets(rows, target, issues) {
-  if (!Array.isArray(rows)) {
-    return;
-  }
+  if (!Array.isArray(rows)) return;
   const field = "resolutionBuckets";
-  // A list carried over from another target (or a preset) on a target that cannot honor it would be
-  // refused by the API — block it here with the same reason.
   if (!targetSupportsResolutionBuckets(target)) {
     issues.push(issue.error(field, "This target does not support multi-resolution buckets — turn them off or pick a supporting target"));
     return;
@@ -869,27 +898,41 @@ function validateResolutionBuckets(rows, target, issues) {
     issues.push(issue.error(field, `At most ${resolutionBucketsMax} resolution buckets`));
   }
   const offered = targetResolutions(target);
+  let form = null;
   const seen = new Set();
   rows.forEach((row, index) => {
     const n = index + 1;
-    const resolution = numberFromDraft(row?.resolution);
-    const repeats = numberFromDraft(row?.repeats);
-    if (
-      resolution === null ||
-      !Number.isInteger(resolution) ||
-      resolution <= 0 ||
-      resolution % resolutionBucketStride !== 0
-    ) {
-      issues.push(issue.error(field, `Bucket ${n}: resolution must be a positive multiple of ${resolutionBucketStride}`));
-    } else if (offered.length && !offered.includes(resolution)) {
+    const square = Object.hasOwn(row ?? {}, "resolution") && !Object.hasOwn(row ?? {}, "width") && !Object.hasOwn(row ?? {}, "height");
+    const rectangular = !Object.hasOwn(row ?? {}, "resolution") && Object.hasOwn(row ?? {}, "width") && Object.hasOwn(row ?? {}, "height");
+    if (!square && !rectangular) {
+      issues.push(issue.error(field, `Bucket ${n}: use resolution or width and height`));
+      return;
+    }
+    const nextForm = square ? "square" : "rectangular";
+    if (rectangular && target?.kernel !== "moss_image_lora") {
+      issues.push(issue.error(field, "This target supports square resolution buckets only"));
+    }
+    if (form && form !== nextForm) {
+      issues.push(issue.error(field, "Use square or rectangular buckets, not both"));
+      return;
+    }
+    form = nextForm;
+    const dimensions = square ? ["resolution"] : ["width", "height"];
+    const values = dimensions.map((key) => resolutionBucketNumber(row?.[key], key));
+    const invalidDimensions = dimensions.filter((_, index) => values[index] === null);
+    if (invalidDimensions.length) {
+      issues.push(issue.error(field, `Bucket ${n}: ${invalidDimensions.join(" and ")} must be whole-number decimal text, positive u32 ${resolutionBucketStride}px multiples`));
+    } else if (square && offered.length && !offered.includes(values[0])) {
       issues.push(issue.error(field, `Bucket ${n}: this target trains at ${offered.join(", ")}`));
-    } else if (seen.has(resolution)) {
-      issues.push(issue.error(field, `Bucket ${n}: resolution ${resolution} is already listed`));
+    } else {
+      const key = square ? String(values[0]) : `${values[0]}x${values[1]}`;
+      if (seen.has(key)) {
+        issues.push(issue.error(field, `Bucket ${n}: geometry ${key} is already listed`));
+      }
+      seen.add(key);
     }
-    if (resolution !== null) {
-      seen.add(resolution);
-    }
-    if (repeats === null || !Number.isInteger(repeats) || repeats < 1 || repeats > resolutionBucketRepeatsMax) {
+    const repeats = resolutionBucketNumber(row?.repeats, "repeats");
+    if (repeats === null) {
       issues.push(issue.error(field, `Bucket ${n}: repeats must be a whole number from 1 to ${resolutionBucketRepeatsMax}`));
     }
   });
@@ -964,6 +1007,10 @@ export function trainingLicenseAckKey(targetId) {
 //
 // sc-10492 dropped both as noise; sc-10501 brought the errors back and this is where
 // that distinction became the app's vocabulary rather than one screen's helper.
+function flux3Value(text) {
+  try { return JSON.parse(text || "{}"); } catch { return text; }
+}
+
 export function configValidation(
   configDraft,
   {
@@ -979,6 +1026,12 @@ export function configValidation(
   } = {},
 ) {
   const issues = [];
+  if (selectedTarget?.family === "flux3") {
+    // JSON.parse produces ordinary objects; arrays/scalars are not source-option bags.
+    if (flux3Value(configDraft.flux3)?.constructor !== Object) {
+      issues.push(issue.requirement("flux3", "JSON object required"));
+    }
+  }
   // The one field the run's subject-mask requirement is reported on (the API's rule).
   const maskField = subjectMaskConsumerField(configDraft, selectedTarget);
   if (!selectedTarget) {
@@ -1029,6 +1082,25 @@ export function configValidation(
     const value = numberFromDraft(configDraft[field]);
     if (!value || value <= 0) {
       issues.push(issue.error(field, `${label} must be greater than zero`));
+    } else if ((["rank", "steps", "resolution", "batchSize", "gradientAccumulation", "saveEvery"].includes(field) || (field === "alpha" && Array.isArray(selectedTarget?.limits?.alpha))) && (!Number.isSafeInteger(value) || value > 0xffffffff)) {
+      issues.push(issue.error(field, `${label} must be a whole number no greater than 4294967295`));
+    } else if (Array.isArray(selectedTarget?.limits?.[field]) && ["rank", "alpha", "steps", "batchSize"].includes(field) && (value < selectedTarget.limits[field][0] || value > selectedTarget.limits[field][1])) {
+      issues.push(issue.error(field, `${label} must be between ${selectedTarget.limits[field][0]} and ${selectedTarget.limits[field][1]}`));
+    } else if (field === "resolution" && Array.isArray(selectedTarget?.limits?.resolutions) && !selectedTarget.limits.resolutions.includes(value)) {
+      issues.push(issue.error(field, `${label} must be one of ${selectedTarget.limits.resolutions.join(", ")}`));
+    } else if (field === "alpha" && selectedTarget?.kernel === "moss_image_lora") {
+      const nativeAlpha = Math.fround(value);
+      if (!Number.isFinite(nativeAlpha) || nativeAlpha <= 0) {
+        issues.push(issue.error(field, "Alpha must be representable as a positive finite f32"));
+      }
+    }
+  }
+  if (selectedTarget?.kernel === "moss_image_lora") {
+    const seed = mossSeedDraft(configDraft.seed);
+    if (seed === null) {
+      issues.push(issue.error("seed", "Seed must be zero or a positive whole number"));
+    } else if (Number.isNaN(seed)) {
+      issues.push(issue.error("seed", "This browser cannot represent that seed exactly; choose a smaller integer or submit the exact i64 through the API"));
     }
   }
   // Weight noising: optional, but when set it must sit inside the API's bound (same max, E6),
@@ -1164,7 +1236,7 @@ export function configValidation(
     // Attached to the version picker — the same field the API's submit-time refusal names.
     issues.push(issue.error("trainingAdapterVersion", `Install ${names.join(" and ")} — this run trains with it.`));
   }
-  if (selectedTarget?.baseModel === "ltx_2_5") {
+  if (selectedTarget?.ui?.ltxWorkflowPlans) {
     const workflows = Array.isArray(selectedTarget?.limits?.ltxWorkflows)
       ? selectedTarget.limits.ltxWorkflows
       : [];
@@ -1204,7 +1276,7 @@ export function configValidation(
         }
       }
     }
-    validateLtxValidationControls(configDraft.ltxValidation, issues);
+    validateLtxValidationControls(configDraft.ltxValidation, issues, selectedTarget?.defaults?.advanced?.ltxValidation);
   }
   return issues;
 }
@@ -1276,14 +1348,22 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
     ? []
     : editedPrompts.length ? editedPrompts : samplePromptsFromTrigger(configDraft.triggerWord);
   const ltxWorkflow = asText(configDraft.ltxWorkflow).trim();
-  const ltxPlan = selectedTarget?.baseModel === "ltx_2_5"
-    ? ltx25WorkflowPlan(ltxWorkflow, configDraft.ltxVideo, configDraft.ltxAudio)
+  const ltxPlan = selectedTarget?.ui?.ltxWorkflowPlans
+    ? ltx25WorkflowPlan(selectedTarget, ltxWorkflow, configDraft.ltxVideo, configDraft.ltxAudio)
     : null;
   const advanced = compactObject({
     ...defaultAdvanced,
+    ...(selectedTarget?.family === "flux3" ? { flux3: flux3Value(configDraft.flux3) } : {}),
     networkType,
     // LoKr factor only matters for lokr; omit it otherwise so lora jobs stay clean.
     decomposeFactor: networkType === "lokr" ? numberFromDraft(configDraft.decomposeFactor) : undefined,
+    // Explicit edits override preset defaults, including an empty module list (all)
+    // and either cache being off. Never resurrect a preset's old selection.
+    ...(selectedTarget?.kernel === "moss_image_lora" ? {
+      loraTargetModules: loraTargetModulesSnapshot(configDraft.loraTargetModules),
+      cacheLatents: configDraft.cacheLatents !== false,
+      cacheTextEmbeddings: configDraft.cacheTextEmbeddings !== false,
+    } : {}),
     weightDecay: numberFromDraft(configDraft.weightDecay),
     lrScheduler: asText(configDraft.lrScheduler).trim() || "constant",
     lrWarmupSteps: numberFromDraft(configDraft.lrWarmupSteps),
@@ -1295,11 +1375,10 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
       ? numberFromDraft(configDraft.gradientNoiseGamma)
       : undefined,
     // Omitted when off (null draft); an empty "on" list is sent as [] and refused by both sides.
+    // Preserve the selected wire form—square rows are never silently expanded into
+    // rectangles, and rectangular width/height never collapse into a square edge.
     resolutionBuckets: Array.isArray(configDraft.resolutionBuckets)
-      ? configDraft.resolutionBuckets.map((row) => ({
-          resolution: numberFromDraft(row?.resolution),
-          repeats: numberFromDraft(row?.repeats),
-        }))
+      ? configDraft.resolutionBuckets.map((row) => mapResolutionBucket(row, resolutionBucketNumber))
       : undefined,
     ...auxLossesSnapshot(configDraft),
     // Omitted entirely when off, so a default job's snapshot is unchanged.
@@ -1339,7 +1418,7 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
           ltxWorkflow,
           ltxVideo: ltxModalitySnapshot(ltxPlan.video),
           ltxAudio: ltxModalitySnapshot(ltxPlan.audio),
-          ltxValidation: ltxValidationSnapshot(configDraft.ltxValidation),
+          ltxValidation: ltxValidationSnapshot(configDraft.ltxValidation, selectedTarget?.defaults?.advanced?.ltxValidation),
         }
       : {}),
     // Always the compacted draft bag (never the target's raw default bag spread above), so a
@@ -1377,7 +1456,9 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
       gradientAccumulation: numberFromDraft(configDraft.gradientAccumulation),
       resolution: objective === "depth" ? irisDepthResolution(configDraft) : numberFromDraft(configDraft.resolution),
       saveEvery: numberFromDraft(configDraft.saveEvery),
-      seed: numberFromDraft(configDraft.seed),
+      seed: selectedTarget?.kernel === "moss_image_lora"
+        ? mossSeedSnapshot(configDraft.seed)
+        : numberFromDraft(configDraft.seed),
       optimizer: asText(configDraft.optimizer).trim(),
       triggerWord: taskBag ? "" : asText(configDraft.triggerWord).trim(),
       advanced,
@@ -1595,7 +1676,7 @@ function auxLossIssues(configDraft, selectedTarget, spec) {
 function bodyLossExtraIssues(configDraft, selectedTarget, prefix) {
   const issues = [];
   if (prefix === "normal" && configDraft.normalRestrictToSubject) {
-    if (selectedTarget?.baseModel === "ltx_2_5") {
+    if (selectedTarget?.ui?.subjectRestrictedNormalLoss === false) {
       // Mirrors the API: LTX-2.5's prepared latent bundles carry no image a mask can align with.
       // The toggle is hidden there, so a carried-over `true` names no input.
       issues.push([null, "LTX-2.5 cannot restrict the normal loss to the subject — clear it or pick another target"]);
@@ -1613,19 +1694,19 @@ function bodyLossExtraIssues(configDraft, selectedTarget, prefix) {
 }
 
 // Field issues for every enabled auxiliary loss (of `family` when given), in spec order.
-function auxLossesIssues(configDraft, selectedTarget, family = null) {
+function auxLossesIssues(configDraft, selectedTarget) {
   return auxLossSpecs
-    .filter((spec) => (!family || spec.family === family) && auxLossOn(configDraft, spec.prefix))
+    .filter((spec) => auxLossOn(configDraft, spec.prefix))
     .flatMap((spec) => auxLossIssues(configDraft, selectedTarget, spec));
 }
 
 // The auxiliary-loss keys a job snapshot carries: none for a loss that is off (a default job's
 // snapshot is unchanged); its weight plus every set knob while on (unset knobs take the API
 // defaults).
-function auxLossesSnapshot(configDraft, family = null) {
+function auxLossesSnapshot(configDraft) {
   const snapshot = {};
   for (const spec of auxLossSpecs) {
-    if ((family && spec.family !== family) || !auxLossOn(configDraft, spec.prefix)) continue;
+    if (!auxLossOn(configDraft, spec.prefix)) continue;
     Object.assign(
       snapshot,
       compactObject({
@@ -1637,30 +1718,4 @@ function auxLossesSnapshot(configDraft, family = null) {
     );
   }
   return snapshot;
-}
-
-// Per-family views of the shared checks (depth anchoring, body, face, latent-perceptual).
-export function depthAnchoringIssues(configDraft, selectedTarget) {
-  return auxLossesIssues(configDraft, selectedTarget, "depth");
-}
-export function depthAnchoringSnapshot(configDraft) {
-  return auxLossesSnapshot(configDraft, "depth");
-}
-export function bodyLossIssues(configDraft, selectedTarget) {
-  return auxLossesIssues(configDraft, selectedTarget, "body");
-}
-export function bodyLossSnapshot(configDraft) {
-  return auxLossesSnapshot(configDraft, "body");
-}
-export function faceLossIssues(configDraft, selectedTarget) {
-  return auxLossesIssues(configDraft, selectedTarget, "face");
-}
-export function faceLossSnapshot(configDraft) {
-  return auxLossesSnapshot(configDraft, "face");
-}
-export function latentPerceptualIssues(configDraft, selectedTarget) {
-  return auxLossesIssues(configDraft, selectedTarget, "latent");
-}
-export function latentPerceptualSnapshot(configDraft) {
-  return auxLossesSnapshot(configDraft, "latent");
 }

@@ -1,5 +1,6 @@
 //! rust-api jobs tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
+use crate::{validate_prompt_enhancement_fields, validate_prompt_enhancement_payload};
 
 #[test]
 fn vector_detail_default_allows_five_minutes_per_svg() {
@@ -45,7 +46,10 @@ async fn worker_termination_refreshes_warm_model_catalog_after_artifact_mutation
     single_model_manifest(&config_dir, "crashed_model", "crashed/model");
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
-    *state.model_size_estimate_disabled_override.lock() = Some(true);
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(true);
     crate::test_reset_catalog_build_counters();
 
     let (status, warm) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
@@ -123,7 +127,10 @@ async fn stale_worker_sweep_refreshes_warm_model_catalog_after_artifact_mutation
     settings.worker_timeout_seconds = 1;
     let jobs_db_path = settings.jobs_db_path.clone();
     let (app, state) = create_app_with_state(settings).expect("app and state create");
-    *state.model_size_estimate_disabled_override.lock() = Some(true);
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(true);
     crate::test_reset_catalog_build_counters();
 
     let (status, warm) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
@@ -506,13 +513,7 @@ async fn prompt_vector_workflow_persists_a_nonclaimable_parent_and_cancel_cascad
         "2222222222222222222222222222222222222222",
     );
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Prompt vectors" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Prompt vectors").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let (status, parent) = request(
@@ -645,13 +646,7 @@ async fn prompt_vector_replay_creates_both_stages_anew_and_revision_drift_is_typ
         "2222222222222222222222222222222222222222",
     );
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Prompt replay" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Prompt replay").await;
     let project_id = project["id"].as_str().expect("project id");
     let body = json!({
         "projectId": project_id,
@@ -737,13 +732,8 @@ async fn vector_route_resolves_default_seed_once_and_preserves_explicit_and_repl
         &["image_to_svg", "text_to_svg"],
     );
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Vector seed persistence" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Vector seed persistence").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let (status, source) = request_multipart_upload(
         app.clone(),
@@ -819,13 +809,7 @@ async fn vector_route_reports_typed_unavailable_backend_before_enqueue() {
         false,
     );
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Vector" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Vector").await;
     let project_id = project["id"].as_str().expect("project id");
     let (_, source) = request_multipart_upload(
         app.clone(),
@@ -1096,13 +1080,7 @@ async fn vector_route_reports_typed_missing_and_incomplete_model_manager_recover
             std::fs::remove_dir_all(&installed).expect("missing install removes directory");
         }
         let app = create_app(test_settings(&temp_dir)).expect("app creates");
-        let (_, project) = request(
-            app.clone(),
-            "POST",
-            "/api/v1/projects",
-            json!({ "name": "Vector" }),
-        )
-        .await;
+        let (_, project) = crate::tests::support::create_project(app.clone(), &"Vector").await;
         let project_id = project["id"].as_str().expect("project id");
         let (_, source) = request_multipart_upload(
             app.clone(),
@@ -1146,13 +1124,7 @@ async fn vector_route_validates_and_stamps_typed_image_to_svg_request() {
     );
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Vector Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Vector Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let (status, source) = request_multipart_upload(
         app.clone(),
@@ -1267,13 +1239,8 @@ async fn vector_worker_fact_publishes_through_the_api_sidecar_contract() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_vector_test_manifest(&temp_dir.path().join("config/manifests"), &["image_to_svg"]);
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Vector publication" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Vector publication").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(project["path"].as_str().expect("project path"));
     let (_, source) = request_multipart_upload(
@@ -1441,20 +1408,8 @@ async fn vector_route_rejects_bad_source_ownership_media_and_model_capability_be
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_vector_test_manifest(&temp_dir.path().join("config/manifests"), &["image_to_svg"]);
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project_a) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Project A" }),
-    )
-    .await;
-    let (_, project_b) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Project B" }),
-    )
-    .await;
+    let (_, project_a) = crate::tests::support::create_project(app.clone(), &"Project A").await;
+    let (_, project_b) = crate::tests::support::create_project(app.clone(), &"Project B").await;
     let project_a_id = project_a["id"].as_str().expect("project A id");
     let project_b_id = project_b["id"].as_str().expect("project B id");
     let (_, raster) = request_multipart_upload(
@@ -2015,13 +1970,8 @@ async fn retry_and_duplicate_recanonicalize_imported_generate_and_edit_manifests
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_imported_image_model_manifests(temp_dir.path());
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Imported image replay" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Imported image replay").await;
     let project_id = project["id"].as_str().expect("project id");
 
     for (mode, source) in [
@@ -2432,13 +2382,7 @@ async fn retry_and_duplicate_reject_path_unsafe_merged_generation_model_before_c
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Audio Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Audio Project").await;
     let project_id = project["id"].as_str().expect("project id");
     let (status, audio_job) = request(
         app.clone(),
@@ -2510,13 +2454,8 @@ async fn retry_and_duplicate_reauthorize_merged_control_weights_before_create() 
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_style_test_manifests(&temp_dir.path().join("config"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Control Retry Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Control Retry Project").await;
     let project_id = project["id"].as_str().expect("project id");
     let (status, original) = request(
         app.clone(),
@@ -2732,10 +2671,10 @@ async fn image_create_retry_and_duplicate_resolve_text_encoder_fresh_and_fail_cl
     }
 }
 
-/// SC-18314: server resolution is worker-private. Exercise the raw queue primitive with the exact
-/// typed-image metadata shape so every generic job projection is covered without depending on a
-/// platform provider fixture. The raw store and `/jobs/claim` must retain the resolution; every
-/// browser-visible HTTP/SSE shape must retain only the authored opaque id.
+/// SC-18314: server resolution is worker-private. Seed the store with the exact trusted typed-image
+/// metadata shape, then exercise the normal public projection/events and HTTP surfaces. Public raw
+/// callers cannot author this private carrier; their canonicalization is tested independently.
+/// The raw store and `/jobs/claim` retain the resolution; browser state retains only the opaque id.
 #[tokio::test]
 async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_retains_it() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -2767,6 +2706,58 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
         "payload": job_payload,
         "requestedGpu": "auto"
     });
+    async fn create_trusted_job(state: &crate::AppState, request: &Value) -> Value {
+        use sceneworks_core::checkpoint_import::{
+            CheckpointContainerV1, ImportLayerV1, ImportPlanV1, SourceLocatorV1,
+        };
+        let plan = ImportPlanV1::new(
+            "checkpoint-plan-private-boundary",
+            "sdxl",
+            vec![ImportLayerV1 {
+                layer_id: "checkpoint".into(),
+                role: "checkpoint".into(),
+                target_path: "model.safetensors".into(),
+                container: CheckpointContainerV1::Safetensors,
+                source: SourceLocatorV1::linked(
+                    "root-approved",
+                    "model.safetensors",
+                    "b".repeat(64),
+                )
+                .unwrap(),
+            }],
+        )
+        .unwrap();
+        let provenance = sceneworks_core::model_artifacts::provenance::checkpoint_model_provenance(
+            &plan,
+            "private-boundary-model",
+        )
+        .unwrap();
+        let job = state
+            .jobs_store
+            .create_job_with_model_provenance(
+                crate::CreateJob {
+                    job_type: crate::JobType::ImageDetail,
+                    project_id: Some("project-1".into()),
+                    project_name: Some("Project 1".into()),
+                    payload: request["payload"].as_object().unwrap().clone(),
+                    requested_gpu: "auto".into(),
+                    source_job_id: None,
+                    duplicate_of_job_id: None,
+                    attempts: 1,
+                    initial_status: None,
+                },
+                Some(&provenance),
+            )
+            .unwrap();
+        assert_eq!(
+            state.jobs_store.model_provenance(&job.id).unwrap(),
+            Some(provenance.clone())
+        );
+        assert_eq!(job.extra["modelProvenance"], provenance);
+        crate::publish(state, "job.updated", &job);
+        crate::publish_queue(state).await.unwrap();
+        serde_json::to_value(crate::public_job_snapshot(job)).unwrap()
+    }
     let assert_public = |surface: &str, value: &Value| {
         let encoded = value.to_string();
         assert!(
@@ -2792,9 +2783,7 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
     };
 
     let mut events = state.events.subscribe();
-    let (status, created) =
-        request(app.clone(), "POST", "/api/v1/jobs", create_request.clone()).await;
-    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let created = create_trusted_job(&state, &create_request).await;
     assert_public("create response", &created);
     assert_eq!(
         created["payload"]["advanced"]["textEncoderModel"],
@@ -2916,9 +2905,7 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
 
     // Seed a fresh row for the one private boundary: a compatible worker claim. The raw payload
     // must survive public projection intact so the worker can validate and prepare its receipt.
-    let (status, worker_job) =
-        request(app.clone(), "POST", "/api/v1/jobs", create_request.clone()).await;
-    assert_eq!(status, StatusCode::CREATED, "{worker_job}");
+    create_trusted_job(&state, &create_request).await;
     let (status, _) = request(
         app.clone(),
         "POST",
@@ -3078,9 +3065,7 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
     // The supervisor crash report wraps its snapshot in `Option<JobSnapshot>` rather than using
     // the ordinary progress response. Claim one final raw row so that container boundary is also
     // proven public while the persisted worker payload remains exact.
-    let (status, termination_job) =
-        request(app.clone(), "POST", "/api/v1/jobs", create_request).await;
-    assert_eq!(status, StatusCode::CREATED, "{termination_job}");
+    let termination_job = create_trusted_job(&state, &create_request).await;
     let termination_job_id = termination_job["id"]
         .as_str()
         .expect("termination job id")
@@ -3524,6 +3509,121 @@ async fn create_image_job_rejects_oversized_advanced_object() {
         .is_some_and(|detail| detail.contains("advanced")));
 }
 
+#[test]
+fn flux3_prompt_enhancement_token_bounds_share_worker_sdk_policy() {
+    for (model, limit) in [
+        ("flux2_dev", 2_048),
+        ("ltx_2_3", 2_048),
+        ("flux3_klein_alias", 2_048),
+        ("flux3_klein", 3_584),
+        ("flux3_klein_base", 3_584),
+    ] {
+        assert_eq!(
+            sceneworks_worker::prompt_enhancement_max_tokens(model),
+            limit
+        );
+        for tokens in [0, 2_048, 2_049, 3_584, 3_585] {
+            let advanced = json!({"enhancePrompt": true, "enhanceMaxTokens": tokens});
+            assert_eq!(
+                validate_prompt_enhancement_fields(model, advanced.as_object().unwrap()).is_ok(),
+                tokens > 0 && tokens <= limit,
+                "{model}: {tokens}"
+            );
+            if matches!(model, "flux3_klein" | "flux3_klein_base") {
+                let payload = json!({
+                    "model": model, "mode": "text_to_image", "prompt": "a fox",
+                    "advanced": advanced
+                });
+                assert_eq!(
+                    validate_prompt_enhancement_payload(payload.as_object().unwrap()).is_ok(),
+                    tokens > 0 && tokens <= limit,
+                    "canonical enqueue {model}: {tokens}"
+                );
+            }
+        }
+        for enabled in [false, true] {
+            let advanced = json!({"enhancePrompt": enabled});
+            assert_eq!(
+                validate_prompt_enhancement_fields(model, advanced.as_object().unwrap()).unwrap(),
+                enabled
+            );
+        }
+        let disabled = json!({"enhancePrompt": false, "enhanceMaxTokens": limit});
+        assert!(validate_prompt_enhancement_fields(model, disabled.as_object().unwrap()).is_err());
+    }
+}
+
+#[test]
+fn flux3_prompt_enhancement_validates_worker_shape_without_requiring_a_local_gpu_build() {
+    for model in ["flux3_klein", "flux3_klein_base"] {
+        let payload = |mode: &str, enabled: bool| {
+            json!({
+                "model": model, "mode": mode, "prompt": "as typed
+            ",
+                "advanced": { "enhancePrompt": enabled }
+            })
+            .as_object()
+            .unwrap()
+            .clone()
+        };
+        let bypass = payload("text_to_image", false);
+        let original = bypass.clone();
+        validate_prompt_enhancement_payload(&bypass).unwrap();
+        assert_eq!(bypass, original);
+        let enabled = payload("text_to_image", true);
+        // Docker API has no Candle dependency; the actual worker independently enforces native
+        // availability and optional-component installation. This is valid even on a backendless API.
+        validate_prompt_enhancement_payload(&enabled).unwrap();
+        for mode in [
+            "edit_image",
+            "character_image",
+            "style_variations",
+            "reference",
+        ] {
+            assert!(
+                validate_prompt_enhancement_payload(&payload(mode, true)).is_err(),
+                "{model}/{mode}"
+            );
+        }
+        for carrier in [
+            json!({"sourceAssetId":"source-1"}),
+            json!({"referenceAssetId":"ref-1"}),
+            json!({"referenceAssetIds":["ref-1"]}),
+        ] {
+            for mode in ["text_to_image", "edit_image", "character_image"] {
+                let mut reference = payload(mode, true);
+                reference.extend(carrier.as_object().unwrap().clone());
+                validate_prompt_enhancement_payload(&reference).unwrap();
+            }
+        }
+        let mut ten = payload("edit_image", true);
+        ten.insert(
+            "referenceAssetIds".to_owned(),
+            json!(vec!["duplicate-slot"; 10]),
+        );
+        validate_prompt_enhancement_payload(&ten).unwrap();
+        ten.insert(
+            "referenceAssetIds".to_owned(),
+            json!(vec!["duplicate-slot"; 11]),
+        );
+        assert!(validate_prompt_enhancement_payload(&ten).is_err());
+        let mut strength = payload("edit_image", true);
+        strength.insert("referenceAssetId".to_owned(), json!("ref-1"));
+        strength.get_mut("advanced").unwrap()["referenceStrength"] = json!(1.0);
+        assert!(validate_prompt_enhancement_payload(&strength)
+            .unwrap_err()
+            .detail
+            .contains("unsupported"));
+        let mut untrusted = enabled;
+        untrusted.get_mut("advanced").unwrap()["promptEnhancement"] =
+            json!({"effectivePrompt":"injected"});
+        assert!(validate_prompt_enhancement_payload(&untrusted)
+            .unwrap_err()
+            .detail
+            .contains("worker-owned"));
+    }
+}
+
 #[tokio::test]
 async fn image_prompt_enhancement_is_typed_bounded_and_route_scoped() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -3875,13 +3975,8 @@ async fn post_preset_prompt_enhancement_uses_the_resolved_candle_route() {
     .expect("user presets write");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Prompt enhancement preset" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Prompt enhancement preset").await;
     let project_id = project["id"].as_str().expect("project id");
     let (status, error) = request(
         app,
@@ -4444,13 +4539,7 @@ async fn retry_and_duplicate_gate_a_merged_lora_set_the_create_path_refuses() {
     write_lora_gate_catalog(&temp_dir);
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
     // The LoRA catalog is project-scoped, so the gate needs a real project to resolve against.
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "LoRA Gate" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"LoRA Gate").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     // Baseline: created with a COMPATIBLE adapter, so the refusals below are about the merged set
@@ -4571,13 +4660,7 @@ async fn retry_honours_character_inline_lora_provenance_without_letting_others_b
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_lora_gate_catalog(&temp_dir);
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Character Retry" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Character Retry").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let (_, character) = request(
         app.clone(),
@@ -4826,13 +4909,7 @@ async fn retry_and_duplicate_gate_a_merged_video_lora_set_the_create_path_refuse
     write_lora_gate_catalog(&temp_dir);
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
     // The LoRA catalog is project-scoped, so the gate needs a real project to resolve against.
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "LoRA Gate" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"LoRA Gate").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     let (status, original) = request(
@@ -5279,6 +5356,95 @@ async fn legacy_over_limit_pose_job_is_readable_but_cannot_be_replayed() {
 }
 
 #[tokio::test]
+async fn imported_video_replay_refuses_same_catalog_id_rebound_before_enqueue() {
+    use sceneworks_worker::minimax_h3_import_fixture as fixture;
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let settings = test_settings(&temp);
+    // E8/E9: use actual source bytes and capture the complete component closure BEFORE compile.
+    // Retain the staging fixture's private source-library guard, including during API admission.
+    let imported = fixture::stage_managed_minimax_h3_import(&settings.data_dir, "same-import-id");
+    let store =
+        sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
+    let root = store
+        .approve_root(&settings.data_dir.join("models/incoming"))
+        .unwrap();
+    let context = fixture::captured_component_context(&settings.data_dir, &imported.entry);
+    let compiled = store
+        .compile_linked_with_context(&root.root_id, "same-import-id", context)
+        .unwrap();
+    let checkpoint_id = &compiled.checkpoint_id;
+    let current_plan = &compiled.plan;
+    let mut model = imported.entry.clone();
+    model.remove("paths");
+    model.insert(
+        "source".into(),
+        json!({"provider":"linked-library",
+        "rootId":root.root_id,"relativePath":"same-import-id"}),
+    );
+    model.insert(
+        "importPlan".into(),
+        json!({"checkpointId":checkpoint_id,
+        "planId":current_plan.plan_id,"semanticDigest":compiled.record.plan.semantic_digest}),
+    );
+    let assembly = sceneworks_core::minimax_h3_import::MiniMaxH3ImportAssembly::from_declared_plan(
+        current_plan,
+        &model,
+    )
+    .unwrap();
+    sceneworks_core::minimax_h3_import::stamp_imported_minimax_h3_entry(&mut model, &assembly);
+    assert_h3_component_authority_required(&settings.data_dir, &model);
+    let config = settings.config_dir.join("manifests");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("builtin.models.jsonc"),
+        json!({"schemaVersion":1,"models":[]}).to_string(),
+    )
+    .unwrap();
+    write_empty_sibling_manifests(&config);
+    std::fs::write(
+        config.join("user.models.jsonc"),
+        json!({"schemaVersion":1,"models":[model]}).to_string(),
+    )
+    .unwrap();
+    let (app, state) = create_app_with_state(settings).unwrap();
+    // Exercise the same canonical catalog and S11 provenance resolver as admission. An absent
+    // fixture entry must not turn this plan-rebind test into an unrelated missing-checkpoint test.
+    let entry = crate::resolve_model_manifest_entry(&state, "same-import-id")
+        .await
+        .unwrap();
+    let provenance = sceneworks_core::model_artifacts::provenance::resolved_model_provenance(
+        &state.settings.data_dir,
+        entry.as_object().unwrap(),
+    )
+    .unwrap();
+    let actual =
+        crate::imported_reference_from_provenance(entry.as_object().unwrap(), provenance.as_ref())
+            .expect("canonical imported fixture has a validated replay identity");
+    assert_eq!(actual["checkpointId"], checkpoint_id.as_str());
+    assert_eq!(actual["planId"], current_plan.plan_id);
+    let mut expected = actual;
+    expected["planId"] = json!(format!("checkpoint-plan-{}", "b".repeat(64)));
+    let (status,error) = request(app.clone(),"POST","/api/v1/video/jobs",json!({
+        "projectId":"p", "model":"same-import-id", "mode":"text_to_video", "prompt":"original weights only",
+        "expectedImportedModelRef":expected
+    })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert!(
+        error["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("planId") && detail.contains("Reimport")),
+        "{error}"
+    );
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        jobs.as_array().map(Vec::len),
+        Some(0),
+        "identity mismatch must not enqueue substituted weights"
+    );
+}
+
+#[tokio::test]
 async fn create_video_job_rejects_over_length_negative_prompt() {
     // sc-8884 (F-082): the negative-prompt cap is shared by the video validator too.
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -5467,13 +5633,7 @@ async fn create_audio_job_maps_request_to_audio_generate_payload() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Audio Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Audio Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let (status, job) = request(
@@ -5520,13 +5680,8 @@ async fn create_audio_job_maps_the_multi_speaker_script() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Dialogue Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Dialogue Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let (status, job) = request(
@@ -5572,13 +5727,8 @@ async fn create_audio_job_rejects_empty_prompt_and_empty_script() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Dialogue Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Dialogue Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     // Empty prompt + empty script array → rejected (a script with no segments is not content).
@@ -5617,13 +5767,7 @@ async fn create_audio_job_maps_sfx_sampling_knobs() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "SFX Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"SFX Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let (status, job) = request(
@@ -5674,13 +5818,8 @@ async fn create_audio_job_injects_base_model_entry_for_voice_clone() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Voice Clone Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Voice Clone Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let (status, job) = request(
@@ -5723,13 +5862,8 @@ async fn create_audio_job_omits_base_model_entry_without_a_reference() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Plain Audio Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Plain Audio Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let (status, job) = request(
@@ -5754,13 +5888,8 @@ async fn create_audio_job_rejects_out_of_range_match_strength() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Bad Strength Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Bad Strength Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let (status, _body) = request(
@@ -5787,13 +5916,7 @@ async fn create_audio_job_rejects_nonsense_sampling_knobs() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "SFX Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"SFX Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let (status, body) = request(
@@ -5824,13 +5947,7 @@ async fn create_audio_job_maps_music_and_edit_fields() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Music Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Music Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let (status, job) = request(
@@ -5886,13 +6003,7 @@ async fn create_audio_job_rejects_half_specified_edit() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Music Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Music Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let (status, body) = request(
@@ -5923,13 +6034,7 @@ async fn create_audio_job_rejects_nonsense_music_fields() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Music Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Music Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     // A non-positive BPM is rejected.
@@ -5999,13 +6104,7 @@ async fn create_audio_job_accepts_case_insensitive_edit_mode() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Music Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Music Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     // A mixed-case KNOWN token is accepted (parity with the worker) and forwarded verbatim.
@@ -6052,13 +6151,7 @@ async fn create_audio_job_rejects_non_audio_model() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Audio Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Audio Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     // A path-safe but non-audio model id resolves to a `type: image` entry → rejected.
@@ -6099,13 +6192,7 @@ async fn create_audio_job_rejects_empty_prompt() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Audio Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Audio Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let (status, body) = request(
@@ -6131,13 +6218,7 @@ async fn yue_audio_app() -> (tempfile::TempDir, axum::Router, String) {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Song Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Song Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     (temp_dir, app, project_id)
 }
@@ -6223,6 +6304,21 @@ async fn create_audio_job_maps_the_full_yue_control_set() {
     assert_eq!(status, StatusCode::CREATED, "{job}");
     assert_eq!(job["payload"]["iclReferenceAssetId"], "asset_mix");
     assert_eq!(job["payload"]["guidanceEnabled"], false);
+
+    for guidance in [0.0, 0.5, 1.0, 1.01] {
+        let (status, job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/audio/jobs",
+            json!({
+                "projectId": project_id, "model":"yue_en_cot", "prompt":"rock", "lyrics":lyrics,
+                "guidanceEnabled":true, "guidance":guidance
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{job}");
+        assert!((job["payload"]["guidance"].as_f64().unwrap() - guidance).abs() < 1e-6);
+    }
 
     // A CoT render with no reference is the plain lyrics2song path.
     let (status, job) = request(
@@ -6349,9 +6445,9 @@ async fn create_audio_job_rejects_invalid_yue_requests() {
             "guidanceEnabled is false",
         ),
         (
-            "guidance ON scale at or below 1",
-            json!({ "model": "yue_en_cot", "guidance": 1.0 }),
-            "greater than 1",
+            "negative YuE guidance scale",
+            json!({ "model": "yue_en_cot", "guidance": -0.5 }),
+            "must be nonnegative",
         ),
         (
             "unknown tier",
@@ -6526,7 +6622,7 @@ async fn in_flight_running_progress_cannot_resurrect_a_canceled_job() {
     claim_job_as_worker(&app, &job_id, "stream-worker", &["image_detail"]).await;
 
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
-    *state.progress_before_accept_once.lock() = Some(barrier.clone());
+    *state.test_hooks.progress_before_accept_once.lock() = Some(barrier.clone());
     let progress_app = app.clone();
     let progress_job_id = job_id.clone();
     let progress = tokio::spawn(async move {
@@ -6719,6 +6815,139 @@ async fn progress_ticks_only_republish_queue_on_status_change() {
     assert!(
         done_events.iter().any(|name| name == "queue.updated"),
         "a status transition must republish the queue: {done_events:?}"
+    );
+}
+
+/// sc-8953 follow-through (2026-10-27): the live `job.updated` payload for a NON-terminal
+/// job drops `result.assets` (the accumulated normalized asset records — KBs each, one
+/// per finished image) and keeps `assetIds`, so a 260-image batch's thousands of per-step
+/// SSE ticks stop carrying the whole array into every WebView2 renderer's `JSON.parse`
+/// (the cumulative multi-GB allocation churn that OOM-killed the renderer mid-batch,
+/// Crashpad `0xE0000008`, daily since 2026-10-24). A TERMINAL event keeps the full
+/// `assets` — the durable row's enrichment contract (`persist_reported_assets`) and the
+/// frontend's pre-catalog fallback both need it. The frontend resolves job outputs
+/// id-first (`jobResultAssets.js`), so a live event without the embedded records
+/// renders identically.
+#[tokio::test]
+async fn live_job_events_drop_result_assets_on_running_ticks_but_not_terminal() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, state) = create_app_with_state(test_settings(&temp_dir)).expect("app creates");
+
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "worker-1",
+            "gpuId": "gpu-0",
+            "gpuName": "GPU 0",
+            "capabilities": ["image_detail"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    let (_, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "projectName": "Project 1",
+            "payload": { "prompt": "mist" },
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+    let job_id = created["id"].as_str().expect("job id is string").to_owned();
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "worker-1" }),
+    )
+    .await;
+
+    let mut events = state.events.subscribe();
+    // A running tick whose result carries BOTH `assets` and `assetIds` (the worker's
+    // accumulated fact set, post-enrichment shape): the EVENT must drop `assets`.
+    request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "running",
+            "stage": "running",
+            "progress": 0.5,
+            "message": "halfway",
+            "workerId": "worker-1",
+            "result": {
+                "assetIds": ["asset-1"],
+                "assets": [{ "id": "asset-1", "type": "image" }]
+            }
+        }),
+    )
+    .await;
+    let tick = tokio::time::timeout(Duration::from_secs(1), events.next())
+        .await
+        .expect("running tick job.updated arrives")
+        .expect("event stream remains open");
+    assert_eq!(tick.event, "job.updated");
+    let tick_job: serde_json::Value = serde_json::from_str(&tick.data).expect("tick event parses");
+    let tick_result = tick_job
+        .get("result")
+        .and_then(serde_json::Value::as_object)
+        .expect("tick event carries a result");
+    assert!(
+        !tick_result.contains_key("assets"),
+        "a running tick's live payload must drop result.assets: {tick_result:?}"
+    );
+    assert!(
+        tick_result.contains_key("assetIds"),
+        "a running tick keeps the id list (the frontend resolves outputs id-first): {tick_result:?}"
+    );
+
+    // The terminal transition keeps the FULL assets on the event.
+    request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "completed",
+            "stage": "completed",
+            "progress": 1,
+            "message": "done",
+            "workerId": "worker-1",
+            "result": {
+                "assetIds": ["asset-1"],
+                "assets": [{ "id": "asset-1", "type": "image" }]
+            }
+        }),
+    )
+    .await;
+    // The terminal transition keeps the FULL assets on its `job.updated` event. The
+    // same request also republishes `queue.updated` (a status transition); skip any
+    // interleaved events until the job event lands.
+    let mut terminal = None;
+    for _ in 0..4 {
+        let event = tokio::time::timeout(Duration::from_secs(1), events.next())
+            .await
+            .expect("terminal events arrive")
+            .expect("event stream remains open");
+        if event.event == "job.updated" {
+            terminal = Some(event);
+            break;
+        }
+    }
+    let terminal = terminal.expect("the terminal transition emits job.updated");
+    let terminal_job: serde_json::Value =
+        serde_json::from_str(&terminal.data).expect("terminal event parses");
+    assert!(
+        terminal_job
+            .get("result")
+            .and_then(|result| result.get("assets"))
+            .is_some(),
+        "a terminal event keeps the full result.assets (the durable row's enrichment contract)"
     );
 }
 
@@ -7468,6 +7697,211 @@ async fn image_job_route_threads_upscale_contract_when_enabled() {
 }
 
 #[tokio::test]
+async fn flux3_owned_reference_jobs_preserve_order_duplicates_and_optional_size_through_duplicate()
+{
+    let _hf = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let models = [("flux3_klein", "black-forest-labs/flux-3-image-klein", "8454017f9ebaada30c998fccd9f67a80c7580f68", 16, 0.0),
+        ("flux3_klein_base", "black-forest-labs/flux-3-image-klein-base", "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4", 50, 3.5)]
+        .into_iter().map(|(id,repo,revision,steps,guidance)| json!({
+            "id":id,"name":id,"family":"flux3","type":"image","adapter":"mlx_flux3",
+            "capabilities":["text_to_image","edit_image","image_to_image","character_image"],
+            "downloads":[{"provider":"huggingface","repo":repo,"revision":revision,"variant":"bf16","files":[],"default":true,"estimatedSizeBytes":1024}],
+            "paths":{},"defaults":{"steps":steps,"guidanceScale":guidance,"resolution":"1024x1024","count":1},
+            "limits":{"minDimension":64,"maxDimension":4096,"requiresDimensionsMultipleOf":16,"maxReferenceAssets":10},
+            "ui":{"label":id}
+        })).collect::<Vec<_>>();
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_vec(&json!({"schemaVersion":1,"models":models})).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        br#"{"schemaVersion":1,"models":[]}"#,
+    )
+    .unwrap();
+    let app = create_app(test_settings(&temp_dir)).unwrap();
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"FLUX3 references").await;
+    let project_id = project["id"].as_str().unwrap();
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+        83,
+        67,
+        image::Rgba([201, 77, 13, 128]),
+    ))
+    .write_to(&mut png, image::ImageFormat::Png)
+    .unwrap();
+    let png = png.into_inner();
+    let mut ids = Vec::new();
+    for name in ["first.png", "second.png"] {
+        let (status, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            name,
+            "image/png",
+            &png,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{asset}");
+        ids.push(asset["id"].as_str().unwrap().to_owned());
+    }
+    let (_, foreign) =
+        crate::tests::support::create_project(app.clone(), &"Other references").await;
+    let (_, foreign_asset) = request_multipart_upload(
+        app.clone(),
+        &format!(
+            "/api/v1/projects/{}/assets",
+            foreign["id"].as_str().unwrap()
+        ),
+        "foreign.png",
+        "image/png",
+        &png,
+    )
+    .await;
+    for model in ["flux3_klein", "flux3_klein_base"] {
+        let body = |extra: Value| {
+            let mut value=json!({"projectId":project_id,"model":model,"mode":"edit_image","prompt":"change the sky","count":1,"referenceAssetIds":[ids[0],ids[1],ids[0]],"advanced":{"flux3_reference_ids":["slot-a","slot-b","slot-c"],"flux3_layout":{"version":1,"boxes":[{"id":"remove","desc":"remove cat","from":"ref_image_0","reference_id":"slot-c","src_bbox":[0.123456789012345,0.2,0.7,0.8],"tgt_bbox":null}]}}}).as_object().unwrap().clone();
+            value.extend(extra.as_object().unwrap().clone());
+            Value::Object(value)
+        };
+        for sides in [
+            json!({}),
+            json!({"width":1024}),
+            json!({"height":64}),
+            json!({"width":1024,"height":80}),
+            json!({"width":48,"height":64}),
+            json!({"width":16,"height":64}),
+        ] {
+            let (status, job) = request(
+                app.clone(),
+                "POST",
+                "/api/v1/image/jobs",
+                body(sides.clone()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{model}: {job}");
+            assert_eq!(
+                job["payload"]["referenceAssetIds"],
+                json!([ids[0], ids[1], ids[0]])
+            );
+            assert_eq!(job["payload"].get("width"), sides.get("width"));
+            assert_eq!(job["payload"].get("height"), sides.get("height"));
+            let authored = &job["payload"]["advanced"];
+            assert_eq!(
+                authored["flux3_reference_ids"],
+                json!(["slot-a", "slot-b", "slot-c"])
+            );
+            assert_eq!(
+                authored["flux3_layout"]["boxes"][0]["src_bbox"][0],
+                json!(0.123456789012345)
+            );
+            assert!(authored["flux3_layout"]["boxes"][0]["tgt_bbox"].is_null());
+            assert_eq!(
+                authored["flux3_layout"]["boxes"][0]["reference_id"],
+                "slot-c"
+            );
+            for action in ["duplicate", "retry"] {
+                let route = format!("/api/v1/jobs/{}/{action}", job["id"].as_str().unwrap());
+                let (status, replay) =
+                    request(app.clone(), "POST", &route, json!({"payloadChanges":{}})).await;
+                assert_eq!(status, StatusCode::CREATED, "{action}: {replay}");
+                assert_eq!(replay["payload"].get("width"), sides.get("width"));
+                assert_eq!(replay["payload"].get("height"), sides.get("height"));
+                assert_eq!(&replay["payload"]["advanced"], authored);
+                assert_eq!(
+                    replay["payload"]["referenceAssetIds"],
+                    job["payload"]["referenceAssetIds"]
+                );
+                for patch in [
+                    json!({"projectId":foreign["id"]}),
+                    json!({"referenceAssetIds":[foreign_asset["id"]]}),
+                    json!({"referenceAssetIds":[ids[0],null]}),
+                    json!({"referenceAssetIds":vec![ids[0].clone();11]}),
+                ] {
+                    let (status, error) =
+                        request(app.clone(), "POST", &route, json!({"payloadChanges":patch})).await;
+                    assert_eq!(status, StatusCode::BAD_REQUEST, "{action}: {error}");
+                }
+            }
+        }
+        let (status, ten) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            body(json!({"referenceAssetIds":vec![ids[0].clone();10],"advanced":{}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{ten}");
+        assert_eq!(
+            ten["payload"]["referenceAssetIds"]
+                .as_array()
+                .unwrap()
+                .len(),
+            10
+        );
+        for invalid in [
+            json!({"referenceAssetIds":vec![ids[0].clone();11]}),
+            json!({"referenceAssetIds":[foreign_asset["id"]]}),
+            json!({"referenceAssetIds":["missing-owned-image"]}),
+            json!({"strength":1.0}),
+            json!({"advanced":{"referenceStrength":1.0}}),
+            json!({"advanced":{"flux3_layout":{"version":1,"boxes":[{"id":"bad","bbox":[0,0,0,1]}]}}}),
+            json!({"advanced":{"flux3_layout":{"version":1,"boxes":[{"id":"bad","from":"ref_image_3","src_bbox":[0,0,1,1],"tgt_bbox":null}]}}}),
+            json!({"advanced":{"flux3_reference_ids":["duplicate","duplicate","third"]}}),
+        ] {
+            let (status, error) =
+                request(app.clone(), "POST", "/api/v1/image/jobs", body(invalid)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{model}: {error}");
+        }
+        // These must survive the public DTO and reach family validation, including snake-case
+        // IP-Adapter scale. A pure parser test cannot catch serde silently dropping a carrier.
+        for carrier in [
+            "strength",
+            "referenceStrength",
+            "denoisingStrength",
+            "imageStrength",
+            "ip_adapter_scale",
+            "ipAdapterScale",
+        ] {
+            let mut extra = serde_json::Map::new();
+            extra.insert(carrier.to_owned(), json!(1.0));
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                "/api/v1/image/jobs",
+                body(Value::Object(extra)),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{model}/{carrier}: {error}"
+            );
+            assert!(
+                error["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains(carrier)),
+                "{carrier}: {error}"
+            );
+        }
+        let (status, plain) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            body(json!({"mode":"text_to_image","referenceAssetIds":[],"advanced":{}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{plain}");
+        assert_eq!(plain["payload"]["width"], 1024);
+        assert_eq!(plain["payload"]["height"], 1024);
+    }
+}
+
+#[tokio::test]
 async fn image_job_route_threads_reference_asset_ids() {
     // sc-6358 / sc-6107 regression guard: the multi-reference edit picker sends a top-level
     // `referenceAssetIds` array. The typed ImageJobRequest must carry the plural list through to the
@@ -7961,13 +8395,7 @@ async fn image_caption_refine_job_resolves_asset_to_confined_image_path() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Caption Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Caption Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
 
@@ -8007,10 +8435,10 @@ async fn image_caption_refine_job_resolves_asset_to_confined_image_path() {
     );
     // No text prompt is required for an image-caption job.
     assert!(job["payload"].get("prompt").is_none());
-    // The resolved imagePath is the asset's absolute on-disk location inside the project dir.
-    // Compare as paths: the handler joins component-wise (native separators), while `rel_path`
-    // keeps the asset record's literal `/`, so a string comparison breaks on Windows (sc-8967).
-    let expected = project_path.join(&rel_path);
+    // The canonical image path follows ProjectStore confinement, including macOS /var aliases.
+    // Compare paths rather than strings to preserve native Windows separators too.
+    let expected =
+        std::fs::canonicalize(project_path.join(&rel_path)).expect("uploaded image canonicalizes");
     assert_eq!(
         std::path::Path::new(job["payload"]["imagePath"].as_str().unwrap()),
         expected
@@ -8033,13 +8461,8 @@ async fn qwen_image_rewrite_rides_the_prompt_refine_seam_with_ordered_references
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Qwen Rewrite Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Qwen Rewrite Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     let mut asset_ids = Vec::new();
@@ -8263,13 +8686,8 @@ async fn a_qwen_rewrite_result_offers_an_editable_prompt_beside_the_untouched_or
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Qwen Rewrite Result Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Qwen Rewrite Result Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     let (status, job) = request(
@@ -8426,13 +8844,8 @@ async fn direct_prompting_needs_neither_rewriter_installed() {
     .expect("user models writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Direct Prompting Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Direct Prompting Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     // Neither rewriter is auto-downloaded. That is the manifest fact the "no download, no prompt to
@@ -8520,13 +8933,8 @@ async fn image_describe_refine_job_resolves_asset_and_forwards_caption_style() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Describe Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Describe Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
 
@@ -8563,8 +8971,9 @@ async fn image_describe_refine_job_resolves_asset_and_forwards_caption_style() {
     assert_eq!(job["payload"]["task"], "image_describe");
     assert_eq!(job["payload"]["captionStyle"], "tags");
     assert!(job["payload"].get("prompt").is_none());
-    // Path (not string) comparison: separator-agnostic on Windows (sc-8967, same as the caption test).
-    let expected = project_path.join(&rel_path);
+    // Match canonical confinement and native path separators (macOS aliases / Windows).
+    let expected =
+        std::fs::canonicalize(project_path.join(&rel_path)).expect("uploaded image canonicalizes");
     assert_eq!(
         std::path::Path::new(job["payload"]["imagePath"].as_str().unwrap()),
         expected
@@ -8605,13 +9014,8 @@ async fn mood_board_refine_job_resolves_multiple_assets_to_image_paths() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Mood Board Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Mood Board Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
 
@@ -8657,8 +9061,9 @@ async fn mood_board_refine_job_resolves_multiple_assets_to_image_paths() {
         .expect("imagePaths array");
     assert_eq!(paths.len(), 2, "both references resolved");
     for (path, rel) in paths.iter().zip(rel_paths.iter()) {
-        // Path (not string) comparison: separator-agnostic on Windows (sc-8967).
-        let expected = project_path.join(rel);
+        // Compare the canonical file path, including platform aliases and separators.
+        let expected =
+            std::fs::canonicalize(project_path.join(rel)).expect("uploaded image canonicalizes");
         assert_eq!(std::path::Path::new(path.as_str().unwrap()), expected);
     }
 }
@@ -8807,13 +9212,7 @@ async fn image_and_video_job_routes_normalize_payloads() {
 async fn existing_video_models_keep_their_pre_sc_17160_reference_budget() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Budget" }),
-    )
-    .await;
+    crate::tests::support::create_project(app.clone(), &"Budget").await;
 
     let (status, job) = request(
         app.clone(),
@@ -8921,13 +9320,7 @@ async fn ref2va_reference_caps_refuse_fifteen_files_and_admit_twelve() {
     .expect("user models writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Ref2VA" }),
-    )
-    .await;
+    crate::tests::support::create_project(app.clone(), &"Ref2VA").await;
 
     let submit = |model: &str, images: usize, clips: usize, audio: usize| {
         let app = app.clone();
@@ -9005,13 +9398,7 @@ async fn ref2va_reference_caps_refuse_fifteen_files_and_admit_twelve() {
 async fn bernini_video_modes_validate_required_media() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Bernini" }),
-    )
-    .await;
+    crate::tests::support::create_project(app.clone(), &"Bernini").await;
 
     // video_to_video without a source clip is rejected.
     let (status, _) = request(
@@ -9342,13 +9729,7 @@ async fn bernini_video_modes_validate_required_media() {
 async fn scail2_animate_character_reaches_the_queue_and_validates_media() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "SCAIL-2" }),
-    )
-    .await;
+    crate::tests::support::create_project(app.clone(), &"SCAIL-2").await;
 
     // The regression itself: a complete request is ACCEPTED, not "Unsupported video mode".
     let (status, animate_job) = request(
@@ -9465,13 +9846,7 @@ fn write_scail2_reference_test_manifest(config_dir: &std::path::Path, multi_refe
 async fn scail2_animate_character_preserves_ordered_multi_references_and_rejects_seven() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "SCAIL-2 multi-reference" }),
-    )
-    .await;
+    crate::tests::support::create_project(app.clone(), &"SCAIL-2 multi-reference").await;
 
     let base = || {
         json!({
@@ -9592,13 +9967,7 @@ async fn scail2_animate_character_preserves_ordered_multi_references_and_rejects
     let config_dir = enabled_temp_dir.path().join("config/manifests");
     write_scail2_reference_test_manifest(&config_dir, true);
     let enabled_app = create_app(test_settings(&enabled_temp_dir)).expect("enabled app creates");
-    request(
-        enabled_app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "SCAIL-2 paired descriptor" }),
-    )
-    .await;
+    crate::tests::support::create_project(enabled_app.clone(), &"SCAIL-2 paired descriptor").await;
     for count in [2usize, 6] {
         let references: Vec<String> = (0..count)
             .map(|index| format!("character-{index}"))
@@ -9629,11 +9998,9 @@ async fn scail2_animate_character_preserves_ordered_multi_references_and_rejects
 async fn retry_and_duplicate_strictly_validate_scail2_multi_reference_replay() {
     let current_temp_dir = tempfile::tempdir().expect("current temp dir creates");
     let current_app = create_app(test_settings(&current_temp_dir)).expect("current app creates");
-    request(
+    crate::tests::support::create_project(
         current_app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "SCAIL-2 current descriptor replay" }),
+        &"SCAIL-2 current descriptor replay",
     )
     .await;
     let (status, current_original) = request(
@@ -9782,11 +10149,9 @@ async fn retry_and_duplicate_strictly_validate_scail2_multi_reference_replay() {
     let enabled_temp_dir = tempfile::tempdir().expect("enabled temp dir creates");
     write_scail2_reference_test_manifest(&enabled_temp_dir.path().join("config/manifests"), true);
     let enabled_app = create_app(test_settings(&enabled_temp_dir)).expect("enabled app creates");
-    request(
+    crate::tests::support::create_project(
         enabled_app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "SCAIL-2 enabled descriptor replay" }),
+        &"SCAIL-2 enabled descriptor replay",
     )
     .await;
     let (status, enabled_original) = request(
@@ -9833,13 +10198,8 @@ async fn retry_and_duplicate_strictly_validate_scail2_multi_reference_replay() {
 async fn person_tracking_routes_match_contracts() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Tracking Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Tracking Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
     std::fs::write(
@@ -10033,13 +10393,7 @@ async fn generation_job_routes_reject_incompatible_loras() {
     write_test_safetensors(&lora_dir.join("qwen.safetensors"));
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Compatibility" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Compatibility").await;
     let project_id = project["id"].as_str().expect("project id");
     let (status, image_error) = request(
         app.clone(),
@@ -10266,13 +10620,8 @@ async fn video_jobs_expand_recipe_presets_server_side() {
     write_test_safetensors(&lora_dir.join("motion.safetensors"));
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Video Preset Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Video Preset Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let (status, video_job) = request(
@@ -10452,13 +10801,8 @@ async fn preset_overridden_video_model_carries_its_own_manifest_entry() {
     .expect("user recipe presets writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Preset Override Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Preset Override Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let (status, video_job) = request(
@@ -10572,14 +10916,9 @@ async fn mac_only_video_is_rejected_before_enqueue_on_direct_preset_and_replay_r
 
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
-    *state.video_platform_override.lock() = Some("windows");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Platform Withdrawal Project" }),
-    )
-    .await;
+    *state.test_hooks.video_platform_override.lock() = Some("windows");
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Platform Withdrawal Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     for payload in [
@@ -10620,7 +10959,7 @@ async fn mac_only_video_is_rejected_before_enqueue_on_direct_preset_and_replay_r
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{base_job}");
-    *state.video_platform_override.lock() = Some("macos");
+    *state.test_hooks.video_platform_override.lock() = Some("macos");
     let (status, eros_job) = request(
         app.clone(),
         "POST",
@@ -10636,7 +10975,7 @@ async fn mac_only_video_is_rejected_before_enqueue_on_direct_preset_and_replay_r
     assert_eq!(status, StatusCode::CREATED, "{eros_job}");
 
     // A legacy Eros job and a model-changing replay are both rejected before a new row is queued.
-    *state.video_platform_override.lock() = Some("linux");
+    *state.test_hooks.video_platform_override.lock() = Some("linux");
     for (job_id, payload_changes) in [
         (eros_job["id"].as_str().unwrap(), json!({})),
         (
@@ -10753,13 +11092,8 @@ async fn preset_overridden_image_model_carries_its_own_manifest_entry() {
     .expect("user recipe presets writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Img Override Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Img Override Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let (status, image_job) = request(
@@ -10890,13 +11224,8 @@ async fn preset_image_job_builds_each_catalog_once() {
     write_test_safetensors(&lora_dir.join("style.safetensors"));
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Image Preset Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Image Preset Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     // Reset the probe counters immediately before the job-create so project setup /
@@ -11043,13 +11372,8 @@ async fn preset_image_job_skips_server_lora_merge_when_client_resolved() {
     write_test_safetensors(&lora_dir.join("style.safetensors"));
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Client Resolved Preset Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Client Resolved Preset Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     // The client selected the preset (recipePresetId) but removed its only LoRA in the picker, so
@@ -11157,13 +11481,8 @@ async fn preset_image_job_skips_server_prompt_fold_when_client_resolved() {
     .expect("user recipe presets writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Client Prompt Preset Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Client Prompt Preset Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     // Baseline: no flag → server folds the preset prefix into the prompt (today's behavior).
@@ -11811,13 +12130,8 @@ async fn video_duration_past_the_post_preset_models_hard_cap_is_rejected() {
     .expect("user recipe presets writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Duration Cap Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Duration Cap Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     // 10s: legal for the default (15) but past the preset-resolved model's 5. `model` omitted so
@@ -11980,13 +12294,8 @@ async fn video_fps_outside_the_post_preset_models_menu_is_rejected() {
     .expect("user recipe presets writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Fps Menu Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Fps Menu Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     // 25fps: on the DEFAULT's menu, off the preset-resolved model's. `model` omitted so the preset's
@@ -12180,13 +12489,8 @@ async fn image_steps_under_the_models_hard_floor_is_rejected() {
     .expect("user models writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Image Step Floor Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Image Step Floor Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     // Under the floor: refused at enqueue, naming the model, the floor and what was asked.
@@ -12319,13 +12623,8 @@ async fn image_hires_fix_is_forwarded_for_capable_models_and_refused_for_others(
     .expect("user models writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Hires Fix Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Hires Fix Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     // A capable model: admitted, and the block travels VERBATIM to the job payload — the DTO
@@ -12468,13 +12767,8 @@ async fn image_sampler_off_the_models_menu_is_rejected() {
     .expect("user models writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Image Sampler Menu Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Image Sampler Menu Project").await;
     let project_id = project["id"].as_str().expect("project id");
     let post = |model: &'static str, advanced: Value| {
         let app = app.clone();
@@ -12572,13 +12866,8 @@ async fn iris_and_plain_app() -> (tempfile::TempDir, axum::Router, String) {
     )
     .expect("user models writes");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Iris Controls Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Iris Controls Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     (temp_dir, app, project_id)
 }
@@ -12818,13 +13107,8 @@ async fn image_reference_count_and_free_size_are_bounded_by_the_models_declared_
     .expect("user models writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Qwen 2.1 Controls Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Qwen 2.1 Controls Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     // Eleven REAL raster assets. sc-24110 added a per-entry half to this gate — each ordered
@@ -13180,13 +13464,8 @@ async fn image_jobs_outside_the_declared_admission_envelope_are_refused_at_enque
     )
     .expect("user models writes");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Qwen 2.1 Envelope Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Qwen 2.1 Envelope Project").await;
     let project_id = project["id"].as_str().expect("project id");
     let enqueue = |width: u32, height: u32| {
         request(
@@ -13298,13 +13577,8 @@ async fn qwen_image_2_1_edit_validates_the_whole_ordered_conditioning_list() {
     .expect("user models writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Qwen 2.1 Ordered Conditioning" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Qwen 2.1 Ordered Conditioning").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     // TWELVE distinct assets. The count below is over DISTINCT ids — the ordered list is deduped,
@@ -13625,13 +13899,8 @@ async fn video_steps_under_the_post_preset_models_hard_floor_is_rejected() {
     .expect("user recipe presets writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Step Floor Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Step Floor Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     // 1 step: fine for the default (no floor) but under the preset-resolved model's 2. `model`
@@ -13839,13 +14108,8 @@ async fn video_steps_off_the_post_preset_models_exact_menu_is_rejected() {
     .expect("user recipe presets writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Step Menu Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Step Menu Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     // THE CASE THE STORY NAMES. 30 steps: over the menu, so a FLOOR-shaped key would have admitted
@@ -14004,13 +14268,8 @@ async fn a_video_request_naming_no_duration_is_admitted_at_the_models_own_defaul
     .expect("builtin manifests seed");
 
     let app = create_app(settings).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Duration Default Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Duration Default Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
     // Every shipped video model whose cap is UNDER the old blanket 6.0 — i.e. every model this
@@ -14191,13 +14450,9 @@ async fn an_image_request_naming_no_size_renders_the_models_own_declared_resolut
     .expect("builtin manifests seed");
 
     let app = create_app(settings).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Image Default Resolution Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Image Default Resolution Project")
+            .await;
     let project_id = project["id"].as_str().expect("project id");
 
     // A matrix that pins each axis INDEPENDENTLY. `defaults.resolution` and `defaults.count` are
@@ -14352,7 +14607,7 @@ fn write_style_test_manifests(config_dir: &std::path::Path) {
         {
           "schemaVersion": 1,
           "source": "documents/style.txt",
-          "promptTemplate": "Subject: {subject}\nStyle: {style}",
+          "promptTemplate": "Description: {subject}\nStyle: {style}",
           "groups": [
             {
               "id": "test-anime",
@@ -14381,13 +14636,8 @@ async fn styled_image_job_folds_style_server_side_from_style_id() {
     write_style_test_manifests(&temp_dir.path().join("config"));
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Styled Job Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Styled Job Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     // Sub-style id → its `prompt` ("gentle hand-painted"); "a fox" becomes the leading Subject and
@@ -14440,7 +14690,7 @@ async fn styled_image_job_folds_style_server_side_from_style_id() {
     assert_eq!(status, StatusCode::CREATED, "{group_styled:?}");
     assert_eq!(
         group_styled["payload"]["prompt"],
-        "Subject: a fox\nStyle: broad test anime look"
+        "Description: a fox\nStyle: broad test anime look"
     );
 
     // An unknown styleId is a clean 400, not a silent no-op.
@@ -14473,13 +14723,8 @@ async fn styled_image_job_rejects_a_style_on_a_tag_convention_model() {
     write_style_test_manifests(&temp_dir.path().join("config"));
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Tag Model Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Tag Model Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     let body = json!({
@@ -14538,13 +14783,8 @@ async fn styled_image_job_skips_fold_when_prompt_resolved_client_side() {
     write_style_test_manifests(&temp_dir.path().join("config"));
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Client Styled Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Client Styled Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     let already_composed = "Subject: a fox\nStyle: gentle hand-painted";
@@ -14571,6 +14811,32 @@ async fn styled_image_job_skips_fold_when_prompt_resolved_client_side() {
         verbatim["payload"]["prompt"], already_composed,
         "a client-composed styled prompt must be taken verbatim, never double-folded"
     );
+}
+
+#[tokio::test]
+async fn appearance_catalog_and_job_route_share_model_aware_composition() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id) = shipped_manifest_app(&temp_dir).await;
+    let (status, catalog) = request(app.clone(), "GET", "/api/v1/appearance", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{catalog:?}");
+    assert_eq!(catalog["entries"].as_array().unwrap().len(), 81);
+    let selection =
+        json!({"film":"film-kodak-portra-400","looks":["look-cool-muted","look-matte-faded-film"]});
+    let body = json!({"projectId":project_id,"model":"z_image_turbo","mode":"text_to_image","prompt":"Subject: a fox","appearance":selection,"count":1,"width":1024,"height":1024});
+    let (status, job) = request(app.clone(), "POST", "/api/v1/image/jobs", body.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{job:?}");
+    assert!(job["payload"]["prompt"].as_str().unwrap().contains("Film:"));
+    assert!(job["payload"]["prompt"].as_str().unwrap().contains("Look:"));
+    assert_eq!(job["payload"]["advanced"]["appearance"], selection);
+    assert_eq!(
+        job["payload"]["advanced"]["appearancePrompt"],
+        "Subject: a fox"
+    );
+    let mut incompatible = body;
+    incompatible["appearance"] = json!({"looks":["look-light-leaks"]});
+    incompatible["presetPromptResolvedClientSide"] = json!(true);
+    let (status, _) = request(app, "POST", "/api/v1/image/jobs", incompatible).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -14716,15 +14982,111 @@ async fn shipped_manifest_app_on_os(
     )
     .expect("builtin manifests seed");
     let app = create_app(settings).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "MiniMax-H3 Reachability" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"MiniMax-H3 Reachability").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     (app, project_id)
+}
+
+/// sc-26691. The video route validates `advanced.referenceImageResizeMode` and STAMPS a fresh
+/// MiniMax-H3 job with its resolved mode (`match` when the caller named none), so the persisted job
+/// is self-describing; a duplicate keeps the recorded mode or takes an explicit change; a misspelt
+/// mode, or the key on another family, is refused. (A record that predates the key — the legacy
+/// `diffusers` replay — is covered by `legacy_h3_records_replay_as_diffusers_and_new_records_keep_their_mode`
+/// in sceneworks-core, since this route can no longer write one.)
+#[tokio::test]
+async fn video_route_stamps_and_replays_the_h3_reference_resize_mode() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id) = shipped_manifest_app(&temp_dir).await;
+    let submit = |model: &str, advanced: Value| {
+        json!({
+            "projectId": project_id,
+            "model": model,
+            "mode": "text_to_video",
+            "prompt": "a lighthouse keeper hums while the storm rolls in",
+            "advanced": advanced,
+        })
+    };
+
+    let (status, fresh) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        submit("minimax_h3", json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{fresh}");
+    assert_eq!(
+        fresh["payload"]["advanced"]["referenceImageResizeMode"], "match",
+        "a fresh request records the engine default it resolves to"
+    );
+
+    let (status, named) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        submit("minimax_h3", json!({ "referenceImageResizeMode": "max" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{named}");
+    assert_eq!(
+        named["payload"]["advanced"]["referenceImageResizeMode"],
+        "max"
+    );
+
+    let fresh_id = fresh["id"].as_str().expect("job id");
+    let (status, duplicate) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{fresh_id}/duplicate"),
+        json!({ "payloadChanges": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{duplicate}");
+    assert_eq!(
+        duplicate["payload"]["advanced"]["referenceImageResizeMode"], "match",
+        "a record written since the key existed replays its own mode"
+    );
+    let (status, changed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{fresh_id}/duplicate"),
+        json!({ "payloadChanges": { "advanced": { "referenceImageResizeMode": "diffusers" } } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{changed}");
+    assert_eq!(
+        changed["payload"]["advanced"]["referenceImageResizeMode"],
+        "diffusers"
+    );
+
+    for (model, advanced, needle) in [
+        (
+            "minimax_h3",
+            json!({ "referenceImageResizeMode": "crop" }),
+            "advanced.referenceImageResizeMode must be one of",
+        ),
+        (
+            "wan_i2v",
+            json!({ "referenceImageResizeMode": "match" }),
+            "is not supported by wan_i2v",
+        ),
+    ] {
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/video/jobs",
+            submit(model, advanced),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{model}: {error}");
+        assert!(
+            error["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains(needle)),
+            "{model}: {error}"
+        );
+    }
 }
 
 /// sc-17159 (epic 17137) — every mode MiniMax-H3 DECLARES is submittable end to end against the
@@ -16125,13 +16487,7 @@ async fn cross_selecting_a_minimax_h3_partition_lora_is_refused_by_the_video_job
     write_test_safetensors_with_keys(&lora_dir.join("h3_ref2v.safetensors"), &keys);
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "H3 partitions" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"H3 partitions").await;
     let project_id = project["id"].as_str().expect("project id");
 
     let submit = |model: &'static str, lora: &'static str| {
@@ -16371,13 +16727,7 @@ fn depth_source_png() -> Vec<u8> {
 async fn image_depth_route_queues_a_typed_job_and_publishes_a_depth_asset() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Depth" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Depth").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(project["path"].as_str().expect("project path"));
     let (_, source) = request_multipart_upload(
@@ -16632,13 +16982,8 @@ async fn qwen_image_2_1_turbo_image_jobs_are_gated_on_turbos_declared_limits() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_shipped_qwen_image_2_1_pair(&temp_dir.path().join("config/manifests"));
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Qwen 2.1 Turbo Project" }),
-    )
-    .await;
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Qwen 2.1 Turbo Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let enqueue = |model: &'static str, extra: Value| {
         let mut body = json!({
@@ -16723,16 +17068,64 @@ fn h3_last_only_typed_video_request_is_valid_and_other_families_still_need_a_sou
         ("minimax_h3_ref", true, false),
         ("ltx_2_3", true, false),
     ] {
-        let payload: crate::dto::VideoJobRequest = serde_json::from_value(serde_json::json!({
+        let value = serde_json::json!({
             "projectId":"owned", "model":model, "mode":"image_to_video", "prompt":"A cyclist rides",
             "lastFrameAssetId": if has_last { Some("last") } else { None },
-        }))
-        .unwrap();
+        });
+        let payload: crate::dto::VideoJobRequest = serde_json::from_value(value.clone()).unwrap();
+        // Shape-only admission defers last-only task compatibility until the catalog resolves.
+        assert_eq!(crate::validate_video_job(&payload).is_ok(), has_last);
         assert_eq!(
-            crate::validate_video_job(&payload).is_ok(),
+            crate::validate_video_reference_asset_ids_payload(
+                value.as_object().unwrap(),
+                &serde_json::json!({"id":model}),
+            )
+            .is_ok(),
             accepted,
             "{model}/{has_last}"
         );
+    }
+}
+
+#[test]
+fn h3_resolved_last_only_import_requires_a_verified_base_partition() {
+    let payload = serde_json::json!({"model":"user-choice", "mode":"image_to_video", "lastFrameAssetId":"last"});
+    for (partition, accepted) in [
+        ("fl2va", true),
+        ("hybrid", true),
+        ("ref2va", false),
+        ("unknown", false),
+    ] {
+        let base = if partition == "ref2va" {
+            "minimax_h3_ref"
+        } else {
+            "minimax_h3"
+        };
+        let entry = serde_json::json!({
+            "id":"user-choice", "family":"minimax-h3", "baseModel":base,
+            "minimaxH3Partition":partition, "importSourceShape":"transformer_directory",
+            "importPlan":{"checkpointId":"checkpoint", "assembly":{"schemaVersion":1, "partition":partition}}
+        });
+        assert_eq!(
+            crate::validate_video_reference_asset_ids_payload(payload.as_object().unwrap(), &entry)
+                .is_ok(),
+            accepted,
+            "{partition}"
+        );
+        let mut unbound = entry.clone();
+        unbound.as_object_mut().unwrap().remove("importPlan");
+        assert!(crate::validate_video_reference_asset_ids_payload(
+            payload.as_object().unwrap(),
+            &unbound
+        )
+        .is_err());
+        let mut spoofed = payload.clone();
+        spoofed["model"] = serde_json::json!("minimax_h3");
+        assert!(crate::validate_video_reference_asset_ids_payload(
+            spoofed.as_object().unwrap(),
+            &serde_json::json!({"id":"other"})
+        )
+        .is_err());
     }
 }
 
@@ -16743,5 +17136,124 @@ fn h3_empty_last_frame_is_not_a_keyframe_input() {
             "projectId":"owned", "model":"minimax_h3", "mode":"image_to_video", "prompt":"A cyclist rides", "lastFrameAssetId":id,
         })).unwrap();
         assert!(crate::validate_video_job(&payload).is_err());
+    }
+}
+
+/// sc-26241: a FLUX 3 request names exactly one of its packages, the publisher FP8R tier is
+/// accepted only for the model that ships it, and everything else is a typed 400 — never a silent
+/// re-interpretation at another precision.
+#[test]
+fn image_job_quant_tiers_are_flux3_packages_and_fp8r_is_flux3_only() {
+    let job = |model: &str, advanced: serde_json::Value| -> crate::dto::ImageJobRequest {
+        serde_json::from_value(json!({
+            "projectId": "project-1",
+            "model": model,
+            "prompt": "a lighthouse",
+            "mode": "text_to_image",
+            "advanced": advanced,
+        }))
+        .expect("image job request parses")
+    };
+    for advanced in [
+        json!({}),
+        json!({"quantTier": "fp8r"}),
+        json!({"quantTier": "nvfp4"}),
+        json!({"mlxQuantize": 0}),
+        json!({"mlxQuantize": 4}),
+        json!({"mlxQuantize": 8, "mlxQuantizeExplicit": true}),
+    ] {
+        for model in ["flux3_klein", "flux3_klein_base"] {
+            assert!(
+                crate::validate_image_job(&job(model, advanced.clone())).is_ok(),
+                "{model}: {advanced}"
+            );
+        }
+    }
+    for (model, advanced) in [
+        ("z_image_turbo", json!({"quantTier": "fp8r"})),
+        (
+            "flux3_klein_base",
+            json!({"quantTier": "fp8r", "mlxQuantize": 8}),
+        ),
+        (
+            "flux3_klein",
+            json!({"quantTier": "fp8r", "mlxQuantize": 8}),
+        ),
+        ("flux3_klein", json!({"quantTier": "fp8r", "convRot": true})),
+        ("flux3_klein", json!({"mlxQuantize": 6})),
+        ("flux3_klein", json!({"quantTier": "int8-convrot"})),
+    ] {
+        let error =
+            crate::validate_image_job(&job(model, advanced.clone())).expect_err("tier refusal");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST, "{model} {advanced}");
+        assert!(
+            error.detail.contains(model),
+            "{model} {advanced}: {}",
+            error.detail
+        );
+    }
+}
+
+#[tokio::test]
+async fn flux3_catalog_tiers_are_canonical_for_both_checkpoints_and_unpinned_derivations_fail_closed(
+) {
+    let temp = tempfile::tempdir().unwrap();
+    let settings = test_settings(&temp);
+    sceneworks_core::builtin_manifests::seed_builtin_manifests(
+        &settings.config_dir,
+        sceneworks_core::builtin_manifests::SeedMode::Overwrite,
+    )
+    .unwrap();
+    let (_app, state) = create_app_with_state(settings).unwrap();
+    let mut authoritative_base = None;
+    for model in ["flux3_klein", "flux3_klein_base"] {
+        for tier in ["bf16", "q4", "q8", "fp8r", "nvfp4"] {
+            let mut payload = json!({
+                "model":model,"advanced":{"quantTier":tier},
+                "modelManifestEntry":{"id":model,"downloads":[{"variant":tier}]}
+            })
+            .as_object()
+            .unwrap()
+            .clone();
+            let result = crate::jobs::canonicalize_image_model_payload(
+                &state,
+                &crate::JobType::ImageGenerate,
+                &mut payload,
+            )
+            .await;
+            // Both checkpoints declare every tier: base q4/q8 carry genuine local-conversion pins
+            // (sc-26243). The forged payload entry never replaces the authoritative catalog.
+            let entry = result.unwrap().unwrap();
+            assert_eq!(entry["id"], model);
+            let declared = entry["downloads"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["variant"] == tier);
+            assert!(declared, "{model}/{tier}");
+            if model == "flux3_klein_base" {
+                authoritative_base = Some(entry);
+            }
+        }
+    }
+    // An unpinned derivation still fails closed: strip the conversion pins from the authoritative
+    // base entry and the native tier refusal names the missing SHA-256 pins, with no dense
+    // fallback and no stale access-denial claim.
+    let mut base = authoritative_base.expect("authoritative base entry");
+    for row in base["downloads"].as_array_mut().unwrap() {
+        row.as_object_mut().unwrap().remove("localDerivation");
+    }
+    for tier in ["q4", "q8"] {
+        let advanced = json!({ "quantTier": tier }).as_object().unwrap().clone();
+        let reason = sceneworks_core::image_request::flux3_catalog_tier_refusal(
+            "flux3_klein_base",
+            &advanced,
+            &base,
+        )
+        .expect("unpinned base derivation is refused");
+        assert!(
+            reason.contains(tier) && reason.contains("SHA-256") && !reason.contains("403"),
+            "{reason}"
+        );
     }
 }

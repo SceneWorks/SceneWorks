@@ -1,6 +1,26 @@
 //! rust-api catalog tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
 
+/// Retain this guard across the complete fixture, including awaited catalog mutations.
+fn catalog_fixture_cache_root(
+    settings: &Settings,
+) -> sceneworks_core::hf_home::test_support::CacheRootGuard {
+    let hub = settings.data_dir.join("cache/huggingface/hub");
+    let guard = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+        settings.data_dir.clone(),
+        hub.clone(),
+    );
+    assert_eq!(
+        sceneworks_core::hf_home::huggingface_hub_cache_dir(&settings.data_dir),
+        hub
+    );
+    assert_eq!(
+        sceneworks_core::hf_home::model_source_library(&settings.data_dir).root(),
+        hub.as_path()
+    );
+    guard
+}
+
 #[test]
 fn merge_model_manifest_entry_deep_merges_nested_blocks() {
     // The worker reads the merged manifest entry from the job payload now
@@ -506,9 +526,12 @@ async fn models_catalog_reuses_every_unchanged_size_estimate_on_second_load() {
     write_empty_sibling_manifests(&config_dir);
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
-    *state.model_size_estimate_disabled_override.lock() = Some(false);
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(false);
     let hook = crate::models::ModelSizeEstimateTestHook::immediate(Some(1234));
-    *state.model_size_estimate_test_hook.lock() = Some(hook.clone());
+    *state.test_hooks.model_size_estimate_test_hook.lock() = Some(hook.clone());
 
     let first = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
     assert_eq!(first.0, StatusCode::OK);
@@ -582,9 +605,12 @@ async fn concurrent_models_catalog_loads_share_one_estimate_per_distinct_key() {
     write_empty_sibling_manifests(&config_dir);
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
-    *state.model_size_estimate_disabled_override.lock() = Some(false);
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(false);
     let hook = crate::models::ModelSizeEstimateTestHook::blocked(Some(1234));
-    *state.model_size_estimate_test_hook.lock() = Some(hook.clone());
+    *state.test_hooks.model_size_estimate_test_hook.lock() = Some(hook.clone());
 
     let first = tokio::spawn(request(app.clone(), "GET", "/api/v1/models", Value::Null));
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -645,9 +671,12 @@ async fn cancelled_size_estimate_leader_wakes_follower_to_retry() {
     write_empty_sibling_manifests(&config_dir);
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
-    *state.model_size_estimate_disabled_override.lock() = Some(false);
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(false);
     let hook = crate::models::ModelSizeEstimateTestHook::blocked(Some(2468));
-    *state.model_size_estimate_test_hook.lock() = Some(hook.clone());
+    *state.test_hooks.model_size_estimate_test_hook.lock() = Some(hook.clone());
 
     let leader = tokio::spawn(request(app.clone(), "GET", "/api/v1/models", Value::Null));
     tokio::time::timeout(Duration::from_secs(2), hook.wait_for_call())
@@ -713,9 +742,12 @@ async fn concurrent_failed_estimate_is_shared_and_retries_after_negative_ttl_exp
     write_empty_sibling_manifests(&config_dir);
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
-    *state.model_size_estimate_disabled_override.lock() = Some(false);
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(false);
     let hook = crate::models::ModelSizeEstimateTestHook::blocked(None);
-    *state.model_size_estimate_test_hook.lock() = Some(hook.clone());
+    *state.test_hooks.model_size_estimate_test_hook.lock() = Some(hook.clone());
 
     let first = tokio::spawn(request(app.clone(), "GET", "/api/v1/models", Value::Null));
     tokio::time::timeout(Duration::from_secs(2), hook.wait_for_call())
@@ -790,9 +822,12 @@ async fn models_catalog_starts_install_sweep_before_size_estimation_completes() 
     crate::models::test_reset_catalog_probe_concurrency();
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
-    *state.model_size_estimate_disabled_override.lock() = Some(false);
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(false);
     let hook = crate::models::ModelSizeEstimateTestHook::blocked(Some(1234));
-    *state.model_size_estimate_test_hook.lock() = Some(hook.clone());
+    *state.test_hooks.model_size_estimate_test_hook.lock() = Some(hook.clone());
 
     let request_task = tokio::spawn(request(app, "GET", "/api/v1/models", Value::Null));
     tokio::time::timeout(Duration::from_secs(2), hook.wait_for_call())
@@ -890,16 +925,14 @@ async fn concurrent_models_and_preset_routes_share_one_install_state_sweep() {
     crate::test_reset_catalog_build_counters();
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
-    *state.model_size_estimate_disabled_override.lock() = Some(false);
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(false);
     let size_hook = crate::models::ModelSizeEstimateTestHook::blocked(Some(1234));
-    *state.model_size_estimate_test_hook.lock() = Some(size_hook.clone());
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Preset Coalescing Project" }),
-    )
-    .await;
+    *state.test_hooks.model_size_estimate_test_hook.lock() = Some(size_hook.clone());
+    let (_, project) =
+        crate::tests::support::create_project(app.clone(), &"Preset Coalescing Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
     let models_task = tokio::spawn(request(app.clone(), "GET", "/api/v1/models", Value::Null));
@@ -971,7 +1004,10 @@ async fn model_catalog_invalidation_refreshes_install_state() {
     single_model_manifest(&config_dir, "refresh_model", "refresh/model");
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
-    *state.model_size_estimate_disabled_override.lock() = Some(true);
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(true);
     crate::test_reset_catalog_build_counters();
 
     let (status, cold) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
@@ -1002,12 +1038,15 @@ async fn invalidation_before_snapshot_publication_forces_current_generation_rebu
     single_model_manifest(&config_dir, "racing_model", "racing/model");
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
-    *state.model_size_estimate_disabled_override.lock() = Some(true);
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(true);
     crate::test_reset_catalog_build_counters();
     let publish_hook = crate::models::ModelCatalogBeforePublishTestHook::blocked();
     state
-        .model_catalog_cache
-        .set_before_publish_test_hook(publish_hook.clone());
+        .test_hooks
+        .set_model_catalog_before_publish_hook(publish_hook.clone());
 
     let request_task = tokio::spawn(request(app.clone(), "GET", "/api/v1/models", Value::Null));
     tokio::time::timeout(Duration::from_secs(2), publish_hook.wait_until_reached())
@@ -1046,6 +1085,48 @@ async fn invalidation_before_snapshot_publication_forces_current_generation_rebu
     );
 }
 
+/// sc-28037 (GitHub #3235): a `/models` client that disconnects mid-build must not
+/// leave its sweep running while the next request starts another. The build is
+/// detached, so it finishes and publishes, and the next caller joins that result.
+#[tokio::test]
+async fn a_dropped_request_mid_build_does_not_start_a_second_sweep() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    single_model_manifest(&config_dir, "abandoned_model", "abandoned/model");
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(true);
+    crate::test_reset_catalog_build_counters();
+    let publish_hook = crate::models::ModelCatalogBeforePublishTestHook::blocked();
+    state
+        .test_hooks
+        .set_model_catalog_before_publish_hook(publish_hook.clone());
+
+    let abandoned = tokio::spawn(request(app.clone(), "GET", "/api/v1/models", Value::Null));
+    tokio::time::timeout(Duration::from_secs(2), publish_hook.wait_until_reached())
+        .await
+        .expect("the first build reaches its pre-publication boundary");
+    abandoned.abort();
+    assert!(abandoned.await.unwrap_err().is_cancelled());
+
+    let retry = tokio::spawn(request(app.clone(), "GET", "/api/v1/models", Value::Null));
+    publish_hook.release();
+    let (status, models) = tokio::time::timeout(Duration::from_secs(2), retry)
+        .await
+        .expect("the retry completes")
+        .expect("the retry joins");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(models[0]["id"], "abandoned_model");
+    assert_eq!(
+        crate::test_model_catalog_builds(),
+        1,
+        "the retry must join the abandoned request's build, not sweep again"
+    );
+}
+
 #[tokio::test]
 async fn models_catalog_disabled_size_estimation_skips_upstream_requests() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -1074,9 +1155,12 @@ async fn models_catalog_disabled_size_estimation_skips_upstream_requests() {
     write_empty_sibling_manifests(&config_dir);
     let (app, state) =
         create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
-    *state.model_size_estimate_disabled_override.lock() = Some(true);
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(true);
     let hook = crate::models::ModelSizeEstimateTestHook::immediate(Some(1234));
-    *state.model_size_estimate_test_hook.lock() = Some(hook.clone());
+    *state.test_hooks.model_size_estimate_test_hook.lock() = Some(hook.clone());
 
     let response = request(app, "GET", "/api/v1/models", Value::Null).await;
 
@@ -1217,6 +1301,8 @@ async fn lora_download_endpoint_queues_hf_download_for_builtin_lora() {
     // repo/file the worker fetches into the HF cache; a non-HF source or already-installed
     // LoRA is rejected, and an unknown id is 404.
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let _cache_root = catalog_fixture_cache_root(&settings);
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
     std::fs::write(
@@ -1260,7 +1346,7 @@ async fn lora_download_endpoint_queues_hf_download_for_builtin_lora() {
     )
     .expect("builtin loras writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (status, job) = request(
         app.clone(),
         "POST",
@@ -1292,9 +1378,14 @@ async fn lora_download_endpoint_queues_hf_download_for_builtin_lora() {
     // detail, so the code is load-bearing contract, not decoration: a client rendering a
     // pre-download catalog snapshot would otherwise show "Not Installed" next to an error
     // saying it IS installed. Guarded here so the code can't be dropped or renamed silently.
-    let repo_dir =
-        huggingface_repo_cache_path(&temp_dir.path().join("data"), "Test/lora-install-probe")
-            .expect("repo cache path");
+    let repo_dir = huggingface_repo_cache_path(&settings.data_dir, "Test/lora-install-probe")
+        .expect("repo cache path");
+    assert_eq!(
+        repo_dir,
+        settings
+            .data_dir
+            .join("cache/huggingface/hub/models--Test--lora-install-probe")
+    );
     let revision = "0123456789abcdef0123456789abcdef01234567";
     std::fs::create_dir_all(repo_dir.join("refs")).expect("create refs");
     std::fs::write(repo_dir.join("refs").join("main"), revision).expect("write refs/main");
@@ -1321,6 +1412,14 @@ async fn lora_download_endpoint_queues_hf_download_for_builtin_lora() {
 async fn model_and_lora_routes_match_manifest_behavior() {
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let _cache_root = catalog_fixture_cache_root(&settings);
+    assert_eq!(
+        huggingface_repo_cache_path(&settings.data_dir, "owner/model").unwrap(),
+        settings
+            .data_dir
+            .join("cache/huggingface/hub/models--owner--model"),
+    );
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
     std::fs::write(
@@ -1440,7 +1539,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
     write_test_safetensors(&lora_dir.join("style.safetensors"));
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (status, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(models[0]["name"], "User Model");
@@ -1512,13 +1611,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         "builtInLoras migrated to loras"
     );
 
-    let (_, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Preset Project" }),
-    )
-    .await;
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Preset Project").await;
     let project_id = project["id"].as_str().expect("project id");
     let (status, refusal) = request(
         app.clone(),
@@ -1719,7 +1812,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     assert_eq!(job["payload"]["manifestEntry"]["scope"], "global");
     assert!(job["payload"].get("sourcePath").is_none());
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (status, url_job) = request(
         app,
         "POST",
@@ -1749,7 +1842,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     );
     assert_eq!(url_job["payload"]["manifestEntry"]["family"], "z-image");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let upload_bytes = test_safetensors_bytes();
     let (status, upload_job) = request_multipart_lora_upload(
         app,
@@ -1789,7 +1882,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     );
 
     TEST_MAX_LORA_UPLOAD_BYTES.with(|cap| cap.set(4));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (bad_status, bad_error) = request_multipart_lora_upload(
         app,
         &[("name", "Too Large"), ("scope", "global")],
@@ -1808,7 +1901,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     std::fs::create_dir_all(&lora_source_dir).expect("lora source dir creates");
     let lora_source = lora_source_dir.join("safe-local.safetensors");
     write_test_safetensors(&lora_source);
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (status, source_path_job) = request(
         app,
         "POST",
@@ -1827,7 +1920,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
 
     let outside_source = temp_dir.path().join("outside.safetensors");
     write_test_safetensors(&outside_source);
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (bad_status, bad_error) = request(
         app,
         "POST",
@@ -1840,11 +1933,11 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     .await;
     assert_eq!(bad_status, StatusCode::BAD_REQUEST);
     assert_eq!(
-            bad_error["detail"],
-            "LoRA sourcePath must be inside app-managed data/loras, project/loras, or staged upload folders"
-        );
+        bad_error["detail"],
+        "sourcePath must be inside an approved folder"
+    );
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (bad_status, bad_error) = request(
         app.clone(),
         "POST",
@@ -1951,7 +2044,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     // rejected with both values surfaced in the error message.
     let mismatch_path = detect_dir.join("qwen-as-wan.safetensors");
     write_test_safetensors_with_keys(&mismatch_path, &qwen_image_tensor_keys());
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (status, mismatch_error) = request(
         app,
         "POST",
@@ -1974,7 +2067,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     // Z-Image; sparse Qwen LoRAs can target only early blocks.
     let auto_path = detect_dir.join("low-mmdit-no-autofill.safetensors");
     write_test_safetensors_with_keys(&auto_path, &z_image_tensor_keys());
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (status, auto_job) = request(
         app,
         "POST",
@@ -1992,7 +2085,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     // user-supplied family is kept.
     let match_path = detect_dir.join("z-match.safetensors");
     write_test_safetensors_with_keys(&match_path, &z_image_tensor_keys());
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (status, match_job) = request(
         app,
         "POST",
@@ -2010,7 +2103,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     // Wan-shaped tensors are detected and accepted when the user agrees.
     let wan_match_path = detect_dir.join("wan-match.safetensors");
     write_test_safetensors_with_keys(&wan_match_path, &wan_video_tensor_keys());
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (status, wan_job) = request(
         app,
         "POST",
@@ -2029,7 +2122,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     // accepted unchanged — the user-supplied label survives.
     let inconclusive_path = detect_dir.join("inconclusive.safetensors");
     write_test_safetensors(&inconclusive_path);
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (status, inconclusive_job) = request(
         app,
         "POST",
@@ -2050,7 +2143,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     // Confident Qwen-Image detection (block count > 40) auto-fills.
     let qwen_path = detect_dir.join("qwen-autofill.safetensors");
     write_test_safetensors_with_keys(&qwen_path, &qwen_image_tensor_keys());
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (status, qwen_job) = request(
         app,
         "POST",
@@ -3630,6 +3723,33 @@ async fn minimax_h3_tier_state_gates_on_every_shard_the_partition_index_names() 
             .any(|file| file.as_str() == Some("q4/ (incomplete: missing model components)")),
         "the torn tier must name itself: {torn:?}"
     );
+
+    // This fixture explicitly declares both partitions as hard co-requisites (the MLX layout).
+    // Repair must clear the warning, and losing a shard in either required partition must restore
+    // it on both cards. CUDA's independent layout is covered by the variant-install tests.
+    for partition in ["transformer_ref", "transformer"] {
+        seed_minimax_partition(&snapshot, "q4", partition, &MINIMAX_SHARDS);
+        let shard = snapshot.join("q4").join(partition).join(MINIMAX_SHARDS[1]);
+        for complete in [true, false, true] {
+            if complete {
+                std::fs::write(&shard, b"x").unwrap();
+            } else {
+                std::fs::remove_file(&shard).unwrap();
+            }
+            let app = create_app(test_settings(&temp_dir)).unwrap();
+            let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+            assert_eq!(status, StatusCode::OK);
+            for model in models.as_array().unwrap() {
+                assert_eq!(model["repairAvailable"], !complete, "{partition}: {model}");
+                assert_eq!(
+                    tier_state(model, "q4")["installed"],
+                    complete,
+                    "{} must follow its declared partition closure",
+                    model["id"]
+                );
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -5239,6 +5359,7 @@ fn managed_upload_provenance() -> sceneworks_core::checkpoint_import::ManagedPro
         version_id: None,
         file_id: None,
         credential_host: None,
+        ..Default::default()
     }
 }
 
@@ -5719,6 +5840,14 @@ async fn deleting_a_global_lora_sweeps_its_project_parked_preview_samples() {
 #[tokio::test]
 async fn partial_model_trash_failure_invalidates_warm_install_and_variant_state() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let _cache_root = catalog_fixture_cache_root(&settings);
+    assert_eq!(
+        huggingface_repo_cache_path(&settings.data_dir, "partial/model").unwrap(),
+        settings
+            .data_dir
+            .join("cache/huggingface/hub/models--partial--model"),
+    );
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
     std::fs::write(
@@ -5777,9 +5906,11 @@ async fn partial_model_trash_failure_invalidates_warm_install_and_variant_state(
     std::fs::write(failing_dir.join("weights.safetensors"), "weights")
         .expect("failing source writes");
 
-    let (app, state) =
-        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
-    *state.model_size_estimate_disabled_override.lock() = Some(true);
+    let (app, state) = create_app_with_state(settings.clone()).expect("app and state create");
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(true);
     crate::test_reset_catalog_build_counters();
     let (status, warm) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
     assert_eq!(status, StatusCode::OK);
@@ -7176,11 +7307,8 @@ async fn license_acknowledgment_typed_download_refuses_a_repo_another_entry_decl
     .await;
     assert_eq!(status, StatusCode::CREATED, "{job:?}");
     assert_eq!(job["payload"]["repo"], "MiniMaxAI/MiniMax-H3");
-    // The STAMP, for the shape this test exists to cover. `shared_repo_model` carries no
-    // `requiresLicenseAcknowledgment`, so a stamp keyed on the entry's flag writes nothing here —
-    // and the RETRY below then re-runs the repo-keyed gate over the stored `repo` and 403s a
-    // download this same server had just authorized. Asserting CREATED and `payload.repo` alone
-    // does not see that; the stamp and the retry leg are what do.
+    // The explicit assertion permits this submission and remains visible on the queued payload.
+    // A replay cannot treat the old assertion as a fresh acceptance of the source owner's terms.
     assert_eq!(
         job["payload"]["licenseAcknowledged"],
         Value::Bool(true),
@@ -7188,6 +7316,27 @@ async fn license_acknowledgment_typed_download_refuses_a_repo_another_entry_decl
     );
 
     let job_id = job["id"].as_str().expect("job id").to_owned();
+    let (status, refused) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/retry"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "no current owner receipt: {refused}"
+    );
+    assert_eq!(refused["code"], "license_acknowledgment_required");
+    let (status, receipt) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/models/minimax_h3/license-acknowledgment",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
     let (retry_status, retry_job) = request(
         app.clone(),
         "POST",
@@ -7406,8 +7555,8 @@ async fn license_acknowledgment_model_import_is_refused_for_a_restricted_repo() 
     .await;
     assert_eq!(plain_status, StatusCode::CREATED, "{plain_job:?}");
 
-    // Asserting the acknowledgment opens it, and the assertion is RECORDED on the queued job so a
-    // retry re-validates against it rather than being refused for a field nothing wrote.
+    // A fresh explicit assertion opens this submission and is retained in its payload. Replay
+    // separately requires a current server receipt rather than trusting the old assertion.
     let (asserted_status, asserted_job) = request(
         app,
         "POST",
@@ -7487,8 +7636,8 @@ async fn license_acknowledgment_lora_import_is_refused_for_a_restricted_repo() {
     .await;
     assert_eq!(plain_status, StatusCode::CREATED, "{plain_job:?}");
 
-    // Asserting the acknowledgment opens it, and the assertion is RECORDED on the queued job so the
-    // raw-payload re-validation on retry sees it rather than refusing what was just authorized.
+    // A fresh explicit assertion opens this submission and is retained in its payload. Replay
+    // separately requires a current server receipt rather than trusting the old assertion.
     let (asserted_status, asserted_job) = request(
         app,
         "POST",
@@ -7805,7 +7954,7 @@ async fn license_acknowledgment_is_not_bypassed_by_a_git_suffix() {
         slashed_body["detail"]
             .as_str()
             .expect("detail")
-            .contains("owner/name form"),
+            .contains("Hugging Face repo components"),
         "the earlier refusal is the repo-form validator, not the licence gate: {slashed_body:?}"
     );
 
@@ -7885,7 +8034,9 @@ async fn deleting_a_model_reconciles_its_resolved_cache_entries() {
 
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    let data_dir = temp_dir.path().join("data");
+    let settings = test_settings(&temp_dir);
+    let _cache_root = catalog_fixture_cache_root(&settings);
+    let data_dir = settings.data_dir.clone();
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
     let model_dir = data_dir.join("models/imports/cached_model");
@@ -7898,12 +8049,20 @@ async fn deleting_a_model_reconciles_its_resolved_cache_entries() {
     let library = sceneworks_core::hf_home::model_source_library(&data_dir)
         .root()
         .to_owned();
+    assert_eq!(library, data_dir.join("cache/huggingface/hub"));
     let snapshot = ArtifactSourceLibrary::new(&library)
         .expect("library root")
         .repository_root("owner/cached-model")
         .expect("repository root")
         .join("snapshots")
         .join(&revision);
+    assert_eq!(
+        snapshot,
+        library
+            .join("models--owner--cached-model")
+            .join("snapshots")
+            .join(&revision)
+    );
     std::fs::create_dir_all(&snapshot).expect("snapshot dir creates");
     std::fs::write(snapshot.join("model.safetensors"), b"weights").expect("weights write");
     let identity =
@@ -7979,7 +8138,7 @@ async fn deleting_a_model_reconciles_its_resolved_cache_entries() {
     )
     .expect("user models writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (status, body) = request(
         app,
         "DELETE",
@@ -8021,7 +8180,9 @@ async fn deleting_one_tier_reconciles_only_that_tiers_resolved_cache_entries() {
 
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    let data_dir = temp_dir.path().join("data");
+    let settings = test_settings(&temp_dir);
+    let _cache_root = catalog_fixture_cache_root(&settings);
+    let data_dir = settings.data_dir.clone();
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
 
@@ -8029,12 +8190,20 @@ async fn deleting_one_tier_reconciles_only_that_tiers_resolved_cache_entries() {
     let library = sceneworks_core::hf_home::model_source_library(&data_dir)
         .root()
         .to_owned();
+    assert_eq!(library, data_dir.join("cache/huggingface/hub"));
     let snapshot = ArtifactSourceLibrary::new(&library)
         .expect("library root")
         .repository_root("owner/tiered-model")
         .expect("repository root")
         .join("snapshots")
         .join(&revision);
+    assert_eq!(
+        snapshot,
+        library
+            .join("models--owner--tiered-model")
+            .join("snapshots")
+            .join(&revision)
+    );
     std::fs::create_dir_all(&snapshot).expect("snapshot dir creates");
     std::fs::write(snapshot.join("q8.safetensors"), b"q8-weights").expect("q8 writes");
     std::fs::write(snapshot.join("q4.safetensors"), b"q4-weights").expect("q4 writes");
@@ -8115,7 +8284,7 @@ async fn deleting_one_tier_reconciles_only_that_tiers_resolved_cache_entries() {
     )
     .expect("user models writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (status, _body) = request(
         app,
         "DELETE",
@@ -8476,4 +8645,159 @@ async fn managed_predictor_raw_queue_stamps_digest_and_refuses_retry_overrides()
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+}
+
+#[tokio::test]
+async fn fetching_job_replays_require_current_receipts_for_every_source_type() {
+    let temp = tempfile::tempdir().unwrap();
+    let settings = test_settings(&temp);
+    let _cache = catalog_fixture_cache_root(&settings);
+    let config_dir = temp.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    write_license_acknowledgment_catalog(&config_dir);
+    let app = create_app(settings.clone()).unwrap();
+    let ack = "/api/v1/models/minimax_h3/license-acknowledgment";
+    let (status, accepted) = request(app.clone(), "PUT", ack, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{accepted}");
+    let output = settings.data_dir.join("models/mlx/convert-fixture");
+    let cases = [
+        (
+            "model_import",
+            "/api/v1/models/import",
+            json!({"repo":"MiniMaxAI/MiniMax-H3","type":"video","licenseAcknowledged":true}),
+        ),
+        (
+            "lora_import",
+            "/api/v1/loras/import",
+            json!({"repo":"MiniMaxAI/MiniMax-H3","name":"fixture","licenseAcknowledged":true}),
+        ),
+        (
+            "lora_download",
+            "/api/v1/loras/restricted_lora/download",
+            json!({"licenseAcknowledged":true}),
+        ),
+        (
+            "model_convert",
+            "/api/v1/jobs",
+            json!({"type":"model_convert","requestedGpu":"auto","payload":{
+            "modelId":"ltx_local","converter":"ltx_video","sourceRepo":"owner/plain","sourceFile":"ltx.safetensors",
+            "baseRepo":"MiniMaxAI/MiniMax-H3","upscalerFile":"**","outputDir":output.display().to_string(),"licenseAcknowledged":true}}),
+        ),
+    ];
+    let mut jobs = Vec::new();
+    for (kind, route, body) in cases {
+        let (status, job) = request(app.clone(), "POST", route, body).await;
+        assert_eq!(status, StatusCode::CREATED, "{kind}: {job}");
+        assert_eq!(job["type"], kind);
+        assert_eq!(job["payload"]["licenseAcknowledged"], true);
+        let id = job["id"].as_str().unwrap().to_owned();
+        for operation in ["retry", "duplicate"] {
+            let (status, replay) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{id}/{operation}"),
+                json!({"payloadChanges":{}}),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::CREATED,
+                "current receipt {kind}/{operation}: {replay}"
+            );
+            assert_eq!(
+                replay["payload"]["licenseAcknowledged"], job["payload"]["licenseAcknowledged"],
+                "authorization must preserve the saved request: {replay}"
+            );
+        }
+        jobs.push((kind, id));
+    }
+    let (status, _) = request(app.clone(), "DELETE", ack, Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let mut violations = Vec::new();
+    for (kind, id) in &jobs {
+        for operation in ["retry", "duplicate"] {
+            let (status, replay) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{id}/{operation}"),
+                json!({"payloadChanges":{}}),
+            )
+            .await;
+            if status != StatusCode::FORBIDDEN
+                || replay["code"] != "license_acknowledgment_required"
+            {
+                violations.push(format!("withdrawn {kind}/{operation}: {status} {replay}"));
+            }
+        }
+    }
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/import",
+        json!({"repo":"MiniMaxAI/MiniMax-H3","type":"video","licenseAcknowledged":false}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "false assertion: {body}");
+    let (status, explicit) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/import",
+        json!({"repo":"MiniMaxAI/MiniMax-H3","type":"video","licenseAcknowledged":true}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "fresh explicit assertion: {explicit}"
+    );
+    let (_, view) = request(app.clone(), "GET", ack, Value::Null).await;
+    assert_eq!(
+        view["acknowledged"], false,
+        "assertion must not mint a stored receipt: {view}"
+    );
+    let explicit_id = explicit["id"].as_str().unwrap();
+    for operation in ["retry", "duplicate"] {
+        let (status, replay) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{explicit_id}/{operation}"),
+            json!({"payloadChanges":{"licenseAcknowledged":true}}),
+        )
+        .await;
+        if status != StatusCode::FORBIDDEN || replay["code"] != "license_acknowledgment_required" {
+            violations.push(format!("assertion override {operation}: {status} {replay}"));
+        }
+    }
+    let (status, _) = request(app.clone(), "PUT", ack, Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let path = config_dir.join("builtin.models.jsonc");
+    let source = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(
+        &path,
+        source.replace(
+            "https://huggingface.co/MiniMaxAI/MiniMax-H3",
+            "https://example.org/new-license",
+        ),
+    )
+    .unwrap();
+    let changed = create_app(settings).unwrap();
+    for (kind, id) in &jobs {
+        for operation in ["retry", "duplicate"] {
+            let (status, replay) = request(
+                changed.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{id}/{operation}"),
+                json!({"payloadChanges":{}}),
+            )
+            .await;
+            if status != StatusCode::FORBIDDEN
+                || replay["code"] != "license_acknowledgment_required"
+            {
+                violations.push(format!(
+                    "changed terms {kind}/{operation}: {status} {replay}"
+                ));
+            }
+        }
+    }
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
 }

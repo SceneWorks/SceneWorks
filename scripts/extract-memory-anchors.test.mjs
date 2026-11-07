@@ -1,3 +1,4 @@
+import { rustFacadeSource, rustFacadeFunction } from "./lib/rust-facade-source.mjs";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -6,6 +7,7 @@ import test, { before } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { declaredSyntheticOwnedAccounting } from "./lib/flux3-owned-accounting-fixture.mjs";
 import { buildMatrix } from "./generate-memory-matrix.mjs";
 import {
   ANALYTIC_BASES,
@@ -16,6 +18,7 @@ import {
   PACKAGED_SOURCES_PATH,
   STORE_PATH,
   anchorCandidate,
+  observedOperatingEnvelope,
   assertEveryDerivableCorpusIsPackaged,
   assertPackagedSources,
   buildAnchorStore,
@@ -67,6 +70,44 @@ before(async () => {
 // zero unclassified cells. SHAPE only: this must never pin how many models or anchors exist, or it
 // becomes a frozen-corpus gate that a catalog addition fails for the wrong reason.
 // ---------------------------------------------------------------------------------------------
+
+test("sampled accounting extracts as typed observation, never a legacy peak anchor", () => {
+  // Explicit synthetic CPU protocol object, not a retained physical measurement.
+  const record = declaredSyntheticOwnedAccounting({ id: "cpu-protocol-only", status: "complete", evidenceScope: "authoritative", target: { modelId: "flux3_klein_base" }, strategy: { rung: "resident", engagedRungs: [], parameters: {} } });
+  const corpus = { path: "cpu-fixture-only", sha256: "e".repeat(64) };
+  const observation = observedOperatingEnvelope(record, corpus);
+  assert.deepEqual(observation.recipe, record.observedExecutionRecipe);
+  assert.deepEqual(observation.accounting, record.ownedProcessMemory);
+  assert.deepEqual(observation.operatingConditions, record.observedOperatingConditions);
+  assert.deepEqual(observation.source, { ...corpus, recordId: record.id });
+  assert.equal(anchorCandidate(record, corpus), null);
+  assert.equal(observation.accounting.unavailableMetrics.physicalResidentBytes, null);
+  assert.equal(observation.operatingConditions.fitAuthorization, false);
+  assert.equal("phaseActivePeakBytes" in observation, false);
+  assert.equal("overallAllocatorEnvelopeBytes" in observation, false);
+  const candidate = structuredClone(record); candidate.evidenceScope = "candidate";
+  assert.equal(observedOperatingEnvelope(candidate, corpus), null);
+  for (const mutate of [
+    value => { value.observedMemory = { overall: { activeBytes: 100, allocatorBytes: 100, reclaimableBytes: 0 } }; },
+    value => { value.strategy.engagedRungs.push("staged_residency"); },
+    value => { value.observedExecutionRecipe.actualLoadSpecSha256 = "f".repeat(64); },
+    value => { value.ownedProcessMemory.phases.denoise.samples = 1; },
+    value => { value.ownedProcessMemory.identity.pid = 0; },
+    value => { value.ownedProcessMemory.physicalNodes.push(0); },
+    value => { value.ownedProcessMemory.unavailableMetrics.allocatorBytes = 120; },
+    value => { value.observedOperatingConditions.fitAuthorization = true; },
+    value => { value.observedOperatingConditions.gpuUuid = "GPU-00000000-0000-0000-0000-000000000001"; },
+  ]) {
+    const mutant = structuredClone(record); mutate(mutant);
+    assert.throws(() => observedOperatingEnvelope(mutant, corpus));
+  }
+  // Aliased legacy-looking fields still cannot satisfy a legacy anchor.
+  const aliased = structuredClone(record);
+  aliased.observedMemory = { overall: { allocatorBytes: 120 } };
+  aliased.diagnostics = { measurements: ["conditioning", "denoise", "decode"].map(phase => ({ name: `${phase}DevicePeakDelta`, value: 100 })) };
+  assert.equal(anchorCandidate(aliased, corpus), null);
+  assert.throws(() => observedOperatingEnvelope(aliased, corpus));
+});
 
 test("every catalog model x tier x lane is classified, with nothing unclassified", () => {
   const anchored = new Set(
@@ -179,6 +220,31 @@ test("a catalog model with zero evidence of any kind is classified, not refused"
   assert.equal(row.basis, "no_retained_evidence", "total absence is an explicit basis, not a gap");
   assert.equal(row.evidence, null, "a no-evidence row cites nothing");
   assert.ok(row.reason.trim().length > 0, "the classification states why it is analytic-only");
+});
+
+test("an unmeasured FLUX 3 Candle coordinate is advisory, never a fabricated anchor or bound", async () => {
+  // Synthetic identity keeps this a missing-evidence test even after terminal real-weight evidence
+  // is retained for the real flux3_klein route. No frozen zero-anchor population or currency gate.
+  const model = {
+    id: "sc26235_unmeasured_flux3_fixture",
+    backends: ["candle"],
+    axes: { candle: { tiers: ["default"] } },
+    family: "flux3",
+    familyGroup: 26233,
+    resolvedRoute: null,
+    resolvedRoutes: { candle: "sc26235_unmeasured_flux3_route" },
+    modality: "image",
+  };
+  const built = await buildAnchorStore({ matrix: { models: [model] } });
+  assert.deepEqual(built.anchors, []);
+  assert.equal(built.analyticOnly.length, 1);
+  const [entry] = built.analyticOnly;
+  assert.equal(entry.modelId, model.id);
+  assert.equal(entry.backend, "candle");
+  assert.equal(entry.basis, "no_retained_evidence");
+  assert.equal(entry.evidence, null);
+  assert.ok(Object.values(entry).every((value) => typeof value !== "number"), "absence cannot invent a numeric bound");
+  assert.ok(!Object.keys(entry).some((key) => /bytes|peak|currency|current/i.test(key)), "an advisory coordinate carries no admission/currentness claim");
 });
 
 test("the checked-in store is what the extractor produces", async () => {
@@ -1206,7 +1272,7 @@ test("every contract_estimate row is on a lane that implements the per-rung ladd
   };
   const implementing = [];
   for (const [backend, relative] of Object.entries(laneSources)) {
-    const source = await readFile(path.join(ROOT, relative), "utf8");
+    const source = await rustFacadeSource(path.join(ROOT, relative));
     if (/fn floor_pseudo_anchor\b/.test(source)) implementing.push(backend);
   }
   assert.deepEqual(
@@ -1235,9 +1301,8 @@ test("every contract_estimate row is on a lane that implements the per-rung ladd
 // ---------------------------------------------------------------------------------------------
 
 test("RECEIPT_PRICED_ROUTES mirrors the worker's is_receipt_priced, read from its source", async () => {
-  const source = await readFile(
+  const source = await rustFacadeSource(
     path.join(ROOT, "crates/sceneworks-worker/src/candle_memory_strategy.rs"),
-    "utf8",
   );
   const body = source.match(
     /pub\(crate\) fn is_receipt_priced\(engine_id: &str\) -> bool \{([\s\S]*?)\n\}/,
@@ -1251,14 +1316,35 @@ test("RECEIPT_PRICED_ROUTES mirrors the worker's is_receipt_priced, read from it
     ([, helper]) => helper,
   );
   assert.ok(helpers.length > 0, "is_receipt_priced delegates to per-family helpers");
+  assert.equal(body[1].replace(/\b(is_[a-z0-9_]+)\(engine_id\)|engine_id\s*==\s*"[^"]+"|\|\|/g, "").trim(), "",
+    "every receipt-priced expression must be understood");
+  const { source: registry } = await rustFacadeFunction(
+    path.join(ROOT, "crates/sceneworks-worker/src/memory_route_registry.rs"), "gate_family",
+  );
+  const gateBody = registry.match(
+    /pub\(crate\) fn gate_family\(engine_id: &str\) -> Option<MemoryGateFamily> \{\s*use MemoryGateFamily::\*;\s*Some\(match engine_id \{([\s\S]*?)\n\s*\}\)\s*\}/,
+  );
+  assert.ok(gateBody, "the shared gate_family uses an engine-id match");
+  const families = new Map();
+  const arm = /((?:"[^"\n]+"\s*\|\s*)*"[^"\n]+")\s*=>\s*([A-Za-z0-9_]+)\s*,/g;
+  for (const [, patterns, family] of gateBody[1].matchAll(arm)) {
+    const ids = [...patterns.matchAll(/"([^"]+)"/g)].map(([, id]) => id);
+    families.set(family, [...(families.get(family) ?? []), ...ids]);
+  }
+  const remainder = gateBody[1].replace(arm, "").replace(/_\s*=>\s*return None\s*,/, "").trim();
+  assert.equal(remainder, "", "every gate_family arm must be understood");
   for (const helper of helpers) {
     const helperBody = source.match(
       new RegExp(`fn ${helper}\\(engine_id: &str\\) -> bool \\{([\\s\\S]*?)\\n\\}`),
     );
     assert.ok(helperBody, `${helper} is defined on the worker`);
-    const literals = helperBody[1].match(/matches!\(\s*engine_id,([\s\S]*?)\)\s*$/);
-    assert.ok(literals, `${helper} is a matches! over engine-id literals`);
-    for (const [, literal] of literals[1].matchAll(/"([^"]+)"/g)) routes.add(literal);
+    const family = helperBody[1].match(
+      /^\s*crate::memory_route_registry::gate_family\(engine_id\)\s*==\s*Some\(crate::memory_route_registry::MemoryGateFamily::([A-Za-z0-9_]+)\)\s*$/,
+    );
+    assert.ok(family, `${helper} delegates to exactly one shared gate family`);
+    const ids = families.get(family[1]);
+    assert.ok(ids?.length, `${family[1]} has registered engine ids`);
+    for (const id of ids) routes.add(id);
   }
   assert.deepEqual(
     [...RECEIPT_PRICED_ROUTES].sort(),

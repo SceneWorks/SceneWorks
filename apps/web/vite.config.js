@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 
 import { defineConfig } from "vite";
 
+import cspPlugin from "./vite-plugin-csp.js";
 import precompressPlugin from "./vite-plugin-precompress.js";
 import bundleReportPlugin from "./vite-plugin-bundle-report.js";
 import themeInitPlugin from "./vite-plugin-theme-init.js";
@@ -29,10 +30,11 @@ const bundleBudgets = JSON.parse(
 const licensesDir = fileURLToPath(new URL("../desktop/licenses", import.meta.url));
 const webRoot = fileURLToPath(new URL(".", import.meta.url));
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   // Generate the pre-paint /theme-init.js from src/accents.js at dev/build time
   // (single source of truth for the accent-id list). See vite-plugin-theme-init.js.
   plugins: [
+    cspPlugin(),
     themeInitPlugin(),
     editorGuidesPlugin(),
     bundleReportPlugin({ budgets: bundleBudgets }),
@@ -42,7 +44,7 @@ export default defineConfig({
   // the specific key keeps it lint-safe (no bare global) under no-undef.
   define: {
     "import.meta.env.VITE_APP_VERSION": JSON.stringify(pkg.version),
-    "import.meta.env.VITE_SDXL_CUDA_MEMORY_ENDPOINTS": JSON.stringify(JSON.stringify(loadSdxlCudaMemoryProjection())),
+    "import.meta.env.VITE_SDXL_CUDA_MEMORY_ENDPOINTS": JSON.stringify(JSON.stringify(loadSdxlCudaMemoryProjection(undefined, { required: command === "build" }))),
   },
   // react-konva pulls its own react-reconciler; without deduping, Vite's dep
   // optimizer can hand it a second React copy, tripping "Invalid hook call /
@@ -51,6 +53,12 @@ export default defineConfig({
   resolve: {
     dedupe: ["react", "react-dom"],
   },
+  // Keep the already-eager shared UI modules together. Without this grouping the
+  // asset-search ownership split fragments the initial closure into many small
+  // chunks, increasing its compressed size beyond the existing first-paint budget.
+  build: { rolldownOptions: { output: { manualChunks(id) {
+    if (/\/src\/(?:context\/AppContext|components\/(?:Modal|DocumentView|Icons|WorkerProgressCard|audioTakeParts)|(?:appConfirm|audioContext|characterMembership|formatting|imageJobs|macGating|modelEligibility|mossImage|presetUtils|uiPreferences|workflowEmbedPreferences|workflowShare)|hooks\/usePreviewArrowNavigation)\.[jt]sx?$/.test(id)) return "app-shared";
+  } } } },
   optimizeDeps: {
     include: ["react", "react-dom", "react-dom/client", "konva", "react-konva"],
   },
@@ -70,4 +78,4 @@ export default defineConfig({
       ],
     },
   },
-});
+}));

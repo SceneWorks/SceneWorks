@@ -78,10 +78,11 @@ function verdictText({ report, blocking, notRestored, replayBlocked }) {
     report.inputImagesRequired > 0
       ? ` It still needs ${report.inputImagesRequired} image${report.inputImagesRequired === 1 ? "" : "s"} from you.`
       : "";
+  const tensorClause = report.tensors?.length ? ` It also needs ${report.tensors.length} exact tensor artifact${report.tensors.length === 1 ? "" : "s"} from you.` : "";
   if (notRestored.length) {
-    return `Everything this recipe names is installed here, but ${lost}.${inputClause}`;
+    return `Everything this recipe names is installed here, but ${lost}.${inputClause}${tensorClause}`;
   }
-  return `Everything this recipe names is installed here.${inputClause}`;
+  return `Everything this recipe names is installed here.${inputClause}${tensorClause}`;
 }
 
 export function WorkflowResolutionReport({ report, share = null, replayNotRestored = [] }) {
@@ -136,6 +137,7 @@ export function WorkflowResolutionReport({ report, share = null, replayNotRestor
             title={`LoRA — ${lora.name ?? lora.repo ?? "unnamed"}`}
           />
         ))}
+        {(report.components ?? []).map((component) => <Row key={`${component.modelId}:${component.purpose}`} title="MOSS Image Edit adapter" state={component.state} detail={component.detail} />)}
         {styles.map((style, index) => (
           <Row
             detail={style.detail}
@@ -152,6 +154,7 @@ export function WorkflowResolutionReport({ report, share = null, replayNotRestor
             title={`Input image — ${input.kind}`}
           />
         ))}
+        {(report.tensors ?? []).map((tensor) => <Row key={`tensor-${tensor.role}`} title={`Exact tensor — ${tensor.role}`} detail={tensor.detail} state="userSupplied" />)}
         {omitted.map((entry) => (
           <Row
             detail={entry.detail}

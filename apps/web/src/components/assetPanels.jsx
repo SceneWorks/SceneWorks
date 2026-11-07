@@ -1,11 +1,14 @@
+import { useMediaTicket } from "../hooks/useMediaTicket.js";
+import { mediaResponse } from "../api/media.js";
 import { AssetVedaOutcome } from "./VedaOutcome.jsx";
 import React from "react";
-import { isAbortError } from "../api.js";
+import { getMediaTicket, isAbortError, subscribeMediaTicket } from "../api.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { assetMatchesCharacter } from "../characterMembership.js";
 import { assetCanCarryWorkflow, saveAssetAs, revealAsset } from "../assetActions.js";
 import { SAVE_WITHOUT_WORKFLOW_LABEL } from "../workflowEmbedPreferences.js";
 import { isDesktop, isPageFullscreen, setViewerFullscreen } from "../runtime.js";
+import { usePreviewArrowNavigation } from "../hooks/usePreviewArrowNavigation.js";
 import {
   AssetMedia,
   AssetThumbnail,
@@ -118,34 +121,65 @@ export async function emptyTrash(trashedAssets, purgeAsset) {
 // Reopens a saved interleaved document: the asset's file points to the segments
 // JSON in assets/documents/, fetched here (served like any project file).
 function DocumentReader({ asset }) {
+  const ticket = useMediaTicket();
+  const [unauthorizedTicket, setUnauthorizedTicket] = React.useState(null);
+  const [retryGeneration, setRetryGeneration] = React.useState(0);
+  React.useEffect(() => {
+    if (unauthorizedTicket !== null && unauthorizedTicket !== ticket) {
+      setUnauthorizedTicket(null);
+      setRetryGeneration((value) => value + 1);
+    }
+  }, [ticket, unauthorizedTicket]);
   const url = assetUrl(asset);
+  const resourceKey = React.useMemo(() => {
+    if (!url) return "";
+    const parsed = new URL(url, "http://sceneworks.invalid");
+    parsed.searchParams.delete("ticket");
+    return parsed.href;
+  }, [url]);
+  const committed = React.useRef({ url, resourceKey, generation: 0 });
+  React.useLayoutEffect(() => {
+    const previous = committed.current;
+    committed.current = {
+      url,
+      resourceKey,
+      generation: previous.generation + (previous.resourceKey === resourceKey ? 0 : 1),
+    };
+  }, [url, resourceKey]);
+  React.useLayoutEffect(() => () => { committed.current.generation += 1; }, []);
   const [segments, setSegments] = React.useState(null);
   const [error, setError] = React.useState("");
 
   React.useEffect(() => {
-    if (!url) {
+    if (!resourceKey) {
       setError("Document file is unavailable.");
       return undefined;
     }
     const controller = new AbortController();
+    const { url: initialUrl, generation } = committed.current;
+    const ownsRequest = () => !controller.signal.aborted && committed.current.generation === generation;
+    let requestTicket = getMediaTicket();
+    setUnauthorizedTicket(null);
     setSegments(null);
     setError("");
-    fetch(url, { signal: controller.signal })
-      .then((response) => {
-        if (!response.ok) {
-          throw new Error(`Request failed (${response.status})`);
-        }
-        return response.json();
-      })
-      .then((document) => {
-        setSegments(Array.isArray(document?.segments) ? document.segments : []);
-      })
-      .catch((err) => {
-        if (isAbortError(err)) return;
-        setError(String(err?.message ?? err));
-      });
+    const load = async () => {
+      let response = await mediaResponse(initialUrl, { signal: controller.signal });
+      // Do not restart a live or already completed read solely for rotation.
+      // If the old credential expired during this read, retry once with the new one.
+      if (response.status === 401 && ownsRequest() && committed.current.url !== initialUrl) {
+        requestTicket = getMediaTicket();
+        response = await mediaResponse(committed.current.url, { signal: controller.signal });
+      }
+      if (response.status === 401 && ownsRequest()) setUnauthorizedTicket(requestTicket);
+      if (!response.ok) throw new Error(`Request failed (${response.status})`);
+      const document = await response.json();
+      if (ownsRequest()) setSegments(Array.isArray(document?.segments) ? document.segments : []);
+    };
+    load().catch((err) => {
+      if (ownsRequest() && !isAbortError(err)) setError(String(err?.message ?? err));
+    });
     return () => controller.abort();
-  }, [url]);
+  }, [resourceKey, retryGeneration]);
 
   if (error) {
     return <p className="empty-panel error-text">Couldn't load document: {error}</p>;
@@ -492,6 +526,7 @@ export function AssetGrid({
         ) : (
           <button
             className={tileClasses.join(" ")}
+            data-asset-id={asset.id}
             onClick={() => setSelectedAssetId(asset.id)}
             onContextMenu={suppressThumbnailContextMenu}
             onDoubleClick={() => onPreview(asset)}
@@ -616,6 +651,7 @@ export function AssetDetail({
   // sc-25682: open the depth action for this image (absent when depth cannot run here).
   onEstimateDepth = null,
 }) {
+  useMediaTicket();
   if (!asset) {
     return <aside className="asset-detail empty-panel">No asset selected</aside>;
   }
@@ -672,6 +708,8 @@ export function AssetDetail({
               Download raw depth (.npy)
             </a>
           ) : null}
+          {asset.type === "tensor" ? <a className="button" download href={assetUrl(asset)}>Download exact tensor (.npy)</a> : null}
+          {asset.type === "tensor" && asset.extra?.workflowCompanion?.path ? <a className="button" download href={assetUrl({ projectId: asset.projectId, file: { path: asset.extra.workflowCompanion.path } })}>Download portable workflow (.json)</a> : null}
         </AssetStatusActions>
       </div>
       <dl>
@@ -934,6 +972,7 @@ function FullscreenPreviewComponent({
   sourceAsset,
   updateAssetStatus,
 }) {
+  React.useSyncExternalStore(subscribeMediaTicket, getMediaTicket, getMediaTicket);
   const hasUpscaleVariants = Boolean(asset.variants?.original && asset.variants?.upscaled);
   const [variantMode, setVariantMode] = React.useState("upscaled");
   React.useEffect(() => {
@@ -942,6 +981,21 @@ function FullscreenPreviewComponent({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [asset.id, asset.variants?.upscaled?.id]);
   const displayedAsset = hasUpscaleVariants ? asset.variants[variantMode] : asset;
+  const regeneratingRef = React.useRef(false);
+  const [regeneration, setRegeneration] = React.useState(null);
+  const regenerate = async () => {
+    if (regeneratingRef.current) return;
+    regeneratingRef.current = true;
+    setRegeneration({ assetId: asset.id, pending: true });
+    try {
+      await onRegenerate(asset);
+      setRegeneration(null);
+    } catch (error) {
+      setRegeneration({ assetId: asset.id, error: error.message || "Could not re-generate this image." });
+    } finally {
+      regeneratingRef.current = false;
+    }
+  };
 
   // Each generated image has its OWN seed on its per-asset recipe (asset.recipe.seed).
   // The generation-set recipe only carries the batch's base seed — shared across every
@@ -967,7 +1021,7 @@ function FullscreenPreviewComponent({
   // the "and nowhere else" half: no envelope, no button.
   const hasRecordedRecipe = Boolean(
     onUseRecipe &&
-      ["image", "video", "vector"].includes(asset.type) &&
+      ["image", "video", "vector", "tensor"].includes(asset.type) &&
       (asset.generationSet?.recipe || asset.recipe),
   );
   // `asset.type === "image"` rather than the sibling's `["image", "video"]`: this button launches
@@ -986,6 +1040,7 @@ function FullscreenPreviewComponent({
   // Zoom/pan is IMAGES ONLY — video keeps its native <video> controls and gets no
   // zoom overlay/UI (sc-8728). `isVideo` gates the whole zoom surface.
   const isVideo = assetCanRenderAsVideo(displayedAsset);
+  const isTensor = displayedAsset.type === "tensor";
 
   // Side-by-side compare (Original vs Edited) for Image-Studio edits that link back
   // to a source asset still present in the gallery (asset.lineage.sourceAssetId,
@@ -993,7 +1048,7 @@ function FullscreenPreviewComponent({
   // OWN Library tile — this is a view-only toggle, never a fold. Excluded for video
   // and for the upscale-variant fold, which owns the footer Original/Upscaled toggle.
   const canCompare =
-    !isVideo && !hasUpscaleVariants && asset.recipe?.mode === "edit_image" && Boolean(sourceAsset);
+    !isVideo && !isTensor && !hasUpscaleVariants && asset.recipe?.mode === "edit_image" && Boolean(sourceAsset);
   const [compareMode, setCompareMode] = React.useState(false);
   const toggleCompare = React.useCallback(() => setCompareMode((on) => !on), []);
   // Drop compare when navigating to another asset (prev/next) so it never persists
@@ -1043,7 +1098,7 @@ function FullscreenPreviewComponent({
   // preventDefault the page scroll; React's onWheel is passive in some browsers.
   React.useEffect(() => {
     const node = viewportNode;
-    if (!node || isVideo) {
+    if (!node || isVideo || isTensor) {
       return undefined;
     }
     const onWheel = (event) => {
@@ -1055,7 +1110,7 @@ function FullscreenPreviewComponent({
     };
     node.addEventListener("wheel", onWheel, { passive: false });
     return () => node.removeEventListener("wheel", onWheel);
-  }, [isVideo, displayedAsset?.id, viewportNode]);
+  }, [isVideo, isTensor, displayedAsset?.id, viewportNode]);
 
   const onPointerDown = (event) => {
     if (view.scale <= PREVIEW_MIN_SCALE) {
@@ -1083,6 +1138,9 @@ function FullscreenPreviewComponent({
   };
 
   const zoomed = view.scale > PREVIEW_MIN_SCALE;
+
+  const goPrevious = previousAsset ? () => onPreviewAsset(previousAsset, "previous") : null;
+  const goNext = nextAsset ? () => onPreviewAsset(nextAsset, "next") : null;
 
   // Right-click context menu (sc-8729). Override the native WKWebView menu on the
   // stage for BOTH the <img> and <video> paths and render our own at the cursor.
@@ -1152,6 +1210,10 @@ function FullscreenPreviewComponent({
     return () => document.removeEventListener("keydown", onKeyDown, true);
   }, [isFullscreen, contextMenu, exitFullscreen]);
 
+  // Left/Right arrows mirror the prev/next buttons; the open context menu keeps its own keys.
+  const stageRef = React.useRef(null);
+  usePreviewArrowNavigation({ rootRef: stageRef, enabled: !contextMenu, onPrevious: goPrevious, onNext: goNext });
+
   // Never leave the OS window/page stuck in fullscreen if the preview unmounts while
   // active (collection exhausted mid-fullscreen, external close).
   React.useEffect(
@@ -1204,16 +1266,16 @@ function FullscreenPreviewComponent({
           onSelect: toggleCompare,
         });
       }
-      if (!isVideo) {
+      if (!isVideo && !isTensor) {
         items.push({ key: "zoom-in", label: "Zoom In", onSelect: zoomIn });
         items.push({ key: "zoom-out", label: "Zoom Out", onSelect: zoomOut });
         items.push({ key: "fit", label: "Fit to View", onSelect: fitToView });
       }
       const submenuItems = [];
-      if (onEditImage && !isVectorAsset(asset)) {
+      if (onEditImage && !isVectorAsset(asset) && !isTensor) {
         submenuItems.push({ key: "image-editor", label: "Image Editor", onSelect: () => onEditImage(asset) });
       }
-      if (onEditInStudio && !isVectorAsset(asset)) {
+      if (onEditInStudio && !isVectorAsset(asset) && !isTensor) {
         submenuItems.push({ key: "image-studio", label: "Image Studio", onSelect: () => onEditInStudio(asset) });
       }
       const submenu = submenuItems.length ? { label: "Edit in", items: submenuItems } : null;
@@ -1223,6 +1285,7 @@ function FullscreenPreviewComponent({
       asset,
       displayedAsset,
       isVideo,
+      isTensor,
       isFullscreen,
       enterFullscreen,
       exitFullscreen,
@@ -1258,12 +1321,12 @@ function FullscreenPreviewComponent({
           Close
         </button>
       </div>
-      <div className="preview-modal-stage" onContextMenu={openContextMenu}>
+      <div className="preview-modal-stage" onContextMenu={openContextMenu} ref={stageRef}>
           <button
             aria-label="Previous asset"
             className="preview-nav-button previous"
             disabled={!previousAsset}
-            onClick={() => previousAsset && onPreviewAsset(previousAsset, "previous")}
+            onClick={() => goPrevious?.()}
             type="button"
           >
             <Icon.ArrowLeft size={18} />
@@ -1279,7 +1342,7 @@ function FullscreenPreviewComponent({
                 <figcaption>Edited</figcaption>
               </figure>
             </div>
-          ) : isVideo ? (
+          ) : isVideo || isTensor ? (
             <AssetMedia asset={displayedAsset} />
           ) : (
             <div
@@ -1301,17 +1364,16 @@ function FullscreenPreviewComponent({
           )}
           <LikenessBadge asset={asset} />
           <AudioTrackBadge asset={asset} />
-          <AssetVedaOutcome asset={asset} />
           <button
             aria-label="Next asset"
             className="preview-nav-button next"
             disabled={!nextAsset}
-            onClick={() => nextAsset && onPreviewAsset(nextAsset, "next")}
+            onClick={() => goNext?.()}
             type="button"
           >
             <Icon.ArrowRight size={18} />
           </button>
-          {isVideo || compareActive ? null : (
+          {isVideo || isTensor || compareActive ? null : (
             <div className="preview-zoom-controls" role="group" aria-label="Zoom controls">
               <button
                 aria-label="Zoom out"
@@ -1356,6 +1418,7 @@ function FullscreenPreviewComponent({
             <strong>{asset.displayName}</strong>
             <span>{asset.recipe?.model}</span>
           </div>
+          <AssetVedaOutcome asset={asset} />
           {hasUpscaleVariants ? (
             <div className="segmented-control compact-segment preview-variant-toggle" aria-label="Image variant">
               <button
@@ -1392,6 +1455,7 @@ function FullscreenPreviewComponent({
             <button onClick={() => saveAssetAs(displayedAsset)} type="button">
               Save As…
             </button>
+            {isTensor && displayedAsset.extra?.workflowCompanion?.path ? <a download href={assetUrl({ projectId: displayedAsset.projectId, file: { path: displayedAsset.extra.workflowCompanion.path } })}>Download portable workflow (.json)</a> : null}
             {/* Its without-the-recipe sibling (sc-15953). The option existed only behind a
                 right-click, which makes "discoverable" untrue for the one action a user takes
                 specifically because they are about to send the file to someone else. PNGs only —
@@ -1428,12 +1492,16 @@ function FullscreenPreviewComponent({
                 not a direct image queue. */}
             {onRegenerate && asset.type === "image" && hasRecordedRecipe ? (
               <button
-                onClick={() => onRegenerate(asset)}
-                title="Regenerate this image with a new random seed"
+                disabled={Boolean(regeneration?.pending)}
+                onClick={regenerate}
+                title="Add a new variation to the queue without leaving this image"
                 type="button"
               >
                 Re-Generate
               </button>
+            ) : null}
+            {regeneration?.assetId === asset.id && regeneration.error ? (
+              <span role="alert">{regeneration.error}</span>
             ) : null}
             {/* An image someone else made, imported here, carrying the recipe that made it in its
                 own bytes (sc-15949 → sc-15952). It has no recorded recipe of its own — nothing on

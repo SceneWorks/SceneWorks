@@ -36,11 +36,23 @@ fn loopback_trusted_only_when_enabled_and_peer_is_local() {
     // local desktop UI/worker bypass the password while LAN clients (other IPs) don't.
     assert!(loopback_trusted(true, Some(addr("127.0.0.1:51234"))));
     assert!(loopback_trusted(true, Some(addr("[::1]:51234"))));
+    assert!(loopback_trusted(
+        true,
+        Some(addr("[::ffff:127.0.0.1]:51234"))
+    ));
     // Enabled but the peer is on the LAN → still gated.
     assert!(!loopback_trusted(true, Some(addr("192.168.1.5:51234"))));
     assert!(!loopback_trusted(true, Some(addr("0.0.0.0:51234"))));
+    assert!(!loopback_trusted(
+        true,
+        Some(addr("[::ffff:192.168.1.5]:51234"))
+    ));
     // A loopback peer alone never trusts without the opt-in (server/Docker default).
     assert!(!loopback_trusted(false, Some(addr("127.0.0.1:51234"))));
+    assert!(!loopback_trusted(
+        false,
+        Some(addr("[::ffff:127.0.0.1]:51234"))
+    ));
     // Unknown peer (e.g. the unit-test oneshot path with no connect info) → not trusted.
     assert!(!loopback_trusted(true, None));
 }
@@ -49,7 +61,7 @@ fn loopback_trusted_only_when_enabled_and_peer_is_local() {
 fn open_bind_override_only_for_explicit_optin() {
     // sc-5720 (API-001): the override that lets an unauthenticated open bind start
     // must require an explicit affirmative value; anything else keeps the refusal.
-    for value in ["1", "true", "TRUE", "yes", "YES", " 1 "] {
+    for value in ["1", "true", "TRUE", "yes", "YES", " 1 ", "On", "YeS"] {
         assert!(open_bind_override_enabled(value), "{value:?} should opt in");
     }
     for value in ["", "0", "false", "no", "off", "2", "enable"] {
@@ -133,6 +145,47 @@ async fn public_health_withholds_host_paths_when_a_token_is_configured() {
     assert_eq!(health["status"], "ok");
     assert_eq!(health["authRequired"], true);
     assert!(health.get("directories").is_none());
+}
+
+/// The lifecycle harnesses (scripts/flux3-image-klein-app-lifecycle.mjs) prove endpoint
+/// ownership from this exact body, and their JS tests consume the checked-in capture rather
+/// than a hand-typed mock. Any serialized field rename here must update that capture, which
+/// the JS suite then re-validates — so the harness and the DTO cannot drift apart silently.
+#[tokio::test]
+async fn ready_health_body_matches_the_checked_in_lifecycle_capture() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let expected_dirs = [
+        ("data", settings.data_dir.display().to_string()),
+        ("config", settings.config_dir.display().to_string()),
+        ("projects", settings.projects_dir().display().to_string()),
+        ("jobsDb", settings.jobs_db_path.display().to_string()),
+    ];
+    let app = create_app(settings).expect("app creates");
+    let (status, mut health) = request(app, "GET", "/api/v1/health", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Normalize only host- and timing-specific VALUES; every key stays as serialized.
+    for (key, path) in expected_dirs {
+        assert_eq!(health["directories"][key], path.as_str(), "{key}");
+        health["directories"][key] = Value::String(format!("<{key}>"));
+    }
+    health["version"] = Value::String("<version>".to_owned());
+    health["startupMaintenance"]["status"] = Value::String("<status>".to_owned());
+
+    let capture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scripts/fixtures/sceneworks-api-health-ready.json");
+    let capture: Value = serde_json::from_str(
+        &std::fs::read_to_string(&capture_path).expect("lifecycle health capture reads"),
+    )
+    .expect("lifecycle health capture parses");
+    assert_eq!(
+        health,
+        capture,
+        "the ready /api/v1/health body changed; update {} to:\n{}",
+        capture_path.display(),
+        serde_json::to_string_pretty(&health).expect("health serializes"),
+    );
 }
 
 #[tokio::test]
@@ -525,6 +578,63 @@ async fn ui_preferences_simple_ui_round_trips_and_merges() {
     let (status, prefs) = request(app, "GET", "/api/v1/ui-preferences", Value::Null).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(prefs["simpleUi"], false);
+}
+
+#[tokio::test]
+async fn ui_preferences_sidebar_collapsed_round_trips_and_merges() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir); // no token configured ⇒ PUT is open
+    let app = create_app(settings).expect("app creates");
+
+    // Fresh install: the Advanced sidebar is expanded.
+    let (status, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(prefs.get("sidebarCollapsed").is_none());
+
+    // Opting in persists and is echoed back.
+    let (status, saved) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "sidebarCollapsed": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["sidebarCollapsed"], true);
+
+    // Survives a "relaunch".
+    let (status, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(prefs["sidebarCollapsed"], true);
+
+    // A partial PUT (theme only) MERGES — it must not silently drop the user back into the
+    // expanded sidebar on their next launch.
+    let (status, _) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "theme": "dark" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(prefs["sidebarCollapsed"], true);
+    assert_eq!(prefs["theme"], "dark");
+
+    // Opting back out persists too (a false must be stored, not treated as "unset").
+    let (status, saved) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "sidebarCollapsed": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["sidebarCollapsed"], false);
+    let (status, prefs) = request(app, "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(prefs["sidebarCollapsed"], false);
 }
 
 #[tokio::test]
@@ -1115,9 +1225,13 @@ async fn cors_preflight_allows_frontend_origin_and_token_header() {
     let request = Request::builder()
         .method("OPTIONS")
         .uri("/api/v1/jobs")
+        .header("host", "localhost:8000")
         .header("origin", "http://localhost:5173")
         .header("access-control-request-method", "POST")
-        .header("access-control-request-headers", "X-SceneWorks-Token")
+        .header(
+            "access-control-request-headers",
+            "X-SceneWorks-Token, X-SceneWorks-Media-Ticket, If-Match",
+        )
         .body(Body::empty())
         .expect("request builds");
 
@@ -1136,6 +1250,18 @@ async fn cors_preflight_allows_frontend_origin_and_token_header() {
         .get("access-control-allow-headers")
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.to_ascii_lowercase().contains("x-sceneworks-token")));
+    assert!(response
+        .headers()
+        .get("access-control-allow-headers")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().contains("if-match")));
+    assert!(response
+        .headers()
+        .get("access-control-allow-headers")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value
+            .to_ascii_lowercase()
+            .contains("x-sceneworks-media-ticket")));
 }
 
 #[tokio::test]

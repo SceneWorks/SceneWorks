@@ -1,24 +1,15 @@
+import { SamplerSchedulerFields, SamplingStepsField, SamplingSeedField } from "./SamplerSchedulerFields.jsx";
+import { useSamplerControls } from "../hooks/useSamplerControls.js";
 import React from "react";
 
 import { AdvancedSection } from "./AdvancedSection.jsx";
-import {
-  SAMPLER_LABELS,
-  SCHEDULER_LABELS,
-  guidanceDefaultFromModel,
-  samplerDefaultFromModel,
-  samplerOptionsFromModel,
-  schedulerDefaultFromModel,
-  schedulerOptionsFromModel,
-  schedulerShiftDefaultFromModel,
-  stepsDefaultFromModel,
-} from "../samplerOptions.js";
+import { negativePromptInertAtGuidance, guidanceDefaultFromModel, samplerDefaultFromModel, schedulerDefaultFromModel, stepsDefaultFromModel } from "../samplerOptions.js";
 import { pidToggleVisible } from "../pidEligibility.js";
 import { pidDecodeHeadsUp } from "../pidDecodeNotice.js";
 
 // Shared advanced-generation controls for Character Studio's Angle Set and Pose
-// Library panels (sc-3857). Mirrors the Image Studio advanced panel
-// (screens/ImageStudio.jsx) — same labels and the same `advanced`-dict keys — so
-// the worker reads identical fields and the two studios stay consistent.
+// Library panels (sc-3857). Sampling menus, reconciliation and fields are shared
+// with the studios; this owner retains Character-specific payload and tuning.
 //
 // State lives in `useCharacterAdvancedOptions(model, { defaultNegativePrompt })`;
 // `<CharacterAdvancedOptions state={…} />` is purely presentational.
@@ -60,11 +51,6 @@ export function useCharacterAdvancedOptions(
         ? identityStructure.default
         : 0.8;
 
-  const samplerOptions = samplerOptionsFromModel(model);
-  const schedulerOptions = schedulerOptionsFromModel(model);
-  const showSamplerPicker = samplerOptions.length > 1;
-  const showSchedulerPicker = schedulerOptions.length > 1;
-
   const [open, setOpen] = React.useState(false);
   const [ipAdapterScale, setIpAdapterScale] = React.useState(referenceStrengthDefault);
   const [trueCfgScale, setTrueCfgScale] = React.useState(trueCfgScaleDefault);
@@ -72,10 +58,11 @@ export function useCharacterAdvancedOptions(
   // Guidance / Steps stay "" = "use the model default"; the placeholder shows the
   // resolved default and the worker reads it off MODEL_TARGETS when unset.
   const [guidance, setGuidance] = React.useState("");
+  const negativePromptCfgOff = negativePromptInertAtGuidance(model, guidance);
   const [steps, setSteps] = React.useState("");
   const [sampler, setSampler] = React.useState(samplerDefaultFromModel(model));
   const [scheduler, setScheduler] = React.useState(schedulerDefaultFromModel(model));
-  const [schedulerShift, setSchedulerShift] = React.useState(schedulerShiftDefaultFromModel(model));
+  const [schedulerShift, setSchedulerShift] = React.useState("");
   const [seed, setSeed] = React.useState("");
   const [negativePrompt, setNegativePrompt] = React.useState(
     supportsNegativePrompt ? defaultNegativePrompt : "",
@@ -93,6 +80,7 @@ export function useCharacterAdvancedOptions(
   const [pidTarget, setPidTarget] = React.useState("4k");
   const showPidToggle = pidToggleVisible(model, catalog);
 
+  const { samplerOptions, schedulerOptions, showSamplerPicker } = useSamplerControls(model, null, { sampler, scheduler, setSampler, setScheduler, setSchedulerShift, reconcile: "model-reset" });
   // Reset the model-derived tuning whenever the backbone changes so a value from a
   // different model never leaks (mirrors ImageStudio's reference-tuning reset).
   const modelId = model?.id;
@@ -100,9 +88,6 @@ export function useCharacterAdvancedOptions(
     setIpAdapterScale(referenceStrengthDefault);
     setTrueCfgScale(trueCfgScaleDefault);
     setControlnetScale(identityStructureDefault);
-    setSampler(samplerDefaultFromModel(model));
-    setScheduler(schedulerDefaultFromModel(model));
-    setSchedulerShift(schedulerShiftDefaultFromModel(model));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modelId]);
 
@@ -131,14 +116,14 @@ export function useCharacterAdvancedOptions(
     if (steps !== "" && Number.isFinite(Number(steps))) {
       advanced.steps = Number(steps);
     }
-    if (showSamplerPicker && sampler && sampler !== "default") {
+    if (samplerOptions.length > 0 && sampler && sampler !== "default") {
       advanced.sampler = sampler;
     }
-    if (showSchedulerPicker && scheduler && scheduler !== "default") {
+    if (schedulerOptions.length > 0 && scheduler && scheduler !== "default") {
       advanced.scheduler = scheduler;
-      if (scheduler === "shift" && Number.isFinite(Number(schedulerShift))) {
-        advanced.schedulerShift = Number(schedulerShift);
-      }
+    }
+    if (model?.image?.supportsSchedulerShift !== false && schedulerShift !== "" && schedulerShift != null && Number.isFinite(Number(schedulerShift))) {
+      advanced.schedulerShift = Number(schedulerShift);
     }
     // PiD decoder (sc-8372): emit usePid:true only when the toggle is shown (model PiD-eligible AND
     // checkpoint installed) AND on. The worker swaps the native VAE for the PiD decode + 2K/4K
@@ -175,7 +160,9 @@ export function useCharacterAdvancedOptions(
     setSchedulerShift,
     seed,
     setSeed,
-    negativePrompt,
+    negativePrompt: negativePromptCfgOff ? "" : negativePrompt,
+    negativePromptDraft: negativePrompt,
+    negativePromptCfgOff,
     setNegativePrompt,
     usePid,
     setUsePid,
@@ -194,7 +181,6 @@ export function useCharacterAdvancedOptions(
     samplerOptions,
     schedulerOptions,
     showSamplerPicker,
-    showSchedulerPicker,
     buildAdvanced,
     // Top-level job-payload seed: null when blank (worker derives from the prompt).
     seedValue: seed === "" ? null : Number(seed),
@@ -224,6 +210,8 @@ export function CharacterAdvancedOptions({ state, baseWidth, baseHeight }) {
     seed,
     setSeed,
     negativePrompt,
+    negativePromptDraft,
+    negativePromptCfgOff,
     setNegativePrompt,
     usePid,
     setUsePid,
@@ -239,8 +227,6 @@ export function CharacterAdvancedOptions({ state, baseWidth, baseHeight }) {
     referenceStrength: referenceStrengthCfg,
     samplerOptions,
     schedulerOptions,
-    showSamplerPicker,
-    showSchedulerPicker,
   } = state;
 
   // PiD high-res decode heads-up (sc-10144): Character angle/pose generations render at a fixed base
@@ -309,77 +295,59 @@ export function CharacterAdvancedOptions({ state, baseWidth, baseHeight }) {
             <label>
               Guidance
               <input
-                max="30"
-                min="0"
                 onChange={(event) => setGuidance(event.target.value)}
                 placeholder={guidancePlaceholder}
-                step="0.1"
+                step="any"
                 type="number"
                 value={guidance}
               />
             </label>
           ) : null}
+          <SamplingStepsField
+            value={steps}
+            onChange={(value) => setSteps(value)}
+            inputProps={{
+              max: "80",
+              min: "1",
+              placeholder: stepsPlaceholder,
+              type: "number"
+            }}
+          />
+          <SamplerSchedulerFields
+            sampler={sampler}
+            scheduler={scheduler}
+            samplerOptions={samplerOptions}
+            schedulerOptions={schedulerOptions}
+            onSamplerChange={setSampler}
+            onSchedulerChange={setScheduler}
+          />
+
           <label>
-            Steps
+            Schedule shift
             <input
-              max="80"
-              min="1"
-              onChange={(event) => setSteps(event.target.value)}
-              placeholder={stepsPlaceholder}
+              disabled={model?.image?.supportsSchedulerShift === false}
+              title={model?.image?.supportsSchedulerShift === false ? "This model has no native flow schedule shift." : undefined}
+              min="0"
+              onChange={(event) => setSchedulerShift(event.target.value)}
+              step="any"
+              placeholder={model?.defaults?.schedulerShift == null ? "Model default" : String(model.defaults.schedulerShift)}
               type="number"
-              value={steps}
+              value={schedulerShift}
             />
           </label>
-          {showSamplerPicker ? (
-            <label>
-              Sampler
-              <select onChange={(event) => setSampler(event.target.value)} value={sampler}>
-                {samplerOptions.map((key) => (
-                  <option key={key} value={key}>
-                    {SAMPLER_LABELS[key] ?? key}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : null}
-          {showSchedulerPicker ? (
-            <label>
-              Scheduler
-              <select onChange={(event) => setScheduler(event.target.value)} value={scheduler}>
-                {schedulerOptions.map((key) => (
-                  <option key={key} value={key}>
-                    {SCHEDULER_LABELS[key] ?? key}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : null}
-          {showSchedulerPicker && scheduler === "shift" ? (
-            <label>
-              Schedule shift
-              <input
-                max="10"
-                min="0.1"
-                onChange={(event) => setSchedulerShift(Number(event.target.value))}
-                step="0.1"
-                type="number"
-                value={schedulerShift}
-              />
-            </label>
-          ) : null}
-          <label>
-            Seed
-            <input
-              onChange={(event) => setSeed(event.target.value)}
-              placeholder="Random"
-              type="number"
-              value={seed}
-            />
-          </label>
+
+          <SamplingSeedField
+            value={seed}
+            onChange={(value) => setSeed(value)}
+            inputProps={{
+              placeholder: "Random",
+              type: "number"
+            }}
+          />
           {supportsNegativePrompt ? (
             <label className="prompt-field">
               Negative prompt
-              <textarea onChange={(event) => setNegativePrompt(event.target.value)} rows={3} value={negativePrompt} />
+              <textarea disabled={negativePromptCfgOff} onChange={(event) => setNegativePrompt(event.target.value)} rows={3} value={negativePromptDraft ?? negativePrompt} />
             </label>
           ) : null}
           {showPidToggle ? (

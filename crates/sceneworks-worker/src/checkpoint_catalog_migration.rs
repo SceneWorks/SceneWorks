@@ -221,12 +221,7 @@ fn migration_candidate(
     }
     // The manifest upsert is keyed on `id`; an entry without one cannot be written back, so it is
     // not a candidate rather than a failure.
-    let model_id = entry
-        .get("id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|id| !id.is_empty())?
-        .to_owned();
+    let model_id = crate::payload::trimmed_string(entry.get("id"))?.to_owned();
     // The path a bespoke lane would LOAD from — deliberately not the wider installed-path reading,
     // which accepts a provenance-only breadcrumb naming bytes this entry does not own.
     let declared = imported_entry_loadable_path(entry)?;
@@ -367,7 +362,7 @@ async fn compile_candidate(
     let install_id = candidate.install_id.clone();
     let relative_path = candidate.relative_path.clone();
     // Four full reads of the checkpoint: off the async runtime.
-    let compiled = tokio::task::spawn_blocking(move || {
+    let compiled = crate::load_progress::spawn_blocking(move || {
         store.compile_managed(
             &install_id,
             &relative_path,
@@ -758,10 +753,9 @@ mod tests {
 
         let config_dir = fx.config_dir.clone();
         let data_dir = fx.data_dir.clone();
-        let pass =
-            tokio::spawn(
-                async move { migrate_legacy_checkpoint_catalog(&config_dir, &data_dir).await },
-            );
+        let pass = crate::load_progress::spawn(async move {
+            migrate_legacy_checkpoint_catalog(&config_dir, &data_dir).await
+        });
 
         // The compiled record is written by `compile_managed`, which runs strictly AFTER the
         // catalog read — so observing it proves the candidate was selected from a catalog that

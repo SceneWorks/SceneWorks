@@ -397,6 +397,78 @@ describe("SceneWorks app shell", () => {
     );
   });
 
+  it("keeps successful dataset uploads and reports failures for retry", async () => {
+    const uploadDatasetItem = vi.fn(async (file) => {
+      if (file.name === "bad.png") throw new Error("failed");
+      return { id: file.name, displayName: file.name, file: { path: `training/uploads/${file.name}`, mimeType: "image/png" } };
+    });
+    root = createRoot(container);
+    await act(async () => root.render(withTrainingDataSetsLibraryContext({
+      activeProject: { id: "project-a", name: "Project A" }, assets: [], datasets: [], uploadDatasetItem,
+    })));
+    await act(async () => [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add images").click());
+    const input = document.body.querySelector(".dataset-add-dropzone input[type=file]");
+    await act(async () => {
+      Object.defineProperty(input, "files", { configurable: true, value: [new File(["a"], "good.png", { type: "image/png" }), new File(["b"], "bad.png", { type: "image/png" })] });
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await settle();
+    expect(container.textContent).toContain("Imported 1 image");
+    expect(container.textContent).toContain("Failed to upload: bad.png");
+  });
+
+  it("shows upload progress and allows cancellation", async () => {
+    let resolveUpload;
+    let signal;
+    const uploadDatasetItem = vi.fn((_file, _projectId, options) => {
+      signal = options.signal;
+      return new Promise((resolve) => { resolveUpload = resolve; });
+    });
+    root = createRoot(container);
+    await act(async () => root.render(withTrainingDataSetsLibraryContext({
+      activeProject: { id: "project-a", name: "Project A" }, assets: [], datasets: [], uploadDatasetItem,
+    })));
+    await act(async () => [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add images").click());
+    const input = document.body.querySelector(".dataset-add-dropzone input[type=file]");
+    await act(async () => {
+      Object.defineProperty(input, "files", { configurable: true, value: [new File(["a"], "one.png", { type: "image/png" })] });
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(document.body.textContent).toContain("Uploading 0 of 1");
+    await act(async () => [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Cancel import").click());
+    expect(signal.aborted).toBe(true);
+    await act(async () => resolveUpload({ id: "late", displayName: "late.png", file: { path: "training/uploads/late.png" } }));
+    expect(container.textContent).toContain("Import cancelled.");
+    expect(container.textContent).not.toContain("Imported 1 image");
+  });
+
+  it("aborts an in-flight dataset import when the project switches and ignores its late result", async () => {
+    let resolveUpload;
+    let signal;
+    const uploadDatasetItem = vi.fn((_file, _projectId, options) => {
+      signal = options.signal;
+      return new Promise((resolve) => { resolveUpload = resolve; });
+    });
+    const renderProject = (id) => withTrainingDataSetsLibraryContext({
+      activeProject: { id, name: id }, assets: [], datasets: [], uploadDatasetItem,
+    });
+    root = createRoot(container);
+    await act(async () => root.render(renderProject("project-a")));
+    await act(async () => [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add images").click());
+    const input = document.body.querySelector(".dataset-add-dropzone input[type=file]");
+    await act(async () => {
+      Object.defineProperty(input, "files", { configurable: true, value: [new File(["a"], "old.png", { type: "image/png" })] });
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(signal.aborted).toBe(false);
+    await act(async () => root.render(renderProject("project-b")));
+    expect(signal.aborted).toBe(true);
+    await act(async () => resolveUpload({ id: "old", displayName: "old.png", file: { path: "training/uploads/old.png" } }));
+    await settle();
+    expect(container.textContent).not.toContain("Imported 1 image");
+    expect(container.textContent).not.toContain("old.png");
+  });
+
   it("does not mutate the API-returned asset record when flagging dataset-only (sc-8939)", async () => {
     // Capture the exact object the upload transport returns so we can assert the import
     // path treats it as immutable (the datasetOnly flag must land on a copy, not here).
@@ -830,6 +902,169 @@ describe("SceneWorks app shell", () => {
     );
   });
 
+  it.each([false, true])("renders dataset-owned similar images and persists manual deletion with the latest caption edits (retry: %s)", async (failSecondSave) => {
+    let dataset = {
+      id: "dataset-a", name: "Portrait Set", version: 3,
+      items: [
+        { id: "keep", path: "images/keep.png", displayName: "keep.png", caption: { text: "keep", source: "manual" } },
+        { id: "delete", path: "images/delete.png", displayName: "delete.png", caption: { text: "delete", source: "manual" } },
+      ],
+    };
+    const updateDataset = vi.fn(async (id, payload) => {
+      if (failSecondSave && updateDataset.mock.calls.length === 2) throw new Error("Dataset save failed");
+      dataset = {
+        ...dataset, ...payload, version: dataset.version + 1,
+        items: payload.items.map((item) => ({ ...item, path: `images/${item.id}.png` })),
+      };
+      return dataset;
+    });
+    const loadReadiness = vi.fn(async () => ({
+      gate: "needs_attention", counts: { warn: dataset.items.length, fatal: 0 }, itemCount: dataset.items.length,
+      items: dataset.items.map((item) => ({
+        itemId: item.id,
+        flags: dataset.items.length > 1
+          ? [{ check: "near_duplicate_embedding", severity: "warn", value: 0.98, peers: dataset.items.filter((peer) => peer.id !== item.id).map((peer) => peer.id) }]
+          : [],
+      })),
+    }));
+    root = createRoot(container);
+    await act(async () => root.render(withTrainingDataSetsLibraryContext({
+      activeProject: { id: "project-a", name: "Project A" },
+      assets: [],
+      datasets: [{ id: dataset.id, name: dataset.name, modality: "image", itemCount: 2 }],
+      loadDataset: vi.fn(async () => dataset), updateDataset, loadReadiness,
+    })));
+    await openPortraitSet();
+    const row = container.querySelector(".dataset-doctor-nearup");
+    expect(row.querySelectorAll("img")).toHaveLength(2);
+    expect([...row.querySelectorAll("img")].every((img) => img.src.includes("/training/datasets/dataset-a/images/"))).toBe(true);
+    await changeField(container.querySelector(".training-caption-card-text"), "updated caption");
+    await act(async () => row.querySelector('input[aria-label="Select delete.png"]').click());
+    await act(async () => row.querySelector("button").click());
+    await settle();
+    if (failSecondSave) {
+      expect(container.textContent).toContain("Dataset save failed");
+      expect(container.querySelectorAll(".training-caption-card-text")).toHaveLength(2);
+      expect(row.querySelector('input[aria-label="Select delete.png"]').checked).toBe(true);
+      expect(row.querySelector("button").disabled).toBe(false);
+      await act(async () => row.querySelector("button").click());
+      await settle();
+    }
+    expect(updateDataset).toHaveBeenLastCalledWith("dataset-a", expect.objectContaining({
+      items: [expect.objectContaining({ id: "keep", caption: expect.objectContaining({ text: "updated caption" }) })],
+    }));
+    expect(container.textContent).toContain("Deleted 1 image from the dataset");
+    expect(container.textContent).not.toContain("keeping the sharpest");
+    expect(container.querySelector(".dataset-doctor-nearup")).toBeNull();
+    expect(container.querySelectorAll(".training-caption-card-text")).toHaveLength(1);
+  });
+
+  it.each([false, true])("cancels a closed picker upload and ignores its late failure=%s", async (failUpload) => {
+    let resolveUpload;
+    let rejectUpload;
+    let signal;
+    const uploadDatasetItem = vi.fn((_file, _projectId, options) => {
+      signal = options.signal;
+      return new Promise((resolve, reject) => { resolveUpload = resolve; rejectUpload = reject; });
+    });
+    const editTarget = { ...zImageTrainingTarget, id: "qwen_image_edit_lora", baseModel: "qwen_image_2_1", limits: { ...zImageTrainingTarget.limits, maxReferenceImages: 3 } };
+    const dataset = singleItemDataset();
+    dataset.items.push({ id: "item_0002", assetId: "asset-b", displayName: "second.png", caption: { text: "second", source: "manual", triggerWords: [] } });
+    const assets = [
+      { id: "asset-a", type: "image", displayName: "item_0001.png", file: { path: "assets/a.png", mimeType: "image/png" } },
+      { id: "asset-b", type: "image", displayName: "second.png", file: { path: "assets/b.png", mimeType: "image/png" } },
+      { id: "asset-c", type: "image", displayName: "candidate.png", file: { path: "assets/c.png", mimeType: "image/png" } },
+    ];
+    root = createRoot(container);
+    await act(async () => root.render(withTrainingDataSetsLibraryContext({
+      activeProject: { id: "project-a", name: "Project A" }, assets,
+      datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 2 }],
+      loadDataset: vi.fn(async () => dataset), trainingTargets: [editTarget], uploadDatasetItem,
+    })));
+    await openPortraitSet();
+    await act(async () => [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Edit pairs").click());
+    await act(async () => container.querySelector('[aria-label="Add references to item_0001.png"]').click());
+    let dialog = document.body.querySelector(".dataset-add-modal");
+    const input = dialog.querySelector('input[type="file"]');
+    await act(async () => {
+      Object.defineProperty(input, "files", { configurable: true, value: [new File(["a"], "old.png", { type: "image/png" })] });
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(signal.aborted).toBe(false);
+    await act(async () => [...dialog.querySelectorAll("button")].find((button) => button.textContent === "Close").click());
+    expect(signal.aborted).toBe(true);
+    await act(async () => container.querySelector('[aria-label="Add references to second.png"]').click());
+    dialog = document.body.querySelector(".dataset-add-modal");
+    await act(async () => [...dialog.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent === "Asset Library").click());
+    const candidate = [...dialog.querySelectorAll('[role="option"]')].find((option) => option.textContent.includes("candidate.png"));
+    await act(async () => candidate.click());
+    await act(async () => {
+      if (failUpload) rejectUpload(new Error("old upload failed"));
+      else resolveUpload({ id: "late", type: "image", displayName: "old.png", file: { path: "training/uploads/old.png", mimeType: "image/png" } });
+    });
+    await settle();
+    expect(document.body.querySelector(".dataset-add-modal")).toBe(dialog);
+    expect(dialog.textContent).toContain("Add reference images to second.png");
+    expect(candidate.getAttribute("aria-selected")).toBe("true");
+    expect(dialog.textContent).not.toContain("old.png");
+    expect(dialog.textContent).not.toContain("old upload failed");
+    expect(container.textContent).not.toContain("Attached 1 of 1 references");
+  });
+
+  it("reports rejected reference uploads at the cap and retains the rejected selection", async () => {
+    const uploadDatasetItem = vi.fn(async (file) => ({
+      id: `upload-${file.name}`, type: "image", displayName: file.name,
+      file: { path: `training/uploads/${file.name}`, mimeType: "image/png" },
+    }));
+    const editTarget = {
+      ...zImageTrainingTarget,
+      id: "qwen_image_edit_lora",
+      baseModel: "qwen_image_2_1",
+      limits: { ...zImageTrainingTarget.limits, maxReferenceImages: 1 },
+    };
+    root = createRoot(container);
+    await act(async () => root.render(withTrainingDataSetsLibraryContext({
+      activeProject: { id: "project-a", name: "Project A" },
+      assets: [{ id: "asset-a", type: "image", displayName: "item_0001.png", file: { path: "assets/images/a.png", mimeType: "image/png" } }],
+      datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }],
+      loadDataset: vi.fn(async () => singleItemDataset()),
+      trainingTargets: [editTarget], uploadDatasetItem,
+    })));
+    await openPortraitSet();
+    await act(async () => [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Edit pairs").click());
+    await act(async () => document.body.querySelector('[aria-label="Add references to item_0001.png"]').click());
+    const input = document.body.querySelector('.dataset-add-dropzone input[type="file"]');
+    await act(async () => {
+      Object.defineProperty(input, "files", { configurable: true, value: [
+        new File(["a"], "accepted.png", { type: "image/png" }),
+        new File(["b"], "rejected.png", { type: "image/png" }),
+      ] });
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await settle();
+    const dialog = document.body.querySelector('.dataset-add-modal');
+    expect(dialog).not.toBeNull();
+    expect(dialog.textContent).toContain("Attached 1 of 2 references. Maximum 1 reference; 1 not added.");
+    const selected = dialog.querySelector('[role="option"][aria-selected="true"]');
+    expect(selected?.textContent).toContain("rejected.png");
+    expect(container.textContent).toContain("1 / 1");
+    expect(container.textContent).not.toContain("Imported 2 of 2 references");
+    await act(async () => [...dialog.querySelectorAll("button")].find((button) => button.textContent.trim() === "Add 1").click());
+    expect(dialog.textContent).toContain("Attached 0 of 1 references. Maximum 1 reference; 1 not added.");
+    expect(dialog.querySelector('[role="option"][aria-selected="true"]')?.textContent).toContain("rejected.png");
+    await act(async () => [...dialog.querySelectorAll("button")].find((button) => button.textContent === "Done").click());
+    await act(async () => container.querySelector('[aria-label="Remove Image 1"]').click());
+    await act(async () => container.querySelector('[aria-label="Add references to item_0001.png"]').click());
+    const nextDialog = document.body.querySelector('.dataset-add-modal');
+    await act(async () => [...nextDialog.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent === "Asset Library").click());
+    const rejected = [...nextDialog.querySelectorAll('[role="option"]')].find((option) => option.textContent.includes("rejected.png"));
+    expect(rejected).toBeTruthy();
+    await act(async () => rejected.click());
+    await act(async () => [...nextDialog.querySelectorAll("button")].find((button) => button.textContent.trim() === "Add 1").click());
+    expect(document.body.querySelector('.dataset-add-modal')).toBeNull();
+    expect(container.textContent).toContain("1 / 1");
+  });
+
   it("preserves ordered references when dedupe rekeys a newly uploaded target between its two saves (sc-24163)", async () => {
     const initialDataset = {
       id: "dataset-a",
@@ -971,6 +1206,72 @@ describe("SceneWorks app shell", () => {
         ],
       }),
     ]);
+  });
+
+  it.each([false, true])("handles caption completion with unsaved edits=%s", async (dirty) => {
+    let completed = false;
+    const original = singleItemDataset();
+    original.items[0].caption.text = "";
+    const generated = { text: "A person wearing a red jacket.", source: "auto", triggerWords: [], mode: "subjectOnly" };
+    const loadDataset = vi.fn(async () => completed
+      ? { ...original, version: 4, items: original.items.map((item) => ({ ...item, caption: generated })) }
+      : original);
+    const updateDataset = vi.fn(async (id, payload) => ({ ...original, ...payload, id, version: 5 }));
+    const refreshDatasets = vi.fn(async () => []);
+    const context = (jobs) => withTrainingDataSetsLibraryContext({
+      activeProject: { id: "project-a", name: "Project A" },
+      assets: [{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }],
+      datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }],
+      jobs,
+      loadDataset,
+      updateDataset,
+      onRefreshDatasets: refreshDatasets,
+    });
+    root = createRoot(container);
+    await act(async () => root.render(context([])));
+    await openPortraitSet();
+    if (dirty) await changeField(field(container, "Dataset name"), "Renamed portraits");
+
+    completed = true;
+    const jobs = [{
+      id: "caption-completed", type: "training_caption", status: "completed", projectId: "project-a",
+      payload: { datasetId: "dataset-a" }, result: { captionedItemCount: 1 },
+    }];
+    await act(async () => root.render(context(jobs)));
+    await settle();
+
+    if (dirty) {
+      expect(field(container, "Dataset name").value).toBe("Renamed portraits");
+      expect(loadDataset).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        [...container.querySelectorAll("button")].find((button) => button.textContent === "Save dataset").click();
+      });
+      await settle();
+      expect(updateDataset).toHaveBeenCalledWith("dataset-a", expect.objectContaining({
+        name: "Renamed portraits", preserveCaptionItemIds: ["item_0001"],
+      }));
+    } else {
+      expect(container.querySelector(".training-caption-card-text").value).toBe(generated.text);
+      expect(container.textContent).toContain("Captioning completed for 1 image.");
+      expect(refreshDatasets).toHaveBeenCalledTimes(1);
+      expect(loadDataset).toHaveBeenCalledTimes(2);
+    }
+    const refreshCount = refreshDatasets.mock.calls.length;
+    expect(refreshCount).toBeGreaterThan(0);
+    await act(async () => root.render(context([...jobs])));
+    await settle();
+    expect(updateDataset).toHaveBeenCalledTimes(dirty ? 1 : 0);
+    if (!dirty) {
+      expect(refreshDatasets).toHaveBeenCalledTimes(refreshCount);
+      // An older-created job completing later must not be hidden by the handled job at index 0.
+      await act(async () => root.render(context([
+        ...jobs,
+        { ...jobs[0], id: "older-caption-completed-later" },
+      ])));
+      await settle();
+      expect(refreshDatasets).toHaveBeenCalledTimes(2);
+      expect(loadDataset).toHaveBeenCalledTimes(3);
+    }
   });
 
   it("queues a caption job for all images via the caption dialog (sc-2025)", async () => {

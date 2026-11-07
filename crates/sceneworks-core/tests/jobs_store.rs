@@ -88,6 +88,14 @@ fn store(name: &str) -> TestStore {
     TestStore { store, _db: db }
 }
 
+/// A store whose owning API process "started" at `unix_seconds`.
+fn store_started_at(name: &str, unix_seconds: i64) -> TestStore {
+    let db = temp_db(name);
+    let store = JobsStore::new(db.path()).with_session_started_at(unix_seconds);
+    store.initialize().expect("store initializes");
+    TestStore { store, _db: db }
+}
+
 fn image_job(payload: Map<String, Value>) -> CreateJob {
     CreateJob {
         job_type: JobType::ImageGenerate,
@@ -3675,6 +3683,49 @@ fn cancel_retry_and_duplicate_preserve_python_metadata_shapes() {
 }
 
 #[test]
+fn preallocated_duplicate_id_is_atomic_unique_and_preserves_the_source() {
+    let store = store("preallocated-training-duplicate");
+    let original = store
+        .create_job(image_job(object(json!({"prompt":"original"}))))
+        .unwrap();
+    let id = "job_preallocated_training_duplicate";
+    let duplicate = store
+        .duplicate_job_with_id(
+            id.to_owned(),
+            &original.id,
+            DuplicateJob {
+                payload_changes: object(json!({"plan":{"jobId":id}})),
+                requested_gpu: Some("gpu-1".into()),
+            },
+        )
+        .unwrap();
+    assert_eq!(duplicate.id, id);
+    assert_eq!(duplicate.payload["plan"]["jobId"], id);
+    assert_eq!(
+        duplicate.duplicate_of_job_id.as_deref(),
+        Some(original.id.as_str())
+    );
+    assert_eq!(duplicate.requested_gpu, "gpu-1");
+    let count = store.list_jobs(None, None, 100).unwrap().len();
+    assert!(store
+        .duplicate_job_with_id(
+            id.to_owned(),
+            &original.id,
+            DuplicateJob {
+                payload_changes: object(json!({"prompt":"must not replace"})),
+                requested_gpu: None,
+            }
+        )
+        .is_err());
+    assert_eq!(store.list_jobs(None, None, 100).unwrap().len(), count);
+    assert_eq!(store.get_job(id).unwrap().payload, duplicate.payload);
+    assert_eq!(
+        store.get_job(&original.id).unwrap().payload,
+        original.payload
+    );
+}
+
+#[test]
 fn stale_sweep_marks_worker_offline_and_job_interrupted() {
     let store = store("stale-sweep");
     register_image_worker(&store);
@@ -3717,6 +3768,75 @@ fn stale_sweep_marks_worker_offline_and_job_interrupted() {
         "stale-sweep error must state the ambiguity + timeout, got {error:?}"
     );
     assert_eq!(sweep.jobs[0].message, "Lost contact with the worker.");
+}
+
+/// Claim a job on `worker-1`, then backdate the worker's last heartbeat to 2000-01-01 so the
+/// next sweep finds it stale. Returns the claimed job's id.
+fn claim_and_go_quiet_since_2000(store: &JobsStore) -> String {
+    register_image_worker(store);
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+    store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+    let connection = Connection::open(store.db_path()).expect("db opens");
+    connection
+        .execute(
+            "update workers set last_seen_at = '2000-01-01T00:00:00Z' where id = ?1",
+            params!["worker-1"],
+        )
+        .expect("worker timestamp updates");
+    created.id
+}
+
+#[test]
+fn stale_sweep_names_an_app_stop_when_the_worker_predates_this_session() {
+    // The worker's last heartbeat (2000) predates this API process (2001): the whole app or
+    // machine stopped mid-job, so the sweep must not tell the user the worker went quiet
+    // while the app kept running — and it must say when contact was lost.
+    let store = store_started_at("stale-sweep-app-stop", 978_307_200);
+    let job_id = claim_and_go_quiet_since_2000(&store);
+
+    let sweep = store
+        .mark_stale_workers_interrupted(1)
+        .expect("sweep succeeds");
+
+    assert_eq!(sweep.workers[0].status, WorkerStatus::Offline);
+    assert_eq!(sweep.jobs[0].id, job_id);
+    assert_eq!(sweep.jobs[0].status, JobStatus::Interrupted);
+    assert_eq!(sweep.jobs[0].worker_id, None);
+    assert_eq!(
+        sweep.jobs[0].message,
+        "SceneWorks stopped while this job was running."
+    );
+    let error = sweep.jobs[0].error.clone().unwrap_or_default();
+    assert!(
+        error.contains("stopped or restarted while this job was running")
+            && error.contains("last heartbeat was at 2000-01-01T00:00:00Z (UTC)")
+            && !error.contains("No heartbeat from the worker"),
+        "app-stop sweep error must name the stop and the last heartbeat, got {error:?}"
+    );
+}
+
+#[test]
+fn stale_sweep_keeps_lost_contact_wording_for_a_worker_seen_this_session() {
+    // The API started (1999) before the worker's last heartbeat (2000): the worker reported to
+    // this process and then went quiet, which is the generic lost-contact case.
+    let store = store_started_at("stale-sweep-live-quiet", 915_148_800);
+    claim_and_go_quiet_since_2000(&store);
+
+    let sweep = store
+        .mark_stale_workers_interrupted(1)
+        .expect("sweep succeeds");
+
+    assert_eq!(sweep.jobs[0].message, "Lost contact with the worker.");
+    let error = sweep.jobs[0].error.clone().unwrap_or_default();
+    assert!(
+        error.contains("No heartbeat from the worker for 1s"),
+        "live-quiet sweep error must keep the timeout wording, got {error:?}"
+    );
 }
 
 #[test]
@@ -5593,7 +5713,7 @@ fn native_converters_registry_contents_are_pinned() {
 #[test]
 fn candle_native_converters_registry_contents_are_pinned() {
     use std::collections::BTreeSet;
-    // sc-24214: `supra2_img`'s converter is the backend-neutral `gen_core::supra2` one, compiled on
+    // sc-24214: `supra2_img`'s converter is the backend-neutral `gen_core_checkpoint::supra2` one, compiled on
     // every platform, and the Candle provider loads the bundle it writes.
     let expected: BTreeSet<&str> = ["flux2_klein_diffusers", "supra2_img"]
         .into_iter()
@@ -7409,6 +7529,50 @@ fn video_job_typed(job_type: JobType, payload: Value, requested_gpu: &str) -> Cr
     }
 }
 
+/// sc-26691, the upgrade window: a MiniMax-H3 job queued before `referenceImageResizeMode`
+/// existed carries no key, and the worker that claims it renders the engine default `match`. The
+/// claim stamps exactly that onto the PERSISTED job, so its later replay reproduces what ran
+/// rather than reading the absence as a pre-upgrade (`diffusers`) render.
+#[test]
+fn claiming_an_unstamped_h3_job_stamps_the_resize_mode_it_renders() {
+    let store = store("h3-claim-resize-stamp");
+    register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
+    let legacy = store
+        .create_job(video_job_with(
+            json!({
+                "model": "minimax_h3",
+                "mode": "text_to_video",
+                "prompt": "a lighthouse",
+                "advanced": { "referenceImageShortEdge": 1536 }
+            }),
+            "auto",
+        ))
+        .expect("job creates");
+    assert!(legacy.payload["advanced"]
+        .get("referenceImageResizeMode")
+        .is_none());
+
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("claim ok")
+        .expect("the mlx worker claims the H3 job");
+    assert_eq!(claimed.id, legacy.id);
+    assert_eq!(
+        claimed.payload["advanced"]["referenceImageResizeMode"],
+        json!("match")
+    );
+    assert_eq!(
+        claimed.payload["advanced"]["referenceImageShortEdge"],
+        json!(1536)
+    );
+    let persisted = store.get_job(&legacy.id).expect("job reads");
+    assert_eq!(
+        persisted.payload["advanced"]["referenceImageResizeMode"],
+        json!("match"),
+        "the stamp is durable, not only in the claim response"
+    );
+}
+
 #[test]
 fn mlx_eligible_video_job_defers_from_torch_worker_to_idle_mlx_worker() {
     let store = store("mlx-video-routing-defer");
@@ -8530,7 +8694,10 @@ fn concurrent_claims_never_lock_and_stay_exactly_once() {
                             utilization: None,
                             status_reason: None,
                         }) {
-                            errors.lock().unwrap().push(error.to_string());
+                            errors.lock().unwrap().push(format!(
+                                "heartbeat_worker worker={worker_id} job={}: {error:?}",
+                                job.id
+                            ));
                         }
                         // Free the worker so it keeps claiming and the queue drains.
                         if let Err(error) = store.update_job_progress(
@@ -8549,11 +8716,17 @@ fn concurrent_claims_never_lock_and_stay_exactly_once() {
                                 worker_id: Some(worker_id.clone()),
                             },
                         ) {
-                            errors.lock().unwrap().push(error.to_string());
+                            errors.lock().unwrap().push(format!(
+                                "update_job_progress worker={worker_id} job={}: {error:?}",
+                                job.id
+                            ));
                         }
                     }
                     Ok(None) => thread::sleep(Duration::from_millis(1)),
-                    Err(error) => errors.lock().unwrap().push(error.to_string()),
+                    Err(error) => errors
+                        .lock()
+                        .unwrap()
+                        .push(format!("claim_next_job worker={worker_id}: {error:?}")),
                 }
             }
         }));
@@ -9471,6 +9644,131 @@ fn resume_checkpoint_step_survives_later_results_and_an_interrupt() {
     assert_eq!(job.status, JobStatus::Interrupted);
     assert_eq!(job.result.get("resumeCheckpointStep"), Some(&json!(100)));
     assert_eq!(job.result.get("other"), Some(&json!(true)));
+}
+
+/// sc-8953 follow-through (2026-10-27): the image worker posts a SLIM result on every denoise
+/// step (`image_jobs::slim_step_result`) — the accumulated `assetWrites`/`generationSet`/
+/// `prefixKvCache` fact sets ride only the per-image and terminal posts, or the per-step SSE
+/// fan-out OOM-kills the WebView2 renderer mid-batch. The result column is replaced wholesale,
+/// so a slim tick omitting them must not blank them off the durable row:
+/// `merge_progress_result_accumulations` restores each from the stored value.
+///
+/// *Mutation that reds this:* posting `Some(object(json!({})))` (an empty result) instead of the
+/// slim shape, or dropping the merge from `update_job_progress_internal`.
+#[test]
+fn slim_step_progress_results_keep_the_accumulated_fact_sets() {
+    let store = store("slim-step-keeps-accumulations");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(object(json!({ "prompt": "p" }))))
+        .expect("job creates");
+    store.claim_next_job("worker-1").expect("claim ok");
+    let report = |result: serde_json::Value| ProgressUpdate {
+        status: JobStatus::Running,
+        stage: ProgressStage::Running,
+        progress: 0.5,
+        message: "running".to_owned(),
+        error: None,
+        result: Some(object(result)),
+        eta_seconds: None,
+        peak_gpu_memory_pct: None,
+        peak_gpu_load_pct: None,
+        backend: None,
+        worker_id: Some("worker-1".to_owned()),
+    };
+    // A full post first (the first finished image): the fact set lands on the row.
+    store
+        .update_job_progress(
+            &created.id,
+            report(json!({
+                "generationSetId": "genset-1",
+                "generationSet": { "id": "genset-1", "count": 260 },
+                "assetWrites": [{ "id": "asset-1" }],
+                "prefixKvCache": [{ "cache": "hit" }],
+            })),
+        )
+        .expect("full progress");
+    // API-owned augmentation replaces raw writes with published assets.
+    let current = store.get_job(&created.id).unwrap();
+    let published = object(json!({"generationSetId":"genset-1",
+        "assets":[{"id":"asset-1","mediaPath":"assets/images/one.png"}],
+        "assetIds":["asset-1"],"prefixKvCache":[{"cache":"hit"}],
+        "generationSet":{"id":"genset-1","count":260},"assetWrites":[{"id":"asset-1"}]}));
+    store
+        .replace_job_result_after_progress(
+            &created.id,
+            Some("worker-1"),
+            JobStatus::Running,
+            &current.result,
+            &published,
+            false,
+        )
+        .unwrap();
+    // Then a slim STEP tick: the accumulations are absent ON PURPOSE.
+    store
+        .update_job_progress(
+            &created.id,
+            report(json!({ "generationSetId": "genset-1", "expectedCount": 260 })),
+        )
+        .expect("slim progress");
+    let job = store.get_job(&created.id).expect("job loads");
+    // The durable row keeps every accumulation the slim tick omitted...
+    assert_eq!(
+        job.result.get("generationSet"),
+        Some(&json!({ "id": "genset-1", "count": 260 }))
+    );
+    assert_eq!(
+        job.result.get("assetWrites"),
+        Some(&json!([{ "id": "asset-1" }]))
+    );
+    assert_eq!(
+        job.result.get("prefixKvCache"),
+        Some(&json!([{ "cache": "hit" }]))
+    );
+    assert_eq!(job.result.get("assets"), published.get("assets"));
+    assert_eq!(job.result.get("assetIds"), published.get("assetIds"));
+    // ...and carries the slim tick's own keys verbatim.
+    assert_eq!(job.result.get("expectedCount"), Some(&json!(260)));
+
+    // A full post that DOES carry an accumulation REPLACES the stored one (the
+    // worker is the authority; the merge is absence-only, never sticky).
+    store
+        .update_job_progress(
+            &created.id,
+            report(json!({
+                "generationSetId": "genset-1",
+                "assetWrites": [{ "id": "asset-1" }, { "id": "asset-2" }],
+            })),
+        )
+        .expect("second full progress");
+    let job = store.get_job(&created.id).expect("job loads");
+    assert_eq!(
+        job.result.get("assetWrites"),
+        Some(&json!([{ "id": "asset-1" }, { "id": "asset-2" }]))
+    );
+    // `generationSet`/`prefixKvCache` absent from that post: still restored.
+    assert_eq!(
+        job.result.get("generationSet"),
+        Some(&json!({ "id": "genset-1", "count": 260 }))
+    );
+    assert_eq!(
+        job.result.get("prefixKvCache"),
+        Some(&json!([{ "cache": "hit" }]))
+    );
+    let mut terminal = report(
+        json!({"generationSetId":"genset-1", "assetWrites":[{"id":"asset-1"},{"id":"asset-2"}]}),
+    );
+    terminal.status = JobStatus::Completed;
+    terminal.stage = ProgressStage::Completed;
+    let accepted = store
+        .update_job_progress_with_outcome(&created.id, terminal)
+        .unwrap();
+    assert!(accepted.side_effects_pending);
+    assert_eq!(accepted.job.result.get("assets"), published.get("assets"));
+    assert_eq!(
+        accepted.job.result.get("assetIds"),
+        published.get("assetIds")
+    );
 }
 
 /// sc-25907 (epic 25899 E3): a Qwen Image 2.1 TURBO image job — plain text-to-image and an ordered

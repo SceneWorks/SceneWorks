@@ -1,3 +1,84 @@
+use super::adapters::resolve_adapters;
+use super::artifact_resolution::model_repo;
+use super::artifact_resolution::resolve_weights_dir;
+use super::artifact_resolution::resolved_mlx_artifact_tier_for_model;
+use super::conditioning::augment_prompt_for_angle;
+use super::conditioning::edit_grouping;
+use super::conditioning::edit_reference_ids;
+use super::conditioning::load_reference_image;
+use super::conditioning::parse_poses;
+use super::conditioning::pose_entries;
+use super::conditioning::resolve_control_identity_source;
+use super::conditioning::resolve_identity_init;
+use super::conditioning::stage_likeness;
+use super::conditioning::EditGrouping;
+use super::conditioning::PoseInput;
+use super::events::consume_gen_events;
+use super::geometry::fit_engine_image;
+use super::is_dense_te_tier;
+use super::load_policy::release_declared_sequential_for_request;
+use super::load_spec::attach_manifest_text_encoder;
+use super::load_spec::attach_required_components;
+use super::load_spec::attach_selected_decoder;
+#[cfg(test)]
+use super::load_spec::load_control_engine;
+use super::load_spec::load_spec;
+use super::mlx_model;
+use super::pid::pid_effective_dims;
+use super::pid::pid_output_tier;
+use super::pid::pid_requested;
+use super::pid::resolve_pid_weights;
+use super::quantization::dense_te_requested_tier_bits;
+use super::quantization::fixed_mlx_artifact_quant;
+use super::quantization::mlx_load_quant_for_resolved_artifact;
+use super::quantization::reconcile_resolved_tier_quant;
+use super::quantization::resolve_quant;
+use super::resolve_seed;
+use super::routing::mlx_flux_strict_control_engine_id;
+use super::sampling::resolve_guidance;
+use super::sampling::resolve_steps;
+use super::stream::drive_gen_items_scored;
+use super::stream::drive_gen_items_scored_reported;
+use super::stream::start_cached_gen_stream_with_request_state;
+use super::strict_control::build_control_conditioning;
+use super::strict_control::ensure_depth_estimator_dir;
+use super::strict_control::preprocess_control_entry;
+use super::strict_control::requested_control_kind;
+use super::strict_control::resolve_control_source;
+use super::strict_control::resolve_user_control_map;
+use super::strict_control::strict_control_default_repo;
+use super::strict_control::trusted_control_weight_revision;
+use super::strict_control::validate_control_kind;
+use super::zimage::augment_prompt_for_pose;
+use super::zimage::CHARACTER_ANGLE_SET_ORDER;
+use super::AdapterSpec;
+use super::CancelFlag;
+use super::Conditioning;
+use super::ControlKind;
+use super::GenerationOutput;
+use super::GenerationRequest;
+use super::Generator;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use super::LoadSpec;
+use super::Progress;
+use super::PromptEnhance;
+use super::Quant;
+use super::ResolvedModel;
+use super::WeightsSource;
+use crate::advanced;
+use crate::safe_weight_filename;
+use crate::ApiClient;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
+use serde_json::json;
 // `EditGrouping` / `edit_grouping` moved to base.rs (sc-8946, F-144): they are the SHARED grouping for
 // the FLUX.2 / Qwen-Edit / SenseNova-U1 edit lanes, not FLUX.2-specific, so navigation lands in base.rs.
 
@@ -7,19 +88,19 @@
 /// [`plan_edit_batch`] and consumed by all three lanes so a change to the plain-With-Character gate
 /// (sc-4411) lands in exactly one place.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-struct EditBatch {
+pub(super) struct EditBatch {
     /// Per-iteration seed (shared across an angle/pose set, per-image on the plain path).
-    seeds: Vec<i64>,
+    pub(super) seeds: Vec<i64>,
     /// Per-iteration prompt (angle/pose augment on the set paths, the base prompt on plain).
-    prompts: Vec<String>,
+    pub(super) prompts: Vec<String>,
     /// Full `PoseInput`s (keypoints + hands + face) for the pose tier; `None` for angles/plain.
-    pose_inputs: Option<Vec<PoseInput>>,
+    pub(super) pose_inputs: Option<Vec<PoseInput>>,
     /// The lane's base raw settings with `angleSet`/`poseLibrary` stamped per grouping.
-    raw_settings: JsonObject,
+    pub(super) raw_settings: JsonObject,
     /// Whether this generation is identity-likeness scored (epic 4406): a Character-Studio angle
     /// set, a pose-library set, OR a plain With-Character `character_image` job (sc-4411). Drives
     /// the [`stage_likeness`] call each lane makes with `references[0]` as the scored source.
-    score_likeness: bool,
+    pub(super) score_likeness: bool,
 }
 
 /// Build the [`EditBatch`] for a native edit stream from its resolved `grouping` and its
@@ -41,7 +122,7 @@ struct EditBatch {
 /// is `references[0]`, which for a `character_image` job IS the `referenceAssetId` (first in the
 /// lane's `*_edit_reference_ids`). `score_likeness` covers all three.
 #[cfg(target_os = "macos")]
-fn plan_edit_batch(
+pub(super) fn plan_edit_batch(
     request: &ImageRequest,
     grouping: &EditGrouping,
     mut raw_settings: JsonObject,
@@ -111,7 +192,7 @@ fn plan_edit_batch(
 /// klein: a 2400×1744 landscape reference → ArcFace 0.47 vs a square crop of the same photo → 0.60,
 /// ≈ −0.13). Crop/pad-fitting the reference to the output aspect (cover+center-crop for `crop`,
 /// letterbox for `pad`/`outpaint`) lets the engine's 1:1 latent mapping preserve the face.
-fn fit_edit_references(
+pub(super) fn fit_edit_references(
     references: Vec<Image>,
     request: &ImageRequest,
     width: u32,
@@ -158,7 +239,7 @@ pub(crate) fn flux2_edit_uses_provider_memory_safety(engine_id: &str) -> bool {
     engine_id == "flux2_dev_edit"
 }
 
-const MAX_KLEIN_EDIT_REFERENCES: usize = 8;
+pub(super) const MAX_KLEIN_EDIT_REFERENCES: usize = 8;
 
 /// Refuse an `advanced.usePid` opt-in on a FLUX.2 **Dev** route (sc-20799).
 ///
@@ -182,7 +263,10 @@ fn refuse_pid_on_flux2_dev_route(route_label: &str, request: &ImageRequest) -> W
     Ok(())
 }
 
-fn flux2_edit_reference_ids(request: &ImageRequest, engine_id: &str) -> WorkerResult<Vec<String>> {
+pub(super) fn flux2_edit_reference_ids(
+    request: &ImageRequest,
+    engine_id: &str,
+) -> WorkerResult<Vec<String>> {
     if engine_id == "flux2_dev_edit" {
         return Ok(edit_reference_ids(request));
     }
@@ -221,7 +305,7 @@ fn flux2_edit_reference_ids(request: &ImageRequest, engine_id: &str) -> WorkerRe
 /// to the bespoke route, including malformed 0/9+ reference requests: the stream preflight rejects
 /// their exact cardinality instead of letting the generic MLX lane silently discard conditioning.
 /// FLUX.2 Dev preserves its established reference-gated routing.
-fn flux2_edit_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn flux2_edit_available(request: &ImageRequest, settings: &Settings) -> bool {
     let Some(engine_id) = flux2_edit_engine_id(&request.model) else {
         return false;
     };
@@ -233,14 +317,14 @@ fn flux2_edit_available(request: &ImageRequest, settings: &Settings) -> bool {
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
 }
 
-fn flux2_edit_route_mode(engine_id: &str, mode: &str) -> bool {
+pub(super) fn flux2_edit_route_mode(engine_id: &str, mode: &str) -> bool {
     engine_id == "flux2_dev_edit"
         || matches!(mode, "edit_image" | "character_image" | "style_variations")
 }
 
 /// One `Reference` (single) or one `MultiReference` (N) edit conditioning from the
 /// resolved reference images (cloned per output).
-fn build_edit_conditioning(references: &[Image]) -> Vec<Conditioning> {
+pub(super) fn build_edit_conditioning(references: &[Image]) -> Vec<Conditioning> {
     if references.len() == 1 {
         vec![Conditioning::Reference {
             image: references[0].clone(),
@@ -253,7 +337,10 @@ fn build_edit_conditioning(references: &[Image]) -> Vec<Conditioning> {
     }
 }
 
-fn flux2_edit_conditioning_reference_count(user_references: usize, has_pose: bool) -> u32 {
+pub(super) fn flux2_edit_conditioning_reference_count(
+    user_references: usize,
+    has_pose: bool,
+) -> u32 {
     let references = if has_pose { 2 } else { user_references };
     u32::try_from(references).unwrap_or(u32::MAX)
 }
@@ -271,7 +358,7 @@ const DEFAULT_EDIT_IMAGE_GUIDANCE: f32 = 1.5;
 /// 1.5). `≤1.0` = off. Defaults to the realism-safe validated value 1.5 (sc-8273) when a character
 /// reference is present and the knob is unspecified; `None` outside `character_image` mode or with
 /// no reference (off = byte-identical render).
-fn flux2_edit_image_guidance(engine_id: &str, request: &ImageRequest) -> Option<f32> {
+pub(super) fn flux2_edit_image_guidance(engine_id: &str, request: &ImageRequest) -> Option<f32> {
     if engine_id == "flux2_klein_9b_kv_edit" {
         return None;
     }
@@ -302,7 +389,10 @@ fn flux2_edit_image_guidance(engine_id: &str, request: &ImageRequest) -> Option<
 
 /// Effective text guidance for FLUX.2 reference/edit paths. Character/Image Studio's variation
 /// slider emits `trueCfgScale`; `guidanceScale` remains the direct-request/legacy fallback.
-fn flux2_edit_text_guidance(request: &ImageRequest, model: &ResolvedModel) -> Option<f32> {
+pub(super) fn flux2_edit_text_guidance(
+    request: &ImageRequest,
+    model: &ResolvedModel,
+) -> Option<f32> {
     if !model.supports_guidance() {
         return None;
     }
@@ -323,7 +413,7 @@ fn flux2_edit_text_guidance(request: &ImageRequest, model: &ResolvedModel) -> Op
 /// tier must be reconciled against the resolved directory before it enters either `LoadSpec` or the
 /// provider safety context. Keeping those two identities equal but wrong would bypass tier-sensitive
 /// memory admission.
-fn flux2_edit_resolved_quant(
+pub(super) fn flux2_edit_resolved_quant(
     request: &ImageRequest,
     weights_dir: &Path,
     model_id: &str,
@@ -367,7 +457,7 @@ const FLUX2_DEV_EDIT_ACTIVATION_TRANSIENT_GB: f64 = 12.0;
 /// single-reference request is admitted by the request-scoped declared path instead
 /// (`Flux2EditMemoryAuthority::RequestScopedAdmissionOnly`). An unavailable live-memory probe still
 /// yields no context and therefore no provider decision.
-fn flux2_dev_edit_memory_context(
+pub(super) fn flux2_dev_edit_memory_context(
     contract: &gen_core::MemoryProviderContract,
     quant: Option<gen_core::Quant>,
     reference_count: usize,
@@ -509,8 +599,9 @@ fn flux2_edit_memory_run_context<'a>(
 /// Generate one FLUX.2 edit image conditioned on `conditioning` (the reference set).
 /// Distilled klein: guidance 1.0, no negative prompt.
 #[allow(clippy::too_many_arguments)]
-fn flux2_edit_generate_one(
+pub(super) fn flux2_edit_generate_one(
     generator: &dyn Generator,
+    sampling: &GenerationRequest,
     use_provider_memory_safety: bool,
     use_pid: bool,
     memory_evaluation: Option<&crate::mlx_fit_gate::MlxRequestEvaluation>,
@@ -560,6 +651,9 @@ fn flux2_edit_generate_one(
         memory: selected_memory,
         preview,
         cancel: cancel.clone(),
+        sampler: sampling.sampler.clone(),
+        scheduler: sampling.scheduler.clone(),
+        scheduler_shift: sampling.scheduler_shift,
         ..Default::default()
     };
     enhance.apply(&mut request, prompt_enhancement);
@@ -639,7 +733,7 @@ fn flux2_edit_raw_settings(
 /// Real FLUX.2 edit generation: load the edit variant once, then `count` outputs each
 /// conditioned on the shared reference set. Mirrors [`generate_stream`]'s blocking-
 /// thread + streamed-events shape and reuses [`consume_gen_events`].
-async fn generate_flux2_edit_stream(
+pub(super) async fn generate_flux2_edit_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -649,6 +743,7 @@ async fn generate_flux2_edit_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let sampling = super::sampling::explicit_sampling_request(request);
     let model = mlx_model(&request.model)
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
     let engine_id = flux2_edit_engine_id(&request.model)
@@ -768,7 +863,7 @@ async fn generate_flux2_edit_stream(
     let adapter_count = adapters.len();
     // sc-6135: FLUX.2-dev caption upsampling — image-conditioned on the reference for the edit path.
     // Gated to dev by the engine + the manifest `ui.promptEnhance` toggle; off for klein.
-    let enhance = PromptEnhance::from_advanced(&request.advanced)?;
+    let enhance = PromptEnhance::from_advanced(&request.model, &request.advanced)?;
     #[cfg(target_os = "macos")]
     let load_quant = mlx_load_quant_for_resolved_artifact(engine_id, quant);
     #[cfg(not(target_os = "macos"))]
@@ -782,7 +877,9 @@ async fn generate_flux2_edit_stream(
             engine_id,
             &request.model,
         )
-        .map_err(|error| crate::classify_engine_error("FLUX.2 edit resolved route", error.into()))?;
+        .map_err(|error| {
+            crate::classify_engine_error("FLUX.2 edit resolved route", error.into())
+        })?;
         #[cfg(not(target_os = "macos"))]
         let resolved_route = request.model.as_str();
         spec = spec.with_resolved_route(resolved_route);
@@ -880,6 +977,7 @@ async fn generate_flux2_edit_stream(
         has_phases: false,
         negative_branch: false,
         prefix_kv_cache_eligible: false,
+        reference_resources: None,
     };
     let (spec, memory_plan) = release_declared_sequential_for_request(
         engine_id,
@@ -980,6 +1078,7 @@ async fn generate_flux2_edit_stream(
                         .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                     let (out_w, out_h, pixels) = flux2_edit_generate_one(
                         generator,
+                        &sampling,
                         use_provider_memory_safety,
                         use_pid,
                         Some(&memory_evaluation),
@@ -1050,11 +1149,11 @@ async fn generate_flux2_edit_stream(
 // ---------------------------------------------------------------------------
 
 /// The engine registry id for the FLUX.2-dev Fun-Controlnet-Union variant (sc-2292).
-const FLUX2_DEV_CONTROL_ENGINE_ID: &str = "flux2_dev_control";
+pub(super) const FLUX2_DEV_CONTROL_ENGINE_ID: &str = "flux2_dev_control";
 /// Default Fun-Controlnet-Union control-weights filename — the `-2602` CFG-distilled variant (the
 /// recommended one — the previous version lost CFG distillation after control training). The default
 /// *repo* is the shared strict-control table (single source of truth — `STRICT_CONTROL_ENGINES`).
-const FLUX2_CONTROL_FILE: &str = "FLUX.2-dev-Fun-Controlnet-Union-2602.safetensors";
+pub(super) const FLUX2_CONTROL_FILE: &str = "FLUX.2-dev-Fun-Controlnet-Union-2602.safetensors";
 /// Pinned revision for the default `alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union` control-weights repo
 /// (sc-9879, F-077 follow-up). Fetching the mutable `main` branch means a re-push (or a compromised token)
 /// could silently swap the ControlNet checkpoint we load; pin the exact commit for defense-in-depth
@@ -1062,7 +1161,7 @@ const FLUX2_CONTROL_FILE: &str = "FLUX.2-dev-Fun-Controlnet-Union-2602.safetenso
 /// revision. HF's tree API still reports the file's `lfs.oid`, which `ensure_hf_cached_file` verifies
 /// the downloaded content against.
 #[cfg(test)]
-const FLUX2_CONTROL_REVISION: &str = "b3dcd7836a0e926248dac3ccba8fc0853495764b";
+pub(super) const FLUX2_CONTROL_REVISION: &str = "b3dcd7836a0e926248dac3ccba8fc0853495764b";
 /// The asset `adapter` id recorded on FLUX.2-dev strict-pose assets (the dev base MLX label).
 const FLUX2_CONTROL_ADAPTER_LABEL: &str = "mlx_flux2";
 
@@ -1071,7 +1170,7 @@ const FLUX2_CONTROL_ADAPTER_LABEL: &str = "mlx_flux2";
 /// pose tier or plain txt2img. Gated to `flux2_dev` (klein has no control checkpoint). Control-weights
 /// presence is NOT part of the gate: they are fetched on first use in the stream (a missing checkpoint
 /// downloads, then errors loudly only on a real failure — never silently drops the poses).
-fn flux2_dev_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn flux2_dev_control_available(request: &ImageRequest, settings: &Settings) -> bool {
     mlx_flux_strict_control_engine_id(&request.model) == Some(FLUX2_DEV_CONTROL_ENGINE_ID)
         && request.mode != "edit_image"
         && !pose_entries(request).is_empty()
@@ -1081,16 +1180,14 @@ fn flux2_dev_control_available(request: &ImageRequest, settings: &Settings) -> b
 /// The (repo, filename) of the FLUX.2-dev control weights — `advanced.controlWeights.{repo,filename}`
 /// overrides, else the `-2602` Fun-Controlnet-Union default (parity with the Z-Image resolver).
 /// The payload filename must be a plain component (sc-8821 / F-019).
-fn flux2_control_repo_file(request: &ImageRequest) -> WorkerResult<(String, String)> {
+pub(super) fn flux2_control_repo_file(request: &ImageRequest) -> WorkerResult<(String, String)> {
     let cw = request
         .advanced
         .get("controlWeights")
         .and_then(Value::as_object);
     let pick = |key: &str, default: &str| {
         cw.and_then(|m| m.get(key))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
+            .and_then(crate::payload::trimmed_value_str)
             .unwrap_or(default)
             .to_owned()
     };
@@ -1160,7 +1257,7 @@ async fn ensure_flux2_control_weights(
 /// Pose ControlNet lock strength for FLUX.2-dev: `advanced.controlScale` (default 0.75, clamp [0,2]).
 /// The Fun-Controlnet-Union README recommends 0.65–0.80 for the dev branch, so the default sits at the
 /// mid-point (Z-Image's strict-pose default is 0.9; the dev branch over-locks above ~0.8).
-fn flux2_control_scale(request: &ImageRequest) -> f32 {
+pub(super) fn flux2_control_scale(request: &ImageRequest) -> f32 {
     advanced::f32_clamped(&request.advanced, "controlScale", 0.75, 0.0..=2.0)
 }
 
@@ -1169,8 +1266,9 @@ fn flux2_control_scale(request: &ImageRequest) -> f32 {
 /// Fun-Controlnet-Union branch. dev is guidance-distilled (embedded scalar) — `guidance` rides the
 /// transformer's guidance embedder (no true-CFG).
 #[allow(clippy::too_many_arguments)]
-fn flux2_control_generate_one_scoped(
+pub(super) fn flux2_control_generate_one_scoped(
     generator: &dyn Generator,
+    sampling: &GenerationRequest,
     memory_evaluation: Option<&crate::mlx_fit_gate::MlxRequestEvaluation>,
     prompt: &str,
     width: u32,
@@ -1195,6 +1293,9 @@ fn flux2_control_generate_one_scoped(
         memory: memory_evaluation.map(|evaluation| evaluation.memory),
         preview,
         cancel: cancel.clone(),
+        sampler: sampling.sampler.clone(),
+        scheduler: sampling.scheduler.clone(),
+        scheduler_shift: sampling.scheduler_shift,
         ..Default::default()
     };
     // sc-20799: this lane used to call `generator.generate` directly — no request scope, no
@@ -1228,7 +1329,7 @@ fn flux2_control_generate_one_scoped(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn flux2_control_raw_settings(
+pub(super) fn flux2_control_raw_settings(
     request: &ImageRequest,
     repo: &str,
     steps: u32,
@@ -1284,7 +1385,7 @@ fn flux2_control_spec(
 }
 
 #[cfg(all(target_os = "macos", test))]
-fn flux2_control_load(
+pub(super) fn flux2_control_load(
     weights_dir: PathBuf,
     control_weights: PathBuf,
     quant: Option<Quant>,
@@ -1299,7 +1400,7 @@ fn flux2_control_load(
 /// [`generate_zimage_control_stream`] — the control checkpoint is fetched on first use, then the dev
 /// control engine loads once on the blocking thread and renders one image per pose (shared seed so
 /// only the pose changes across the set). dev keeps its embedded guidance (no CFG).
-async fn generate_flux2_dev_control_stream(
+pub(super) async fn generate_flux2_dev_control_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -1309,6 +1410,7 @@ async fn generate_flux2_dev_control_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let sampling = super::sampling::explicit_sampling_request(request);
     // sc-20799: this lane wires no PiD decode path at all, so `advanced.usePid` was discarded here
     // with no diagnostic. Refuse it before any weights are fetched.
     refuse_pid_on_flux2_dev_route("FLUX.2-dev strict-control", request)?;
@@ -1460,6 +1562,7 @@ async fn generate_flux2_dev_control_stream(
         has_phases: false,
         negative_branch: false,
         prefix_kv_cache_eligible: false,
+        reference_resources: None,
     };
     let (spec, memory_plan) = release_declared_sequential_for_request(
         FLUX2_DEV_CONTROL_ENGINE_ID,
@@ -1545,6 +1648,7 @@ async fn generate_flux2_dev_control_stream(
                     .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                 let (out_w, out_h, pixels) = flux2_control_generate_one_scoped(
                     generator,
+                    &sampling,
                     Some(&memory_evaluation),
                     &prompt,
                     width,
@@ -1792,8 +1896,9 @@ mod flux2_dev_admission_tests {
     #[test]
     fn a_pid_opt_in_on_a_flux2_dev_route_is_refused_rather_than_dropped() {
         for advanced in [json!({ "usePid": true }), json!({ "usePid": "true" })] {
-            let error = refuse_pid_on_flux2_dev_route("FLUX.2-dev edit", &advanced_request(advanced))
-                .expect_err("a PiD opt-in on a Dev route must not be silently ignored");
+            let error =
+                refuse_pid_on_flux2_dev_route("FLUX.2-dev edit", &advanced_request(advanced))
+                    .expect_err("a PiD opt-in on a Dev route must not be silently ignored");
             assert!(
                 matches!(error, WorkerError::InvalidPayload(_)),
                 "expected a typed InvalidPayload refusal, got {error:?}"

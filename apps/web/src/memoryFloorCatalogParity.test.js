@@ -1373,6 +1373,10 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
         "acestep_v15_turbo",
         "chatterbox_tts",
         "chatterbox_ve",
+        // sc-26235: the native Candle BF16 floor is declared, not measured.
+        "flux3_klein",
+        // sc-26239: separate base CFG checkpoint, also an unmeasured declaration.
+        "flux3_klein_base",
         "kokoro_82m",
         "moss_sfx_v2",
         "moss_tts_realtime",

@@ -1,9 +1,11 @@
+import { fileSha256 as hash } from "./lib/file-sha256.mjs";
 // sc-24163 E11. No imports, synthetic completion, downloads, or memory campaign.
 // The production API submits/resumes both jobs and registers their final adapters.
+import { enterMacMetalExecution, metalChildOptions } from "./lib/apple-metal-execution-lock.mjs";
+import { bindMetallib } from "./ci/memory-catalog/bind-metallib.mjs";
 import assert from "node:assert/strict";
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
 import { cp, lstat, mkdir, open, readFile, readdir, realpath, rename, stat, writeFile, copyFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import path from "node:path";
@@ -123,7 +125,7 @@ export function syntheticPng(edit = false) {
   return Buffer.concat([Buffer.from("89504e470d0a1a0a", "hex"), chunk("IHDR", header), chunk("IDAT", deflateSync(rows)), chunk("IEND", Buffer.alloc(0))]);
 }
 
-async function hash(file) { const digest = createHash("sha256"); for await (const bytes of createReadStream(file)) digest.update(bytes); return digest.digest("hex"); }
+
 async function safetensorsMetadata(file) {
   const handle = await open(file, "r");
   try {
@@ -180,7 +182,7 @@ export async function runLifecycle(env = process.env, runtime = {}) {
   const alive = () => { if (controller.signal.aborted) throw controller.signal.reason; for (const child of children.filter((child) => child.service)) requireFact(child.exitCode === null && child.signalCode === null, "owned API or worker exited"); };
   const launch = async (command, args, childEnv, name, service = false) => {
     const log = await open(path.join(evidence, `${name}.log`), "wx"); handles.push(log);
-    const child = spawn(command, args, { cwd: root, env: childEnv, detached: true, stdio: ["ignore", log.fd, log.fd] }); child.service = service; children.push(child);
+    const child = spawn(command, args, metalChildOptions({ cwd: root, env: childEnv, detached: true, stdio: ["ignore", log.fd, log.fd] })); child.service = service; children.push(child);
     // Install listeners immediately; spawn failures never become unhandled events.
     child.done = new Promise((resolve, reject) => { child.once("error", reject); child.once("exit", (code, signal) => resolve({ code, signal })); });
     if (service) child.done.catch((error) => controller.abort(error));
@@ -237,7 +239,12 @@ export async function runLifecycle(env = process.env, runtime = {}) {
     assertOwnedCacheEnv(childEnv, { weights, hub, xet });
     Object.assign(receipt.identity, { base_revision: BASE_REVISION, base_snapshot: base, worker_id: workerId, hf_home: weights, hf_hub_cache: hub, hf_xet_cache: xet });
     await save();
-    await checkedCommand("cargo", ["build", "--release", "--locked", "-p", "sceneworks-rust-api"], { ...env, CARGO_TARGET_DIR: path.join(root, "target") }, "build");
+    await checkedCommand("cargo", ["build", "--release", "--locked", "-p", "sceneworks-rust-api", "--message-format=json-render-diagnostics"], { ...env, CARGO_TARGET_DIR: path.join(root, "target") }, "build");
+    const native = await bindMetallib({ messages: path.join(evidence, "build.log"), lockFile: path.join(root, "Cargo.lock"),
+      targetRoot: path.join(root, "target"), temporaryRoot: env.RUNNER_TEMP, consumer: "app",
+      explicitOverride: env.PMETAL_METALLIB_PATH ?? "", explicitNativeDirectory: env.PMETAL_MLX_PREBUILT_DIR ?? "" });
+    await copyFile(native.receipt, path.join(evidence, "native-metallib-binding.json"));
+    childEnv.PMETAL_METALLIB_PATH = native.path;
     requireFact(await git("status", "--porcelain") === "", "build changed the pinned checkout");
     const binary = path.join(root, "target", "release", "sceneworks-rust-api"); receipt.identity.binary_sha256 = await hash(binary);
     await checkedCommand(binary, [], { ...childEnv, SCENEWORKS_GPU_CHECK: "1" }, "metal-preflight");
@@ -313,5 +320,11 @@ export async function runLifecycle(env = process.env, runtime = {}) {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2);
-  runLifecycle(process.env, { preflightOnly: args.length === 1 && args[0] === "--preflight-only" }).then((receipt) => console.log(`${receipt.status}: ${receipt.cases.length} completed app jobs`)).catch((error) => { console.error(error.message); process.exitCode = 1; });
+  const preflightOnly = args.length === 1 && args[0] === "--preflight-only";
+  const run = async () => {
+    if (!preflightOnly && await enterMacMetalExecution(10 * 60 * 60)) return;
+    const receipt = await runLifecycle(process.env, { preflightOnly });
+    console.log(`${receipt.status}: ${receipt.cases.length} completed app jobs`);
+  };
+  run().catch((error) => { console.error(error.message); process.exitCode = 1; });
 }

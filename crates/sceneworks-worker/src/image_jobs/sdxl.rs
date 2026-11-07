@@ -1,9 +1,59 @@
+use super::adapters::resolve_adapters;
+use super::artifact_resolution::model_repo;
+use super::artifact_resolution::resolve_weights_dir;
+use super::artifact_resolution::resolved_mlx_artifact_provenance;
+use super::artifact_resolution::resolved_mlx_artifact_tier;
+use super::conditioning::load_reference_image;
+use super::conditioning::non_empty;
+use super::conditioning::resolve_character_image_likeness_source;
+use super::conditioning::stage_likeness;
+use super::events::consume_gen_events;
+use super::geometry::fit_engine_image;
+use super::mlx_model;
+use super::quantization::resolve_quant;
+use super::resolve_seed;
+use super::sampling::mlx_raw_settings;
+use super::sampling::resolve_guidance;
+use super::sampling::resolve_negative_prompt;
+use super::sampling::resolve_steps;
+#[cfg(not(target_os = "macos"))]
+use super::sdxl_imported::SDXL_EDIT_STRENGTH;
+#[cfg(not(target_os = "macos"))]
+use super::sdxl_imported::SDXL_INPAINT_STRENGTH;
+use super::stream::drive_gen_items_scored;
+use super::stream::start_cached_gen_stream;
+use super::AdapterSpec;
+use super::CancelFlag;
+use super::Conditioning;
+use super::GenerationOutput;
+use super::GenerationRequest;
+use super::Generator;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use super::LoadSpec;
+use super::Progress;
+use super::Quant;
+use super::ResolvedModel;
+use super::WeightsSource;
+use crate::advanced;
+use crate::huggingface_snapshot_dir;
+use crate::ApiClient;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
+use serde_json::json;
 /// Default h94 IP-Adapter snapshot repo (ViT-H encoder + plus/plus-face SDXL weights).
 const SDXL_IP_ADAPTER_REPO: &str = "h94/IP-Adapter";
 /// img2img strength for a plain SDXL edit (torch `SdxlDiffusersAdapter` default 0.6).
-const SDXL_EDIT_STRENGTH: f32 = 0.6;
+pub(super) const SDXL_EDIT_STRENGTH: f32 = 0.6;
 /// img2img strength for masked inpaint / outpaint (torch default 0.85).
-const SDXL_INPAINT_STRENGTH: f32 = 0.85;
+pub(super) const SDXL_INPAINT_STRENGTH: f32 = 0.85;
 /// IP-Adapter scale when the request omits it — matches the torch plus-face default 0.7
 /// (`SdxlDiffusersAdapter._ip_adapter_scale`); the engine's own fallback is 0.6.
 const SDXL_IP_SCALE: f32 = 0.7;
@@ -11,7 +61,7 @@ const SDXL_IP_SCALE: f32 = 0.7;
 /// Which advanced SDXL path a request maps onto (or `None` for plain txt2img, which stays
 /// on [`generate_stream`]). Outpaint wins over a plain mask when `fit_mode == outpaint`
 /// (the torch path checks outpaint first, then unions any user mask into the border).
-enum SdxlSubMode {
+pub(super) enum SdxlSubMode {
     /// Reference image-prompt via IP-Adapter (txt2img + decoupled cross-attn).
     Ip,
     /// Plain img2img edit (Reference init only).
@@ -32,7 +82,7 @@ fn sdxl_engine_model(model: &str) -> Option<ResolvedModel> {
 
 /// Classify an SDXL job into an advanced sub-mode. `None` = plain txt2img (no reference,
 /// not an edit) → handled by the base MLX path.
-fn sdxl_sub_mode(request: &ImageRequest) -> Option<SdxlSubMode> {
+pub(super) fn sdxl_sub_mode(request: &ImageRequest) -> Option<SdxlSubMode> {
     if request.mode == "edit_image" {
         if !non_empty(&request.source_asset_id) {
             return None;
@@ -53,7 +103,7 @@ fn sdxl_sub_mode(request: &ImageRequest) -> Option<SdxlSubMode> {
 
 /// True when this is an SDXL advanced job (sdxl-family model + an advanced sub-mode) whose
 /// base weights resolve — routed here rather than to plain txt2img.
-fn sdxl_advanced_available(request: &ImageRequest, settings: &Settings) -> bool {
+pub(super) fn sdxl_advanced_available(request: &ImageRequest, settings: &Settings) -> bool {
     sdxl_engine_model(&request.model).is_some()
         && sdxl_sub_mode(request).is_some()
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
@@ -62,18 +112,13 @@ fn sdxl_advanced_available(request: &ImageRequest, settings: &Settings) -> bool 
 /// Resolve the IP-Adapter snapshot directory (`advanced.ipAdapterRepo` override, else the
 /// h94 default). The engine loader finds the ViT-H encoder + plus/plus-face weights inside.
 fn resolve_ip_adapter_dir(request: &ImageRequest, settings: &Settings) -> Option<PathBuf> {
-    let repo = request
-        .advanced
-        .get("ipAdapterRepo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.advanced.get("ipAdapterRepo"))
         .unwrap_or(SDXL_IP_ADAPTER_REPO);
     huggingface_snapshot_dir(&settings.data_dir, repo)
 }
 
 /// An [`Image`] (RGB8) as an `image::RgbImage` for host-side compositing.
-fn engine_image_to_rgb(image: Image) -> WorkerResult<image::RgbImage> {
+pub(super) fn engine_image_to_rgb(image: Image) -> WorkerResult<image::RgbImage> {
     image::RgbImage::from_raw(image.width, image.height, image.pixels)
         .ok_or_else(|| WorkerError::InvalidPayload("image buffer size mismatch".to_owned()))
 }
@@ -122,6 +167,7 @@ fn sdxl_advanced_spec(
 #[allow(clippy::too_many_arguments)]
 fn sdxl_advanced_generate_one(
     generator: &dyn Generator,
+    sampling_controls: &GenerationRequest,
     prompt: &str,
     negative_prompt: Option<String>,
     width: u32,
@@ -146,7 +192,7 @@ fn sdxl_advanced_generate_one(
         conditioning,
         preview,
         cancel: cancel.clone(),
-        ..Default::default()
+        ..sampling_controls.clone()
     };
     let output = generator.generate(&request, on_progress).map_err(|error| {
         WorkerError::Engine(format!("sdxl advanced generation failed: {error}"))
@@ -188,7 +234,7 @@ fn sdxl_advanced_raw_settings(
 /// Real SDXL advanced generation: resolve the conditioning images on the async side, then load
 /// once + generate `count` images on the blocking thread (the MLX generator is `!Send`). Reuses
 /// [`consume_gen_events`] for streaming + asset writes.
-async fn generate_sdxl_advanced_stream(
+pub(super) async fn generate_sdxl_advanced_stream(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -198,6 +244,7 @@ async fn generate_sdxl_advanced_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    let sampling_controls = super::sampling::explicit_sampling_request(request);
     let model = sdxl_engine_model(&request.model)
         .ok_or_else(|| WorkerError::InvalidPayload("not an SDXL engine model".to_owned()))?;
     let sub_mode = sdxl_sub_mode(request)
@@ -399,10 +446,8 @@ async fn generate_sdxl_advanced_stream(
     // the scored source) and is non-fatal (a decode failure → `None` → scores omitted). Decoding the
     // source here is independent of the conditioning Reference above, so the existing IP path is
     // untouched. The `!Send` scorer is built ONCE inside the closure and reused across the N outputs.
-    let likeness =
-        matches!(sub_mode, SdxlSubMode::Ip).then(|| {
-            resolve_character_image_likeness_source(request, settings, project_path)
-        });
+    let likeness = matches!(sub_mode, SdxlSubMode::Ip)
+        .then(|| resolve_character_image_likeness_source(request, settings, project_path));
     let face_stack_dir = stage_likeness(
         api,
         settings,
@@ -423,13 +468,7 @@ async fn generate_sdxl_advanced_stream(
     let resolved_artifact = if crate::mlx_fit_gate::manifest_declares_decode_quality_policies(
         &request.model_manifest_entry,
     ) {
-        resolved_mlx_artifact_provenance(
-            request,
-            settings,
-            &repo,
-            &weights_dir,
-            effective_tier,
-        )?
+        resolved_mlx_artifact_provenance(request, settings, &repo, &weights_dir, effective_tier)?
     } else {
         None
     };
@@ -465,6 +504,7 @@ async fn generate_sdxl_advanced_stream(
             drive_gen_items_scored(tx, seeds, move |_index, seed, preview, on_progress| {
                 let (out_w, out_h, pixels) = sdxl_advanced_generate_one(
                     generator,
+                    &sampling_controls,
                     &prompt,
                     negative_prompt.clone(),
                     width,

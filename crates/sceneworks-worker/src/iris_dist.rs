@@ -1,6 +1,6 @@
 //! Multi-rank Iris-3B training on ONE host (story sc-25689, epic sc-25678).
 //!
-//! The Iris trainers are multi-PROCESS (`gen_core::iris::train::dist`: one process per rank, a
+//! The Iris trainers are multi-PROCESS (`gen_core_iris::train::dist`: one process per rank, a
 //! host TCP collective with bounded waits, typed `DistError`s). SceneWorks hosts such a run on the
 //! worker that claimed the job:
 //!
@@ -252,10 +252,66 @@ impl WireProgress {
     }
 }
 
+/// Tensor-neutral I/O facts crossing the rank process boundary. No provider strings or
+/// pre-computed percentages are put on the wire; the coordinator uses the same formatter.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct WireLoadActivity {
+    phase: String,
+    component: String,
+    file: PathBuf,
+    bytes_read: u64,
+    total_bytes: Option<u64>,
+    component_bytes_read: u64,
+    component_total_bytes: Option<u64>,
+    files_checked: usize,
+    total_files: Option<usize>,
+}
+impl WireLoadActivity {
+    fn from_activity(activity: gen_core::LoadActivity) -> Self {
+        Self {
+            phase: match activity.phase {
+                gen_core::LoadActivityPhase::Checking => "checking",
+                gen_core::LoadActivityPhase::Verifying => "verifying",
+                gen_core::LoadActivityPhase::Loading => "loading",
+            }
+            .to_owned(),
+            component: activity.component,
+            file: activity.file,
+            bytes_read: activity.bytes_read,
+            total_bytes: activity.total_bytes,
+            component_bytes_read: activity.component_bytes_read,
+            component_total_bytes: activity.component_total_bytes,
+            files_checked: activity.files_checked,
+            total_files: activity.total_files,
+        }
+    }
+    fn into_activity(self) -> Option<gen_core::LoadActivity> {
+        Some(gen_core::LoadActivity {
+            phase: match self.phase.as_str() {
+                "checking" => gen_core::LoadActivityPhase::Checking,
+                "verifying" => gen_core::LoadActivityPhase::Verifying,
+                "loading" => gen_core::LoadActivityPhase::Loading,
+                _ => return None,
+            },
+            component: self.component,
+            file: self.file,
+            bytes_read: self.bytes_read,
+            total_bytes: self.total_bytes,
+            component_bytes_read: self.component_bytes_read,
+            component_total_bytes: self.component_total_bytes,
+            files_checked: self.files_checked,
+            total_files: self.total_files,
+        })
+    }
+}
+
 /// One protocol message a rank writes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub(crate) enum RankMessage {
+    LoadActivity {
+        activity: Option<WireLoadActivity>,
+    },
     Progress {
         progress: WireProgress,
     },
@@ -347,17 +403,27 @@ pub fn iris_rank_entry() -> Option<i32> {
     let spec_path = PathBuf::from(std::env::var_os(RANK_SPEC_ENV)?);
     // The rank's own diagnostics (stderr, inherited by the worker's log) use the worker's format.
     sceneworks_core::observability::init_logging();
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     {
         let thread = std::thread::Builder::new()
             .name("iris-rank".to_owned())
             .stack_size(crate::WORKER_ENTRY_STACK_BYTES)
             .spawn(move || {
-                let settings = crate::settings::Settings::from_env();
                 let mut out = std::io::stdout();
+                let settings = match crate::settings::Settings::try_from_env() {
+                    Ok(settings) => settings,
+                    Err(error) => {
+                        write_message(
+                            &mut out,
+                            &RankMessage::Failed {
+                                message: error.to_string(),
+                                dist: None,
+                                canceled: false,
+                            },
+                        );
+                        return 1;
+                    }
+                };
                 match (read_spec(&spec_path), RankWorld::from_env()) {
                     (Ok(spec), Ok(world)) => run_rank_process_with(
                         &spec,
@@ -386,10 +452,7 @@ pub fn iris_rank_entry() -> Option<i32> {
             _ => 1,
         })
     }
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
+    #[cfg(not(native_lane))]
     {
         let _ = spec_path;
         write_message(
@@ -414,13 +477,7 @@ fn read_spec(path: &Path) -> Result<RankSpec, String> {
 /// Train one rank: the SAME weights-free preflight and trainer inputs as the single-process path,
 /// the rank's world stamped onto the request, progress and the outcome written as protocol lines on
 /// `out`, cancellation read from `input` (a `cancel` line, or EOF when the coordinator is gone).
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 pub(crate) fn run_rank_process_using(
     spec: &RankSpec,
     world: &RankWorld,
@@ -434,10 +491,7 @@ pub(crate) fn run_rank_process_using(
 
 /// [`run_rank_process_using`], optionally exiting the PROCESS when the coordinator disappears (the
 /// real rank entry does; an in-process test must not).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn run_rank_process_with(
     spec: &RankSpec,
     world: &RankWorld,
@@ -505,18 +559,30 @@ fn run_rank_process_with(
         .ok();
 
     let spec_load = inputs.load_spec(engine_id, &request.config.train_dtype);
+    let load_bridge = crate::load_progress::ProcessBridge::new(|activity| {
+        write_message(
+            &mut std::io::stdout(),
+            &RankMessage::LoadActivity {
+                activity: activity.map(WireLoadActivity::from_activity),
+            },
+        );
+    });
     let outcome = (|| {
         let mut trainer = load_trainer(engine_id, &spec_load)?;
         trainer.validate(&request)?;
         trainer.train(&request, &mut |progress| {
-            write_message(
-                out,
-                &RankMessage::Progress {
-                    progress: WireProgress::from_progress(&progress),
-                },
-            )
+            load_bridge.regular(|| {
+                write_message(
+                    out,
+                    &RankMessage::Progress {
+                        progress: WireProgress::from_progress(&progress),
+                    },
+                )
+            })
         })
     })();
+    // Flush/stop the process bridge before Done/Failed, so no rank load can arrive afterwards.
+    drop(load_bridge);
     let _ = finish(request, prepared_inputs);
     match outcome {
         Ok(output) => {
@@ -532,7 +598,7 @@ fn run_rank_process_with(
         }
         Err(error) => {
             let canceled = matches!(error, gen_core::Error::Canceled);
-            let dist = gen_core::iris::train::dist::dist_error(&error).map(|typed| WireDistError {
+            let dist = gen_core_iris::train::dist::dist_error(&error).map(|typed| WireDistError {
                 kind: crate::iris_curricula::dist_error_kind(typed).to_owned(),
                 detail: typed.to_string(),
             });
@@ -657,10 +723,7 @@ fn free_loopback_port() -> std::io::Result<u16> {
 
 /// Coordinate `world_size` rank processes of an Iris plan until they finish: rank 0's events go to
 /// `tx`, `cancel` fans out, and the outcome is rank 0's export or a typed failure. Blocking.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn drive_rank_fleet(
     settings: &crate::settings::Settings,
     job_id: &str,
@@ -680,10 +743,7 @@ pub(crate) fn drive_rank_fleet(
     )
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn drive_rank_fleet_with(
     settings: &crate::settings::Settings,
     job_id: &str,
@@ -733,7 +793,7 @@ pub(crate) fn drive_rank_fleet_with(
         command
             .envs(world.env())
             .env(RANK_SPEC_ENV, &spec_path)
-            .env(gen_core::iris::train::dist::DIST_TOKEN_ENV, &token)
+            .env(gen_core_iris::train::dist::DIST_TOKEN_ENV, &token)
             // The rank resolves the plan's paths against THIS worker's settings, whatever the
             // ambient environment says (a test worker, an embedded worker with defaulted dirs).
             .env("SCENEWORKS_DATA_DIR", &settings.data_dir)
@@ -834,9 +894,16 @@ pub(crate) fn drive_rank_fleet_with(
         }
         match inbox.recv_timeout(Duration::from_millis(100)) {
             Ok(FleetEvent::Message(rank, message)) => match message {
+                RankMessage::LoadActivity { activity } => {
+                    if rank == 0 && !consumer_gone && fleet.ranks[rank].done.is_none() {
+                        gen_core::LoadActivityContext::capture()
+                            .report(activity.and_then(WireLoadActivity::into_activity));
+                    }
+                }
                 RankMessage::Progress { progress } => {
                     if rank == 0 && !consumer_gone {
                         if let Some(progress) = progress.into_progress() {
+                            crate::load_progress::training_progress(&progress);
                             if tx.blocking_send(TrainEvent::Progress(progress)).is_err() {
                                 // Nobody listens to this job any more: stop every rank.
                                 consumer_gone = true;
@@ -1000,13 +1067,7 @@ fn fleet_failure_message(failures: &[RankFailure], world_size: usize) -> String 
 /// Fake rank processes for the fleet tests: the test binary itself, re-entered on the ignored
 /// [`tests::fake_iris_rank_process`] test, which plays one rank according to
 /// `SCENEWORKS_FAKE_RANK_BEHAVIOR` and records its environment under `SCENEWORKS_FAKE_RANK_RECORD`.
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 pub(crate) mod test_support {
     use super::*;
 
@@ -1119,15 +1180,36 @@ pub(crate) mod test_support {
     }
 }
 
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 mod tests {
     use super::*;
+    #[test]
+    fn load_activity_wire_round_trip_preserves_counts_and_component_totals() {
+        let activity = gen_core::LoadActivity {
+            phase: gen_core::LoadActivityPhase::Loading,
+            component: "transformer".to_owned(),
+            file: PathBuf::from("transformer/shard-2.safetensors"),
+            bytes_read: 17,
+            total_bytes: Some(40),
+            component_bytes_read: 57,
+            component_total_bytes: Some(80),
+            files_checked: 2,
+            total_files: Some(3),
+        };
+        let message = RankMessage::LoadActivity {
+            activity: Some(WireLoadActivity::from_activity(activity.clone())),
+        };
+        let mut output = Vec::new();
+        write_message(&mut output, &message);
+        let wire = parse_message(std::str::from_utf8(&output).unwrap()).unwrap();
+        let RankMessage::LoadActivity {
+            activity: Some(wire),
+        } = wire
+        else {
+            panic!("wrong rank event");
+        };
+        assert_eq!(wire.into_activity(), Some(activity));
+    }
 
     #[test]
     fn the_wire_round_trips_every_progress_event_and_ignores_noise() {
@@ -1205,7 +1287,7 @@ mod tests {
             model_options: options.clone(),
             ..Default::default()
         };
-        let plan = gen_core::iris::train::dist::parse_dist(
+        let plan = gen_core_iris::train::dist::parse_dist(
             config.model_options["iris"].get("dist"),
             false,
             true,
@@ -1283,7 +1365,7 @@ mod tests {
         let behavior = std::env::var(BEHAVIOR_ENV).unwrap_or_default();
         let record_dir = PathBuf::from(std::env::var_os(RECORD_ENV).expect("a record dir"));
         let spec = read_spec(Path::new(&std::env::var_os(RANK_SPEC_ENV).unwrap()));
-        let token = std::env::var(gen_core::iris::train::dist::DIST_TOKEN_ENV).ok();
+        let token = std::env::var(gen_core_iris::train::dist::DIST_TOKEN_ENV).ok();
         std::fs::write(
             record_dir.join(format!("rank-{}.json", world.rank)),
             serde_json::to_vec(&json!({

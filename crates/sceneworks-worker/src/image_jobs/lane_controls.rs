@@ -78,21 +78,21 @@ pub(crate) fn resolve_lane_request_controls(
             "the engine does not honour a caption-overflow policy (advanced.{CAPTION_OVERFLOW_KEY})"
         )));
     }
-    let cfg_off = guidance == Some(1.0);
+    let cfg_off = controls::cfg_off(guidance.map(f64::from), &request.model_manifest_entry);
     if cfg_off && cfg_interval.is_some() {
-        return Err(refuse(
-            "a guidance interval has no effect at guidance 1.0 (classifier-free guidance is off)"
-                .to_owned(),
-        ));
+        return Err(refuse(format!(
+            "a guidance interval has no effect at guidance {:.1} (classifier-free guidance is off)",
+            guidance.unwrap_or(1.0)
+        )));
     }
     if cfg_off
         && controls::negative_prompt_requires_guidance(&request.model_manifest_entry)
         && negative_prompt.is_some_and(|prompt| !prompt.trim().is_empty())
     {
-        return Err(refuse(
-            "the negative prompt has no effect at guidance 1.0 (classifier-free guidance is off)"
-                .to_owned(),
-        ));
+        return Err(refuse(format!(
+            "the negative prompt has no effect at guidance {:.1} (classifier-free guidance is off)",
+            guidance.unwrap_or(1.0)
+        )));
     }
     Ok(LaneRequestControls {
         cfg_interval,
@@ -604,6 +604,23 @@ mod tests {
             resolve_lane_request_controls(&request, &honouring(), Some(1.0), Some("blurry"))
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn lane_cfg_off_matches_the_declared_provider_value() {
+        let request = request(
+            json!({}),
+            "blurry",
+            json!({"negativePromptRequiresGuidance":true,"guidanceOffValue":0}),
+        );
+        assert!(
+            resolve_lane_request_controls(&request, &honouring(), Some(1.0), Some("blurry"))
+                .is_ok()
+        );
+        let error =
+            resolve_lane_request_controls(&request, &honouring(), Some(0.0), Some("blurry"))
+                .unwrap_err();
+        assert!(error.to_string().contains("guidance 0.0"));
     }
 
     #[test]

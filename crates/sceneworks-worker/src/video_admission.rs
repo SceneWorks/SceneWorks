@@ -31,11 +31,30 @@
 //! they evaluate. The eventual provider run context still receives the actual request geometry,
 //! and the image lane remains untouched at one frame.
 
+#[path = "video_admission/bernini.rs"]
+mod bernini;
+pub(crate) use bernini::*;
+
+#[path = "video_admission/wan_vace.rs"]
+mod wan_vace;
+pub(crate) use wan_vace::*;
+
+#[path = "video_admission/scail2.rs"]
+mod scail2;
+pub(crate) use scail2::*;
+
+#[path = "video_admission/krea.rs"]
+mod krea;
+pub(crate) use krea::*;
+
 use gen_core::tiling::VideoDecodeMemoryProfile;
+// Request/component pricing on `NativeAllocationFacts` moved into gen-core-h3 (inference sc-27316)
+// as an extension trait.
 use gen_core::{
     Conditioning, MemoryBackend, MemoryBudget, MemoryCacheState, MemoryGeometry, MemoryNumericTier,
     MemoryProviderContract, MemoryRunContext, MemorySelection, MemoryStrategy, OffloadPolicy,
 };
+use gen_core_h3::h3_memory::NativeAllocationFactsExt;
 use sceneworks_core::memory_calibration::{Ltx25Decoder, Ltx25TransformerVariant, StrategyRung};
 use sceneworks_core::video_memory_curves::{
     VideoCurveBackend, VideoCurveDecodePass, VideoCurveGeometry, VideoCurveLoadShape,
@@ -49,28 +68,6 @@ use sha2::Digest;
 use crate::memory_strategy::{
     AnchorDerivationLane, Budget, Candidate, CandidateBasis, RequestScope, Selection,
 };
-
-pub(crate) const BERNINI_R2V_RECEIPT_DOMAIN: &str = "bernini-r2v-references-v2";
-pub(crate) const BERNINI_R2V_SEAL_DOMAIN: &str = "bernini-r2v-request-seal-v1";
-pub(crate) const BERNINI_MV2V_RECEIPT_DOMAIN: &str = "bernini-mv2v-clips-v1";
-pub(crate) const BERNINI_MV2V_SEAL_DOMAIN: &str = "bernini-mv2v-request-seal-v1";
-pub(crate) const BERNINI_ADS2V_RECEIPT_DOMAIN: &str = "bernini-ads2v-sources-v1";
-pub(crate) const BERNINI_ADS2V_SEAL_DOMAIN: &str = "bernini-ads2v-request-seal-v1";
-pub(crate) const BERNINI_ADAPTER_RECEIPT_AXIS_DOMAIN: &str = "bernini-adapter-receipt-v1";
-// sc-20799. Outside Bernini and LTX the video carriers were keyed by SHAPE ALONE — a bare `"other"`
-// plus `conditioning.len()` — so a one-image `MultiReference` and an eight-image one, or two
-// different driving clips and masks, shared a single admission identity and could borrow each
-// other's admitted peak. These seal the carriers the way Bernini's do: a content-INDEPENDENT
-// evidence axis (order, counts, native shapes, and the exact knobs that change the working set)
-// plus a request-only byte seal appended after `+`, which `video_curve_overlay` strips before curve
-// lookup. Sealed BEFORE any fitted curve exists for these cells, so no curve can be fitted against
-// a borrowable identity.
-pub(crate) const WAN_VACE_REPLACE_RECEIPT_DOMAIN: &str = "wan-vace-replace-person-carrier-v1";
-pub(crate) const WAN_VACE_REPLACE_SEAL_DOMAIN: &str = "wan-vace-replace-person-request-seal-v1";
-pub(crate) const SCAIL2_CARRIER_RECEIPT_DOMAIN: &str = "scail2-carrier-v1";
-pub(crate) const SCAIL2_CARRIER_SEAL_DOMAIN: &str = "scail2-carrier-request-seal-v1";
-pub(crate) const KREA_V2V_RECEIPT_DOMAIN: &str = "krea-realtime-v2v-clip-v1";
-pub(crate) const KREA_V2V_SEAL_DOMAIN: &str = "krea-realtime-v2v-request-seal-v1";
 
 fn backend_axis(lane: VideoLane) -> &'static str {
     match lane {
@@ -96,626 +93,6 @@ fn seal_images(role: &str, images: &[gen_core::Image], seal: &mut sha2::Sha256) 
         .collect::<Vec<_>>()
         .join(",");
     format!("{role}-{}:{shapes}", images.len())
-}
-
-/// Worker seal for the single-expert Wan-VACE `replace_person` carrier
-/// (`video_jobs::vace::build_vace_conditioning`): one `ControlClip` of driving frames plus its
-/// per-frame mask, then one `Reference` per character image. The frame/mask cardinality, the
-/// per-frame geometry, the masking strength and the replacement mode all move the working set, and
-/// the reference ORDER is load order, so all of them are evidence axes.
-pub(crate) fn wan_vace_replace_person_receipt(
-    lane: VideoLane,
-    width: u32,
-    height: u32,
-    conditioning: &[Conditioning],
-) -> Result<String, String> {
-    let [Conditioning::ControlClip {
-        frames,
-        mask,
-        masking_strength,
-        start_frame,
-        mode,
-    }, references @ ..] = conditioning
-    else {
-        return Err(
-            "Wan-VACE replace_person admission requires a leading ControlClip carrier".to_owned(),
-        );
-    };
-    if frames.len() != mask.len() || frames.is_empty() {
-        return Err(format!(
-            "Wan-VACE replace_person admission requires equal non-empty frame/mask counts, got {} and {}",
-            frames.len(),
-            mask.len()
-        ));
-    }
-    if *start_frame != 0 {
-        return Err(format!(
-            "Wan-VACE replace_person admission requires a frame-0 control clip, got {start_frame}"
-        ));
-    }
-    let mut reference_images: Vec<gen_core::Image> = Vec::with_capacity(references.len());
-    for entry in references {
-        let Conditioning::Reference { image, strength } = entry else {
-            return Err(
-                "Wan-VACE replace_person admission accepts only Reference entries after its \
-                 ControlClip"
-                    .to_owned(),
-            );
-        };
-        if strength.is_some() {
-            return Err(
-                "Wan-VACE replace_person references carry no strength; a populated one is a \
-                 different workload"
-                    .to_owned(),
-            );
-        }
-        reference_images.push(image.clone());
-    }
-    let mut seal = sha2::Sha256::new();
-    seal.update(WAN_VACE_REPLACE_SEAL_DOMAIN.as_bytes());
-    seal.update(masking_strength.to_bits().to_le_bytes());
-    let frames_axis = seal_images("control-frames", frames, &mut seal);
-    let mask_axis = seal_images("control-mask", mask, &mut seal);
-    let reference_axis = seal_images("references", &reference_images, &mut seal);
-    Ok(format!(
-        "{WAN_VACE_REPLACE_RECEIPT_DOMAIN}:backend-{}:composite-{width}x{height}:{frames_axis}:{mask_axis}:strength-{:08x}:mode-{mode:?}:frame-0:{reference_axis}+{WAN_VACE_REPLACE_SEAL_DOMAIN}-{:x}",
-        backend_axis(lane),
-        masking_strength.to_bits(),
-        seal.finalize()
-    ))
-}
-
-/// Worker seal for both SCAIL-2 carriers (`animate_character` and `replace_person`), which share
-/// one physical assembly built by `video_jobs::scail2`: a `Reference` identity still, its painted
-/// `Mask`, and a `ControlClip` of driving frames plus per-frame color masks. The engine TASK is a
-/// separate axis because animation and replacement are different working sets over the same shapes.
-pub(crate) fn scail2_carrier_receipt(
-    lane: VideoLane,
-    mode: &str,
-    width: u32,
-    height: u32,
-    conditioning: &[Conditioning],
-) -> Result<String, String> {
-    let task = match mode {
-        "animate_character" => "animation",
-        "replace_person" => "replacement",
-        other => return Err(format!("SCAIL-2 admission has no carrier for mode {other}")),
-    };
-    let [Conditioning::Reference {
-        image: reference,
-        strength: reference_strength,
-    }, Conditioning::Mask {
-        image: reference_mask,
-    }, Conditioning::ControlClip {
-        frames,
-        mask,
-        masking_strength,
-        start_frame,
-        mode: replacement_mode,
-    }] = conditioning
-    else {
-        return Err(
-            "SCAIL-2 admission requires exactly one Reference, one Mask, and one ControlClip, in \
-             that order"
-                .to_owned(),
-        );
-    };
-    if reference_strength.is_some() {
-        return Err(
-            "the SCAIL-2 identity reference carries no strength; a populated one is a different \
-             workload"
-                .to_owned(),
-        );
-    }
-    if frames.len() != mask.len() || frames.is_empty() {
-        return Err(format!(
-            "SCAIL-2 admission requires equal non-empty driving frame/mask counts, got {} and {}",
-            frames.len(),
-            mask.len()
-        ));
-    }
-    if *start_frame != 0 {
-        return Err(format!(
-            "SCAIL-2 admission requires a frame-0 driving clip, got {start_frame}"
-        ));
-    }
-    let mut seal = sha2::Sha256::new();
-    seal.update(SCAIL2_CARRIER_SEAL_DOMAIN.as_bytes());
-    seal.update(task.as_bytes());
-    seal.update(masking_strength.to_bits().to_le_bytes());
-    let reference_axis = seal_images("reference", std::slice::from_ref(reference), &mut seal);
-    let reference_mask_axis = seal_images(
-        "reference-mask",
-        std::slice::from_ref(reference_mask),
-        &mut seal,
-    );
-    let frames_axis = seal_images("driving-frames", frames, &mut seal);
-    let mask_axis = seal_images("driving-mask", mask, &mut seal);
-    Ok(format!(
-        "{SCAIL2_CARRIER_RECEIPT_DOMAIN}:backend-{}:task-{task}:composite-{width}x{height}:{reference_axis}:{reference_mask_axis}:{frames_axis}:{mask_axis}:strength-{:08x}:mode-{replacement_mode:?}:frame-0+{SCAIL2_CARRIER_SEAL_DOMAIN}-{:x}",
-        backend_axis(lane),
-        masking_strength.to_bits(),
-        seal.finalize()
-    ))
-}
-
-/// Worker seal for the Krea Realtime video-to-video carrier
-/// (`video_jobs::krea_realtime::krea_realtime_conditioning`): one `VideoClip` whose frame count and
-/// per-frame geometry set the autoregressive init working set, plus the v2v strength — the one knob
-/// that distinguishes v2v from the i2v cache warm, which drops strength entirely.
-pub(crate) fn krea_v2v_clip_receipt(
-    lane: VideoLane,
-    width: u32,
-    height: u32,
-    conditioning: &[Conditioning],
-) -> Result<String, String> {
-    let [Conditioning::VideoClip {
-        frames,
-        frame_idx,
-        strength,
-    }] = conditioning
-    else {
-        return Err(
-            "Krea Realtime video_to_video admission requires exactly one VideoClip".to_owned(),
-        );
-    };
-    if *frame_idx != 0 || frames.is_empty() {
-        return Err(format!(
-            "Krea Realtime v2v admission requires a non-empty frame-0 clip, got {} frames at {frame_idx}",
-            frames.len()
-        ));
-    }
-    let mut seal = sha2::Sha256::new();
-    seal.update(KREA_V2V_SEAL_DOMAIN.as_bytes());
-    seal.update(strength.to_bits().to_le_bytes());
-    let frames_axis = seal_images("clip", frames, &mut seal);
-    Ok(format!(
-        "{KREA_V2V_RECEIPT_DOMAIN}:backend-{}:composite-{width}x{height}:{frames_axis}:frame-0:strength-{:08x}+{KREA_V2V_SEAL_DOMAIN}-{:x}",
-        backend_axis(lane),
-        strength.to_bits(),
-        seal.finalize()
-    ))
-}
-
-pub(crate) fn bernini_adapter_receipt_axis(component_id: &str) -> String {
-    let mut digest = sha2::Sha256::new();
-    digest.update(BERNINI_ADAPTER_RECEIPT_AXIS_DOMAIN.as_bytes());
-    digest.update(component_id.as_bytes());
-    format!(
-        "{BERNINI_ADAPTER_RECEIPT_AXIS_DOMAIN}-{:x}",
-        digest.finalize()
-    )
-}
-
-fn round_half_even(value: f64) -> i64 {
-    let floor = value.floor();
-    let fraction = value - floor;
-    if fraction < 0.5 {
-        floor as i64
-    } else if fraction > 0.5 || (floor as i64) % 2 != 0 {
-        floor as i64 + 1
-    } else {
-        floor as i64
-    }
-}
-
-fn bernini_vit_shape(width: u32, height: u32) -> (i64, i64) {
-    const FACTOR: i64 = 28;
-    const MIN_PIXELS: i64 = 3136;
-    const MAX_PIXELS: i64 = 50176;
-    let (width, height) = (f64::from(width), f64::from(height));
-    let mut effective_height = round_half_even(height / FACTOR as f64) * FACTOR;
-    let mut effective_width = round_half_even(width / FACTOR as f64) * FACTOR;
-    if effective_height * effective_width > MAX_PIXELS {
-        let scale = ((height * width) / MAX_PIXELS as f64).sqrt();
-        effective_height = FACTOR.max((height / scale / FACTOR as f64).floor() as i64 * FACTOR);
-        effective_width = FACTOR.max((width / scale / FACTOR as f64).floor() as i64 * FACTOR);
-    } else if effective_height * effective_width < MIN_PIXELS {
-        let scale = (MIN_PIXELS as f64 / (height * width)).sqrt();
-        effective_height = (height * scale / FACTOR as f64).ceil() as i64 * FACTOR;
-        effective_width = (width * scale / FACTOR as f64).ceil() as i64 * FACTOR;
-    }
-    (effective_width, effective_height)
-}
-
-/// Exact full-Bernini source preprocessing: both clip frames and reference images pass through
-/// the max-624, stride-16 VAE transform before conditioning. The renderer-only provider instead
-/// uses output geometry for both; SceneWorks resolves the full `bernini` provider, so mixing the
-/// two is an evidence mismatch rather than a conservative approximation.
-fn bernini_full_vae_shape(width: u32, height: u32) -> (i64, i64) {
-    const MAX_SIZE: f64 = 624.0;
-    const STRIDE: i64 = 16;
-    let (width, height) = (f64::from(width), f64::from(height));
-    let mut scale = (MAX_SIZE / width.max(height)).min(1.0);
-    scale = scale.max(1.0 / width.min(height));
-    let make_divisible = |value: f64| {
-        let scaled = round_half_even(value);
-        STRIDE.max(round_half_even(scaled as f64 / STRIDE as f64) * STRIDE)
-    };
-    let mut effective = (
-        make_divisible(width * scale),
-        make_divisible(height * scale),
-    );
-    if effective.0.max(effective.1) > MAX_SIZE as i64 {
-        scale = MAX_SIZE / effective.0.max(effective.1) as f64;
-        effective = (
-            make_divisible(effective.0 as f64 * scale),
-            make_divisible(effective.1 as f64 * scale),
-        );
-    }
-    effective
-}
-
-fn bernini_packed_source_tokens(frames: usize, width: u32, height: u32) -> Result<u64, String> {
-    const VAE_TEMPORAL_SCALE: u64 = 4;
-    const VAE_DIT_SPATIAL_STRIDE: u64 = 16;
-    let frames =
-        u64::try_from(frames).map_err(|_| "Bernini source frame count overflow".to_owned())?;
-    if u64::from(width) % VAE_DIT_SPATIAL_STRIDE != 0
-        || u64::from(height) % VAE_DIT_SPATIAL_STRIDE != 0
-    {
-        return Err(format!(
-            "Bernini source geometry {width}x{height} does not land on the exact VAE/DiT token grid"
-        ));
-    }
-    let latent_frames = frames.saturating_sub(1) / VAE_TEMPORAL_SCALE + 1;
-    latent_frames
-        .checked_mul(u64::from(width) / VAE_DIT_SPATIAL_STRIDE)
-        .and_then(|tokens| tokens.checked_mul(u64::from(height) / VAE_DIT_SPATIAL_STRIDE))
-        .ok_or_else(|| "Bernini packed source-token count overflow".to_owned())
-}
-
-/// Worker-side independent twin of the provider's ordered reference receipt. The first axis is the
-/// content-independent memory evidence identity (count/order/native and effective shapes); the
-/// second is a request-only byte seal. Curve lookup strips only the seal, so same-shape references
-/// share memory evidence while post-admission content mutation still fails provider configure.
-pub(crate) fn bernini_r2v_reference_receipt(
-    lane: VideoLane,
-    width: u32,
-    height: u32,
-    conditioning: &[Conditioning],
-) -> Result<String, String> {
-    let (clip, images) = match conditioning {
-        [Conditioning::MultiReference { images }] => (None, images.as_slice()),
-        [
-            Conditioning::VideoClip {
-                frames,
-                frame_idx,
-                strength,
-            },
-            Conditioning::MultiReference { images },
-        ] => (
-            Some((frames.as_slice(), *frame_idx, *strength)),
-            images.as_slice(),
-        ),
-        _ => {
-            return Err(
-                "Bernini reference admission requires one MultiReference, optionally preceded by exactly one VideoClip"
-                    .to_owned(),
-            )
-        }
-    };
-    if !(1..=8).contains(&images.len()) {
-        return Err(format!(
-            "Bernini R2V admission requires 1-8 flattened images, got {}",
-            images.len()
-        ));
-    }
-    let backend = match lane {
-        VideoLane::Mlx => "mlx",
-        VideoLane::Candle => "candle",
-    };
-    const FULL_PREPROCESS_AXIS: &str = "source-preprocess-full-vae624-v1";
-    let mut request_seal = sha2::Sha256::new();
-    request_seal.update(BERNINI_R2V_SEAL_DOMAIN.as_bytes());
-    let mut entries = Vec::with_capacity(images.len() + usize::from(clip.is_some()));
-    let has_video = clip.is_some();
-    let mut packed_tokens = 0_u64;
-    if let Some((frames, frame_idx, strength)) = clip {
-        if frame_idx != 0
-            || strength.to_bits() != 1.0_f32.to_bits()
-            || !matches!(frames.len(), 45 | 61 | 77)
-        {
-            return Err(
-                "Bernini RV2V admission requires one normalized 45/61/77-frame VideoClip at frame 0 with strength 1"
-                    .to_owned(),
-            );
-        }
-        request_seal.update(b"video-1");
-        request_seal.update(frame_idx.to_le_bytes());
-        request_seal.update(strength.to_bits().to_le_bytes());
-        for (index, frame) in frames.iter().enumerate() {
-            let expected = u64::from(width)
-                .checked_mul(u64::from(height))
-                .and_then(|pixels| pixels.checked_mul(3))
-                .and_then(|pixels| usize::try_from(pixels).ok())
-                .ok_or_else(|| "Bernini RV2V clip geometry overflow".to_owned())?;
-            if frame.width != width || frame.height != height || frame.pixels.len() != expected {
-                return Err(format!(
-                    "Bernini RV2V clip frame {index} is not exact output-sized RGB8"
-                ));
-            }
-            request_seal.update((index as u32).to_le_bytes());
-            request_seal.update(frame.width.to_le_bytes());
-            request_seal.update(frame.height.to_le_bytes());
-            request_seal.update(&frame.pixels);
-        }
-        let (vae_width, vae_height) = bernini_full_vae_shape(width, height);
-        let tokens =
-            bernini_packed_source_tokens(frames.len(), vae_width as u32, vae_height as u32)?;
-        packed_tokens = packed_tokens
-            .checked_add(tokens)
-            .ok_or_else(|| "Bernini combined source-token count overflow".to_owned())?;
-        entries.push(format!(
-            "video-1:frames-{};native-{width}x{height};vae-{}x{}x{};tokens-{tokens}",
-            frames.len(),
-            (frames.len() - 1) / 4 + 1,
-            vae_width / 8,
-            vae_height / 8
-        ));
-    }
-    for (index, image) in images.iter().enumerate() {
-        let expected = u64::from(image.width)
-            .checked_mul(u64::from(image.height))
-            .and_then(|pixels| pixels.checked_mul(3))
-            .and_then(|pixels| usize::try_from(pixels).ok())
-            .ok_or_else(|| "Bernini R2V reference geometry overflow".to_owned())?;
-        if image.pixels.len() != expected {
-            return Err(format!(
-                "Bernini R2V reference {index} has {} RGB bytes, expected {expected}",
-                image.pixels.len()
-            ));
-        }
-        let (vit_width, vit_height) = bernini_vit_shape(image.width, image.height);
-        let (vae_width, vae_height) = bernini_full_vae_shape(image.width, image.height);
-        request_seal.update(image.width.to_le_bytes());
-        request_seal.update(image.height.to_le_bytes());
-        request_seal.update(&image.pixels);
-        if has_video {
-            let tokens = bernini_packed_source_tokens(1, vae_width as u32, vae_height as u32)?;
-            packed_tokens = packed_tokens
-                .checked_add(tokens)
-                .ok_or_else(|| "Bernini combined source-token count overflow".to_owned())?;
-            entries.push(format!(
-                "{index}:native-{}x{};vit-{vit_width}x{vit_height};vae-{vae_width}x{vae_height};tokens-{tokens}",
-                image.width, image.height
-            ));
-        } else {
-            entries.push(format!(
-                "{index}:native-{}x{};vit-{vit_width}x{vit_height};vae-{vae_width}x{vae_height}",
-                image.width, image.height
-            ));
-        }
-    }
-    let packed_surface = has_video.then(|| format!("packed-source-tokens-{packed_tokens}:"));
-    Ok(format!(
-        "{BERNINI_R2V_RECEIPT_DOMAIN}:backend-{backend}:{FULL_PREPROCESS_AXIS}:count-{}:{}{}+{BERNINI_R2V_SEAL_DOMAIN}-{:x}",
-        images.len(),
-        packed_surface.as_deref().unwrap_or_default(),
-        entries.join("|"),
-        request_seal.finalize()
-    ))
-}
-
-fn bernini_mv2v_source_ids(count: usize) -> Vec<String> {
-    if count <= 5 {
-        return (1..=count).map(|id| id.to_string()).collect();
-    }
-    (0..count)
-        .map(|index| {
-            let id = 1.0 + 4.0 * index as f64 / (count - 1) as f64;
-            if id.fract() == 0.0 {
-                format!("{id:.0}")
-            } else {
-                format!("{id:.6}")
-            }
-        })
-        .collect()
-}
-
-fn bernini_ads2v_source_ids(count: usize) -> Vec<String> {
-    debug_assert!((3..=10).contains(&count));
-    if count <= 3 {
-        return (1..=count).map(|id| id.to_string()).collect();
-    }
-    (0..count)
-        .map(|index| {
-            let id = 1.0 + 2.0 * index as f64 / (count - 1) as f64;
-            if id.fract() == 0.0 {
-                format!("{id:.0}")
-            } else {
-                format!("{id:.6}")
-            }
-        })
-        .collect()
-}
-
-/// Worker twin of the full provider's ADS2V receipt. The role labels make the source and
-/// reference clips non-interchangeable; image count/order and backend preprocessing remain exact.
-pub(crate) fn bernini_ads2v_source_receipt(
-    lane: VideoLane,
-    width: u32,
-    height: u32,
-    conditioning: &[Conditioning],
-) -> Result<String, String> {
-    let [Conditioning::VideoClip {
-        frames: source_frames,
-        frame_idx: source_index,
-        strength: source_strength,
-    }, Conditioning::VideoClip {
-        frames: reference_frames,
-        frame_idx: reference_index,
-        strength: reference_strength,
-    }, Conditioning::MultiReference { images }] = conditioning
-    else {
-        return Err("Bernini ADS2V admission requires [source VideoClip, reference VideoClip, MultiReference 1-8 ordered images]".to_owned());
-    };
-    if !(1..=8).contains(&images.len()) {
-        return Err("Bernini ADS2V admission requires 1-8 flattened images".to_owned());
-    }
-    let expected = u64::from(width)
-        .checked_mul(u64::from(height))
-        .and_then(|pixels| pixels.checked_mul(3))
-        .and_then(|pixels| usize::try_from(pixels).ok())
-        .ok_or_else(|| "Bernini ADS2V clip geometry overflow".to_owned())?;
-    let backend = match lane {
-        VideoLane::Mlx => "mlx",
-        VideoLane::Candle => "candle",
-    };
-    let (clip_vae_width, clip_vae_height) = bernini_full_vae_shape(width, height);
-    let mut seal = sha2::Sha256::new();
-    seal.update(BERNINI_ADS2V_SEAL_DOMAIN.as_bytes());
-    let mut tokens_total = 0_u64;
-    let mut entries = Vec::with_capacity(images.len() + 2);
-    for (role, frames, frame_idx, strength) in [
-        ("source-video", source_frames, source_index, source_strength),
-        (
-            "reference-video",
-            reference_frames,
-            reference_index,
-            reference_strength,
-        ),
-    ] {
-        if *frame_idx != 0
-            || strength.to_bits() != 1.0_f32.to_bits()
-            || !matches!(frames.len(), 45 | 61 | 77)
-        {
-            return Err(format!("Bernini ADS2V {role} clip must be normalized 45/61/77 frames at frame 0 with strength 1"));
-        }
-        seal.update(role.as_bytes());
-        seal.update(frame_idx.to_le_bytes());
-        seal.update(strength.to_bits().to_le_bytes());
-        for (frame_index, frame) in frames.iter().enumerate() {
-            if frame.width != width || frame.height != height || frame.pixels.len() != expected {
-                return Err(format!(
-                    "Bernini ADS2V {role} clip frame {frame_index} is not exact output-sized RGB8"
-                ));
-            }
-            seal.update((frame_index as u32).to_le_bytes());
-            seal.update(frame.width.to_le_bytes());
-            seal.update(frame.height.to_le_bytes());
-            seal.update(&frame.pixels);
-        }
-        let tokens = bernini_packed_source_tokens(
-            frames.len(),
-            clip_vae_width as u32,
-            clip_vae_height as u32,
-        )?;
-        tokens_total = tokens_total
-            .checked_add(tokens)
-            .ok_or_else(|| "Bernini ADS2V combined source-token overflow".to_owned())?;
-        entries.push(format!(
-            "{role}:frames-{};native-{width}x{height};vae-{}x{}x{};tokens-{tokens}",
-            frames.len(),
-            (frames.len() - 1) / 4 + 1,
-            clip_vae_width / 8,
-            clip_vae_height / 8
-        ));
-    }
-    for (index, image) in images.iter().enumerate() {
-        let expected = u64::from(image.width)
-            .checked_mul(u64::from(image.height))
-            .and_then(|pixels| pixels.checked_mul(3))
-            .and_then(|pixels| usize::try_from(pixels).ok())
-            .ok_or_else(|| "Bernini ADS2V image geometry overflow".to_owned())?;
-        if image.pixels.len() != expected {
-            return Err(format!(
-                "Bernini ADS2V image {index} has malformed RGB8 bytes"
-            ));
-        }
-        seal.update((index as u32).to_le_bytes());
-        seal.update(image.width.to_le_bytes());
-        seal.update(image.height.to_le_bytes());
-        seal.update(&image.pixels);
-        let (vit_width, vit_height) = bernini_vit_shape(image.width, image.height);
-        let (vae_width, vae_height) = bernini_full_vae_shape(image.width, image.height);
-        let tokens = bernini_packed_source_tokens(1, vae_width as u32, vae_height as u32)?;
-        tokens_total = tokens_total
-            .checked_add(tokens)
-            .ok_or_else(|| "Bernini ADS2V combined source-token overflow".to_owned())?;
-        entries.push(format!("image-{}:native-{}x{};vit-{vit_width}x{vit_height};vae-{vae_width}x{vae_height};tokens-{tokens}", index + 1, image.width, image.height));
-    }
-    let count = images.len() + 2;
-    Ok(format!("{BERNINI_ADS2V_RECEIPT_DOMAIN}:backend-{backend}:source-preprocess-full-vae624-v1:count-{count}:packed-source-tokens-{tokens_total}:source-ids-{}:{}+{BERNINI_ADS2V_SEAL_DOMAIN}-{:x}", bernini_ads2v_source_ids(count).join(","), entries.join("|"), seal.finalize()))
-}
-
-/// Worker twin of the provider's MV2V receipt.  Clips remain ordered and independently sealed;
-/// curve lookup receives the complete normalized VAE/DiT and source-id surface but not RGB bytes.
-pub(crate) fn bernini_mv2v_clip_receipt(
-    lane: VideoLane,
-    width: u32,
-    height: u32,
-    conditioning: &[Conditioning],
-) -> Result<String, String> {
-    if !(2..=8).contains(&conditioning.len())
-        || conditioning
-            .iter()
-            .any(|entry| !matches!(entry, Conditioning::VideoClip { .. }))
-    {
-        return Err(
-            "Bernini MV2V admission requires exactly 2-8 ordered VideoClips and no images"
-                .to_owned(),
-        );
-    }
-    let backend = match lane {
-        VideoLane::Mlx => "mlx",
-        VideoLane::Candle => "candle",
-    };
-    let mut seal = sha2::Sha256::new();
-    seal.update(BERNINI_MV2V_SEAL_DOMAIN.as_bytes());
-    let mut total_tokens = 0_u64;
-    let mut entries = Vec::with_capacity(conditioning.len());
-    let (vae_width, vae_height) = bernini_full_vae_shape(width, height);
-    let expected = u64::from(width)
-        .checked_mul(u64::from(height))
-        .and_then(|pixels| pixels.checked_mul(3))
-        .and_then(|pixels| usize::try_from(pixels).ok())
-        .ok_or_else(|| "Bernini MV2V clip geometry overflow".to_owned())?;
-    for (clip_index, entry) in conditioning.iter().enumerate() {
-        let Conditioning::VideoClip {
-            frames,
-            frame_idx,
-            strength,
-        } = entry
-        else {
-            unreachable!()
-        };
-        if *frame_idx != 0
-            || strength.to_bits() != 1.0_f32.to_bits()
-            || !matches!(frames.len(), 45 | 61 | 77)
-        {
-            return Err(format!("Bernini MV2V clip {clip_index} requires normalized 45/61/77 frames at frame 0 with strength 1"));
-        }
-        seal.update((clip_index as u32).to_le_bytes());
-        seal.update(frame_idx.to_le_bytes());
-        seal.update(strength.to_bits().to_le_bytes());
-        for (frame_index, frame) in frames.iter().enumerate() {
-            if frame.width != width || frame.height != height || frame.pixels.len() != expected {
-                return Err(format!("Bernini MV2V clip {clip_index} frame {frame_index} is not exact output-sized RGB8"));
-            }
-            seal.update((frame_index as u32).to_le_bytes());
-            seal.update(frame.width.to_le_bytes());
-            seal.update(frame.height.to_le_bytes());
-            seal.update(&frame.pixels);
-        }
-        let tokens =
-            bernini_packed_source_tokens(frames.len(), vae_width as u32, vae_height as u32)?;
-        total_tokens = total_tokens
-            .checked_add(tokens)
-            .ok_or_else(|| "Bernini MV2V combined source-token count overflow".to_owned())?;
-        entries.push(format!(
-            "video-{}:frames-{};native-{width}x{height};vae-{}x{}x{};tokens-{tokens}",
-            clip_index + 1,
-            frames.len(),
-            (frames.len() - 1) / 4 + 1,
-            vae_width / 8,
-            vae_height / 8,
-        ));
-    }
-    Ok(format!(
-        "{BERNINI_MV2V_RECEIPT_DOMAIN}:backend-{backend}:source-preprocess-full-vae624-v1:count-{}:packed-source-tokens-{total_tokens}:source-ids-{}:{}+{BERNINI_MV2V_SEAL_DOMAIN}-{:x}",
-        conditioning.len(), bernini_mv2v_source_ids(conditioning.len()).join(","), entries.join("|"), seal.finalize()
-    ))
 }
 
 /// Content-independent overlay identity used for fitted video-curve lookup. Request byte seals are
@@ -757,11 +134,15 @@ enum VideoEncodeProfile {
     /// The request VAE-encodes nothing before denoise.
     Nothing,
     /// The provider's calibrated conservative encode working set.
+    #[cfg(any(test, target_os = "macos"))]
     Calibrated(VideoDecodeMemoryProfile),
     /// The request encodes conditioning the provider publishes no calibrated encode cost for
     /// (LTX on MLX, every CUDA provider): priced at the provider's conservative single-pass VAE
     /// working set for the frames it encodes instead.
     UncalibratedConservative(VideoDecodeMemoryProfile),
+    /// The provider's typed native request workspace bound prices this actual encode carrier
+    /// in `native_quant_phase_floor`, rather than fabricating a measured encoder profile.
+    NativeWorkspaceBound,
 }
 
 /// The conditioning a request VAE-encodes before denoise, as the admission identity names it. What
@@ -771,6 +152,7 @@ enum VideoEncodeProfile {
 struct VideoEncodeRequest<'a> {
     mode: &'a str,
     reference_count: u32,
+    native_conditioning_bound: bool,
 }
 
 /// Resolves the request's conditioning VAE-encode cost for one graded candidate: `(lane, provider,
@@ -798,12 +180,13 @@ fn no_video_encode_profile(
 /// What the provider's own encode calibration says about a request. Only the MLX bundle
 /// calibrates encoders, so other builds construct `Uncalibrated` alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum ProviderEncodeAnswer {
     /// The provider calibrates its encoder, and this request's encode costs this much.
+    #[cfg(any(test, target_os = "macos"))]
     Profile(VideoDecodeMemoryProfile),
     /// The provider calibrates its encoder, and this request encodes nothing. A calibrated
     /// provider's own "nothing" is never second-guessed.
+    #[cfg(any(test, target_os = "macos"))]
     EncodesNothing,
     /// The provider publishes no encode calibration at all (LTX on MLX, every CUDA provider).
     Uncalibrated,
@@ -811,10 +194,7 @@ enum ProviderEncodeAnswer {
 
 /// Whether a request VAE-encodes conditioning before denoise: any reference input, or any mode
 /// other than plain text-to-video. Consulted only for a provider without encode calibration.
-#[cfg_attr(
-    not(any(target_os = "macos", feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg(any(test, native_lane))]
 fn request_encodes_conditioning(request: VideoEncodeRequest<'_>) -> bool {
     request.reference_count > 0 || request.mode != "text_to_video"
 }
@@ -822,10 +202,7 @@ fn request_encodes_conditioning(request: VideoEncodeRequest<'_>) -> bool {
 /// What one VAE-encode pass of a provider's conditioning covers: a single still, or a clip as long
 /// as the output.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    not(any(target_os = "macos", feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg(any(test, native_lane))]
 enum EncodePass {
     /// Every conditioning input is a still, VAE-encoded one at a time: one frame.
     Still,
@@ -853,10 +230,7 @@ enum EncodePass {
 ///
 /// A `(provider, mode)` this table does not name is priced as the full clip: an unknown encode is
 /// never assumed to be a still.
-#[cfg_attr(
-    not(any(target_os = "macos", feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg(any(test, native_lane))]
 fn uncalibrated_encode_pass(provider_id: &str, mode: &str) -> EncodePass {
     use EncodePass::{Clip, Still};
     match (provider_id, mode) {
@@ -889,10 +263,7 @@ fn uncalibrated_encode_pass(provider_id: &str, mode: &str) -> EncodePass {
 }
 
 /// The frames the largest uncalibrated encode pass VAE-encodes ([`uncalibrated_encode_pass`]).
-#[cfg_attr(
-    not(any(target_os = "macos", feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg(any(test, native_lane))]
 fn uncalibrated_encode_frames(provider_id: &str, mode: &str, frames: u32) -> u32 {
     match uncalibrated_encode_pass(provider_id, mode) {
         EncodePass::Still => 1,
@@ -908,10 +279,7 @@ fn uncalibrated_encode_frames(provider_id: &str, mode: &str, frames: u32) -> u32
 ///   the frames its largest encode pass covers ([`uncalibrated_encode_frames`]), or refused
 ///   without one. This holds on every rung: bounded decode tiles the decode, never the
 ///   conditioning encode, so a bounded-decode candidate runs the same full encode.
-#[cfg_attr(
-    not(any(target_os = "macos", feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg(any(test, native_lane))]
 fn classify_video_encode_profile(
     provider_id: &str,
     request: VideoEncodeRequest<'_>,
@@ -919,23 +287,32 @@ fn classify_video_encode_profile(
     answer: ProviderEncodeAnswer,
     conservative: impl FnOnce(u32) -> Option<VideoDecodeMemoryProfile>,
 ) -> Result<VideoEncodeProfile, String> {
+    #[cfg(any(test, target_os = "macos"))]
     match answer {
+        #[cfg(any(test, target_os = "macos"))]
         ProviderEncodeAnswer::Profile(profile) => {
             return Ok(VideoEncodeProfile::Calibrated(profile))
         }
+        #[cfg(any(test, target_os = "macos"))]
         ProviderEncodeAnswer::EncodesNothing => return Ok(VideoEncodeProfile::Nothing),
         ProviderEncodeAnswer::Uncalibrated => {}
     }
+    #[cfg(not(any(test, target_os = "macos")))]
+    let _ = answer;
     if !request_encodes_conditioning(request) {
         return Ok(VideoEncodeProfile::Nothing);
     }
-    conservative(uncalibrated_encode_frames(
+    if let Some(profile) = conservative(uncalibrated_encode_frames(
         provider_id,
         request.mode,
         frames,
-    ))
-    .map(VideoEncodeProfile::UncalibratedConservative)
-    .ok_or_else(|| {
+    )) {
+        return Ok(VideoEncodeProfile::UncalibratedConservative(profile));
+    }
+    if request.native_conditioning_bound {
+        return Ok(VideoEncodeProfile::NativeWorkspaceBound);
+    }
+    Err({
         format!(
             "{provider_id}: {} with {} reference(s) encodes conditioning, but the provider \
                  publishes neither a calibrated encode cost nor a conservative VAE profile; \
@@ -1019,6 +396,7 @@ fn packaged_video_encode_profile(
 }
 
 /// Evidence revision a candidate carries when the conditioning encode is its binding phase.
+#[cfg(any(test, target_os = "macos"))]
 const ENCODE_PROFILE_EVIDENCE_REVISION: &str = "video-provider-conservative-encode-profile-v1";
 /// Evidence revision a candidate carries when an uncalibrated conditioning encode, priced at the
 /// provider's conservative single-pass VAE profile, is its binding phase (sc-20688).
@@ -1193,7 +571,7 @@ fn video_decode_profile_at_mlx_limit(
             evidence_revision: "video-provider-conservative-decode-profile-v1",
         }));
     }
-    #[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
+    #[cfg(not(native_lane))]
     let _ = (lane, provider_id, selection, frames);
     let _ = mlx_limit_bytes;
     Ok(None)
@@ -1239,6 +617,9 @@ pub(crate) struct VideoRequestIdentity<'a> {
 pub(crate) struct LadderVideoSelector<'a> {
     identity: VideoRequestIdentity<'a>,
     contract: &'a MemoryProviderContract,
+    /// Borrowed resolved carrier; row bounds are re-derived at each admitted geometry, never
+    /// inferred from a filename, reference count or another request's cached identity.
+    native_quant_request: Option<NativeQuantRequest<'a>>,
     budget: Option<Budget>,
     /// The activation-headroom allowance the caller already charges this load. Supplied, never
     /// derived here — see the module doc.
@@ -1276,6 +657,7 @@ pub(crate) struct LadderVideoSelector<'a> {
     /// keeps the guard's admitted ceiling identical to the one the selector graded even when the
     /// peak came from a decode profile or a warm resident credit.
     resident_floors: Vec<(VideoAdmissionGeometry, u64, Option<u64>)>,
+    refusal_phases: Vec<(VideoAdmissionGeometry, VideoBindingPhase)>,
 }
 
 #[derive(Clone, Debug)]
@@ -1318,6 +700,7 @@ impl<'a> LadderVideoSelector<'a> {
         Self {
             identity,
             contract,
+            native_quant_request: None,
             budget,
             headroom_bytes,
             curves,
@@ -1329,6 +712,7 @@ impl<'a> LadderVideoSelector<'a> {
             profile_error: std::cell::RefCell::new(None),
             selections: Vec::new(),
             resident_floors: Vec::new(),
+            refusal_phases: Vec::new(),
         }
     }
 
@@ -1441,6 +825,155 @@ impl PhasePeaks {
     }
 }
 
+/// Any typed task profile opts this source into selected-task accounting, including a valid
+/// selected zero. Only sources with NO typed profiles use the legacy route-wide scalar.
+fn native_quant_adapter_overlay_bytes(
+    native: &gen_core::h3_memory::NativeAllocationFacts,
+    rows: gen_core::h3_memory::NativeRows,
+    legacy_overlay: u64,
+    window: Option<u32>,
+) -> gen_core::Result<u64> {
+    if native.tasks.iter().any(|task| task.adapter.is_some()) {
+        native.adapter_resident_bytes_windowed(rows, window)
+    } else {
+        Ok(legacy_overlay)
+    }
+}
+
+/// Strengthen the raw stage prediction with the provider's task-conditional DiT allocation
+/// envelope. Precompute and denoise are successive instants of the existing Denoise phase:
+/// compare them, never sum them. No host RSS/device sum and no second policy allowance here.
+fn native_quant_phase_floor(
+    contract: &MemoryProviderContract,
+    selection: &MemorySelection,
+    request: Option<NativeQuantRequest<'_>>,
+    geometry: VideoAdmissionGeometry,
+    mut ordinary: PhasePeaks,
+) -> gen_core::Result<PhasePeaks> {
+    let Some(native) = contract
+        .phase_facts
+        .as_ref()
+        .and_then(|phase| phase.native_quant.as_ref())
+    else {
+        return Ok(ordinary);
+    };
+    let request = request.ok_or_else(|| {
+        gen_core::Error::Unsupported(
+            "native H3 allocation estimate requires the resolved request carrier".into(),
+        )
+    })?;
+    let shape = request.shape_at(geometry);
+    let rows = request.rows_at(native, geometry)?;
+    let facts = contract.asset_facts;
+    // H3's native pipeline unconditionally releases the conditioner and reference VAEs before
+    // loading the DiT, even on Resident (PreserveLoadDefaults). Do not invent TE/VAE co-residency
+    // by reusing another provider's optional-staging schedule. Keep unclassified base bytes.
+    let unclassified = facts
+        .base_bytes
+        .saturating_sub(facts.transformer_bytes)
+        .saturating_sub(facts.conditioning_bytes)
+        .saturating_sub(facts.decoder_bytes);
+    let window = if contract
+        .engages_selection(selection, MemoryStrategy::BoundedTransformerResidency)
+        && selection.parameters.window_component().includes_dit()
+    {
+        selection.parameters.transformer_window_size
+    } else {
+        None
+    };
+    // Native-main late consumer delta: when the source declares per-task adapter profiles, the
+    // steady overlay is the SELECTED task's installed adapter residency — the native phase
+    // methods already price the TOTAL install high-water (install peak minus resident, plus the
+    // scoped forward scratch), so it is never added on top here. The route-independent global
+    // overlay remains only as the legacy None-profile fallback.
+    let steady_overlay =
+        native_quant_adapter_overlay_bytes(native, rows, facts.overlay_bytes, window)?;
+    // The source-owned window plan correlates root/refiner, current window, shared native
+    // storage and retained tables. A full-component native floor would erase a valid rung 4.
+    let denoise = if matches!(
+        native.backend,
+        gen_core::h3_memory::NativeBackend::Candle { .. }
+    ) {
+        let patch = native.selected_patch(shape)?;
+        let scores = selection
+            .parameters
+            .attention_chunk_size
+            .map(u64::from)
+            .unwrap_or(gen_core_h3::veda::workspace::CUDA_DENSE_SCORE_ELEMENTS)
+            .min(gen_core_h3::veda::workspace::CUDA_DENSE_SCORE_ELEMENTS);
+        let mut limits = gen_core_h3::veda::workspace::Limits::for_backend(
+            gen_core_h3::veda::workspace::Backend::Cuda,
+        );
+        limits.attention = scores.checked_mul(16).ok_or_else(|| {
+            gen_core::Error::Unsupported("H3 CUDA attention workspace overflow".into())
+        })?;
+        match gen_core_h3::veda::workspace::for_video_request_with_patch_and_limits(
+            shape,
+            gen_core_h3::veda::workspace::Backend::Cuda,
+            patch,
+            limits,
+        )? {
+            Some(veda) => native.denoise_peak_bytes_with_veda(rows, window, &veda)?,
+            None => native.denoise_peak_bytes_windowed(rows, window)?,
+        }
+    } else {
+        native.denoise_peak_bytes_windowed(rows, window)?
+    };
+    let add = |base: u64, extra: u64| {
+        base.checked_add(extra)
+            .ok_or_else(|| gen_core::Error::Unsupported("H3 phase allocation size overflow".into()))
+    };
+    let native_denoise = add(
+        add(
+            native
+                .precompute_peak_bytes_windowed(rows, window)?
+                .max(denoise),
+            unclassified,
+        )?,
+        steady_overlay,
+    )?;
+    ordinary.denoise_bytes = ordinary.denoise_bytes.max(native_denoise);
+    if let Some(conditioning) = &native.conditioning {
+        // Native-main late consumer delta: packed row counts follow the SELECTED partition's own
+        // patch geometry, never the stock [1, 2, 2]. A source whose selected partition disagrees
+        // with this request's geometry is surfaced here rather than priced at wrong rows.
+        let workspace = gen_core_h3::h3_conditioning_memory::workspace_with_patch(
+            &shape,
+            conditioning,
+            native.selected_patch(shape)?,
+        )?;
+        if workspace.conditioning_bytes > 0 {
+            // TE/vision have been released before reference VAE/audio encoding. Their existing
+            // prediction remains a separate maximum, never an invented co-resident weight sum.
+            ordinary.conditioning_bytes = ordinary.conditioning_bytes.max(add(
+                add(
+                    native.conditioning_resident_bytes,
+                    workspace.conditioning_bytes,
+                )?
+                .max(native.conditioning_load_bytes),
+                unclassified,
+            )?);
+        }
+        // Video and audio decode are serial, with independently resident decoder subsets.
+        ordinary.decode_bytes = ordinary.decode_bytes.max(add(
+            add(
+                native.video_decode_resident_bytes,
+                workspace.video_decode_bytes,
+            )?
+            .max(native.video_decode_load_bytes)
+            .max(
+                add(
+                    native.audio_decode_resident_bytes,
+                    workspace.audio_decode_bytes,
+                )?
+                .max(native.audio_decode_load_bytes),
+            ),
+            unclassified,
+        )?);
+    }
+    Ok(ordinary)
+}
+
 /// The weights+headroom floor for one engaged composition, expressed per phase.
 ///
 /// The fallback scalar is exactly
@@ -1462,6 +995,159 @@ fn floor_phase_peaks(
     }
 }
 
+/// Native H3 owns the actual stage residency for every backend and selection, including
+/// correlated root/window/cache and selected TE inventories. Correct ordinary weights BEFORE
+/// adding the existing activation allowance: a legacy cross-stage sum cannot be removed by
+/// maxing a correct native floor afterward, and would falsely refuse independently fitting stages.
+fn video_floor_weights_bytes(
+    selector: &LadderVideoSelector<'_>,
+    geometry: VideoAdmissionGeometry,
+    selection: MemorySelection,
+    engaged: &[MemoryStrategy],
+) -> gen_core::Result<u64> {
+    let contract = selector.contract;
+    if let Some(native) = contract
+        .phase_facts
+        .as_ref()
+        .and_then(|phase| phase.native_quant.as_ref())
+    {
+        let request = selector.native_quant_request.ok_or_else(|| {
+            gen_core::Error::Unsupported(
+                "native H3 allocation estimate requires the resolved request carrier".into(),
+            )
+        })?;
+        let rows = request.rows_at(native, geometry)?;
+        let component = selection.parameters.window_component();
+        let bounded =
+            contract.engages_selection(&selection, MemoryStrategy::BoundedTransformerResidency);
+        let dit_window = if bounded && component.includes_dit() {
+            selection.parameters.transformer_window_size
+        } else {
+            None
+        };
+        let dit = native.resident_peak_bytes_windowed(rows, dit_window)?;
+        let facts = contract.asset_facts;
+        let conditioning = native
+            .conditioning_stream
+            .as_ref()
+            .filter(|_| bounded && component.includes_text_encoder())
+            .map_or(facts.conditioning_bytes, |stream| {
+                stream.peak_bytes(selection.parameters.transformer_window_size)
+            });
+        let encode = if request.shape.conditioning.is_empty() {
+            0
+        } else {
+            native.conditioning_resident_bytes
+        };
+        let unclassified = facts
+            .base_bytes
+            .saturating_sub(facts.conditioning_bytes)
+            .saturating_sub(facts.transformer_bytes)
+            .saturating_sub(facts.decoder_bytes);
+        // Same selected-task adapter rule as the phase floor: a declared profile's steady
+        // residency replaces the route-independent global overlay; install high-water is priced
+        // inside the native windowed peak, never added on top of it.
+        let steady_overlay =
+            native_quant_adapter_overlay_bytes(native, rows, facts.overlay_bytes, dit_window)?;
+        return Ok(conditioning
+            .max(encode)
+            .max(native.video_decode_resident_bytes)
+            .max(native.audio_decode_resident_bytes)
+            .max(dit.saturating_add(steady_overlay))
+            .saturating_add(unclassified));
+    }
+    Ok(if selector.backend() == MemoryBackend::Mlx {
+        crate::mlx_fit_gate::mlx_fallback_weights_bytes(contract, engaged, selection.parameters)
+    } else {
+        crate::mlx_fit_gate::estimate_floor_weights_bytes(contract, engaged)
+    })
+}
+
+/// H3 CUDA always stages these phases. Retain their separate source-derived weight lifetimes
+/// before adding workspace: a decode-weight maximum must never be charged again during Veda.
+fn native_cuda_phase_weights(
+    selector: &LadderVideoSelector<'_>,
+    geometry: VideoAdmissionGeometry,
+    selection: MemorySelection,
+) -> Option<gen_core::Result<PhasePeaks>> {
+    if selector.identity.lane != VideoLane::Candle {
+        return None;
+    }
+    let native = selector
+        .contract
+        .phase_facts
+        .as_ref()?
+        .native_quant
+        .as_ref()?;
+    Some((|| {
+        let request = selector.native_quant_request.ok_or_else(|| {
+            gen_core::Error::Unsupported("H3 CUDA allocation requires the resolved request".into())
+        })?;
+        let rows = request.rows_at(native, geometry)?;
+        let facts = selector.contract.asset_facts;
+        let bounded = selector
+            .contract
+            .engages_selection(&selection, MemoryStrategy::BoundedTransformerResidency);
+        let component = selection.parameters.window_component();
+        let window = if bounded && component.includes_dit() {
+            selection.parameters.transformer_window_size
+        } else {
+            None
+        };
+        let conditioning = if bounded && component.includes_text_encoder() {
+            native
+                .conditioning_stream
+                .as_ref()
+                .ok_or_else(|| {
+                    gen_core::Error::Unsupported(
+                        "H3 CUDA source omits its text-encoder window facts".into(),
+                    )
+                })?
+                .peak_bytes(selection.parameters.transformer_window_size)
+        } else {
+            facts.conditioning_bytes
+        };
+        let reference_encoders = if request.shape.conditioning.is_empty() {
+            0
+        } else {
+            native.conditioning_resident_bytes
+        };
+        let overlay =
+            native_quant_adapter_overlay_bytes(native, rows, facts.overlay_bytes, window)?;
+        let unclassified = facts
+            .base_bytes
+            .saturating_sub(facts.transformer_bytes)
+            .saturating_sub(facts.conditioning_bytes)
+            .saturating_sub(facts.decoder_bytes);
+        let add = |base: u64, extra: u64| {
+            base.checked_add(extra).ok_or_else(|| {
+                gen_core::Error::Unsupported("H3 CUDA phase allocation size overflow".into())
+            })
+        };
+        let phase = |base: u64| add(add(base, unclassified)?, selector.headroom_bytes);
+        Ok(PhasePeaks {
+            conditioning_bytes: phase(conditioning.max(reference_encoders))?,
+            denoise_bytes: phase(add(
+                native.resident_peak_bytes_windowed(rows, window)?,
+                overlay,
+            )?)?,
+            decode_bytes: {
+                let weights = native
+                    .video_decode_resident_bytes
+                    .max(native.audio_decode_resident_bytes);
+                if native.conditioning.is_some() {
+                    // The source-owned VAE graph below prices its complete serial decode workspace
+                    // and constructor. A generic transformer activation allowance describes a
+                    // different lifetime and must not shadow that complete decoder graph.
+                    add(weights, unclassified)?
+                } else {
+                    phase(weights)?
+                }
+            },
+        })
+    })())
+}
+
 /// The historical activation floor, strengthened by the provider's own decode working set when the
 /// selected runtime bundle exposes one. The generic allowance remains a lower bound: a decode-only
 /// profile cannot prove that conditioning or denoise need less activation memory. Conversely, a
@@ -1472,14 +1158,20 @@ fn profiled_floor_phase_peaks(
     selection: MemorySelection,
     engaged: &[MemoryStrategy],
 ) -> (PhasePeaks, Option<&'static str>) {
-    let weights = if selector.backend() == MemoryBackend::Mlx {
-        crate::mlx_fit_gate::mlx_fallback_weights_bytes(
-            selector.contract,
-            engaged,
-            selection.parameters,
-        )
-    } else {
-        crate::mlx_fit_gate::estimate_floor_weights_bytes(selector.contract, engaged)
+    let weights = match video_floor_weights_bytes(selector, geometry, selection, engaged) {
+        Ok(weights) => weights,
+        Err(error) => {
+            *selector.profile_error.borrow_mut() = Some(error.to_string());
+            // Never graded: the selector propagates the provider accounting error as a refusal.
+            return (
+                PhasePeaks {
+                    conditioning_bytes: 0,
+                    denoise_bytes: 0,
+                    decode_bytes: 0,
+                },
+                None,
+            );
+        }
     };
     let scalar = weights.saturating_add(selector.headroom_bytes);
     let generic = PhasePeaks {
@@ -1526,11 +1218,25 @@ fn profiled_floor_phase_peaks(
         VideoEncodeRequest {
             mode: selector.identity.mode,
             reference_count: selector.identity.reference_count,
+            native_conditioning_bound: selector.native_quant_request.is_some()
+                && selector
+                    .contract
+                    .phase_facts
+                    .as_ref()
+                    .and_then(|phase| phase.native_quant.as_ref())
+                    .and_then(|native| native.conditioning.as_ref())
+                    .is_some(),
         },
         geometry,
         selection,
     ) {
         Ok(VideoEncodeProfile::Nothing) => None,
+        Ok(VideoEncodeProfile::NativeWorkspaceBound) => {
+            // The real carrier's positive encode workspace is merged with raw stage peaks
+            // below. This classification is not "encodes nothing" and grants no free encode.
+            None
+        }
+        #[cfg(any(test, target_os = "macos"))]
         Ok(VideoEncodeProfile::Calibrated(profile)) => {
             Some((profile, ENCODE_PROFILE_EVIDENCE_REVISION))
         }
@@ -1791,6 +1497,7 @@ fn anchor_derived_phase_peaks<'a>(
 /// There is deliberately no binding-phase flip band here. Each phase has its own fitted law and the
 /// scalar is the max over those three evaluations at this exact geometry, so a phase crossing is a
 /// result of the measured curves rather than an extrapolation away from one scalar anchor.
+#[cfg(test)]
 fn fitted_or_floor_phase_peaks<'a>(
     selector: &LadderVideoSelector<'a>,
     geometry: VideoAdmissionGeometry,
@@ -1802,6 +1509,55 @@ fn fitted_or_floor_phase_peaks<'a>(
     Option<&'a str>,
     Option<&'static str>,
 ) {
+    fitted_or_floor_phase_peaks_for_selection(
+        selector,
+        geometry,
+        MemorySelection {
+            strategy,
+            parameters: crate::mlx_fit_gate::estimate_floor_smallest_parameters(
+                selector.contract,
+                engaged,
+            )
+            .unwrap_or_default(),
+            tier: selector.identity.tier,
+        },
+        engaged,
+    )
+}
+
+fn fitted_or_floor_phase_peaks_for_selection<'a>(
+    selector: &LadderVideoSelector<'a>,
+    geometry: VideoAdmissionGeometry,
+    selection: MemorySelection,
+    engaged: &[MemoryStrategy],
+) -> (
+    PhasePeaks,
+    CandidateBasis,
+    Option<&'a str>,
+    Option<&'static str>,
+) {
+    if let Some(native) = native_cuda_phase_weights(selector, geometry, selection) {
+        let phases = match native {
+            Ok(phases) => phases,
+            Err(error) => {
+                *selector.profile_error.borrow_mut() = Some(error.to_string());
+                PhasePeaks {
+                    conditioning_bytes: 0,
+                    denoise_bytes: 0,
+                    decode_bytes: 0,
+                }
+            }
+        };
+        // The retained measurements still describe their original resident geometry. This
+        // candidate uses the provider's complete source/request estimator at the chosen policy.
+        return (
+            phases,
+            CandidateBasis::EstimateFloor,
+            None,
+            Some("h3-cuda-native-phase-estimate-v1"),
+        );
+    }
+    let strategy = selection.strategy;
     let fitted = selector
         .curves
         .zip(selector.contract.calibration.as_ref())
@@ -1868,15 +1624,6 @@ fn fitted_or_floor_phase_peaks<'a>(
             None,
         );
     }
-    let selection = MemorySelection {
-        strategy,
-        parameters: crate::mlx_fit_gate::estimate_floor_smallest_parameters(
-            selector.contract,
-            engaged,
-        )
-        .unwrap_or_default(),
-        tier: selector.identity.tier,
-    };
     let (floor, profile_revision) =
         profiled_floor_phase_peaks(selector, geometry, selection, engaged);
     (floor, CandidateBasis::EstimateFloor, None, profile_revision)
@@ -1897,6 +1644,70 @@ fn video_memory_geometry(geometry: VideoAdmissionGeometry, reference_count: u32)
     }
 }
 
+/// Native floor synthesis prices the finite declared scope domain rather than silently falling
+/// back to Dit. The existing selector retains its highest-footprint-fit performance preference
+/// and its minimum-demand refusal; no bounds or margins are changed here.
+fn video_estimate_selections(
+    contract: &MemoryProviderContract,
+    tier: MemoryNumericTier,
+) -> Vec<MemorySelection> {
+    let native = contract
+        .phase_facts
+        .as_ref()
+        .and_then(|phase| phase.native_quant.as_ref())
+        .is_some();
+    let native_cuda = native && contract.backend.backend_kind() == gen_core::MemoryBackend::Candle;
+    let mut selections = Vec::new();
+    for strategy in MemoryStrategy::ALL {
+        // A request can require more than the smallest score budget for even one attention
+        // row. Grade the provider's finite domain rather than abandoning the entire rung.
+        if native_cuda {
+            if let Ok(domain) = contract.selection_space(strategy, tier, false) {
+                selections.extend(domain);
+            }
+            continue;
+        }
+        let engaged = contract.engaged_composition(strategy);
+        let Some(parameters) =
+            crate::mlx_fit_gate::estimate_floor_smallest_parameters(contract, &engaged)
+        else {
+            continue;
+        };
+        let mut scopes = if native && strategy == MemoryStrategy::BoundedTransformerResidency {
+            contract
+                .capability(strategy)
+                .map(|capability| capability.parameters.transformer_window_components.clone())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        if scopes.is_empty() {
+            selections.push(MemorySelection {
+                strategy,
+                parameters,
+                tier,
+            });
+        } else {
+            // max_by keeps the last equal candidate: keep the legacy cheapest scope on exact
+            // footprint ties, while unequal footprints are graded by existing selector policy.
+            scopes.sort_by_key(|scope| std::cmp::Reverse(*scope));
+            for scope in scopes {
+                selections.push(MemorySelection {
+                    strategy,
+                    parameters: gen_core::MemoryStrategyParameters {
+                        transformer_window_component: (scope
+                            != gen_core::TransformerComponent::Dit)
+                            .then_some(scope),
+                        ..parameters
+                    },
+                    tier,
+                });
+            }
+        }
+    }
+    selections
+}
+
 impl VideoStrategySelector for LadderVideoSelector<'_> {
     fn select(&mut self, geometry: VideoAdmissionGeometry) -> VideoRungSelection {
         let memory_geometry = video_memory_geometry(geometry, self.identity.reference_count);
@@ -1907,7 +1718,7 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
             .as_ref()
             .map(|identity| identity.fingerprint.as_str());
 
-        // One exact-fitted-or-floor candidate per rung the provider's OWN contract can execute. A rung
+        // Exact-fitted-or-floor candidates for the provider's OWN executable rungs/scopes. A rung
         // the provider has not wired is never offered — predicting a saving the provider will
         // silently ignore is how a staged prediction turns into a SIGKILL
         // (`mlx_fit_gate::engine_supports_sequential`'s rationale, applied through the contract).
@@ -1927,24 +1738,47 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
         // `a_rung_whose_prerequisite_is_unmet_is_not_offered` pins that the shared exclusion is in
         // force on the video lane, rather than assuming it.
         let mut synthesized = Vec::new();
-        for strategy in MemoryStrategy::ALL {
+        let mut excluded_profile_error = None;
+        let native_cuda = self.identity.lane == VideoLane::Candle
+            && self
+                .contract
+                .phase_facts
+                .as_ref()
+                .and_then(|facts| facts.native_quant.as_ref())
+                .is_some();
+        for selection in video_estimate_selections(self.contract, self.identity.tier) {
+            let strategy = selection.strategy;
             let engaged = self.contract.engaged_composition(strategy);
-            let Some(parameters) =
-                crate::mlx_fit_gate::estimate_floor_smallest_parameters(self.contract, &engaged)
-            else {
-                continue;
-            };
-            let selection = MemorySelection {
-                strategy,
-                parameters,
-                tier: self.identity.tier,
-            };
             // Phase-resolved for as long as possible: the scalar is taken only here, where
             // gen-core's evidence type forces one.
             let (phase_peaks, basis, curve_id, profile_revision) =
-                fitted_or_floor_phase_peaks(self, geometry, strategy, &engaged);
-            if self.profile_error.borrow().is_some() {
-                return VideoRungSelection::Undecidable;
+                fitted_or_floor_phase_peaks_for_selection(self, geometry, selection, &engaged);
+            let phase_peaks = match native_quant_phase_floor(
+                self.contract,
+                &selection,
+                self.native_quant_request,
+                geometry,
+                phase_peaks,
+            ) {
+                Ok(peaks) => peaks,
+                Err(error) => {
+                    if !native_cuda {
+                        *self.profile_error.borrow_mut() = Some(error.to_string());
+                        return VideoRungSelection::Undecidable;
+                    }
+                    excluded_profile_error = Some(error.to_string());
+                    self.profile_error.borrow_mut().take();
+                    continue;
+                }
+            };
+            let profile_error = self.profile_error.borrow_mut().take();
+            if let Some(error) = profile_error {
+                if !native_cuda {
+                    *self.profile_error.borrow_mut() = Some(error);
+                    return VideoRungSelection::Undecidable;
+                }
+                excluded_profile_error = Some(error);
+                continue;
             }
             let absolute_predicted_peak_bytes = phase_peaks.peak_bytes();
             let Some(predicted_peak_bytes) =
@@ -1975,20 +1809,19 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
             // Deriving it as `peak - counted_weights` gets both shapes right by construction and
             // can never exceed the peak it grades, which a declared constant can (warm path, small
             // floor). Fitted-curve and anchor-derived peaks are phase-resolved and carry no split.
-            let unmodeled_activation_bytes =
-                matches!(basis, CandidateBasis::EstimateFloor).then(|| {
-                    let weights = if backend == MemoryBackend::Mlx {
-                        crate::mlx_fit_gate::mlx_fallback_weights_bytes(
-                            self.contract,
-                            &engaged,
-                            parameters,
-                        )
-                    } else {
-                        crate::mlx_fit_gate::estimate_floor_weights_bytes(self.contract, &engaged)
-                    };
-                    let counted_weights = weights.saturating_sub(self.attributable_resident_bytes);
-                    predicted_peak_bytes.saturating_sub(counted_weights)
-                });
+            let unmodeled_activation_bytes = if matches!(basis, CandidateBasis::EstimateFloor) {
+                let weights = match video_floor_weights_bytes(self, geometry, selection, &engaged) {
+                    Ok(weights) => weights,
+                    Err(error) => {
+                        *self.profile_error.borrow_mut() = Some(error.to_string());
+                        return VideoRungSelection::Undecidable;
+                    }
+                };
+                let counted_weights = weights.saturating_sub(self.attributable_resident_bytes);
+                Some(predicted_peak_bytes.saturating_sub(counted_weights))
+            } else {
+                None
+            };
             if strategy == MemoryStrategy::Resident {
                 self.resident_floors.push((
                     geometry,
@@ -2018,7 +1851,15 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
             ));
         }
         if synthesized.is_empty() {
+            *self.profile_error.borrow_mut() = excluded_profile_error;
             return VideoRungSelection::Undecidable;
+        }
+        if let Some(candidate) = synthesized
+            .iter()
+            .min_by_key(|candidate| candidate.2.peak_bytes())
+        {
+            self.refusal_phases
+                .push((geometry, candidate.2.binding_phase()));
         }
 
         let candidates = synthesized
@@ -2076,11 +1917,11 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
                     // binds is a geometry property and flips inside one model's envelope.
                     binding_phase = ?synthesized
                         .iter()
-                        .find(|(candidate, ..)| candidate.strategy == selection.strategy)
+                        .find(|(candidate, ..)| *candidate == selection)
                         .map(|(_, _, peaks, ..)| peaks.binding_phase()),
                     curve_id = synthesized
                         .iter()
-                        .find(|(candidate, ..)| candidate.strategy == selection.strategy)
+                        .find(|(candidate, ..)| *candidate == selection)
                         .and_then(|(_, _, _, _, curve_id, _, _)| *curve_id)
                         .unwrap_or("none"),
                     needed_gb,
@@ -2097,7 +1938,20 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
                     evidence_revision: selected
                         .4
                         .or(selected.5)
-                        .unwrap_or("video-estimate-floor-v1")
+                        .unwrap_or(
+                            if self.native_quant_request.is_some()
+                                && self
+                                    .contract
+                                    .phase_facts
+                                    .as_ref()
+                                    .and_then(|phase| phase.native_quant.as_ref())
+                                    .is_some()
+                            {
+                                "video-native-allocation-estimate-v1"
+                            } else {
+                                "video-estimate-floor-v1"
+                            },
+                        )
                         .to_owned(),
                 });
                 VideoRungSelection::Selected {
@@ -2226,7 +2080,16 @@ pub(crate) fn packaged_video_evidence_covers_request(
     let Some(contract) = generator.memory_strategy_contract() else {
         return false;
     };
-    curve_evidence_covers_request(
+    // Native allocation facts are an ESTIMATOR, not packaged measured evidence. They still
+    // supply a request-scoped demand basis and must reach the same live-budget/ladder path.
+    // Other providers (None) retain their existing abstention behavior.
+    (request.native_quant_request.is_some()
+        && contract
+            .phase_facts
+            .as_ref()
+            .and_then(|phase| phase.native_quant.as_ref())
+            .is_some())
+        || curve_evidence_covers_request(
         sceneworks_core::video_memory_curves::packaged_video_memory_curves(),
         contract,
         request,
@@ -2517,6 +2380,12 @@ fn admit_video_generation_with_curves_and_profiles(
     let Some(contract) = contract else {
         return VideoAdmissionOutcome::default();
     };
+    let native_cuda = request.lane == VideoLane::Candle
+        && contract
+            .phase_facts
+            .as_ref()
+            .and_then(|facts| facts.native_quant.as_ref())
+            .is_some();
     // sc-22738: a measured lower bound this host cannot carry refuses HERE — with the contract and
     // the live budget resolved, and before a single estimate is priced. See
     // [`exceeded_bound_refusal`] for why a measurement decides ahead of the ladder rather than
@@ -2561,15 +2430,40 @@ fn admit_video_generation_with_curves_and_profiles(
         decode_profile,
     );
     selector.encode_profile = encode_profile;
-    let verdict = sceneworks_core::video_request::video_admission(
-        request.model_id,
-        request.lane,
-        request.width,
-        request.height,
-        request.frames,
-        request.decode_chunk_size,
-        &mut selector,
-    );
+    selector.native_quant_request = request.native_quant_request;
+    let verdict = if request.native_quant_request.is_some()
+        && contract
+            .phase_facts
+            .as_ref()
+            .and_then(|phase| phase.native_quant.as_ref())
+            .is_some()
+    {
+        // The loaded provider's typed allocation facts establish this route, including imported
+        // ids absent from the built-in catalog. Keep the actual id throughout evidence/refusals;
+        // an unknown decoder cap remains honestly unmodelled at the actual request geometry.
+        sceneworks_core::video_request::video_admission_for_geometries(
+            request.model_id,
+            sceneworks_core::video_request::video_admission_geometries(
+                request.model_id,
+                request.lane,
+                request.width,
+                request.height,
+                request.frames,
+                request.decode_chunk_size,
+            ),
+            &mut selector,
+        )
+    } else {
+        sceneworks_core::video_request::video_admission(
+            request.model_id,
+            request.lane,
+            request.width,
+            request.height,
+            request.frames,
+            request.decode_chunk_size,
+            &mut selector,
+        )
+    };
     if let Some(error) = selector.accounting_error {
         return VideoAdmissionOutcome {
             memory: None,
@@ -2586,6 +2480,7 @@ fn admit_video_generation_with_curves_and_profiles(
     }
     let resident_floors = selector.resident_floors;
     let selections = selector.selections;
+    let refusal_phases = selector.refusal_phases;
     match verdict {
         sceneworks_core::video_request::VideoAdmission::NotRouted
         | sceneworks_core::video_request::VideoAdmission::Undecidable => {
@@ -2668,7 +2563,9 @@ fn admit_video_generation_with_curves_and_profiles(
                 return VideoAdmissionOutcome {
                     memory: None,
                     context: None,
-                    refusal: None,
+                    refusal: native_cuda.then(|| format!(
+                        "H3 CUDA source cannot execute the selected memory configuration: {reason}. No tensor execution started; choose a supported residency/window configuration."
+                    )),
                 };
             }
             VideoAdmissionOutcome {
@@ -2683,6 +2580,20 @@ fn admit_video_generation_with_curves_and_profiles(
             geometry,
             ..
         } => {
+            if native_cuda {
+                let phase = refusal_phases
+                    .iter()
+                    .find_map(|(graded, phase)| (*graded == geometry).then_some(phase))
+                    .map_or("unknown", |phase| match phase {
+                        VideoBindingPhase::Conditioning => "conditioning",
+                        VideoBindingPhase::Denoise => "denoise",
+                        VideoBindingPhase::Decode => "decode",
+                    });
+                return VideoAdmissionOutcome {
+                    refusal: Some(format!("{message} Limiting pool: GPU; phase: {phase}. No supported residency/window configuration fits this request. Free GPU memory, reduce resolution or frame count, or use a GPU with more memory.")),
+                    ..Default::default()
+                };
+            }
             let Some((resident_floor_bytes, resident_floor_activation_bytes)) = resident_floors
                 .iter()
                 .find_map(|(graded, bytes, activation)| {
@@ -2739,297 +2650,6 @@ fn admit_video_generation_with_curves_and_profiles(
             }
         }
     }
-}
-
-fn bernini_memory_attempt(request: &VideoAdmissionInputs<'_>) -> bool {
-    request.model_id == "bernini"
-        && (matches!(
-            request.mode,
-            "video_to_video"
-                | "reference_to_video"
-                | "reference_video_to_video"
-                | "multi_video_to_video"
-        ) || request.reference_count > 0)
-}
-
-fn bernini_reference_receipt_has_video(axis: &str) -> bool {
-    axis.split_once(':')
-        .is_some_and(|(_, suffix)| suffix.contains(":video-1:"))
-}
-
-fn bernini_rv2v_receipt_matches_surface(
-    axis: &str,
-    width: u32,
-    height: u32,
-    frames: u32,
-    reference_count: u32,
-) -> bool {
-    let (vae_width, vae_height) = bernini_full_vae_shape(width, height);
-    let Ok(video_tokens) =
-        bernini_packed_source_tokens(frames as usize, vae_width as u32, vae_height as u32)
-    else {
-        return false;
-    };
-    let video_marker = format!(
-        "video-1:frames-{frames};native-{width}x{height};vae-{}x{}x{};tokens-{video_tokens}",
-        (frames - 1) / 4 + 1,
-        vae_width / 8,
-        vae_height / 8,
-    );
-    let Some((declared_total, token_surface)) = axis
-        .split_once(":packed-source-tokens-")
-        .and_then(|(_, suffix)| suffix.split_once(':'))
-    else {
-        return false;
-    };
-    let Ok(declared_total) = declared_total.parse::<u64>() else {
-        return false;
-    };
-    let tokens: Vec<_> = token_surface
-        .split(";tokens-")
-        .skip(1)
-        .filter_map(|suffix| {
-            suffix
-                .chars()
-                .take_while(char::is_ascii_digit)
-                .collect::<String>()
-                .parse::<u64>()
-                .ok()
-        })
-        .collect();
-    axis.contains("source-preprocess-full-vae624-v1")
-        && axis.matches("video-1:").count() == 1
-        && axis.contains(&video_marker)
-        && tokens.len() == reference_count as usize
-        && tokens
-            .iter()
-            .try_fold(0_u64, |sum, token| sum.checked_add(*token))
-            == Some(declared_total)
-}
-
-fn bernini_surface_is_exact(
-    request: &VideoAdmissionInputs<'_>,
-    contract: Option<&MemoryProviderContract>,
-) -> bool {
-    let Some(contract) = contract else {
-        return false;
-    };
-    let expected_adapter = contract
-        .resident_components()
-        .iter()
-        .find(|component| component.kind == gen_core::MemoryComponentKind::AdapterStack)
-        .map(|component| bernini_adapter_receipt_axis(&component.id));
-    let adapter_axis = request.overlay.and_then(|overlay| {
-        overlay
-            .split('+')
-            .find(|axis| axis.starts_with(BERNINI_ADAPTER_RECEIPT_AXIS_DOMAIN))
-    });
-    let expected_provider_mode = match request.mode {
-        "video_to_video" => "provider_video_mode:v2v",
-        "reference_to_video" => "provider_video_mode:r2v",
-        "reference_video_to_video" => "provider_video_mode:rv2v",
-        "multi_video_to_video" => "provider_video_mode:mv2v",
-        "ads2v" => "provider_video_mode:ads2v",
-        _ => return false,
-    };
-    let reference_prefix = match request.lane {
-        VideoLane::Mlx => {
-            "bernini-r2v-references-v2:backend-mlx:source-preprocess-full-vae624-v1:count-"
-        }
-        VideoLane::Candle => {
-            "bernini-r2v-references-v2:backend-candle:source-preprocess-full-vae624-v1:count-"
-        }
-    };
-    let mv2v_prefix = match request.lane {
-        VideoLane::Mlx => {
-            "bernini-mv2v-clips-v1:backend-mlx:source-preprocess-full-vae624-v1:count-"
-        }
-        VideoLane::Candle => {
-            "bernini-mv2v-clips-v1:backend-candle:source-preprocess-full-vae624-v1:count-"
-        }
-    };
-    let ads2v_prefix = match request.lane {
-        VideoLane::Mlx => {
-            "bernini-ads2v-sources-v1:backend-mlx:source-preprocess-full-vae624-v1:count-"
-        }
-        VideoLane::Candle => {
-            "bernini-ads2v-sources-v1:backend-candle:source-preprocess-full-vae624-v1:count-"
-        }
-    };
-    let axes: Vec<_> = request
-        .overlay
-        .unwrap_or_default()
-        .split('+')
-        .filter(|axis| !axis.is_empty())
-        .collect();
-    let reference_axis = axes
-        .iter()
-        .copied()
-        .find(|axis| axis.starts_with(reference_prefix));
-    let seal_axis = axes
-        .iter()
-        .copied()
-        .find(|axis| axis.starts_with(BERNINI_R2V_SEAL_DOMAIN));
-    let reference_axis_count = axes
-        .iter()
-        .filter(|axis| axis.starts_with(reference_prefix))
-        .count();
-    let seal_axis_count = axes
-        .iter()
-        .filter(|axis| axis.starts_with(BERNINI_R2V_SEAL_DOMAIN))
-        .count();
-    let mv2v_axis = axes
-        .iter()
-        .copied()
-        .find(|axis| axis.starts_with(mv2v_prefix));
-    let mv2v_seal = axes
-        .iter()
-        .copied()
-        .find(|axis| axis.starts_with(BERNINI_MV2V_SEAL_DOMAIN));
-    let mv2v_axis_count = axes
-        .iter()
-        .filter(|axis| axis.starts_with(mv2v_prefix))
-        .count();
-    let mv2v_seal_count = axes
-        .iter()
-        .filter(|axis| axis.starts_with(BERNINI_MV2V_SEAL_DOMAIN))
-        .count();
-    let ads2v_axis = axes
-        .iter()
-        .copied()
-        .find(|axis| axis.starts_with(ads2v_prefix));
-    let ads2v_seal = axes
-        .iter()
-        .copied()
-        .find(|axis| axis.starts_with(BERNINI_ADS2V_SEAL_DOMAIN));
-    let ads2v_axis_count = axes
-        .iter()
-        .filter(|axis| axis.starts_with(ads2v_prefix))
-        .count();
-    let ads2v_seal_count = axes
-        .iter()
-        .filter(|axis| axis.starts_with(BERNINI_ADS2V_SEAL_DOMAIN))
-        .count();
-    let reference_count = reference_axis.and_then(|axis| {
-        axis.strip_prefix(reference_prefix)?
-            .split_once(':')?
-            .0
-            .parse::<u32>()
-            .ok()
-    });
-    let receipt_has_video = reference_axis.is_some_and(bernini_reference_receipt_has_video);
-    let overlay_is_exact = adapter_axis == expected_adapter.as_deref()
-        && axes.contains(&expected_provider_mode)
-        && axes.iter().all(|axis| {
-            *axis == expected_provider_mode
-                || Some(*axis) == expected_adapter.as_deref()
-                || axis.starts_with(reference_prefix)
-                || axis.starts_with(BERNINI_R2V_SEAL_DOMAIN)
-                || axis.starts_with(mv2v_prefix)
-                || axis.starts_with(BERNINI_MV2V_SEAL_DOMAIN)
-                || axis.starts_with(ads2v_prefix)
-                || axis.starts_with(BERNINI_ADS2V_SEAL_DOMAIN)
-        });
-    let carrier_is_exact = match request.mode {
-        "video_to_video" => {
-            request.reference_count == 1
-                && request.reference_shape == "video"
-                && reference_axis_count == 0
-                && seal_axis_count == 0
-        }
-        "reference_to_video" => {
-            (1..=8).contains(&request.reference_count)
-                && request.reference_shape == "multi_image"
-                && reference_count == Some(request.reference_count)
-                && !receipt_has_video
-                && reference_axis_count == 1
-                && seal_axis.is_some()
-                && seal_axis_count == 1
-        }
-        "reference_video_to_video" => {
-            (2..=9).contains(&request.reference_count)
-                && request.reference_shape == "video+multi_image"
-                && reference_count == Some(request.reference_count - 1)
-                && receipt_has_video
-                && reference_axis.is_some_and(|axis| {
-                    bernini_rv2v_receipt_matches_surface(
-                        axis,
-                        request.width,
-                        request.height,
-                        request.frames,
-                        request.reference_count,
-                    )
-                })
-                && reference_axis_count == 1
-                && seal_axis.is_some()
-                && seal_axis_count == 1
-        }
-        "multi_video_to_video" => {
-            (2..=8).contains(&request.reference_count)
-                && request.reference_shape == "multi_video"
-                && mv2v_axis.is_some_and(|axis| {
-                    axis.contains(&format!(":count-{}:", request.reference_count))
-                        && axis.matches("video-").count() == request.reference_count as usize
-                        && axis.contains(&format!(
-                            "source-ids-{}",
-                            bernini_mv2v_source_ids(request.reference_count as usize).join(",")
-                        ))
-                })
-                && mv2v_axis_count == 1
-                && mv2v_seal.is_some()
-                && mv2v_seal_count == 1
-                && reference_axis_count == 0
-                && seal_axis_count == 0
-        }
-        "ads2v" => {
-            (3..=10).contains(&request.reference_count)
-                && request.reference_shape == "ads2v"
-                && ads2v_axis.is_some_and(|axis| {
-                    axis.contains(&format!(":count-{}:", request.reference_count))
-                        && axis.matches("source-video:").count() == 1
-                        && axis.matches("reference-video:").count() == 1
-                        && axis.matches("image-").count()
-                            == request.reference_count.saturating_sub(2) as usize
-                        && axis.contains(&format!(
-                            "source-ids-{}",
-                            bernini_ads2v_source_ids(request.reference_count as usize).join(",")
-                        ))
-                })
-                && ads2v_axis_count == 1
-                && ads2v_seal.is_some()
-                && ads2v_seal_count == 1
-                && reference_axis_count == 0
-                && seal_axis_count == 0
-                && mv2v_axis_count == 0
-                && mv2v_seal_count == 0
-        }
-        _ => false,
-    };
-    request.model_id == "bernini"
-        && carrier_is_exact
-        && request.fps == 16
-        && matches!(
-            (request.width, request.height),
-            (848, 480) | (480, 848) | (1280, 720) | (720, 1280)
-        )
-        && matches!(request.frames, 45 | 61 | 77)
-        && request.tier.precision == gen_core::Precision::Bf16
-        && matches!(
-            request.tier.quant,
-            None | Some(gen_core::Quant::Q4) | Some(gen_core::Quant::Q8)
-        )
-        && overlay_is_exact
-}
-
-/// Why a Bernini request is outside the SUPPORTED SURFACE — never "why it is unmeasured".
-///
-/// sc-22512 deleted the second arm this function used to have, which formatted
-/// "no current calibrated evidence matches route=…, lane=…, tier=…" for a well-formed request on a
-/// coordinate nobody had captured. That message was the last place in video admission where the
-/// absence of a measurement produced a denial instead of an abstention (E8), and its only remaining
-/// caller now guards on `!bernini_surface_is_exact`, so the arm was also dead.
-fn bernini_surface_refusal() -> String {
-    "Bernini memory admission refused: exact surface requires V2V, R2V, RV2V, MV2V, or ADS2V [source VideoClip, reference VideoClip, ordered MultiReference 1-8 images]; FPS16, frames 45/61/77, one public geometry, supported tier, backend-specific source receipt, and the exact loaded adapter receipt".to_owned()
 }
 
 fn curve_evidence_covers_request(
@@ -3142,8 +2762,45 @@ fn refusal_is_a_margin_artifact(
     needed_gb <= widened_floor_gb && floor_gb <= available_gb
 }
 
+/// Native H3 row sizing borrows the same decoded carrier sent to generation. It is an upper
+/// envelope before tokenization, not measured memory or an executed-tensor receipt.
+#[derive(Clone, Copy)]
+pub(crate) struct NativeQuantRequest<'a> {
+    pub(crate) shape: gen_core_h3::veda::workspace::Request<'a>,
+    pub(crate) evaluations: Option<u32>,
+}
+
+impl<'a> NativeQuantRequest<'a> {
+    fn shape_at(
+        self,
+        geometry: VideoAdmissionGeometry,
+    ) -> gen_core_h3::veda::workspace::Request<'a> {
+        gen_core_h3::veda::workspace::Request {
+            width: geometry.width,
+            height: geometry.height,
+            frames: geometry.estimate_frames(),
+            count: geometry.batch,
+            ..self.shape
+        }
+    }
+
+    fn rows_at(
+        self,
+        native: &gen_core::h3_memory::NativeAllocationFacts,
+        geometry: VideoAdmissionGeometry,
+    ) -> gen_core::Result<gen_core::h3_memory::NativeRows> {
+        native.request_rows(
+            self.shape_at(geometry),
+            self.evaluations
+                .map(|n| n as usize)
+                .unwrap_or(native.default_evaluations),
+        )
+    }
+}
+
 /// Everything `admit_video_generation` needs that is not on the generator.
 pub(crate) struct VideoAdmissionInputs<'a> {
+    pub(crate) native_quant_request: Option<NativeQuantRequest<'a>>,
     pub(crate) model_id: &'a str,
     /// The resolved catalog family, not the engine descriptor family.
     pub(crate) model_family: &'a str,
@@ -3184,7 +2841,7 @@ pub(crate) struct VideoRuntimeMemoryState {
 
 impl VideoRuntimeMemoryState {
     fn selector_budget(self) -> Option<Budget> {
-        const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+        const BYTES_PER_GIB: f64 = crate::fit_gate::BYTES_PER_GIB;
         Some(Budget {
             available_gb: self
                 .budget
@@ -3295,7 +2952,7 @@ pub(crate) fn live_video_runtime_state(
     )
 }
 
-#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 pub(crate) fn live_video_runtime_state(
     _engine_id: &str,
     _cache_state: MemoryCacheState,
@@ -3332,7 +2989,7 @@ const fn rung_of(strategy: MemoryStrategy) -> StrategyRung {
 pub(crate) fn admit_video_generation_with_veda(
     generator: &dyn gen_core::Generator,
     request: VideoAdmissionInputs<'_>,
-    sparse: Option<&gen_core::veda::workspace::WorkspaceBound>,
+    sparse: Option<&gen_core_h3::veda::workspace::WorkspaceBound>,
     floor_headroom_bytes: u64,
 ) -> crate::WorkerResult<VideoAdmissionOutcome> {
     admit_with_veda_bound(
@@ -3344,20 +3001,44 @@ pub(crate) fn admit_video_generation_with_veda(
     )
 }
 
+fn veda_device_workspace_bytes(bound: &gen_core_h3::veda::workspace::WorkspaceBound) -> u64 {
+    match bound.backend {
+        gen_core_h3::veda::workspace::Backend::Cuda => bound.device_peak_bytes(),
+        gen_core_h3::veda::workspace::Backend::Mlx => bound.unified_peak_bytes(),
+    }
+}
+
 fn admit_with_veda_bound(
     generator: &dyn gen_core::Generator,
     mut request: VideoAdmissionInputs<'_>,
-    sparse: Option<&gen_core::veda::workspace::WorkspaceBound>,
+    sparse: Option<&gen_core_h3::veda::workspace::WorkspaceBound>,
     floor_headroom_bytes: u64,
     dense: impl FnOnce(&dyn gen_core::Generator, VideoAdmissionInputs<'_>) -> VideoAdmissionOutcome,
 ) -> crate::WorkerResult<VideoAdmissionOutcome> {
+    let native_cuda = request.lane == VideoLane::Candle
+        && generator
+            .memory_strategy_contract()
+            .and_then(|contract| contract.phase_facts.as_ref())
+            .and_then(|facts| facts.native_quant.as_ref())
+            .is_some();
+    if native_cuda {
+        // The shared selector composes Veda with the selected DiT attention lifetime. Adding its
+        // scalar to all phases, or applying a resident-weight gate afterward, contradicts that plan.
+        let outcome = dense(generator, request);
+        if outcome.refusal.is_none() && outcome.context.is_none() {
+            return Err(crate::WorkerError::InvalidPayload(
+                "H3 CUDA admission could not establish a supported device-memory strategy for this request; no tensors were loaded. Check the available GPU memory and the source's supported offload/window configurations.".into(),
+            ));
+        }
+        return Ok(outcome);
+    }
     let Some(bound) = sparse else {
         return Ok(dense(generator, request));
     };
     let runtime = request.runtime;
     request.headroom_bytes = request
         .headroom_bytes
-        .checked_add(bound.total_bytes)
+        .checked_add(veda_device_workspace_bytes(bound))
         .ok_or_else(|| crate::WorkerError::InvalidPayload("Veda admission size overflow".into()))?;
     let outcome = dense(generator, request);
     if outcome.refusal.is_some() {
@@ -3379,7 +3060,7 @@ fn admit_with_veda_bound(
 /// problem bound, never to enlarge it.
 pub(crate) fn admit_veda_workspace(
     contract: Option<&MemoryProviderContract>,
-    bound: &gen_core::veda::workspace::WorkspaceBound,
+    bound: &gen_core_h3::veda::workspace::WorkspaceBound,
     selection: Option<&gen_core::MemorySelection>,
     runtime: Option<VideoRuntimeMemoryState>,
     headroom_bytes: u64,
@@ -3411,7 +3092,7 @@ pub(crate) fn admit_veda_workspace(
     let need = base
         .checked_sub(credit)
         .and_then(|n| n.checked_add(headroom_bytes))
-        .and_then(|n| n.checked_add(bound.total_bytes))
+        .and_then(|n| n.checked_add(veda_device_workspace_bytes(bound)))
         .ok_or_else(|| crate::WorkerError::InvalidPayload("Veda admission size overflow".into()))?;
     let available = runtime
         .budget
@@ -3420,53 +3101,46 @@ pub(crate) fn admit_veda_workspace(
     if available < need {
         return Err(crate::WorkerError::InvalidPayload(format!(
             "Veda {:?} plan {} needs {} bytes (dense native floor plus complete sparse/fallback workspace {}), but {} bytes are available",
-            bound.backend,bound.plan,need,bound.total_bytes,available)));
+            bound.backend,bound.plan,need,veda_device_workspace_bytes(bound),available)));
     }
     Ok(())
 }
 
-/// Dense measured evidence is only the baseline; enabled sparse adds its explicit complete
-/// predictor/workspace/fallback bound. Shared with the Candle pre-load gate and CPU fixtures.
-#[cfg(any(not(target_os = "macos"), test))]
+/// Archived catalog baseline arithmetic, retained only to keep historical measurement fixtures
+/// meaningful. Production CUDA H3 composes source-derived per-phase allocation facts.
+#[cfg(test)]
 pub(crate) fn veda_cold_peak_gb(
     dense_baseline_gb: f64,
-    sparse: Option<&gen_core::veda::workspace::WorkspaceBound>,
+    sparse: Option<&gen_core_h3::veda::workspace::WorkspaceBound>,
 ) -> f64 {
     sparse.map_or(dense_baseline_gb, |bound| {
-        dense_baseline_gb + bound.total_bytes as f64 / (1024. * 1024. * 1024.)
+        dense_baseline_gb + veda_device_workspace_bytes(bound) as f64 / (1024. * 1024. * 1024.)
     })
 }
 
-/// CUDA host residency must fit independently of the device pool. Scorer/selector/gather
-/// categories contain both host and device temporaries; retaining their complete bounds here
-/// is conservative for the host, without charging device-only QKV/output/dense-score buffers.
-#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
-pub(crate) fn veda_host_workspace_bytes(bound: &gen_core::veda::workspace::WorkspaceBound) -> u64 {
-    [
-        bound.predictor_host_bytes,
-        bound.predictor_load_bytes,
-        bound.layout_host_bytes,
-        bound.position_rows_bytes,
-        bound.scorer_bytes,
-        bound.selector_bytes,
-        bound.gather_bytes,
-        bound.predictor_device_bytes,
-        bound.self_test_bytes,
-    ]
-    .iter()
-    .sum()
+/// Historical Veda-only host fixture. Production H3 checks the provider's complete source
+/// preparation, retained host weights, media and Veda host bound together.
+#[cfg(test)]
+fn veda_host_workspace_bytes(bound: &gen_core_h3::veda::workspace::WorkspaceBound) -> u64 {
+    bound.host_peak_bytes()
 }
-#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
-pub(crate) fn admit_veda_host_workspace(
-    bound: &gen_core::veda::workspace::WorkspaceBound,
+
+#[cfg(test)]
+fn admit_veda_host_workspace(
+    bound: &gen_core_h3::veda::workspace::WorkspaceBound,
     available: Option<u64>,
 ) -> crate::WorkerResult<()> {
     let needed = veda_host_workspace_bytes(bound);
+    admit_h3_host_bytes(needed, available)
+}
+
+#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
+pub(crate) fn admit_h3_host_bytes(needed: u64, available: Option<u64>) -> crate::WorkerResult<()> {
     let available=available.ok_or_else(||crate::WorkerError::InvalidPayload(
-        "Veda admission could not read available host RAM; refusing predictor/scorer allocation".into()))?;
+        "H3 host-memory admission could not read available RAM; refusing tensor/predictor preparation".into()))?;
     if needed > available {
         return Err(crate::WorkerError::InvalidPayload(format!(
-        "Veda predictor/scorer host workspace needs {needed} bytes, but host RAM has {available} bytes available")));
+        "H3 host preparation/retained workspace needs {needed} bytes, but host RAM has {available} bytes available. Free host RAM or use a machine with more RAM; a larger GPU does not resolve this pool limit.")));
     }
     Ok(())
 }

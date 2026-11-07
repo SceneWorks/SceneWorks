@@ -7,13 +7,14 @@
 import { irisRestoreControls } from "./irisRestore.js";
 import { serializeLora } from "./presetUtils.js";
 import { modelSupportsAlphaOutput } from "./qwenAlpha.js";
+import { isMossEdit, mossEditReferenceIds, buildMossEditJobAdvanced } from "./mossImage.js";
+import { imageModelServesMode } from "./modelEligibility.js";
 
 // Models that can edit an existing image with a prompt — the manifest tags them
 // with an `edit_image`/`image_edit` capability (same filter the Image Studio uses).
-export function editCapableModels(imageModels) {
+export function editCapableModels(imageModels, capabilities) {
   return (imageModels ?? []).filter((model) => {
-    const caps = model.capabilities ?? [];
-    return caps.includes("edit_image") || caps.includes("image_edit");
+    return imageModelServesMode(model, "edit_image", capabilities);
   });
 }
 
@@ -74,7 +75,27 @@ export function buildEditJobBody({
   guidanceScale = null,
   transparentBackground = false,
   modelEntry = null,
+  mossImageEdit,
+  mossEditSettings = {},
 }) {
+  if (isMossEdit(model, "edit_image")) {
+    if (maskAssetId || (Array.isArray(loras) && loras.length) || editLora) throw new Error("MOSS editing does not support masks or generic LoRAs.");
+    const refs = mossEditReferenceIds({ referenceAssetIds: referenceAssetIds ?? [], sourceAssetId });
+    return {
+      projectId: project.id, projectName: project.name ?? null, requestedGpu,
+      mode: "edit_image", model, prompt: mossEditSettings.promptBatch?.[0] ?? prompt, negativePrompt: mossEditSettings.negativePrompt ?? "",
+      ...(mossEditSettings.promptBatch?.length ? { prompts: [...mossEditSettings.promptBatch] } : {}),
+      seed: mossEditSettings.mossImageAdvanced?.noise || seed == null || seed === "" ? null : Number(seed), count: 1,
+      width: mossEditSettings.width ?? width ?? 512, height: mossEditSettings.height ?? height ?? 512,
+      referenceAssetIds: refs,
+      advanced: buildMossEditJobAdvanced({ mossImageEdit,
+        mossImage: { max_sequence_length: mossEditSettings.max_sequence_length ?? 4096, training_shift: mossEditSettings.training_shift ?? 1 },
+        mossImageAdvanced: mossEditSettings.mossImageAdvanced,
+        mossPromptBatch: mossEditSettings.promptBatch,
+        stepsOverride: mossEditSettings.steps ?? 30, guidanceOverride: mossEditSettings.guidanceScale ?? guidanceScale ?? 4,
+        schedulerShift: mossEditSettings.schedulerShift ?? 5 }),
+    };
+  }
   // Guidance override (sc-10275): only sent when the user set a finite value —
   // otherwise omitted so the worker's per-family model default stands. The worker
   // maps `advanced.guidanceScale` to `guidance` or, for true-CFG edit families

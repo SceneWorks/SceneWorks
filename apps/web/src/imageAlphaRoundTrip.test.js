@@ -20,16 +20,10 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-// konva's node build pulls in the native `canvas` package; nothing here mounts a <Stage>, so keep
-// it out of the import graph the same way `ImageEditor.test.jsx` does.
-vi.mock("react-konva", async () => {
-  const React = await import("react");
-  const passthrough = (name) => ({ children }) => React.createElement("div", { "data-konva": name }, children);
-  return { Stage: passthrough("stage"), Layer: passthrough("layer"), Image: () => null, Rect: () => null };
-});
-
+// The export owner is canvas-only; these pure fixtures no longer import the React/Konva screen.
 import { addLayer, createLayer, singleLayerWorking } from "./imageLayers.js";
-import { compositeWorkingToCanvas, workingToPngFile } from "./screens/ImageEditor.jsx";
+import { compositeWorkingToCanvas, workingToPngFile } from "./screens/imageEditor/export.js";
+
 import {
   alphaHistogram,
   blobBytes,
@@ -151,8 +145,23 @@ describe("open → save round trip", () => {
   });
 
   it("composites at the document size the editor holds", async () => {
-    const { canvases } = await exportPng(openDocument(rgbaFixture()));
-    expect([canvases[0].width, canvases[0].height]).toEqual([64, 64]);
+    const { documentRef, made } = pixelDocument();
+    const createElement = documentRef.createElement;
+    const sizesAtEncode = [];
+    documentRef.createElement = (tag) => {
+      const canvas = createElement(tag);
+      const toBlob = canvas.toBlob;
+      canvas.toBlob = (...args) => {
+        sizesAtEncode.push([canvas.width, canvas.height]);
+        return toBlob(...args);
+      };
+      return canvas;
+    };
+    const file = await workingToPngFile(openDocument(rgbaFixture()), undefined, { documentRef });
+    const image = decodePng(await blobBytes(file));
+    expect(sizesAtEncode).toEqual([[64, 64]]);
+    expect([image.width, image.height]).toEqual([64, 64]);
+    expect([made[0].width, made[0].height]).toEqual([0, 0]); // released after encoding
   });
 
   it("refuses to export with no working document", async () => {

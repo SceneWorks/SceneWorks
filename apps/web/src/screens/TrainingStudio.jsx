@@ -1,11 +1,12 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import { formatDecimalGb } from "../formatting.js";
+import React, { useCallback, useEffect, useInsertionEffect, useMemo, useRef, useState } from "react";
+import { isImageUpload, isCaptionUpload, uploadFileBaseName, uploadFileExtension, uploadFiles } from "../uploadFiles.js";
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { DEFAULT_MAC_CAPABILITIES, macTrainingKernelBlocked } from "../macGating.js";
 import { candleTrainingKernelBlocked } from "../candleGating.js";
 import { API_BASE_URL, checkIrisDataset, irisItemSidecar, isAbortError } from "../api.js";
 import { errorMessage } from "../errorMessage.js";
-import { assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { JOY_CAPTION_MODEL_ID, POSE_DETECT_MODEL_ID, terminalStatuses } from "../constants.js";
@@ -22,16 +23,14 @@ import { trainingBaseState, trainingBaseTier } from "../trainingBase.js";
 import {
   appendReferences,
   captionDraftsFromDataset,
-  datasetHealth,
   datasetItemSelectionKey,
   datasetOwnedAssets,
   datasetPayload,
   datasetReferenceAssets,
   datasetReferenceCap,
-  datasetSaveValidation,
   imageAssetName,
+  preserveUneditedDatasetCaptions,
   normalizeDatasetAssetIds,
-  referenceDraftsDiffer,
   referenceDraftsFromDataset,
   selectionAfterDuplicateRemoval,
 } from "../training/datasetHelpers.js";
@@ -89,23 +88,13 @@ import { useIrisDataWalk } from "../training/useIrisDataWalk.js";
 import { useIrisMetrics, useIrisPlanCheck, useIrisStagePresets } from "../training/useIrisCurricula.js";
 import { IrisRunMetrics } from "./training/IrisCurriculaOptions.jsx";
 import { collectCaptionSidecars, isJsonCaptionSidecar } from "../training/captionSidecars.js";
+import { useLatestHandlers } from "../training/useLatestHandlers.js";
+import { useDatasetDraft } from "../training/useDatasetDraft.js";
 import { DatasetEditorPanel } from "./training/DatasetEditorPanel.jsx";
 
 // Re-exported for callers/tests that import the pure config builders from the
 // screen; the implementations now live in ../training/trainingConfig.js (sc-4199).
 export { configDraftFromTarget, trainingConfigSnapshot };
-
-const IMPORT_IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "bmp", "gif", "tif", "tiff"]);
-
-function uploadFileBaseName(name) {
-  return String(name ?? "").replaceAll("\\", "/").split("/").pop() ?? "";
-}
-
-function uploadFileExtension(name) {
-  const base = uploadFileBaseName(name);
-  const dotIndex = base.lastIndexOf(".");
-  return dotIndex > 0 ? base.slice(dotIndex + 1).toLowerCase() : "";
-}
 
 // Lowercased stem used to pair an image upload with its caption sidecar
 // (e.g. `Mira_01.png` and `Mira_01.txt` both resolve to `mira_01`).
@@ -113,14 +102,6 @@ function uploadFileStem(name) {
   const base = uploadFileBaseName(name);
   const dotIndex = base.lastIndexOf(".");
   return (dotIndex > 0 ? base.slice(0, dotIndex) : base).toLowerCase();
-}
-
-function isCaptionUpload(file) {
-  return uploadFileExtension(file?.name) === "txt" || file?.type === "text/plain";
-}
-
-function isImageUpload(file) {
-  return String(file?.type ?? "").startsWith("image/") || IMPORT_IMAGE_EXTENSIONS.has(uploadFileExtension(file?.name));
 }
 
 function parseTriggerWords(value) {
@@ -430,7 +411,25 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const datasetsError = trainingDatasetsError;
   const loadingDatasets = loadingTrainingDatasets;
   const onPreview = setPreviewAsset;
-  const uploadDatasetItem = uploadTrainingDatasetItem ?? ((file) => importAssetRaw(file, { throwOnError: true }));
+  const uploadDatasetItem = uploadTrainingDatasetItem ?? ((file, _projectId, { signal } = {}) => importAssetRaw(file, { throwOnError: true, select: false, signal }));
+  const importController = useRef(null);
+  const importProject = useRef(activeProject?.id);
+  if (importProject.current !== activeProject?.id) {
+    importController.current?.abort();
+    importProject.current = activeProject?.id;
+  }
+  useEffect(() => () => importController.current?.abort(), []);
+  useEffect(() => { setImportingAssets(false); }, [activeProject?.id]);
+  async function uploadDatasetFiles(files, controller, projectId) {
+    return uploadFiles(files, (file, signal) => uploadDatasetItem(file, projectId, { signal }), {
+      signal: controller.signal,
+      onProgress: (done, total) => {
+        const message = `Uploading ${done} of ${total}…`;
+        setImportProgress(message);
+        setDatasetMessage(message);
+      },
+    });
+  }
   const loadDataset = loadTrainingDataset;
   const createDataset = createTrainingDataset;
   const updateDataset = updateTrainingDataset;
@@ -444,16 +443,26 @@ export function TrainingStudio({ mode = "training" } = {}) {
     () => trainingTargetsCatalog?.targets ?? [],
     [trainingTargetsCatalog?.targets],
   );
-  const [activeDataset, setActiveDataset] = useState(null);
-  const [datasetError, setDatasetError] = useState("");
-  const [datasetMessage, setDatasetMessage] = useState("");
-  const [draftName, setDraftName] = useState("");
-  const [busyDatasetId, setBusyDatasetId] = useState("");
+  const {
+    activeDataset, setActiveDataset, datasetError, setDatasetError, datasetMessage, setDatasetMessage,
+    draftName, setDraftName, busyDatasetId, setBusyDatasetId, setUploadedDatasetAssets, savingDataset,
+    setSavingDataset, deletingDataset, setDeletingDataset, selectedAssetIds, setSelectedAssetIds,
+    associatedCharacterId, setAssociatedCharacterId, captionDraftById, setCaptionDraftById, namedCaptionsById,
+    setNamedCaptionsById, holdoutById, setHoldoutById, referenceDraftById, setReferenceDraftById,
+    editPairsMode, setEditPairsMode, selectedDatasetId, setSelectedDatasetId, renamePrefix, setRenamePrefix,
+    datasetDraftRevisionRef, imageAssets, assetsById, unavailableAssetIds, memberAssets, datasetThumbAsset,
+    health, dirty, dirtyRef, activeDatasetIdRef, hasUnsavedDatasetDraft, saveValidity, canSave,
+    removeUnavailableAsset, clearDatasetDraft, discardDraft, setItemReferences, updateCaption
+  } = useDatasetDraft({ activeProject, assets });
   const [importingAssets, setImportingAssets] = useState(false);
+  const [importProgress, setImportProgress] = useState("");
+  function cancelDatasetImport() {
+    importController.current?.abort();
+    setImportingAssets(false);
+    setImportProgress("");
+    setDatasetMessage("Import cancelled.");
+  }
   const [addDialogOpen, setAddDialogOpen] = useState(false);
-  const [uploadedDatasetAssets, setUploadedDatasetAssets] = useState([]);
-  const [savingDataset, setSavingDataset] = useState(false);
-  const [deletingDataset, setDeletingDataset] = useState(false);
   // Guards the async gap between the delete click and the confirm resolving, so a
   // double-click can't fire two DELETEs before `deletingDataset` disables the button.
   const deleteDatasetGuardRef = useRef(false);
@@ -461,8 +470,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // Every open owns a monotonic generation. A refresh reload is allowed to commit only
   // if the draft it started from is still current after its second await.
   const datasetLoadGenerationRef = useRef(0);
-  const datasetDraftRevisionRef = useRef(0);
-  const handledParquetImportJobsRef = useRef(new Set());
+  const handledDatasetJobsRef = useRef(new Set());
   // sc-24815: the "attach this trained LoRA to <character>" offer. An answer is recorded
   // twice — per project in localStorage (survives a reload) and in this Map (survives a
   // blocked or quota-limited store) — and every check unions the two through
@@ -481,7 +489,6 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // ref and in storage, neither of which re-runs the offer effect, so without this a
   // decline would leave the next undecided run hidden until unrelated state changed.
   const [trainedLoraDecisionRevision, setTrainedLoraDecisionRevision] = useState(0);
-  const [selectedAssetIds, setSelectedAssetIds] = useState([]);
   // Dataset Doctor readiness report (sc-6534), fetched server-side over the saved
   // dataset. `null` until the first fetch resolves; the loading flag keeps badges in
   // a neutral "not assessed" state rather than flashing green while a fetch is in flight.
@@ -490,29 +497,6 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // Bumped after a per-image override write (sc-6534) to re-fetch readiness — an ack is a metadata
   // write that doesn't change the dataset version, so it isn't caught by the version-keyed effect.
   const [readinessRefreshTick, setReadinessRefreshTick] = useState(0);
-  // Owning character for this dataset (sc-2022). Seeded from the loaded dataset,
-  // set when images are imported from the Character tab, threaded into the save
-  // payload. "" = a general (unassociated) dataset.
-  const [associatedCharacterId, setAssociatedCharacterId] = useState("");
-  // Single source of truth for caption edits, keyed by selection id (sc-2025):
-  // seeded from the saved dataset items, updated as the user edits an item's
-  // caption or imports a .txt sidecar, and threaded into the dataset payload on
-  // save. Replaces the old importedCaptions + rename-caption draft split.
-  const [captionDraftById, setCaptionDraftById] = useState({});
-  // Per-item named captions (`{ field: text }`) parsed from freshly imported `.json` sidecars,
-  // keyed by selection id and threaded into the save payload (sc-25685). Saved items carry theirs
-  // on the item itself.
-  const [namedCaptionsById, setNamedCaptionsById] = useState({});
-  // sc-25689: per-item holdout overrides (`{ [selectionId]: boolean }`) until the dataset is saved.
-  const [holdoutById, setHoldoutById] = useState({});
-  // Instruction-edit pairs (sc-24161): each item's ORDERED reference images, keyed by item
-  // selection id -> [reference selection id, ...]. Seeded from the saved dataset like captions and
-  // threaded into the save payload; the item image is the edit target and its caption the
-  // instruction. `editPairsMode` reveals the per-item reference rails for a dataset with none yet.
-  const [referenceDraftById, setReferenceDraftById] = useState({});
-  const [editPairsMode, setEditPairsMode] = useState(false);
-  const [selectedDatasetId, setSelectedDatasetId] = useState("");
-  const [renamePrefix, setRenamePrefix] = useState("");
   const [captionTriggerWords, setCaptionTriggerWords] = useState("");
   // Open caption settings dialog: null | { type: "all" } | { type: "item", member }.
   const [captionDialog, setCaptionDialog] = useState(null);
@@ -544,111 +528,26 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const customizedConfigFieldsRef = useRef(customizedConfigFields);
   customizedConfigFieldsRef.current = customizedConfigFields;
 
-  const datasetAssets = useMemo(
-    () => [
-      ...datasetOwnedAssets(activeDataset, activeProject?.id, assets),
-      // Stored edit-pair references that are not library assets render (and re-save) through
-      // synthetic dataset-owned assets, exactly like dataset-owned items (sc-24161).
-      ...datasetReferenceAssets(activeDataset, activeProject?.id, assets),
-    ],
-    [activeDataset, activeProject?.id, assets],
-  );
-  const imageAssets = useMemo(() => {
-    const merged = [
-      ...assets.filter((asset) => assetCanRenderAsImage(asset)),
-      ...uploadedDatasetAssets,
-      ...datasetAssets,
-    ];
-    const seen = new Set();
-    return merged.filter((asset) => {
-      if (!asset?.id || seen.has(asset.id)) {
-        return false;
-      }
-      seen.add(asset.id);
-      return true;
-    });
-  }, [assets, datasetAssets, uploadedDatasetAssets]);
-  const assetsById = useMemo(() => new Map(imageAssets.map((asset) => [asset.id, asset])), [imageAssets]);
-  const unavailableAssetIds = useMemo(
-    () => selectedAssetIds.filter((assetId) => !assetsById.has(assetId)),
-    [assetsById, selectedAssetIds],
-  );
-  // Members shown in the editor body: the dataset's own items (available
-  // assets), in selection order. Captions come from the saved dataset items or
-  // freshly imported .txt sidecars, keyed by selection id.
-  const memberAssets = useMemo(
-    () => selectedAssetIds.map((id) => assetsById.get(id)).filter(Boolean),
-    [assetsById, selectedAssetIds],
-  );
-  // Thumbnail for the compact dataset selector (sc-2025): the list summary's
-  // server-resolved cover image (first item), falling back to the open dataset's
-  // first loaded member.
-  const datasetThumbAsset = (dataset) => {
-    if (dataset?.coverPath) {
-      return { projectId: activeProject?.id, type: "image", file: { path: dataset.coverPath } };
-    }
-    if (dataset?.id === selectedDatasetId && memberAssets[0]) {
-      return memberAssets[0];
-    }
-    return null;
-  };
-  const health = useMemo(
-    () => datasetHealth({ activeDataset, imageAssets, selectedAssetIds }),
-    [activeDataset, imageAssets, selectedAssetIds],
-  );
   // Per-thumbnail readiness, keyed by the same selection id the caption grid renders
   // under (sc-6534). An absent entry means "not assessed yet" — never silently good.
   const readinessByKey = useMemo(() => readinessBySelectionKey(activeDataset, readiness), [activeDataset, readiness]);
   // Train is disabled only when a saved report exists and is genuinely Blocked (too few
   // images / a fatal flag). Bias to warn: no report or a warning gate never hard-blocks.
   const readinessBlocksTraining = trainBlockedByReadiness(readiness);
-  const originalAssetIds = useMemo(() => normalizeDatasetAssetIds(activeDataset, assets), [activeDataset, assets]);
-  // Caption edits also make the dataset dirty so the single Save persists them.
-  const captionsDirty = useMemo(
+  // Both jobs mutate the saved dataset asynchronously. Refresh captions just like imported
+  // images, rather than leaving the editor's pre-job draft ready to overwrite the results.
+  const completedDatasetJobs = useMemo(
     () =>
-      Boolean(activeDataset) &&
-      (activeDataset.items ?? []).some((item, index) => {
-        const draft = captionDraftById[datasetItemSelectionKey(activeDataset, item, index)];
-        return draft && (draft.text ?? "") !== (item.caption?.text ?? "");
-      }),
-    [activeDataset, captionDraftById],
-  );
-  // Reference edits (add / remove / reorder, sc-24161) also make the dataset dirty.
-  const savedReferenceDrafts = useMemo(
-    () => referenceDraftsFromDataset(activeDataset),
-    [activeDataset],
-  );
-  const referencesDirty =
-    Boolean(activeDataset) && referenceDraftsDiffer(referenceDraftById, savedReferenceDrafts, selectedAssetIds);
-  const dirty =
-    Boolean(activeDataset) &&
-    (draftName.trim() !== activeDataset.name ||
-      associatedCharacterId !== (activeDataset.characterId ?? "") ||
-      selectedAssetIds.length !== originalAssetIds.length ||
-      selectedAssetIds.some((id, index) => id !== originalAssetIds[index]) ||
-      captionsDirty ||
-      referencesDirty ||
-      Object.keys(holdoutById).length > 0);
-  // Refresh awaits the catalog request. Read the current draft state after that
-  // await so a rename begun while refresh is in flight is never overwritten by
-  // the freshly loaded dataset object.
-  const dirtyRef = useRef(dirty);
-  dirtyRef.current = dirty;
-  const activeDatasetIdRef = useRef(activeDataset?.id ?? "");
-  activeDatasetIdRef.current = activeDataset?.id ?? "";
-  useEffect(() => {
-    datasetDraftRevisionRef.current += 1;
-  }, [activeDataset?.id, draftName, selectedAssetIds, associatedCharacterId, captionDraftById, referenceDraftById]);
-  const completedParquetImport = useMemo(
-    () =>
-      jobs.find(
+      jobs.filter(
         (job) =>
-          job.type === "dataset_parquet_import" &&
+          ["dataset_parquet_import", "training_caption"].includes(job.type) &&
           job.status === "completed" &&
-          job.payload?.datasetId === activeDataset?.id,
-      ) ?? null,
-    [jobs, activeDataset?.id],
+          job.payload?.datasetId === activeDataset?.id &&
+          (!job.projectId || job.projectId === activeProject?.id),
+      ),
+    [jobs, activeDataset?.id, activeProject?.id],
   );
+  const completedDatasetJob = completedDatasetJobs[0];
   // The newest completed subject-mask job for this dataset (sc-2126): its id keys the mask-report
   // refetch, so the editor picks up masks the moment the worker finishes.
   const completedSubjectMaskJobId = useMemo(
@@ -661,22 +560,13 @@ export function TrainingStudio({ mode = "training" } = {}) {
       )?.id ?? "",
     [jobs, activeDataset?.id],
   );
-  const completedParquetImportId = completedParquetImport?.id ?? "";
-  const completedParquetImportCount = completedParquetImport?.result?.importedItemCount;
-  // Unsaved work the destructive-transition guards protect (sc-11970): an edited saved
-  // dataset (dirty) OR a brand-new dataset the user has started building (name / members /
-  // character) but not yet saved. A new draft isn't "dirty" (no baseline), but discarding
-  // it is just as destructive, so the guard covers it too.
-  const hasUnsavedDatasetDraft = activeDataset
-    ? dirty
-    : Boolean(draftName.trim() || selectedAssetIds.length || associatedCharacterId);
-  // One summary gates Save and feeds the chip row, so they cannot disagree (epic 10644).
-  // `savingDataset` and "nothing changed" are non-validation gates — like submittingJob on
-  // the Train button — so they stay in the disabled expression rather than becoming issues.
-  const saveDraft = useMemo(() => ({ name: draftName, selectedAssetIds }), [draftName, selectedAssetIds]);
-  const saveContext = useMemo(() => ({ health }), [health]);
-  const saveValidity = useValidation(datasetSaveValidation, saveDraft, saveContext);
-  const canSave = saveValidity.ready && !savingDataset && (!activeDataset || dirty);
+  // One refresh covers all finished writes. Include every id so a job finishing out of
+  // order still invalidates the editor even when the newest-created job was already handled.
+  const completedDatasetJobId = completedDatasetJobs.map((job) => job.id).sort().join(",");
+  const completedDatasetJobType = completedDatasetJob?.type;
+  const completedDatasetJobCount = completedDatasetJobType === "training_caption"
+    ? completedDatasetJob?.result?.captionedItemCount
+    : completedDatasetJob?.result?.importedItemCount;
   const displayedCaptionPrompt = captionSettings.captionPrompt || buildJoyCaptionPrompt(captionSettings);
   // JoyCaption model provisioning (sc-5620): the native captioner has no auto-download (unlike
   // the torch path), so on a gated Mac a missing model would just fail the queued caption job.
@@ -693,7 +583,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     selectedCaptionModel === joyCaptionModel;
   const captionModelSizeLabel = useMemo(() => {
     const bytes = Number(captionModel?.downloadSizeBytes);
-    return Number.isFinite(bytes) && bytes > 0 ? `${(bytes / 1e9).toFixed(1)} GB` : "";
+    return formatDecimalGb(bytes, "");
   }, [captionModel?.downloadSizeBytes]);
   const onDownloadCaptionModel = captionModel && typeof createModelDownloadJob === "function"
     ? () => createModelDownloadJob(captionModel)
@@ -1113,7 +1003,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setConfigTriggerFollowsCaptions(true);
     setConfigPromptsFollowTrigger(true);
     configBasisRef.current = { targetId: "", datasetId: "", presetId: "" };
-  }, [activeProject?.id]);
+  }, [activeProject?.id, setActiveDataset, setCaptionDraftById, setDatasetError, setDatasetMessage,
+  setDraftName, setEditPairsMode, setReferenceDraftById, setRenamePrefix, setSelectedAssetIds,
+  setSelectedDatasetId, setUploadedDatasetAssets]);
 
   // sc-2022: open a dataset requested from elsewhere (Character Studio's
   // "Open" action hands off via studioLaunch). Keyed on the launch id so a
@@ -1138,7 +1030,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setRenamePrefix(safeSlug(activeDataset?.name, "item"));
     setCaptionTriggerWords(datasetTriggerPhrase);
     setCaptionSettings((current) => ({ ...current, nameInput: datasetTriggerPhrase, triggerWords: datasetTriggerPhrase }));
-  }, [activeDataset]);
+  }, [activeDataset, setCaptionDraftById, setReferenceDraftById, setRenamePrefix]);
 
   useEffect(() => {
     if (!selectedTargetId && firstTarget?.id) {
@@ -1287,7 +1179,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
 
   async function openDataset(
     datasetId,
-    { preserveCurrentDraft = false, expectedDraftRevision, canCommit } = {},
+    { preserveCurrentDraft = false, expectedDraftRevision, canCommit, onCommit } = {},
   ) {
     // Opening a DIFFERENT dataset re-seeds the whole editor; confirm before discarding an
     // unsaved draft (sc-11970). Re-opening the SAME dataset (internal reloads after a save)
@@ -1329,6 +1221,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
       ) {
         return null;
       }
+      onCommit?.();
       setActiveDataset(dataset);
       setDraftName(dataset?.name ?? "");
       setSelectedAssetIds(normalizeDatasetAssetIds(dataset, assets));
@@ -1408,17 +1301,17 @@ export function TrainingStudio({ mode = "training" } = {}) {
   useEffect(() => {
     if (
       !datasetLibraryMode ||
-      !completedParquetImportId ||
+      !completedDatasetJobId ||
       !activeDataset?.id ||
       dirty ||
-      handledParquetImportJobsRef.current.has(completedParquetImportId)
+      handledDatasetJobsRef.current.has(completedDatasetJobId)
     ) {
       return undefined;
     }
-    const jobId = completedParquetImportId;
+    const jobId = completedDatasetJobId;
     const datasetId = activeDataset.id;
     const draftRevision = datasetDraftRevisionRef.current;
-    const handledJobs = handledParquetImportJobsRef.current;
+    const handledJobs = handledDatasetJobsRef.current;
     handledJobs.add(jobId);
     let canceled = false;
     let settled = false;
@@ -1435,20 +1328,28 @@ export function TrainingStudio({ mode = "training" } = {}) {
           preserveCurrentDraft: true,
           expectedDraftRevision: draftRevision,
           canCommit,
+          // Hydration can briefly make the editor dirty before the draft-seeding effect.
+          // Mark the refresh handled before those state updates trigger cleanup.
+          onCommit: () => { settled = true; },
         });
         if (canceled || !dataset) return;
-        const imported = completedParquetImportCount;
+        const count = completedDatasetJobCount;
         setDatasetMessage(
-          Number.isFinite(imported)
-            ? `Parquet import completed with ${imported} image${imported === 1 ? "" : "s"}.`
-            : "Parquet import completed.",
+          completedDatasetJobType === "training_caption"
+            ? Number.isFinite(count)
+              ? `Captioning completed for ${count} image${count === 1 ? "" : "s"}.`
+              : "Captioning completed."
+            : Number.isFinite(count)
+              ? `Parquet import completed with ${count} image${count === 1 ? "" : "s"}.`
+              : "Parquet import completed.",
         );
         setDatasetError("");
         settled = true;
       } catch (err) {
         if (!canceled) {
           handledJobs.delete(jobId);
-          setDatasetError(`Parquet import completed, but the dataset could not be reloaded: ${err.message}`);
+          const label = completedDatasetJobType === "training_caption" ? "Captioning" : "Parquet import";
+          setDatasetError(`${label} completed, but the dataset could not be reloaded: ${err.message}`);
         }
       }
     })();
@@ -1458,15 +1359,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
         handledJobs.delete(jobId);
       }
     };
-  }, [
-    activeDataset?.id,
-    activeProject?.id,
-    completedParquetImportCount,
-    completedParquetImportId,
-    datasetLibraryMode,
-    dirty,
-    refreshTrainingDatasets,
-  ]);
+  }, [activeDataset?.id, activeDatasetIdRef, activeProject?.id, completedDatasetJobCount, completedDatasetJobId,
+  completedDatasetJobType, datasetDraftRevisionRef, datasetLibraryMode, dirty, refreshTrainingDatasets,
+  setDatasetError, setDatasetMessage]);
 
   // sc-24815 — offer to attach a finished run's adapter back to the character that owns
   // the dataset it trained from. Single-fire is the entire safety story: `attach_lora`
@@ -1596,25 +1491,6 @@ export function TrainingStudio({ mode = "training" } = {}) {
     decideTrainedLoraOffer(trainedLoraOffer.projectId, trainedLoraOffer.jobId);
   }
 
-  // Drops a member (or an unavailable/orphaned id) from the dataset selection.
-  function removeUnavailableAsset(assetId) {
-    setDatasetMessage("");
-    setSelectedAssetIds((current) => current.filter((id) => id !== assetId));
-  }
-
-  function clearDatasetDraft() {
-    setActiveDataset(null);
-    setDatasetError("");
-    setDatasetMessage("");
-    setDraftName("");
-    setSelectedAssetIds([]);
-    setAssociatedCharacterId("");
-    setUploadedDatasetAssets([]);
-    setSelectedDatasetId("");
-    setReferenceDraftById({});
-    setEditPairsMode(false);
-  }
-
   // Starting a new dataset abandons the current draft — confirm before discarding unsaved
   // work (sc-11970), then clear to a blank draft.
   async function startNewDataset() {
@@ -1625,33 +1501,6 @@ export function TrainingStudio({ mode = "training" } = {}) {
     clearDatasetDraft();
   }
 
-  // Revert the draft to the last saved state (sc-11970): the actionable half of the
-  // "Unsaved changes" pill. A saved dataset restores from `activeDataset` in place (no
-  // reload); an unstarted draft clears. `activeDataset` is unchanged, so the caption-seed
-  // effect won't fire — reset the per-field drafts explicitly.
-  function discardDraft() {
-    if (!hasUnsavedDatasetDraft) {
-      return;
-    }
-    if (!activeDataset) {
-      clearDatasetDraft();
-      return;
-    }
-    setDatasetError("");
-    setDatasetMessage("");
-    setDraftName(activeDataset.name ?? "");
-    setSelectedAssetIds(normalizeDatasetAssetIds(activeDataset, assets));
-    setAssociatedCharacterId(activeDataset.characterId ?? "");
-    setCaptionDraftById(captionDraftsFromDataset(activeDataset));
-    setReferenceDraftById(referenceDraftsFromDataset(activeDataset));
-  }
-
-  // Replace one item's ordered reference list (reorder / remove from the reference rail, sc-24161).
-  function setItemReferences(selectionId, referenceIds) {
-    setDatasetMessage("");
-    setReferenceDraftById((current) => ({ ...current, [selectionId]: [...(referenceIds ?? [])] }));
-  }
-
   // Append picked references to an item, never past the reference cap — the picker cannot hand
   // the item more than the model accepts, and the user is told how many did not fit.
   function addItemReferences(selectionId, pickedIds) {
@@ -1659,12 +1508,16 @@ export function TrainingStudio({ mode = "training" } = {}) {
       cap: datasetReferenceLimit,
       itemId: selectionId,
     });
+    const current = referenceDraftById[selectionId] ?? [];
+    const rejectedIds = [...new Set(pickedIds)].filter((id) => id && id !== selectionId && !next.includes(id));
+    const accepted = next.length - current.length;
     setItemReferences(selectionId, next);
     if (dropped > 0) {
-      setDatasetMessage(
-        `Maximum ${datasetReferenceLimit} references; ${dropped} not added.`,
-      );
+      setDatasetError(`Attached ${accepted} of ${accepted + dropped} references. Maximum ${datasetReferenceLimit} reference${datasetReferenceLimit === 1 ? "" : "s"}; ${dropped} not added.`);
+    } else {
+      setDatasetError("");
     }
+    return { accepted, dropped, rejectedIds };
   }
 
   // Upload dropped files as dataset-only images, then attach them as references (sc-24161) —
@@ -1674,34 +1527,26 @@ export function TrainingStudio({ mode = "training" } = {}) {
     if (!files.length) {
       return;
     }
+    importController.current?.abort();
+    const controller = new AbortController();
+    importController.current = controller;
+    const projectId = activeProject?.id;
     setImportingAssets(true);
+    setImportProgress(`Uploading 0 of ${files.length}…`);
     setDatasetError("");
-    try {
-      const imported = [];
-      for (const file of files) {
-        const asset = await uploadDatasetItem(file);
-        if (asset?.id) {
-          const datasetAsset = { ...asset, datasetOnly: true };
-          imported.push(datasetAsset.id);
-          setUploadedDatasetAssets((current) => [datasetAsset, ...current.filter((item) => item.id !== datasetAsset.id)]);
-        }
-      }
-      addItemReferences(selectionId, imported);
-    } catch (err) {
-      setDatasetError(err.message);
-    } finally {
-      setImportingAssets(false);
-    }
-  }
-
-  // Editing a caption marks it as manually authored (sc-2025) — caption source
-  // is detected, never picked by the user.
-  function updateCaption(selectionId, text) {
-    setDatasetMessage("");
-    setCaptionDraftById((current) => ({
-      ...current,
-      [selectionId]: { text, source: "manual" },
-    }));
+    const results = await uploadDatasetFiles(files, controller, projectId);
+    if (controller.signal.aborted) return;
+    const imported = results.filter((result) => result.value).map(({ value }) => ({ ...value, datasetOnly: true }));
+    setUploadedDatasetAssets((current) => [...imported, ...current.filter((item) => !imported.some((asset) => item.id === asset.id))]);
+    const { accepted, dropped, rejectedIds } = addItemReferences(selectionId, imported.map((asset) => asset.id));
+    const failed = results.filter((result) => result.error);
+    const capNote = dropped ? ` Maximum ${datasetReferenceLimit} reference${datasetReferenceLimit === 1 ? "" : "s"}; ${dropped} not added.` : "";
+    const failureNote = failed.length ? ` Failed to upload: ${failed.map(({ file }) => file.name).join(", ")}. Retry those files.` : "";
+    const message = `Attached ${accepted} of ${files.length} references.${capNote}${failureNote}`;
+    setDatasetMessage(message);
+    if (dropped || failed.length) setDatasetError(message);
+    setImportingAssets(false);
+    return { complete: failed.length === 0 && dropped === 0, rejectedIds };
   }
 
   function updateConfigDraft(field, value) {
@@ -1861,7 +1706,12 @@ export function TrainingStudio({ mode = "training" } = {}) {
     if (!files.length) {
       return;
     }
+    importController.current?.abort();
+    const controller = new AbortController();
+    importController.current = controller;
+    const projectId = activeProject?.id;
     setImportingAssets(true);
+    setImportProgress(`Uploading 0 of ${files.length}…`);
     setDatasetError("");
     setDatasetMessage("");
     try {
@@ -1883,24 +1733,19 @@ export function TrainingStudio({ mode = "training" } = {}) {
       const imported = [];
       const captionsByAssetId = {};
       const namedCaptionsByAssetId = {};
-      for (const file of imageFiles) {
-        const asset = await uploadDatasetItem(file);
-        if (asset?.id) {
-          // Flag the dataset-only origin on a COPY (sc-8939): mutating the API-returned
-          // record in place can leak the flag into any other holder of that instance
-          // (e.g. an asset cached in context). Build a fresh object instead.
-          const datasetAsset = { ...asset, datasetOnly: true };
-          imported.push(datasetAsset.id);
-          setUploadedDatasetAssets((current) => [datasetAsset, ...current.filter((item) => item.id !== datasetAsset.id)]);
-          const sidecar = sidecarByStem.get(uploadFileStem(file.name));
-          if (sidecar?.text) {
-            captionsByAssetId[asset.id] = { source: "imported", text: sidecar.text };
-          }
-          if (sidecar?.captions && Object.keys(sidecar.captions).length) {
-            namedCaptionsByAssetId[asset.id] = sidecar.captions;
-          }
-        }
+      const results = await uploadDatasetFiles(imageFiles, controller, projectId);
+      if (controller.signal.aborted) return;
+      const failures = results.filter((result) => result.error);
+      for (const { file, value: asset } of results) {
+        if (!asset) continue;
+        const datasetAsset = { ...asset, datasetOnly: true };
+        imported.push(datasetAsset.id);
+        setUploadedDatasetAssets((current) => [datasetAsset, ...current.filter (item => item.id !== datasetAsset.id)]);
+        const sidecar = sidecarByStem.get(uploadFileStem(file.name));
+        if (sidecar?.text) captionsByAssetId[asset.id] = { source: "imported", text: sidecar.text };
+        if (sidecar?.captions && Object.keys(sidecar.captions).length) namedCaptionsByAssetId[asset.id] = sidecar.captions;
       }
+      if (failures.length) setDatasetError(`Failed to upload: ${failures.map(({ file }) => file.name).join(", ")}. Retry those files.`);
 
       if (imported.length) {
         setSelectedAssetIds((current) => Array.from(new Set([...current, ...imported])));
@@ -1934,9 +1779,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
         setDatasetError("No images were imported.");
       }
     } catch (err) {
-      setDatasetError(err.message);
+      if (!controller.signal.aborted) setDatasetError(err.message);
     } finally {
-      setImportingAssets(false);
+      if (!controller.signal.aborted) setImportingAssets(false);
     }
   }
 
@@ -1977,8 +1822,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
       name: draftName,
       selectedAssetIds: selectionOverride ?? selectedAssetIds,
     });
+    // Caption jobs can finish while this editor holds an older snapshot (or a dirty draft
+    // that cannot be auto-refreshed). Never re-save its unedited captions over those results.
     const dataset = base
-      ? await updateDataset(base.id, payload)
+      ? await updateDataset(base.id, preserveUneditedDatasetCaptions(payload, activeDataset ?? base))
       : await createDataset(payload);
     if (dataset) {
       setActiveDataset(dataset);
@@ -2034,15 +1881,24 @@ export function TrainingStudio({ mode = "training" } = {}) {
 
   // Iris depth / restoration sidecars (sc-25687 / sc-25688): attach (file) or remove (null) one
   // saved item's depth map / mask / degraded input; the API answers with the updated dataset.
-  async function irisSidecar(item, kind, file, fields) {
+  const sidecarOwner = useMemo(() => ({ projectId: activeProject?.id, datasetId: activeDataset?.id, token }),
+    [activeProject?.id, activeDataset?.id, token]);
+  const committedSidecarContext = useRef(null);
+  useInsertionEffect(() => {
+    committedSidecarContext.current = { owner: sidecarOwner, assets };
+    return () => { committedSidecarContext.current = null; };
+  }, [sidecarOwner, assets]);
+  const irisSidecar = useCallback(async (item, kind, file, fields) => {
+    if (committedSidecarContext.current?.owner !== sidecarOwner) throw new Error("Dataset changed.");
     const dataset = await irisItemSidecar(
-      { projectId: activeProject?.id, datasetId: activeDataset?.id, itemId: item.id, kind, file, fields },
-      { token },
+      { projectId: sidecarOwner.projectId, datasetId: sidecarOwner.datasetId, itemId: item.id, kind, file, fields },
+      { token: sidecarOwner.token },
     );
+    if (committedSidecarContext.current?.owner !== sidecarOwner) return dataset;
     setActiveDataset(dataset);
-    setSelectedAssetIds(normalizeDatasetAssetIds(dataset, assets));
+    setSelectedAssetIds(normalizeDatasetAssetIds(dataset, committedSidecarContext.current.assets));
     return dataset;
-  }
+  }, [sidecarOwner, setActiveDataset, setSelectedAssetIds]);
 
   async function importParquetDataset(settings) {
     setDatasetError("");
@@ -2124,8 +1980,14 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // with the live dataset, then maps them to selection keys and drops them. Non-destructive: the
   // originals stay in the library/uploads and can be re-added.
   async function removeDuplicates(removeIds) {
+    return removeDatasetImages(removeIds, true);
+  }
+
+  // Manual Doctor selections use the same persistence path, without claiming that the chosen
+  // images are exact copies or that the sharpest was automatically kept.
+  async function removeDatasetImages(removeIds, automaticDuplicates = false) {
     if (!removeIds?.length || savingDataset) {
-      return;
+      return false;
     }
     setSavingDataset(true);
     setDatasetError("");
@@ -2133,8 +1995,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
     try {
       const saved = await persistDataset();
       if (!saved?.id) {
-        setDatasetError("Save the dataset before removing duplicates.");
-        return;
+        setDatasetError("Save the dataset before deleting images.");
+        return false;
       }
       const { nextSelection, removedCount } = selectionAfterDuplicateRemoval({
         dataset: saved,
@@ -2142,17 +2004,21 @@ export function TrainingStudio({ mode = "training" } = {}) {
         removeIds,
       });
       if (!removedCount) {
-        setDatasetError("Those duplicates are no longer in the dataset.");
-        return;
+        setDatasetError("Those images are no longer in the dataset.");
+        return false;
       }
       const updated = await persistDataset(nextSelection, saved);
       if (updated) {
         setDatasetMessage(
-          `Removed ${removedCount} duplicate${removedCount === 1 ? "" : "s"}, keeping the sharpest of each. The originals stay in your library.`,
+          automaticDuplicates
+            ? `Removed ${removedCount} duplicate${removedCount === 1 ? "" : "s"}, keeping the sharpest of each. The originals stay in your library.`
+            : `Deleted ${removedCount} image${removedCount === 1 ? "" : "s"} from the dataset. Library originals are kept.`,
         );
       }
+      return Boolean(updated);
     } catch (err) {
       setDatasetError(err.message);
+      return false;
     } finally {
       setSavingDataset(false);
     }
@@ -2402,6 +2268,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const doctorHandlersRef = useRef({});
   doctorHandlersRef.current = {
     onRemoveDuplicates: removeDuplicates,
+    onDeleteSelected: removeDatasetImages,
     onUpscaleLowRes: upscaleLowRes,
     onSmartCrop: smartCropItems,
     onStripExif: stripExifItems,
@@ -2413,6 +2280,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
       report: readiness,
       loading: readinessLoading,
       onRemoveDuplicates: (...args) => doctorHandlersRef.current.onRemoveDuplicates(...args),
+      onDeleteSelected: (...args) => doctorHandlersRef.current.onDeleteSelected(...args),
       onUpscaleLowRes: (...args) => doctorHandlersRef.current.onUpscaleLowRes(...args),
       onSmartCrop: (...args) => doctorHandlersRef.current.onSmartCrop(...args),
       onStripExif: (...args) => doctorHandlersRef.current.onStripExif(...args),
@@ -2423,6 +2291,56 @@ export function TrainingStudio({ mode = "training" } = {}) {
     // report or its loading flag changes.
     [readiness, readinessLoading],
   );
+
+  const sessionHandlers = useLatestHandlers({
+    onRefreshDatasets, startNewDataset, openDataset, setDraftName, discardDraft,
+    setAddDialogOpen, setRenamePrefix, applyOrderedNames, setCaptionDialog, saveDataset,
+    removeUnavailableAsset, importParquetDataset, handleDeleteDataset, setItemReferences, addItemReferences,
+    importItemReferences, setEditPairsMode, onPreview, updateCaption, addAssets, handleImport,
+    updateCaptionSetting, runCaptionJob, toggleCaptionExtraOption, toggleItemQualityAck, setActiveView,
+    cancelDatasetImport, uploadPreparedBundle, generateSubjectMasks, uploadSubjectMask,
+    onToggleHoldout: (id, on) => setHoldoutById((current) => ({ ...current, [id]: on })),
+    onDownloadCaptionModel,
+  });
+
+  const datasetSession = useMemo(() => ({
+    loadingDatasets, onRefreshDatasets: sessionHandlers.onRefreshDatasets, busyDatasetId, datasetThumbAsset,
+    datasets, startNewDataset: sessionHandlers.startNewDataset, openDataset: sessionHandlers.openDataset, activeDataset, selectedDatasetId,
+    datasetsError, datasetError, datasetMessage, draftName, setDraftName: sessionHandlers.setDraftName,
+    dirty, discardDraft: sessionHandlers.discardDraft, setAddDialogOpen: sessionHandlers.setAddDialogOpen, renamePrefix, setRenamePrefix: sessionHandlers.setRenamePrefix,
+    renaming, memberAssets, applyOrderedNames: sessionHandlers.applyOrderedNames, setCaptionDialog: sessionHandlers.setCaptionDialog, health,
+    canSave, saveValidity, saveDataset: sessionHandlers.saveDataset, savingDataset, unavailableAssetIds, removeUnavailableAsset: sessionHandlers.removeUnavailableAsset, onImportParquet: sessionHandlers.importParquetDataset,
+    onDeleteDataset: sessionHandlers.handleDeleteDataset, deletingDataset,
+  }), [loadingDatasets, sessionHandlers, busyDatasetId, datasetThumbAsset, datasets, activeDataset, selectedDatasetId,
+  datasetsError, datasetError, datasetMessage, draftName, dirty, renamePrefix, renaming, memberAssets, health,
+  canSave, saveValidity, savingDataset, unavailableAssetIds, deletingDataset]);
+  const editPairSession = useMemo(() => ({
+    referenceCap: datasetReferenceLimit, referenceDraftById, setItemReferences: sessionHandlers.setItemReferences, addItemReferences: sessionHandlers.addItemReferences, importItemReferences: sessionHandlers.importItemReferences, editPairsMode, setEditPairsMode: sessionHandlers.setEditPairsMode,
+  }), [datasetReferenceLimit, referenceDraftById, sessionHandlers, editPairsMode]);
+  const captionDownloadAvailable = Boolean(onDownloadCaptionModel);
+  const captionSession = useMemo(() => ({
+    captionDraftById, namedCaptionsById, holdoutById,
+    onToggleHoldout: irisSelected ? sessionHandlers.onToggleHoldout : undefined, onPreview: sessionHandlers.onPreview, updateCaption: sessionHandlers.updateCaption, captioning, addDialogOpen,
+    selectedAssetIds, addAssets: sessionHandlers.addAssets, handleImport: sessionHandlers.handleImport, captionDialog, updateCaptionSetting: sessionHandlers.updateCaptionSetting, runCaptionJob: sessionHandlers.runCaptionJob, toggleCaptionExtraOption: sessionHandlers.toggleCaptionExtraOption,
+    displayedCaptionPrompt, captionSettings, captionModelMissing, onDownloadCaptionModel: captionDownloadAvailable ? sessionHandlers.onDownloadCaptionModel : undefined, captionModelSizeLabel,
+    captionModelName: captionModel?.name ?? "JoyCaption",
+  }), [captionDownloadAvailable, captionDraftById, namedCaptionsById, holdoutById, irisSelected,
+  sessionHandlers, captioning, addDialogOpen, selectedAssetIds, captionDialog, displayedCaptionPrompt,
+  captionSettings, captionModelMissing, captionModelSizeLabel, captionModel]);
+  const doctorSession = useMemo(() => ({
+    datasetDoctor, readinessByKey, onToggleItemAck: sessionHandlers.toggleItemQualityAck,
+  }), [datasetDoctor, readinessByKey, sessionHandlers]);
+  const config = useMemo(() => ({
+    imageAssets, characters, associatedCharacterId, setActiveView: sessionHandlers.setActiveView,
+    importingAssets, importProgress, onCancelImport: sessionHandlers.cancelDatasetImport, gpuOptions, onUploadPreparedBundle: sessionHandlers.uploadPreparedBundle,
+    onIrisSidecar: activeDataset?.id ? irisSidecar : undefined,
+  }), [imageAssets, characters, associatedCharacterId, sessionHandlers, importingAssets, importProgress, gpuOptions, activeDataset, irisSidecar]);
+  const maskSession = useMemo(() => ({
+    projectId: activeProject?.id,
+    report: subjectMasks,
+    onGenerateMasks: sessionHandlers.generateSubjectMasks,
+    onUploadMask: sessionHandlers.uploadSubjectMask,
+  }), [activeProject, subjectMasks, sessionHandlers]);
 
   return (
     <ModelAvailabilityGate
@@ -2460,43 +2378,12 @@ export function TrainingStudio({ mode = "training" } = {}) {
           <>
             {datasetLibraryMode ? (
               <DatasetEditorPanel
-                datasetSession={{
-                  loadingDatasets, onRefreshDatasets, busyDatasetId, datasetThumbAsset,
-                  datasets, startNewDataset, openDataset, activeDataset, selectedDatasetId,
-                  datasetsError, datasetError, datasetMessage, draftName, setDraftName,
-                  dirty, discardDraft, setAddDialogOpen, renamePrefix, setRenamePrefix,
-                  renaming, memberAssets, applyOrderedNames, setCaptionDialog, health,
-                  canSave, saveValidity, saveDataset, savingDataset, unavailableAssetIds,
-                  removeUnavailableAsset, onImportParquet: importParquetDataset,
-                  onDeleteDataset: handleDeleteDataset, deletingDataset,
-                }}
-                editPairSession={{
-                  referenceCap: datasetReferenceLimit, referenceDraftById, setItemReferences,
-                  addItemReferences, importItemReferences, editPairsMode, setEditPairsMode,
-                }}
-                captionSession={{
-                  captionDraftById, namedCaptionsById, holdoutById,
-                  onToggleHoldout: irisSelected ? (id, on) => setHoldoutById((current) => ({ ...current, [id]: on })) : undefined, onPreview, updateCaption, captioning, addDialogOpen,
-                  selectedAssetIds, addAssets, handleImport, captionDialog,
-                  updateCaptionSetting, runCaptionJob, toggleCaptionExtraOption,
-                  displayedCaptionPrompt, captionSettings, captionModelMissing,
-                  onDownloadCaptionModel, captionModelSizeLabel,
-                  captionModelName: captionModel?.name ?? "JoyCaption",
-                }}
-                doctorSession={{
-                  datasetDoctor, readinessByKey, onToggleItemAck: toggleItemQualityAck,
-                }}
-                config={{
-                  imageAssets, characters, associatedCharacterId, setActiveView,
-                  importingAssets, gpuOptions, onUploadPreparedBundle: uploadPreparedBundle,
-                  onIrisSidecar: activeDataset?.id ? irisSidecar : undefined,
-                }}
-                maskSession={{
-                  projectId: activeProject?.id,
-                  report: subjectMasks,
-                  onGenerateMasks: generateSubjectMasks,
-                  onUploadMask: uploadSubjectMask,
-                }}
+                datasetSession={datasetSession}
+                editPairSession={editPairSession}
+                captionSession={captionSession}
+                doctorSession={doctorSession}
+                config={config}
+                maskSession={maskSession}
               />
             ) : (
               <>

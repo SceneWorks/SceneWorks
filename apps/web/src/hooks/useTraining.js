@@ -1,8 +1,9 @@
-import { useCallback, useRef, useState } from "react";
-import { apiFetch, isAbortError } from "../api.js";
+import { useAppDomainValue } from "../context/useAppDomainValue.js";
+import { useProjectScopedList } from "./useProjectScopedList.js";
+import { trainingApi } from "../api/trainingResources.js";
+import { useCallback, useState } from "react";
 import { isCurrentProjectRequest } from "../appStateHelpers.js";
 import { rethrowUnlessPrompted } from "../modelLibrary.js";
-import { refreshFailure, refreshSuccess } from "../refreshResult.js";
 import { upsertJobNewest } from "../sorters.js";
 
 // Owns the project's training-dataset state plus dataset CRUD, caption sidecar/job,
@@ -18,63 +19,44 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
   const [trainingDatasetsProjectId, setTrainingDatasetsProjectId] = useState(null);
   const [loadingTrainingDatasets, setLoadingTrainingDatasets] = useState(false);
   const [trainingDatasetsError, setTrainingDatasetsError] = useState("");
-  const trainingRefreshIdRef = useRef(0);
-
   const isCurrentTrainingRequest = useCallback(
     (projectId) =>
       isCurrentProjectRequest(activeProjectRef?.current?.id ?? null, projectId),
     [activeProjectRef],
   );
 
-  const refreshTrainingDatasets = useCallback(
-    async (projectId = activeProject?.id, { signal } = {}) => {
-      // Reject an already-stale explicit call without letting it supersede the
-      // current project's in-flight refresh. Accepted calls receive monotonically
-      // increasing ownership so an older request for the *same* project cannot
-      // overwrite a newer request or clear its loading state.
-      if (!isCurrentTrainingRequest(projectId)) return refreshFailure("stale");
-      const refreshId = ++trainingRefreshIdRef.current;
-      const ownsCurrentRefresh = () =>
-        refreshId === trainingRefreshIdRef.current &&
-        isCurrentTrainingRequest(projectId);
-
-      if (!projectId) {
-        setTrainingDatasets([]);
-        setTrainingDatasetsProjectId(null);
-        setTrainingDatasetsError("");
-        setLoadingTrainingDatasets(false);
-        return refreshFailure("missing-project");
-      }
-      setLoadingTrainingDatasets(true);
-      try {
-        const items = await apiFetch(`/api/v1/projects/${projectId}/training/datasets`, token, { signal });
-        if (!ownsCurrentRefresh()) return refreshFailure("stale");
-        setTrainingDatasets(items);
-        setTrainingDatasetsProjectId(projectId);
-        setTrainingDatasetsError("");
-        return refreshSuccess(items);
-      } catch (err) {
-        if (!ownsCurrentRefresh()) return refreshFailure("stale", err);
-        if (isAbortError(err)) return refreshFailure("aborted", err);
-        setTrainingDatasets([]);
-        setTrainingDatasetsProjectId(projectId);
-        setTrainingDatasetsError(err.message);
-        return refreshFailure("error", err);
-      } finally {
-        if (!signal?.aborted && ownsCurrentRefresh()) {
-          setLoadingTrainingDatasets(false);
-        }
-      }
+  const refreshTrainingDatasets = useProjectScopedList({
+    token, activeProject, activeProjectRef,
+    load: trainingApi.datasets,
+    admitFromRef: true,
+    setItems: setTrainingDatasets,
+    onMissing: () => {
+      setTrainingDatasets([]);
+      setTrainingDatasetsProjectId(null);
+      setTrainingDatasetsError("");
+      setLoadingTrainingDatasets(false);
     },
-    [token, activeProject, isCurrentTrainingRequest],
-  );
+    onStart: () => setLoadingTrainingDatasets(true),
+    onSuccess: (_items, projectId) => {
+      setTrainingDatasetsProjectId(projectId);
+      setTrainingDatasetsError("");
+    },
+    onError: (error, projectId) => {
+      setTrainingDatasets([]);
+      setTrainingDatasetsProjectId(projectId);
+      setTrainingDatasetsError(error.message);
+    },
+    onSettled: ({ ownsRequest, aborted }) => {
+      if (ownsRequest && !aborted) setLoadingTrainingDatasets(false);
+    },
+  });
 
   const loadTrainingDataset = useCallback(
     async (datasetId, projectId = activeProject?.id) => {
       if (!projectId || !datasetId) {
         return null;
       }
-      return apiFetch(`/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}`, token);
+      return trainingApi.dataset(projectId, datasetId, token);
     },
     [token, activeProject],
   );
@@ -90,11 +72,7 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
         return null;
       }
       const suffix = query ? `?${query}` : "";
-      return apiFetch(
-        `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/readiness${suffix}`,
-        token,
-        { signal },
-      );
+      return trainingApi.readiness(projectId, datasetId, suffix, token, { signal });
     },
     [token, activeProject],
   );
@@ -119,11 +97,7 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
         ...(expectedContentHash ? { expectedContentHash } : {}),
         ...(expectedCaptionHash ? { expectedCaptionHash } : {}),
       };
-      return apiFetch(
-        `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/items/${encodeURIComponent(itemId)}/quality-ack`,
-        token,
-        { method: "POST", body: JSON.stringify(body) },
-      );
+      return trainingApi.qualityAck(projectId, datasetId, itemId, token, { method: "POST", body: JSON.stringify(body) });
     },
     [token, activeProject],
   );
@@ -133,7 +107,7 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
       if (!projectId) {
         throw new Error("Create or open a project first.");
       }
-      const created = await apiFetch(`/api/v1/projects/${projectId}/training/datasets`, token, {
+      const created = await trainingApi.datasets(projectId, token, {
         method: "POST",
         body: JSON.stringify(payload),
       });
@@ -146,15 +120,16 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
   );
 
   const uploadTrainingDatasetItem = useCallback(
-    async (file, projectId = activeProject?.id) => {
+    async (file, projectId = activeProject?.id, { signal } = {}) => {
       if (!projectId) {
         throw new Error("Create or open a project first.");
       }
       const form = new FormData();
       form.append("file", file);
-      return apiFetch(`/api/v1/projects/${projectId}/training/uploads`, token, {
+      return trainingApi.uploads(projectId, token, {
         method: "POST",
         body: form,
+        signal,
       });
     },
     [token, activeProject],
@@ -167,11 +142,7 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
       }
       const form = new FormData();
       form.append("file", file);
-      const updated = await apiFetch(
-        `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/items/${encodeURIComponent(itemId)}/ltx-prepared-bundle`,
-        token,
-        { method: "POST", body: form },
-      );
+      const updated = await trainingApi.ltxPreparedBundle(projectId, datasetId, itemId, token, { method: "POST", body: form });
       if (isCurrentTrainingRequest(projectId)) {
         await refreshTrainingDatasets(projectId);
       }
@@ -185,7 +156,7 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
       if (!projectId || !datasetId) {
         throw new Error("Select a training dataset first.");
       }
-      const updated = await apiFetch(`/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}`, token, {
+      const updated = await trainingApi.dataset(projectId, datasetId, token, {
         method: "PATCH",
         body: JSON.stringify(payload),
       });
@@ -202,14 +173,10 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
       if (!projectId || !datasetId) {
         throw new Error("Select a training dataset first.");
       }
-      const updated = await apiFetch(
-        `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/batch-rename`,
-        token,
-        {
+      const updated = await trainingApi.batchRename(projectId, datasetId, token, {
           method: "POST",
           body: JSON.stringify(payload),
-        },
-      );
+        });
       if (isCurrentTrainingRequest(projectId)) {
         await refreshTrainingDatasets(projectId);
       }
@@ -227,11 +194,7 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
       if (!projectId || !datasetId) {
         throw new Error("Select a training dataset first.");
       }
-      const result = await apiFetch(
-        `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}`,
-        token,
-        { method: "DELETE" },
-      );
+      const result = await trainingApi.dataset(projectId, datasetId, token, { method: "DELETE" });
       if (isCurrentTrainingRequest(projectId)) {
         await refreshTrainingDatasets(projectId);
       }
@@ -245,14 +208,10 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
       if (!projectId || !datasetId) {
         throw new Error("Select a training dataset first.");
       }
-      const result = await apiFetch(
-        `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/caption-sidecars`,
-        token,
-        {
+      const result = await trainingApi.captionSidecars(projectId, datasetId, token, {
           method: "POST",
           body: JSON.stringify(payload),
-        },
-      );
+        });
       if (isCurrentTrainingRequest(projectId)) {
         await refreshTrainingDatasets(projectId);
       }
@@ -266,14 +225,10 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
       if (!projectId || !datasetId) {
         throw new Error("Select a training dataset first.");
       }
-      const job = await apiFetch(
-        `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/caption-jobs`,
-        token,
-        {
+      const job = await trainingApi.captionJobs(projectId, datasetId, token, {
           method: "POST",
           body: JSON.stringify(payload),
-        },
-      );
+        });
       setJobs((items) => upsertJobNewest(items, job));
       setError("");
       return job;
@@ -286,14 +241,10 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
       if (!projectId || !datasetId) {
         throw new Error("Select an empty training dataset first.");
       }
-      const job = await apiFetch(
-        `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/parquet-import-jobs`,
-        token,
-        {
+      const job = await trainingApi.parquetImportJobs(projectId, datasetId, token, {
           method: "POST",
           body: JSON.stringify(payload),
-        },
-      );
+        });
       setJobs((items) => upsertJobNewest(items, job));
       setError("");
       return job;
@@ -307,14 +258,10 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
       if (!projectId || !datasetId) {
         throw new Error("Select a training dataset first.");
       }
-      const job = await apiFetch(
-        `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/upscale-jobs`,
-        token,
-        {
+      const job = await trainingApi.upscaleJobs(projectId, datasetId, token, {
           method: "POST",
           body: JSON.stringify(payload),
-        },
-      );
+        });
       setJobs((items) => upsertJobNewest(items, job));
       setError("");
       return job;
@@ -330,14 +277,10 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
       if (!projectId || !datasetId) {
         throw new Error("Select a training dataset first.");
       }
-      const job = await apiFetch(
-        `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/analysis-jobs`,
-        token,
-        {
+      const job = await trainingApi.analysisJobs(projectId, datasetId, token, {
           method: "POST",
           body: JSON.stringify(payload),
-        },
-      );
+        });
       setJobs((items) => upsertJobNewest(items, job));
       setError("");
       return job;
@@ -353,14 +296,10 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
       if (!projectId || !datasetId) {
         throw new Error("Select a training dataset first.");
       }
-      const job = await apiFetch(
-        `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/face-analysis-jobs`,
-        token,
-        {
+      const job = await trainingApi.faceAnalysisJobs(projectId, datasetId, token, {
           method: "POST",
           body: JSON.stringify(payload),
-        },
-      );
+        });
       setJobs((items) => upsertJobNewest(items, job));
       setError("");
       return job;
@@ -375,14 +314,10 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
       if (!projectId || !datasetId) {
         throw new Error("Select a training dataset first.");
       }
-      const job = await apiFetch(
-        `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/subject-mask-jobs`,
-        token,
-        {
+      const job = await trainingApi.subjectMaskJobs(projectId, datasetId, token, {
           method: "POST",
           body: JSON.stringify(payload),
-        },
-      );
+        });
       setJobs((items) => upsertJobNewest(items, job));
       setError("");
       return job;
@@ -396,11 +331,7 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
       if (!projectId || !datasetId) {
         return null;
       }
-      return apiFetch(
-        `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/subject-masks`,
-        token,
-        { signal },
-      );
+      return trainingApi.subjectMasks(projectId, datasetId, token, { signal });
     },
     [token, activeProject],
   );
@@ -413,11 +344,7 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
       }
       const form = new FormData();
       form.append("file", file);
-      return apiFetch(
-        `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/items/${encodeURIComponent(itemId)}/subject-mask`,
-        token,
-        { method: "POST", body: form },
-      );
+      return trainingApi.subjectMask(projectId, datasetId, itemId, token, { method: "POST", body: form });
     },
     [token, activeProject],
   );
@@ -428,11 +355,7 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
       if (!projectId || !datasetId) {
         throw new Error("Select a training dataset first.");
       }
-      const result = await apiFetch(
-        `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/smart-crop`,
-        token,
-        { method: "POST", body: JSON.stringify({ itemIds }) },
-      );
+      const result = await trainingApi.smartCrop(projectId, datasetId, token, { method: "POST", body: JSON.stringify({ itemIds }) });
       setError("");
       return result;
     },
@@ -444,11 +367,7 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
       if (!projectId || !datasetId) {
         throw new Error("Select a training dataset first.");
       }
-      const result = await apiFetch(
-        `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/strip-exif`,
-        token,
-        { method: "POST", body: JSON.stringify(itemIds ? { itemIds } : {}) },
-      );
+      const result = await trainingApi.stripExif(projectId, datasetId, token, { method: "POST", body: JSON.stringify(itemIds ? { itemIds } : {}) });
       setError("");
       return result;
     },
@@ -462,7 +381,7 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
       }
       let job;
       try {
-        job = await apiFetch(`/api/v1/projects/${projectId}/training/jobs`, token, {
+        job = await trainingApi.jobs(projectId, token, {
           method: "POST",
           body: JSON.stringify(request),
         });
@@ -479,14 +398,11 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
     [token, activeProject, setJobs, setError],
   );
 
-  return {
+  const context = useAppDomainValue({
     trainingDatasets,
-    setTrainingDatasets,
     trainingDatasetsProjectId,
-    setTrainingDatasetsProjectId,
     loadingTrainingDatasets,
     trainingDatasetsError,
-    setTrainingDatasetsError,
     refreshTrainingDatasets,
     loadTrainingDataset,
     loadTrainingDatasetReadiness,
@@ -508,6 +424,7 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
     uploadTrainingDatasetSubjectMask,
     smartCropTrainingDataset,
     stripExifTrainingDataset,
-    createTrainingJob,
-  };
+    createTrainingJob
+  });
+  return { ...context, setTrainingDatasets, setTrainingDatasetsProjectId, setTrainingDatasetsError, context };
 }

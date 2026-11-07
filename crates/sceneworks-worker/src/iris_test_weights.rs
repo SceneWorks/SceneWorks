@@ -1,6 +1,6 @@
 //! Shared Iris task-export weight fixture for this crate's tests.
 //!
-//! `gen_core::iris` export resolution (`TaskExport::from_dir`, `RestorationResources::from_dir`)
+//! `gen_core_iris` export resolution (`TaskExport::from_dir`, `RestorationResources::from_dir`)
 //! reads the `model.safetensors` header for the trained-export `irisTask` stamp and refuses a
 //! header it cannot parse, so a staged install's weights must be a real safetensors file. The stub
 //! loaders the tests inject never read tensors, so a header-only file is enough.
@@ -8,7 +8,7 @@
 // Not every target/feature combination compiles every caller.
 #![allow(dead_code)]
 
-use gen_core::iris::{IrisTask, ADAPTER_TASK_KEY};
+use gen_core_iris::{IrisTask, ADAPTER_TASK_KEY};
 
 /// A valid, tensor-free `model.safetensors` stamped `irisTask=<task>` in its `__metadata__` (the
 /// stamp a trained export of that task carries; a matching stamp resolves, as an unstamped release
@@ -97,6 +97,10 @@ pub(crate) const TEXT_ENCODER_LANGUAGE_SHARD: &str = "model-00001-of-00002.safet
 /// The files of a Qwen3-VL text-encoder snapshot both Iris engines can PRICE: a miniature tower
 /// config (the shape of the engines' own tiny snapshot), the shard index, and two header-valid
 /// shards — one language-tower tensor (resident) and one vision-tower tensor (never materialized).
+///
+/// The MLP width is 64, not the engines' miniature 48 (sc-26266): the MLX tower packs every
+/// projection at ONE affine group size, so a q8 / q4 contract exists only for a tower whose
+/// widths a group (32 or 64) divides. 48 has none, and the pre-load contract refuses the tier.
 pub(crate) fn priceable_text_encoder_files() -> Vec<(&'static str, Vec<u8>)> {
     let config = serde_json::json!({
         "architectures": ["Qwen3VLForConditionalGeneration"],
@@ -110,7 +114,7 @@ pub(crate) fn priceable_text_encoder_files() -> Vec<(&'static str, Vec<u8>)> {
             "hidden_act": "silu",
             "hidden_size": 32,
             "initializer_range": 0.02,
-            "intermediate_size": 48,
+            "intermediate_size": 64,
             "max_position_embeddings": 4096,
             "model_type": "qwen3_vl_text",
             "num_attention_heads": 4,

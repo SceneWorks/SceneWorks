@@ -4,16 +4,18 @@
 use serde_json::{Map, Value};
 
 use crate::contracts::{JobSnapshot, JobType, WorkerSnapshot};
-use crate::image_request::MAX_JOB_POSES;
+use crate::image_request::{
+    image_quant_tier_refusal, Flux3Tier, FLUX3_TIERED_MODEL_IDS, MAX_JOB_POSES,
+};
 use crate::jobs_store::routing::catalog::{
     imported_image_request_provider_eligible, CANDLE_LORA_MODELS, CANDLE_QUANT_LORA_MODELS,
     CANDLE_QUANT_MODELS, CANDLE_ROUTED_MODELS, CANDLE_ROUTED_TRAINING_KERNELS,
     CANDLE_VIDEO_I2V_ROUTED_MODELS, CANDLE_VIDEO_ROUTED_MODELS, CANDLE_VIDEO_VACE_MODELS,
 };
 use crate::jobs_store::routing::mlx::{
-    instantid_mlx_eligible, iris_mlx_eligible, pulid_flux_mlx_eligible,
-    qwen_image_2_1_mlx_eligible, supra2_mlx_eligible, upscale_job_is_mlx_eligible,
-    video_upscale_job_is_mlx_eligible,
+    flux3_payload_tier, flux3_surface_eligible, instantid_mlx_eligible, iris_mlx_eligible,
+    pulid_flux_mlx_eligible, qwen_image_2_1_mlx_eligible, supra2_mlx_eligible,
+    upscale_job_is_mlx_eligible, video_upscale_job_is_mlx_eligible,
 };
 use crate::jobs_store::routing::{
     conditioned_reference_count, has_malformed_optional_nested_number, has_nonempty_array,
@@ -60,6 +62,7 @@ pub(crate) const CANDLE_VIDEO_LORA_MODELS: &[&str] = &[
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CandleImageLane {
     ImportedFamily,
+    MossImageEdit,
     InstantId,
     SdxlControl,
     SdxlEdit,
@@ -77,6 +80,8 @@ pub(crate) enum CandleImageLane {
     /// refuses `edit_image` and every conditioning carrier for EVERY family — the same reason
     /// `ZImageEdit` exists for an id that is itself a candle txt2img id.
     QwenImage21Edit,
+    /// FLUX.3's ordered AE-only conditioning, served by the generic registered generator.
+    Flux3Reference,
     BooguImg2Img,
     KreaEdit,
     BerniniEdit,
@@ -120,6 +125,11 @@ impl CandleImageRoute {
 }
 
 const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
+    CandleImageRoute {
+        lane: CandleImageLane::MossImageEdit,
+        models: ModelMatch::Family(crate::moss_image::is_moss),
+        shape: moss_edit_candle_eligible,
+    },
     CandleImageRoute {
         lane: CandleImageLane::InstantId,
         models: ModelMatch::Any(&["instantid_realvisxl"]),
@@ -213,6 +223,11 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
     // so this lane's shape predicate is literally the MLX one — one request contract, one gate, two
     // backends. Placed with the other registry editors, above the generic txt2img fall-through,
     // because `CANDLE_IMAGE_CHECKS` would otherwise refuse the edit mode and the carriers.
+    CandleImageRoute {
+        lane: CandleImageLane::Flux3Reference,
+        models: ModelMatch::Family(crate::image_request::flux3::is_model),
+        shape: flux3_reference_candle_eligible,
+    },
     CandleImageRoute {
         lane: CandleImageLane::QwenImage21Edit,
         // Turbo (sc-25907) is the same request contract under a second engine id.
@@ -348,6 +363,13 @@ pub(crate) fn image_job_candle_lane(job: &JobSnapshot) -> Option<CandleImageLane
     }
     let model = job.payload.get("model").and_then(Value::as_str)?;
 
+    // sc-26241: a precision request the model cannot load is refused before ANY lane — a
+    // specialized conditioned route matching on its other carriers must never pick it up and run
+    // it at a precision the request did not name.
+    if candle_image_quant_tier_refusal(model, &job.payload) {
+        return None;
+    }
+
     if imported_image_request_provider_eligible(model, &job.payload, "candle") {
         return Some(CandleImageLane::ImportedFamily);
     }
@@ -401,11 +423,16 @@ pub(crate) enum CandleImageRefusal {
     Phases,
     /// `advanced.mlxQuantize > 0` on a family that ships no packed tier.
     QuantTier,
+    /// `advanced.quantTier: "fp8r"` (sc-26241) on a model that ships no publisher FP8 rowwise
+    /// package, or combined with a second precision carrier.
+    Fp8rTier,
     /// Iris-3B (sc-25680): anything outside the text-to-image surface the MLX arm admits — a
     /// non-`text_to_image` mode, controls, a quant carrier (`mlxQuantize` / `quantTier`), or an
     /// enabled hires fix (adapters route since sc-25681). Delegates to [`iris_mlx_eligible`] so the two lanes refuse
     /// exactly the same list.
     IrisSurface,
+    /// Distilled FLUX 3 has the same text-to-image-only surface on both native backends.
+    Flux3Surface,
     /// Supra2-IMG (sc-24214): anything outside the plain text-to-image surface the MLX arm admits —
     /// a non-`text_to_image` mode, controls, a user LoRA, a quant carrier (`mlxQuantize` /
     /// `quantTier`) or an enabled hires fix. Delegates to [`supra2_mlx_eligible`] so the two lanes
@@ -429,7 +456,11 @@ impl CandleImageRefusal {
             Self::Poses => "advanced.poses",
             Self::Phases => "advanced.phases",
             Self::QuantTier => "advanced.mlxQuantize",
+            Self::Fp8rTier => "an advanced.quantTier fp8r this model cannot load",
             Self::IrisSurface => "a carrier outside Iris-3B's plain text-to-image surface",
+            Self::Flux3Surface => {
+                "a carrier outside distilled FLUX 3's plain text-to-image surface"
+            }
             Self::Supra2Surface => "a carrier outside Supra2-IMG's plain text-to-image surface",
         }
     }
@@ -469,7 +500,12 @@ const CANDLE_IMAGE_CHECKS: &[(CandleImageRefusal, CandleImageCheck)] = &[
     (CandleImageRefusal::Poses, candle_refuses_poses),
     (CandleImageRefusal::Phases, candle_refuses_phases),
     (CandleImageRefusal::QuantTier, candle_refuses_quant_tier),
+    (CandleImageRefusal::Fp8rTier, candle_refuses_fp8r_tier),
     (CandleImageRefusal::IrisSurface, candle_refuses_iris_surface),
+    (
+        CandleImageRefusal::Flux3Surface,
+        candle_refuses_flux3_surface,
+    ),
     (
         CandleImageRefusal::Supra2Surface,
         candle_refuses_supra2_surface,
@@ -484,6 +520,39 @@ const CANDLE_IMAGE_CHECKS: &[(CandleImageRefusal, CandleImageCheck)] = &[
 /// table so a carrier the generic checks name is reported by them.
 fn candle_refuses_iris_surface(model: &str, payload: &Map<String, Value>) -> bool {
     model == "iris_3b" && !iris_mlx_eligible(payload)
+}
+
+/// Distilled FLUX 3 on Candle: the shared text-to-image surface ([`flux3_surface_eligible`]) in any
+/// package the Candle provider serves (sc-26241) — bf16, the locally converted GGML q4/q8, and the
+/// publisher FP8R/NVFP4. Which WORKER may run a publisher package (its device floor) is the
+/// scheduler's `required_capability`, not this lane predicate. A malformed or conflicting
+/// precision request is refused here by name.
+fn flux3_reference_candle_eligible(payload: &Map<String, Value>) -> bool {
+    crate::image_request::flux3::parse(payload).is_ok_and(|request| !request.asset_ids.is_empty())
+        && flux3_payload_tier(payload).is_ok_and(Flux3Tier::served_by_candle)
+        && flux3_surface_eligible(payload)
+}
+
+fn candle_refuses_flux3_surface(model: &str, payload: &Map<String, Value>) -> bool {
+    FLUX3_TIERED_MODEL_IDS.contains(&model)
+        && !(flux3_payload_tier(payload).is_ok_and(Flux3Tier::served_by_candle)
+            && flux3_surface_eligible(payload))
+}
+
+/// A named precision tier the model cannot load is refused, never run at another precision: the
+/// generic lane reads only `mlxQuantize`, so without this a `quantTier: "fp8r"` on a dense family
+/// would silently render dense. FLUX 3's own tiers are judged by [`candle_refuses_flux3_surface`].
+fn candle_refuses_fp8r_tier(model: &str, payload: &Map<String, Value>) -> bool {
+    !FLUX3_TIERED_MODEL_IDS.contains(&model) && candle_image_quant_tier_refusal(model, payload)
+}
+
+/// [`image_quant_tier_refusal`] over a payload's `advanced` block (absent = nothing to refuse).
+fn candle_image_quant_tier_refusal(model: &str, payload: &Map<String, Value>) -> bool {
+    match payload.get("advanced") {
+        None | Some(Value::Null) => false,
+        Some(Value::Object(advanced)) => image_quant_tier_refusal(model, advanced).is_some(),
+        Some(_) => FLUX3_TIERED_MODEL_IDS.contains(&model),
+    }
 }
 
 /// Supra2-IMG (sc-24214) serves ONE request shape on both lanes: plain 256x256 text-to-image with no
@@ -713,6 +782,16 @@ pub(crate) fn image_request_candle_eligible(model: &str, payload: &Map<String, V
     candle_image_first_refusal(model, payload).is_none()
 }
 
+fn moss_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
+    let entry = payload
+        .get("modelManifestEntry")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    crate::moss_image::is_edit(payload)
+        && crate::moss_image::native_request(payload, &entry).is_ok()
+}
+
 /// Whether the request explicitly asks for on-the-fly quantization the candle backend can't do.
 /// `advanced.mlxQuantize` is an optional advanced override, so a payload-level value `> 0` is a
 /// deliberate tier/quant request. Individual families may provide their own default tier or reject
@@ -784,6 +863,20 @@ pub(crate) fn video_request_is_candle_eligible(
         // `mlxQuantize`; accepting this field would silently discard the user's explicit choice.
         return false;
     }
+    // A plan-backed entry is decided HERE, by the only two candle video lanes that load a plan's
+    // bytes — the same order `resolve_candle_video_route` decides it in on the worker. Falling
+    // through to the id-keyed arms below would let a plan forwarded under a BUILTIN id
+    // (`minimax_h3`, `wan_2_2`, …) be claimed by a lane that loads the shipped weights, and the
+    // worker would then refuse the job it was handed (sc-26680; the MLX twin is sc-20651's guard).
+    if crate::jobs_store::routing::catalog::checkpoint_plan_checkpoint_id_of_payload_entry(payload)
+        .is_some()
+    {
+        return *job_type == JobType::VideoGenerate
+            && (plan_backed_wan_video_candle_eligible(payload)
+                || crate::jobs_store::routing::catalog::plan_backed_minimax_h3_video_eligible(
+                    model, payload,
+                ));
+    }
     match job_type {
         // The base txt2video / image→video lane (sc-5097 / sc-5175 / sc-5493), plus SCAIL-2 standalone
         // character animation (`animate_character`, sc-6837 — a distinct candle engine, not VACE).
@@ -793,10 +886,8 @@ pub(crate) fn video_request_is_candle_eligible(
                 // Bernini (sc-10997, epic 6562): t2v + the editing/reference/multi-source modes on the
                 // distinct candle `bernini` engine — its own gate (not the generic txt2video path).
                 || bernini_video_candle_eligible(model, payload)
-                // An imported plan-backed Wan checkpoint (epic 20398): its model id is in no static
-                // routed list, so every predicate above answers `false` and the job would be
-                // refused at enqueue even though the candle ComfyUI Wan T2V lane serves it.
-                || plan_backed_wan_video_candle_eligible(payload)
+            // Plan-backed entries (epic 20398's Wan T2V lane, sc-26680's imported H3 DiT) were
+            // decided above, before any id-keyed arm.
         }
         // replace_person → candle Wan-VACE (sc-5494) OR candle SCAIL-2 (sc-6837, routed by model id).
         JobType::PersonReplace => {
@@ -850,6 +941,34 @@ pub(crate) fn plan_backed_wan_video_candle_eligible(payload: &Map<String, Value>
         && !has_nonempty_string(payload, "lastFrameAssetId")
         && !has_nonempty_string(payload, "sourceClipAssetId")
         && !has_nonempty_string(payload, "bridgeRightClipAssetId")
+}
+
+/// The exact request shape MiniMax-H3's BASE partition (`transformer/`: t2va + fl2va) serves:
+/// `text_to_video` with no keyframe, `image_to_video` with exactly ONE keyframe — the first frame
+/// or, last-frame-only, the last (FL2VA conditions on 0, 1 or 2 keyframes; the API admits the
+/// last-only shape through `h3_keyframes`, and the worker's `resolve_minimax_h3_conditioning`
+/// places it) — `first_last_frame` with both, and never a reference, clip, mask or bridge. One predicate for the builtin `minimax_h3`
+/// candle arm and the imported-DiT claim (sc-26680) on both lanes, so the partition an imported
+/// checkpoint is bound to cannot serve a shape the builtin partition refuses.
+pub(crate) fn minimax_h3_base_partition_shape(payload: &Map<String, Value>) -> bool {
+    let has_source = has_nonempty_string(payload, "sourceAssetId");
+    let has_last = has_nonempty_string(payload, "lastFrameAssetId");
+    let mode_matches = match payload.get("mode").and_then(Value::as_str) {
+        Some("text_to_video") => !has_source && !has_last,
+        // sc-26691: last-only was admitted by the API and served by the worker but claimed by no
+        // lane, so the no-lane gate refused it at submit ("no backend implements it").
+        Some("image_to_video") => has_source != has_last,
+        Some("first_last_frame") => has_source && has_last,
+        _ => false,
+    };
+    mode_matches
+        && !has_nonempty_string(payload, "sourceClipAssetId")
+        && !has_nonempty_string(payload, "bridgeRightClipAssetId")
+        && !has_nonempty_string(payload, "referenceAssetId")
+        && !has_nonempty_string(payload, "maskAssetId")
+        && !has_nonempty_or_malformed_array(payload, "referenceAssetIds")
+        && !has_nonempty_or_malformed_array(payload, "sourceClipAssetIds")
+        && !has_nonempty_or_malformed_array(payload, "referenceAudioAssetIds")
 }
 
 /// Which `video_generate` modes the candle (Windows/Linux/CUDA) lane claims for `model` — the
@@ -974,37 +1093,9 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
     } else if model == "minimax_h3" {
         // MiniMax-H3 base partition (sc-20755): t2va with no anchors, or fl2va with one/two
         // keyframes. Keep this explicit like the MLX twin: the reference partition is a different
-        // catalog entry with its own exact Ref2VA arm below.
-        match payload.get("mode").and_then(Value::as_str) {
-            Some("text_to_video") => {
-                if has_nonempty_string(payload, "sourceAssetId")
-                    || has_nonempty_string(payload, "lastFrameAssetId")
-                {
-                    return false;
-                }
-            }
-            Some("image_to_video") => {
-                if !has_nonempty_string(payload, "sourceAssetId")
-                    || has_nonempty_string(payload, "lastFrameAssetId")
-                {
-                    return false;
-                }
-            }
-            Some("first_last_frame") => {
-                if !has_nonempty_string(payload, "sourceAssetId")
-                    || !has_nonempty_string(payload, "lastFrameAssetId")
-                {
-                    return false;
-                }
-            }
-            _ => return false,
-        }
-        if has_nonempty_string(payload, "sourceClipAssetId")
-            || has_nonempty_string(payload, "bridgeRightClipAssetId")
-            || has_nonempty_or_malformed_array(payload, "referenceAssetIds")
-            || has_nonempty_or_malformed_array(payload, "sourceClipAssetIds")
-            || has_nonempty_or_malformed_array(payload, "referenceAudioAssetIds")
-        {
+        // catalog entry with its own exact Ref2VA arm below. Shared with the imported-DiT claim
+        // (sc-26680), which serves exactly this partition.
+        if !minimax_h3_base_partition_shape(payload) {
             return false;
         }
     } else if model == "minimax_h3_ref" {
@@ -2150,6 +2241,13 @@ pub(crate) fn training_job_is_candle_eligible(job: &JobSnapshot) -> bool {
         network_type.eq_ignore_ascii_case("lora") || network_type.eq_ignore_ascii_case("lokr");
 
     match kernel {
+        "moss_image_lora" => {
+            job.job_type == JobType::LoraTrain
+                && super::catalog::moss_training_plan_is_supported(plan)
+        }
+        "flux3_klein_lora" | "flux3_klein_edit_lora" => {
+            base_model == "flux3_klein_base" && network_type == "lora"
+        }
         "kolors_lora" => base_model == "kolors" && is_adapter,
         "sd3_lora" => matches!(base_model, "sd3_5_large" | "sd3_5_medium") && is_adapter,
         "wan_lora" => base_model == "wan_2_2" && network_type.eq_ignore_ascii_case("lora"),

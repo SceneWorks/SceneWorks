@@ -1,0 +1,204 @@
+{
+  "schema": 1,
+  "status": "passed",
+  "sourceSha": "0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+  "productPin": "354b41ccaccdc14afccff0d0fb1ae1b0be04836e",
+  "nativeEvidence": {
+    "ref": "main",
+    "sha": "0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+    "root": "D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks\\inference-evidence",
+    "productPin": "354b41ccaccdc14afccff0d0fb1ae1b0be04836e"
+  },
+  "backend": "cuda",
+  "runId": "41213935677",
+  "runAttempt": "1",
+  "configuration": {
+    "syntheticOnly": true,
+    "encodedSeamOnly": true,
+    "downloads": false
+  },
+  "cases": [
+    {
+      "name": "pruned_adaln::manual_unit_patch_and_mixed_reference_full_forward_matches_resident_control",
+      "exitCode": 0,
+      "command": [
+        "E:\\huggingface\\sc26691-private\\41213935677-1-bootstrap-4c3625898b20859f57ca38986ed80b1c427cdfdb\\native-target-0bada8f7287f414c30f77eb1d29ef4a544eb8ffc-cuda\\release\\deps\\integration-83d33d4827e1188d.exe",
+        "pruned_adaln::manual_unit_patch_and_mixed_reference_full_forward_matches_resident_control",
+        "adapter_topology::a_genuine_lokr_installs_on_the_pruned_curve_with_the_same_delta",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "log": "native.log"
+    },
+    {
+      "name": "adapter_topology::a_genuine_lokr_installs_on_the_pruned_curve_with_the_same_delta",
+      "exitCode": 0,
+      "command": [
+        "E:\\huggingface\\sc26691-private\\41213935677-1-bootstrap-4c3625898b20859f57ca38986ed80b1c427cdfdb\\native-target-0bada8f7287f414c30f77eb1d29ef4a544eb8ffc-cuda\\release\\deps\\integration-83d33d4827e1188d.exe",
+        "pruned_adaln::manual_unit_patch_and_mixed_reference_full_forward_matches_resident_control",
+        "adapter_topology::a_genuine_lokr_installs_on_the_pruned_curve_with_the_same_delta",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "log": "native.log"
+    }
+  ],
+  "surfaceEvidence": {
+    "backend": "cuda",
+    "conditioning": [
+      {
+        "property": "context_values",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      },
+      {
+        "property": "context_vs_zero_same_shape",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      },
+      {
+        "property": "first_only_values",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      },
+      {
+        "property": "first_only_vs_zero_same_shape",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      },
+      {
+        "property": "last_only_values",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      },
+      {
+        "property": "first_vs_last_placement",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      },
+      {
+        "property": "first_only_vs_drop",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      },
+      {
+        "property": "last_only_vs_drop",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      },
+      {
+        "property": "first_last_swap_values",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      },
+      {
+        "property": "first_last_drop_first",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      },
+      {
+        "property": "first_last_drop_last",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      },
+      {
+        "property": "reference_image_values",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      },
+      {
+        "property": "fl2va_vs_ref2va_positioning",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      },
+      {
+        "property": "ordered_reference_values",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      },
+      {
+        "property": "reference_video_only_values",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      },
+      {
+        "property": "reference_audio_only_CONDITIONING_ROWS",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      },
+      {
+        "property": "reference_audio_values_visual_fixed",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      },
+      {
+        "property": "hybrid_checkpoint_FL_portion_vs_wrong_REF_portion",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      },
+      {
+        "property": "hybrid_checkpoint_REF_portion_vs_wrong_FL_portion",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      },
+      {
+        "property": "reference_image_drop_same_layout",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      },
+      {
+        "property": "reference_video_drop_same_layout",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      },
+      {
+        "property": "reference_audio_only_drop_same_layout_CONDITIONING_ROWS",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      },
+      {
+        "property": "ordered_video_references_AB_vs_BA",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      },
+      {
+        "property": "ordered_audio_references_AB_vs_BA_visual_fixed",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      },
+      {
+        "property": "mixed_image_video_soundtrack_audio_reference_order",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      },
+      {
+        "property": "mixed_image_drop_same_layout",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      },
+      {
+        "property": "mixed_video_carrier_drop_same_layout",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      },
+      {
+        "property": "mixed_standalone_audio_drop_same_layout",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      },
+      {
+        "property": "mixed_video_soundtrack_drop_same_layout",
+        "status": "passed",
+        "scope": "encoded-generated-rows-only"
+      }
+    ],
+    "adapterStack": true,
+    "rawPreprocessing": false,
+    "endToEndAV": false,
+    "omittedAVContrasts": "NOT proven by encoded witnesses"
+  }
+}

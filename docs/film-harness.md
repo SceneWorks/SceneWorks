@@ -947,6 +947,18 @@ nor its attempt record. A reference attempt records the **effective** value — 
 when the plan named none — so a lowered run is comparable against a default one; a plan that names
 nothing dispatches exactly what it did before the knob existed.
 
+**The reference resize policy rides beside it (sc-26691).** `model.advanced.referenceImageResizeMode`
+is `match` (the engine default: scale the reference to the target canvas's area, never upscaling),
+`max` (only downsize a short edge above `referenceImageShortEdge`) or `diffusers` (force that short
+edge, upscaling included — the only behaviour before sc-26691). The short edge is read by `max` /
+`diffusers` only. The mode reaches exactly the shots the short edge reaches; a reference attempt
+records the **effective** mode (the plan's, or `match`). Replay is legacy-aware: every new video job is
+stamped with its resolved mode at creation, and a MiniMax-H3 job queued before the key existed is
+stamped with the mode it renders (`match`) when a worker claims it. So only a job that finished
+without any stamp rendered under the forced short edge: its retry/duplicate is stamped `diffusers`,
+and a reference attempt recorded without a mode settles from its job — the job's stamp when it has
+one, `diffusers` only when the job completed unstamped, unset while nothing has rendered.
+
 ### Accelerators: `model.loras` and `advanced.steps` (sc-23406)
 
 The 50-step base regime renders a minute of MiniMax-H3 film in hours. sc-18729 measured **12.6 min
@@ -1732,7 +1744,7 @@ target/debug/film-harness fixture-sound  --out DIR
 `plan` and `compile` need a SceneWorks API with a worker advertising `prompt_refine`; `run`
 additionally needs `video_generate`, `audio_generate` when the pack carries a `dialogue` entry with
 `text` (sc-23404), and, unless `--no-export`, `timeline_export`. Default API
-`http://127.0.0.1:8000`, or `$SCENEWORKS_API_URL`; token from `$SCENEWORKS_ACCESS_TOKEN`. `compile`
+`http://127.0.0.1:8000`, or `$SCENEWORKS_API_URL`; token from `$SCENEWORKS_ACCESS_TOKEN` or `--token-stdin` (read up to 64 KiB from standard input, then EOF). Prefer these over the legacy `--token TOKEN` option, which exposes the secret in process listings. `--token-stdin` works with every subcommand and cannot be combined with `--token`. `compile`
 looks for `brief.json`/`brief.jsonc` beside the plan when `--brief` is not given, and re-checks beat
 coverage by the `beatId` each generated shot carries. `resume`, `replace-take`, `cancel` and
 `status` read everything else they need from the run record in `--out`. Exit codes: 0 completed,

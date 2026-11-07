@@ -117,7 +117,19 @@ test("Windows terminal workflows use the in-box PowerShell host", async () => {
     "",
   ].map((suffix) => readFile(new URL(`../.github/workflows/starvector-terminal${suffix ? `-${suffix}` : ""}.yml`, import.meta.url), "utf8")));
   for (const workflow of workflows) assert.doesNotMatch(workflow, /shell: pwsh/);
-  assert.equal(workflows.reduce((count, workflow) => count + (workflow.match(/shell: powershell/g) ?? []).length, 0), 21);
+  let windowsJobs = 0;
+  for (const workflow of workflows) {
+    const starts = [...workflow.matchAll(/^  ([a-z][a-z0-9-]*):\n/gm)];
+    for (let index = 0; index < starts.length; index += 1) {
+      const job = workflow.slice(starts[index].index, starts[index + 1]?.index);
+      if (!job.includes("runs-on: [self-hosted, Windows, X64, cuda, real-weights]")) continue;
+      windowsJobs += 1;
+      const steps = job.split(/(?=^      - )/m).slice(1);
+      for (const step of steps) if (/^        run:/m.test(step)) assert.match(step, /^        shell: powershell$/m,
+        `${starts[index][1]} actual command must use the in-box PowerShell host`);
+    }
+  }
+  assert.equal(windowsJobs, 6, "source/provision/readiness plus three terminal Windows jobs remain covered");
 });
 
 test("existing default-branch workflow bridges every pre-merge terminal operation", async () => {
@@ -129,7 +141,11 @@ test("existing default-branch workflow bridges every pre-merge terminal operatio
     const suffix = reusable ? `-${reusable}` : "";
     assert.match(bridge, new RegExp(`uses: \\.\\/.github/workflows/starvector-terminal${suffix}\\.yml`));
   }
-  assert.match(bridge, /options: \[standard, source, provision, readiness, campaign, diagnostic-candle-1b\]/);
+  const choices = bridge.match(/starvector_terminal_operation:[\s\S]*?options: \[([^\]]+)\]/)?.[1].split(",").map((choice) => choice.trim());
+  assert.ok(choices, "the registered manual operation menu exists");
+  const legacy = ["standard", "source", "provision", "readiness", "campaign", "diagnostic-candle-1b"];
+  assert.deepEqual(choices.filter((choice) => legacy.includes(choice)), legacy, "legacy choices retain presence and order without freezing other epics' modes");
+  assert.equal(new Set(choices).size, choices.length, "manual choices are unique");
   assert.match(bridge, /starvector-readiness:[\s\S]*?uses: \.\/.github\/workflows\/starvector-terminal-readiness\.yml[\s\S]*?with:[\s\S]*?permanent_pin: \$\{\{ inputs\.permanent_pin \}\}/);
 });
 

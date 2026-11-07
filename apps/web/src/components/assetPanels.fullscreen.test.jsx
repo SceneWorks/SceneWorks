@@ -247,3 +247,51 @@ describe("FullscreenPreview fullscreen (remote browser)", () => {
     expect(isFullscreen()).toBe(false);
   });
 });
+
+describe("FullscreenPreview arrow-key navigation", () => {
+  const previousAsset = { ...imageAsset, id: "asset-prev", displayName: "Before" };
+  const nextAsset = { ...imageAsset, id: "asset-next", displayName: "After" };
+
+  beforeEach(async () => {
+    await loadComponent(true);
+  });
+
+  async function pressArrow(key, target = document.body) {
+    await act(async () => {
+      target.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+    });
+  }
+
+  it("Left/Right arrows step to the previous/next asset like the buttons", async () => {
+    const onPreviewAsset = vi.fn();
+    await renderPreview(baseProps({ onPreviewAsset, previousAsset, nextAsset }));
+    await pressArrow("ArrowRight");
+    await pressArrow("ArrowLeft");
+    expect(onPreviewAsset.mock.calls).toEqual([
+      [nextAsset, "next"],
+      [previousAsset, "previous"],
+    ]);
+  });
+
+  it("does nothing past the collection's end or while the context menu is open", async () => {
+    const onPreviewAsset = vi.fn();
+    await renderPreview(baseProps({ onPreviewAsset, nextAsset }));
+    await pressArrow("ArrowLeft");
+    expect(onPreviewAsset).not.toHaveBeenCalled();
+
+    await rightClickStage();
+    expect(menu()).not.toBeNull();
+    await pressArrow("ArrowRight", menu());
+    expect(onPreviewAsset).not.toHaveBeenCalled();
+  });
+
+  it("leaves arrows to a focused element outside the viewer", async () => {
+    const onPreviewAsset = vi.fn();
+    await renderPreview(baseProps({ onPreviewAsset, nextAsset }));
+    const outside = document.createElement("button");
+    document.body.appendChild(outside);
+    await pressArrow("ArrowRight", outside);
+    outside.remove();
+    expect(onPreviewAsset).not.toHaveBeenCalled();
+  });
+});

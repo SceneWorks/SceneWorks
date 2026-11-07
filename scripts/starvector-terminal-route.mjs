@@ -1,8 +1,10 @@
 #!/usr/bin/env node
+import { sha256 as sha } from "./lib/file-sha256.mjs";
 // Source-owned production entrypoint. It only uses the typed Vector Studio route
 // and the checked-in metrics script; no runner supplied program can author
 // canonical evidence.
-import { createHash } from "node:crypto";
+import { metalChildOptions } from "./lib/apple-metal-execution-lock.mjs";
+import { execFileWithFds } from "./lib/exec-file-with-fds.mjs";
 import { execFile as execFileCallback } from "node:child_process";
 import { appendFile, lstat, mkdir, readdir, realpath, readFile, stat, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
@@ -18,7 +20,7 @@ const execFile = promisify(execFileCallback);
 const die = (message) => { throw new Error(`starvector terminal route: ${message}`); };
 const terminal = new Set(["completed", "failed", "cancelled", "canceled"]);
 const ASSET_SETTLE_GRACE_MS = 30_000;
-const sha = (value) => createHash("sha256").update(value).digest("hex");
+
 const json = async (file) => JSON.parse(await readFile(file, "utf8"));
 const finishReasons = new Set(["complete_root", "eos", "token_limit", "byte_limit", "wall_time_limit", "cancelled"]);
 const portableRelative = (relative) => relative.split("/").map((part) => part.replaceAll(":", "__colon__")).join("/");
@@ -480,7 +482,7 @@ async function main() {
   const runtimePath = path.join(output, "runtime.json"); await writeFile(runtimePath, JSON.stringify(runtime, null, 2) + "\n");
   const transcriptSha = sha(await readFile(transcript));
   const metricScript = path.join(path.dirname(fileURLToPath(import.meta.url)), "starvector-terminal-metrics.py"); await stat(metricScript);
-  await execFile(python, [metricScript, "measure", "--bundle", bundlePath, "--events", eventsPath, "--runtime", runtimePath, "--output", path.join(output, "metrics.json"), "--tuple", tuple, "--transcript-sha256", transcriptSha], { env: { ...process.env, STARVECTOR_TERMINAL_NO_JOB_DOWNLOADS: "1" } });
+  await execFileWithFds(python, [metricScript, "measure", "--bundle", bundlePath, "--events", eventsPath, "--runtime", runtimePath, "--output", path.join(output, "metrics.json"), "--tuple", tuple, "--transcript-sha256", transcriptSha], metalChildOptions({ env: { ...process.env, STARVECTOR_TERMINAL_NO_JOB_DOWNLOADS: "1" } }), execFile);
   const metrics = await json(path.join(output, "metrics.json"));
   if (metrics?.tuple !== tuple || metrics.route_transcript_sha256 !== transcriptSha || !Array.isArray(metrics.image_quality_facts)) die("source-owned metric script did not emit bound per-case facts");
   const run = assembleRun(tuple, cases, events, metrics);

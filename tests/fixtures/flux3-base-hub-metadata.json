@@ -1,0 +1,266 @@
+{
+  "source_url": "https://huggingface.co/api/models/black-forest-labs/flux-3-image-klein-base/revision/1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4?blobs=true",
+  "repository": "black-forest-labs/flux-3-image-klein-base",
+  "revision": "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4",
+  "evidence_kind": "Public Hub metadata only; not an authenticated file-download or local weight hash attestation. Pinned base file access returned HTTP403 on2026-10-16.",
+  "gated": "auto",
+  "license_declaration": {
+    "license": "other",
+    "license_name": "flux-kommunity-license",
+    "license_link": "LICENSE.md"
+  },
+  "repository_file_count": 39,
+  "repository_size_bytes": 43229093855,
+  "files": [
+    {
+      "rfilename": ".gitattributes",
+      "blobId": "df07f775d4323e3fe2b366619b54b35f88d1079d",
+      "size": 1732
+    },
+    {
+      "rfilename": "LICENSE.md",
+      "blobId": "044cf48568c278150d132a7479ea237a79766ea7",
+      "size": 19593
+    },
+    {
+      "rfilename": "NOTICE.md",
+      "blobId": "ee97a99bbf8ad09b197cf3cb6a079084876b0376",
+      "size": 330
+    },
+    {
+      "rfilename": "README.md",
+      "blobId": "fc6d80df5269eb10b1d6124e70ec13815badfe58",
+      "size": 13657
+    },
+    {
+      "rfilename": "ae.safetensors",
+      "blobId": "78f8fcf4adb004763e3335b937a9d7a6dfa9f5b5",
+      "size": 336211292,
+      "lfs": {
+        "sha256": "868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3",
+        "size": 336211292,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "config.json",
+      "blobId": "88305de45c2a050899303d2a63dc8fa9a710ab7c",
+      "size": 805
+    },
+    {
+      "rfilename": "launch-gallery.jpg",
+      "blobId": "5ecf2330448a251f9ea4db2229ff79a7c9907665",
+      "size": 6537996,
+      "lfs": {
+        "sha256": "0c6efa4c1cae8648a3d491431dd77c507979e309f655fb0c44bd1c827f8d5f9f",
+        "size": 6537996,
+        "pointerSize": 132
+      }
+    },
+    {
+      "rfilename": "manifest.json",
+      "blobId": "5d8344c8e4a6125c5a4de05523c2611149a4e42e",
+      "size": 404
+    },
+    {
+      "rfilename": "model.safetensors",
+      "blobId": "d14d35da5f5cc4f47127a504cc5dfcb53a8a774d",
+      "size": 11076957072,
+      "lfs": {
+        "sha256": "5c921759dc03663dbb67df11d8e3d317d2d5b893b31b969c95dc77ebf861b19c",
+        "size": 11076957072,
+        "pointerSize": 136
+      }
+    },
+    {
+      "rfilename": "modular_model_index.json",
+      "blobId": "7c7c23d26d1a8d63d6aa387cd44a5618cb9490bd",
+      "size": 1447
+    },
+    {
+      "rfilename": "teaser.jpg",
+      "blobId": "32d8d7a3a6d234d4d5875b88bd9c1c17578501f6",
+      "size": 1094632,
+      "lfs": {
+        "sha256": "e83954f766bdf993f7a3115bdb3181ba29dfda89b2c9a5d75de612499e760db0",
+        "size": 1094632,
+        "pointerSize": 132
+      }
+    },
+    {
+      "rfilename": "text_encoder/LICENSE",
+      "blobId": "261eeb9e9f8b2b4b0d119366dda99c6fd7d35c64",
+      "size": 11357
+    },
+    {
+      "rfilename": "text_encoder/README.md",
+      "blobId": "542417095b66d3fc13be22bbf6722928787b8ef4",
+      "size": 7133
+    },
+    {
+      "rfilename": "text_encoder/chat_template.json",
+      "blobId": "e49e75bdda104c8de941eb20e0b3765184fb27bc",
+      "size": 5502
+    },
+    {
+      "rfilename": "text_encoder/config.json",
+      "blobId": "22be8bb79043d39840ca5e70d7a2dab80311602c",
+      "size": 1505
+    },
+    {
+      "rfilename": "text_encoder/generation_config.json",
+      "blobId": "e116347d7ef42621c7a5957f82c015c38d939c1f",
+      "size": 269
+    },
+    {
+      "rfilename": "text_encoder/merges.txt",
+      "blobId": "20024bfe7c83998e9aeaf98a0cd6a2ce6306c2f0",
+      "size": 1671839
+    },
+    {
+      "rfilename": "text_encoder/model-00001-of-00002.safetensors",
+      "blobId": "c76bab650cbb4864c0f85f6d3af26ba3fe857165",
+      "size": 4967229296,
+      "lfs": {
+        "sha256": "30a01a0556622645a3cce87b655bbbbbc1f170c196099f1b666c93202c3339a9",
+        "size": 4967229296,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "text_encoder/model-00002-of-00002.safetensors",
+      "blobId": "e2792feb019e73e6f15d89bc62295fd424807583",
+      "size": 3908490048,
+      "lfs": {
+        "sha256": "046296a2a387efb43b0c997d5833c789604d168834f6e0d3064bf7bb13d002a6",
+        "size": 3908490048,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "text_encoder/model.safetensors.index.json",
+      "blobId": "3b52de97496e2f4501dfa92a87642f60db3e22a1",
+      "size": 64742
+    },
+    {
+      "rfilename": "text_encoder/preprocessor_config.json",
+      "blobId": "2ea84a437d448ff71b08df68fdd949d5cc4ebb64",
+      "size": 390
+    },
+    {
+      "rfilename": "text_encoder/tokenizer.json",
+      "blobId": "c6cc1014128b19d1fc46b1d30a23e3b1d35db421",
+      "size": 7032403
+    },
+    {
+      "rfilename": "text_encoder/tokenizer_config.json",
+      "blobId": "d3d3763207692c78780f4bf42d4dadf49a5c8012",
+      "size": 10868
+    },
+    {
+      "rfilename": "text_encoder/video_preprocessor_config.json",
+      "blobId": "3ba673a5ad7d4d13f54155ecd38b2a94a6dac8fe",
+      "size": 385
+    },
+    {
+      "rfilename": "text_encoder/vocab.json",
+      "blobId": "4783fe10ac3adce15ac8f358ef5462739852c569",
+      "size": 2776833
+    },
+    {
+      "rfilename": "transformer/config.json",
+      "blobId": "a9049c100bd54d7ee995145e459d57a825aafdc8",
+      "size": 416
+    },
+    {
+      "rfilename": "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+      "blobId": "9d90309bdfba9cad35eba11432fa970aa7ca3e25",
+      "size": 9887081880,
+      "lfs": {
+        "sha256": "160026c6235e6a10842208d4f4077fd51018cdc525b57e69385a783d7a4d4b43",
+        "size": 9887081880,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+      "blobId": "d4ad1688651593fc2a8ebb6b3e896aea4ec3e67c",
+      "size": 1189878064,
+      "lfs": {
+        "sha256": "1b4a893a94561112c9cfc2d69f4043d6686e012b050a9c7149d064e23d92413a",
+        "size": 1189878064,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "transformer/diffusion_pytorch_model.safetensors.index.json",
+      "blobId": "72cc06b365278a064b3595a8ddd00f19712a6771",
+      "size": 37747
+    },
+    {
+      "rfilename": "vae/config.json",
+      "blobId": "2410d0e0a4b381022ad7ab0ac3007c3c8a5d010c",
+      "size": 808
+    },
+    {
+      "rfilename": "vae/diffusion_pytorch_model.safetensors",
+      "blobId": "1fd5b4913b6a9147a73b62f1ffcaf6fdc892a0df",
+      "size": 336213556,
+      "lfs": {
+        "sha256": "d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5",
+        "size": 336213556,
+        "pointerSize": 134
+      }
+    },
+    {
+      "rfilename": "variants/fp8r/config.json",
+      "blobId": "3328363c3725666b6e2fba186c73535433eaf1d6",
+      "size": 807
+    },
+    {
+      "rfilename": "variants/fp8r/hf_quant_config.json",
+      "blobId": "9d8a5adc0d0bcbe9b1abda83a83d2e1b1c1d497f",
+      "size": 1377
+    },
+    {
+      "rfilename": "variants/fp8r/manifest.json",
+      "blobId": "43a11eed3f9f2ba16bfc67abf3b7021d49d16676",
+      "size": 1815
+    },
+    {
+      "rfilename": "variants/fp8r/model.safetensors",
+      "blobId": "a2190587ad382ebd23486509302e510da3f66043",
+      "size": 6250501712,
+      "lfs": {
+        "sha256": "60de5b577f26b6bc3cf4823c180406f888416caec9474265c82d71cc4b515241",
+        "size": 6250501712,
+        "pointerSize": 135
+      }
+    },
+    {
+      "rfilename": "variants/nvfp4/config.json",
+      "blobId": "c5cf7d83ee0e10ead1c4b736af9341d25a3d18a3",
+      "size": 808
+    },
+    {
+      "rfilename": "variants/nvfp4/hf_quant_config.json",
+      "blobId": "65acade67829f9219c15dc39aaf7f67b13653454",
+      "size": 2723
+    },
+    {
+      "rfilename": "variants/nvfp4/manifest.json",
+      "blobId": "cb20f22b0c67ceaf4b206ae01270f19669d32f2d",
+      "size": 3916
+    },
+    {
+      "rfilename": "variants/nvfp4/model.safetensors",
+      "blobId": "1a3a40aebb64e28ba4ab6fbdfad5714bf391fa75",
+      "size": 5257226696,
+      "lfs": {
+        "sha256": "fa3341c15644cbcbae9416c40349b82d8dc20bdd9224a64f4d63818b1116df3e",
+        "size": 5257226696,
+        "pointerSize": 135
+      }
+    }
+  ]
+}

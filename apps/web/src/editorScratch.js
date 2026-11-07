@@ -40,10 +40,22 @@ export function resultAssetsToPurge(job) {
   return [];
 }
 
+// Results that cannot all be represented by the editor's single working canvas stay
+// addressable with their recipe inputs. This applies to any native batch or tensor job.
+export function nonCanvasJobOutputs(job) {
+  if (job?.status !== "completed") return [];
+  const { assets = [], expectedCount = 1 } = job.result ?? {};
+  // Inline upscale may publish both the original and an upscaled copy for ONE
+  // requested image. Keep its established temporary-result behavior.
+  const upscaleCopies = job.payload?.upscale?.enabled ? 2 : 1;
+  return expectedCount > upscaleCopies || assets.some((asset) => asset.type === "tensor") ? assets : [];
+}
+
 // The full set of assets to purge for a completed editor scratch op: the tracked scratch
 // source + mask (from the registry entry) plus the job's result assets. De-duped by asset
 // id. `entry.assets` is the array of scratch/mask asset objects the editor staged.
 export function scratchOpAssetsToPurge(entry, job) {
+  if (nonCanvasJobOutputs(job).length) return [];
   const out = [];
   const seen = new Set();
   const push = (asset) => {

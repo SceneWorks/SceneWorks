@@ -256,10 +256,10 @@ pub struct AppSettings {
     #[serde(default)]
     pub remote_password_set: bool,
     /// User-set GPU memory cap as a fraction (0.1–1.0) of total unified memory (epic 7819).
-    /// `None` = no limit (MLX keeps its own default budget). Stored as a fraction so it's portable
-    /// across machines; the MLX worker spawn derives `fraction × hw.memsize` bytes and applies it to
-    /// the MLX runtime process-globally, covering generations, upscales, AND LoRA training. macOS/MLX
-    /// only today — the candle/Windows path is tracked separately (sc-7826).
+    /// `None` means no explicit user target. macOS keeps the existing fraction × total
+    /// unified-memory byte request. CUDA MOSS training resolves the same fraction against
+    /// its actual selected device's total VRAM, independent of host RAM and other GPUs.
+    /// This is not an OS process quota or a promise that every CUDA job honors it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_memory_limit_fraction: Option<f32>,
     /// App-owned resolved-model hot-cache policy. Nested serde defaults preserve upgrades from
@@ -317,22 +317,54 @@ fn sanitize_storage_overrides(settings: &mut AppSettings, linux_absolute: bool) 
     settings.hf_home = sanitize(settings.hf_home.take());
 }
 
+/// Startup readers can use defaults to keep the recovery UI available. Mutations and
+/// IPC readers use the fallible path, so unreadable/corrupt files can never be reset.
 pub fn load_settings() -> AppSettings {
-    let mut settings: AppSettings = std::fs::read_to_string(settings_path())
-        .ok()
-        .and_then(|body| serde_json::from_str(&body).ok())
-        .unwrap_or_default();
+    read_settings_at(&settings_path()).unwrap_or_else(|error| {
+        tracing::error!(%error, "desktop settings unavailable; preserving recovery data");
+        AppSettings::default()
+    })
+}
+
+fn read_settings_at(path: &std::path::Path) -> Result<AppSettings, String> {
+    let body = match std::fs::read(path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(AppSettings::default()),
+        Err(error) => return Err(format!("Cannot read settings at {}: {error}. The file has been preserved; restore it before saving settings.", path.display())),
+    };
+    let mut settings: AppSettings = serde_json::from_slice(&body).map_err(|error|
+        format!("Settings at {} are corrupt: {error}. The original file has been preserved; restore or move it before saving settings.", path.display()))?;
     sanitize_resolved_cache_policy(&mut settings);
     #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let mut settings = settings;
-        sanitize_storage_overrides(&mut settings, true);
-        settings
-    }
-    #[cfg(not(all(unix, not(target_os = "macos"))))]
-    {
-        settings
-    }
+    sanitize_storage_overrides(&mut settings, true);
+    Ok(settings)
+}
+
+pub(crate) fn validate_settings_file() -> Result<(), String> {
+    read_settings_at(&settings_path()).map(|_| ())
+}
+
+fn settings_update_lock_at(
+    path: &std::path::Path,
+) -> Result<sceneworks_core::file_lock::FileLock, String> {
+    let parent = path.parent().ok_or("Settings path has no parent")?;
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    // Stable sidecar inode: locking settings.json itself would lose the lock on rename.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path.with_extension("json.lock"))
+        .map_err(|error| error.to_string())?;
+    let guard =
+        sceneworks_core::file_lock::FileLock::exclusive(file).map_err(|error| error.to_string())?;
+    read_settings_at(path)?;
+    Ok(guard)
+}
+
+fn settings_update_lock() -> Result<sceneworks_core::file_lock::FileLock, String> {
+    settings_update_lock_at(&settings_path())
 }
 
 fn sanitize_resolved_cache_policy(settings: &mut AppSettings) {
@@ -342,25 +374,13 @@ fn sanitize_resolved_cache_policy(settings: &mut AppSettings) {
     }
 }
 
-/// Write `body` to `path` atomically via temp-file + rename, so a crash / full disk
-/// mid-write can't leave a truncated file (F-127, sc-8929). The temp file sits next to
-/// the target so the rename stays on the same filesystem (a cross-device rename is not
-/// atomic). Mirrors the sidecar pidfile writer's temp+rename. Extracted from
-/// [`save_settings`] so the atomicity contract is unit-testable against a scratch path.
+/// Persist settings through the shared durable filesystem writer.
 fn atomic_write(path: &std::path::Path, body: &[u8]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, body).map_err(|error| error.to_string())?;
-    std::fs::rename(&tmp, path).map_err(|error| {
-        // Leave no stray temp file behind if the rename fails.
-        let _ = std::fs::remove_file(&tmp);
-        error.to_string()
-    })
+    sceneworks_core::fsutil::write_atomic(path, body).map_err(|error| error.to_string())
 }
 
 fn save_settings(settings: &AppSettings) -> Result<(), String> {
+    read_settings_at(&settings_path())?;
     let body = serde_json::to_string_pretty(settings).map_err(|error| error.to_string())?;
     // Atomic (temp+rename) so a torn write never wipes the data-dir/HF-home overrides
     // + credential metadata (F-127, sc-8929).
@@ -593,6 +613,7 @@ pub fn read_remote_password() -> Option<String> {
 /// to the UI (only used as the sidecar access token). Rejects an empty password so a
 /// LAN bind can never end up with an empty token (story 3 backstop).
 pub fn set_remote_password(password: &str) -> Result<(), String> {
+    let _settings_guard = settings_update_lock()?;
     let password = validate_remote_password(password)?;
     keyring::Entry::new(KEYRING_SERVICE, REMOTE_PASSWORD_ACCOUNT)
         .map_err(|error| error.to_string())?
@@ -607,6 +628,7 @@ pub fn set_remote_password(password: &str) -> Result<(), String> {
 /// disables remote access (fail-closed: no password ⇒ no non-loopback bind). Safe to
 /// call when no password is stored.
 pub fn clear_remote_password() -> Result<(), String> {
+    let _settings_guard = settings_update_lock()?;
     if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, REMOTE_PASSWORD_ACCOUNT) {
         match entry.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => {}
@@ -687,7 +709,13 @@ fn remote_access_status() -> RemoteAccessStatus {
 
 /// Current LAN remote-access status for the Settings screen (story 4).
 #[tauri::command]
-pub fn get_remote_access() -> RemoteAccessStatus {
+pub async fn get_remote_access() -> RemoteAccessStatus {
+    tauri::async_runtime::spawn_blocking(get_remote_access_blocking)
+        .await
+        .expect("desktop command task panicked")
+}
+
+fn get_remote_access_blocking() -> RemoteAccessStatus {
     remote_access_status()
 }
 
@@ -752,6 +780,15 @@ fn confirm_remote_access_action(app: &AppHandle, title: &str, body: &str) -> boo
         .blocking_show()
 }
 
+/// Storage mutations require the same native consent gate as LAN configuration.
+fn confirm_storage_action_with(confirm: impl FnOnce() -> bool) -> Result<(), String> {
+    if confirm() {
+        Ok(())
+    } else {
+        Err("Storage change was declined.".to_owned())
+    }
+}
+
 /// Apply the password-command ordering through injectable confirmation and
 /// persistence seams. Validation is deliberately first so invalid input cannot
 /// summon a native dialog or reach the keychain.
@@ -782,6 +819,17 @@ pub async fn set_remote_access(
     enabled: bool,
     port: u16,
 ) -> Result<RemoteAccessStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || set_remote_access_blocking(app, enabled, port))
+        .await
+        .expect("desktop command task panicked")
+}
+
+fn set_remote_access_blocking(
+    app: AppHandle,
+    enabled: bool,
+    port: u16,
+) -> Result<RemoteAccessStatus, String> {
+    let _settings_guard = settings_update_lock()?;
     let mut settings = load_settings();
     let stored_password = (enabled && settings.remote_password_set)
         .then(read_remote_password)
@@ -822,6 +870,15 @@ pub async fn set_remote_access_password(
     app: AppHandle,
     password: String,
 ) -> Result<RemoteAccessStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || set_remote_access_password_blocking(app, password))
+        .await
+        .expect("desktop command task panicked")
+}
+
+fn set_remote_access_password_blocking(
+    app: AppHandle,
+    password: String,
+) -> Result<RemoteAccessStatus, String> {
     set_remote_access_password_with(
         &password,
         || {
@@ -839,7 +896,13 @@ pub async fn set_remote_access_password(
 
 /// Clear the LAN password, which also disables remote access (fail-closed, story 3).
 #[tauri::command]
-pub fn clear_remote_access_password() -> Result<RemoteAccessStatus, String> {
+pub async fn clear_remote_access_password() -> Result<RemoteAccessStatus, String> {
+    tauri::async_runtime::spawn_blocking(clear_remote_access_password_blocking)
+        .await
+        .expect("desktop command task panicked")
+}
+
+fn clear_remote_access_password_blocking() -> Result<RemoteAccessStatus, String> {
     clear_remote_password()?;
     Ok(remote_access_status())
 }
@@ -880,41 +943,85 @@ fn run_capture(program: &str, args: &[&str]) -> Option<String> {
 }
 
 #[tauri::command]
-pub fn get_app_settings() -> AppSettings {
-    load_settings()
+pub async fn get_app_settings() -> Result<AppSettings, String> {
+    tauri::async_runtime::spawn_blocking(get_app_settings_blocking)
+        .await
+        .expect("desktop command task panicked")
+}
+
+fn get_app_settings_blocking() -> Result<AppSettings, String> {
+    read_settings_at(&settings_path())
 }
 
 /// Floor for the user's GPU memory fraction — below this even small models can't load and the
 /// worker would just OOM on every job, so the slider clamps here (epic 7819).
 const MIN_GPU_MEMORY_FRACTION: f32 = 0.1;
 
-/// Persist the user's GPU memory cap as a fraction of total unified memory, or clear it. `None`
-/// (and a non-finite or ≥ 1.0 value — 100% is "use everything" = no constraint) clears the cap;
-/// otherwise the value is clamped to `[MIN_GPU_MEMORY_FRACTION, 0.99]`. Persists the fraction AND
-/// (macOS, sc-7824) writes the derived byte ceiling to the live-handoff file the running MLX worker
-/// re-reads between jobs, so the change applies within a couple of seconds with no worker restart.
-/// Returns the updated settings.
+static GPU_MEMORY_LIMIT_UPDATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Persist the existing global fraction and atomically update its live handoff.
+/// macOS keeps its unified-memory byte form; CUDA MOSS training resolves the
+/// fraction against its actual selected device. Changes apply to subsequent jobs.
+/// `None` and 100% clear the request; the existing slider floor remains unchanged.
 #[tauri::command]
-pub fn set_gpu_memory_limit(fraction: Option<f32>) -> Result<AppSettings, String> {
-    let mut settings = load_settings();
+pub async fn set_gpu_memory_limit(fraction: Option<f32>) -> Result<AppSettings, String> {
+    tauri::async_runtime::spawn_blocking(move || set_gpu_memory_limit_blocking(fraction))
+        .await
+        .expect("desktop command task panicked")
+}
+
+fn set_gpu_memory_limit_blocking(fraction: Option<f32>) -> Result<AppSettings, String> {
+    let _settings_guard = settings_update_lock()?;
+    let _guard = GPU_MEMORY_LIMIT_UPDATE_LOCK
+        .lock()
+        .map_err(|_| "GPU memory settings update is unavailable".to_owned())?;
+    set_gpu_memory_limit_using(
+        fraction,
+        load_settings(),
+        save_settings,
+        write_gpu_memory_limit_for,
+    )
+}
+
+fn set_gpu_memory_limit_using(
+    fraction: Option<f32>,
+    mut settings: AppSettings,
+    mut save: impl FnMut(&AppSettings) -> Result<(), String>,
+    write_handoff: impl FnOnce(&AppSettings) -> Result<(), String>,
+) -> Result<AppSettings, String> {
+    let previous = settings.gpu_memory_limit_fraction;
     settings.gpu_memory_limit_fraction = match fraction {
         Some(value) if value.is_finite() && value < 1.0 => {
             Some(value.clamp(MIN_GPU_MEMORY_FRACTION, 0.99))
         }
         _ => None,
     };
-    save_settings(&settings)?;
-    #[cfg(target_os = "macos")]
-    write_gpu_memory_limit_file();
+    save(&settings)?;
+    if let Err(error) = write_handoff(&settings) {
+        settings.gpu_memory_limit_fraction = previous;
+        if let Err(rollback) = save(&settings) {
+            return Err(format!("GPU memory handoff failed: {error}; restoring the persisted setting also failed: {rollback}"));
+        }
+        return Err(format!("GPU memory target was not applied: {error}"));
+    }
     Ok(settings)
 }
 
 /// Persist a validated resolved-model cache policy. The three process environments are captured
 /// when the API/MLX/Candle sidecars start, so callers should present this as requiring restart.
 #[tauri::command]
-pub fn set_resolved_cache_policy(
+pub async fn set_resolved_cache_policy(
     policy: sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy,
 ) -> Result<AppSettings, String> {
+    tauri::async_runtime::spawn_blocking(move || set_resolved_cache_policy_blocking(policy))
+        .await
+        .expect("desktop command task panicked")
+}
+
+fn set_resolved_cache_policy_blocking(
+    policy: sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy,
+) -> Result<AppSettings, String> {
+    let _settings_guard = settings_update_lock()?;
     policy.validate().map_err(|error| error.to_string())?;
     let mut settings = load_settings();
     settings.resolved_cache = policy;
@@ -922,41 +1029,115 @@ pub fn set_resolved_cache_policy(
     Ok(settings)
 }
 
-/// Write the resolved byte ceiling (or `0` for "no limit") to the live-handoff file the running MLX
-/// worker re-reads between jobs (epic 7819, sc-7824), so a slider change applies without a worker
-/// restart. Best-effort: a write failure just means the change waits for the next worker restart
-/// (which re-reads `SCENEWORKS_GPU_MEMORY_LIMIT_BYTES` from the persisted fraction anyway).
-#[cfg(target_os = "macos")]
-fn write_gpu_memory_limit_file() {
-    let bytes = gpu_memory_limit_bytes().unwrap_or(0);
+/// Initialize the handoff from durable settings when a native worker starts.
+/// Serialize with slider updates so startup cannot overwrite a newer user request.
+pub(crate) fn write_gpu_memory_limit_file() -> Result<(), String> {
+    let _guard = GPU_MEMORY_LIMIT_UPDATE_LOCK
+        .lock()
+        .map_err(|_| "GPU memory settings update is unavailable".to_owned())?;
+    let settings = load_settings();
     let path = sceneworks_core::app_paths::gpu_memory_limit_file(&crate::setup::config_dir());
-    let _ = std::fs::write(&path, bytes.to_string());
+    initialize_gpu_memory_limit_file_at(&path, &settings, write_gpu_memory_limit_for)
+}
+
+fn initialize_gpu_memory_limit_file_at(
+    path: &std::path::Path,
+    settings: &AppSettings,
+    write_handoff: impl FnOnce(&AppSettings) -> Result<(), String>,
+) -> Result<(), String> {
+    if settings.gpu_memory_limit_fraction.is_some() {
+        return write_handoff(settings);
+    }
+    // No persisted desktop fraction is not itself an explicit Off interaction.
+    // Preserve an absent file (startup environment), or an existing explicit
+    // request, including zero. Never repair corrupt/unknown input to unlimited.
+    match std::fs::read_to_string(path) {
+        Ok(raw) => sceneworks_core::app_paths::parse_gpu_memory_limit_request(&raw).map(|_| ()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("GPU memory handoff is unavailable: {error}")),
+    }
+}
+
+fn write_gpu_memory_limit_for(settings: &AppSettings) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let body = unified_gpu_memory_limit_bytes(settings.gpu_memory_limit_fraction)?
+        .unwrap_or(0)
+        .to_string()
+        .into_bytes();
+    #[cfg(not(target_os = "macos"))]
+    let body = gpu_memory_limit_handoff(settings.gpu_memory_limit_fraction, None, false)?;
+    let path = sceneworks_core::app_paths::gpu_memory_limit_file(&crate::setup::config_dir());
+    atomic_write(&path, &body)
+}
+
+fn gpu_memory_limit_handoff(
+    fraction: Option<f32>,
+    unified_total_bytes: Option<u64>,
+    unified: bool,
+) -> Result<Vec<u8>, String> {
+    let Some(fraction) = fraction else {
+        return Ok(b"0".to_vec());
+    };
+    if !fraction.is_finite() || !(MIN_GPU_MEMORY_FRACTION..1.0).contains(&fraction) {
+        return Err(
+            "Stored GPU memory target is invalid; choose a target from 10% to 100%.".to_owned(),
+        );
+    }
+    if !unified {
+        // No desktop maximum-VRAM conversion: each actual CUDA device resolves
+        // this same global fraction in its own native admission domain.
+        return serde_json::to_vec(&serde_json::json!({"fraction":fraction}))
+            .map_err(|error| error.to_string());
+    }
+    let total = unified_total_bytes
+        .filter(|total| *total > 0)
+        .ok_or_else(|| {
+            "Unified GPU memory is unavailable; the target was not applied.".to_owned()
+        })?;
+    // Preserve the existing macOS fraction-to-byte rounding policy.
+    let bytes = (total as f64 * fraction as f64).round() as u64;
+    if bytes == 0 {
+        return Err("GPU memory target resolves to zero bytes; choose a larger target.".to_owned());
+    }
+    Ok(bytes.to_string().into_bytes())
 }
 
 /// Read the MLX worker's latest GPU memory telemetry for the Settings readout (epic 7819, sc-7825).
 /// `None` when the worker hasn't published any yet, or on platforms/workers without MLX telemetry
 /// (candle/CPU never write the file). Best-effort: a missing or unparseable file yields `None`.
 #[tauri::command]
-pub fn get_gpu_telemetry() -> Option<sceneworks_core::app_paths::GpuMemoryTelemetry> {
+pub async fn get_gpu_telemetry() -> Option<sceneworks_core::app_paths::GpuMemoryTelemetry> {
+    tauri::async_runtime::spawn_blocking(get_gpu_telemetry_blocking)
+        .await
+        .expect("desktop command task panicked")
+}
+
+fn get_gpu_telemetry_blocking() -> Option<sceneworks_core::app_paths::GpuMemoryTelemetry> {
     let path = sceneworks_core::app_paths::gpu_telemetry_file(&crate::setup::config_dir());
     let raw = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str(&raw).ok()
 }
 
-/// The configured GPU memory ceiling in BYTES for the MLX worker, or `None` for no limit:
-/// `fraction × hw.memsize` (total unified memory). Read at worker spawn (`supervise_mlx_worker`)
-/// and passed as `SCENEWORKS_GPU_MEMORY_LIMIT_BYTES`, which `run_worker_loop` applies process-
-/// globally. macOS only — the fraction is meaningless without a unified-memory total; the
-/// candle/Windows path is tracked separately (sc-7826).
+/// The existing macOS explicit byte cap. Missing device metadata is an error,
+/// distinct from the user's explicit off request.
 #[cfg(target_os = "macos")]
-pub fn gpu_memory_limit_bytes() -> Option<u64> {
-    let fraction = load_settings().gpu_memory_limit_fraction?;
-    if !(fraction.is_finite() && (MIN_GPU_MEMORY_FRACTION..1.0).contains(&fraction)) {
-        return None;
+pub fn gpu_memory_limit_bytes() -> Result<Option<u64>, String> {
+    unified_gpu_memory_limit_bytes(load_settings().gpu_memory_limit_fraction)
+}
+
+#[cfg(target_os = "macos")]
+fn unified_gpu_memory_limit_bytes(fraction: Option<f32>) -> Result<Option<u64>, String> {
+    if fraction.is_none() {
+        return Ok(None);
     }
     let total =
-        run_capture("sysctl", &["-n", "hw.memsize"]).and_then(|value| value.parse::<u64>().ok())?;
-    Some((total as f64 * fraction as f64).round() as u64)
+        run_capture("sysctl", &["-n", "hw.memsize"]).and_then(|value| value.parse::<u64>().ok());
+    let body = gpu_memory_limit_handoff(fraction, total, true)?;
+    let bytes = std::str::from_utf8(&body)
+        .map_err(|error| error.to_string())?
+        .parse::<u64>()
+        .map_err(|error| error.to_string())?;
+    Ok(Some(bytes))
 }
 
 /// First-run storage state for the splash Step 1 + the in-app wizard gate. The
@@ -982,10 +1163,16 @@ pub struct StorageSetup {
 }
 
 #[tauri::command]
-pub fn get_storage_setup() -> StorageSetup {
-    let settings = load_settings();
+pub async fn get_storage_setup() -> Result<StorageSetup, String> {
+    tauri::async_runtime::spawn_blocking(get_storage_setup_blocking)
+        .await
+        .expect("desktop command task panicked")
+}
+
+fn get_storage_setup_blocking() -> Result<StorageSetup, String> {
+    let settings = read_settings_at(&settings_path())?;
     let (hf_home_active, hf_home_from_environment) = huggingface_home_selection();
-    StorageSetup {
+    Ok(StorageSetup {
         data_dir: settings.data_dir,
         data_dir_default: default_data_dir().to_string_lossy().into_owned(),
         hf_home: settings.hf_home,
@@ -994,7 +1181,7 @@ pub fn get_storage_setup() -> StorageSetup {
         hf_home_from_environment,
         storage_configured: settings.storage_configured,
         setup_completed: settings.setup_completed,
-    }
+    })
 }
 
 /// Persist the splash Step 1 storage choice and mark storage configured. Empty
@@ -1002,10 +1189,35 @@ pub fn get_storage_setup() -> StorageSetup {
 /// before the API/worker are spawned, so the chosen paths take effect with no
 /// restart.
 #[tauri::command]
-pub fn save_storage_setup(data_dir: String, hf_home: String) -> Result<AppSettings, String> {
+pub async fn save_storage_setup(
+    app: AppHandle,
+    data_dir: String,
+    hf_home: String,
+) -> Result<AppSettings, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        save_storage_setup_blocking(app, data_dir, hf_home)
+    })
+    .await
+    .expect("desktop command task panicked")
+}
+
+fn save_storage_setup_blocking(
+    app: AppHandle,
+    data_dir: String,
+    hf_home: String,
+) -> Result<AppSettings, String> {
+    let data_dir = storage_override_input("SceneWorks data directory", &data_dir)?;
+    let hf_home = storage_override_input("Hugging Face cache directory", &hf_home)?;
+    let body = format!("Workspace directory: {:?}\nModel cache home: {:?}\n\nThis changes where SceneWorks reads and writes files. Continue only if you started this change in SceneWorks.",
+        data_dir.clone().unwrap_or_else(|| default_data_dir().to_string_lossy().into_owned()),
+        hf_home.clone().unwrap_or_else(|| shared_huggingface_home().to_string_lossy().into_owned()));
+    confirm_storage_action_with(|| {
+        confirm_remote_access_action(&app, "Change SceneWorks storage?", &body)
+    })?;
+    let _settings_guard = settings_update_lock()?;
     let mut settings = load_settings();
-    settings.data_dir = storage_override_input("SceneWorks data directory", &data_dir)?;
-    settings.hf_home = storage_override_input("Hugging Face cache directory", &hf_home)?;
+    settings.data_dir = data_dir;
+    settings.hf_home = hf_home;
     settings.storage_configured = true;
     save_settings(&settings)?;
     Ok(settings)
@@ -1014,7 +1226,14 @@ pub fn save_storage_setup(data_dir: String, hf_home: String) -> Result<AppSettin
 /// Mark the in-app setup wizard (Steps 2-3) complete so the studio shows on
 /// subsequent loads.
 #[tauri::command]
-pub fn complete_setup() -> Result<(), String> {
+pub async fn complete_setup() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(complete_setup_blocking)
+        .await
+        .expect("desktop command task panicked")
+}
+
+fn complete_setup_blocking() -> Result<(), String> {
+    let _settings_guard = settings_update_lock()?;
     let mut settings = load_settings();
     settings.setup_completed = true;
     save_settings(&settings)
@@ -1024,7 +1243,14 @@ pub fn complete_setup() -> Result<(), String> {
 /// setup wizard). Storage configuration is left in place — relocating the data
 /// dir is a separate, restart-bound action handled by the data-directory control.
 #[tauri::command]
-pub fn reset_setup() -> Result<(), String> {
+pub async fn reset_setup() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(reset_setup_blocking)
+        .await
+        .expect("desktop command task panicked")
+}
+
+fn reset_setup_blocking() -> Result<(), String> {
+    let _settings_guard = settings_update_lock()?;
     let mut settings = load_settings();
     settings.setup_completed = false;
     save_settings(&settings)
@@ -1043,19 +1269,46 @@ fn pick_folder(app: &AppHandle) -> Option<String> {
 
 #[tauri::command]
 pub async fn choose_folder(app: AppHandle) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || choose_folder_blocking(app))
+        .await
+        .expect("desktop command task panicked")
+}
+
+fn choose_folder_blocking(app: AppHandle) -> Option<String> {
     pick_folder(&app)
 }
 
 #[tauri::command]
-pub fn set_data_dir(path: String) -> Result<AppSettings, String> {
+pub async fn set_data_dir(app: AppHandle, path: String) -> Result<AppSettings, String> {
+    tauri::async_runtime::spawn_blocking(move || set_data_dir_blocking(app, path))
+        .await
+        .expect("desktop command task panicked")
+}
+
+fn set_data_dir_blocking(app: AppHandle, path: String) -> Result<AppSettings, String> {
+    let path = storage_override_input("SceneWorks data directory", &path)?;
+    let selected = path
+        .clone()
+        .unwrap_or_else(|| default_data_dir().to_string_lossy().into_owned());
+    let body = format!("Workspace directory: {selected:?}\n\nThis changes where SceneWorks reads and writes files. Continue only if you started this change in SceneWorks.");
+    confirm_storage_action_with(|| {
+        confirm_remote_access_action(&app, "Change SceneWorks storage?", &body)
+    })?;
+    let _settings_guard = settings_update_lock()?;
     let mut settings = load_settings();
-    settings.data_dir = storage_override_input("SceneWorks data directory", &path)?;
+    settings.data_dir = path;
     save_settings(&settings)?;
     Ok(settings)
 }
 
 #[tauri::command]
 pub async fn choose_data_dir(app: AppHandle) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || choose_data_dir_blocking(app))
+        .await
+        .expect("desktop command task panicked")
+}
+
+fn choose_data_dir_blocking(app: AppHandle) -> Option<String> {
     pick_folder(&app)
 }
 
@@ -1067,12 +1320,21 @@ pub async fn choose_data_dir(app: AppHandle) -> Option<String> {
 /// is a change to the existing library-path configuration, not a parallel setting. Like the data
 /// directory, the sidecars receive it as spawn environment, so it applies on the next launch.
 #[tauri::command]
-pub fn set_model_library(path: String) -> Result<AppSettings, String> {
+pub async fn set_model_library(app: AppHandle, path: String) -> Result<AppSettings, String> {
+    tauri::async_runtime::spawn_blocking(move || set_model_library_blocking(app, path))
+        .await
+        .expect("desktop command task panicked")
+}
+
+fn set_model_library_blocking(app: AppHandle, path: String) -> Result<AppSettings, String> {
+    let path = model_library_override_for(&path, cfg!(all(unix, not(target_os = "macos"))))?;
+    let body = format!("Model cache home: {path:?}\n\nThis changes where SceneWorks reads and writes model files. Continue only if you started this change in SceneWorks.");
+    confirm_storage_action_with(|| {
+        confirm_remote_access_action(&app, "Change SceneWorks storage?", &body)
+    })?;
+    let _settings_guard = settings_update_lock()?;
     let mut settings = load_settings();
-    settings.hf_home = Some(model_library_override_for(
-        &path,
-        cfg!(all(unix, not(target_os = "macos"))),
-    )?);
+    settings.hf_home = Some(path);
     save_settings(&settings)?;
     Ok(settings)
 }
@@ -1088,7 +1350,13 @@ fn model_library_override_for(path: &str, linux_absolute: bool) -> Result<String
 }
 
 #[tauri::command]
-pub fn reveal_in_os(path: String) -> Result<(), String> {
+pub async fn reveal_in_os(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || reveal_in_os_blocking(path))
+        .await
+        .expect("desktop command task panicked")
+}
+
+fn reveal_in_os_blocking(path: String) -> Result<(), String> {
     let target = validate_reveal_target(&path)?;
     let result = if cfg!(target_os = "macos") {
         Command::new("open").arg("-R").arg(&target).status()
@@ -1111,11 +1379,7 @@ pub fn reveal_in_os(path: String) -> Result<(), String> {
 fn app_managed_roots() -> Vec<PathBuf> {
     let settings = load_settings();
     [
-        settings
-            .data_dir
-            .as_deref()
-            .map(PathBuf::from)
-            .unwrap_or_else(default_data_dir),
+        data_dir_from_settings(&settings),
         settings
             .hf_home
             .as_deref()
@@ -1158,8 +1422,12 @@ fn validate_reveal_target(path: &str) -> Result<PathBuf, String> {
 /// default. This is the root under which projects (and thus assets) live on disk; the
 /// project registry (`<data_dir>/recent-projects.json`) maps a `projectId` to its
 /// `.sceneworks` project directory, onto which a project-relative `file.path` joins.
-fn resolved_data_dir() -> PathBuf {
-    load_settings()
+pub(crate) fn resolved_data_dir() -> PathBuf {
+    data_dir_from_settings(&load_settings())
+}
+
+fn data_dir_from_settings(settings: &AppSettings) -> PathBuf {
+    settings
         .data_dir
         .as_deref()
         .map(PathBuf::from)
@@ -1176,7 +1444,21 @@ fn resolved_data_dir() -> PathBuf {
 /// the real file the API would serve. Exposed as a command so the frontend (sc-8727) can
 /// turn an asset into an absolute path to feed [`reveal_in_os`] / [`save_asset_as`].
 #[tauri::command]
-pub fn resolve_asset_path(project_id: String, relative_path: String) -> Result<String, String> {
+pub async fn resolve_asset_path(
+    project_id: String,
+    relative_path: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        resolve_asset_path_blocking(project_id, relative_path)
+    })
+    .await
+    .expect("desktop command task panicked")
+}
+
+fn resolve_asset_path_blocking(
+    project_id: String,
+    relative_path: String,
+) -> Result<String, String> {
     let store = sceneworks_core::project_store::ProjectStore::new(
         resolved_data_dir(),
         env!("CARGO_PKG_VERSION"),
@@ -1216,61 +1498,167 @@ fn sanitized_export_filename(value: &str) -> String {
         .to_owned()
 }
 
-/// The largest export payload the shell will accept from the webview.
-///
-/// Hoisted out of [`save_image_export`]'s body (sc-15954) so the web half can be pinned against
-/// it. It stopped being unreachable when the Image Editor's untouched download became a byte-exact
-/// passthrough of the source file: every editor export used to be a canvas raster bounded by
-/// `EDITOR_CANVAS_MAX_SIDE`, and a 300 MB source now arrives here whole. The editor keeps its own
-/// mirror (`MAX_DESKTOP_EXPORT_BYTES` in `apps/web/src/screens/ImageEditor.jsx`) and falls back to
-/// the raster BEFORE the invoke, so the user reads a sentence rather than catching this error —
-/// which is why the two numbers have to stay equal, and why a test says so.
+/// Total export ceiling shared with the Image Editor's raster fallback (sc-15954).
+/// The browser checks File.size before reading bytes, and the shell checks the
+/// declaration before opening a staging file. Payloads then arrive in bounded
+/// binary chunks; the ceiling and byte-exact export contract remain unchanged.
 const MAX_EXPORT_BYTES: usize = 256 * 1024 * 1024;
 
-/// Write an export payload to disk EXACTLY as the webview handed it over.
-///
-/// Split out of [`save_image_export`] so the one property that matters about this path is
-/// testable without a native dialog (sc-15954): the desktop shell must not re-encode, re-frame or
-/// otherwise touch the bytes. The Image Editor's untouched-document download hands
-/// `exportEditorFile` the source PNG itself — chunk, colour profile and all — and the browser
-/// half of that function writes it through an object URL, which is verbatim by construction. This
-/// is the desktop half, and "verbatim" has to mean the same thing on both or the two paths
-/// disagree about what a download contains.
-fn write_export_bytes(destination: &std::path::Path, image_bytes: &[u8]) -> Result<(), String> {
-    std::fs::write(destination, image_bytes).map_err(|error| error.to_string())
+// Export payloads are streamed into native staging files in <= 1 MiB raw IPC
+// chunks. No command deserializes a JSON Vec<u8>, and the total is checked before
+// allocating a file or requesting any bytes from the webview.
+const MAX_EXPORT_CHUNK_BYTES: usize = 1024 * 1024;
+const MAX_EXPORT_SESSIONS: usize = 4;
+struct ExportSession {
+    file: tempfile::NamedTempFile,
+    destination: PathBuf,
+    expected: usize,
+    received: usize,
+    updated: std::time::Instant,
+}
+static EXPORTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, ExportSession>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn export_sessions(
+) -> Result<std::sync::MutexGuard<'static, std::collections::HashMap<String, ExportSession>>, String>
+{
+    let mut sessions = EXPORTS
+        .lock()
+        .map_err(|_| "Export state is unavailable".to_owned())?;
+    sessions.retain(|_, session| session.updated.elapsed() < std::time::Duration::from_secs(300));
+    Ok(sessions)
 }
 
-/// Save a browser-generated export through the native dialog: the Image Editor's
-/// PNGs and, via the web `saveExportFile` helper, JSON plan/pack/batch exports
-/// (sc-6554) — the bytes are written verbatim whatever they are. WebKitGTK and
-/// WKWebView have inconsistent `<a download>` behavior for blob URLs, while this
-/// path gives every desktop platform the intended filename and a real save
-/// destination. The explicit size ceiling prevents an untrusted webview payload
-/// from causing an unbounded allocation in the shell.
-#[tauri::command]
-pub async fn save_image_export(
-    app: AppHandle,
-    image_bytes: Vec<u8>,
-    suggested_filename: String,
-) -> Result<Option<String>, String> {
-    if image_bytes.is_empty() {
+fn validate_export_size(size: usize) -> Result<(), String> {
+    if size == 0 {
         return Err("The exported file was empty.".to_owned());
     }
-    if image_bytes.len() > MAX_EXPORT_BYTES {
+    if size > MAX_EXPORT_BYTES {
         return Err("The exported file exceeds the 256 MB desktop limit.".to_owned());
     }
+    Ok(())
+}
 
-    let destination = app
-        .dialog()
-        .file()
-        .set_file_name(sanitized_export_filename(&suggested_filename))
-        .blocking_save_file()
-        .and_then(|file| file.into_path().ok());
-    let Some(destination) = destination else {
-        return Ok(None);
+#[tauri::command]
+pub async fn begin_image_export(
+    app: AppHandle,
+    suggested_filename: String,
+    total_bytes: usize,
+) -> Result<Option<String>, String> {
+    validate_export_size(total_bytes)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let destination = app
+            .dialog()
+            .file()
+            .set_file_name(sanitized_export_filename(&suggested_filename))
+            .blocking_save_file()
+            .and_then(|file| file.into_path().ok());
+        let Some(destination) = destination else {
+            return Ok(None);
+        };
+        let mut sessions = export_sessions()?;
+        if sessions.len() >= MAX_EXPORT_SESSIONS {
+            return Err("Too many exports are in progress.".to_owned());
+        }
+        let parent = destination
+            .parent()
+            .ok_or("Export destination has no parent")?;
+        let file = tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
+        let id = uuid::Uuid::new_v4().to_string();
+        sessions.insert(
+            id.clone(),
+            ExportSession {
+                file,
+                destination,
+                expected: total_bytes,
+                received: 0,
+                updated: std::time::Instant::now(),
+            },
+        );
+        Ok(Some(id))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn append_export_chunk(id: &str, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    if bytes.is_empty() || bytes.len() > MAX_EXPORT_CHUNK_BYTES {
+        return Err("Invalid export chunk size.".to_owned());
+    }
+    let mut sessions = export_sessions()?;
+    let session = sessions.get_mut(id).ok_or("Export is missing or expired")?;
+    if bytes.len() > session.expected.saturating_sub(session.received) {
+        return Err("Export exceeds its declared size.".to_owned());
+    }
+    if let Err(error) = session.file.write_all(bytes) {
+        sessions.remove(id);
+        return Err(error.to_string());
+    }
+    session.received += bytes.len();
+    session.updated = std::time::Instant::now();
+    Ok(())
+}
+
+/// The payload must be raw binary. JSON arrays are rejected without Vec decoding.
+#[tauri::command]
+pub async fn save_image_export(request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("Export chunks must use raw binary IPC.".to_owned());
     };
-    write_export_bytes(&destination, &image_bytes)?;
-    Ok(Some(destination.to_string_lossy().into_owned()))
+    if bytes.len() > MAX_EXPORT_CHUNK_BYTES {
+        return Err("Invalid export chunk size.".to_owned());
+    }
+    let id = request
+        .headers()
+        .get("x-sceneworks-export-id")
+        .and_then(|value| value.to_str().ok())
+        .ok_or("Missing export ID")?
+        .to_owned();
+    // Only a bounded chunk is copied into the blocking I/O task.
+    let bytes = bytes.clone();
+    tauri::async_runtime::spawn_blocking(move || append_export_chunk(&id, &bytes))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn finish_export(id: &str) -> Result<String, String> {
+    let session = export_sessions()?
+        .remove(id)
+        .ok_or("Export is missing or expired")?;
+    if session.received != session.expected {
+        return Err("Export is incomplete.".to_owned());
+    }
+    session
+        .file
+        .as_file()
+        .sync_all()
+        .map_err(|error| error.to_string())?;
+    session
+        .file
+        .persist(&session.destination)
+        .map_err(|error| error.to_string())?;
+    sceneworks_core::fsutil::sync_parent_directory(&session.destination)
+        .map_err(|error| error.to_string())?;
+    Ok(session.destination.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub async fn finish_image_export(export_id: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || finish_export(&export_id))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn cancel_image_export(export_id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        export_sessions()?.remove(&export_id);
+        Ok(())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// Save an asset file to a user-chosen destination (sc-8726). Opens the native "save as"
@@ -1291,6 +1679,26 @@ pub async fn save_image_export(
 /// SOURCE asset is never touched: this is one copy written differently, not a cleanup pass.
 #[tauri::command]
 pub async fn save_asset_as(
+    app: AppHandle,
+    source_path: String,
+    suggested_filename: String,
+    start_dir: Option<String>,
+    without_workflow: Option<bool>,
+) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        save_asset_as_blocking(
+            app,
+            source_path,
+            suggested_filename,
+            start_dir,
+            without_workflow,
+        )
+    })
+    .await
+    .expect("desktop command task panicked")
+}
+
+fn save_asset_as_blocking(
     app: AppHandle,
     source_path: String,
     suggested_filename: String,
@@ -1329,7 +1737,13 @@ pub async fn save_asset_as(
 /// Enumerate stored credentials for the Settings screen: host, label, scheme, and
 /// whether the secret is present in the keychain. Never returns the token itself.
 #[tauri::command]
-pub fn list_credentials() -> Result<Vec<CredentialStatus>, String> {
+pub async fn list_credentials() -> Result<Vec<CredentialStatus>, String> {
+    tauri::async_runtime::spawn_blocking(list_credentials_blocking)
+        .await
+        .expect("desktop command task panicked")
+}
+
+fn list_credentials_blocking() -> Result<Vec<CredentialStatus>, String> {
     load_settings()
         .credentials
         .into_iter()
@@ -1351,13 +1765,28 @@ pub fn list_credentials() -> Result<Vec<CredentialStatus>, String> {
 /// Save (or overwrite) the token for a host in the OS keychain and record its
 /// non-secret metadata. The token is write-only — it is never read back to the UI.
 #[tauri::command]
-pub fn set_credential(
+pub async fn set_credential(
     app: AppHandle,
     host: String,
     label: String,
     scheme: CredentialScheme,
     token: String,
 ) -> Result<Vec<CredentialStatus>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        set_credential_blocking(app, host, label, scheme, token)
+    })
+    .await
+    .expect("desktop command task panicked")
+}
+
+fn set_credential_blocking(
+    app: AppHandle,
+    host: String,
+    label: String,
+    scheme: CredentialScheme,
+    token: String,
+) -> Result<Vec<CredentialStatus>, String> {
+    let _settings_guard = settings_update_lock()?;
     let host = normalize_host(&host);
     if host.is_empty() {
         return Err("A host is required (e.g. huggingface.co).".to_owned());
@@ -1391,12 +1820,25 @@ pub fn set_credential(
     // Drop any cached secret for this host so the worker pulls the new token on its
     // next download without an app restart (sc-5891).
     crate::setup::invalidate_credential_cache(&app, &host);
-    list_credentials()
+    list_credentials_blocking()
 }
 
 /// Remove a host's credential from the keychain and drop its metadata.
 #[tauri::command]
-pub fn delete_credential(app: AppHandle, host: String) -> Result<Vec<CredentialStatus>, String> {
+pub async fn delete_credential(
+    app: AppHandle,
+    host: String,
+) -> Result<Vec<CredentialStatus>, String> {
+    tauri::async_runtime::spawn_blocking(move || delete_credential_blocking(app, host))
+        .await
+        .expect("desktop command task panicked")
+}
+
+fn delete_credential_blocking(
+    app: AppHandle,
+    host: String,
+) -> Result<Vec<CredentialStatus>, String> {
+    let _settings_guard = settings_update_lock()?;
     let host = normalize_host(&host);
     if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, &cred_account(&host)) {
         match entry.delete_credential() {
@@ -1417,11 +1859,17 @@ pub fn delete_credential(app: AppHandle, host: String) -> Result<Vec<CredentialS
     // Drop the cached secret so a revoked credential stops being served by the
     // credential socket without an app restart (sc-5891).
     crate::setup::invalidate_credential_cache(&app, &host);
-    list_credentials()
+    list_credentials_blocking()
 }
 
 #[tauri::command]
-pub fn restart_worker(app: AppHandle) {
+pub async fn restart_worker(app: AppHandle) {
+    tauri::async_runtime::spawn_blocking(move || restart_worker_blocking(app))
+        .await
+        .expect("desktop command task panicked")
+}
+
+fn restart_worker_blocking(app: AppHandle) {
     // Kill the current GPU worker child; its supervisor respawns it. macOS runs the MLX
     // worker; Windows runs the candle worker (the Python worker was retired off-Mac,
     // sc-5563). Shared with the remote REST restart (epic 4484 story 12).
@@ -1436,12 +1884,24 @@ pub fn restart_worker(app: AppHandle) {
 /// that may be mid-render — followed by a relaunch. Idempotent: a second call while a teardown is
 /// already running is a no-op, so a double click cannot start two.
 #[tauri::command]
-pub fn restart_app(app: AppHandle) {
+pub async fn restart_app(app: AppHandle) {
+    tauri::async_runtime::spawn_blocking(move || restart_app_blocking(app))
+        .await
+        .expect("desktop command task panicked")
+}
+
+fn restart_app_blocking(app: AppHandle) {
     crate::setup::begin_restart(&app);
 }
 
 #[tauri::command]
-pub fn get_gpu_info() -> GpuInfo {
+pub async fn get_gpu_info() -> GpuInfo {
+    tauri::async_runtime::spawn_blocking(get_gpu_info_blocking)
+        .await
+        .expect("desktop command task panicked")
+}
+
+fn get_gpu_info_blocking() -> GpuInfo {
     #[cfg(target_os = "macos")]
     {
         let mut devices = Vec::new();
@@ -1542,6 +2002,129 @@ pub fn get_gpu_info() -> GpuInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_handoff_preserves_mac_total_bytes_and_defers_cuda_device_fraction() {
+        use sceneworks_core::app_paths::{parse_gpu_memory_limit_request, GpuMemoryLimitRequest};
+        let mac = gpu_memory_limit_handoff(Some(0.5), Some(1000), true).unwrap();
+        assert_eq!(
+            parse_gpu_memory_limit_request(std::str::from_utf8(&mac).unwrap()).unwrap(),
+            GpuMemoryLimitRequest::Bytes(500)
+        );
+        let cuda = gpu_memory_limit_handoff(Some(0.5), None, false).unwrap();
+        assert_eq!(
+            parse_gpu_memory_limit_request(std::str::from_utf8(&cuda).unwrap()).unwrap(),
+            GpuMemoryLimitRequest::Fraction(0.5)
+        );
+        assert_eq!(
+            cuda,
+            gpu_memory_limit_handoff(Some(0.5), Some(u64::MAX), false).unwrap(),
+            "desktop max/host totals must not change a selected-device CUDA fraction"
+        );
+        assert_eq!(gpu_memory_limit_handoff(None, None, true).unwrap(), b"0");
+        assert_eq!(gpu_memory_limit_handoff(None, None, false).unwrap(), b"0");
+        assert!(gpu_memory_limit_handoff(Some(0.5), None, true).is_err());
+        assert!(gpu_memory_limit_handoff(Some(0.5), Some(0), true).is_err());
+        for fraction in [f32::NAN, f32::INFINITY, -0.5, 0.0, 0.01, 1.0] {
+            assert!(gpu_memory_limit_handoff(Some(fraction), Some(1000), true).is_err());
+            assert!(gpu_memory_limit_handoff(Some(fraction), None, false).is_err());
+        }
+        for fraction in [MIN_GPU_MEMORY_FRACTION, 0.99] {
+            assert!(gpu_memory_limit_handoff(Some(fraction), Some(1000), true).is_ok());
+            assert!(gpu_memory_limit_handoff(Some(fraction), None, false).is_ok());
+        }
+    }
+
+    #[test]
+    fn memory_startup_preserves_unset_environment_and_explicit_off_without_repairing_corruption() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("gpu_memory_limit");
+        let settings = AppSettings::default();
+        let writes = std::cell::Cell::new(0);
+        initialize_gpu_memory_limit_file_at(&path, &settings, |_| {
+            writes.set(writes.get() + 1);
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            !path.exists(),
+            "unset desktop preference must preserve startup environment semantics"
+        );
+        for raw in ["0", "64", r#"{"fraction":0.5}"#] {
+            std::fs::write(&path, raw).unwrap();
+            initialize_gpu_memory_limit_file_at(&path, &settings, |_| {
+                writes.set(writes.get() + 1);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        }
+        std::fs::write(&path, "corrupt").unwrap();
+        assert!(initialize_gpu_memory_limit_file_at(&path, &settings, |_| {
+            writes.set(writes.get() + 1);
+            Ok(())
+        })
+        .is_err());
+        assert_eq!(writes.get(), 0);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "corrupt");
+        let configured = AppSettings {
+            gpu_memory_limit_fraction: Some(0.5),
+            ..AppSettings::default()
+        };
+        initialize_gpu_memory_limit_file_at(&path, &configured, |settings| {
+            let body = gpu_memory_limit_handoff(settings.gpu_memory_limit_fraction, None, false)?;
+            atomic_write(&path, &body)
+        })
+        .unwrap();
+        assert_eq!(
+            sceneworks_core::app_paths::parse_gpu_memory_limit_request(
+                &std::fs::read_to_string(&path).unwrap()
+            )
+            .unwrap(),
+            sceneworks_core::app_paths::GpuMemoryLimitRequest::Fraction(0.5)
+        );
+    }
+
+    #[test]
+    fn memory_setting_rpc_path_persists_and_rolls_back_if_live_handoff_fails() {
+        let initial = AppSettings {
+            gpu_memory_limit_fraction: Some(0.25),
+            ..AppSettings::default()
+        };
+        let mut saves = Vec::new();
+        let error = set_gpu_memory_limit_using(
+            Some(0.5),
+            initial,
+            |settings| {
+                saves.push(settings.gpu_memory_limit_fraction);
+                Ok(())
+            },
+            |_| Err("fixture handoff write failed".to_owned()),
+        )
+        .err()
+        .unwrap();
+        assert!(error.contains("not applied"));
+        assert_eq!(saves, [Some(0.5), Some(0.25)]);
+        let mut saves = Vec::new();
+        let updated = set_gpu_memory_limit_using(
+            None,
+            AppSettings::default(),
+            |settings| {
+                saves.push(settings.gpu_memory_limit_fraction);
+                Ok(())
+            },
+            |settings| {
+                assert_eq!(
+                    gpu_memory_limit_handoff(settings.gpu_memory_limit_fraction, None, false)?,
+                    b"0"
+                );
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.gpu_memory_limit_fraction, None);
+        assert_eq!(saves, [None]);
+    }
 
     #[test]
     fn linux_storage_inputs_require_absolute_paths() {
@@ -1676,7 +2259,21 @@ mod tests {
         let destination = root.join("shot.png");
         let bytes = png_with_workflow_chunk();
 
-        write_export_bytes(&destination, &bytes).expect("write export bytes");
+        let id = uuid::Uuid::new_v4().to_string();
+        EXPORTS.lock().unwrap().insert(
+            id.clone(),
+            ExportSession {
+                file: tempfile::NamedTempFile::new_in(root).unwrap(),
+                destination: destination.clone(),
+                expected: bytes.len(),
+                received: 0,
+                updated: std::time::Instant::now(),
+            },
+        );
+        for chunk in bytes.chunks(11) {
+            append_export_chunk(&id, chunk).expect("append raw export bytes");
+        }
+        finish_export(&id).expect("publish export bytes");
 
         let written = std::fs::read(&destination).expect("read back the export");
         assert_eq!(
@@ -1703,7 +2300,7 @@ mod tests {
     #[test]
     fn the_desktop_export_ceiling_matches_the_editors_mirror_of_it() {
         let editor = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../apps/web/src/screens/ImageEditor.jsx");
+            .join("../../apps/web/src/screens/imageEditor/export.js");
         let source = std::fs::read_to_string(&editor)
             .unwrap_or_else(|error| panic!("read {}: {error}", editor.display()));
         let declared = format!(
@@ -1712,7 +2309,7 @@ mod tests {
         );
         assert!(
             source.contains(&declared),
-            "apps/web/src/screens/ImageEditor.jsx must declare `export const {declared}` to match \
+            "apps/web/src/screens/imageEditor/export.js must declare `export const {declared}` to match \
              this crate's MAX_EXPORT_BYTES; the editor decides BEFORE the invoke whether the \
              passthrough fits, so a drift is either a hard error on a file that used to download \
              or a needless fallback to the raster"
@@ -1906,11 +2503,10 @@ mod tests {
         atomic_write(&path, b"{\"new\":1}").expect("atomic write");
         assert_eq!(std::fs::read(&path).expect("read back"), b"{\"new\":1}");
 
-        // The temp file used for the rename must not survive a successful write.
-        let tmp = path.with_extension("json.tmp");
-        assert!(
-            !tmp.exists(),
-            "temp file must be renamed away, not left behind"
+        assert_eq!(
+            std::fs::read_dir(root).expect("entries").count(),
+            1,
+            "only the published settings file may remain"
         );
 
         // A round-trip of real settings through save-shaped bytes stays valid JSON.
@@ -2448,5 +3044,142 @@ mod tests {
         assert!(build.contains("\"set_resolved_cache_policy\""));
         let main = include_str!("main.rs");
         assert!(main.contains("settings::set_resolved_cache_policy"));
+    }
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+
+    #[test]
+    fn missing_and_corrupt_settings_are_distinct_and_corruption_is_preserved() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("settings.json");
+        assert!(read_settings_at(&path).unwrap().data_dir.is_none());
+        for corrupt in [b"{broken".as_slice(), b"{\"dataDir\":42}".as_slice()] {
+            std::fs::write(&path, corrupt).unwrap();
+            assert!(read_settings_at(&path).is_err());
+            assert!(settings_update_lock_at(&path).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), corrupt);
+        }
+        std::fs::write(&path, br#"{"dataDir":"/old","setupCompleted":true}"#).unwrap();
+        let settings = read_settings_at(&path).unwrap();
+        assert_eq!(settings.data_dir.as_deref(), Some("/old"));
+        assert!(settings.setup_completed);
+    }
+
+    #[test]
+    fn settings_transaction_child() {
+        let Some(path) = std::env::var_os("SW_SETTINGS_TRANSACTION_CHILD") else {
+            return;
+        };
+        let path = PathBuf::from(path);
+        let _guard = settings_update_lock_at(&path).unwrap();
+        let mut settings = read_settings_at(&path).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        settings.credentials.push(CredentialMeta {
+            host: std::process::id().to_string(),
+            label: "child".to_owned(),
+            scheme: CredentialScheme::Bearer,
+        });
+        atomic_write(&path, &serde_json::to_vec(&settings).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn settings_read_modify_write_serializes_across_processes() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("settings.json");
+        let mut children = Vec::new();
+        for _ in 0..4 {
+            children.push(
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "settings::boundary_tests::settings_transaction_child",
+                    ])
+                    .env("SW_SETTINGS_TRANSACTION_CHILD", &path)
+                    .spawn()
+                    .unwrap(),
+            );
+        }
+        for mut child in children {
+            assert!(child.wait().unwrap().success());
+        }
+        assert_eq!(read_settings_at(&path).unwrap().credentials.len(), 4);
+    }
+
+    #[test]
+    fn data_directory_policy_is_shared_by_startup_assets_and_managed_roots() {
+        let defaults = AppSettings::default();
+        assert_eq!(data_dir_from_settings(&defaults), default_data_dir());
+        let settings = AppSettings {
+            data_dir: Some("/chosen/workspace".to_owned()),
+            ..defaults
+        };
+        assert_eq!(
+            data_dir_from_settings(&settings),
+            PathBuf::from("/chosen/workspace")
+        );
+    }
+
+    #[test]
+    fn storage_confirmation_accepts_or_declines_before_mutation() {
+        assert!(confirm_storage_action_with(|| false).is_err());
+        assert!(confirm_storage_action_with(|| true).is_ok());
+        let source = include_str!("settings.rs");
+        for name in [
+            "save_storage_setup_blocking",
+            "set_data_dir_blocking",
+            "set_model_library_blocking",
+        ] {
+            let body = source.split(&format!("fn {name}(")).nth(1).unwrap();
+            assert!(
+                body.find("confirm_storage_action_with").unwrap()
+                    < body.find("settings_update_lock").unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn binary_exports_bound_chunks_totals_and_preserve_destination_until_complete() {
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("image.png");
+        std::fs::write(&destination, b"old").unwrap();
+        assert!(validate_export_size(0).is_err());
+        assert!(validate_export_size(MAX_EXPORT_BYTES + 1).is_err());
+        assert!(validate_export_size(MAX_EXPORT_BYTES).is_ok());
+        let id = uuid::Uuid::new_v4().to_string();
+        EXPORTS.lock().unwrap().insert(
+            id.clone(),
+            ExportSession {
+                file: tempfile::NamedTempFile::new_in(root.path()).unwrap(),
+                destination: destination.clone(),
+                expected: 4,
+                received: 0,
+                updated: std::time::Instant::now(),
+            },
+        );
+        assert!(append_export_chunk(&id, &vec![0; MAX_EXPORT_CHUNK_BYTES + 1]).is_err());
+        assert!(append_export_chunk(&id, b"12345").is_err());
+        append_export_chunk(&id, b"12").unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"old");
+        assert!(finish_export(&id).is_err());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"old");
+        EXPORTS.lock().unwrap().insert(
+            id.clone(),
+            ExportSession {
+                file: tempfile::NamedTempFile::new_in(root.path()).unwrap(),
+                destination: destination.clone(),
+                expected: 4,
+                received: 0,
+                updated: std::time::Instant::now(),
+            },
+        );
+        append_export_chunk(&id, b"12").unwrap();
+        append_export_chunk(&id, b"34").unwrap();
+        assert_eq!(finish_export(&id).unwrap(), destination.to_string_lossy());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"1234");
+        assert!(append_export_chunk(&id, b"x").is_err());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
     }
 }

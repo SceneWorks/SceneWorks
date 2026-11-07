@@ -12,6 +12,13 @@ vi.mock("react-konva", async () => {
   return { Stage: passthrough("stage"), Layer: passthrough("layer"), Image: () => null, Rect: () => null };
 });
 
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import JSON5 from 'json5';
+import { configure, controlScope } from '../testUtils/imageControls.js';
+import { terminalBrowserDom } from '../testUtils/terminalBrowserDom.js';
+import { click } from '../testUtils/dom.js';
 import { ImageEditor } from "./ImageEditor.jsx";
 import { AppContext } from "../context/AppContext.js";
 
@@ -196,4 +203,27 @@ describe("the Image Editor's recipe pill asks the one reader (sc-15954)", () => 
     expect(pill().getAttribute("data-tone")).toBe("unknown");
     expect(pill().getAttribute("title")).toMatch(/not that it has none/);
   });
+  it("production terminal configures every actual MOSS Editor generation control",async()=>{
+    inspect.mockResolvedValue(body({workflow:null}));
+    const models=JSON5.parse(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)),'../../../../config/manifests/builtin.models.jsonc'),'utf8')).models;
+    const model={...models.find(item=>item.id==='moss_image_sft'),installState:'installed',usable:true,capabilities:['text_to_image','edit_image'],conditionalPurposes:{moss_image_edit:{installState:'installed'}}},gate=vi.fn(async()=>false),ctx=baseContext({imageModels:[model],models:[model],confirmWorkflowEmbeddingBeforeGeneration:gate,createImageJob:vi.fn(async()=>({id:'editor-job'}))});
+    await render(ctx);const edit=[...container.querySelectorAll('button')].find(node=>node.matches('.ie-acc-head')&&node.textContent.trim()==='AI Edit');expect(edit).toBeTruthy();await click(edit);
+    const surface=container.querySelector('.image-editor-surface'),snapshot=node=>[...node.querySelectorAll('input,select,textarea')].map(control=>({value:control.value,checked:control.checked})),hiddenClicks=vi.fn();
+    const retained=['hidden','display','visibility'].map((kind,index)=>{
+      const pane=document.createElement('div'),clone=surface.cloneNode(true),ids=new Map([...clone.querySelectorAll('[id]')].map(node=>[node.id,`retained-${index}-${node.id}`]));
+      for(const node of clone.querySelectorAll('[id]'))node.id=ids.get(node.id);
+      for(const node of clone.querySelectorAll('[for],[aria-labelledby]'))for(const key of ['for','aria-labelledby'])if(node.hasAttribute(key))node.setAttribute(key,node.getAttribute(key).split(/\s+/).map(id=>ids.get(id)??id).join(' '));
+      if(kind==='hidden')pane.hidden=true;else pane.style[kind==='display'?'display':'visibility']=kind==='display'?'none':'hidden';
+      for(const button of clone.querySelectorAll('button'))button.addEventListener('click',hiddenClicks);pane.appendChild(clone);surface.before(pane);return {pane,clone,before:snapshot(clone)};
+    });
+    const page=terminalBrowserDom(container);expect(container.querySelectorAll('.image-editor-surface .ie-insp-body')).toHaveLength(4);expect(await controlScope(page,'editor').count()).toBe(1);
+    const expected={model:model.id,prompt:'editor instruction',negativePrompt:'editor negative',width:512,height:768,seed:173,count:1,advanced:{steps:3,guidanceScale:4,schedulerShift:5,mossImage:{training_shift:1,max_sequence_length:4096},mossImageEdit:{reference_max_edge:512,use_kv_cache:true}}};
+    await configure(page,expected,'editor',[]);
+    expect(surface.querySelector('.ie-insp-body textarea.ie-textarea').value).toBe(expected.prompt);for(const item of retained)expect(snapshot(item.clone)).toEqual(item.before);
+    await controlScope(page,'editor').getByRole('button',{name:'Generate edit',exact:true}).click();expect(gate).toHaveBeenCalledTimes(1);expect(hiddenClicks).not.toHaveBeenCalled();expect(ctx.importAsset).not.toHaveBeenCalled();
+    // Two visible Editors remain ambiguous; hidden ancestors cannot become fallback targets.
+    retained[0].pane.hidden=false;await expect(configure(page,expected,'editor',[])).rejects.toThrow('expected one actual DOM control, got 2');retained[0].pane.hidden=true;
+    container.hidden=true;expect(await controlScope(page,'editor').count()).toBe(0);await expect(configure(page,expected,'editor',[])).rejects.toThrow('expected one actual DOM control, got 0');container.hidden=false;
+  });
+
 });

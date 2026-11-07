@@ -67,6 +67,8 @@ pub(crate) const INSPECT_CODE_UNREADABLE: &str = "workflow_inspect_unreadable";
 /// sharing violation on the staging directory is the likely cause, and telling the user their PNG
 /// is malformed sends them to fix a file that is fine.
 pub(crate) const INSPECT_CODE_READ_FAILED: &str = "workflow_inspect_read_failed";
+/// Fixed public summary, safe even when a worker join error carries diagnostics.
+pub(crate) const INSPECT_READ_FAILED_DETAIL: &str = "SceneWorks could not read the uploaded image back off disk, so its workflow could not be checked. Nothing is known to be wrong with the file — try again.";
 
 /// `code` on the 4xx for a request that is not a usable multipart with exactly one `file` field —
 /// an empty body, a JSON body, a missing `boundary`, a missing or duplicated `file`.
@@ -153,6 +155,7 @@ pub(crate) async fn inspect_workflow(
         code: Some(INSPECT_CODE_BAD_MULTIPART),
     })?;
     let mut file: Option<PathBuf> = None;
+    let mut json_companion = false;
     let mut project_id: Option<String> = None;
     // Same shape as `assets::import_asset`: the `file` field is staged before a later field can
     // error, so collection happens inside a fallible block whose error path removes the temp.
@@ -172,6 +175,9 @@ pub(crate) async fn inspect_workflow(
                             code: Some(INSPECT_CODE_BAD_MULTIPART),
                         });
                     }
+                    json_companion = field
+                        .file_name()
+                        .is_some_and(|name| name.ends_with(".sceneworks-workflow.json"));
                     file = Some(stage_inspect_upload(&state, field).await?);
                 }
                 Some("projectId") => {
@@ -207,7 +213,14 @@ pub(crate) async fn inspect_workflow(
     // executor's thread otherwise). The temp file is removed whether it succeeded, failed, or the
     // task itself panicked — nothing about the outcome may leave an upload behind.
     let read_path = temp_path.clone();
-    let read = tokio::task::spawn_blocking(move || read_workflow_chunk_file(&read_path)).await;
+    let read = tokio::task::spawn_blocking(move || {
+        if json_companion {
+            read_json_companion(&read_path).map(|(share, _)| Some(share))
+        } else {
+            read_workflow_chunk_file(&read_path).map_err(|error| inspect_error(&error))
+        }
+    })
+    .await;
     let _ = tokio::fs::remove_file(&temp_path).await;
     let read = read.map_err(|error| ApiError {
         status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -238,7 +251,7 @@ pub(crate) async fn inspect_workflow(
                     .to_owned(),
             ),
         })),
-        Err(error) => Err(inspect_error(&error)),
+        Err(error) => Err(error),
     }
 }
 
@@ -248,6 +261,8 @@ pub(crate) async fn inspect_workflow(
 /// statement about a file the caller sent. Its own code because the caller's next move is a bug
 /// report, not a different image.
 pub(crate) const ASSET_WORKFLOW_CODE_UNREADABLE: &str = "asset_workflow_unreadable";
+/// Fixed public summary: diagnostic parser text is logged separately.
+pub(crate) const ASSET_WORKFLOW_UNREADABLE_DETAIL: &str = "SceneWorks recorded a workflow on this image but can no longer read it back. The image itself is unaffected.";
 
 /// `GET /api/v1/projects/:project_id/assets/:asset_id/workflow` — the recipe an IMPORTED asset is
 /// carrying, plus what this install can do about it right now (sc-15952).
@@ -285,6 +300,43 @@ pub(crate) async fn get_asset_workflow(
         store.get_asset(&lookup_project, &asset_id)
     })
     .await?;
+    if asset.get("type").and_then(Value::as_str) == Some("tensor") {
+        if let Some(companion) = asset.pointer("/extra/workflowCompanion") {
+            let relative = companion
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ApiError::internal("Tensor workflow companion path is missing"))?
+                .to_owned();
+            let expected = companion
+                .get("sha256")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ApiError::internal("Tensor workflow companion identity is missing"))?
+                .to_owned();
+            let lookup = project_id.clone();
+            let file = project_call(state.clone(), move |store| {
+                store.project_file(&lookup, &relative)
+            })
+            .await?;
+            let share = tokio::task::spawn_blocking(move || {
+                let (share, digest) = read_json_companion(&file.path)?;
+                if digest != expected {
+                    return Err(ApiError::internal(
+                        "Tensor workflow companion changed; restore the original companion",
+                    ));
+                }
+                Ok::<_, ApiError>(share)
+            })
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))??;
+            let catalogs = inspect_catalogs(&state, Some(&project_id)).await?;
+            return Ok(Json(WorkflowInspectResponse {
+                status: INSPECT_STATUS_WORKFLOW,
+                workflow: Some(share.clone()),
+                resolution: Some(build_resolution_report(&share, &catalogs)),
+                detail: None,
+            }));
+        }
+    }
     // Absent is the ordinary answer, not a failure: most assets are generated or were imported
     // from an image with no chunk in it. Same 200 + `no_workflow` shape the inspect route uses for
     // every foreign PNG, so the web has ONE branch.
@@ -319,9 +371,7 @@ pub(crate) async fn get_asset_workflow(
         tracing::error!(event = "asset_workflow_unreadable", %project_id, error = %error);
         ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            detail: "SceneWorks recorded a workflow on this image but can no longer read it back. \
-                     The image itself is unaffected."
-                .to_owned(),
+            detail: ASSET_WORKFLOW_UNREADABLE_DETAIL.to_owned(),
             context: None,
             code: Some(ASSET_WORKFLOW_CODE_UNREADABLE),
         }
@@ -353,9 +403,7 @@ pub(crate) async fn get_asset_workflow(
         );
         return Err(ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            detail: "SceneWorks recorded a workflow on this image but can no longer read it back. \
-                     The image itself is unaffected."
-                .to_owned(),
+            detail: ASSET_WORKFLOW_UNREADABLE_DETAIL.to_owned(),
             context: None,
             code: Some(ASSET_WORKFLOW_CODE_UNREADABLE),
         });
@@ -410,6 +458,14 @@ async fn stage_inspect_upload(
     state: &AppState,
     field: axum::extract::multipart::Field<'_>,
 ) -> Result<PathBuf, ApiError> {
+    let maximum = if field
+        .file_name()
+        .is_some_and(|name| name.ends_with(".sceneworks-workflow.json"))
+    {
+        sceneworks_core::workflow_share::WORKFLOW_SHARE_MAX_BYTES.min(max_inspect_upload_bytes())
+    } else {
+        max_inspect_upload_bytes()
+    };
     let upload_dir = state.settings.data_dir.join("cache").join("uploads");
     tokio::fs::create_dir_all(&upload_dir)
         .await
@@ -423,7 +479,7 @@ async fn stage_inspect_upload(
     stream_multipart_field_to_file(
         field,
         &temp_path,
-        max_inspect_upload_bytes(),
+        maximum,
         || "Uploaded image is too large".to_owned(),
         || async {
             let _ = tokio::fs::remove_file(&temp_path).await;
@@ -434,6 +490,42 @@ async fn stage_inspect_upload(
     // recognizes the 413 by status; everything else it can return is a failure to WRITE the temp.
     .map_err(|error| coded(error, INSPECT_CODE_STAGE_FAILED))?;
     Ok(temp_path)
+}
+
+fn read_json_companion(path: &std::path::Path) -> Result<(WorkflowShare, String), ApiError> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(|e| ApiError::internal(e.to_string()))?;
+    let limit = sceneworks_core::workflow_share::WORKFLOW_SHARE_MAX_BYTES;
+    let mut bytes = Vec::new();
+    file.take((limit + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    if bytes.len() > limit {
+        return Err(coded(
+            ApiError::bad_request("Workflow JSON companion exceeds160KiB"),
+            INSPECT_CODE_TOO_LARGE,
+        ));
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|_| {
+        coded(
+            ApiError::bad_request("Workflow companion must be UTF-8 JSON"),
+            INSPECT_CODE_UNREADABLE,
+        )
+    })?;
+    let share = sceneworks_core::workflow_share::parse_workflow_share_json(text).map_err(|e| {
+        coded(
+            ApiError::bad_request(format!("Invalid workflow companion: {e}")),
+            INSPECT_CODE_UNREADABLE,
+        )
+    })?;
+    if share.kind != WORKFLOW_KIND_IMAGE {
+        return Err(coded(
+            ApiError::bad_request("Tensor companion must describe an image edit workflow"),
+            INSPECT_CODE_UNREADABLE,
+        ));
+    }
+    Ok((share, format!("{:x}", Sha256::digest(&bytes))))
 }
 
 /// Map a reader failure onto a typed status, a machine-readable `code`, and a sentence fit to show
@@ -473,9 +565,7 @@ fn inspect_error(error: &WorkflowChunkError) -> ApiError {
         // sentence must not imply otherwise.
         WorkflowChunkError::Io { .. } => ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            detail: "SceneWorks could not read the uploaded image back off disk, so its workflow \
-                     could not be checked. Nothing is known to be wrong with the file — try again."
-                .to_owned(),
+            detail: INSPECT_READ_FAILED_DETAIL.to_owned(),
             context: None,
             code: Some(INSPECT_CODE_READ_FAILED),
         },
@@ -551,9 +641,36 @@ async fn inspect_catalogs(
         // an envelope whose `model` had been scrubbed to `""` — reporting a model the file never
         // named as installed. Same rule the styles/presets already followed through `named_entry`.
         models: models.iter().filter_map(model_catalog_entry).collect(),
+        conditional_components: models
+            .iter()
+            .filter_map(moss_edit_component_entry)
+            .collect(),
         loras: loras.iter().filter_map(lora_catalog_entry).collect(),
         styles: style_catalog_entries(&styles),
         recipe_presets: presets.iter().filter_map(named_entry).collect(),
+    })
+}
+
+/// The authenticated catalog snapshot already verified pinned component presence and hashes.
+/// Keep its mode-specific package separate from backbone readiness and generic LoRAs.
+fn moss_edit_component_entry(entry: &Value) -> Option<CatalogEntry> {
+    let id = entry_str(entry, "id")?;
+    if !sceneworks_core::moss_image::is_moss(&id) {
+        return None;
+    }
+    let state = entry.pointer("/conditionalPurposes/moss_image_edit")?;
+    let blocked = state.get("blocked").and_then(Value::as_bool) == Some(true);
+    Some(CatalogEntry {
+        id: format!("{id}:moss_image_edit"),
+        name: Some("MOSS Image Edit adapter".to_owned()),
+        repo: None,
+        hash: None,
+        installed: !blocked
+            && state.get("installState").and_then(Value::as_str) == Some("installed"),
+        install: (!blocked).then(|| InstallAction {
+            method: "POST".to_owned(),
+            path: format!("/api/v1/models/{id}/conditional-components/moss_image_edit/download"),
+        }),
     })
 }
 

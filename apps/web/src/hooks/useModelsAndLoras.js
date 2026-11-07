@@ -1,24 +1,21 @@
-import { useCallback, useState } from "react";
-import { apiFetch, isAbortError } from "../api.js";
-import { isCurrentProjectRequest } from "../appStateHelpers.js";
+import { useAppDomainValue } from "../context/useAppDomainValue.js";
+import { isAbortError } from "../api.js";
 import { refreshFailure, refreshSuccess } from "../refreshResult.js";
+import { useConsentRequestOwner } from "./useConsentRequestOwner.js";
+import { useProjectScopedList } from "./useProjectScopedList.js";
+import { modelsApi } from "../api/modelsResources.js";
+import { lorasApi } from "../api/lorasResources.js";
+import { useCallback, useRef, useState } from "react";
 import { appConfirm } from "../appConfirm.jsx";
 import {
   borrowedLicenseAcknowledgmentBlocked,
   licenseAckRefusalMessage,
   licenseAcknowledgmentBlocked,
   licenseAcknowledgmentSource,
-  requiresLicenseAcknowledgment,
 } from "../licenseAcknowledgment.js";
 import { upsertJobNewest } from "../sorters.js";
 
 const maxLoraUploadBytes = 2 * 1024 * 1024 * 1024;
-const maxModelUploadBytes = 256 * 1024 * 1024 * 1024;
-
-function uploadLimitLabel(bytes) {
-  const gib = bytes / (1024 * 1024 * 1024);
-  return Number.isInteger(gib) ? `${gib}GB` : `${gib.toFixed(1)}GB`;
-}
 
 // A delete first tries to move the artifacts to the OS trash (Recycle Bin / Trash).
 // When that fails the API removes nothing and returns `trashUnavailable`; the user is
@@ -36,16 +33,9 @@ function confirmPermanentDelete() {
   });
 }
 
-// Owns the model + LoRA catalogs and their import/download/convert/delete actions.
-// Extracted from App.jsx (sc-1651). Models and LoRAs are coupled (a LoRA delete/
-// import re-pulls both via the lora overlay), so they share one hook. App keeps the
-// cross-cutting orchestrators — refreshData (bulk loader; seeds models+loras through
-// the returned setters) and refreshDataWithLoraOverlay (refreshData + refreshLoras,
-// also called by the SSE handler) — and passes them in. Both props MUST be
-// identity-stable (sc-8811): they are useCallback deps of deleteModel/deleteLora,
-// which sit in appContextValue's dependency array, so an unstable prop rebuilds the
-// context value every App render and defeats the sc-4194 memoization. App passes
-// ref-delegating useCallbacks for both.
+// Owns model/LoRA catalogs, callback-stable refreshes and catalog mutations.
+// Optional refresh overrides retain the hook test/embedding contract. App uses
+// these owned callbacks directly, so it needs no cyclic forwarding refs.
 export function useModelsAndLoras({
   token,
   activeProject,
@@ -54,68 +44,74 @@ export function useModelsAndLoras({
   setLoraError = setError,
   setJobs,
   setActiveView,
-  refreshData,
-  refreshDataWithLoraOverlay,
+  refreshData: refreshModelsOverride,
+  refreshDataWithLoraOverlay: refreshWithLorasOverride,
 }) {
   const [models, setModels] = useState([]);
+  const [modelCatalogStatus, setModelCatalogStatus] = useState("idle");
+  const modelCatalogRequestRef = useRef(0);
+
   const [loras, setLoras] = useState([]);
+  const captureConsentOwner = useConsentRequestOwner(token, models, loras, activeProject?.id);
 
   // sc-4194: actions wrapped in useCallback so their identity is stable across App's
   // SSE-driven re-renders, letting appContextValue memoize.
-  const refreshLoras = useCallback(
-    async (projectId = activeProject?.id, { signal } = {}) => {
-      if (
-        projectId &&
-        !isCurrentProjectRequest(activeProject?.id ?? null, projectId)
-      ) {
+  const refreshLoras = useProjectScopedList({
+    token, activeProject, activeProjectRef,
+    load: (projectId, token, options) => lorasApi.list(projectId ? `?projectId=${encodeURIComponent(projectId)}` : "", token, options),
+    setItems: setLoras,
+    setError: setLoraError,
+    optionalProject: true,
+  });
+
+  const refreshModels = useCallback(async ({ signal } = {}) => {
+    const requestId = ++modelCatalogRequestRef.current;
+    // Do not blank an already-authoritative catalog during an SSE/manual refresh. This state is
+    // specifically the cold-start boundary where no availability answer exists yet.
+    setModelCatalogStatus((current) => (current === "ready" ? current : "loading"));
+    try {
+      const items = await modelsApi.list(token, { signal });
+      if (requestId !== modelCatalogRequestRef.current) {
         return refreshFailure("stale");
       }
-      try {
-        const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
-        const items = await apiFetch(`/api/v1/loras${query}`, token, { signal });
-        // sc-8858: an SSE-triggered refresh for a specific project can resolve after
-        // the user switches away; committing then would clobber the new project's
-        // LoRA overlay with the old one's. Drop the stale response — mirrors
-        // refreshTimelines' guard (useTimelines.js). Only project-scoped refreshes
-        // are guarded; a global refresh (projectId undefined) still commits.
-        if (
-          projectId &&
-          !isCurrentProjectRequest(activeProjectRef?.current?.id ?? null, projectId)
-        ) {
-          return refreshFailure("stale");
-        }
-        setLoras(items);
-        setLoraError("");
-        return refreshSuccess(items);
-      } catch (err) {
-        if (
-          projectId &&
-          !isCurrentProjectRequest(activeProjectRef?.current?.id ?? null, projectId)
-        ) {
-          return refreshFailure("stale", err);
-        }
-        if (isAbortError(err)) return refreshFailure("aborted", err);
-        setLoraError(err.message);
-        return refreshFailure("error", err);
+      setModels(items);
+      setModelCatalogStatus("ready");
+      setError("");
+      return refreshSuccess(items);
+    } catch (err) {
+      if (requestId !== modelCatalogRequestRef.current) {
+        return refreshFailure("stale", err);
       }
-    },
-    [token, activeProject, activeProjectRef, setLoraError],
-  );
+      if (isAbortError(err)) {
+        setModelCatalogStatus((current) => (current === "loading" ? "idle" : current));
+        return refreshFailure("aborted", err);
+      }
+      setModelCatalogStatus((current) => (current === "loading" ? "error" : current));
+      setError(err.message);
+      return refreshFailure("error", err);
+    }
+  }, [token, setError]);
+
+  const refreshModelAndLoras = useCallback(async (projectId = activeProjectRef.current?.id) => {
+    await Promise.all([
+      refreshModels(),
+      refreshLoras(projectId || undefined),
+    ]);
+  }, [activeProjectRef, refreshModels, refreshLoras]);
+
+  const refreshData = refreshModelsOverride ?? refreshModels;
+  const refreshDataWithLoraOverlay = refreshWithLorasOverride ?? refreshModelAndLoras;
 
   const deleteModel = useCallback(
     async (model) => {
-      let result = await apiFetch(`/api/v1/models/${encodeURIComponent(model.id)}`, token, {
+      let result = await modelsApi.item(model.id, token, {
         method: "DELETE",
       });
       if (result?.trashUnavailable) {
         if (!(await confirmPermanentDelete())) {
           return { cancelled: true };
         }
-        result = await apiFetch(
-          `/api/v1/models/${encodeURIComponent(model.id)}?permanent=true`,
-          token,
-          { method: "DELETE" },
-        );
+        result = await modelsApi.removePermanently(model.id, token, { method: "DELETE" });
       }
       if (result.removedManifestEntry) {
         setModels((items) => items.filter((item) => item.id !== model.id));
@@ -136,11 +132,7 @@ export function useModelsAndLoras({
   // loop (sc-12088). One DELETE; the confirm dialog makes the permanence explicit.
   const deleteModelVariant = useCallback(
     async (model, variant) => {
-      const result = await apiFetch(
-        `/api/v1/models/${encodeURIComponent(model.id)}/variants/${encodeURIComponent(variant)}`,
-        token,
-        { method: "DELETE" },
-      );
+      const result = await modelsApi.variant(model.id, variant, token, { method: "DELETE" });
       setError("");
       await refreshData();
       return result;
@@ -158,7 +150,7 @@ export function useModelsAndLoras({
       params.set("projectId", activeProject.id);
     }
     const query = params.toString() ? `?${params.toString()}` : "";
-    let result = await apiFetch(`/api/v1/loras/${encodeURIComponent(lora.id)}${query}`, token, {
+    let result = await lorasApi.itemWithQuery(lora.id, query, token, {
       method: "DELETE",
     });
     if (result?.trashUnavailable) {
@@ -166,11 +158,7 @@ export function useModelsAndLoras({
         return { cancelled: true };
       }
       params.set("permanent", "true");
-      result = await apiFetch(
-        `/api/v1/loras/${encodeURIComponent(lora.id)}?${params.toString()}`,
-        token,
-        { method: "DELETE" },
-      );
+      result = await lorasApi.item(lora.id, params.toString(), token, { method: "DELETE" });
     }
     if (result.removedManifestEntry) {
       setLoras((items) => items.filter((item) => item.id !== lora.id || item.scope !== lora.scope));
@@ -194,7 +182,7 @@ export function useModelsAndLoras({
         params.set("projectId", activeProject.id);
       }
       const query = params.toString() ? `?${params.toString()}` : "";
-      const updated = await apiFetch(`/api/v1/loras/${encodeURIComponent(lora.id)}${query}`, token, {
+      const updated = await lorasApi.itemWithQuery(lora.id, query, token, {
         method: "PATCH",
         body: JSON.stringify(updates),
       });
@@ -217,10 +205,7 @@ export function useModelsAndLoras({
         params.set("projectId", activeProject.id);
       }
       const query = params.toString() ? `?${params.toString()}` : "";
-      const result = await apiFetch(
-        `/api/v1/loras/${encodeURIComponent(lora.id)}/embedded-tags${query}`,
-        token,
-      );
+      const result = await lorasApi.embeddedTags(lora.id, query, token);
       return Array.isArray(result?.tags) ? result.tags : [];
     },
     [token, activeProject],
@@ -228,36 +213,25 @@ export function useModelsAndLoras({
 
   const createModelImportJob = useCallback(
     async (payload, options = {}) => {
-    const { file, ...metadata } = payload;
-    if (file?.size > maxModelUploadBytes) {
-      throw new Error(`Uploaded model file exceeds the ${uploadLimitLabel(maxModelUploadBytes)} limit`);
+    const ownsRequest = captureConsentOwner(token);
+    if (!ownsRequest()) return null;
+    // Request building is loaded on first use so it stays out of the first-paint bundle.
+    const { buildModelImportRequest } = await import("../modelImportRequest.js");
+    if (!ownsRequest()) return null;
+    // An import may acquire components of the selected base. Reuse current server
+    // consent without turning a cached flag into a new acceptance assertion.
+    const base = models.find((model) => model.id === payload.baseModel);
+    const blocked = await licenseAcknowledgmentBlocked(base, token);
+    if (!ownsRequest()) return null;
+    if (blocked) {
+      throw new Error(licenseAckRefusalMessage(base));
     }
-    let body;
-    if (file) {
-      body = new FormData();
-      // Multipart fields are appended verbatim — the backend reads them by literal field name
-      // (models.rs `model_import_request_from_multipart`) with none of the `#[serde(alias)]`
-      // tolerance the JSON branch below gets. Callers must key metadata by the backend's own
-      // multipart field names (e.g. `type`, not `modelType`) or the value is silently dropped
-      // and the import defaults to `image` (sc-14020).
-      Object.entries(metadata).forEach(([key, value]) => {
-        if (value == null || value === "") {
-          return;
-        }
-        // The multipart parser reads `source` as a JSON DOCUMENT (models.rs
-        // `model_import_request_from_multipart` runs `serde_json::from_str` on it), so an object
-        // appended verbatim would arrive as the literal "[object Object]" and be refused as an
-        // invalid import source. Every other field is a scalar and is unchanged (epic 20398).
-        body.append(key, typeof value === "object" && !(value instanceof Blob) ? JSON.stringify(value) : value);
-      });
-      body.append("file", file);
-    } else {
-      body = JSON.stringify(metadata);
-    }
-    const job = await apiFetch("/api/v1/models/import", token, {
+    const { endpoint, body } = buildModelImportRequest(payload);
+    const job = await modelsApi.importRequest(endpoint, token, {
       method: "POST",
       body,
     });
+    if (!ownsRequest()) return null;
     setJobs((items) => upsertJobNewest(items, job));
     if (options.navigateToQueue ?? false) {
       setActiveView("Queue");
@@ -265,7 +239,7 @@ export function useModelsAndLoras({
     setError("");
     return job;
     },
-    [token, setJobs, setActiveView, setError],
+    [token, models, setJobs, setActiveView, setError, captureConsentOwner],
   );
 
   const createLoraImportJob = useCallback(
@@ -305,7 +279,7 @@ export function useModelsAndLoras({
         projectName: metadata.scope === "project" ? activeProject.name : null,
       });
     }
-    const job = await apiFetch("/api/v1/loras/import", token, {
+    const job = await lorasApi.import(token, {
       method: "POST",
       body,
     });
@@ -321,6 +295,8 @@ export function useModelsAndLoras({
 
   const createModelDownloadJob = useCallback(
     async (model, options = {}) => {
+      const ownsRequest = captureConsentOwner(token);
+      if (!ownsRequest()) return null;
       // Licence-acknowledgment CHOKE POINT (sc-17227). Every download-starting surface funnels
       // through here — the Models screen, the Simple UI's model manager, the first-run Setup
       // Wizard, the studio availability gates, the workflow drop, the Update button — so this is
@@ -331,11 +307,13 @@ export function useModelsAndLoras({
       // `requiresLicenseAcknowledgment` model the repo is PUBLIC, so nothing upstream refuses an
       // unacknowledged fetch and the weights would simply land. The API refuses the same request
       // independently (`apps/rust-api/src/models.rs`) for clients this code never runs in.
-      if (licenseAcknowledgmentBlocked(model)) {
-        setError(licenseAckRefusalMessage(model));
-        return null;
-      }
       try {
+        const blocked = await licenseAcknowledgmentBlocked(model, token);
+        if (!ownsRequest()) return null;
+        if (blocked) {
+          setError(licenseAckRefusalMessage(model));
+          return null;
+        }
         // sc-8509: install a specific quant tier when the caller passes one (the Models-page tier
         // picker for a quant-matrix model). Absent `variant` installs the model's default tier —
         // the back-compat single-download behavior every other caller relies on.
@@ -343,36 +321,38 @@ export function useModelsAndLoras({
         if (options.variant) {
           body.variant = options.variant;
         }
+        if (options.componentId) {
+          body.componentId = options.componentId;
+        }
         // Co-requisite choice groups (sc-22998 / sc-23000): e.g. YuE2's `{ decoder: "legacy" }`
         // installs the legacy decoder add-on instead of the manifest default. Sent only when a
         // caller names one, so every other download's body is unchanged.
         if (options.choices && typeof options.choices === "object" && Object.keys(options.choices).length) {
           body.choices = options.choices;
         }
-        // Carry the acknowledgment to the API, which refuses the download without it. Sent only
-        // when the model actually requires one, so no other download's body changes shape.
-        if (requiresLicenseAcknowledgment(model)) {
-          body.licenseAcknowledged = true;
-        }
-        const job = await apiFetch(`/api/v1/models/${model.id}/download`, token, {
+        // The server reads its current terms-bound record. No new acceptance assertion
+        // may be inferred from browser state, even after the preflight succeeded.
+        const job = await modelsApi.download(model.id, token, {
           method: "POST",
           body: JSON.stringify(body),
         });
+        if (!ownsRequest()) return null;
         setJobs((items) => upsertJobNewest(items, job));
         setError("");
         return job;
       } catch (err) {
+        if (!ownsRequest()) return null;
         setError(err.message);
         return null;
       }
     },
-    [token, setJobs, setError],
+    [token, setJobs, setError, captureConsentOwner],
   );
 
   const createModelConvertJob = useCallback(
     async (model) => {
       try {
-        const job = await apiFetch(`/api/v1/models/${model.id}/convert`, token, {
+        const job = await modelsApi.convert(model.id, token, {
           method: "POST",
           body: JSON.stringify({ requestedGpu: "auto" }),
         });
@@ -392,6 +372,8 @@ export function useModelsAndLoras({
   // Mirrors createModelDownloadJob.
   const createLoraDownloadJob = useCallback(
     async (lora) => {
+      const ownsRequest = captureConsentOwner(token);
+      if (!ownsRequest()) return null;
       // The LoRA half of the licence CHOKE POINT (sc-17227). `POST /api/v1/loras/:id/download`
       // gates on the repo the catalog row resolves to, so a LoRA whose `source.repo` is a
       // restricted repo is refused exactly as the model download is — and without this the refusal
@@ -400,24 +382,24 @@ export function useModelsAndLoras({
       // reads that stamp and the ack the Models screen already persists, so accepting the licence
       // once on the model's card is what makes its LoRAs downloadable.
       const licenseSource = licenseAcknowledgmentSource(lora);
-      if (borrowedLicenseAcknowledgmentBlocked(lora)) {
-        setLoraError(licenseAckRefusalMessage(licenseSource));
-        return null;
-      }
       try {
-        const body = { requestedGpu: "auto" };
-        // Sent only for a row the server flagged, so no other LoRA download changes shape.
-        if (licenseSource) {
-          body.licenseAcknowledged = true;
+        const blocked = await borrowedLicenseAcknowledgmentBlocked(lora, token);
+        if (!ownsRequest()) return null;
+        if (blocked) {
+          setLoraError(licenseAckRefusalMessage(licenseSource));
+          return null;
         }
-        const job = await apiFetch(`/api/v1/loras/${encodeURIComponent(lora.id)}/download`, token, {
+        const body = { requestedGpu: "auto" };
+        const job = await lorasApi.download(lora.id, token, {
           method: "POST",
           body: JSON.stringify(body),
         });
+        if (!ownsRequest()) return null;
         setJobs((items) => upsertJobNewest(items, job));
         setLoraError("");
         return job;
       } catch (err) {
+        if (!ownsRequest()) return null;
         // The server probes installState live from the HF cache; our badge is a snapshot
         // from the last catalog fetch. When the cache is filled out-of-band (the on-demand
         // pull at first generation, another client) the row is already "installed" server-
@@ -433,15 +415,24 @@ export function useModelsAndLoras({
         return null;
       }
     },
-    [token, setJobs, setLoraError, refreshLoras],
+    [token, setJobs, setLoraError, refreshLoras, captureConsentOwner],
   );
 
-  return {
+  const downloadConditionalComponents = useCallback(async (modelId, purpose) => {
+    const ownsRequest = captureConsentOwner(token);
+    if (!ownsRequest()) return null;
+    const blocked = await licenseAcknowledgmentBlocked(models.find((model) => model.id === modelId), token);
+    if (!ownsRequest()) return null;
+    if (blocked) throw new Error(licenseAckRefusalMessage(models.find((model) => model.id === modelId)));
+    return modelsApi.conditionalDownload(modelId, purpose, token, {
+      method: "POST", body: JSON.stringify({}),
+    });
+  }, [token, models, captureConsentOwner]);
+
+  const context = useAppDomainValue({
+    modelCatalogStatus,
     models,
-    setModels,
     loras,
-    setLoras,
-    refreshLoras,
     deleteModel,
     deleteModelVariant,
     deleteLora,
@@ -450,7 +441,9 @@ export function useModelsAndLoras({
     createModelImportJob,
     createLoraImportJob,
     createModelDownloadJob,
+    downloadConditionalComponents,
     createLoraDownloadJob,
-    createModelConvertJob,
-  };
+    createModelConvertJob
+  });
+  return { ...context, refreshModels, refreshModelAndLoras, setModels, setLoras, refreshLoras, context };
 }

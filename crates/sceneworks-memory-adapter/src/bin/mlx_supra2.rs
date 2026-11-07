@@ -23,7 +23,8 @@
 //! `runtime_complete` — the shape every identity-carrying arm emits.
 
 use super::*;
-use mlx_gen::gen_core::supra2::{TEXT_ENCODER_COMPONENT, VAE_COMPONENT};
+#[cfg(test)]
+use gen_core_checkpoint::supra2::{TEXT_ENCODER_COMPONENT, VAE_COMPONENT};
 use std::time::Instant;
 
 const LANE: &str = "mlx";
@@ -37,33 +38,11 @@ pub(super) const ENVS: protocol::Supra2Envs = protocol::Supra2Envs {
     vae_env: "SCENEWORKS_SUPRA2_IMG_COMPONENT_VAE",
 };
 
-/// The spec the worker loads Supra2 under: the converted bundle plus both pinned components,
-/// resident, eager, default (dense) precision, no quantization.
-pub(super) fn load_spec(bundle: PathBuf, text_encoder: PathBuf, vae: PathBuf) -> LoadSpec {
-    LoadSpec::new(WeightsSource::Dir(bundle))
-        .with_offload_policy(OffloadPolicy::Resident)
-        .with_load_shape(LoadShape::EagerMaterialization)
-        .with_component(TEXT_ENCODER_COMPONENT, WeightsSource::Dir(text_encoder))
-        .with_component(VAE_COMPONENT, WeightsSource::Dir(vae))
-}
+pub(super) use protocol::supra2_load_spec as load_spec;
 
-/// The published request at `count` images (guidance left to the engine's default CFG 3.0).
-pub(super) fn capture_request(count: u32) -> GenerationRequest {
-    let size = mlx_gen::gen_core::supra2::IMAGE_SIZE;
-    GenerationRequest {
-        prompt: protocol::SUPRA2_IMG_PROMPT.to_owned(),
-        width: size,
-        height: size,
-        count,
-        seed: Some(protocol::SUPRA2_IMG_SEED),
-        steps: Some(protocol::SUPRA2_IMG_STEPS),
-        ..Default::default()
-    }
-}
+pub(super) use protocol::supra2_capture_request as capture_request;
 
-fn millis(start: Instant) -> u64 {
-    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
-}
+use protocol::elapsed_millis as millis;
 
 fn context(
     selection: &MemorySelection,
@@ -72,7 +51,7 @@ fn context(
     total_bytes: u64,
     predicted_peak_bytes: u64,
 ) -> MemoryRunContext {
-    let size = mlx_gen::gen_core::supra2::IMAGE_SIZE;
+    let size = gen_core_checkpoint::supra2::IMAGE_SIZE;
     MemoryRunContext {
         selection: *selection,
         optimization_authority: if calibration.is_some() {
@@ -503,7 +482,7 @@ mod tests {
     /// boundary, at count 1 and at the product maximum.
     #[test]
     fn the_capture_requests_resolve_through_the_engines_own_boundary() {
-        use mlx_gen::gen_core::supra2::{Supra2Resolved, DEFAULT_GUIDANCE};
+        use gen_core_checkpoint::supra2::{Supra2Resolved, DEFAULT_GUIDANCE};
         for count in [1, protocol::SUPRA2_IMG_PRODUCT_MAX_COUNT] {
             let resolved = Supra2Resolved::resolve(&capture_request(count))
                 .unwrap_or_else(|error| panic!("count {count}: {error}"));

@@ -89,17 +89,16 @@ fn with_sam3_weights<R>(
     f: impl FnOnce(&Weights) -> WorkerResult<R>,
 ) -> WorkerResult<R> {
     let cell = WEIGHTS.get_or_init(|| Mutex::new(None));
-    let mut guard = cell.lock().unwrap_or_else(|poisoned| {
-        let mut guard = poisoned.into_inner();
-        *guard = None;
-        guard
-    });
-    if guard.is_none() {
-        let weights = Weights::from_file(model_path, device)
-            .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))?;
-        *guard = Some(weights);
-    }
-    f(guard.as_ref().expect("weights loaded"))
+    let mut guard = crate::cache_thread::lock_resetting(cell, |slot| *slot = None);
+    let weights = crate::cache_thread::get_or_load(
+        &mut guard,
+        |_| true,
+        || {
+            Weights::from_file(model_path, device)
+                .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))
+        },
+    )?;
+    f(weights)
 }
 
 /// A built (optionally quantized) `Sam3VideoModel` with the `"person"` concept already tokenized.
@@ -447,20 +446,26 @@ pub(crate) fn segment_all_persons_in_memory(
         ));
     }
 
-    let device = default_device().map_err(|e| WorkerError::Engine(format!("sam3 device: {e}")))?;
-    let tensors: Vec<Tensor> = frames
+    // Validate borrowed frame views before opening a device: a malformed CPU payload must be a
+    // typed InvalidPayload even on a host with no CUDA device. The views borrow pixels, not clone
+    // them, and only valid views reach tensor creation.
+    let views = frames
         .iter()
         .map(|frame| {
-            let view = image::ImageBuffer::<image::Rgb<u8>, &[u8]>::from_raw(
+            image::ImageBuffer::<image::Rgb<u8>, &[u8]>::from_raw(
                 frame.width,
                 frame.height,
                 frame.pixels.as_slice(),
             )
             .ok_or_else(|| {
                 WorkerError::InvalidPayload("scail2 segmentation: malformed RGB frame".into())
-            })?;
-            input_tensor(&view, &device)
+            })
         })
+        .collect::<WorkerResult<Vec<_>>>()?;
+    let device = default_device().map_err(|e| WorkerError::Engine(format!("sam3 device: {e}")))?;
+    let tensors: Vec<Tensor> = views
+        .iter()
+        .map(|view| input_tensor(view, &device))
         .collect::<WorkerResult<Vec<_>>>()?;
 
     let outputs = propagate_person_concept(

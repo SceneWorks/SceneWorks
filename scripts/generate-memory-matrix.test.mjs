@@ -1,3 +1,4 @@
+import { rustFacadeSource } from "./lib/rust-facade-source.mjs";
 
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -20,6 +21,7 @@ import {
   buildMatrix,
   buildStoryBackendScope,
   cellState,
+  COMPOSITE_STORY_OWNERSHIP,
   declarationModelForCoordinate,
   familyGroup,
   familyStory,
@@ -31,6 +33,7 @@ import {
   isImplemented,
   isPublishableCell,
   MODEL_STORIES,
+  PAIRED_MODEL_STORIES,
   modelStory,
   OUT_OF_MATRIX_CATALOG_ENTRIES,
   IMAGE_CANDLE_DERIVATION_ENTRY_POINTS,
@@ -347,7 +350,32 @@ test("ownership lookups resolve per backend and refuse to invent a twin", () => 
   // by its own throw-mutation cases below.
 });
 
-test("the ownership tables scope every story to exactly one backend", () => {
+test("FLUX 3 Candle model and resource family have distinct existing owners", () => {
+  assert.equal(modelStory("flux3_klein", "mlx"), 26234);
+  assert.equal(modelStory("flux3_klein", "candle"), 26235);
+  assert.equal(familyStory("flux3_klein", "mlx"), 26233);
+  assert.equal(familyStory("flux3_klein", "candle"), 26241);
+  const scope = buildStoryBackendScope();
+  assert.deepEqual(scope.get(26235), { backend: "candle", role: "model story", owner: "flux3_klein" });
+  assert.deepEqual(scope.get(26241), { backend: "candle", role: "family story", owner: "family SC-26233" });
+
+  // A missing family twin must fail closed, even when the per-model Candle owner is present.
+  const family = FAMILY_STORIES[26233];
+  const candleOwner = family.candle;
+  try {
+    delete family.candle;
+    assert.throws(() => familyStory("flux3_klein", "candle"), /owns no candle story/);
+  } finally {
+    family.candle = candleOwner;
+  }
+  // Reusing the model owner as the family owner is not an acceptable substitute for the twin.
+  assert.throws(() => buildStoryBackendScope(MODEL_STORIES, {
+    ...FAMILY_STORIES,
+    26233: { ...FAMILY_STORIES[26233], candle: 26235 },
+  }), /exactly one owner and one backend/);
+});
+
+test("the ownership tables resolve every story to one exact declared scope", () => {
   // One scope entry per distinct story, with exact multi-owner claims only where declared.
   //
   // sc-22512 replaced the pinned `146` with that relation, derived from the tables themselves: the
@@ -361,7 +389,7 @@ test("the ownership tables scope every story to exactly one backend", () => {
   assert.equal(
     scope.size,
     new Set(scopedStoryIds).size,
-    "every declared (story, backend) pair resolves to exactly one scope entry",
+    "every distinct story resolves once, including exact declared paired and composite claims",
   );
   assert.deepEqual(scope.get(15475), { backend: "mlx", role: "model story", owner: "boogu_image_turbo" });
   assert.deepEqual(scope.get(15827), {
@@ -389,6 +417,89 @@ test("the ownership tables scope every story to exactly one backend", () => {
     () => buildStoryBackendScope({ alpha: { mlx: 1 }, beta: { mlx: 1 } }, {}),
     /exactly one owner and one backend/,
   );
+});
+
+test("explicit paired same-model ownership covers both backends and no other scope", () => {
+  const models = { flux3_klein_base: { mlx: 26239, candle: 26239 } };
+  const families = { 26233: { mlx: 26233, candle: 26241 } };
+  const pairs = { flux3_klein_base: 26239 };
+  let scope;
+  assert.doesNotThrow(() => { scope = buildStoryBackendScope(models, families, pairs); });
+  for (const backend of ["mlx", "candle"]) {
+    assert.doesNotThrow(() => assertCellOwnershipIsBackendScoped([{
+      id: `base-${backend}`, modelId: "flux3_klein_base", backend,
+      owningModelStory: 26239, owningFamilyStory: families[26233][backend],
+    }], scope));
+  }
+  assert.throws(() => buildStoryBackendScope(models, families, {}), /exactly one owner and one backend/);
+  assert.throws(() => buildStoryBackendScope({ ...models, other: { mlx: 26239 } }, families, pairs), /exactly one owner and one backend/);
+  assert.throws(() => buildStoryBackendScope({ ...models, other: { mlx: 26239, candle: 26239 } }, families, { ...pairs, other: 26239 }), /exactly one owner and one backend/);
+  assert.throws(() => buildStoryBackendScope(models, { 26233: { mlx: 26239 } }, pairs), /exactly one owner and one backend/);
+  assert.throws(() => buildStoryBackendScope({ flux3_klein_base: { mlx: 26239, candle: 26240 } }, {}, pairs), /paired/);
+  assert.throws(() => buildStoryBackendScope(models, families, { absent: 26239 }), /paired/);
+});
+
+test("paired FLUX3 and composite MOSS ownership coexist without widening either scope", () => {
+  const scope = buildStoryBackendScope();
+  assert.deepEqual(PAIRED_MODEL_STORIES, { flux3_klein_base: 26239 });
+  assert.deepEqual(COMPOSITE_STORY_OWNERSHIP, [
+    { story: 26323, backend: "mlx", family: 26323, model_ids: ["moss_image_base", "moss_image_sft"] },
+    { story: 26324, backend: "candle", family: 26323, model_ids: ["moss_image_base", "moss_image_sft"] },
+  ]);
+  assert.deepEqual(scope.get(26239), {
+    backend: "paired", backends: ["mlx", "candle"], role: "model story", owner: "flux3_klein_base",
+  });
+  for (const { story, backend, family, model_ids: modelIds } of COMPOSITE_STORY_OWNERSHIP) {
+    assert.deepEqual(scope.get(story), {
+      backend, role: "composite story", owner: `family SC-${family}`,
+      claims: [
+        ...modelIds.map((owner) => ({ role: "model story", owner })),
+        { role: "family story", owner: `family SC-${family}` },
+      ],
+    });
+  }
+  const cells = ["flux3_klein", "flux3_klein_base", "moss_image_base", "moss_image_sft"]
+    .flatMap((modelId) => ["mlx", "candle"].map((backend) => ({
+      id: `${modelId}:${backend}`, modelId, backend,
+      owningModelStory: modelStory(modelId, backend),
+      owningFamilyStory: familyStory(modelId, backend),
+    })));
+  assert.doesNotThrow(() => assertCellOwnershipIsBackendScoped(cells, scope));
+  for (const cell of cells) {
+    const foreign = cell.modelId.startsWith("moss") ? 26239 : cell.backend === "mlx" ? 26323 : 26324;
+    assert.throws(() => assertCellOwnershipIsBackendScoped([
+      { ...cell, owningModelStory: foreign },
+    ], scope), /this cell needs/);
+    assert.throws(() => assertCellOwnershipIsBackendScoped([
+      { ...cell, owningFamilyStory: foreign },
+    ], scope), /this cell needs/);
+    if (cell.modelId.startsWith("moss")) {
+      const otherBackendStory = cell.backend === "mlx" ? 26324 : 26323;
+      for (const field of ["owningModelStory", "owningFamilyStory"]) {
+        assert.throws(() => assertCellOwnershipIsBackendScoped([
+          { ...cell, [field]: otherBackendStory },
+        ], scope), /is scoped to .* but the cell is/);
+      }
+    }
+  }
+  const models = structuredClone(MODEL_STORIES);
+  const families = structuredClone(FAMILY_STORIES);
+  assert.deepEqual(buildStoryBackendScope(models, families, PAIRED_MODEL_STORIES), scope);
+  assert.throws(() => buildStoryBackendScope(models, families, {}), /exactly one owner and one backend/);
+  for (const modelId of ["moss_image_base", "moss_image_sft"]) {
+    const missing = structuredClone(models);
+    delete missing[modelId].mlx;
+    assert.throws(() => buildStoryBackendScope(missing, families, PAIRED_MODEL_STORIES), /incomplete declared composite scope/);
+  }
+  const missingFamily = structuredClone(families);
+  delete missingFamily[26323].candle;
+  assert.throws(() => buildStoryBackendScope(models, missingFamily, PAIRED_MODEL_STORIES), /incomplete declared composite scope/);
+  assert.throws(() => buildStoryBackendScope(models, families, {
+    ...PAIRED_MODEL_STORIES, moss_image_base: 26323,
+  }), /paired model ownership must declare exactly/);
+  assert.throws(() => buildStoryBackendScope({
+    ...models, intruder: { mlx: 26323 },
+  }, families, PAIRED_MODEL_STORIES), /outside its declared composite scope/);
 });
 
 test("a cell may never name a story scoped to the other backend", () => {
@@ -1555,64 +1666,104 @@ test("the staged column tells structural truth apart from undelivered work (sc-2
   assert.match(row("svd", "candle"), /Missing/);
 });
 
-test("an Anchored rollup carries (stale) exactly when every anchor behind it is stale (sc-22513)", async () => {
-  const matrix = await buildMatrix();
-  const row = (markdown, id, backend) =>
-    markdown
-      .split("\n")
-      .find((line) => line.startsWith(`| \`${id}\` |`) && line.includes(`| ${backend} |`));
-  const anchored = matrix.models.flatMap((model) =>
-    model.backends
-      .filter((backend) =>
-        matrix.anchors.some((anchor) => anchor.modelId === model.id && anchor.backend === backend),
-      )
-      .map((backend) => [model.id, backend]),
-  );
-  assert.ok(anchored.length > 0, "no anchored lane — the fixture would be vacuous");
-  const anchoredRollups = anchored.filter(([id, backend]) =>
-    /\| Anchored/.test(row(renderMarkdown(matrix), id, backend)),
-  );
-  assert.ok(anchoredRollups.length > 0, "no lane rolls up as Anchored — the marker is unreachable");
+function assertPackagedMatrixPair(matrix, markdown) {
+  assert.equal(markdown, renderMarkdown(matrix));
+}
 
-  const withCurrency = (current) => ({
-    ...matrix,
-    anchors: matrix.anchors.map((anchor) => ({ ...anchor, current })),
-  });
-  // Every anchor stale -> every Anchored rollup marked. Every anchor current -> none marked. The
-  // marker is therefore driven by currency and by nothing else about the lane.
-  const allStale = renderMarkdown(withCurrency(false));
-  const allCurrent = renderMarkdown(withCurrency(true));
-  for (const [id, backend] of anchoredRollups) {
-    assert.match(row(allStale, id, backend), /Anchored[^|]*\(stale\)/, `${id}:${backend} stale`);
-    assert.doesNotMatch(row(allCurrent, id, backend), /\(stale\)/, `${id}:${backend} current`);
-  }
-  // ONE current anchor on a lane is enough to clear its marker — the claim is "every anchor behind
-  // it", not "any".
-  const [id, backend] = anchoredRollups[0];
-  const firstOfLane = matrix.anchors.find(
-    (anchor) => anchor.modelId === id && anchor.backend === backend,
+test("packaged matrix provenance rejects source-revision and markdown mutations", async () => {
+  const matrix = JSON.parse(
+    await readFile(new URL("../docs/generated/memory-matrix.json", import.meta.url), "utf8"),
   );
-  const mixed = renderMarkdown({
+  const markdown = await readFile(new URL("../docs/generated/memory-matrix.md", import.meta.url), "utf8");
+  assertPackagedMatrixPair(matrix, markdown);
+  const changedSource = structuredClone(matrix);
+  changedSource.generatedFrom.sceneWorksRevision = `source-tree:${"0".repeat(64)}`;
+  assert.notEqual(changedSource.generatedFrom.sceneWorksRevision, matrix.generatedFrom.sceneWorksRevision);
+  assert.throws(() => assertPackagedMatrixPair(changedSource, markdown), { code: "ERR_ASSERTION" });
+  const changedMarkdown = markdown.replace(matrix.generatedFrom.sceneWorksRevision, "mutated-provenance");
+  assert.notEqual(changedMarkdown, markdown);
+  assert.throws(() => assertPackagedMatrixPair(matrix, changedMarkdown), { code: "ERR_ASSERTION" });
+});
+
+test("an Anchored rollup carries (stale) exactly when every anchor behind it is stale (sc-22513)", () => {
+  // Currency is advisory, not a requirement to regenerate packaged measurements after source
+  // changes. Exercise the consumer-visible rollup with controlled lanes and anchor currency;
+  // neither today's source revision nor the checked-in matrix's measurement population is a gate.
+  const models = ["Anchored", "Anchored/underived", "Implemented"].map((state, index) => ({
+    id: `fixture_${index}`,
+    modality: "image",
+    backends: ["mlx", "candle"],
+    resolvedRoutes: { mlx: "fixture", candle: "fixture" },
+    routeKind: "registry",
+    owningFamilyStories: { mlx: 22513, candle: 22513 },
+    owningModelStories: { mlx: null, candle: null },
+    state,
+  }));
+  const coverage = models.flatMap((model) => model.backends.map((backend) => ({
+    modelId: model.id,
+    backend,
+    rung: "staged_residency",
+    coordinates: 1,
+    implemented: 1,
+    states: { [model.state]: 1 },
+  })));
+  const anchors = models.filter((model) => model.state.startsWith("Anchored")).flatMap((model) =>
+    model.backends.flatMap((backend) => ["q4", "q8"].map((tier) => ({
+      id: `${model.id}:${backend}:${tier}`,
+      modelId: model.id,
+      backend,
+      tier,
+      geometry: { width: 64, height: 64, frames: 1 },
+      cells: 1,
+      current: false,
+      currencyAttestation: null,
+    }))),
+  );
+  const matrix = {
+    generatedFrom: { sceneWorksRevision: "fixture-revision" },
+    summary: {
+      catalogEntries: models.length,
+      catalogEntriesByModality: { image: models.length },
+      unroutedEntries: [], outOfMatrixEntries: [], taskRouteEntries: [],
+      cells: coverage.length, publishedCells: coverage.length, elidedCells: 0, elidedByState: {},
+      mlxStagedStaticCoverage: models.length, mlxStagedStaticCoverageDenominator: models.length,
+      videoMlxStagedStaticCoverage: 0, videoMlxStagedStaticCoverageDenominator: 0,
+      anchors: anchors.length, anchoredCells: anchors.length, staleAnchors: anchors.length,
+      attestedAnchors: 0, analyticOnlyCells: 0, publicationPredicate: "Fixture coordinates.",
+    },
+    models, coverage, anchors,
+    modelSlices: Object.fromEntries(models.map((model) => [model.id, []])),
+  };
+  const row = (markdown, id, backend) => {
+    const found = markdown.split("\n").find((line) =>
+      line.startsWith(`| \`${id}\` |`) && line.includes(`| ${backend} |`));
+    assert.ok(found, `${id}:${backend} must be rendered`);
+    return found;
+  };
+  for (const current of [[false, false], [true, true], [false, true], [true, false]]) {
+    const markdown = renderMarkdown({
+      ...matrix,
+      anchors: anchors.map((anchor) => ({ ...anchor, current: current[anchor.tier === "q4" ? 0 : 1] })),
+    });
+    for (const model of models) {
+      for (const backend of model.backends) {
+        const rendered = row(markdown, model.id, backend);
+        assert.equal(rendered.includes("(stale)"), model.state.startsWith("Anchored") && !current.some(Boolean),
+          `${model.id}:${backend} with currency ${current}`);
+        assert.ok(rendered.endsWith(`| ${model.state}${rendered.includes("(stale)") ? " (stale)" : ""} |`),
+          "currency must not change the lane's implementation state");
+      }
+    }
+  }
+  // A current anchor on another backend must not clear this lane's advisory marker.
+  const split = renderMarkdown({
     ...matrix,
-    anchors: matrix.anchors.map((anchor) => ({
-      ...anchor,
-      current: anchor.id === firstOfLane.id,
-    })),
+    anchors: anchors.map((anchor) => ({ ...anchor, current: anchor.backend === "mlx" })),
   });
-  assert.doesNotMatch(row(mixed, id, backend), /\(stale\)/);
-  // A lane the marker must never reach: no anchor behind it at all.
-  const unanchored = matrix.models
-    .flatMap((model) => model.backends.map((backend) => [model.id, backend]))
-    .find(
-      ([candidateId, candidateBackend]) =>
-        !matrix.anchors.some(
-          (anchor) => anchor.modelId === candidateId && anchor.backend === candidateBackend,
-        ),
-    );
-  assert.doesNotMatch(row(allStale, unanchored[0], unanchored[1]), /\(stale\)/);
-  // The shipped artifact agrees with the renderer.
-  const shipped = await readFile(new URL("../docs/generated/memory-matrix.md", import.meta.url), "utf8");
-  assert.equal(shipped, renderMarkdown(matrix));
+  for (const model of models.filter((model) => model.state.startsWith("Anchored"))) {
+    assert.doesNotMatch(row(split, model.id, "mlx"), /\(stale\)/);
+    assert.match(row(split, model.id, "candle"), /\(stale\)/);
+  }
 });
 
 // ── sc-22513: the collapse ─────────────────────────────────────────────────────────────────────
@@ -2019,11 +2170,11 @@ test("the derivation is defined per LANE, read off the Rust that declares and wi
 
 test("the shipped derivation reaches every lane through its REAL admission source (epic 22505)", async () => {
   const [derivation, admission, vram, candleStrategy, mlxFitGate] = await Promise.all([
-    readFile(new URL(`../${SOURCE_PATHS.anchorDerivation}`, import.meta.url), "utf8"),
-    readFile(new URL(`../${SOURCE_PATHS.anchorAdmission}`, import.meta.url), "utf8"),
-    readFile(new URL(`../${SOURCE_PATHS.anchorAdmissionImageVram}`, import.meta.url), "utf8"),
-    readFile(new URL(`../${SOURCE_PATHS.anchorAdmissionImageCandle}`, import.meta.url), "utf8"),
-    readFile(new URL(`../${SOURCE_PATHS.mlxFitGate}`, import.meta.url), "utf8"),
+    rustFacadeSource(new URL(`../${SOURCE_PATHS.anchorDerivation}`, import.meta.url)),
+    rustFacadeSource(new URL(`../${SOURCE_PATHS.anchorAdmission}`, import.meta.url)),
+    rustFacadeSource(new URL(`../${SOURCE_PATHS.anchorAdmissionImageVram}`, import.meta.url)),
+    rustFacadeSource(new URL(`../${SOURCE_PATHS.anchorAdmissionImageCandle}`, import.meta.url)),
+    rustFacadeSource(new URL(`../${SOURCE_PATHS.mlxFitGate}`, import.meta.url)),
   ]);
   const lanes = parseAnchorDerivationLanes(derivation, {
     "video:mlx": { law: "video", sources: [admission] },
@@ -2170,7 +2321,7 @@ test("the fingerprint covers exactly the anchor and catalog sources, and the art
     routingCandle: "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
     routingMlx: "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
     engines: "crates/sceneworks-worker/src/engines.rs",
-    imageRouting: "crates/sceneworks-worker/src/image_jobs/base.rs",
+    imageRouting: "crates/sceneworks-worker/src/image_jobs/routing.rs",
     videoRouteWan: "crates/sceneworks-worker/src/video_jobs/wan.rs",
     videoRouteLtx: "crates/sceneworks-worker/src/video_jobs/ltx.rs",
     videoRouteSvd: "crates/sceneworks-worker/src/video_jobs/svd.rs",

@@ -92,6 +92,12 @@ shape minus the declared `level`). `LogEntry` reads the declared `level` when pr
 (`error`/`warn`/`info`/`debug`), falling back to a heuristic otherwise, and derives a
 compact `message` summary from each line.
 
+An event emitted inside one or more `tracing` spans also carries that scope (sc-26691):
+`spans` lists each span root-to-leaf as `{ name, ...fields }` and `span` repeats the
+innermost one, mirroring tracing-subscriber's own JSON shape. Work a span scopes — e.g.
+the H3 import preparation's `jobId` / `checkpointId` / `phase` — is therefore
+attributable from every line inside it. An event field named `span` or `spans` wins.
+
 ### Routing — `gpu_route_decision` (API, sc-3449)
 
 Emitted at claim time whenever a claim is routing-relevant. **This is the line that
@@ -149,6 +155,15 @@ shared code) when it drops its resident generator after the idle timeout: `engin
 `SCENEWORKS_GENERATOR_CACHE_IDLE_SECONDS` seconds (default 300) and is logged at info
 level. It correlates with the worker releasing cached GPU allocations (Metal/MLX or
 CUDA) before the next generation cold-loads weights again.
+
+### Generator cache miss — `generator_cache_miss` (Rust worker, sc-27985)
+
+Emitted at info level each time a request cold-loads instead of reusing the resident
+generator: `engine`, and `reason` — `empty` (nothing resident: first job, or after an
+idle eviction) or `identity_changed`, with `residentEngine` and `changed`, the
+comma-separated cache-identity fields that differ (for example `adapters` when a LoRA
+was added or removed, `resolved_route` for a different acceleration mode). A warm hit
+emits nothing.
 
 ### Warm execution-policy decision — `generator_cache_warm_policy_decision` (Rust worker, sc-18317)
 

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import trainingTargets from "../../../../tests/fixtures/rust_migration_contracts/training/target-registry.json";
 
 import { summarize } from "../validation/issues.js";
 import {
@@ -30,7 +31,6 @@ import {
   depthAnchoringCombinationRefusal,
   auxModelsInstallNote,
   trainingAdapterModelId,
-  depthAnchoringNoVideoLtxWorkflows,
   depthAnchoringEveryMax,
   depthAnchoringMaxTDefault,
   depthAnchoringModelOptions,
@@ -44,11 +44,11 @@ import {
   targetSupportsFaceLandmarkLoss,
   targetSupportsIdentityLoss,
   faceLossCombinationRefusal,
-  faceLossIssues,
   resolutionBucketRepeatsMax,
   resolutionBucketsMax,
   resolutionBucketStride,
   seedResolutionBuckets,
+  randomTrainingSeed,
   targetSupportsResolutionBuckets,
   targetSupportsWeightNoise,
   weightNoiseSigmaMax,
@@ -103,6 +103,8 @@ describe("trainingTargetLicense", () => {
     expect(messages(true)).not.toContain(message);
   });
 });
+
+const ltxContract = trainingTargets.targets.find((item) => item.id === "ltx_2_5_video_lora");
 
 const ltxWorkflows = [
   "i2v_lora", "t2v_lora", "v2a_lora", "a2v_lora", "t2a_lora",
@@ -363,15 +365,30 @@ describe("LTX-2.5 advanced workflow contract", () => {
       },
     },
     limits: { ...target.limits, ltxWorkflows },
+    ui: ltxContract.ui,
   };
+  ltxTarget.defaults.advanced.ltxValidation = ltxContract.defaults.advanced.ltxValidation;
   const preparedDataset = {
     ...dataset,
     items: [{ id: "item_1", ltxPreparedBundlePath: "prepared/item_1.safetensors" }],
   };
 
+  it("uses server-owned defaults, workflow plans, and carve-outs even for a different target id", () => {
+    const changed = structuredClone(ltxTarget);
+    changed.id = "other-target";
+    changed.baseModel = "other-model";
+    changed.defaults.advanced.ltxValidation.width = 640;
+    changed.ui.ltxWorkflowPlans.t2v_lora.video.conditions = [{ type: "firstFrame", probability: 0.25 }];
+    const draft = configDraftFromTarget(changed, preparedDataset, ["auto"]);
+    expect(draft.ltxValidation.width).toBe(640);
+    expect(draft.ltxVideo.conditions).toEqual([{ type: "firstFrame", probability: 0.25 }]);
+    expect(depthAnchoringCombinationRefusal(changed, { ltxWorkflow: "t2a_lora" })).toContain("generates none");
+    expect(subjectMaskConsumerField({ normalWeight: "0.1", normalRestrictToSubject: true }, changed)).toBeNull();
+  });
+
   it.each(ltxWorkflows)("submits the canonical %s video/audio plan", (workflow) => {
     const draft = configDraftFromTarget(ltxTarget, preparedDataset, ["auto"]);
-    const plan = ltx25WorkflowPlan(workflow);
+    const plan = ltx25WorkflowPlan(ltxTarget, workflow);
     const snapshot = trainingConfigSnapshot({
       activeDataset: preparedDataset,
       selectedTarget: ltxTarget,
@@ -512,6 +529,17 @@ describe("configValidation", () => {
       expect(kindsOf(configValidation({ ...wholeDraft, [field]: -1 }, ctx), field)).toEqual(["error"]);
     });
   }
+
+  it("enforces advertised numeric limits and integer fields without losing fractional alpha or learning rate", () => {
+    const advertised = { ...target, limits: { rank: [4, 128], alpha: [1, 128], steps: [10, 2000], batchSize: [1, 4], resolutions: [512, 1024] } };
+    const errors = (draft, selectedTarget = advertised) => configValidation({ ...wholeDraft, ...draft }, { ...ctx, selectedTarget }).filter((entry) => entry.kind === "error");
+    expect(errors({ rank: 3 }).some((entry) => entry.field === "rank")).toBe(true);
+    expect(errors({ steps: 100.5 }).some((entry) => entry.field === "steps")).toBe(true);
+    expect(errors({ saveEvery: 4294967296 }).some((entry) => entry.field === "saveEvery")).toBe(true);
+    expect(errors({ resolution: 768 }).some((entry) => entry.field === "resolution")).toBe(true);
+    expect(errors({ alpha: 1.5 }).some((entry) => entry.field === "alpha")).toBe(true);
+    expect(errors({ alpha: 1.5, learningRate: 0.00001 }, { ...advertised, limits: { ...advertised.limits, alpha: undefined } })).toEqual([]);
+  });
 
   it("names the output after the target's output kind", () => {
     const issues = configValidation({ ...wholeDraft, outputName: "" }, ctx);
@@ -1152,7 +1180,7 @@ describe("depth anchoring target support (sc-2125)", () => {
   // depthAnchoringCombinationRefusal ⇒ red.
   it("refuses a full fine-tune and the no-video LTX-2.5 workflows", () => {
     const supported = { ...target, limits: { ...target.limits, supportsDepthAnchoring: true } };
-    const ltx = { ...supported, baseModel: "ltx_2_5" };
+    const ltx = { ...supported, baseModel: "ltx_2_5", ui: ltxContract.ui };
     const messages = (draft, selectedTarget) =>
       configValidation({ ...whole, depthAnchoringWeight: "0.1", ...draft }, { activeDataset: dataset, selectedTarget })
         .filter((entry) => entry.field === "depthAnchoringWeight")
@@ -1161,8 +1189,8 @@ describe("depth anchoring target support (sc-2125)", () => {
       "Depth anchoring trains a LoRA/LoKr adapter only, not a full fine-tune",
     ]);
     expect(messages({ networkType: "lora" }, supported)).toEqual([]);
-    expect(depthAnchoringNoVideoLtxWorkflows).toHaveLength(6);
-    for (const workflow of depthAnchoringNoVideoLtxWorkflows) {
+    expect(ltxContract.ui.noVideoLossWorkflows).toHaveLength(6);
+    for (const workflow of ltxContract.ui.noVideoLossWorkflows) {
       expect(messages({ ltxWorkflow: workflow }, ltx)).toHaveLength(1);
       // The same name on a non-LTX-2.5 target is no refusal.
       expect(depthAnchoringCombinationRefusal(supported, { ltxWorkflow: workflow })).toBeNull();
@@ -1475,7 +1503,7 @@ describe("body losses (sc-24832)", () => {
   // Mirrors the API: LTX-2.5 cannot restrict the normal loss to the subject — a field-less issue,
   // since the toggle is hidden there. Mutation: drop the LTX-2.5 check in bodyLossIssues ⇒ red.
   it("flags subject-restricted normals on LTX-2.5 only", () => {
-    const ltx25 = { ...bodyTarget, baseModel: "ltx_2_5" };
+    const ltx25 = { ...bodyTarget, baseModel: "ltx_2_5", ui: ltxContract.ui };
     const draft = { normalWeight: "0.1", normalRestrictToSubject: true, ltxWorkflow: "t2v_lora" };
     const ltx = configValidation({ ...whole, ...draft }, { activeDataset: dataset, selectedTarget: ltx25 });
     expect(ltx.filter((entry) => entry.field === null && /LTX-2.5 cannot restrict/.test(entry.message))).toHaveLength(1);
@@ -1514,7 +1542,7 @@ describe("body losses (sc-24832)", () => {
   // name no field ⇒ red.
   it("refuses a full fine-tune and a video-less LTX-2.5 workflow on the weight key", () => {
     expect(bodyLossCombinationRefusal(bodyTarget, { networkType: "full" })).toMatch(/full fine-tune/);
-    const ltx25 = { ...bodyTarget, baseModel: "ltx_2_5" };
+    const ltx25 = { ...bodyTarget, baseModel: "ltx_2_5", ui: ltxContract.ui };
     expect(bodyLossCombinationRefusal(ltx25, { ltxWorkflow: "v2a_lora" })).toMatch(/v2a_lora/);
     expect(bodyLossCombinationRefusal(ltx25, { ltxWorkflow: "t2v_lora" })).toBe(null);
     const blocked = configValidation(
@@ -1666,15 +1694,15 @@ describe("face losses (sc-24831)", () => {
 // their controls are not offered there. Mutation: drop `faceLossCombinationRefusal` from
 // `faceLossScheduleIssues` ⇒ no issue ⇒ red.
 describe("face loss combination refusals (sc-24831)", () => {
-  const ltx = { id: "ltx_2_5_video_lora", baseModel: "ltx_2_5", limits: { supportsIdentityLoss: true, supportsFaceLandmarkLoss: true } };
+  const ltx = { id: "ltx_2_5_video_lora", baseModel: "ltx_2_5", ui: ltxContract.ui, limits: { supportsIdentityLoss: true, supportsFaceLandmarkLoss: true } };
   const full = { ...target, limits: { ...target.limits, supportsIdentityLoss: true, supportsFaceLandmarkLoss: true } };
   it("refuses a full fine-tune and a no-video LTX-2.5 workflow on the weight key", () => {
     for (const [key, label] of [["identityLossWeight", "Identity loss"], ["faceLandmarkLossWeight", "Face landmark loss"]]) {
-      const ft = faceLossIssues({ [key]: "0.1", identityLossReference: "dataset_average", networkType: "full" }, full);
-      expect(ft).toEqual([[key, `${label} trains a LoRA/LoKr adapter only, not a full fine-tune`]]);
-      const audio = faceLossIssues({ [key]: "0.1", identityLossReference: "dataset_average", ltxWorkflow: "t2a_lora" }, ltx);
-      expect(audio).toEqual([[key, `${label} needs a generated video stream; the LTX-2.5 workflow t2a_lora generates none`]]);
-      expect(faceLossIssues({ [key]: "0.1", identityLossReference: "dataset_average", ltxWorkflow: "t2v_lora" }, ltx)).toEqual([]);
+      const messages = (draft, selectedTarget) => configValidation(draft, { selectedTarget }).filter((entry) => entry.field === key).map((entry) => entry.message);
+      const draft = { [key]: "0.1", identityLossReference: "dataset_average" };
+      expect(messages({ ...draft, networkType: "full" }, full)).toEqual([`${label} trains a LoRA/LoKr adapter only, not a full fine-tune`]);
+      expect(messages({ ...draft, ltxWorkflow: "t2a_lora" }, ltx)).toEqual([`${label} needs a generated video stream; the LTX-2.5 workflow t2a_lora generates none`]);
+      expect(messages({ ...draft, ltxWorkflow: "t2v_lora" }, ltx)).toEqual([]);
     }
     expect(faceLossCombinationRefusal({ baseModel: "ltx_2_3" }, { ltxWorkflow: "t2a_lora" }, "Identity loss")).toBeNull();
   });
@@ -1755,7 +1783,7 @@ describe("latent-space perceptual losses (sc-24833)", () => {
       expect(issues.map((entry) => entry.field)).toContain(`${loss.prefix}Weight`);
       expect(latentLossCombinationRefusal(supported, { networkType: "lora" }, loss)).toBeNull();
     }
-    const ltx = { ...supported, baseModel: "ltx_2_5" };
+    const ltx = { ...supported, baseModel: "ltx_2_5", ui: ltxContract.ui };
     const [vaeAnchor, lpips] = latentPerceptualLosses;
     expect(latentLossCombinationRefusal(ltx, { ltxWorkflow: "t2a_lora" }, vaeAnchor)).toContain("t2a_lora");
     expect(latentLossCombinationRefusal(ltx, { ltxWorkflow: "t2v_lora" }, vaeAnchor)).toBeNull();
@@ -1829,6 +1857,267 @@ describe("bucket ladder follows Resolution (sc-2124)", () => {
   });
 });
 
+// MOSS uses literal native module paths, finite fractional alpha, independent frozen-encoder cache
+// controls and either bucket wire form. Mutation: normalize module aliases, omit a cache, square a rectangle, or coerce
+// alpha to an integer ⇒ red.
+describe("MOSS training draft serialization", () => {
+  const moss = {
+    id: "moss_image_base_lora",
+    kernel: "moss_image_lora",
+    outputKind: "lora",
+    defaults: {
+      rank: 16,
+      alpha: 16,
+      learningRate: 0.0001,
+      steps: 1000,
+      batchSize: 1,
+      gradientAccumulation: 1,
+      resolution: 1024,
+      saveEvery: 250,
+      seed: 42,
+      optimizer: "adamw",
+      advanced: {
+        networkType: "lora",
+        loraTargetModules: [],
+        cacheLatents: true,
+        cacheTextEmbeddings: true,
+      },
+    },
+    limits: {
+      networkTypes: ["lora", "lokr"],
+      supportsResolutionBuckets: true,
+      resolutions: [256, 512, 768, 1024],
+    },
+  };
+
+  it("persists literal modules, independent caches, fractional alpha and a portrait rectangle", () => {
+    const draft = {
+      ...configDraftFromTarget(moss, dataset, ["auto"]),
+      alpha: "0.5",
+      loraTargetModules: "q\nlayers.0.proj.ffn_up_gate",
+      resolutionBuckets: [{ width: "768", height: "1024", repeats: "2" }],
+    };
+    const snapshot = trainingConfigSnapshot({
+      activeDataset: dataset,
+      configDraft: draft,
+      selectedPreset: null,
+      selectedTarget: moss,
+    });
+    expect(snapshot.config.alpha).toBe(0.5);
+    expect(seedResolutionBuckets(moss, "1024")).toEqual([
+      { resolution: "256", repeats: "1" },
+      { resolution: "512", repeats: "1" },
+      { resolution: "768", repeats: "1" },
+      { resolution: "1024", repeats: "1" },
+    ]);
+    expect(snapshot.config.advanced).toMatchObject({
+      loraTargetModules: ["q", "layers.0.proj.ffn_up_gate"],
+      cacheLatents: true,
+      cacheTextEmbeddings: true,
+      resolutionBuckets: [{ width: 768, height: 1024, repeats: 2 }],
+    });
+    expect(configValidation(draft, { activeDataset: dataset, selectedTarget: moss }).filter(
+      (entry) => entry.field === "resolutionBuckets",
+    )).toEqual([]);
+  });
+
+  it("serializes toggle defaults as the legacy every-image-at-each-resolution ladder and round-trips it", () => {
+    const draft = { ...configDraftFromTarget(moss, dataset, ["auto"]), resolutionBuckets: seedResolutionBuckets(moss, "1024") };
+    const snapshot = trainingConfigSnapshot({ activeDataset: dataset, configDraft: draft, selectedTarget: moss });
+    const expected = [{ resolution: 256, repeats: 1 }, { resolution: 512, repeats: 1 }, { resolution: 768, repeats: 1 }, { resolution: 1024, repeats: 1 }];
+    expect(snapshot.config.advanced.resolutionBuckets).toEqual(expected);
+    const restored = configDraftFromTarget({ ...moss, defaults: snapshot.config }, dataset, ["auto"]);
+    expect(restored.resolutionBuckets).toEqual(draft.resolutionBuckets);
+    expect(trainingConfigSnapshot({ activeDataset: dataset, configDraft: restored, selectedTarget: moss }).config.advanced.resolutionBuckets).toEqual(expected);
+  });
+
+  it.each(["width", "height", "resolution", "repeats"])("rejects fractional %s draft text before conversion, including rounded-to-integer text", (field) => {
+    const base = configDraftFromTarget(moss, dataset, ["auto"]);
+    const initial = field === "resolution" ? { resolution: "768", repeats: "1" } : { width: "768", height: "1024", repeats: "1" };
+    for (const value of ["768.0000000000000001", "1.0000000000000001", "1.5", "1e0", "0x20", "", "-32"]) {
+      const row = { ...initial, [field]: value };
+      const configDraft = { ...base, resolutionBuckets: [row] };
+      const errors = configValidation(configDraft, { activeDataset: dataset, selectedTarget: moss }).filter((entry) => entry.field === "resolutionBuckets");
+      expect(errors.length, `${field}=${value}`).toBeGreaterThan(0);
+      expect(errors.map((entry) => entry.message).join(" "), `${field}=${value}`).toContain(field);
+      expect(trainingConfigSnapshot({ activeDataset: dataset, configDraft, selectedTarget: moss }).config.advanced.resolutionBuckets[0][field], `${field}=${value}`).toBeNull();
+    }
+  });
+
+  it("checks bucket integer bounds and stride in validation and serialization", () => {
+    const base = configDraftFromTarget(moss, dataset, ["auto"]);
+    for (const row of [{ width: "32", height: "4294967264", repeats: "100" }, { width: "4294967264", height: "32", repeats: "1" }]) {
+      const configDraft = { ...base, resolutionBuckets: [row] };
+      expect(configValidation(configDraft, { activeDataset: dataset, selectedTarget: moss }).filter((entry) => entry.field === "resolutionBuckets")).toEqual([]);
+      expect(trainingConfigSnapshot({ activeDataset: dataset, configDraft, selectedTarget: moss }).config.advanced.resolutionBuckets).toEqual([Object.fromEntries(Object.entries(row).map(([key, value]) => [key, Number(value)]))]);
+    }
+    for (const [field, values] of [["width", ["0", "31", "33", "4294967295", "4294967296"]], ["height", ["0", "4294967296"]], ["repeats", ["0", "101"]]]) {
+      for (const value of values) {
+        const configDraft = { ...base, resolutionBuckets: [{ width: "768", height: "1024", repeats: "1", [field]: value }] };
+        expect(configValidation(configDraft, { activeDataset: dataset, selectedTarget: moss }).filter((entry) => entry.field === "resolutionBuckets").length).toBeGreaterThan(0);
+        expect(trainingConfigSnapshot({ activeDataset: dataset, configDraft, selectedTarget: moss }).config.advanced.resolutionBuckets[0][field]).toBeNull();
+      }
+    }
+  });
+
+  it("does not silently discard conflicting geometry keys on draft reload or serialization", () => {
+    const row = { resolution: 768, width: 768, height: 1024, repeats: 1 };
+    const target = { ...moss, defaults: { ...moss.defaults, advanced: { resolutionBuckets: [row] } } };
+    const configDraft = configDraftFromTarget(target, dataset, ["auto"]);
+    expect(configDraft.resolutionBuckets).toEqual([{ resolution: "768", width: "768", height: "1024", repeats: "1" }]);
+    expect(configValidation(configDraft, { activeDataset: dataset, selectedTarget: moss }).filter((entry) => entry.field === "resolutionBuckets")[0].message).toMatch(/resolution or width/);
+    expect(trainingConfigSnapshot({ activeDataset: dataset, configDraft, selectedTarget: moss }).config.advanced.resolutionBuckets).toEqual([row]);
+  });
+
+  it("persists literal seeds, explicit zero and one concrete Randomize result without Auto semantics", () => {
+    const draft = configDraftFromTarget(moss, dataset, ["auto"]);
+    expect(draft.seed).toBe("42");
+    const seedIssues = (seed) => configValidation(
+      { ...draft, seed: String(seed) }, { activeDataset: dataset, selectedTarget: moss },
+    ).filter((entry) => entry.field === "seed");
+    const snapshotSeed = (seed) => trainingConfigSnapshot({
+      activeDataset: dataset, configDraft: { ...draft, seed }, selectedPreset: null, selectedTarget: moss,
+    }).config.seed;
+    for (const seed of [0, 42, 1_000_000_001, Number.MAX_SAFE_INTEGER]) {
+      expect(seedIssues(seed), String(seed)).toEqual([]);
+    }
+    for (const seed of ["", "-1", "1.5", "NaN", "Infinity", "9223372036854775808"]) {
+      expect(seedIssues(seed).length, seed).toBeGreaterThan(0);
+    }
+    expect(seedIssues("9223372036854775807")[0].message).toMatch(/browser cannot represent.*exactly/i);
+    // Exact-text validation: `Number()` ROUNDS both of these into a different
+    // integer, so the draft text must be refused rather than submitted as a
+    // silently rounded seed.
+    for (const seed of ["9007199254740990.5", "42.0000000000000001"]) {
+      expect(Number.isInteger(Number(seed)), `${seed} exercised the coercion trap`).toBe(true);
+      expect(seedIssues(seed).length, seed).toBeGreaterThan(0);
+      expect(seedIssues(seed)[0].message).toMatch(/zero or a positive whole number/i);
+      expect(snapshotSeed(seed), seed).toBeNull();
+    }
+    let draws = 0;
+    const concrete = randomTrainingSeed(() => { draws += 1; return 0.25; });
+    expect(concrete).toBe("250000000");
+    for (const seed of ["0", concrete]) {
+      const snapshot = trainingConfigSnapshot({
+        activeDataset: dataset, configDraft: { ...draft, seed }, selectedPreset: null, selectedTarget: moss,
+      });
+      const replay = trainingConfigSnapshot({
+        activeDataset: dataset,
+        configDraft: configDraftFromTarget({ ...moss, defaults: snapshot.config }, dataset, ["auto"]),
+        selectedPreset: null, selectedTarget: moss,
+      });
+      expect(snapshot.config.seed).toBe(Number(seed));
+      expect(replay.config.seed).toBe(snapshot.config.seed);
+    }
+    // The browser boundary value round-trips EXACTLY through draft and snapshot.
+    expect(snapshotSeed(String(Number.MAX_SAFE_INTEGER))).toBe(Number.MAX_SAFE_INTEGER);
+    const maxReplay = trainingConfigSnapshot({
+      activeDataset: dataset,
+      configDraft: configDraftFromTarget(
+        { ...moss, defaults: trainingConfigSnapshot({
+          activeDataset: dataset,
+          configDraft: { ...draft, seed: String(Number.MAX_SAFE_INTEGER) },
+          selectedPreset: null,
+          selectedTarget: moss,
+        }).config },
+        dataset,
+        ["auto"],
+      ),
+      selectedPreset: null,
+      selectedTarget: moss,
+    });
+    expect(maxReplay.config.seed).toBe(Number.MAX_SAFE_INTEGER);
+    expect(draws).toBe(1);
+  });
+
+  it("checks native f32 alpha boundaries without an arbitrary MOSS maximum", () => {
+    const draft = configDraftFromTarget(moss, dataset, ["auto"]);
+    const alphaIssues = (alpha) => configValidation(
+      { ...draft, alpha }, { activeDataset: dataset, selectedTarget: moss },
+    ).filter((entry) => entry.field === "alpha");
+    for (const alpha of ["0.5", "129", "1e-45", "3.4028234663852886e38"]) {
+      expect(alphaIssues(alpha), alpha).toEqual([]);
+    }
+    for (const alpha of ["0", "-1", "1e-100", "1e40", "Infinity", "NaN"]) {
+      expect(alphaIssues(alpha).length, alpha).toBeGreaterThan(0);
+    }
+    expect(alphaIssues("1e-100")[0].message).toMatch(/f32/i);
+    expect(alphaIssues("1e40")[0].message).toMatch(/f32/i);
+  });
+
+  it("refuses mixed, incomplete and duplicate rectangular geometry without changing portrait order", () => {
+    const draft = configDraftFromTarget(moss, dataset, ["auto"]);
+    const messages = (rows) => configValidation(
+      { ...draft, resolutionBuckets: rows },
+      { activeDataset: dataset, selectedTarget: moss },
+    ).filter((entry) => entry.field === "resolutionBuckets").map((entry) => entry.message);
+    expect(messages([
+      { width: "768", height: "1024", repeats: "1" },
+      { resolution: "1024", repeats: "1" },
+    ]).join(" ")).toMatch(/square or rectangular/i);
+    expect(messages([{ width: "768", repeats: "1" }]).join(" ")).toMatch(/resolution or width/i);
+    expect(messages([{ width: "4294967296", height: "1024", repeats: "1" }]).join(" ")).toMatch(/u32/i);
+    expect(messages([{ width: "1024", height: "4294967296", repeats: "1" }]).join(" ")).toMatch(/u32/i);
+    expect(messages([{ width: "4294967264", height: "1024", repeats: "1" }])).toEqual([]);
+    expect(messages([
+      { width: "768", height: "1024", repeats: "1" },
+      { width: "768", height: "1024", repeats: "2" },
+    ]).join(" ")).toMatch(/already listed/i);
+    const snapshot = trainingConfigSnapshot({
+      activeDataset: dataset,
+      configDraft: { ...draft, resolutionBuckets: [{ width: "768", height: "1024", repeats: "1" }, { width: "1024", height: "768", repeats: "1" }] },
+      selectedPreset: null,
+      selectedTarget: moss,
+    });
+    expect(snapshot.config.advanced.resolutionBuckets).toEqual([
+      { width: 768, height: 1024, repeats: 1 },
+      { width: 1024, height: 768, repeats: 1 },
+    ]);
+  });
+
+  it.each([[false, false], [false, true], [true, false], [true, true]])(
+    "saves and reloads independent cache choices (%s, %s) and an explicit all-module edit",
+    (cacheLatents, cacheTextEmbeddings) => {
+      const preset = { config: { ...moss.defaults, advanced: {
+        ...moss.defaults.advanced,
+        loraTargetModules: ["q"],
+        cacheLatents: !cacheLatents,
+        cacheTextEmbeddings: !cacheTextEmbeddings,
+      } } };
+      const seeded = configDraftFromTarget(moss, dataset, ["auto"], "", preset);
+      expect(seeded.cacheLatents).toBe(!cacheLatents);
+      expect(seeded.cacheTextEmbeddings).toBe(!cacheTextEmbeddings);
+      const snapshot = trainingConfigSnapshot({
+        activeDataset: dataset,
+        configDraft: { ...seeded, loraTargetModules: "", cacheLatents, cacheTextEmbeddings },
+        selectedPreset: preset,
+        selectedTarget: moss,
+      });
+      expect(snapshot.config.advanced).toMatchObject({
+        loraTargetModules: [], cacheLatents, cacheTextEmbeddings,
+      });
+      const restored = configDraftFromTarget({ ...moss, defaults: snapshot.config }, dataset, ["auto"]);
+      expect(restored.loraTargetModules).toBe("");
+      expect(restored.cacheLatents).toBe(cacheLatents);
+      expect(restored.cacheTextEmbeddings).toBe(cacheTextEmbeddings);
+      expect(preset.config.advanced.loraTargetModules).toEqual(["q"]);
+    },
+  );
+
+  it("refuses rectangular plans for square-only targets without removing legacy buckets", () => {
+    const squareTarget = { ...moss, kernel: "z_image_lora" };
+    const draft = configDraftFromTarget(squareTarget, dataset, ["auto"]);
+    const bucketIssues = (rows) => configValidation(
+      { ...draft, resolutionBuckets: rows },
+      { activeDataset: dataset, selectedTarget: squareTarget },
+    ).filter((entry) => entry.field === "resolutionBuckets");
+    expect(bucketIssues([{ width: "768", height: "1024", repeats: "1" }]).map(
+      (entry) => entry.message,
+    ).join(" ")).toMatch(/square resolution buckets only/i);
+    expect(bucketIssues([{ resolution: "1024", repeats: "2" }])).toEqual([]);
+  });
+});
+
 // sc-24161: Start training is held when the saved dataset's edit-pair shape does not fit the
 // selected target, with the cap the base model declares.
 describe("configValidation edit-pair dataset shape", () => {
@@ -1852,5 +2141,27 @@ describe("configValidation edit-pair dataset shape", () => {
     expect(messages(3).some((message) => message.includes("limit of 2"))).toBe(true);
     expect(messages(2).some((message) => message.includes("reference"))).toBe(false);
     expect(messages(0).some((message) => message.includes("needs a"))).toBe(true);
+  });
+});
+
+describe("FLUX.3 existing training targets", () => {
+  it.each(["flux3_klein_lora", "flux3_klein_edit_lora"])("round trips nondefault source options for %s", (id) => {
+    const target = trainingTargets.targets.find((target) => target.id === id);
+    expect(target).toBeDefined();
+    const dataset = { id: "ds_flux3", name: "Synthetic fixtures" };
+    const draft = configDraftFromTarget(target, dataset, ["auto"]);
+    expect(JSON.parse(draft.flux3).mode).toBe(id.includes("edit") ? "edit" : "captioned");
+    draft.flux3 = JSON.stringify({ mode: id.includes("edit") ? "edit" : "captioned", caption_dropout: 0.3, max_sequence_length: 96, random_flip: true });
+    const body = trainingConfigSnapshot({ activeDataset: dataset, configDraft: draft, selectedTarget: target });
+    expect(body.targetId).toBe(id);
+    expect(body.config.optimizer).toBe("adamw");
+    expect(body.config.advanced.gradientCheckpointing).toBe(false);
+    expect(body.config.advanced.flux3).toEqual(JSON.parse(draft.flux3));
+    expect(body.config.advanced.sampleEvery).toBe(0);
+    for (const invalid of ["{bad json", "null", "[]", "42", '"text"']) {
+      draft.flux3 = invalid;
+      expect(configValidation(draft, { activeDataset: dataset, selectedTarget: target }).some((issue) => issue.field === "flux3")).toBe(true);
+      expect(() => trainingConfigSnapshot({ activeDataset: dataset, configDraft: draft, selectedTarget: target })).not.toThrow();
+    }
   });
 });

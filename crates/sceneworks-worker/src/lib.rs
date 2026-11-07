@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use reqwest::header;
@@ -30,69 +29,205 @@ use sceneworks_core::lora_family::{
 // `read_safetensors_header` joined this block in sc-14057: the LoRA-import path used to read the
 // header itself, and now delegates to `lora_family::inspect_adapter_in_dir`, leaving
 // `classify_adapter` as the only caller — which is gated.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use sceneworks_core::lora_family::read_safetensors_header;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
-))]
-use sceneworks_core::lora_family::resolve_adapter_in_dir;
 use sceneworks_core::lora_url::{
     lora_source_url_file_name, lora_source_url_file_stem, parse_lora_source_url_with_private,
     validate_lora_url_host, validate_public_ip,
 };
 use sceneworks_core::project_store::{ProjectStore, ProjectStoreError};
 use sceneworks_core::slug::slugify;
-use sceneworks_core::time::{format_unix_seconds, now_unix_seconds};
 use serde::Deserialize;
 use serde_json::{json, Number, Value};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, Command};
 use tokio::time::MissedTickBehavior;
 use tracing::Level;
 use uuid::Uuid;
 
+/// Resolve the same trusted receipt-backed immutable snapshot used by native generation.
+/// May baseline an unstamped, fully identified v2 source receipt; never mints a download receipt
+/// from an arbitrary cache directory, and never repairs an existing corrupt tree stamp.
+pub fn flux3_receipted_snapshot(
+    data_dir: &Path,
+    repo: &str,
+    revision: &str,
+    model: &str,
+) -> Option<PathBuf> {
+    // All these catalog rows download the SAME original whole repository. Derived q4/q8
+    // receipts never authorize an original, and the generic resolver's exact identity policy
+    // stays unchanged (including its legacy `None` => `default` interpretation).
+    ["bf16", "default", "fp8r", "nvfp4"]
+        .into_iter()
+        .find_map(|variant| {
+            model_jobs::huggingface_receipt_weights_dir_at_revision(
+                data_dir,
+                repo,
+                revision,
+                Some(model),
+                Some(variant),
+            )
+        })
+}
+
+/// Validate the canonical FLUX 3 runtime payload independently of download selectors.
+/// This is filesystem/index integrity, not whole-repository download completion or a weights
+/// rehash. It stays backend-neutral so the catalog and neither-backend API can use the exact
+/// pinned inference contract without linking MLX or CUDA. Indexed paths retain the inference
+/// resolver's containment rules and allowance for this HF repository's own blob symlinks.
+pub fn flux3_runtime_bundle_check(
+    package_dir: &Path,
+    model_id: &str,
+) -> std::result::Result<(), String> {
+    let resources = gen_core_flux3::GenerationResources {
+        package_dir: package_dir.to_path_buf(),
+        text_encoder_dir: package_dir.join(gen_core_flux3::TEXT_ENCODER_COMPONENT),
+        autoencoder_file: package_dir.join("ae.safetensors"),
+    };
+    resources
+        .check(model_id)
+        .map_err(|error| error.to_string())?;
+    let roots = gen_core::safetensors_shards::snapshot_shard_roots(&resources.text_encoder_dir)
+        .map_err(|error| error.to_string())?;
+    gen_core::safetensors_shards::resolve_safetensors_shards(
+        &resources.text_encoder_dir,
+        "model",
+        &roots,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Check one snapshot member by its canonical path. File symlinks may target this HF repository's
+/// own blob store; directory links must stay inside the snapshot. Nothing from a sibling repo or
+/// arbitrary caller path may certify a bundled component.
+pub(crate) fn flux3_snapshot_member(
+    root: &Path,
+    path: &Path,
+    directory: bool,
+) -> Result<(), String> {
+    let canonical_root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
+    let target = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let allowed = if directory {
+        target.starts_with(&canonical_root)
+    } else {
+        gen_core::safetensors_shards::snapshot_shard_roots(root)
+            .map_err(|e| e.to_string())?
+            .iter()
+            .any(|allowed| target.starts_with(allowed))
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} resolves outside the pinned snapshot (or its own blob store): {}",
+            path.display(),
+            target.display()
+        ))
+    }
+}
+
+/// Validate the runtime resources for a publisher FLUX 3 tier contained in a whole snapshot.
+/// Whole-repository download completion is separate: a dense bundle alone cannot certify FP8R or
+/// NVFP4. No tensors or accelerator are loaded.
+pub fn flux3_runtime_tier_bundle_check(root: &Path, tier: &str, model: &str) -> Result<(), String> {
+    if !matches!(tier, "fp8r" | "nvfp4") {
+        return flux3_runtime_bundle_check(root, model);
+    }
+    let package = root.join("variants").join(tier);
+    flux3_snapshot_member(root, &package, true)?;
+    for name in ["config.json", "model.safetensors"] {
+        flux3_snapshot_member(root, &package.join(name), false)?;
+    }
+    // Header-authoritative checkpoint boundary: flow map from the selected native header.
+    let config = gen_core_flux3::resolve_checkpoint(&package).map_err(|e| e.to_string())?;
+    let storage = gen_core_flux3::artifacts::NativeDitStorage::from_package(&package)
+        .map_err(|e| e.to_string())?;
+    if storage.key().map_err(|e| e.to_string())? != tier {
+        return Err(format!(
+            "{} is not the selected {tier} package",
+            package.display()
+        ));
+    }
+    let te = root.join(&config.text_encoder.path);
+    let ae = root.join(&config.vae.path);
+    flux3_snapshot_member(root, &te, true)?;
+    flux3_snapshot_member(root, &ae, false)?;
+    let spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(package))
+        .with_component(
+            gen_core_flux3::TEXT_ENCODER_COMPONENT,
+            gen_core::WeightsSource::Dir(te),
+        )
+        .with_component(
+            gen_core_flux3::AUTOENCODER_COMPONENT,
+            gen_core::WeightsSource::File(ae),
+        );
+    gen_core_flux3::GenerationResources::from_spec(&spec, &config, model)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Check the complete inventory of a locally converted FLUX 3 package: owned outputs and external
+/// encoder/autoencoder files by their conversion receipt, plus the encoder shard set. This is an
+/// integrity check, not a GPU load or memory measurement.
+pub fn flux3_converted_bundle_check(root: &Path, package: &Path) -> Result<(), String> {
+    use gen_core_flux3::conversion::ComponentRole;
+    // Header-authoritative checkpoint boundary for the converted native package.
+    let config = gen_core_flux3::resolve_checkpoint(package).map_err(|e| e.to_string())?;
+    let receipt =
+        gen_core_flux3::conversion::open_conversion(package).map_err(|e| e.to_string())?;
+    let te = root.join(&config.text_encoder.path);
+    let ae = root.join(&config.vae.path);
+    flux3_snapshot_member(root, &te, true)?;
+    flux3_snapshot_member(root, &ae, false)?;
+    let prefix = format!("{}/", config.text_encoder.path);
+    receipt
+        .verify_external_with(|role, path| match role {
+            ComponentRole::TextEncoder => path
+                .strip_prefix(&prefix)
+                .map(|rest| te.join(rest))
+                .ok_or_else(|| {
+                    gen_core::Error::Unsupported(format!("unrecognized encoder path {path}"))
+                }),
+            ComponentRole::Autoencoder if path == config.vae.path => Ok(ae.clone()),
+            other => Err(gen_core::Error::Unsupported(format!(
+                "unexpected external {other:?}: {path}"
+            ))),
+        })
+        .map_err(|e| e.to_string())?;
+    let roots =
+        gen_core::safetensors_shards::snapshot_shard_roots(&te).map_err(|e| e.to_string())?;
+    gen_core::safetensors_shards::resolve_safetensors_shards(&te, "model", &roots)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Request-geometry admission against a model's declared `admissionGeometry` envelope (sc-24112).
+/// Backend-neutral: the envelope is a property of the engine's attention layout, which both lanes
+/// share, so a per-lane copy would be two declarations of one fact.
+pub(crate) use sceneworks_core::admission_geometry;
 // Shared `advanced` knob accessors (sc-4281). The MLX image/video job paths are macOS-gated; the
 // candle InstantID lane (sc-5491) is the first off-Mac caller, so the module also compiles on the
 // Windows candle build. The candle lane calls only a subset (`flag`/`str`/`f32_clamped`), so allow
 // dead_code there (the rest are MLX-only) — same pattern as `openpose_skeleton`. On a non-candle
 // Windows/Linux build it stays excluded, so its accessors are never uncalled-dead there.
-/// Request-geometry admission against a model's declared `admissionGeometry` envelope (sc-24112).
-/// Backend-neutral: the envelope is a property of the engine's attention layout, which both lanes
-/// share, so a per-lane copy would be two declarations of one fact.
-pub(crate) use sceneworks_core::admission_geometry;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod advanced;
 mod api_client;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod asset_media;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-mod image_sampling;
+#[cfg(native_lane)]
+mod cv;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+mod ort_cuda;
 // Shared one-child PNG persistence for upscale (Mac + candle) and smart-select (Mac).
 // Keep the include site on the callers' superset so the neither-backend lane does not
 // compile an otherwise dead helper — plus `test`, because this seam is where the standalone
 // upscale's embedded workflow is written (sc-15948) and that contract should be asserted on every
 // lane rather than only where an upscaler backend compiles. The non-test build is unchanged.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
-))]
+#[cfg(any(native_lane, test))]
 mod single_child_asset;
 // Lazy, on-demand download-credential pull from the macOS desktop credential socket
 // (sc-5891). Compiles on all targets; the socket I/O is `cfg(unix)` and inert unless
@@ -125,17 +260,11 @@ mod resolved_cache_promotion;
 mod generator_cache;
 // Resident-model cache for image→image `gen_core::Transform`s (the Iris-3B restorer, sc-25683): the
 // third thin wrapper over `cache_thread`, sharing one resident engine with the generator cache.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 mod transform_cache;
 // Iris-3B restoration (sc-25683): the engine's pure planner for the pre-submission preview (public:
 // the rust-api plan endpoint calls it), the cache-only install resolver, admission and the run.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub mod iris_restore;
 // sc-21027: MiniMax-H3's FL2VA provider labels its two conditioning-force boundaries. A Metal
 // watchdog timeout there poisons this process's command queue, so record the first timeout, refuse
@@ -147,7 +276,6 @@ mod mlx_worker_recovery;
 // gen-core's typed execution domains (graph-eval cadence, FFN chunk, CFG batching) from what each
 // provider declares. Backend-neutral and typed entirely against `gen_core::*`, so it links on all
 // targets exactly like `generator_cache`; off macOS its production callers are cfg'd out.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod execution_planner;
 // Resident-model cache for the native prompt-refine / caption / describe LLM (sc-8840, F-038): the
 // text-LLM sibling of `generator_cache`. Typed entirely against the tensor-free
@@ -156,33 +284,15 @@ mod execution_planner;
 // so off both natives it is dead (allow it, mirroring the `generator_cache` precedent). Caches the
 // ~16 GB refine model keyed by weights dir + selection reqs with the SAME idle-eviction window as
 // `generator_cache` so a single setting bounds resident model memory across both lanes.
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 mod refine_model_cache;
 // Bounds MLX's free-buffer cache across a long LLM decode (sc-24029). Dead off both natives for the
 // same reason `refine_model_cache` is: nothing there decodes on a resident text model.
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 mod mlx_decode_cache;
 // Compressed-KV opt-in and the KV-cache report SceneWorks records for a local LLM generation
 // (sc-20682). Dead off both natives for the same reason as the two modules above.
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 mod llm_kv_cache;
 use api_client::*;
 // Backend-neutral engine dispatch table + registry-derived capability advertisement
@@ -227,17 +337,9 @@ pub mod memory_strategy;
 // `sceneworks_core::video_request`'s selector seam by calling `memory_strategy::select_strategy`.
 // Cross-platform on purpose — the video lane spans both backends and the gate must not imply the
 // two are symmetric, so one module serves both and names the difference explicitly.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod mlx_fit_gate;
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod mlx_phase_estimate;
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 mod video_admission;
 // The full base fine-tune memory-envelope gate (sc-14056) lives beside the generation MLX fit gate
 // (it reuses that module's byte-summing + unified-memory budget probe). Re-exported for the rust-api
@@ -245,13 +347,7 @@ mod video_admission;
 pub use mlx_fit_gate::full_finetune_memory_error;
 // Iris-3B generation training seams (sc-25685/sc-25686): the trainer's data-walk report the API
 // surfaces before launch, and the declared memory-floor gate (the macOS submit-time twin is public).
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 mod iris_training;
 pub use iris_training::{
     iris_checkpoint_root, iris_data_walk_report, iris_plan_memory_error, iris_run_checkpoint_dirs,
@@ -260,13 +356,7 @@ pub use iris_training::{
 // Iris-3B depth (sc-25687) / restoration (sc-25688) training seams: task items + load inputs for the
 // executor, and the pre-launch checks the API serves (install availability, sidecar format/alignment,
 // the per-item dataset report, the degradation parser).
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 mod iris_task_training;
 pub use iris_task_training::{
     check_degraded_sidecar, check_depth_sidecar, check_restore_degradation,
@@ -275,35 +365,20 @@ pub use iris_task_training::{
 };
 // Iris-3B curricula, REPA, holdout and fp16 (sc-25689): the engine's stage presets, its plan
 // resolution (typed refusals + receipts) and the REPA teacher TRAINING resource.
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code, unused_imports)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code, unused_imports))]
 mod iris_curricula;
 pub use iris_curricula::{
     installed_repa_teacher, iris_stage_presets, IrisPlanRefusal, ResolvedIrisPlan,
 };
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub use iris_curricula::{resolve_iris_config, resolve_iris_plan};
 // Multi-rank Iris training on one host (sc-25689): the worker launches `world_size` rank processes
 // (this same executable, re-entered through [`iris_rank_entry`]) and coordinates them.
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code, unused_imports)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code, unused_imports))]
 mod iris_dist;
 pub use iris_dist::iris_rank_entry;
 // The auxiliary-training-model install check (sc-25213), shared with the rust-api submit gate.
-pub use training_jobs::installed_aux_training_model_dir;
+pub use training_jobs::{flux3_training_config_witness, installed_aux_training_model_dir};
 // CUDA/candle VRAM fit-gate + small-card emulation (epic 10765 Phase 0, sc-10766). Pure helpers wired
 // into `generate_candle_stream`; gated to the same candle lane as that consumer so the pub(crate)
 // helpers aren't dead code (→ `-D warnings`) in the non-candle / macOS builds.
@@ -326,6 +401,10 @@ mod krea_control_fit;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod conditioning_fit;
 use supervisor::*;
+mod utility_dispatch;
+use utility_dispatch::run_utility_job;
+mod worker_loop;
+pub use worker_loop::run_worker_loop;
 mod converted_install;
 mod model_jobs;
 pub use model_jobs::recover_stranded_model_conversions;
@@ -341,7 +420,14 @@ use media_jobs::*;
 // `sceneworks_core::media_convert` routine (sips on macOS, ffmpeg elsewhere).
 mod image_decode;
 mod image_jobs;
+mod parquet_row;
 use image_jobs::*;
+
+/// Model-scoped enhancement TOKEN ceiling shared by API enqueue and worker/native parsing.
+/// This is independent of effective-caption Unicode-character admission after enhancement.
+pub fn prompt_enhancement_max_tokens(model_id: &str) -> u64 {
+    u64::from(gen_core::generator::max_enhance_tokens_for_model(model_id))
+}
 mod vector_jobs;
 #[doc(hidden)]
 pub use vector_jobs::build_vector_asset_fact;
@@ -384,7 +470,7 @@ mod yue2_admission;
 // sc-23001's YuE2 memory-profile capture entrypoint: one #[ignore]d test the terminal campaign
 // (`scripts/yue2-memory-profile.mjs`, sc-23002) runs once per case in a fresh process. Test-only,
 // and only where the candle audio lane is linked (Metal on macOS, CUDA under `backend-candle`).
-#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(all(test, native_lane))]
 mod yue2_memory_profile;
 // YuE2 song jobs (sc-22999): `audio_generate` jobs carrying a `yue2` block, run through the `yue2`
 // provider's `generate_with_report`. Compiled everywhere; the engine is reached through the audio
@@ -404,6 +490,8 @@ pub mod voice_register;
 // so off macOS the items are otherwise unused (the parity tests still build + run).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod person_replace;
+#[cfg(all(feature = "test-support", native_lane))]
+pub mod test_support;
 mod training_jobs;
 use training_jobs::*;
 mod caption_jobs;
@@ -416,19 +504,10 @@ use dataset_parquet_jobs::*;
 pub mod catalog_analysis;
 pub mod catalog_image_fetch;
 pub mod catalog_parquet_scanner;
-// The shared scaffold both dataset-analysis jobs route through (sc-8836, F-034) — the `CancelJoinGuard`
-// select loop, per-item progress ramp, and sidecar POST extracted out of the two near-duplicate modules.
-// Gated to the same lanes as its only callers (the real `run_*_analysis_job` in the two modules below);
-// on the parity lane those fall back to no-op stubs, so the scaffold has no consumer and must not compile.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+// Dataset item parsing is shared by the native analysis, caption and upscale jobs.
+#[cfg(native_lane)]
 mod analysis_jobs_common;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use analysis_jobs_common::*;
 mod dataset_analysis_jobs;
 use dataset_analysis_jobs::*;
@@ -440,12 +519,9 @@ use face_analysis_jobs::*;
 // dataset's content-hash-keyed mask sidecar for the masked-loss trainer.
 mod subject_mask_jobs;
 use subject_mask_jobs::*;
-// sc-4407 — the shared, generator-agnostic face-likeness scorer (epic 4406): the backbone identity-
-// likeness component the Angles (sc-4409) / Poses (sc-4410) / With-Character (sc-4411) surfaces call as
-// a post-pass over a finished generation. Its public seam (`FaceLikenessScorer`) has no production
-// caller YET — the consuming surfaces are separate stories — so allow the unused seam here; the pure
-// scoring core is exercised by the module's unit tests and the seam by the ignored real-weight test.
-#[allow(dead_code)]
+// Shared face-likeness scorer for native comparison jobs and generation post-passes.
+// Portable builds retain its pure scoring and metadata contracts in unit tests.
+#[cfg(any(test, native_lane))]
 mod face_likeness;
 // sc-4415 — on-demand "compare image to another" likeness tool (epic 4406): scores a CANDIDATE asset
 // against a SOURCE identity reference asset through the shared `face_likeness` scorer. Lives in
@@ -467,47 +543,31 @@ mod downloads;
 mod qwen_alpha;
 // Every consumer is the TextLlm lane in `prompt_refine_jobs`, which only a backend build compiles;
 // a no-backend build keeps the module for its pure-function tests.
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 mod qwen_prompt_rewrite;
 // sc-6541 closed-loop study: test-only LoRA output-quality eval harness (research instrument) —
 // see the module doc + docs/sc-6541/closed-loop-protocol.md.
 #[cfg(all(test, target_os = "macos"))]
+#[path = "../tests/studies/lora_eval_harness.rs"]
 mod lora_eval_harness;
 // sc-6541 closed-loop study: native-Rust LoRA train→generate driver (research instrument) —
 // see the module doc + docs/sc-6541/closed-loop-protocol.md.
 #[cfg(all(test, target_os = "macos"))]
+#[path = "../tests/studies/lora_train_driver.rs"]
 mod lora_train_driver;
 // Shared test-support helpers for the real-weight smoke harnesses (sc-8866, epic 8800): the
 // byte-identical `env_or` + RGB8 degenerate-decode floor checks (`image_mean`/`image_std`/
 // `is_all_zero`/`save_png`) that were copy-pasted across every `*_mlx_smoke.rs` (macOS) and
 // `*_gpu_smoke.rs` (off-Mac candle) file + `footprint_measure.rs`. Gated on the SUPERSET of both
 // smoke lanes so it compiles exactly where a smoke that imports it does.
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 mod smoke_support;
 // sc-12409: parity guard tying the shipped video manifest's `limits.maxPixels` to the area cap of
 // the ENGINE PINNED by Cargo.toml (mlx via `runtime-macos` on macOS, candle via `runtime-cuda`
 // off-mac under backend-candle). Not a smoke — no weights, no GPU; just the shipped manifest bytes
 // vs the pinned `MAX_AREA_*` const. Gated on the same "engine bundle present" superset as
 // `smoke_support` because it needs a backend crate in scope to read the const.
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 mod pinned_engine_geometry;
 // sc-17607: the COMPOSITION half of the SC-15833 FLUX.2 audit — is `flux2_dev` still registered by
 // `candle-gen-flux2` in the bundle the worker links? A codegen digest cannot answer that, because
@@ -543,27 +603,21 @@ mod flux2_dev_gpu_smoke;
 // the resulting asset carries the engine's measured mixed/native checkpointWeightFacts receipt.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod imported_nvfp4_gpu_smoke;
+// Real-weight end-to-end worker smoke for a LINKED imported Krea 2 checkpoint stored in a ComfyUI
+// descriptor-gated quant — scalar-scaled fp8 (E4M3FN) or Kitchen MXFP8 (sc-27092). Same shape as the
+// NVFP4 smoke: model_import + image_generate through the checkpoint-plan route, asserting the
+// manifest's classification and the asset's measured dense-fallback receipt.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod imported_comfy_quant_gpu_smoke;
 // Real-weight end-to-end worker smoke for Iris-3B on Candle/CUDA (sc-25680): one production
 // `image_generate` job through the shipped catalog entry and the generic text_encoder seam. The
 // native prompt-batch smoke (sc-25681) also runs on the macOS/MLX lane.
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 mod iris_gpu_smoke;
 // Real-weight Iris-3B generation TRAINING smoke (sc-25685 MLX / sc-25686 Candle): one bounded LoRA
 // `lora_train` job through the production executor, then the adapter applied by an `image_generate`
 // job. Backend-neutral, so the same test runs on Apple Silicon and on the CUDA real-weights card.
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 mod iris_training_gpu_smoke;
 // Real-weight GPU smoke for the candle Anima 2B lane (epic 10512, sc-10625 — the hardware-gated
 // acceptance extracted from sc-10525). Test-only + candle-only; drives `crate::inference_runtime::load("anima_base" |
@@ -751,6 +805,12 @@ mod voiceclone_smoke;
 // manifest footprint fields.
 #[cfg(all(test, target_os = "macos"))]
 mod footprint_measure;
+// FLUX 3 Image Klein on the Candle/CUDA lane (sc-26243): the off-macOS half of the footprint campaign.
+// Same #[ignore]-gated, one-generation-per-process contract as footprint_measure, but the memory
+// receipt is the whole-GPU delta read from nvidia-smi. Compiled only for non-macOS candle test builds;
+// it runs no model compute unless an operator invokes an ignored campaign test by name.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod flux3_candle_footprint;
 // On-device RESOLUTION sweep of the MLX activation transient (sc-16195, epic 15448). Test-only +
 // macOS-only; the sibling of footprint_measure with the axis rotated — that one measures ONE
 // resolution across tiers, this one measures ONE tier across resolutions, sampling the same
@@ -805,10 +865,7 @@ mod bernini_tier_build;
 // `pose_jobs` skeleton render; on a candle-disabled box off Mac it still builds +
 // unit-tests (cross-platform raster) but its items are otherwise unused — so allow
 // dead_code only there.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 mod openpose_skeleton;
 // Native canny edge-map preprocessor for the Fun-Controlnet-Union canny head
 // (epic 8236, sc-8240). Pure CPU raster (cross-platform + testable everywhere),
@@ -817,10 +874,7 @@ mod openpose_skeleton;
 // off-Mac candle strict-control trio (sc-8304); on a candle-disabled box off Mac
 // it still builds + unit-tests but its items are otherwise unused — so allow
 // dead_code only there.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 mod canny;
 // Depth-map preprocessor for the Fun-Controlnet-Union depth head (epic 8236): arbitrary image →
 // `ControlKind::Depth` control image via a Depth Anything V2 port. Sibling of `canny` /
@@ -830,19 +884,13 @@ mod canny;
 // driver (sc-8243 mac) AND the off-Mac candle strict-control trio (sc-8304, which wires the candle
 // estimator into `preprocess_control_entry`); on a candle-disabled box off Mac the estimator stays
 // unused — so allow dead_code only there.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 mod depth;
 // DWPose pose detection via onnxruntime (epic 3482, sc-3487). On Mac the CoreML EP +
 // on the off-Mac candle GPU-worker lane the CUDA EP (sc-5496, epic 5482) run the same
 // RTMW detector in-process; on a candle-disabled box the capability is not advertised and the job
 // remains queued.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod pose_jobs;
 // Control-type preprocessor registry (ControlNet Training Studio A1, sc-10160, epic 10159): the
 // single `ControlKind`-keyed mapping from a target image to its condition image, wrapping the
@@ -858,10 +906,7 @@ mod pose_jobs;
 // (through A2). That caller exists only on the neural-inference builds (macOS / off-Mac candle), so
 // the module is fully wired there; on a candle-disabled off-Mac ("neither") build there is still no
 // consumer of the neural path, so keep the dead_code allowance only for that build.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 mod control_preprocess;
 // Folder-ingest control-dataset prep (Training Studio A2, sc-10161, epic 10159): the "create your
 // own" GENERATE core — raw target images → render each condition via the A1 `control_preprocess`
@@ -872,70 +917,36 @@ mod control_preprocess;
 // first real caller — it renders conditions from an existing dataset then trains. That caller exists
 // only on the neural-inference builds; on a candle-disabled off-Mac ("neither") build nothing drives
 // the pipeline, so keep the dead_code allowance only for that build.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 mod control_dataset_prep;
-// Bring-your-own-dataset ingest adapter (Training Studio A3, sc-10171, epic 10159): the second
-// dataset-input path — map a PROVIDED dataset into the same on-disk layout A2 emits, skipping what
-// the source supplies. Prepared pairs (target + rendered condition) are convention-validated then
-// ingested as-is / normalized / regenerated via the A1 preprocessor; annotated COCO
-// (person_keypoints + captions) renders the OpenPose-18 skeleton from ground-truth keypoints (no
-// detection) — cross-platform. Reuses A2's square letterbox + write/manifest tail. B1 (sc-10162)
-// ships only the render-from-an-existing-dataset source; wiring this bring-your-own path into the
-// studio job (source provisioning + convention-warning surfacing) is a scoped follow-up, so this
-// module keeps its dead_code allowance until that lands.
-#[allow(dead_code)]
-mod control_dataset_byo;
 // ControlNet Training Studio orchestration job (B1, sc-10162, epic 10159): renders the per-image
 // control condition from an existing captioned dataset via `control_preprocess`/`control_dataset_prep`
 // (A1/A2), then trains the control branch through the shared `training_jobs` executor
 // (`krea_control` → `krea_2_control`). Cross-platform module shell with a neural-build-gated real impl
 // + a loud stub, mirroring `training_jobs`.
 mod control_training_jobs;
-// CUDA execution-provider dependency preloading for the off-Mac candle `ort` paths
-// (sc-6209, epic 5482): `ort::ep::cuda::preload_dylibs` dlopens the CUDA-12 runtime +
-// cuDNN-9 DLLs the onnxruntime CUDA EP needs, so it engages the GPU regardless of PATH
-// (the Mac CoreML path needs no equivalent). Shared by pose_jobs (DWPose, sc-5496) +
-// person_jobs (YOLO, sc-5498), and Real-ESRGAN (sc-5499) next — gated to the candle GPU
-// lane only.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-mod ort_cuda;
 // SCRFD 5-point face-landmark extraction (epic 4422, sc-4433): native-MLX SCRFD on Mac, plus the
 // candle SCRFD/ArcFace stack on the Windows/Linux candle lane (sc-5497, epic 5482) — the same
 // InstantID face-stack detector reused in-process for the Key Point Library "extract kps from this
 // image" capability. So the module compiles on Mac AND the candle lane; on a candle-disabled box the
 // capability is not advertised and the job remains queued.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod kps_jobs;
 // Image upscaling: Real-ESRGAN (epic 3482, sc-3489) RRDBNet x2/x4 via `ort`/CoreML on Mac, plus the
 // SeedVR2 one-step diffusion upscaler — native MLX on Mac (sc-4815) and the candle CUDA backend on
 // Windows (sc-5928). So the module compiles on Mac AND the Windows/CUDA candle lane; the ort/CoreML
 // Real-ESRGAN path inside stays Mac-gated while the candle worker supplies the off-Mac Real-ESRGAN
 // lane, and SeedVR2 is backend-neutral (`crate::inference_runtime::load("seedvr2")`).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod upscale_jobs;
 // YOLO11 person detection + selected-person ByteTrack tracking (epic 3482, sc-3488/sc-3633;
 // off-Mac candle lane sc-5498, epic 5482). Native-MLX YOLO11m on Mac, `ort`/CUDA on the off-Mac
 // candle GPU-worker lane (the pure-Rust ByteTrack in `person_track` is backend-neutral). So both
 // modules compile on Mac AND the candle lane; a candle-disabled off-Mac build refuses the jobs.
 // Person segmentation uses MLX SAM2/SAM3 on Mac and native candle SAM3 off-Mac.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod person_jobs;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod person_track;
 // Native-MLX SAM2 person segmentation (epic 3704, sc-3709): the `mlx-gen-sam2`
 // box-prompt segmenter generates per-frame masks in `run_person_track`. On Mac this is SAM2; off-Mac
@@ -949,24 +960,15 @@ mod person_segment;
 mod person_segment_sam3;
 // Smart-select image segmentation: native SAM3 box-PVS on both registered runtimes. Candle's
 // pinned SAM3 surface has no point-prompt API, so segment_jobs rejects points before any I/O.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod segment_jobs;
 // Iris-3B monocular depth (sc-25682): the `image_depth` job — a raw float32 `.npy` depth asset plus a
 // derived preview, served by the native MLX worker on macOS and the Candle worker off-Mac.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod depth_jobs;
 // Reading a saved depth asset as a consumer (sc-25682): the depth-control adapter. Compiled on every
 // build; its only caller (strict depth control) is gated behind a native lane.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 mod depth_asset;
 // Off-Mac candle SAM3 text-concept person segmenter (sc-6247, epic 5482 under sc-5062) — the
 // Windows/CUDA sibling of `person_segment_sam3`, driving `candle-gen-sam3`'s `Sam3VideoModel` to
@@ -978,36 +980,21 @@ mod person_segment_sam3_candle;
 // modules (`person_segment_sam3` MLX / `person_segment_sam3_candle` candle). Extracted here ONCE so a
 // fix lands on both platforms and they cannot silently diverge; the per-backend files keep only their
 // tensor/model/device seam. Same superset gate as `scail2_masks` (both SAM3 modules or neither).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod person_segment_sam3_common;
 // SCAIL-2 color-coded segmentation-mask painting (epic 5439, sc-5448): turns native SAM3
 // per-person masks into the palette-painted RGB masks the SCAIL-2 engine consumes. Backend-neutral
 // (pure pixel painting over `AllPersonMasks`); available on both the macOS MLX lane (sc-5448) and the
 // off-Mac candle lane (sc-6837, the candle SCAIL-2 sibling), each over its own SAM3 module's
 // structurally-identical `AllPersonMasks`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod scail2_masks;
 use downloads::*;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use kps_jobs::*;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use pose_jobs::*;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use upscale_jobs::*;
 
 mod checkpoint_catalog_migration;
@@ -1020,12 +1007,20 @@ pub(crate) use manifest::*;
 mod paths;
 pub use paths::*;
 mod payload;
+mod text_clean;
 pub(crate) use payload::*;
 mod settings;
 pub use settings::*;
 
 mod imports;
 pub use imports::*;
+mod load_progress;
+#[cfg(any(test, native_lane))]
+mod model_io;
+mod stream_supervision;
+#[cfg(any(test, native_lane))]
+use stream_supervision::StreamSignal;
+use stream_supervision::StreamSupervisor;
 mod progress;
 pub(crate) use progress::*;
 mod util;
@@ -1046,25 +1041,13 @@ const DEFAULT_TRANSITION_DURATION_SECONDS: f64 = 0.5;
 // aliases fall back to the literal values — kept in lockstep by
 // `person_track_sample_constants_are_a_single_source_of_truth`, which asserts the equality on the
 // lanes where both exist.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const PERSON_TRACK_SAMPLE_RATE_FPS: f64 = person_track::SAMPLE_RATE_FPS;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const PERSON_TRACK_MAX_SAMPLES: usize = person_track::MAX_SAMPLES;
-#[cfg(not(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-)))]
+#[cfg(not(native_lane))]
 const PERSON_TRACK_SAMPLE_RATE_FPS: f64 = 2.0;
-#[cfg(not(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-)))]
+#[cfg(not(native_lane))]
 const PERSON_TRACK_MAX_SAMPLES: usize = 24;
 const PERSON_TRACK_X_DRIFT: f64 = 0.018;
 
@@ -1076,23 +1059,47 @@ struct DiscoveredGpu {
     utilization: Option<WorkerUtilizationSnapshot>,
 }
 
-async fn shutdown_signal() {
-    use std::sync::OnceLock;
-    use tokio::sync::watch;
+/// The process-wide shutdown latch every worker loop's [`shutdown_signal`] waits on. Created
+/// lazily and never reset: once set, every current and future wait resolves.
+fn shutdown_latch() -> &'static tokio::sync::watch::Sender<bool> {
+    static SHUTDOWN: std::sync::OnceLock<tokio::sync::watch::Sender<bool>> =
+        std::sync::OnceLock::new();
+    SHUTDOWN.get_or_init(|| tokio::sync::watch::channel(false).0)
+}
 
-    static SHUTDOWN: OnceLock<watch::Sender<bool>> = OnceLock::new();
-    let sender = SHUTDOWN.get_or_init(|| {
-        let (sender, _receiver) = watch::channel(false);
-        let signal = sender.clone();
-        tokio::spawn(async move {
+/// Set `latch` (sticky). Latched with `send_replace` so a request that arrives between two
+/// `select!` calls, when no receiver is subscribed, is still observed by the next wait.
+fn latch_shutdown(latch: &tokio::sync::watch::Sender<bool>) {
+    latch.send_replace(true);
+}
+
+/// Ask every worker loop in THIS process to shut down gracefully, exactly as Ctrl-C / SIGTERM /
+/// (on a supervised Windows child) stdin EOF would (sc-26691).
+///
+/// The in-process utility loops the API embeds call `run_worker_loop` directly, so their only
+/// shutdown sources used to be the OS signals — an API stopping for any other reason (its desktop
+/// parent died, or a supervisor closed its stdin) left them running, and the API then waited out
+/// its whole shutdown grace for loops that were never told to stop. The embedding process calls
+/// this the moment its own shutdown begins. Idempotent.
+pub fn request_shutdown() {
+    latch_shutdown(shutdown_latch());
+}
+
+/// Whether [`request_shutdown`] (or a process shutdown signal) has latched shutdown.
+pub fn shutdown_requested() -> bool {
+    *shutdown_latch().borrow()
+}
+
+async fn shutdown_signal() {
+    static WATCHER: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    WATCHER.get_or_init(|| {
+        let latch = shutdown_latch().clone();
+        crate::load_progress::spawn(async move {
             wait_for_process_shutdown_source().await;
-            // Latch the request even if it arrives between two `select!` calls,
-            // when no receiver is currently subscribed.
-            signal.send_replace(true);
+            latch_shutdown(&latch);
         });
-        sender
     });
-    let mut receiver = sender.subscribe();
+    let mut receiver = shutdown_latch().subscribe();
     wait_for_shutdown_latch(&mut receiver).await;
 }
 
@@ -1133,7 +1140,7 @@ async fn wait_for_process_shutdown_source() {
         // supervisor process is NOT a child (its stdin is the real console, not a
         // supervisor-held pipe), so it keeps Ctrl-C only; gate the stdin path to child
         // workers via the `SCENEWORKS_WORKER_CHILD` marker the supervisor sets.
-        if std::env::var_os("SCENEWORKS_WORKER_CHILD").is_some() {
+        if sceneworks_core::env_util::env_flag("SCENEWORKS_WORKER_CHILD", false) {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {}
                 _ = wait_for_parent_stdin_close() => {}
@@ -1164,7 +1171,7 @@ async fn wait_for_parent_stdin_close() {
         let signal = tx.clone();
         // One dedicated blocking reader for the whole process, so repeated turns never
         // each park a fresh thread. Detached: dropping the JoinHandle lets it run on.
-        tokio::task::spawn_blocking(move || {
+        crate::load_progress::spawn_blocking(move || {
             use std::io::Read;
             let mut stdin = std::io::stdin();
             let mut scratch = [0_u8; 64];
@@ -1282,7 +1289,12 @@ pub async fn run() -> WorkerResult<()> {
             "rust_worker defaulting HF_HOME"
         );
     }
-    let settings = Settings::from_env();
+    let settings = Settings::try_from_env()?;
+    // Refuse the preparation scope before an auto supervisor can enumerate devices.
+    validate_utility_worker_selection(
+        &settings,
+        utility_job_scope(std::env::var("SCENEWORKS_UTILITY_JOBS").ok().as_deref()),
+    )?;
     // Only the top-level worker process performs conversion recovery. It runs before any utility
     // children are spawned, and the lifecycle lock excludes independently running finalizers.
     // Child restarts must never sweep while sibling utility workers may be converting.
@@ -1297,7 +1309,7 @@ pub async fn run() -> WorkerResult<()> {
         {
             let config_dir = settings.config_dir.clone();
             let data_dir = settings.data_dir.clone();
-            tokio::spawn(async move {
+            crate::load_progress::spawn(async move {
                 match checkpoint_catalog_migration::migrate_legacy_checkpoint_catalog(
                     &config_dir,
                     &data_dir,
@@ -1422,7 +1434,7 @@ async fn probe_cuda_health(settings: &Settings) -> GpuHealth {
     if !should_run_cuda_preflight(settings) {
         return GpuHealth::Usable;
     }
-    let probe = tokio::task::spawn_blocking(cuda_preflight).await;
+    let probe = crate::load_progress::spawn_blocking(cuda_preflight).await;
     // A JoinError can only be a panic inside `cuda_preflight`, which already catches its own
     // (see `preflight::cuda_preflight`) — report rather than propagate either way. It is NOT
     // evidence of a driver-class fault, so it is folded into the same `Err` the classifier then
@@ -1544,7 +1556,7 @@ fn spawn_retention_checkpoint(
         RetentionCheckpointOutcome, RetentionHold,
     };
 
-    tokio::task::spawn_blocking(move || {
+    crate::load_progress::spawn_blocking(move || {
         let Some(retention) = resolved_cache_retention(&data_dir) else {
             return;
         };
@@ -1599,7 +1611,7 @@ fn spawn_retention_checkpoint(
 /// an optimization, and a closure that could not be promoted is simply recorded again the next time
 /// that model loads.
 fn spawn_promotion_drain(settings: Settings) -> tokio::task::JoinHandle<()> {
-    tokio::task::spawn_blocking(move || resolved_cache_promotion::drain_intake(&settings))
+    crate::load_progress::spawn_blocking(move || resolved_cache_promotion::drain_intake(&settings))
 }
 
 /// Re-run the CUDA probe for a worker that is currently unhealthy, and act on any change
@@ -1683,254 +1695,28 @@ fn reclaim_import_staging(
     sceneworks_core::checkpoint_ingest::sweep_staging(&store, &in_flight)
 }
 
-pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
-    // sc-4482 (epic 3720): log the resolved backend-neutral gen-core contract version at startup
-    // so a pin skew that slips past the CI guard (`scripts/check-gen-core-skew.sh`) is
-    // diagnosable from one log line. One shared contract version backs every linked backend.
-    tracing::info!(
-        event = "gen_core_contract_version",
-        version = %gen_core::VERSION,
-        gpuId = %settings.gpu_id,
-        "rust_worker gen-core contract version"
-    );
-    // sc-7820 (epic 7819): apply the GPU memory ceiling to the MLX runtime once at startup, before
-    // any model load. The MLX limit is process-global, so this single call covers generations,
-    // upscales, AND LoRA training. When the user configured no ceiling (0) a default derived from
-    // physical RAM is applied instead (GitHub #1932) — MLX's own default budget is ~all of unified
-    // memory, which starves macOS on a small Mac. No-op on non-macOS/candle builds.
-    generator_cache::apply_gpu_memory_limit(settings.gpu_memory_limit_bytes);
-    // sc-26610: keep proven weight-seal digests across worker restarts, so a restart does not
-    // re-hash every multi-GB weight file before its next load.
-    gen_core::ArtifactSeal::persist_proven_digests_in(
-        settings.data_dir.join("cache").join("seal-digests"),
-    );
-    // sc-7825 (epic 7819): on the MLX GPU worker only, publish live MLX memory telemetry to the
-    // shared config dir for the Settings readout. Gated to `mlx` so the CPU utility workers (which
-    // do no MLX work) don't clobber the file with zeros.
-    if settings.gpu_id == "mlx" {
-        generator_cache::spawn_gpu_telemetry(settings.config_dir.clone());
+fn validate_utility_worker_selection(
+    settings: &Settings,
+    scope: UtilityJobScope,
+) -> WorkerResult<()> {
+    if scope == UtilityJobScope::ModelDownload && !is_cpu_worker(&settings.gpu_id) {
+        return Err(WorkerError::InvalidPayload(
+            "model_download utility scope requires the cpu worker".to_owned(),
+        ));
     }
-    // sc-16247 / sc-16260: probe the CUDA device ONCE before advertising anything, and let the
-    // verdict shape what this worker claims to be able to do. `discover_gpu` withholds the whole
-    // candle capability block on an unusable GPU, so the registration below advertises only the
-    // placeholder set and no generation job can route here.
-    let mut health = cuda_startup_health(&settings).await;
-    let gpu = discover_gpu(&settings, &health).await;
-    let api = ApiClient::new(&settings);
-    let http_client = crate::downloads::streaming_download_client();
-    register_worker_with_retry(&api, &settings, &gpu).await?;
-    let mut lock_failures = 0_u32;
-    let mut idle_heartbeat = IdleHeartbeat::new(progress_report_interval(&settings));
-    // sc-16260 AC 4: the startup probe is one sample, so an unhealthy worker re-probes on an
-    // interval and re-advertises if the host is repaired underneath it. Seeded a full interval
-    // out — the startup probe just ran, and re-running it immediately would say nothing new.
-    let mut next_gpu_recheck = Instant::now() + GPU_HEALTH_RECHECK;
-    // sc-19710 / sc-19706: ONE resolved-cache maintenance slot, shared by the retention checkpoint
-    // and the promotion drain. A single slot is deliberate rather than one handle each: a sweep
-    // walks and re-hashes eviction candidates while a promotion copies and hashes a whole bundle,
-    // and running both at once would have them competing for the same disk and the same entries —
-    // retention deciding what fits while promotion is still adding to it.
-    //
-    // The startup occupant is the retention checkpoint, which recovers the store (finishing any
-    // eviction interrupted by a crash) and then enforces retention. It is started, never awaited —
-    // the first job claim must not queue behind a recover-plus-retention pass.
-    let mut maintenance_task = Some(spawn_retention_checkpoint(settings.data_dir.clone(), true));
-    let mut next_retention_checkpoint = Instant::now() + RESOLVED_CACHE_RETENTION_INTERVAL;
-    // sc-20636: the other startup reclamation. Spawned blocking and never awaited, for the same
-    // reason the retention checkpoint is not: removing an abandoned multi-gigabyte staging tree
-    // must not delay the first job claim.
-    {
-        let data_dir = settings.data_dir.clone();
-        tokio::task::spawn_blocking(move || match reclaim_import_staging(&data_dir) {
-            Ok(0) => {}
-            Ok(reclaimed) => tracing::info!(
-                event = "import_staging_reclaimed",
-                reclaimed,
-                "reclaimed abandoned model-import staging directories"
-            ),
-            Err(error) => tracing::warn!(error = %error, "model-import staging sweep failed"),
-        });
+    Ok(())
+}
+
+fn initialize_worker_gpu_with(
+    settings: &Settings,
+    scope: UtilityJobScope,
+    apply_limit: impl FnOnce(u64),
+) -> WorkerResult<()> {
+    validate_utility_worker_selection(settings, scope)?;
+    if !is_cpu_worker(&settings.gpu_id) {
+        apply_limit(settings.gpu_memory_limit_bytes);
     }
-    loop {
-        // A Metal watchdog timeout poisons the command queue for this OS process. The just-failed
-        // job was already made terminal by `run_utility_job`; stop BEFORE `poll_once` can claim a
-        // successor, mark this instance unhealthy, and clean-exit. Under `GPU_ID=auto` the existing
-        // supervisor observes that single exit and spawns a fresh process with fresh Metal state.
-        // Clean exit is intentional: an abnormal-exit attribution would manufacture a second job
-        // failure after the truthful first timeout has already been persisted.
-        if settings.gpu_id == "mlx" {
-            if let Some(recycle) = mlx_worker_recovery::global().begin_recycle() {
-                emit_event_value(
-                    Level::ERROR,
-                    json!({
-                        "event": "mlx_h3_i2v_poisoned_worker_recycle",
-                        "workerId": settings.worker_id,
-                        "gpuId": settings.gpu_id,
-                        "firstTimeout": recycle.first_timeout,
-                        "sawSubmissionsIgnored": recycle.saw_submissions_ignored,
-                    }),
-                );
-                let _ = heartbeat_with_reason(
-                    &api,
-                    &settings,
-                    WorkerStatus::Unhealthy,
-                    None,
-                    Some(recycle.reason),
-                )
-                .await;
-                return Ok(());
-            }
-            if let Some(reason) = mlx_worker_recovery::global().quarantine_reason() {
-                // This is reachable only when shutdown interrupted the active job's terminal-write
-                // retry. Stay unclaimable rather than recycling on an unconfirmed failure or
-                // falling through to `poll_once`; the shutdown arm normally resolves immediately.
-                let _ = heartbeat_with_reason(
-                    &api,
-                    &settings,
-                    WorkerStatus::Unhealthy,
-                    None,
-                    Some(reason),
-                )
-                .await;
-                tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(settings.poll_seconds.max(1))) => {}
-                    _ = shutdown_signal() => return Ok(()),
-                }
-                continue;
-            }
-        }
-        if !health.is_usable() && Instant::now() >= next_gpu_recheck {
-            next_gpu_recheck = Instant::now() + GPU_HEALTH_RECHECK;
-            recheck_gpu_health(&api, &settings, &mut health).await?;
-        }
-        // sc-8845 (F-043): shutdown is observed ONLY here, around the claim / idle-sleep phase —
-        // NOT around full job execution. `poll_once` does no long GPU work (memory-sync, idle
-        // heartbeat, the transactional claim POST, and the idle sleep), so racing it against
-        // shutdown and dropping it at an await point loses no job state: nothing is claimed on the
-        // idle path, and a claimed job is handled below OUTSIDE this select. Before this change the
-        // select raced the WHOLE `poll_once` (claim + the entire job) against shutdown, so a
-        // graceful quit mid-job dropped the in-flight future at an arbitrary await, left the job
-        // `running` until the 90s stale sweep marked it `interrupted`, and killed spawn_blocking GPU
-        // work mid-write. Now a mid-job shutdown trips the job's cancel and posts a prompt terminal
-        // `Canceled` (see `run_job_with_shutdown`).
-        let claim = tokio::select! {
-            result = poll_once(&api, &settings, &mut idle_heartbeat, &health) => result,
-            _ = shutdown_signal() => {
-                // Clean-idle shutdown: no job in flight, so the pre-existing Offline heartbeat +
-                // return is preserved exactly.
-                let _ = heartbeat(&api, &settings, WorkerStatus::Offline, None).await;
-                return Ok(());
-            }
-        };
-        match claim {
-            Ok(None) => {
-                lock_failures = 0;
-                // Claiming nothing is the proof of idleness both maintenance activities require:
-                // no job is in flight, so neither a sweep nor a bundle copy can compete with one.
-                // Every artifact lock a sweep takes is non-blocking, so an in-use model is skipped
-                // rather than waited on.
-                //
-                // The handle is polled, never awaited: this arm sits directly on the claim path,
-                // so the loop must come straight back round to claim the next job while
-                // maintenance is still running. Work is also skipped entirely while a predecessor
-                // is in flight, so slow sweeps and slow copies cannot stack up.
-                if maintenance_task
-                    .as_ref()
-                    .is_some_and(tokio::task::JoinHandle::is_finished)
-                {
-                    maintenance_task = None;
-                }
-                if maintenance_task.is_none() {
-                    if Instant::now() >= next_retention_checkpoint {
-                        // Retention wins whenever it is due. The reverse ordering could starve
-                        // retention indefinitely on a worker with a steady promotion stream, and
-                        // retention is what keeps the cache inside its size limit — the limit
-                        // promotion admission itself is judged against.
-                        //
-                        // This does NOT make starving promotion impossible, only bounded by an
-                        // assumption: the next checkpoint is armed when this one is STARTED, so a
-                        // sweep that runs longer than the interval is already due again when it
-                        // finishes and sweeps run back to back, with no idle turn left over for a
-                        // drain. That holds only while sweep duration stays under the interval.
-                        // It is self-stabilizing rather than a defect — a sweep that slow means
-                        // the cache is over its limit, which is the condition promotion must not
-                        // be adding to — so the ordering stands, but the guarantee is
-                        // "promotion yields to retention", not "promotion always runs".
-                        next_retention_checkpoint =
-                            Instant::now() + RESOLVED_CACHE_RETENTION_INTERVAL;
-                        maintenance_task =
-                            Some(spawn_retention_checkpoint(settings.data_dir.clone(), false));
-                    } else if resolved_cache_promotion::work_pending(&settings.data_dir) {
-                        // sc-19706: in-memory check only — no store open, no stat — because this
-                        // sits on the claim path exactly like the checkpoint gate above.
-                        maintenance_task = Some(spawn_promotion_drain(settings.clone()));
-                    }
-                }
-            }
-            Ok(Some(job)) => {
-                lock_failures = 0;
-                // Execute the claimed job WITHOUT racing (and dropping) the whole future against
-                // shutdown. `run_job_with_shutdown` supervises execution: on a mid-job shutdown it
-                // trips the job's cancel flag, lets the in-flight future wind down (never dropped
-                // mid-write), and posts a terminal `Canceled` for the job before returning
-                // `ShutdownDuringJob` so the loop exits with the job in a prompt terminal state.
-                match run_job_with_shutdown(&api, &settings, &http_client, job).await {
-                    // `run_utility_job` already posts a terminal Idle heartbeat at its end, so the
-                    // scheduler should treat that as the just-sent one and wait a full interval —
-                    // marking it *due* here made the next `poll_once` fire a redundant second Idle
-                    // heartbeat right away (sc-8952).
-                    JobOutcome::Completed => idle_heartbeat.mark_sent(),
-                    JobOutcome::ShutdownDuringJob => {
-                        let _ = heartbeat(&api, &settings, WorkerStatus::Offline, None).await;
-                        return Ok(());
-                    }
-                }
-            }
-            Err(error) if is_database_locked(&error) => {
-                // SQLite claim contention. With busy_timeout + BEGIN IMMEDIATE in the
-                // store this should be rare, but back off (instead of hammering at the
-                // flat poll interval) and make it visible so an MLX-eligible job lost to
-                // lock contention is explained rather than silently losing the claim to another poller.
-                lock_failures = lock_failures.saturating_add(1);
-                let delay = retry_delay(settings.poll_seconds, lock_failures);
-                emit_event_value(
-                    Level::WARN,
-                    json!({
-                        "event": "claim_lock_contention",
-                        "workerId": settings.worker_id,
-                        "gpuId": settings.gpu_id,
-                        "consecutiveFailures": lock_failures,
-                        "retryInSeconds": delay,
-                        "error": error.to_string(),
-                    }),
-                );
-                // The back-off sleep is a between-jobs wait, so it too must observe shutdown rather
-                // than blocking a graceful quit for up to `delay` seconds.
-                tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(delay)) => {}
-                    _ = shutdown_signal() => {
-                        let _ = heartbeat(&api, &settings, WorkerStatus::Offline, None).await;
-                        return Ok(());
-                    }
-                }
-            }
-            Err(error) => {
-                lock_failures = 0;
-                tracing::error!(
-                    event = "rust_worker_poll_failed",
-                    error = %error,
-                    "worker claim poll failed"
-                );
-                tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(settings.poll_seconds.max(1))) => {}
-                    _ = shutdown_signal() => {
-                        let _ = heartbeat(&api, &settings, WorkerStatus::Offline, None).await;
-                        return Ok(());
-                    }
-                }
-            }
-        }
-    }
+    Ok(())
 }
 
 /// Outcome of supervising one claimed job through [`run_job_with_shutdown`].
@@ -2210,448 +1996,6 @@ pub(crate) async fn heartbeat_with_reason(
     }
 }
 
-/// Dispatch one claimed job to its handler and reconcile the terminal state.
-///
-/// `shutdown` (sc-8845, F-043) is the process-shutdown [`CancelFlag`] tripped by
-/// `run_job_with_shutdown` when SIGTERM/Ctrl-C arrives mid-job. The caller's
-/// bounded-wait-then-terminal-`Canceled` write is what GUARANTEES no job dangles `running` even for a
-/// handler that cannot observe the flag. The always-compiled placeholder path threads it directly so
-/// the shutdown-during-job behavior is exercised on every target (the GPU handlers are macOS/candle-
-/// gated). sc-9618 (F-043 follow-up): the dispatch below is scoped in [`with_shutdown_flag`], binding
-/// the flag as a task-local so the per-engine GPU consumer loops (image `consume_gen_events`, video
-/// `generate_video`, training `consume_training_events`, the shared `run_batched_analysis_job`, and the
-/// image-detail loop) consult it via `shutdown_requested()` at their existing per-step cancel
-/// checkpoints — tripping the engine cancel mid-step on quit instead of winding down at the grace
-/// window. MLX and candle twins stay in sync because both funnel through those SAME shared consumers.
-async fn run_utility_job(
-    api: &ApiClient,
-    settings: &Settings,
-    http_client: &reqwest::Client,
-    job: JobSnapshot,
-    shutdown: gen_core::CancelFlag,
-) {
-    // Bind the process-shutdown flag as a task-local for the whole dispatch (sc-9618, F-043 follow-up)
-    // so the per-engine GPU consumer loops awaited below honor it at their per-step cancel checkpoints
-    // (via `shutdown_requested()`), stopping a gen/prompt mid-step on quit instead of waiting out the
-    // grace window — without threading the flag through every stream-handler signature. The placeholder
-    // path keeps its explicit `&shutdown` (it's the always-compiled reference implementation).
-    // Per-run metrics probe (epic 10402, sc-10404): reset the MLX peak-memory
-    // window and start the background GPU-load/memory sampler before the job
-    // runs, so peak memory + peak load cover the whole job. Consumed after the
-    // handler returns to POST the hardware/timing block; settings + phase
-    // timings are posted separately by the handlers and coalesce-merge server-side.
-    let metrics_probe = job_metrics::JobMetricsProbe::start(&settings.gpu_id);
-    let result = with_shutdown_flag(shutdown.clone(), async {
-        // sc-19708: the ONE pre-loader guard. Typed model-source admission happens here for every
-        // job type, before any handler runs; handlers never carry availability or cache policy.
-        //
-        // sc-19707: run it on the BLOCKING pool. The guard walks the resolved-cache journal, stats
-        // whole closures, and — when it leases a local bundle — takes the entry's shared artifact
-        // lock through the blocking `FileExt::lock_shared`. An evictor holding that lock
-        // exclusively would otherwise stall this runtime worker thread, not just this job.
-        let guard_job_type = job.job_type.clone();
-        let guard_payload = job.payload.clone();
-        let guard_settings = settings.clone();
-        let guard_task = tokio::task::spawn_blocking(move || {
-            external_library_runtime::RuntimeSourceGuard::begin(
-                &guard_job_type,
-                &guard_payload,
-                &guard_settings,
-            )
-        });
-        // The guard's admission pass can re-verify a multi-GB resolved bundle, which outlasts the
-        // API's stale-worker timeout — the sc-13856 hazard at a new call site. Awaiting the handle
-        // bare let the sweep mark a still-healthy worker offline mid-verification (the Krea bf16
-        // 90s lost-heartbeat incident), so the wait must pump heartbeats on the progress interval.
-        let source_guard = progress::heartbeat_while_blocking(
-            api,
-            settings,
-            &job.id,
-            "model source guard",
-            guard_task,
-        )
-        .await
-        .map_err(|error| ("Model source unavailable.", error))?;
-        let dispatch_result = match job.job_type {
-            JobType::Placeholder => run_placeholder_job(api, settings, &job, &shutdown)
-                .await
-                .map_err(|error| ("Placeholder job failed.", error)),
-            // Native MLX image generation, served in-process by the linked mlx-gen
-            // engine on the macOS Apple-Silicon GPU worker (epic 3018). Off macOS the
-            // capability is never advertised, so this arm is unreachable there.
-            JobType::ImageGenerate => run_image_generate_job(api, settings, &job)
-                .await
-                .map_err(|error| ("Image generation failed.", error)),
-            // Plain Image Edit (sc-3513): the distinct `image_edit` job type (`mode=edit_image`
-            // + `sourceAssetId`, epic 2427) shares the generate handler — it dispatches on
-            // payload model+mode (qwen/flux2/sdxl edit streams), not job type. The API only
-            // routes MLX-eligible edit models here (jobs_store::image_job_is_mlx_eligible); off
-            // macOS the `image_edit` capability is never advertised, so this arm is unreachable.
-            JobType::ImageEdit => run_image_generate_job(api, settings, &job)
-                .await
-                .map_err(|error| ("Image edit failed.", error)),
-            JobType::VectorGenerate => run_vector_job(api, settings, &job)
-                .await
-                .map_err(|error| ("Vector generation failed.", error)),
-            // Native MLX tile-ControlNet detail refine (epic 3041, sc-3060), served in-process
-            // by the engine on the macOS Apple-Silicon GPU worker. Off macOS the capability is
-            // never advertised, so this arm is unreachable there and the job remains queued.
-            JobType::ImageDetail => run_image_detail_job(api, settings, &job)
-                .await
-                .map_err(|error| ("Image detail enhancement failed.", error)),
-            // SenseNova-U1 visual question answering + Document Studio interleave (epic 3180,
-            // sc-3905). These bypass the `Generator` registry and call the concrete `T2iModel`
-            // directly (text / text+images output the `GenerationOutput` contract can't express).
-            // On Mac the API routes them here through `understanding_job_is_mlx_eligible`; off-Mac
-            // the candle worker advertises the same capabilities and uses the candle handlers below.
-            JobType::ImageVqa => run_vqa_job(api, settings, &job)
-                .await
-                .map_err(|error| ("Visual question answering failed.", error)),
-            JobType::ImageInterleave => run_interleave_job(api, settings, &job)
-                .await
-                .map_err(|error| ("Interleaved generation failed.", error)),
-            // Native MLX video generation, served in-process by the linked mlx-gen engine
-            // on the macOS Apple-Silicon GPU worker (epic 3018). sc-3033 ships the runtime
-            // + procedural stub; the real Wan (sc-3034) / LTX+audio (sc-3035) models link
-            // their provider crates. Off macOS the capability is never advertised, so this
-            // arm is unreachable there.
-            // The clip-conditioning advanced video modes (epic 3040, sc-3522) share the video
-            // generation handler — `run_video_generate_job` dispatches `extend_clip` /
-            // `video_bridge` by the request `mode` into the LTX IC-LoRA `VideoClip` path. The API
-            // only routes the LTX-eligible jobs here (`video_job_is_mlx_eligible`); off macOS the
-            // VideoExtend/VideoBridge capabilities are never advertised, so these arms are
-            // unreachable there (the procedural stub would otherwise ignore the conditioning).
-            JobType::VideoGenerate | JobType::VideoExtend | JobType::VideoBridge => {
-                run_video_generate_job(api, settings, &job)
-                    .await
-                    .map_err(|error| ("Video generation failed.", error))
-            }
-            // replace_person → native Wan-VACE (epic 3040, sc-3521): the `PersonReplace` job
-            // type (and `video_generate` mode=`replace_person`) shares the video handler, which
-            // dispatches on `mode == "replace_person"` to the engine `wan_vace` provider — the
-            // native equivalent of the torch `WanVACEPipeline` path. The API routes only
-            // MLX-eligible replace_person jobs here (`jobs_store::video_job_is_mlx_eligible`). The
-            // off-Mac candle lane serves eligible Wan-VACE/SCAIL-2 replacement; unsupported models
-            // are refused and remain queued.
-            JobType::PersonReplace => run_video_generate_job(api, settings, &job)
-                .await
-                .map_err(|error| ("Person replacement failed.", error)),
-            // Pure audio synthesis (SceneWorks Audio Studio, epic 13400 / sc-13404): Kokoro TTS (and
-            // future SFX/music) served in-process by the runtime's candle audio lane
-            // (`inference_runtime::load_audio` → `catalog().audio()`). Advertised only by a worker
-            // that links the audio registry (the macOS mlx worker, whose `runtime-macos` bundle ships
-            // it default-on); a worker without the lane never advertises `audio_generate`, so this arm
-            // is unreachable there and the job stays queued for a capable worker.
-            JobType::AudioGenerate => run_audio_generate_job(api, settings, &job)
-                .await
-                .map_err(|error| ("Audio generation failed.", error)),
-            // Native MLX LoRA/LoKr training (epic 3039, sc-3043/3049), served in-process
-            // by the linked mlx-gen engine on the macOS Apple-Silicon GPU worker. The API
-            // routes only MLX-native families here (jobs_store::training_job_is_mlx_eligible);
-            // unsupported shapes are refused and remain queued for a compatible native trainer.
-            // Off macOS the execute capability is advertised only by a linked native trainer.
-            JobType::LoraTrain => run_lora_train_job(api, settings, &job)
-                .await
-                .map_err(|error| ("LoRA training failed.", error)),
-            // ControlNet Training Studio (epic 10159, sc-10162): render the per-image control
-            // condition from the plan's dataset (A1/A2), then train the control branch through the
-            // same native executor as LoRA (`krea_control` → `krea_2_control`). Candle-only today; the
-            // routing gate keeps it on a candle worker (or the linked mlx build), the stub fails loudly
-            // elsewhere.
-            JobType::ControlTraining => {
-                control_training_jobs::run_control_training_job(api, settings, &job)
-                    .await
-                    .map_err(|error| ("ControlNet training failed.", error))
-            }
-            // Native MLX JoyCaption dataset captioning (epic 3550, sc-3556). The API
-            // routes only `captioner=joy_caption` jobs here; other captioners remain queued unless
-            // another compatible native captioner registers.
-            JobType::TrainingCaption => run_training_caption_job(api, settings, &job)
-                .await
-                .map_err(|error| ("Training captioning failed.", error)),
-            JobType::DatasetParquetImport => run_dataset_parquet_import_job(api, settings, &job)
-                .await
-                .map_err(|error| ("Parquet dataset import failed.", error)),
-            // Dataset Doctor CLIP-embedding analysis (sc-6535): the native MLX or Candle worker embeds
-            // every dataset image (clip_vit_l14) and POSTs the content-hash sidecar.
-            JobType::DatasetAnalysis => run_dataset_analysis_job(api, settings, &job)
-                .await
-                .map_err(|error| ("Dataset analysis failed.", error)),
-            JobType::CatalogAnalysis => run_catalog_analysis_job(api, settings, &job)
-                .await
-                .map_err(|error| ("Catalog analysis failed.", error)),
-            // Dataset Doctor face pass (sc-6538): the native SCRFD+ArcFace stack embeds the largest face of
-            // each Person-dataset image and POSTs the face sidecar. MLX on Mac (`mlx-gen-face`), candle on
-            // the candle lane; off both the handler returns a precise unsupported error.
-            JobType::DatasetFaceAnalysis => run_dataset_face_analysis_job(api, settings, &job)
-                .await
-                .map_err(|error| ("Dataset face analysis failed.", error)),
-            // Training subject masks (sc-2126): SAM3 "person" segmentation of every dataset image,
-            // POSTed to the mask sidecar. Routed by the `image_segment` capability; MLX on Mac, candle
-            // off-Mac; off both the handler returns a precise unsupported error.
-            JobType::DatasetSubjectMask => run_dataset_subject_mask_job(api, settings, &job)
-                .await
-                .map_err(|error| ("Subject mask generation failed.", error)),
-            // On-demand "compare image to another" likeness tool (sc-4415): scores a CANDIDATE asset
-            // against a SOURCE identity reference asset through the shared SCRFD+ArcFace scorer. MLX on Mac,
-            // candle off-Mac; off both the handler returns a precise unsupported error. Like the
-            // dataset-face pass, the job-type capability is gpu.rs-hardcoded (the face stack has no gen-core
-            // registry), so a job stays queued rather than mis-claimed where the stack isn't linked.
-            JobType::FaceLikenessCompare => run_face_likeness_compare_job(api, settings, &job)
-                .await
-                .map_err(|error| ("Face likeness compare failed.", error)),
-            // Native candle prompt refinement (epic 5095, sc-5525; consolidated onto candle-llm in sc-7404):
-            // routes `prompt_refine` to the candle `core_llm::TextLlm` provider (candle-llama, resolved
-            // model-first). The candle worker advertises `prompt_refine` only when `backend_candle_enabled`
-            // (engines::registry_capabilities from the registered core_llm provider); without a native
-            // text provider the capability is not advertised and the job remains queued.
-            JobType::PromptRefine => run_prompt_refine_job(api, settings, &job)
-                .await
-                .map_err(|error| ("Prompt refinement failed.", error)),
-            JobType::ModelDownload => run_model_download_job(api, settings, http_client, &job)
-                .await
-                .map_err(|error| ("Model download failed.", error)),
-            JobType::LoraImport => run_lora_import_job(api, settings, http_client, &job)
-                .await
-                .map_err(|error| ("LoRA import failed.", error)),
-            JobType::LoraDownload => run_lora_download_job(api, settings, http_client, &job)
-                .await
-                .map_err(|error| ("LoRA download failed.", error)),
-            JobType::ModelImport => run_model_import_job(api, settings, http_client, &job)
-                .await
-                .map_err(|error| ("Model import failed.", error)),
-            JobType::ModelConvert => run_model_convert_job(api, settings, &job)
-                .await
-                .map_err(|error| ("Model conversion failed.", error)),
-            JobType::FrameExtract => run_frame_extract_job(api, settings, &job)
-                .await
-                .map_err(|error| ("Frame extraction failed.", error)),
-            JobType::TimelineExport => run_timeline_export_job(api, settings, &job)
-                .await
-                .map_err(|error| ("Timeline export failed.", error)),
-            JobType::PersonDetect => run_person_detect_job(api, settings, &job)
-                .await
-                .map_err(|error| ("Person detection failed.", error)),
-            // DWPose whole-body pose detection (epic 3482, sc-3487 Mac / sc-5496 off-Mac):
-            // RTMW via onnxruntime, replacing the Python rtmlib path — CoreML EP on the
-            // macOS MLX worker, CUDA EP on the off-Mac candle GPU worker. Available on Mac
-            // AND the candle lane; on a candle-disabled box `PoseDetect` is never advertised, so the
-            // job remains queued and this falls to the `_` arm only if called defensively.
-            #[cfg(any(
-                target_os = "macos",
-                all(not(target_os = "macos"), feature = "backend-candle")
-            ))]
-            JobType::PoseDetect => run_pose_detect_job(api, settings, &job)
-                .await
-                .map_err(|error| ("Pose detection failed.", error)),
-            // SCRFD 5-point landmark extraction (epic 4422, sc-4433): native-MLX SCRFD on Mac + the candle
-            // SCRFD/ArcFace stack on the Windows/Linux candle lane (sc-5497, epic 5482), served in-process
-            // for the Key Point Library. Available on Mac AND the candle lane; on a candle-disabled box
-            // `KpsExtract` is never advertised, so the job remains queued and this falls to the `_` arm
-            // only if called defensively.
-            #[cfg(any(
-                target_os = "macos",
-                all(not(target_os = "macos"), feature = "backend-candle")
-            ))]
-            JobType::KpsExtract => run_kps_extract_job(api, settings, &job)
-                .await
-                .map_err(|error| ("Keypoint extraction failed.", error)),
-            // Image upscaling, served in-process by `upscale_jobs::run_image_upscale_job`: Real-ESRGAN
-            // RRDBNet x2/x4 via onnxruntime/CoreML (epic 3482, sc-3489, Mac) + SeedVR2 one-step diffusion
-            // (native MLX on Mac sc-4815 / candle CUDA on Windows sc-5928). Available on Mac AND the
-            // Windows/CUDA candle lane; on a build without either lane `ImageUpscale` is never advertised,
-            // so the job remains queued. The routing oracle admits only the engines each native lane serves.
-            #[cfg(any(
-                target_os = "macos",
-                all(not(target_os = "macos"), feature = "backend-candle")
-            ))]
-            JobType::ImageUpscale => run_image_upscale_job(api, settings, &job)
-                .await
-                .map_err(|error| ("Image upscale failed.", error)),
-            // Dataset Doctor one-tap upscale (sc-6539): Real-ESRGAN over flagged low-res items, then
-            // re-point each via the API. Same engine + worker lanes as image_upscale.
-            #[cfg(any(
-                target_os = "macos",
-                all(not(target_os = "macos"), feature = "backend-candle")
-            ))]
-            JobType::DatasetUpscale => run_dataset_upscale_job(api, settings, &job)
-                .await
-                .map_err(|error| ("Dataset upscale failed.", error)),
-            // Smart-select segmentation (epic 6087, sc-6105): native-MLX SAM3 box-prompt segmentation,
-            // served in-process by `segment_jobs::run_image_segment_job` — a box prompt → a binary
-            // inpaint mask asset for the Image Editor. Advertised by both native workers; Candle
-            // point prompts fail closed because the pinned provider exposes box PVS only.
-            #[cfg(any(
-                target_os = "macos",
-                all(not(target_os = "macos"), feature = "backend-candle")
-            ))]
-            JobType::ImageSegment => segment_jobs::run_image_segment_job(api, settings, &job)
-                .await
-                .map_err(|error| ("Smart-select segmentation failed.", error)),
-            // Iris-3B monocular depth (sc-25682): the `iris_3b_depth` task export on the native MLX
-            // worker (macOS) or the Candle worker (off-Mac); a build without either lane never
-            // advertises `image_depth`, so the job remains queued.
-            #[cfg(any(
-                target_os = "macos",
-                all(not(target_os = "macos"), feature = "backend-candle")
-            ))]
-            JobType::ImageDepth => depth_jobs::run_image_depth_job(api, settings, &job)
-                .await
-                .map_err(|error| ("Depth estimation failed.", error)),
-            // SeedVR2 video upscaling (epic 4811): one-step super-resolution — native MLX on Mac (sc-4816)
-            // / candle CUDA on Windows (sc-5928). SceneWorks' first video upscaler: decodes the source
-            // clip, runs the temporal-chunked 5D upscale, re-encodes, and passes the source audio through.
-            // Available on Mac + the Windows/CUDA candle lane; elsewhere `VideoUpscale` is never advertised
-            // (no torch path), so it falls to the `_` arm and the routing oracle reports it unsupported.
-            #[cfg(any(
-                target_os = "macos",
-                all(not(target_os = "macos"), feature = "backend-candle")
-            ))]
-            JobType::VideoUpscale => {
-                video_jobs::seedvr2::run_video_upscale_job(api, settings, &job)
-                    .await
-                    .map_err(|error| ("Video upscale failed.", error))
-            }
-            JobType::PersonTrack => run_person_track_job(api, settings, &job)
-                .await
-                .map_err(|error| ("Person tracking failed.", error)),
-            _ => {
-                let result = fail_job(
-                    api,
-                    &job.id,
-                    "No utility exists for this job type.",
-                    Some(format!(
-                        "Unsupported utility job type: {}",
-                        job.job_type.as_str()
-                    )),
-                )
-                .await;
-                result.map_err(|error| ("Utility job failed.", error))
-            }
-        };
-        // Success releases the operation-owned source sessions; failure re-probes the exact bound
-        // sources so a mid-load disconnect surfaces as the typed unavailable condition instead of
-        // a raw loader error (sc-19708). An error with the source still present stays verbatim.
-        match dispatch_result {
-            Ok(()) => source_guard
-                .finish_success()
-                .map_err(|error| ("Model source session cleanup failed.", error)),
-            Err((message, error)) => Err((message, source_guard.classify_failure(settings, error))),
-        }
-    })
-    .await;
-    if matches!(job.job_type, JobType::LoraImport | JobType::ModelImport) {
-        let _ = cleanup_uploaded_import_source(settings, &job.payload).await;
-    }
-    if let Err((message, error)) = result {
-        match error {
-            WorkerError::Canceled(_) => {}
-            error => {
-                // sc-16247: this detail is what `QueueScreen` renders as `job.error`, so it is the
-                // last point before a raw `DriverError(...)` reaches the user. `classify_engine_error`
-                // already annotates the lanes that route through it (the reported krea_2_turbo path),
-                // but ~35 other load seams build `WorkerError::Engine` directly — a host driver
-                // problem hits all of them identically. Annotating here catches every one, and is a
-                // no-op when the guidance is already present.
-                let original_detail = error.to_string();
-                let recovery_detail = if settings.gpu_id == "mlx" {
-                    mlx_worker_recovery::global().observe(&original_detail)
-                } else {
-                    None
-                };
-                if let Some(detail) = &recovery_detail {
-                    emit_event_value(
-                        Level::ERROR,
-                        json!({
-                            "event": "mlx_h3_i2v_worker_poisoned",
-                            "workerId": settings.worker_id,
-                            "gpuId": settings.gpu_id,
-                            "jobId": job.id,
-                            "originalError": original_detail,
-                            "jobError": detail,
-                        }),
-                    );
-                }
-                let poisoned = recovery_detail.is_some();
-                let detail = recovery_detail
-                    .unwrap_or_else(|| annotate_cuda_driver_failure(&original_detail));
-                if poisoned {
-                    // A clean child exit is not an abnormal death, so the supervisor deliberately
-                    // will not invent a second terminal attribution for it. Persist the original
-                    // timeout before arming that exit. Transport/API failures keep this process
-                    // quarantined and retry without claiming; shutdown cancellation stops the
-                    // retry and leaves the loop's no-claim backstop armed.
-                    let mut attempt = 0_u32;
-                    let _ = mlx_worker_recovery::persist_terminal_failure_with(
-                        mlx_worker_recovery::global(),
-                        || {
-                            attempt = attempt.saturating_add(1);
-                            let post_attempt = attempt;
-                            let detail = detail.clone();
-                            let job_id = job.id.clone();
-                            let shutdown = shutdown.clone();
-                            async move {
-                                let Err(terminal_error) =
-                                    fail_job(api, &job_id, message, Some(detail)).await
-                                else {
-                                    return mlx_worker_recovery::TerminalPersistenceAttempt::Persisted;
-                                };
-                                emit_event_value(
-                                    Level::ERROR,
-                                    json!({
-                                        "event": "mlx_h3_i2v_terminal_failure_retry",
-                                        "workerId": settings.worker_id,
-                                        "gpuId": settings.gpu_id,
-                                        "jobId": &job_id,
-                                        "attempt": post_attempt,
-                                        "error": terminal_error.to_string(),
-                                    }),
-                                );
-                                if shutdown.is_cancelled() {
-                                    return mlx_worker_recovery::TerminalPersistenceAttempt::Stop;
-                                }
-                                let _ = heartbeat_with_reason(
-                                    api,
-                                    settings,
-                                    WorkerStatus::Unhealthy,
-                                    Some(&job_id),
-                                    mlx_worker_recovery::global().quarantine_reason(),
-                                )
-                                .await;
-                                tokio::time::sleep(Duration::from_secs(
-                                    settings.poll_seconds.max(1),
-                                ))
-                                .await;
-                                mlx_worker_recovery::TerminalPersistenceAttempt::Retry
-                            }
-                        },
-                    )
-                    .await;
-                } else {
-                    let _ = fail_job(api, &job.id, message, Some(detail)).await;
-                }
-                tracing::error!(
-                    event = "utility_job_failed",
-                    jobId = %job.id,
-                    error = %error,
-                    "{message}"
-                );
-            }
-        }
-    }
-    // Capture + POST the run's hardware metrics for every job type — including
-    // failed/canceled runs, which still carry a meaningful peak + wall-clock
-    // (epic 10402, sc-10404). Best-effort: never fails the job.
-    let metrics = metrics_probe.finish().await;
-    job_metrics::post_generation_metrics(api, &job.id, &metrics).await;
-    // Do not advertise Idle after a poison latch. The next loop turn reports Unhealthy and exits
-    // before polling, so no scheduler observation can mistake this process for claimable between
-    // the active job's truthful failure and the supervisor's replacement.
-    if settings.gpu_id != "mlx" || mlx_worker_recovery::global().can_claim() {
-        let _ = heartbeat(api, settings, WorkerStatus::Idle, None).await;
-    }
-}
-
 async fn run_placeholder_job(
     api: &ApiClient,
     settings: &Settings,
@@ -2755,15 +2099,21 @@ fn progress_report_interval(settings: &Settings) -> Duration {
 }
 
 fn retry_delay(poll_seconds: u64, attempt: u32) -> u64 {
-    let multiplier = 2_u64.saturating_pow(attempt.saturating_sub(1).min(4));
-    poll_seconds.max(1).saturating_mul(multiplier).clamp(1, 30)
+    sceneworks_core::network_policy::retry_delay_seconds(poll_seconds, attempt)
 }
 
+#[cfg(test)]
+pub(crate) use tests::test_api_stub;
 #[cfg(test)]
 mod test_env;
 
 #[cfg(test)]
 mod iris_test_weights;
+
+// Synthetic dense MiniMax-H3 DiT import fixtures shared by the import-job and video-arm tests
+// (sc-26680).
+#[cfg(any(test, feature = "test-support"))]
+pub mod minimax_h3_import_fixture;
 
 // NTFS disk discipline for the multi-gigabyte weight fixtures (StorageFull incident, 2026-08-20).
 // The `set_len`-extended fixtures the memory gates need are holes on APFS/ext4 and FULL allocations
@@ -2803,3 +2153,49 @@ mod snapshot_install;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod cpu_preparation_startup_tests {
+    use super::*;
+    #[test]
+    fn cpu_preparation_startup_never_initializes_gpu_and_wrong_selection_refuses_first() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut settings = Settings::for_test(temporary.path().to_path_buf());
+        settings.gpu_id = "cpu".to_owned();
+        for scope in [
+            UtilityJobScope::All,
+            UtilityJobScope::Disabled,
+            UtilityJobScope::ModelDownload,
+        ] {
+            initialize_worker_gpu_with(&settings, scope, |_| {
+                panic!("CPU touched GPU memory initialization")
+            })
+            .unwrap();
+            assert!(!should_run_cuda_preflight(&settings));
+        }
+        for id in ["mlx", "0", "1", "auto", "CPU"] {
+            settings.gpu_id = id.to_owned();
+            assert!(initialize_worker_gpu_with(
+                &settings,
+                UtilityJobScope::ModelDownload,
+                |_| panic!("wrong selection touched GPU before refusal")
+            )
+            .is_err());
+            let calls = std::cell::Cell::new(0);
+            initialize_worker_gpu_with(&settings, UtilityJobScope::All, |bytes| {
+                assert_eq!(bytes, settings.gpu_memory_limit_bytes);
+                calls.set(calls.get() + 1);
+            })
+            .unwrap();
+            assert_eq!(calls.get(), 1);
+        }
+    }
+}
+
+mod weights_source;
+
+#[cfg(any(test, native_lane))]
+mod adapter_resolution;
+
+#[cfg(test)]
+mod source_tests;

@@ -1,3 +1,6 @@
+import { FakeEventSource } from "../testUtils/events.js";
+import { deferred } from "../testUtils/async.js";
+import { settle } from "../testUtils/dom.js";
 // sc-9750 (F-052 follow-up): focused unit coverage for the two hooks extracted from
 // App.jsx — useAccessGate (the remote-access gate + media-ticket mint) and useJobEvents
 // (the live job/worker/queue SSE stream). The App.*.test.jsx suite already exercises
@@ -88,37 +91,11 @@ vi.mock("../runtime.js", async (importOriginal) => {
 
 // A minimal FakeEventSource capturing listeners so tests can dispatch SSE events, plus
 // close() bookkeeping so the effect-cleanup assertion has something to check.
-class FakeEventSource {
-  static instances = [];
-  constructor(url) {
-    this.url = url;
-    this.listeners = {};
-    this.closed = false;
-    FakeEventSource.instances.push(this);
-  }
-  addEventListener(event, handler) {
-    this.listeners[event] = handler;
-  }
-  close() {
-    this.closed = true;
-  }
-}
 
-function deferred() {
-  let resolve;
-  const promise = new Promise((nextResolve) => {
-    resolve = nextResolve;
-  });
-  return { promise, resolve };
-}
 
-async function settle() {
-  await act(async () => {
-    for (let i = 0; i < 6; i += 1) {
-      await Promise.resolve();
-    }
-  });
-}
+
+
+
 
 describe("useAccessGate (sc-9750)", () => {
   let container;
@@ -209,6 +186,28 @@ describe("useAccessGate (sc-9750)", () => {
     // Mint succeeded → ready flips true and the ticket is stored.
     expect(get().api.ready).toBe(true);
     expect(setMediaTicketSpy).toHaveBeenCalledWith("media-1");
+  });
+
+  it("renews its own ticket and re-renders the gate when absolute expiry rotates it", async () => {
+    vi.useFakeTimers();
+    try {
+      window.localStorage.setItem("sceneworks-token", "remote-token");
+      apiResponders.set("/api/v1/access", { authRequired: true });
+      apiResponders.set("/api/v1/auth/verify", { ok: true });
+      let mints = 0;
+      apiResponders.set("/api/v1/files/ticket", () => ({ ticket: `client-${++mints}`, expiresInSeconds: 15 }));
+      const { get } = mount();
+      await settle();
+      const firstRender = get();
+      await act(async () => vi.advanceTimersByTime(5000));
+      await settle();
+      const calls = apiFetch.mock.calls.filter(([path]) => path === "/api/v1/files/ticket");
+      expect(calls.at(-1)[2].headers["X-SceneWorks-Media-Ticket"]).toBe("client-1");
+      expect(calls.at(-1)[2].body).toBe("{}");
+      expect(setMediaTicketSpy).toHaveBeenLastCalledWith("client-2");
+      expect(get()).not.toBe(firstRender);
+      expect(get().api.ready).toBe(true);
+    } finally { vi.useRealTimers(); }
   });
 
   it("pauses media-ticket refresh while hidden and leaves one timer after visibility churn", async () => {
@@ -1114,7 +1113,7 @@ describe("useJobEvents (sc-9750)", () => {
   });
 
   // A superset of the hook's props with stable no-op stand-ins; a test overrides only
-  // what it asserts on. Refs mirror how App feeds live handles into the handlers.
+  // what it asserts on. Refresh callbacks follow the committed App domain owners.
   function baseProps(overrides = {}) {
     return {
       access: { authRequired: false },
@@ -1129,10 +1128,10 @@ describe("useJobEvents (sc-9750)", () => {
       pushNotice: () => {},
       dismissNoticeKind: () => {},
       generatedAssetRefreshesRef: { current: new Map() },
-      refreshAssetsRef: { current: () => {} },
-      refreshModelsRef: { current: () => {} },
-      refreshModelAndLorasRef: { current: () => {} },
-      refreshPersonTracksRef: { current: () => {} },
+      refreshAssets: () => {},
+      refreshModels: () => {},
+      refreshModelAndLoras: () => {},
+      refreshPersonTracks: () => {},
       activeProjectRef: { current: null },
       enqueueTimelineGenerationApply: () => {},
       hasVisibleLocalFailure: () => false,
@@ -1152,6 +1151,22 @@ describe("useJobEvents (sc-9750)", () => {
     act(() => root.render(<Harness />));
     return { setProps: (next) => act(() => setProps(next)) };
   }
+
+  it("aborts a pending ticket and suppresses teardown errors", async () => {
+    let rejectTicket;
+    const errors = [];
+    apiResponders.set("/api/v1/jobs/events/ticket", () => new Promise((_, reject) => { rejectTicket = reject; }));
+    mount(baseProps({ access: { authRequired: true }, token: "token", setError: (message) => errors.push(message) }));
+    const signal = apiFetch.mock.calls.at(-1)[2].signal;
+    expect(signal.aborted).toBe(false);
+    act(() => root.unmount());
+    root = null;
+    expect(signal.aborted).toBe(true);
+    rejectTicket(new Error("aborted"));
+    await settle();
+    expect(errors).toEqual([]);
+    expect(FakeEventSource.instances).toHaveLength(0);
+  });
 
   // sc-15105: the SSE ticket POST is a gated route, so a mid-session password rotation
   // 401s it too. It used to push the raw "SceneWorks access token required" into the error
@@ -1207,6 +1222,34 @@ describe("useJobEvents (sc-9750)", () => {
     expect(FakeEventSource.instances.length).toBe(1);
   });
 
+  it("keeps SSE refresh callbacks on committed owners across a suspended transition", async () => {
+    const a = vi.fn();
+    const b = vi.fn();
+    const props = baseProps({ refreshAssets: a });
+    const pending = new Promise(() => {});
+    function Owner({ refreshAssets, suspend }) {
+      useJobEvents({ ...props, refreshAssets });
+      if (suspend) throw pending;
+      return null;
+    }
+    const view = (callback, suspend = false) => <React.Suspense fallback="loading"><Owner refreshAssets={callback} suspend={suspend} /></React.Suspense>;
+    root = createRoot(container);
+    await act(async () => root.render(view(a)));
+    await settle();
+    const source = FakeEventSource.instances[0];
+    await act(async () => React.startTransition(() => root.render(view(b, true))));
+    const event = (id) => act(() => source.listeners["job.updated"]({ data: JSON.stringify({
+      id, projectId: "p", status: "running", result: { generationSetId: id, assetIds: [id] },
+    }) }));
+    event("suspended");
+    expect(a).toHaveBeenCalledWith("p");
+    expect(b).not.toHaveBeenCalled();
+    await act(async () => root.render(view(b)));
+    event("committed");
+    expect(b).toHaveBeenCalledWith("p");
+    expect(FakeEventSource.instances).toHaveLength(1);
+  });
+
   it("routes job.updated through setJobs and refreshes generated assets", async () => {
     const jobs = [];
     const refreshedProjects = [];
@@ -1215,7 +1258,7 @@ describe("useJobEvents (sc-9750)", () => {
         jobs.length = 0;
         jobs.push(...updater([]));
       },
-      refreshAssetsRef: { current: (projectId) => refreshedProjects.push(projectId) },
+      refreshAssets: (projectId) => refreshedProjects.push(projectId),
     });
     mount(props);
     await settle();
@@ -1499,9 +1542,9 @@ describe("useJobEvents (sc-9750)", () => {
         jobs = updater(jobs);
         jobsRef.current = jobs;
       },
-      refreshModelsRef: { current: refreshData },
-      refreshModelAndLorasRef: { current: () => {} },
-      refreshAssetsRef: { current: refreshAssets },
+      refreshModels: refreshData,
+      refreshModelAndLoras: () => {},
+      refreshAssets: refreshAssets,
       enqueueTimelineGenerationApply: applyTimeline,
       pushNotice,
     }));
@@ -1666,7 +1709,7 @@ describe("useJobEvents (sc-9750)", () => {
         jobs = updater(jobs);
         jobsRef.current = jobs;
       },
-      refreshAssetsRef: { current: refreshAssets },
+      refreshAssets: refreshAssets,
       enqueueTimelineGenerationApply: applyTimeline,
     }));
     await settle();
@@ -1720,7 +1763,7 @@ describe("useJobEvents (sc-9750)", () => {
         jobs = updater(jobs);
         jobsRef.current = jobs;
       },
-      refreshAssetsRef: { current: refreshAssets },
+      refreshAssets: refreshAssets,
       enqueueTimelineGenerationApply: applyTimeline,
     }));
     await settle();
@@ -1761,7 +1804,7 @@ describe("useJobEvents (sc-9750)", () => {
         jobs = updater(jobs);
         jobsRef.current = jobs;
       },
-      refreshAssetsRef: { current: refreshAssets },
+      refreshAssets: refreshAssets,
       enqueueTimelineGenerationApply: applyTimeline,
     }));
     await settle();

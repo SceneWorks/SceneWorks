@@ -4,6 +4,15 @@
 //! (submit-time field errors) and the worker (preflight + engine mapping) share, and the auxiliary
 //! catalog models the technique needs installed.
 
+/// Every advanced technique key parsed by this module.
+pub const TECHNIQUE_KEYS: &[&str] = &[
+    DEPTH_ANCHORING_WEIGHT_KEY,
+    DEPTH_ANCHORING_MODEL_KEY,
+    DEPTH_ANCHORING_MIN_T_KEY,
+    DEPTH_ANCHORING_MAX_T_KEY,
+    DEPTH_ANCHORING_EVERY_KEY,
+];
+
 use serde_json::Value;
 
 use super::{technique_value, TrainingConfig, TrainingPlanError, TrainingTarget};
@@ -57,7 +66,7 @@ pub fn target_supports_depth_anchoring(target: &TrainingTarget) -> bool {
         == Some(true)
 }
 
-/// The LTX-2.5 workflows (`advanced.ltxWorkflow`, web: `depthAnchoringNoVideoLtxWorkflows`) that
+/// The LTX-2.5 workflows (`advanced.ltxWorkflow`, advertised in the target UI contract) that
 /// generate no video stream — audio-only, or video as frozen conditioning — so there is no x0 video
 /// latent to decode; the engine's LTX-2.5 trainers refuse depth anchoring for them (sc-24830).
 pub const DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS: [&str; 6] = [

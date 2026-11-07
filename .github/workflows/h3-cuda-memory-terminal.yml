@@ -1,0 +1,136 @@
+name: H3 CUDA long-clip memory acceptance
+
+# Same-ref callable ONLY from the existing explicit manual dispatch bridge.
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  anchors:
+    if: ${{ github.event_name == 'workflow_dispatch' && fromJSON(inputs.plan).stationary_pair_authorized == true }}
+    runs-on: ${{ fromJSON(format('["self-hosted","Windows","X64","cuda","real-weights","{0}"]', fromJSON(inputs.plan).expectedRunner)) }}
+    # Preserve the existing serialized lane for either explicitly selected GPU.
+    concurrency:
+      group: windows-candle-gpu-real-weights
+      cancel-in-progress: false
+    timeout-minutes: ${{ fromJSON(inputs.plan).mode == 'matched-resident-control' && 180 || fromJSON(inputs.plan).additionalSparse24 == true && 600 || 360 }}
+    env:
+      SW_F329_PLAN: ${{ inputs.plan }}
+      H3_CONTROLLER_AUTHORIZED_PAIR: ${{ format('{0}:{1}', fromJSON(inputs.plan).sceneworks, fromJSON(inputs.plan).inference) }}
+      H3_TERMINAL_AUTHORIZED_PAIR: ${{ fromJSON(inputs.plan).mode == 'matched-resident-control' && 'c8815c7cd46feba2f82562a315d1a44a6c88a9e8:2ff0353820e370d004305ae99a035ab38b93de30' || format('{0}:{1}', fromJSON(inputs.plan).sceneworks, fromJSON(inputs.plan).inference) }}
+      CARGO_BUILD_JOBS: '4'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CUDA_COMPUTE_CAP: '120'
+      CUDA_PATH: 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9'
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ fromJSON(inputs.plan).sceneworks }}
+          path: sceneworks
+          fetch-depth: 128
+          persist-credentials: false
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          repository: SceneWorks/inference
+          ref: ${{ fromJSON(inputs.plan).inference }}
+          path: inference
+          fetch-depth: 128
+          persist-credentials: false
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        if: ${{ fromJSON(inputs.plan).mode == 'matched-resident-control' }}
+        with:
+          ref: c8815c7cd46feba2f82562a315d1a44a6c88a9e8
+          path: runtime-sceneworks
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        if: ${{ fromJSON(inputs.plan).mode == 'matched-resident-control' }}
+        with:
+          repository: SceneWorks/inference
+          ref: 2ff0353820e370d004305ae99a035ab38b93de30
+          path: runtime-inference
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require final source pair and private Windows output roots before setup
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $p = $env:SW_F329_PLAN | ConvertFrom-Json
+          $selectionJson = node sceneworks/scripts/h3-cuda-memory-terminal.mjs device
+          if ($LASTEXITCODE -ne 0) { throw 'invalid explicit physical GPU selection' }
+          $selection = $selectionJson | ConvertFrom-Json
+          if ($env:GITHUB_SHA -ne $p.sceneworks) { throw 'dispatch source differs from frozen SceneWorks candidate' }
+          if ($env:RUNNER_NAME -ne $p.expectedRunner) { throw 'unexpected real-weights listener' }
+          if ((git -C sceneworks rev-parse HEAD) -ne $p.sceneworks -or (git -C inference rev-parse HEAD) -ne $p.inference) { throw 'checkout source mismatch' }
+          git -C inference fetch --no-tags origin main
+          if ($LASTEXITCODE -ne 0) { throw 'cannot verify inference main' }
+          if ($p.mode -eq 'matched-resident-control') {
+            git -C sceneworks fetch --no-tags origin c8815c7cd46feba2f82562a315d1a44a6c88a9e8
+            if ($LASTEXITCODE -ne 0) { throw 'cannot verify original common JS closure' }
+            git -C runtime-inference fetch --no-tags origin main
+            if ($LASTEXITCODE -ne 0) { throw 'cannot verify immutable runtime inference ancestry' }
+          }
+          $scope = if ($p.mode -eq 'matched-resident-control') { 'matched-resident-control' } else { 'acceptance' }
+          $root = "D:\Codex\work\sw-f329-$scope-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          if (Test-Path -LiteralPath $root) { throw 'refusing to overwrite prior acceptance output' }
+          $tempRoot = "$root-temp"
+          New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+          $uuid = (nvidia-smi -i $selection.physicalGpuIndex --query-gpu=uuid --format=csv,noheader,nounits).Trim()
+          if ($LASTEXITCODE -ne 0 -or $uuid -cne $selection.physicalGpuUuid) { throw 'selected physical GPU UUID unavailable' }
+          $encoding = [System.Text.UTF8Encoding]::new($false)
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "SW_F329_OUTPUT=$root`nTEMP=$tempRoot`nTMP=$tempRoot`nCUDA_VISIBLE_DEVICES=$uuid`nCUDA_DEVICE_ORDER=PCI_BUS_ID`nSCENEWORKS_GPU_ID=$($selection.physicalGpuIndex)`n", $encoding)
+      - name: Check script entry point and pure refusal contracts before native/model setup
+        working-directory: sceneworks
+        shell: cmd
+        run: |
+          node --check scripts\h3-cuda-memory-terminal.mjs
+          if errorlevel 1 exit /b %ERRORLEVEL%
+          node scripts\h3-cuda-memory-terminal.mjs check
+          if errorlevel 1 exit /b %ERRORLEVEL%
+          node --test scripts\h3-cuda-memory-terminal.test.mjs
+          if errorlevel 1 exit /b %ERRORLEVEL%
+          node --check scripts\h3-matched-resident-control.mjs
+          if errorlevel 1 exit /b %ERRORLEVEL%
+          node --test scripts\h3-matched-resident-control.test.mjs
+          if errorlevel 1 exit /b %ERRORLEVEL%
+          python scripts\h3-cuda-memory-lease.test.py
+      - name: Execute the selected stationary campaign or explicit matched Resident control
+        working-directory: sceneworks
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b %ERRORLEVEL%
+          where ffmpeg
+          if errorlevel 1 exit /b %ERRORLEVEL%
+          where ffprobe
+          if errorlevel 1 exit /b %ERRORLEVEL%
+          python scripts\h3-cuda-memory-lease.py "%GITHUB_WORKSPACE%\sceneworks" "%GITHUB_WORKSPACE%\inference" "%SW_F329_OUTPUT%"
+      - name: Keep output, source, allocation, numerical and media evidence
+        if: always() && env.SW_F329_OUTPUT != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sw-f329-${{ fromJSON(inputs.plan).mode == 'matched-resident-control' && 'matched-resident-control' || 'cuda-memory-acceptance' }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.SW_F329_OUTPUT }}/*.json
+            ${{ env.SW_F329_OUTPUT }}-lease/*.json
+            ${{ env.SW_F329_OUTPUT }}-lease/*.log
+            ${{ env.SW_F329_OUTPUT }}/workstation-veda/*.json
+            ${{ env.SW_F329_OUTPUT }}/workstation-veda/original/**/*.json
+            ${{ env.SW_F329_OUTPUT }}/workstation-veda/*.log
+            ${{ env.SW_F329_OUTPUT }}/workstation-veda/*.mp4
+            ${{ env.SW_F329_OUTPUT }}/24gib-veda-dense/*.json
+            ${{ env.SW_F329_OUTPUT }}/24gib-veda-dense/*.log
+            ${{ env.SW_F329_OUTPUT }}/24gib-veda-dense/*.mp4
+            ${{ env.SW_F329_OUTPUT }}/24gib-veda-sparse/*.json
+            ${{ env.SW_F329_OUTPUT }}/24gib-veda-sparse/*.log
+            ${{ env.SW_F329_OUTPUT }}/24gib-veda-sparse/*.mp4
+            ${{ env.SW_F329_OUTPUT }}/matched-resident-control/*.json
+            ${{ env.SW_F329_OUTPUT }}/matched-resident-control/*.log
+            ${{ env.SW_F329_OUTPUT }}/matched-resident-control/*.mp4
+          if-no-files-found: error

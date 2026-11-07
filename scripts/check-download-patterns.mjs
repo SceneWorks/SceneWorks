@@ -202,9 +202,10 @@ export const KNOWN_ZERO_MATCHES = [];
 // pass, each instance now has an owner, a reason, and a story that CANNOT be closed without
 // deleting its waiver — the gate reds if the condition clears and reds if the entry moves.
 //
-// sc-18923 paid both gated-LoRA debts, and sc-18926 paid the last redirect debt, so there are no
-// production repo-condition waivers. New gated or redirected catalog sources hard-fail unless a
-// new live owner and explicit rationale are added here.
+// sc-18923 paid both gated-LoRA debts, and sc-18926 paid the last redirect debt. New gated or
+// redirected catalog sources hard-fail unless a new live owner and explicit rationale are added
+// here. Whole-repo downloads (files: []) make no selective pattern claim: FLUX 3 keeps its real
+// gated/credential declaration, but needs no pattern-evidence row or orphan selective waiver.
 export const KNOWN_REPO_CONDITIONS = [];
 
 const REPO_CONDITION_KINDS = new Set(["evidence-gated", "evidence-repo-id-mismatch"]);

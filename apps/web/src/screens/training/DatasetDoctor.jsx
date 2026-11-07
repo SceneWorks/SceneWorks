@@ -1,4 +1,6 @@
 import React from "react";
+import { createPortal } from "react-dom";
+import { errorMessage } from "../../errorMessage.js";
 
 import {
   aestheticScore,
@@ -109,9 +111,9 @@ export function ReadinessFlagDetails({ entry, onToggle }) {
 // group — the specific other photos it refers to, shown as thumbnails with a similarity label —
 // instead of an anonymous count, so the user can decide which to keep. `renderThumbnail(itemId)` is
 // a render-prop: the parent owns image URLs (this file stays presentational, like the rest of it).
-// `onRemoveDuplicates` reuses the one-tap dedupe action, scoped to the cluster's removable subset
-// (exact/pHash copies); a pure-CLIP cluster is legitimate variety and carries no remove button.
-export function NearDuplicateClusters({ report, renderThumbnail, onRemoveDuplicates }) {
+// Automatic dedupe remains scoped to exact/pHash copies. Manual selection is available for
+// every group, including CLIP similarity, so the user can choose which photos to keep.
+export function NearDuplicateClusters({ report, ...props }) {
   const clusters = nearDuplicateClusters(report);
   if (!clusters.length) {
     return null;
@@ -119,33 +121,116 @@ export function NearDuplicateClusters({ report, renderThumbnail, onRemoveDuplica
   return (
     <div className="dataset-doctor-nearups" aria-label="Near-duplicate groups">
       {clusters.map((cluster, index) => (
-        <div
-          className={`dataset-doctor-nearup kind-${cluster.kind}`}
+        <NearDuplicateGroup
           key={cluster.itemIds.join("+") || index}
-        >
-          <div className="dataset-doctor-nearup-head">
-            <span className="dataset-doctor-nearup-label">{nearDuplicateClusterLabel(cluster)}</span>
-            {cluster.removableItemIds.length && typeof onRemoveDuplicates === "function" ? (
-              <button
-                type="button"
-                className="secondary-action"
-                onClick={() => onRemoveDuplicates(cluster.removableItemIds)}
-              >
-                Remove {cluster.removableItemIds.length}{" "}
-                {cluster.removableItemIds.length === 1 ? "extra" : "extras"} (keeps the sharpest)
-              </button>
-            ) : null}
-          </div>
-          <div className="dataset-doctor-nearup-thumbs">
-            {cluster.itemIds.map((itemId) => (
-              <span className="dataset-doctor-nearup-thumb" key={itemId} title={itemId}>
-                {typeof renderThumbnail === "function" ? renderThumbnail(itemId) : null}
-              </span>
-            ))}
-          </div>
-        </div>
+          cluster={cluster}
+          {...props}
+        />
       ))}
     </div>
+  );
+}
+
+function NearDuplicateGroup({ cluster, renderThumbnail, itemLabel = (id) => id, onRemoveDuplicates, onDeleteSelected, busy = false }) {
+  const [selected, setSelected] = React.useState(new Set());
+  const [deleting, setDeleting] = React.useState(false);
+  const [error, setError] = React.useState("");
+  const canSelect = typeof onDeleteSelected === "function";
+  const disabled = busy || deleting;
+  const selectedIds = cluster.itemIds.filter((id) => selected.has(id));
+
+  async function deleteSelected() {
+    if (disabled || !selectedIds.length) return;
+    setDeleting(true);
+    setError("");
+    try {
+      const result = await onDeleteSelected(selectedIds);
+      if (result !== false) setSelected(new Set());
+    } catch (error) {
+      setError(errorMessage(error, "Could not delete the selected images."));
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  return (
+    <div className={`dataset-doctor-nearup kind-${cluster.kind}`} role="group" aria-label={nearDuplicateClusterLabel(cluster)}>
+      <div className="dataset-doctor-nearup-head">
+        <span className="dataset-doctor-nearup-label">{nearDuplicateClusterLabel(cluster)}</span>
+        <div className="dataset-doctor-nearup-actions">
+          {cluster.removableItemIds.length && typeof onRemoveDuplicates === "function" ? (
+            <button type="button" className="secondary-action" disabled={disabled} onClick={() => onRemoveDuplicates(cluster.removableItemIds)}>
+              Remove {cluster.removableItemIds.length}{" "}
+              {cluster.removableItemIds.length === 1 ? "extra" : "extras"} (keeps the sharpest)
+            </button>
+          ) : null}
+          {canSelect ? (
+            <button type="button" className="secondary-action" disabled={disabled || !selectedIds.length} onClick={deleteSelected}
+              title="Delete selected images from this dataset. Library originals are kept.">
+              {deleting ? "Deleting…" : `Delete selected (${selectedIds.length})`}
+            </button>
+          ) : null}
+        </div>
+      </div>
+      <div className="dataset-doctor-nearup-thumbs">
+        {cluster.itemIds.map((itemId) => (
+          <NearDuplicateThumbnail key={itemId} label={itemLabel(itemId)} selected={selected.has(itemId)}
+            disabled={disabled} selectable={canSelect}
+            onToggle={() => setSelected((current) => {
+              const next = new Set(current);
+              if (next.has(itemId)) next.delete(itemId);
+              else next.add(itemId);
+              return next;
+            })}
+            renderThumbnail={() => renderThumbnail?.(itemId)} />
+        ))}
+      </div>
+      {error ? <div role="alert">{error}</div> : null}
+    </div>
+  );
+}
+
+const NEAR_DUPLICATE_PREVIEW_SIZE = 48 * 4;
+
+function NearDuplicateThumbnail({ label, selected, disabled, selectable, onToggle, renderThumbnail }) {
+  const [preview, setPreview] = React.useState(null);
+  function showPreview(event) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const size = Math.min(NEAR_DUPLICATE_PREVIEW_SIZE, window.innerWidth - 16, window.innerHeight - 16);
+    const below = rect.bottom + 8;
+    setPreview({
+      width: size,
+      height: size,
+      left: Math.max(8, Math.min(rect.left + rect.width / 2 - size / 2, window.innerWidth - size - 8)),
+      top: below + size <= window.innerHeight - 8 ? below : Math.max(8, rect.top - size - 8),
+    });
+  }
+  const showingPreview = preview !== null;
+  React.useEffect(() => {
+    if (!showingPreview) return;
+    const hide = () => setPreview(null);
+    window.addEventListener("scroll", hide, true);
+    window.addEventListener("resize", hide);
+    return () => {
+      window.removeEventListener("scroll", hide, true);
+      window.removeEventListener("resize", hide);
+    };
+  }, [showingPreview]);
+
+  return (
+    <label className={`dataset-doctor-nearup-thumb${selected ? " selected" : ""}`}
+      tabIndex={selectable ? undefined : 0} aria-label={selectable ? undefined : label}
+      onMouseEnter={showPreview} onMouseLeave={() => setPreview(null)}
+      onFocus={showPreview} onBlur={() => setPreview(null)}
+      onKeyDown={(event) => { if (event.key === "Escape") setPreview(null); }}>
+      {renderThumbnail()}
+      {selectable ? <input type="checkbox" checked={selected} disabled={disabled} onChange={onToggle} aria-label={`Select ${label}`} /> : null}
+      {preview ? createPortal(
+        <div className="dataset-doctor-nearup-preview" style={preview} role="img" aria-label={`Preview of ${label}`}>
+          {renderThumbnail()}
+        </div>, document.body,
+      ) : null}
+    </label>
   );
 }
 

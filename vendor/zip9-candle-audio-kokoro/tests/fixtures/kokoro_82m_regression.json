@@ -1,0 +1,30 @@
+{
+  "_doc": "Kokoro-82M regression fixture (sc-12854): deterministic request -> metric envelope + PCM repeatability hash. Numbers only — generated media stays out of git. The metric envelope bands gate EVERY run on EVERY backend (CPU/Metal/CUDA) and EVERY build profile — they are backend-agnostic acoustic properties (duration/LUFS/dBTP/clipping/rate/channels). The committed PCM hashes are a CPU determinism gate: candle's Metal/CUDA kernels are not bit-identical to CPU, so they are asserted exactly ONLY on a CPU build on the canonical platform (macos/aarch64) and reported (with intra-process repeatability still asserted) on GPU builds / other platforms (sc-13928). So on `--features metal`/`cuda` the envelope + intra-process repeatability are the drift gate. Regenerate by running the test with --nocapture and reviewing the printed measurements.",
+  "_measured_reference": {
+    "opt0": "4 independent processes x 3 runs each on macos/aarch64 (Candle CPU, dev profile = opt-level 0), 2026-07-18: duration 3.175s, -25.93 LUFS, -9.50 dBTP, 0 clipped, identical hash in all 12 runs; first-run latency 3.96-4.03s, steady 3.19-3.27s, warmup overhead ~0.74-0.78s, peak RSS ~1007-1011 MiB.",
+    "opt3": "4 independent processes on nax-macos, the real-weights runner itself (Candle CPU, release profile = opt-level 3), 2026-08-02: identical hash in every process, metric envelope satisfied on every run, and the same acoustic values as opt0 — duration 3.175s, -25.93 LUFS, -9.50 dBTP, 0 clipped. Test-body wall 9.7-13.1s against 35.3-40.7s for the same test at opt-level 0 on the same box under the same live-CI load, i.e. ~3x (the spread is contention, so treat 3x as the conservative figure rather than the 3.6x best case). Beyond the fixture, these were also run in release on the same box and passed: `kokoro_conformance` and `kokoro_wav_conformance` (the frame-RMS CV / voiced-periodicity speech-shape gates the envelope alone does not cover), and the whole candle-audio-asr family including `whisper_transcribes_kokoro_roundtrip_within_cer`, the greedy-argmax CER gate where a numerically shifted logit could have flipped a discrete decision. It did not."
+  },
+  "model": "kokoro_82m",
+  "script": "The quick brown fox jumps over the lazy dog.",
+  "voice": "af_heart",
+  "language": "en",
+  "seed": 42,
+  "runs": 3,
+  "envelope": {
+    "sample_rate": 24000,
+    "channels": 1,
+    "min_duration_secs": 2.8,
+    "max_duration_secs": 3.6,
+    "min_integrated_lufs": -28.0,
+    "max_integrated_lufs": -23.5,
+    "max_true_peak_dbtp": -7.0,
+    "max_clipped_samples": 0
+  },
+  "repeatability": {
+    "_doc": "sc-17004: the exact-hash tuple is (backend, os, arch, OPT-LEVEL). The PCM bits differ between an unoptimized and an optimized build of this workspace's own crates, so one committed hash cannot gate both — which is why the lane could not simply be switched to --release. Measured on nax-macos (the real-weights runner) 2026-08-02: `cargo test` => opt0 hash; `cargo test --release` => opt3 hash; and `CARGO_PROFILE_DEV_OPT_LEVEL=3 cargo test`, which raises opt-level while leaving debug_assertions ON, => the opt3 hash. That third run isolates OPT-LEVEL, not debug_assertions, as the causal variable. Both hashes reproduce across independent processes (12x opt0, 4x opt3) and the two are acoustically indistinguishable — identical duration, LUFS, dBTP and clipping — so the difference is confined to the low bits. WHICH codegen transform is responsible has NOT been isolated; do not repeat the plausible-sounding guess that it is FMA contraction, because it is not: rustc leaves FP contraction off and `a * b + c` still emits separate `fmul`/`fadd` at `-C opt-level=3` on aarch64-apple-darwin (checked against this repo's pinned rustc 1.96.0). Scope note: `[profile.dev.package.\"*\"] opt-level = 3` applies to registry DEPENDENCIES only, not to workspace members, so candle is identical in both profiles while `candle-audio-kokoro` AND its `candle-audio` host-DSP dependency are both unoptimized in dev.",
+    "os": "macos",
+    "arch": "aarch64",
+    "pcm_sha256_opt0": "e358255a6058b8490bd73c7799ad12a1b0d3a20f7393278983f30e77831076a3",
+    "pcm_sha256_opt3": "02b9ba0b67070a5ccadf7dd1f0f253f13d442436f93cfcc1dc151f8771493ed6"
+  }
+}

@@ -35,16 +35,16 @@
 //! whenever someone adds a knob to one of the studio's job builders. A deny-list leaks every
 //! future field by default, so [`ADVANCED_KEY_RULES`] classifies every key those builders can
 //! emit and anything unclassified is dropped. `crates/sceneworks-core/tests/workflow_share.rs`
-//! parses each builder named in [`ADVANCED_BUILDERS`] and fails the build when a key is neither
+//! parses each builder named in `tests/common/workflow_registry.rs::ADVANCED_BUILDERS` and fails the build when a key is neither
 //! allow-listed nor explicitly denied — a new knob can neither silently leak nor silently vanish.
 //!
 //! sc-15946 shipped that lint against ONE builder on the premise that it was the only one. It was
 //! not: sc-15948 found a second (`buildDetailJobBody`, whose `cnScale` was being dropped) and then
 //! two more (the character lane's `angleSet`, the interleave lane's `systemMessage` /
 //! `imageGuidanceScale`). A lint that is bolted on per discovery closes no class, so
-//! [`ADVANCED_BUILDERS`] is a registry the lint ENUMERATES, and the same test walks
+//! `tests/common/workflow_registry.rs::ADVANCED_BUILDERS` is a registry the lint ENUMERATES, and the same test walks
 //! `apps/web/src` for anything that builds an `advanced` map and refuses to pass while one is in
-//! neither the registry nor [`DEFERRED_ADVANCED_BUILDERS`].
+//! neither the registry nor `DEFERRED_ADVANCED_BUILDERS` in that test registry.
 //!
 //! The line between in and out is *what to make* vs *what this machine can afford*:
 //! sampler / steps / guidance / PiD describe the intended output and travel; quant tier,
@@ -482,7 +482,7 @@ pub enum AdvancedDisposition {
 
 /// Which builder a rule is held accountable to, so the coverage lint knows what JS to read.
 ///
-/// Every variant except [`Self::Server`] names exactly one entry in [`ADVANCED_BUILDERS`], and
+/// Every variant except [`Self::Server`] names exactly one entry in `tests/common/workflow_registry.rs::ADVANCED_BUILDERS`, and
 /// the lint asserts that correspondence in both directions — a variant with no registry entry, or
 /// a registry entry with no variant, fails. That is what makes adding a builder a decision rather
 /// than an omission.
@@ -495,6 +495,10 @@ pub enum AdvancedDisposition {
 pub enum AdvancedKeySource {
     /// `buildImageJobAdvanced` — the Image Studio's ~30-knob builder.
     StudioBuilder,
+    /// The shared MOSS edit controls, also used by the eager Library/editor request builder.
+    MossEditBuilder,
+    /// `imageRecipeRequest` — replays persisted adapter settings without authoring new controls.
+    ImageRecipeReplayBuilder,
     /// `buildEditJobBody` — the Image Editor's prompt-edit body (sc-15948 follow-up: it emits
     /// `advanced.guidanceScale` and feeds an embedding lane, so it is registered even though
     /// every key it emits was already classified).
@@ -544,15 +548,17 @@ pub enum AdvancedKeySource {
     VideoUpscaleBuilder,
     /// Stamped onto `advanced` by the API after the request arrives (recipe-preset resolution
     /// in `apps/rust-api/src/generation.rs`). Classified here for the record; the lint does
-    /// not expect to find them in the JS, and no [`ADVANCED_BUILDERS`] entry claims it.
+    /// not expect to find them in the JS, and no `tests/common/workflow_registry.rs::ADVANCED_BUILDERS` entry claims it.
     Server,
 }
 
 impl AdvancedKeySource {
     /// Every variant, so the lint can assert the registry covers them all. A new variant that
-    /// nobody registered fails [`ADVANCED_BUILDERS`]'s round-trip test.
+    /// nobody registered fails `tests/common/workflow_registry.rs::ADVANCED_BUILDERS`'s round-trip test.
     pub const ALL: &'static [Self] = &[
         Self::StudioBuilder,
+        Self::MossEditBuilder,
+        Self::ImageRecipeReplayBuilder,
         Self::EditBuilder,
         Self::DetailBuilder,
         Self::CharacterBuilder,
@@ -571,683 +577,13 @@ impl AdvancedKeySource {
     ];
 }
 
-/// The JS shape a registered builder writes its `advanced` map in, and therefore which extractor
-/// in `crates/sceneworks-core/tests/workflow_share.rs` can read it.
-///
-/// Named in the registry rather than sniffed, because a wrong guess is the failure mode this whole
-/// lint exists to prevent: an extractor that quietly understands nothing returns an empty key set
-/// and passes. Each extractor panics with instructions when the file stops matching its shape.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AdvancedBuilderShape {
-    /// `return { key, ...(cond ? { key } : {}) }` — the conditional-spread object literal
-    /// `buildImageJobAdvanced` is built from. Needs the brace-aware scanner.
-    ReturnedObject,
-    /// `advanced: { a, b }` — a flat object literal in a returned payload, no spreads, no
-    /// nesting (`buildDetailJobBody`).
-    FlatAdvancedLiteral,
-    /// `const advanced = { … }` followed by `advanced.key = …` assignments. Both halves are
-    /// emits, and a spread in the initializer must be declared in
-    /// [`AdvancedBuilder::spread_of`].
-    AssignedObject,
-    /// `advancedExtras: { … }` — a controller's contribution, merged into a
-    /// [`Self::AssignedObject`] builder's initializer by spread.
-    ExtrasLiteral,
-    /// The builder posts NO `advanced` map at all (`buildUpscaleJobBody`). Registered anyway,
-    /// because it feeds an embedding lane: the lint asserts the function stays empty of
-    /// `advanced`, so the day someone adds a knob there it has to be classified.
-    NoAdvancedMap,
-    /// `advanced: { key, ...(cond ? { key } : {}) }` — an `advanced:` literal WITH conditional
-    /// spreads, in a payload passed to a call rather than returned (sc-15956).
-    ///
-    /// The video builders' shape, and the one the four existing arms between them could not read:
-    /// [`Self::FlatAdvancedLiteral`] asserts the literal has no spread and no nesting, and
-    /// [`Self::ReturnedObject`] looks for a `return {`. Uses the same brace-aware
-    /// `scan_object_literal` [`Self::ReturnedObject`] does, and honours
-    /// [`AdvancedBuilder::spread_of`] the way [`Self::AssignedObject`] does — so a spread of
-    /// somebody else's map has to name the builder that accounts for it.
-    SpreadAdvancedLiteral,
-}
-
-/// One JS builder whose `advanced` keys reach an embedding lane.
-///
-/// The registry the coverage lint enumerates. `path` + `function` are read out of the repo, so a
-/// rename fails loudly rather than silently pointing the lint at nothing.
-#[derive(Debug, Clone, Copy)]
-pub struct AdvancedBuilder {
-    /// The tag rules use to name this builder. Unique across the registry.
-    pub source: AdvancedKeySource,
-    /// Repo-relative path of the file that defines it.
-    pub path: &'static str,
-    /// The JS function whose body the extractor reads.
-    pub function: &'static str,
-    pub shape: AdvancedBuilderShape,
-    /// The embedding lane this builder's payload ends up written by, so a reader can see why the
-    /// keys matter. Prose, asserted only to be non-trivial.
-    pub lane: &'static str,
-    /// Keys the extractor MUST still find. A floor against an extractor that has quietly stopped
-    /// understanding the file — the failure mode that makes a green lint worthless.
-    pub anchors: &'static [&'static str],
-    /// The smallest number of keys the extractor may report before the lint calls itself broken.
-    /// Set well under the real count; it is a floor, not a census.
-    pub minimum_keys: usize,
-    /// Identifiers spread into an [`AdvancedBuilderShape::AssignedObject`] initializer, whose keys
-    /// are accounted for by another registry entry. Declared so a NEW spread of something nobody
-    /// classified fails the lint instead of vanishing into it.
-    pub spread_of: &'static [&'static str],
-}
-
-/// Every builder whose `advanced` keys travel inside a shared image (sc-15948).
-///
-/// The lanes, as of sc-15948: `POST /api/v1/image/jobs` (`text_to_image` / `edit_image` /
-/// `character_image`), `POST /api/v1/image/detail/jobs`, `POST /api/v1/image/interleave/jobs`, and
-/// the standalone `image_upscale` job. All four write their PNG through a seam that embeds.
-///
-/// **Adding a builder here is what turns the lint on for it.** Adding a builder to the WEB and not
-/// to this table fails `every_advanced_builder_in_the_web_app_is_accounted_for`, which walks
-/// `apps/web/src` and refuses any `advanced`-map producer that is in neither this registry nor
-/// [`DEFERRED_ADVANCED_BUILDERS`].
-pub const ADVANCED_BUILDERS: &[AdvancedBuilder] = &[
-    AdvancedBuilder {
-        source: AdvancedKeySource::StudioBuilder,
-        path: "apps/web/src/imageJobAdvanced.js",
-        function: "buildImageJobAdvanced",
-        shape: AdvancedBuilderShape::ReturnedObject,
-        lane:
-            "POST /api/v1/image/jobs — text_to_image, edit_image and character_image, written by \
-               `write_image_asset`",
-        anchors: &["resolution", "sampler", "steps", "styleId", "poses"],
-        minimum_keys: 25,
-        spread_of: &[],
-    },
-    AdvancedBuilder {
-        source: AdvancedKeySource::EditBuilder,
-        path: "apps/web/src/imageJobs.js",
-        function: "buildEditJobBody",
-        shape: AdvancedBuilderShape::AssignedObject,
-        lane: "POST /api/v1/image/jobs — edit_image from the Image Editor, written by \
-               `write_image_asset`",
-        anchors: &["guidanceScale"],
-        minimum_keys: 1,
-        spread_of: &[],
-    },
-    AdvancedBuilder {
-        source: AdvancedKeySource::DetailBuilder,
-        path: "apps/web/src/imageJobs.js",
-        function: "buildDetailJobBody",
-        shape: AdvancedBuilderShape::FlatAdvancedLiteral,
-        lane: "POST /api/v1/image/detail/jobs, written by `image_jobs/detail.rs`",
-        anchors: &["strength", "cnScale"],
-        minimum_keys: 2,
-        spread_of: &[],
-    },
-    AdvancedBuilder {
-        source: AdvancedKeySource::CharacterBuilder,
-        path: "apps/web/src/components/CharacterAdvancedOptions.jsx",
-        function: "buildAdvanced",
-        shape: AdvancedBuilderShape::AssignedObject,
-        lane: "POST /api/v1/image/jobs — character_image, written by `write_image_asset`",
-        anchors: &["ipAdapterScale", "steps", "usePid"],
-        // The angle-set / pose-library controllers' `advancedExtras`, each registered below.
-        minimum_keys: 9,
-        spread_of: &["base"],
-    },
-    AdvancedBuilder {
-        source: AdvancedKeySource::CharacterAngleExtras,
-        path: "apps/web/src/screens/characterPanels.jsx",
-        function: "useAngleController",
-        shape: AdvancedBuilderShape::ExtrasLiteral,
-        lane: "POST /api/v1/image/jobs — character_image (angle set), written by \
-               `write_image_asset`",
-        anchors: &["angleSet"],
-        minimum_keys: 2,
-        spread_of: &[],
-    },
-    AdvancedBuilder {
-        source: AdvancedKeySource::CharacterPoseExtras,
-        path: "apps/web/src/screens/characterPanels.jsx",
-        function: "usePoseController",
-        shape: AdvancedBuilderShape::ExtrasLiteral,
-        lane: "POST /api/v1/image/jobs — character_image (pose library), written by \
-               `write_image_asset`",
-        anchors: &["poses", "faceRestore"],
-        minimum_keys: 3,
-        spread_of: &[],
-    },
-    AdvancedBuilder {
-        source: AdvancedKeySource::InterleaveBuilder,
-        path: "apps/web/src/screens/DocumentStudio.jsx",
-        function: "submit",
-        shape: AdvancedBuilderShape::AssignedObject,
-        lane: "POST /api/v1/image/interleave/jobs, written by `sensenova_jobs.rs` through \
-               `write_image_asset`",
-        anchors: &["systemMessage", "imageGuidanceScale"],
-        minimum_keys: 2,
-        spread_of: &[],
-    },
-    AdvancedBuilder {
-        source: AdvancedKeySource::UpscaleBuilder,
-        path: "apps/web/src/imageJobs.js",
-        function: "buildUpscaleJobBody",
-        shape: AdvancedBuilderShape::NoAdvancedMap,
-        lane: "POST /api/v1/jobs type=image_upscale, written by `single_child_asset.rs`",
-        anchors: &[],
-        minimum_keys: 0,
-        spread_of: &[],
-    },
-    // -----------------------------------------------------------------------
-    // The VIDEO builders (sc-15956), promoted out of `DEFERRED_ADVANCED_BUILDERS`
-    // -----------------------------------------------------------------------
-    //
-    // All six moved in the SAME change as the video write seams below, because the back-check that
-    // every entry here is named by an embedding seam makes the two halves inseparable — see
-    // `WORKFLOW_WRITE_SEAMS`.
-    AdvancedBuilder {
-        source: AdvancedKeySource::VideoStudioBuilder,
-        path: "apps/web/src/screens/VideoStudio.jsx",
-        function: "submit",
-        shape: AdvancedBuilderShape::SpreadAdvancedLiteral,
-        lane: "POST /api/v1/jobs type=video_generate — the Video Studio, written by \
-               `video_jobs/mod.rs::encode_media`",
-        anchors: &[
-            "motion",
-            "selectedPersonTrack",
-            "replacementModeLabel",
-            "lightning",
-            "videoConditioningStrength",
-        ],
-        minimum_keys: 20,
-        spread_of: &[],
-    },
-    AdvancedBuilder {
-        source: AdvancedKeySource::TimelineBaseBuilder,
-        path: "apps/web/src/components/editor/useEditorGeneration.js",
-        function: "buildBasePayload",
-        shape: AdvancedBuilderShape::AssignedObject,
-        lane: "POST /api/v1/jobs type=video_generate — the timeline editor's shared video payload \
-               (queueTimelineVideoJob), written by `video_jobs/mod.rs::encode_media`",
-        anchors: &["resolution", "motion", "lightning"],
-        minimum_keys: 6,
-        spread_of: &[],
-    },
-    AdvancedBuilder {
-        source: AdvancedKeySource::TimelineExtendBuilder,
-        path: "apps/web/src/screens/EditorScreen.jsx",
-        function: "extendSelectedClip",
-        shape: AdvancedBuilderShape::SpreadAdvancedLiteral,
-        lane: "POST /api/v1/jobs type=video_generate — timeline extend, written by \
-               `video_jobs/mod.rs::encode_media`",
-        anchors: &["timelineAction", "timelineContext"],
-        minimum_keys: 2,
-        spread_of: &["base.advanced"],
-    },
-    AdvancedBuilder {
-        source: AdvancedKeySource::TimelineReplaceBuilder,
-        path: "apps/web/src/screens/EditorScreen.jsx",
-        function: "replaceSelectedItem",
-        shape: AdvancedBuilderShape::SpreadAdvancedLiteral,
-        lane: "POST /api/v1/jobs type=video_generate — timeline replace, written by \
-               `video_jobs/mod.rs::encode_media`",
-        anchors: &["timelineAction", "timelineContext"],
-        minimum_keys: 2,
-        spread_of: &["base.advanced"],
-    },
-    AdvancedBuilder {
-        source: AdvancedKeySource::TimelineBridgeBuilder,
-        path: "apps/web/src/screens/EditorScreen.jsx",
-        function: "bridgeGap",
-        shape: AdvancedBuilderShape::SpreadAdvancedLiteral,
-        lane: "POST /api/v1/jobs type=video_generate — timeline bridge, written by \
-               `video_jobs/mod.rs::encode_media`",
-        anchors: &["timelineAction", "timelineContext"],
-        minimum_keys: 2,
-        spread_of: &["base.advanced"],
-    },
-    AdvancedBuilder {
-        source: AdvancedKeySource::SimpleVideoBuilder,
-        path: "apps/web/src/simple/simpleJobs.js",
-        function: "buildSimpleVideoRequest",
-        shape: AdvancedBuilderShape::SpreadAdvancedLiteral,
-        lane: "POST /api/v1/jobs type=video_generate — the Simple shell's video request, written \
-               by `video_jobs/mod.rs::encode_media`",
-        anchors: &["resolution"],
-        minimum_keys: 1,
-        spread_of: &[],
-    },
-    AdvancedBuilder {
-        source: AdvancedKeySource::VideoUpscaleBuilder,
-        path: "apps/web/src/screens/VideoUpscalePanel.jsx",
-        function: "onUpscale",
-        shape: AdvancedBuilderShape::NoAdvancedMap,
-        lane: "POST /api/v1/jobs type=video_upscale, written by \
-               `video_jobs/seedvr2.rs::encode_seedvr2_stream`",
-        anchors: &[],
-        minimum_keys: 0,
-        spread_of: &[],
-    },
-];
-
-/// A builder that produces an `advanced` map the lint has SEEN and deliberately does not
-/// classify, because its lane does not embed yet.
-///
-/// This list exists so "unaccounted for" and "accounted for as out of scope" are different
-/// states. Making one of these lanes embed means moving its entry into [`ADVANCED_BUILDERS`] —
-/// at which point every key it emits must be classified, which is the point.
-#[derive(Debug, Clone, Copy)]
-pub struct DeferredAdvancedBuilder {
-    pub path: &'static str,
-    pub function: &'static str,
-    /// Why it is not classified. Two categories, and the lint accepts nothing else, so a deferral
-    /// cannot be a shrug:
-    ///
-    /// * **Awaiting classification** — names the `sc-` story that owns turning its lane on.
-    /// * **Permanently exempt** — starts with [`PERMANENT_EXEMPTION`] and says why no story will
-    ///   ever own it, plus what would have to change for that to stop being true.
-    pub reason: &'static str,
-}
-
-/// The prefix that marks a [`DeferredAdvancedBuilder::reason`] as a PERMANENT exemption rather
-/// than a story-owned deferral.
-///
-/// A deferral normally names the story that will classify its keys. Some `advanced` maps are not
-/// waiting on anybody: they are a different namespace on a lane that embeds nothing, so there is no
-/// story to name and inventing a fake id would be worse than saying so. The lint requires a reason
-/// with this prefix to state what would have to change (an embedding write seam) and to name
-/// [`ADVANCED_BUILDERS`] as where the entry moves if it ever does.
-pub const PERMANENT_EXEMPTION: &str = "PERMANENT EXEMPTION:";
-
-/// One permanent exemption for an `advanced` map that is not a generation payload at all.
-///
-/// **The six video builders that used to live here were promoted by sc-15956** — the story this
-/// list was built for — and their 17 unclassified keys are now rules in [`ADVANCED_KEY_RULES`].
-/// The mechanism worked exactly as designed: making a video seam embed was impossible until every
-/// one of those keys had an `allow`/`deny` decision, and two of them (`selectedPersonTrack`,
-/// `timelineContext`) turned out to be object-shaped id-and-free-text carriers that would have
-/// travelled silently under the pre-sc-16113 arrangement.
-///
-/// Note the count. This list's own comment said "~15 keys"; the real number was 17, because two
-/// (`timelineAction`, `timelineContext`) are emitted only by the three `EditorScreen.jsx` actions
-/// and no one had read those builders. A deferral list records that a decision is owed, not what
-/// the decision costs — and that gap is the argument for the lint being a discovery scan rather
-/// than a hand-maintained tally.
-///
-/// # What enforces that, and what does not (sc-16113)
-///
-/// This list used to claim, in this comment, that "nothing about a video lane can start embedding
-/// while its keys sit in this list". Nothing did. A reviewer added a `write_workflow_chunk` +
-/// `embeddable_workflow_share` call to a real video-lane PNG write in
-/// `crates/sceneworks-worker/src/video_jobs/seedvr2.rs` and every lint stayed green, because the
-/// sweep over `apps/web/src` accepts membership in EITHER registry and the write-seam lint read
-/// four hard-coded worker files.
-///
-/// What is enforced now, by `every_worker_write_seam_declares_the_lane_it_embeds_for` in
-/// `crates/sceneworks-core/tests/workflow_share.rs`:
-///
-/// * every function in `crates/sceneworks-worker/src` that the scan can see an envelope reach —
-///   it calls a name on the core write surface, or names a `WorkflowShare` (or a worker struct
-///   holding one) in its own signature, or calls a worker function that does — must have a
-///   [`WORKFLOW_WRITE_SEAMS`] entry, and an undeclared one fails the build. The seams are found by
-///   walking the crate, not by a file list, and `use … as …` renames of those names are resolved
-///   before the walk;
-/// * a seam declared [`SeamDisposition::Embeds`] must name the web builders that feed it, and a
-///   named builder that is in THIS list fails the build, naming the seam, the lane and the builder;
-/// * a seam cannot dodge that by declaring [`SeamDisposition::Declines`]. A decline is checked
-///   POSITIVELY against the source: it may not call `write_workflow_chunk` with anything but a
-///   literal `None`, may not name `WorkflowShare` in its body at all, may not accept one through
-///   its signature, and must fill every share-carrying struct field with `None` — by initializer
-///   OR by later assignment. Where the envelope came from does not matter, so parsing one back out
-///   of another file and writing it on is an embed like any other.
-///
-/// So making a video lane embed now requires EITHER moving its builder into [`ADVANCED_BUILDERS`],
-/// which is what forces every key it emits to be classified, or writing a builder list into
-/// [`WORKFLOW_WRITE_SEAMS`] that is not true. The lint cannot tell those two apart — it has no way
-/// to know which web builder feeds a Rust seam — so what it guarantees is that the statement had
-/// to be written at all, and that the honest version of it fails the build. Review is what catches
-/// the dishonest one.
-pub const DEFERRED_ADVANCED_BUILDERS: &[DeferredAdvancedBuilder] = &[DeferredAdvancedBuilder {
-    path: "apps/web/src/training/trainingConfig.js",
-    function: "trainingConfigSnapshot",
-    reason: "PERMANENT EXEMPTION: the Training Studio's `advanced` is a DIFFERENT namespace \
-                 from the image payload's — trainer hyperparameters (networkType, lrScheduler, \
-                 sampleSteps, decomposeFactor) on a training job, not generation intent for an \
-                 image. No training write seam EMBEDS a workflow, nothing sanitizes these keys \
-                 through `ADVANCED_KEY_RULES`, and no story is waiting to classify them: this is \
-                 not a deferral with an owner, it is deliberately outside the allow-list. What \
-                 would have to change is a training write seam that embeds. Then, and only then, \
-                 this entry moves into `ADVANCED_BUILDERS` and every key it emits needs an \
-                 allow/deny decision.",
-}];
-
-/// A (file, function) reference to one entry in [`ADVANCED_BUILDERS`] or
-/// [`DEFERRED_ADVANCED_BUILDERS`] (sc-16113).
-///
-/// The same key those two registries are already joined on by
-/// `every_advanced_builder_in_the_web_app_is_accounted_for`, so a seam names a builder exactly the
-/// way the sweep does. A reference that resolves to neither registry fails the lint; a reference
-/// that resolves to the DEFERRED one fails it too, and that is the whole point of the type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WebBuilderRef {
-    /// Repo-relative path of the JS/JSX file that defines the builder.
-    pub path: &'static str,
-    /// The builder function's name.
-    pub function: &'static str,
-}
-
-/// What one worker seam does about the workflow chunk (sc-16113).
-///
-/// Four states, not two, because "writes no chunk", "writes whatever its caller decided" and
-/// "an envelope reaches it but it writes no file" are three different claims and only one of them
-/// ends the lane question. Each is checked against the seam's own source, so the disposition is a
-/// declaration the lint verifies rather than one it trusts.
-#[derive(Debug, Clone, Copy)]
-pub enum SeamDisposition {
-    /// An envelope leaves this function into a file or into a share-carrying field. Must name at
-    /// least one builder, and every one of them must be in [`ADVANCED_BUILDERS`] — a reference to
-    /// [`DEFERRED_ADVANCED_BUILDERS`] is exactly the state this registry exists to refuse.
-    ///
-    /// Where the envelope came from is not part of the test: building one, parsing one back out of
-    /// another file, or cloning one held elsewhere are all embedding, because what reaches the
-    /// written file is the same either way.
-    Embeds(&'static [WebBuilderRef]),
-    /// Writes an envelope its CALLER built, and obtains none of its own. The lane question belongs
-    /// to the callers, and they are seams in their own right: a function that hands a
-    /// `WorkflowShare` to this one names it, which is what the discovery scan reads. The reason
-    /// says why the decision is not made here.
-    ///
-    /// Verified: it must accept a share through its signature, must reach the write surface (a
-    /// function that reaches no writer is [`SeamDisposition::Inert`], not a conduit), and must not
-    /// build, parse or name a `WorkflowShare` of its own — sourcing one is deciding a lane.
-    Conduit(&'static str),
-    /// Writes the file with no envelope at all, deliberately. The reason must say why that asset
-    /// has no generation recipe to record.
-    ///
-    /// Verified positively, not by the absence of a builder call: it may not call
-    /// `write_workflow_chunk` with anything but a literal `None`, may not name `WorkflowShare` in
-    /// its body, may not accept one through its signature, and must fill every share-carrying
-    /// struct field with `None` — by initializer or by later assignment. So declining is not a way
-    /// to embed without classifying a lane, whatever the envelope's provenance.
-    Declines(&'static str),
-    /// A `WorkflowShare` reaches this function's signature and goes nowhere: it writes no file,
-    /// builds no envelope and calls nothing on the write surface. A logging or validation helper
-    /// that takes a spec is this, and calling it a [`SeamDisposition::Conduit`] would be a false
-    /// statement — a conduit writes.
-    ///
-    /// Verified: it must carry a share, and it must call nothing the scan can see reach a write.
-    /// The moment it calls a writer it stops being inert and owes a lane.
-    Inert(&'static str),
-}
-
-/// One place in `sceneworks-worker` where a [`WorkflowShare`] can reach a written file (sc-16113).
-///
-/// The registry that ties "this lane has an embedding write seam" to "its builder is in
-/// [`ADVANCED_BUILDERS`]". `path` + `function` are read out of the repo, so a rename or a move
-/// fails loudly, and the seams themselves are DISCOVERED by scanning the worker crate rather than
-/// listed here — an entry nobody can find is as much a failure as a seam nobody declared.
-#[derive(Debug, Clone, Copy)]
-pub struct WorkflowWriteSeam {
-    /// Repo-relative path of the file that contains the seam.
-    pub path: &'static str,
-    /// The Rust function whose body touches the envelope.
-    pub function: &'static str,
-    /// Prose: which product lane's files this seam writes, so a reader can see why the builders
-    /// below are the ones that feed it. Asserted only to be non-trivial.
-    pub lane: &'static str,
-    /// What it does about the chunk, checked against the source.
-    pub disposition: SeamDisposition,
-}
-
-/// Every worker seam a [`WorkflowShare`] can pass through, and the web builders behind each one.
-///
-/// **The gate this whole epic's deferral list was supposed to be.** Adding an embedding call to a
-/// lane whose builder sits in [`DEFERRED_ADVANCED_BUILDERS`] now fails the build twice over: once
-/// because the new seam has no entry here, and again if the entry names the deferred builder.
-///
-/// Kept honest in both directions by `every_worker_write_seam_declares_the_lane_it_embeds_for`: a
-/// discovered seam with no entry fails, and an entry whose function no longer touches an envelope
-/// fails too.
-///
-/// # Ordering, for whoever wires a new lane (sc-15956)
-///
-/// The back-check that every [`ADVANCED_BUILDERS`] entry is named by some embedding seam means the
-/// two halves of a new lane cannot be split across two PRs: classifying the ~15 video keys on its
-/// own would leave `VideoStudio.jsx::submit` registered with no seam behind it, which fails. Move
-/// the builder up and add the seam entry in the SAME change. The failure is loud either way, but
-/// it is worth knowing before the split is attempted.
-///
-/// Likewise `a_seam_that_embeds_for_a_deferred_builder_fails_the_build` hard-codes
-/// `VideoStudio.jsx::submit` as its deferred example, so promoting that builder turns that
-/// mutation proof into a "did not panic" failure. Re-point it at whatever is still deferred then;
-/// the proof is that SOME deferred builder is refused, not that one particular one is.
-pub const WORKFLOW_WRITE_SEAMS: &[WorkflowWriteSeam] = &[
-    WorkflowWriteSeam {
-        path: "crates/sceneworks-worker/src/image_jobs.rs",
-        function: "write_image_asset",
-        lane: "POST /api/v1/image/jobs (text_to_image / edit_image / character_image) and \
-               POST /api/v1/image/interleave/jobs — the one funnel every generated image is \
-               written through",
-        disposition: SeamDisposition::Embeds(IMAGE_JOB_BUILDERS),
-    },
-    WorkflowWriteSeam {
-        path: "crates/sceneworks-worker/src/image_jobs.rs",
-        function: "upscaled_workflow_share",
-        lane: "POST /api/v1/image/jobs — the inline-upscale sub-step of a generate job, whose \
-               envelope is the generation's payload with the APPLIED pass overlaid",
-        disposition: SeamDisposition::Embeds(GENERATE_JOB_BUILDERS),
-    },
-    WorkflowWriteSeam {
-        path: "crates/sceneworks-worker/src/image_jobs.rs",
-        function: "write_upscaled_asset",
-        lane: "POST /api/v1/image/jobs — the inline-upscaled variant's own PNG",
-        disposition: SeamDisposition::Embeds(GENERATE_JOB_BUILDERS),
-    },
-    WorkflowWriteSeam {
-        path: "crates/sceneworks-worker/src/image_jobs.rs",
-        function: "detail_workflow_share",
-        lane: "POST /api/v1/image/detail/jobs — the standalone detail pass's own envelope",
-        disposition: SeamDisposition::Embeds(&[WebBuilderRef {
-            path: "apps/web/src/imageJobs.js",
-            function: "buildDetailJobBody",
-        }]),
-    },
-    WorkflowWriteSeam {
-        path: "crates/sceneworks-worker/src/image_jobs.rs",
-        function: "standalone_upscale_workflow_share",
-        lane: "POST /api/v1/jobs type=image_upscale — the standalone upscale job's own envelope",
-        disposition: SeamDisposition::Embeds(&[WebBuilderRef {
-            path: "apps/web/src/imageJobs.js",
-            function: "buildUpscaleJobBody",
-        }]),
-    },
-    WorkflowWriteSeam {
-        path: "crates/sceneworks-worker/src/image_jobs.rs",
-        function: "standalone_restore_workflow_share",
-        lane: "POST /api/v1/jobs type=image_upscale engine=iris — the standalone Iris restoration's \
-               own envelope (sc-25683)",
-        disposition: SeamDisposition::Embeds(&[WebBuilderRef {
-            path: "apps/web/src/imageJobs.js",
-            function: "buildUpscaleJobBody",
-        }]),
-    },
-    WorkflowWriteSeam {
-        path: "crates/sceneworks-worker/src/image_jobs/detail.rs",
-        function: "run_image_detail_job",
-        lane: "POST /api/v1/image/detail/jobs — writes the refined PNG (macOS-gated; the scan is \
-               textual, so this seam is read on every platform)",
-        disposition: SeamDisposition::Embeds(&[WebBuilderRef {
-            path: "apps/web/src/imageJobs.js",
-            function: "buildDetailJobBody",
-        }]),
-    },
-    WorkflowWriteSeam {
-        path: "crates/sceneworks-worker/src/upscale_jobs.rs",
-        function: "run_iris_restore_job_using",
-        lane: "POST /api/v1/jobs type=image_upscale engine=iris — hands the standalone Iris \
-               restoration's envelope to the shared single-child writer (sc-25683)",
-        disposition: SeamDisposition::Embeds(&[WebBuilderRef {
-            path: "apps/web/src/imageJobs.js",
-            function: "buildUpscaleJobBody",
-        }]),
-    },
-    WorkflowWriteSeam {
-        path: "crates/sceneworks-worker/src/upscale_jobs.rs",
-        function: "run_image_upscale_job",
-        lane: "POST /api/v1/jobs type=image_upscale — hands the standalone upscale's envelope to \
-               the shared single-child writer",
-        disposition: SeamDisposition::Embeds(&[WebBuilderRef {
-            path: "apps/web/src/imageJobs.js",
-            function: "buildUpscaleJobBody",
-        }]),
-    },
-    WorkflowWriteSeam {
-        path: "crates/sceneworks-worker/src/single_child_asset.rs",
-        function: "write_single_child_asset",
-        lane: "The shared one-PNG-child writer: the standalone upscale and the smart-select mask \
-               both come through here",
-        disposition: SeamDisposition::Conduit(
-            "It writes the `SingleChildAssetSpec::workflow` its caller decided on and builds no \
-             envelope of its own, so the lane question belongs to the callers — and every caller \
-             is a seam here in its own right, because handing a `WorkflowShare` in is what the \
-             discovery scan reads.",
-        ),
-    },
-    WorkflowWriteSeam {
-        path: "crates/sceneworks-worker/src/video_jobs/mod.rs",
-        function: "video_workflow_metadata",
-        lane: "POST /api/v1/jobs type=video_generate — the funnel every GENERATED clip is encoded \
-               through (`encode_media`), whatever engine, route or studio produced it",
-        disposition: SeamDisposition::Embeds(VIDEO_JOB_BUILDERS),
-    },
-    WorkflowWriteSeam {
-        path: "crates/sceneworks-worker/src/video_jobs/seedvr2.rs",
-        function: "seedvr2_workflow_metadata",
-        lane: "POST /api/v1/jobs type=video_upscale — the SeedVR2 upscale's own clip, encoded \
-               through `encode_seedvr2_stream` (macOS + candle-gated; the scan is textual, so \
-               this seam is read on every platform)",
-        disposition: SeamDisposition::Embeds(VIDEO_UPSCALE_BUILDERS),
-    },
-    WorkflowWriteSeam {
-        path: "crates/sceneworks-worker/src/segment_jobs.rs",
-        function: "run_image_segment_job",
-        lane: "POST /api/v1/jobs type=image_segment — the smart-select mask",
-        disposition: SeamDisposition::Declines(
-            "A smart-select mask is not a generated image: it is a binary selection derived from a \
-             box prompt and a concept string, with no generation recipe to replay. It is also \
-             grayscale, and the chunk writer encodes RGB8, so embedding would triple its size and \
-             change its colour type.",
-        ),
-    },
-];
-
-/// The builder behind an upscaled clip (sc-15956 review).
-///
-/// Its own list rather than a seventh entry in [`VIDEO_JOB_BUILDERS`], because it is a different
-/// job type on a different encoder: `type=video_upscale` through `encode_seedvr2_stream`, not
-/// `type=video_generate` through `encode_media`. The image lane draws the same line —
-/// `buildUpscaleJobBody` feeds `run_image_upscale_job` and nothing else.
-///
-/// The panel posts no `advanced` map at all, and is registered precisely so that stays true: it
-/// feeds an embedding lane, so the day it grows a knob the coverage lint demands a classification
-/// instead of dropping it silently.
-const VIDEO_UPSCALE_BUILDERS: &[WebBuilderRef] = &[WebBuilderRef {
-    path: "apps/web/src/screens/VideoUpscalePanel.jsx",
-    function: "onUpscale",
-}];
-
-/// Every builder behind a generated clip (sc-15956).
-///
-/// All six feed ONE seam, because all six post `type=video_generate` and every video-GENERATE job
-/// funnels through `encode_media` — the same property that let sc-12371 measure clip length in one
-/// place. It is not, and never was, the only libx264 site in the worker: `video_upscale` has one of
-/// its own, and [`VIDEO_UPSCALE_BUILDERS`] is the seam behind it.
-const VIDEO_JOB_BUILDERS: &[WebBuilderRef] = &[
-    WebBuilderRef {
-        path: "apps/web/src/screens/VideoStudio.jsx",
-        function: "submit",
-    },
-    WebBuilderRef {
-        path: "apps/web/src/components/editor/useEditorGeneration.js",
-        function: "buildBasePayload",
-    },
-    WebBuilderRef {
-        path: "apps/web/src/screens/EditorScreen.jsx",
-        function: "extendSelectedClip",
-    },
-    WebBuilderRef {
-        path: "apps/web/src/screens/EditorScreen.jsx",
-        function: "replaceSelectedItem",
-    },
-    WebBuilderRef {
-        path: "apps/web/src/screens/EditorScreen.jsx",
-        function: "bridgeGap",
-    },
-    WebBuilderRef {
-        path: "apps/web/src/simple/simpleJobs.js",
-        function: "buildSimpleVideoRequest",
-    },
-];
-
-/// The builders behind every image the generate lane writes (`POST /api/v1/image/jobs`).
-///
-/// Named once because three seams share it: the base render, the inline-upscale envelope, and the
-/// upscaled variant's own PNG.
-const GENERATE_JOB_BUILDERS: &[WebBuilderRef] = &[
-    WebBuilderRef {
-        path: "apps/web/src/imageJobAdvanced.js",
-        function: "buildImageJobAdvanced",
-    },
-    WebBuilderRef {
-        path: "apps/web/src/imageJobs.js",
-        function: "buildEditJobBody",
-    },
-    WebBuilderRef {
-        path: "apps/web/src/components/CharacterAdvancedOptions.jsx",
-        function: "buildAdvanced",
-    },
-    WebBuilderRef {
-        path: "apps/web/src/screens/characterPanels.jsx",
-        function: "useAngleController",
-    },
-    WebBuilderRef {
-        path: "apps/web/src/screens/characterPanels.jsx",
-        function: "usePoseController",
-    },
-];
-
-/// [`GENERATE_JOB_BUILDERS`] plus the interleave lane, which reaches `write_image_asset` through
-/// `sensenova_jobs.rs` threading its `workflow_source` into the same `ImagePlan`.
-///
-/// The interleave lane has no inline-upscale sub-step, so it is not in [`GENERATE_JOB_BUILDERS`].
-const IMAGE_JOB_BUILDERS: &[WebBuilderRef] = &[
-    WebBuilderRef {
-        path: "apps/web/src/imageJobAdvanced.js",
-        function: "buildImageJobAdvanced",
-    },
-    WebBuilderRef {
-        path: "apps/web/src/imageJobs.js",
-        function: "buildEditJobBody",
-    },
-    WebBuilderRef {
-        path: "apps/web/src/components/CharacterAdvancedOptions.jsx",
-        function: "buildAdvanced",
-    },
-    WebBuilderRef {
-        path: "apps/web/src/screens/characterPanels.jsx",
-        function: "useAngleController",
-    },
-    WebBuilderRef {
-        path: "apps/web/src/screens/characterPanels.jsx",
-        function: "usePoseController",
-    },
-    WebBuilderRef {
-        path: "apps/web/src/screens/DocumentStudio.jsx",
-        function: "submit",
-    },
-];
-
 /// How an allowed value is reduced. Anything that does not match its shape is dropped rather
 /// than passed through — that is what stops an object (and any path inside it) from being
 /// smuggled under an allow-listed scalar key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdvancedShape {
+    /// Public catalog recipe IDs, without arbitrary nested metadata.
+    Appearance,
     /// String, number or bool. Path-shaped strings are dropped (see [`is_path_shaped`]).
     Scalar,
     /// The structured-prompt recipe (`apps/web/src/ideogramCaption.js`), reduced to its scalar
@@ -1265,11 +601,20 @@ pub enum AdvancedShape {
     MossImageOptions,
     /// Provider receipt with local adapter paths reduced to their frozen relative filename.
     MossImageReport,
+    MossImageEditOptions,
+    MossImageEditReport,
+    MossImageAdvanced,
+    PromptBatch,
+    SampleIndex,
     /// The Krea multi-phase denoise list, reduced to `{ steps, guidance, loras:[{index, weight}] }`.
     Phases,
     /// A `[start, end]` pair of finite numbers (the CFG interval, sc-25681). Anything else —
     /// another length, a string, a nested value — is dropped, like an object under a scalar key.
     NumberPair,
+    /// FLUX.3 authored box document, reduced to public coordinate/identity/description fields.
+    Flux3Layout,
+    /// Ordered attachment-instance IDs (not paths or asset locators), at most ten unique values.
+    StringList,
 }
 
 /// One classified `advanced` key.
@@ -1347,12 +692,19 @@ const fn deny_server(key: &'static str, reason: &'static str) -> AdvancedKeyRule
 /// Every `advanced` key, classified.
 ///
 /// The load-bearing table. `crates/sceneworks-core/tests/workflow_share.rs` parses every builder
-/// in [`ADVANCED_BUILDERS`] and fails when a key one of them can emit is missing here — so a new
+/// in `tests/common/workflow_registry.rs::ADVANCED_BUILDERS` and fails when a key one of them can emit is missing here — so a new
 /// knob is a build-time decision, not a silent leak and not a silent loss.
 ///
 /// The rule of thumb when classifying a new key: does it describe **what to make** (travels)
 /// or **what this machine can afford to make it with** (does not)?
 pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
+    allow("flux3_layout", AdvancedShape::Flux3Layout, "Authored FLUX.3 soft-guidance boxes; public row fields only, never worker provenance."),
+    allow("flux3_reference_ids", AdvancedShape::StringList, "Ordered attachment-instance identities for FLUX.3 layout replay; not asset paths."),
+    allow("mossImageEdit", AdvancedShape::MossImageEditOptions, "Authored native edit reference edge and cache policy, emitted and restored by Studio."),
+    allow_from("mossImageEditExecutionReport", AdvancedShape::MossImageEditReport, AdvancedKeySource::Server, "Actual edit adapter and ordered reference identity; imported receipts are scrubbed before execution."),
+    allow_from("mossImageAdvanced", AdvancedShape::MossImageAdvanced, AdvancedKeySource::MossEditBuilder, "Edit-only authored tensor identities/shape, negative batch and output kind. Local asset IDs are removed; exact artifacts must be reacquired."),
+    allow_from("promptBatch", AdvancedShape::PromptBatch, AdvancedKeySource::MossEditBuilder, "The full bounded native edit text batch, retained with exact tensor row bindings for replay."),
+    allow_from("mossImageSampleIndex", AdvancedShape::SampleIndex, AdvancedKeySource::Server, "Output ordinal within the original native edit batch; display provenance only, scrubbed before a new execution."),
     allow("mossImage", AdvancedShape::MossImageOptions, "Requested MOSS mode and author controls; canonical native wire object."),
     deny("mossOrdinarySettings", "Inactive ordinary UI choices are local restore metadata, not the accelerated image's requested generation settings."),
     allow_from("mossImageExecutionReport", AdvancedShape::MossImageReport, AdvancedKeySource::Server, "Actual completed provider receipt; local adapter location is removed before sharing. Imported reports are display only and scrubbed before a new execution."),
@@ -1487,6 +839,10 @@ pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
         AdvancedShape::Scalar,
         "Authored control-lock strength.",
     ),
+    allow("appearance", AdvancedShape::Appearance, "Selected public Camera/Film/Look/Lighting catalog IDs."),
+    allow("appearancePromptBatch", AdvancedShape::PromptBatch, "Raw pre-appearance native batch, distinct from the worker-owned effective promptBatch."),
+    allow("appearancePrompt", AdvancedShape::Scalar, "Raw pre-appearance prose, for composition exactly once on replay."),
+    allow("appearanceNegativePrompt", AdvancedShape::Scalar, "Authored negative text before recipe contributions."),
     allow(
         "styleId",
         AdvancedShape::Scalar,
@@ -2017,7 +1373,7 @@ const PROSE_MAX_BYTES: usize = 16 * 1024;
 /// character is pushed only if it fits whole, and the loop stops at the first that does not. A
 /// `String` cannot hold invalid UTF-8 anyway — what this avoids is the byte-slicing form of the
 /// same bound, which panics on a multi-byte boundary rather than producing invalid output.
-fn shareable_prose(value: &str) -> String {
+pub(crate) fn shareable_prose(value: &str) -> String {
     let mut stripped = String::new();
     for character in value.chars().filter(|&character| {
         matches!(character, '\n' | '\t')
@@ -2106,25 +1462,8 @@ fn is_invisible_formatting(character: char) -> bool {
 /// this returns. `.` and `-` and `_` are legal INSIDE a segment, so a segment must additionally
 /// start with an alphanumeric — otherwise `../x` reads as the perfectly-shaped repo id `..`/`x`.
 fn hf_repo_id(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.chars().count() > LABEL_MAX_CHARS {
-        return None;
-    }
-    let mut segments = trimmed.split('/');
-    let (Some(owner), Some(name), None) = (segments.next(), segments.next(), segments.next())
-    else {
-        return None;
-    };
-    let segment_ok = |segment: &str| {
-        segment
-            .chars()
-            .next()
-            .is_some_and(|first| first.is_ascii_alphanumeric())
-            && segment.chars().all(|character| {
-                character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
-            })
-    };
-    (segment_ok(owner) && segment_ok(name)).then(|| trimmed.to_owned())
+    let repo = crate::hf_repo_id::namespaced(value).ok()?;
+    (repo.chars().count() <= LABEL_MAX_CHARS).then(|| repo.to_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -2163,7 +1502,7 @@ impl WorkflowAssetFacts {
             model: asset.recipe.model.clone(),
             prompt: asset.recipe.prompt.clone(),
             negative_prompt: asset.recipe.negative_prompt.clone(),
-            seed: asset.recipe.seed,
+            seed: asset.recipe.seed.unwrap_or_default(),
             width: asset.file.width,
             height: asset.file.height,
         }
@@ -2266,7 +1605,33 @@ fn build_share_of_kind(
     // The produced image's seed — not the payload's. `payload.seed` is the batch BASE and
     // `payload.seeds` is the whole batch; only whoever wrote one file knows which one rendered
     // it. The batch list never travels: the other images are not this share's business.
-    let seed = Some(facts.seed);
+    let advanced_edit = crate::moss_image::is_edit(job_payload)
+        && job_payload
+            .get("advanced")
+            .and_then(|v| v.get(crate::moss_image_advanced::KEY))
+            .is_some();
+    let seed = if job_payload
+        .get("advanced")
+        .and_then(|v| v.get("mossImageAdvanced"))
+        .and_then(|v| v.get("noise"))
+        .is_some_and(|v| !v.is_null())
+    {
+        None
+    } else if advanced_edit {
+        job_payload
+            .get("seed")
+            .and_then(Value::as_i64)
+            .or_else(|| {
+                job_payload
+                    .get("advanced")
+                    .and_then(|v| v.get(crate::moss_image::EDIT_REPORT_KEY))
+                    .and_then(|v| v.pointer("/base/samples/0/seed"))
+                    .and_then(Value::as_i64)
+            })
+            .or(Some(facts.seed))
+    } else {
+        Some(facts.seed)
+    };
 
     // Raw on purpose: `reduce_workflow_share` runs `sanitize_advanced`, and sanitizing here as
     // well would be the same pass twice — harmless only for as long as every rule stays
@@ -2281,6 +1646,26 @@ fn build_share_of_kind(
     // (`reduce_workflow_share`), so the build side cannot grow a field the parse side does not
     // guard — which is exactly how the top-level labels below escaped the path check before.
     let is_video = kind == WORKFLOW_KIND_VIDEO;
+    // FLUX.3 reference dimensions are authored OPTIONS. Falling back to the produced crop would
+    // turn automatic/one-sided sizing into a different request (and an odd crop may not be on-grid).
+    let reference_output = (!is_video && crate::image_request::flux3::is_model(&model))
+        .then(|| crate::image_request::flux3::parse(job_payload).ok())
+        .flatten()
+        .filter(|intent| !intent.asset_ids.is_empty());
+    let (width, height) = match reference_output {
+        Some(intent) => (intent.width, intent.height),
+        None => (
+            u32_field("width").or(facts.width),
+            u32_field("height").or(facts.height),
+        ),
+    };
+    let moss_edit = crate::moss_image::is_moss(&model) && mode == "edit_image";
+    let invalid_moss_references = moss_edit
+        && crate::moss_image::edit_reference_slots(job_payload)
+            .is_ok_and(|ids| ids.is_empty() || ids.len() > 4);
+    let invalid_moss_references = invalid_moss_references
+        || (moss_edit && crate::moss_image::edit_reference_slots(job_payload).is_err());
+    let inputs = describe_inputs(job_payload, moss_edit);
     reduce_workflow_share(WorkflowShare {
         kind: kind.to_owned(),
         schema_version: WORKFLOW_SHARE_SCHEMA_VERSION,
@@ -2293,8 +1678,8 @@ fn build_share_of_kind(
         prompt,
         negative_prompt,
         seed,
-        width: u32_field("width").or(facts.width),
-        height: u32_field("height").or(facts.height),
+        width,
+        height,
         count: u32_field("count"),
         // Video-only, and read off the payload rather than off the encoded file: these are the ASK
         // (see the field docs). Gated on the kind so an image envelope cannot grow a `fps` from a
@@ -2309,11 +1694,15 @@ fn build_share_of_kind(
         fit_mode: string_field("fitMode"),
         upscale: sanitize_upscale(job_payload.get("upscale")),
         loras: sanitize_loras(job_payload.get("loras")),
-        inputs: describe_inputs(job_payload),
+        inputs,
         advanced,
         // Nothing to carry in: the marker is derived by `reduce_workflow_share` from what the
         // sanitizer actually dropped, in this direction exactly as in the other.
-        omitted: Vec::new(),
+        omitted: if invalid_moss_references {
+            vec![OMITTED_INPUTS.to_owned()]
+        } else {
+            Vec::new()
+        },
     })
 }
 
@@ -2358,7 +1747,7 @@ pub fn embeddable_video_workflow_share(
 }
 
 /// Input images by shape. Reads the ids only to count them; no id ever reaches the envelope.
-fn describe_inputs(job_payload: &JsonObject) -> Vec<WorkflowInput> {
+fn describe_inputs(job_payload: &JsonObject, moss_edit: bool) -> Vec<WorkflowInput> {
     let has_id = |key: &str| {
         job_payload
             .get(key)
@@ -2382,7 +1771,8 @@ fn describe_inputs(job_payload: &JsonObject) -> Vec<WorkflowInput> {
     // `lastFrameAssetId` is the video lane's end-frame target: a STILL, like `sourceAssetId`, so it
     // counts here rather than as a clip. An image payload never carries it, so this is a no-op for
     // the image lane.
-    let sources = usize::from(has_id("sourceAssetId")) + usize::from(has_id("lastFrameAssetId"));
+    let sources = usize::from(!moss_edit && has_id("sourceAssetId"))
+        + usize::from(has_id("lastFrameAssetId"));
     if sources > 0 {
         inputs.push(WorkflowInput {
             kind: INPUT_KIND_SOURCE.to_owned(),
@@ -2390,7 +1780,11 @@ fn describe_inputs(job_payload: &JsonObject) -> Vec<WorkflowInput> {
             control_mode: None,
         });
     }
-    let references = usize::from(has_id("referenceAssetId")) + id_list_len("referenceAssetIds");
+    let references = if moss_edit {
+        crate::moss_image::edit_reference_slots(job_payload).map_or(0, |ids| ids.len())
+    } else {
+        usize::from(has_id("referenceAssetId")) + id_list_len("referenceAssetIds")
+    };
     if references > 0 {
         inputs.push(WorkflowInput {
             kind: INPUT_KIND_REFERENCE.to_owned(),
@@ -2980,18 +2374,108 @@ pub fn sanitize_advanced(advanced: &JsonObject) -> JsonObject {
         let sanitized = match rule.shape {
             AdvancedShape::Scalar => sanitize_scalar(key, value),
             AdvancedShape::StructuredPrompt => sanitize_structured_prompt(value),
+            AdvancedShape::Appearance => sanitize_appearance(value),
             AdvancedShape::Poses => sanitize_poses(value),
             AdvancedShape::Phases => sanitize_phases(value),
             AdvancedShape::H3VedaSettings => sanitize_h3_veda_settings(value),
             AdvancedShape::MossImageOptions => sanitize_moss_options(value),
             AdvancedShape::MossImageReport => sanitize_moss_execution_report(value),
+            AdvancedShape::MossImageEditOptions => {
+                let mut advanced = JsonObject::new();
+                advanced.insert(crate::moss_image::EDIT_OPTIONS_KEY.into(), value.clone());
+                crate::moss_image::edit_options(&advanced)
+                    .ok()
+                    .and_then(|v| serde_json::to_value(v).ok())
+            }
+            AdvancedShape::MossImageEditReport => sanitize_moss_edit_execution_report(value),
+            AdvancedShape::MossImageAdvanced => crate::moss_image_advanced::share_options(value),
+            AdvancedShape::PromptBatch => value
+                .as_array()
+                .filter(|p| {
+                    !p.is_empty()
+                        && p.len() <= 8
+                        && p.iter().all(|v| {
+                            v.as_str()
+                                .is_some_and(|s| !s.is_empty() && s.chars().count() <= 4000)
+                        })
+                })
+                .map(|values| {
+                    Value::Array(
+                        values
+                            .iter()
+                            .map(|value| {
+                                Value::String(shareable_prose(
+                                    value.as_str().expect("validated prose"),
+                                ))
+                            })
+                            .collect(),
+                    )
+                }),
+            AdvancedShape::SampleIndex => {
+                value.as_u64().filter(|index| *index < 8).map(Value::from)
+            }
             AdvancedShape::NumberPair => sanitize_number_pair(value),
+            AdvancedShape::Flux3Layout => sanitize_flux3_layout(value),
+            AdvancedShape::StringList => sanitize_reference_ids(value),
         };
         if let Some(sanitized) = sanitized {
             out.insert(key.clone(), sanitized);
         }
     }
     out
+}
+
+fn sanitize_reference_ids(value: &Value) -> Option<Value> {
+    let values = value.as_array()?;
+    if values.len() > 10 {
+        return None;
+    }
+    let ids = values
+        .iter()
+        .map(|v| v.as_str().filter(|s| !s.is_empty() && !is_path_shaped(s)))
+        .collect::<Option<Vec<_>>>()?;
+    if ids.iter().collect::<std::collections::HashSet<_>>().len() != ids.len() {
+        return None;
+    }
+    Some(value.clone())
+}
+
+fn sanitize_flux3_layout(value: &Value) -> Option<Value> {
+    let rows = value.get("boxes")?.as_array()?;
+    let identities = rows
+        .iter()
+        .filter_map(|r| {
+            r.get("reference_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>();
+    crate::image_request::flux3::validate_layout(value, 10, Some(&identities)).ok()?;
+    let mut boxes = Vec::new();
+    for row in rows {
+        let mut public = JsonObject::new();
+        for key in [
+            "id",
+            "desc",
+            "bbox",
+            "from",
+            "reference_id",
+            "src_bbox",
+            "tgt_bbox",
+            "bbox_space",
+            "src_space",
+            "tgt_space",
+        ] {
+            if let Some(v) = row.get(key) {
+                if key != "desc" && v.as_str().is_some_and(is_path_shaped) {
+                    return None;
+                }
+                public.insert(key.to_owned(), v.clone());
+            }
+        }
+        boxes.push(Value::Object(public));
+    }
+    Some(serde_json::json!({"version":1,"boxes":boxes}))
 }
 
 fn sanitize_moss_options(value: &Value) -> Option<Value> {
@@ -3017,6 +2501,16 @@ pub fn sanitize_moss_execution_report(value: &Value) -> Option<Value> {
         adapter.adapter_path = std::path::PathBuf::from("lora.safetensors");
     }
     serde_json::to_value(MossImageExecutionReport::new(data).ok()?).ok()
+}
+
+/// Native validation protects report identities; only local filesystem locations are scrubbed.
+pub fn sanitize_moss_edit_execution_report(value: &Value) -> Option<Value> {
+    let mut report: gen_core::moss_image_edit::MossImageEditExecutionReport =
+        serde_json::from_value(value.clone()).ok()?;
+    report.adapter_path = std::path::PathBuf::from("adapter_model.safetensors");
+    let base = serde_json::to_value(&report.base).ok()?;
+    report.base = serde_json::from_value(sanitize_moss_execution_report(&base)?).ok()?;
+    serde_json::to_value(report).ok()
 }
 
 /// Preserve a complete, valid Veda control object. The API's shared H3 validator owns the wire
@@ -3046,6 +2540,8 @@ fn sanitize_h3_veda_settings(value: &Value) -> Option<Value> {
 /// Exempt from the PATH check only. They are still bounded and control-stripped by
 /// [`shareable_prose`], because on the parse side they are a stranger's strings.
 const PROSE_KEYS: &[&str] = &[
+    "appearancePrompt",
+    "appearanceNegativePrompt",
     "stylePrompt",
     "intent",
     "runtimePrompt",
@@ -3055,6 +2551,21 @@ const PROSE_KEYS: &[&str] = &[
     // the exact silent-loss failure this epic's lint exists to prevent.
     "systemMessage",
 ];
+
+fn sanitize_appearance(value: &Value) -> Option<Value> {
+    let mut selection: crate::appearance::AppearanceSelection =
+        serde_json::from_value(value.clone()).ok()?;
+    selection.camera = selection.camera.as_deref().and_then(shareable_label);
+    selection.film = selection.film.as_deref().and_then(shareable_label);
+    selection.lighting = selection.lighting.as_deref().and_then(shareable_label);
+    selection.looks = selection
+        .looks
+        .iter()
+        .filter_map(|id| shareable_label(id))
+        .take(32)
+        .collect();
+    serde_json::to_value(selection).ok()
+}
 
 fn sanitize_scalar(key: &str, value: &Value) -> Option<Value> {
     match value {
@@ -3332,6 +2843,45 @@ fn field_from_serde_error(error: &serde_json::Error) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn flux3_reference_shares_preserve_optional_sides_not_output_crops() {
+        for model in ["flux3_klein", "flux3_klein_base"] {
+            let facts = WorkflowAssetFacts {
+                mode: "edit_image".to_owned(),
+                model: model.to_owned(),
+                prompt: "change the sky".to_owned(),
+                negative_prompt: String::new(),
+                seed: 71,
+                width: Some(83),
+                height: Some(67),
+            };
+            for (sides, expected) in [
+                (json!({}), (None, None)),
+                (json!({"width":16}), (Some(16), None)),
+                (json!({"height":48}), (None, Some(48))),
+                (json!({"width":16,"height":48}), (Some(16), Some(48))),
+            ] {
+                let mut payload = json!({"model":model,"mode":"edit_image","referenceAssetIds":["owned-a","owned-a"]}).as_object().unwrap().clone();
+                payload.extend(sides.as_object().unwrap().clone());
+                let share = build_workflow_share_from(&facts, &payload);
+                assert_eq!((share.width, share.height), expected, "{model}: {sides}");
+                let encoded = serde_json::to_value(&share).unwrap();
+                let decoded: WorkflowShare = serde_json::from_value(encoded).unwrap();
+                assert_eq!((decoded.width, decoded.height), expected);
+            }
+            let plain = json!({"model":model,"mode":"text_to_image"})
+                .as_object()
+                .unwrap()
+                .clone();
+            let share = build_workflow_share_from(&facts, &plain);
+            assert_eq!(
+                (share.width, share.height),
+                (Some(83), Some(67)),
+                "legacy non-reference fallback is unchanged"
+            );
+        }
+    }
 
     /// The keys of a JSON object, sorted, so an assertion about WHICH keys survived the
     /// allow-list cannot accidentally assert the order they came out in.
@@ -3660,6 +3210,34 @@ mod tests {
     }
 
     #[test]
+    fn flux3_layout_share_keeps_public_rows_nulls_precision_and_strips_local_provenance() {
+        let document = serde_json::json!({"version":1,"privatePath":"D:/private/source.png","boxes":[{"id":"cat","from":"ref_image_0","reference_id":"slot-b","src_bbox":[0.123456789012345,0.2,0.7,0.8],"tgt_bbox":null,"desc":"cat","privatePath":"D:/private/source.png"}]});
+        let mut advanced = JsonObject::new();
+        advanced.insert("flux3_layout".into(), document.clone());
+        advanced.insert(
+            "flux3_reference_ids".into(),
+            serde_json::json!(["slot-a", "slot-b"]),
+        );
+        let sanitized = sanitize_advanced(&advanced);
+        let rows = &sanitized["flux3_layout"]["boxes"];
+        assert_eq!(rows[0]["src_bbox"], document["boxes"][0]["src_bbox"]);
+        assert!(rows[0]["tgt_bbox"].is_null());
+        assert_eq!(rows[0]["from"], "ref_image_0");
+        assert_eq!(rows[0]["reference_id"], "slot-b");
+        assert!(rows[0].get("privatePath").is_none());
+        assert!(sanitized["flux3_layout"].get("privatePath").is_none());
+        assert_eq!(
+            sanitized["flux3_reference_ids"],
+            advanced["flux3_reference_ids"]
+        );
+        advanced.insert(
+            "flux3_reference_ids".into(),
+            serde_json::json!(["D:/private/source.png"]),
+        );
+        assert!(!sanitize_advanced(&advanced).contains_key("flux3_reference_ids"));
+    }
+
+    #[test]
     fn is_path_shaped_matches_the_four_path_families() {
         for path in [
             "/home/michael/x.png",
@@ -3849,7 +3427,14 @@ mod tests {
         assert!(!sanitized.contains_key("sampler"));
         assert_eq!(
             PROSE_KEYS,
-            ["stylePrompt", "intent", "runtimePrompt", "systemMessage"]
+            [
+                "appearancePrompt",
+                "appearanceNegativePrompt",
+                "stylePrompt",
+                "intent",
+                "runtimePrompt",
+                "systemMessage"
+            ]
         );
     }
 

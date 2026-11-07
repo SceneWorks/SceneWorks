@@ -1,7 +1,8 @@
-import { isMossImage, mossWireOptions, mossAccelerated } from "./mossImage.js";
+import { isMossImage, isMossEdit, mossWireOptions, mossAccelerated, buildMossEditJobAdvanced } from "./mossImage.js";
 import { buildStructuredPromptRecipe } from "./ideogramCaption.js";
-import { tierQuantize, isConvRotTier, isNvfp4Tier, NVFP4_TIER } from "./quantTier.js";
+import { tierQuantize, isConvRotTier, isNvfp4Tier, isFp8rTier } from "./quantTier.js";
 import { modelSupportsAlphaOutput } from "./qwenAlpha.js";
+import { isFlux3LayoutModel } from "./flux3Layout.js";
 
 // sc-8854 (F-052): pure builder for the Image Studio job's `advanced` payload. Extracted
 // verbatim from ImageStudio.submit() — the ~110-line object literal that assembled the
@@ -18,6 +19,9 @@ import { modelSupportsAlphaOutput } from "./qwenAlpha.js";
 export function buildImageJobAdvanced(state) {
   const {
     resolution,
+    model,
+    flux3Layout,
+    flux3ReferenceIds,
     // Structured-prompt recipe round-trip (sc-6147).
     sendStructured,
     submitIntent,
@@ -27,9 +31,7 @@ export function buildImageJobAdvanced(state) {
     sampler,
     scheduler,
     schedulerShift,
-    // sc-25681: a model with a schedule-shift axis but no scheduler menu (Iris-3B,
-    // `image.supportsSchedulerShift`) — the shift rides on its own.
-    supportsSchedulerShift,
+    // Shift is independent of the scheduler menu; an empty value retains the native grid.
     // sc-25681: the CFG interval `[start, end]` (already resolved by the studio: `null` when the
     // model does not offer one, the default full interval is selected, or CFG is off) and the
     // caption-overflow policy (`"default"` = the checkpoint's own).
@@ -96,6 +98,10 @@ export function buildImageJobAdvanced(state) {
     // Style Catalog recipe round-trip (sc-13132). Both are undefined unless a style is applied.
     styleId,
     styleUserPrompt,
+    appearance,
+    appearanceUserPrompt,
+    appearanceUserPromptBatch,
+    appearanceUserNegative,
     // Krea 2 multi-phase denoise (epic 13879 S5, sc-13885). `multiPhaseActive` is the resolved gate
     // (model advertises the acceleration compat + text-to-image mode + the editor enabled); `phases`
     // is the ALREADY-SERIALIZED emit-shape list (serializePhases runs in ImageStudio, where the
@@ -105,12 +111,32 @@ export function buildImageJobAdvanced(state) {
   } = state;
 
   const moss = isMossImage(state.model ?? selectedModel?.id);
+  const mossEdit = isMossEdit(state.model ?? selectedModel?.id, mode);
+  const editAdvanced = mossEdit ? buildMossEditJobAdvanced(state) : null;
   const dmd = moss && mossAccelerated(state.mossImage);
   const effectiveSteps = dmd ? state.mossDmdSteps ?? 8 : stepsOverride;
   return {
+    ...(appearance ? { appearance, appearancePrompt: appearanceUserPrompt ?? "", appearanceNegativePrompt: appearanceUserNegative ?? "", ...(appearanceUserPromptBatch?.length ? { appearancePromptBatch: appearanceUserPromptBatch } : {}) } : {}),
+    ...(mossEdit ? {
+      resolution,
+      mossImage: editAdvanced.mossImage,
+      mossImageEdit: editAdvanced.mossImageEdit,
+      ...(editAdvanced.mossImageAdvanced ? { mossImageAdvanced: editAdvanced.mossImageAdvanced } : {}),
+      ...(editAdvanced.promptBatch ? { promptBatch: editAdvanced.promptBatch } : {}),
+      steps: editAdvanced.steps,
+      guidanceScale: editAdvanced.guidanceScale,
+      schedulerShift: editAdvanced.schedulerShift,
+      ...(styleId ? { styleId: editAdvanced.styleId, ...(Object.hasOwn(editAdvanced, "stylePrompt") ? { stylePrompt: editAdvanced.stylePrompt } : {}) } : {}),
+
+    } : {
     ...(moss ? { mossImage: mossWireOptions(state.mossImage) } : {}),
     ...(dmd && state.mossOrdinarySettings ? { mossOrdinarySettings: state.mossOrdinarySettings } : {}),
     resolution,
+    ...(isFlux3LayoutModel(model) && flux3Layout?.boxes?.length ? {
+      // Preserve the original document and current attachment order, never a rounded table.
+      flux3_layout: flux3Layout,
+      flux3_reference_ids: flux3ReferenceIds ?? [],
+    } : {}),
     // Structured-prompt recipe round-trip (sc-6147): persist the full caption +
     // original intent + magic-prompt backend alongside the job so "Use this recipe"
     // can rehydrate the builder rather than replay the serialized JSON as a plain
@@ -136,13 +162,8 @@ export function buildImageJobAdvanced(state) {
     // method (CFG++) rides the payload. The worker N3-falls an unadvertised
     // method back to the default, so an invalid value is harmless.
     ...(!dmd && guidanceMethod && guidanceMethod !== "cfg" ? { guidanceMethod } : {}),
-    // The schedule shift (time-shift mu) is only honored when a curated
-    // (non-default) scheduler is active — it shapes that curated schedule;
-    // the default scheduler keeps the engine's resolution-native shift, so
-    // emitting it there would override the no-op default (epic 7114).
-    // sc-25681: a model that declares the shift axis without a scheduler menu (Iris-3B) sends
-    // its shift regardless — there is no scheduler picker to gate it on.
-    ...(!dmd && ((scheduler && scheduler !== "default") || supportsSchedulerShift) &&
+    // An explicit Shift overrides the native grid independently of scheduler selection.
+    ...(!dmd && schedulerShift !== "" && schedulerShift != null &&
     Number.isFinite(Number(schedulerShift))
       ? { schedulerShift: Number(schedulerShift) }
       : {}),
@@ -237,7 +258,10 @@ export function buildImageJobAdvanced(state) {
     // Emitted ONLY when the picker is shown AND the user explicitly picked nvfp4 — disjoint from both
     // spreads above. This is the SC#5 opt-in at the payload layer: absent this deliberate pick no
     // request ever carries the label, so no q4 render can be silently upgraded to NVFP4 on Blackwell.
-    ...(showTierPicker && isNvfp4Tier(quantTier) ? { quantTier: NVFP4_TIER } : {}),
+    // FP8R must identify even a single installed tier (including Simple's hidden picker).
+    // Unlike the legacy NVFP4 opt-in, omitting it would request a different dense format.
+    ...(isFp8rTier(quantTier) || ((showTierPicker || tierExplicit) && isNvfp4Tier(quantTier))
+      ? { quantTier } : {}),
     // PiD decoder (epic 7840, sc-7851): emit usePid:true only when the toggle is shown
     // (model PiD-eligible AND checkpoint installed) AND on. The worker swaps the native
     // VAE for the PiD decode + 2K/4K super-resolve pass; it rides `advanced` (opaque
@@ -327,5 +351,7 @@ export function buildImageJobAdvanced(state) {
     // { steps, guidance, loras:[{ index, weight? }] } shape the worker parses; the omit-when-inactive
     // rule keeps the round-trip lossless.
     ...(multiPhaseActive && Array.isArray(phases) && phases.length ? { phases } : {}),
+
+    }),
   };
 }

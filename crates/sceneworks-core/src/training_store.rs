@@ -1,11 +1,9 @@
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use crate::contracts::ExtraFields;
 use crate::dataset_quality::{
@@ -102,6 +100,10 @@ pub struct TrainingDatasetUpdateInput {
     /// Full replacement for the dataset's ordered item set when present.
     #[serde(default)]
     pub items: Option<Vec<TrainingDatasetItemInput>>,
+    /// Keep the current stored caption for these unchanged items, even if a background
+    /// caption job finished after the editor loaded its snapshot.
+    #[serde(default)]
+    pub preserve_caption_item_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -433,7 +435,26 @@ impl TrainingDatasetStore {
         if let Some(character_id) = input.character_id {
             dataset.character_id = Some(character_id);
         }
-        if let Some(items) = input.items {
+        if let Some(mut items) = input.items {
+            // Resolve preservation against the current manifest inside the store mutation,
+            // not a frontend GET followed by PATCH that can race a completed caption job.
+            for item in &mut items {
+                if let Some(saved) = item.id.as_deref().and_then(|id| {
+                    input
+                        .preserve_caption_item_ids
+                        .iter()
+                        .any(|keep| keep == id)
+                        .then(|| dataset.items.iter().find(|saved| saved.id == id))
+                        .flatten()
+                }) {
+                    item.caption = Some(CaptionInput {
+                        text: saved.caption.text.clone(),
+                        source: Some(saved.caption.source.clone()),
+                        trigger_words: saved.caption.trigger_words.clone(),
+                        mode: saved.caption.mode.clone(),
+                    });
+                }
+            }
             let dataset_root = dataset_root(&self.project_path, &dataset.id);
             let temp_media_dir = dataset_root.join(format!("images.tmp-{}", random_hex(8)?));
             fs::create_dir_all(&temp_media_dir)?;
@@ -1011,34 +1032,13 @@ impl TrainingDatasetStore {
             // it lands in the dataset (sc-6143). Worker-derived outputs are PNG today, but routing this
             // copy through the same sniff-and-transcode chokepoint as every other ingestion path means
             // a producer that ever emits another format cannot slip an undecodable image into `images/`.
-            let source_kind = crate::media_convert::sniff_image_kind_at(&source);
-            let needs_transcode = source_kind.is_some_and(|kind| !kind.is_natively_supported());
-            let extension = if needs_transcode {
-                "png".to_owned()
-            } else {
-                source
-                    .extension()
-                    .and_then(|value| value.to_str())
-                    .filter(|value| !value.is_empty())
-                    .map(|value| value.to_ascii_lowercase())
-                    .unwrap_or_else(|| "png".to_owned())
-            };
-            let relative_path = format!("images/{}.{extension}", repoint.item_id);
-            let target = root.join(&relative_path);
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            if needs_transcode {
-                let kind = source_kind.expect("needs_transcode implies a sniffed kind");
-                crate::media_convert::transcode_to_png(&source, &target).map_err(|error| {
-                    ProjectStoreError::BadRequest(format!(
-                        "Could not convert {} image to a supported format: {error}",
-                        kind.label()
-                    ))
-                })?;
-            } else {
-                fs::copy(&source, &target)?;
-            }
+            let ingested = crate::media_convert::ingest_image_with_naming(
+                &source,
+                &root.join("images").join(&repoint.item_id),
+                crate::media_convert::ImageCopyNaming::SourceExtension("png"),
+            )?;
+            let relative_path = format!("images/{}.{}", repoint.item_id, ingested.extension);
+            let target = ingested.path;
             // Drop the item's previous file if its extension (hence path) changed, to avoid orphans.
             let previous = root.join(&dataset.items[index].path);
             if previous != target && previous.exists() {
@@ -1222,14 +1222,16 @@ const PREPARED_FPS_ERROR: &str = "metadata fps must be a finite number in 0.01..
 /// Header-only admission check for uploaded prepared examples. Runtime-specific validators still
 /// validate the selected workflow and all referenced condition tensors at dry-run/execute time.
 fn validate_ltx_prepared_bundle_header(path: &Path) -> ProjectStoreResult<()> {
-    let header = crate::lora_family::read_safetensors_header(path).map_err(|error| {
-        ProjectStoreError::BadRequest(format!("Invalid LTX prepared safetensors bundle: {error}"))
-    })?;
-    let object = header.as_object().ok_or_else(|| {
-        ProjectStoreError::BadRequest(
-            "Invalid LTX prepared safetensors bundle: header must be an object".to_owned(),
-        )
-    })?;
+    let header = crate::safetensors::read_file_header(
+        path,
+        crate::safetensors::MAX_ADAPTER_HEADER_BYTES,
+        crate::safetensors::HeaderJsonPolicy::Standard,
+    )
+    .map_err(|error| invalid_prepared_bundle(&error.to_string()))?;
+    let object = header
+        .value
+        .as_object()
+        .expect("shared reader requires an object");
     let metadata = object
         .get("__metadata__")
         .and_then(Value::as_object)
@@ -1309,26 +1311,19 @@ fn validate_ltx_prepared_bundle_header(path: &Path) -> ProjectStoreResult<()> {
         }
         next_offset = end;
     }
-    validate_prepared_payload_length(path, next_offset)?;
+    validate_prepared_payload_length(header.file_len, header.data_start, next_offset)?;
     require_prepared_float_tensor(object, "video_latents", &video_shape)?;
     require_prepared_float_tensor(object, "audio_latents", &audio_shape)?;
     Ok(())
 }
 
 fn validate_prepared_payload_length(
-    path: &Path,
+    physical_bytes: u64,
+    data_start: u64,
     declared_data_bytes: u64,
 ) -> ProjectStoreResult<()> {
-    let physical_bytes = fs::metadata(path)?.len();
-    let mut file = fs::File::open(path)?;
-    let mut header_length_bytes = [0_u8; 8];
-    file.read_exact(&mut header_length_bytes).map_err(|_| {
-        invalid_prepared_bundle("file is missing its safetensors header-length prefix")
-    })?;
-    let header_bytes = u64::from_le_bytes(header_length_bytes);
-    let expected_bytes = 8_u64
-        .checked_add(header_bytes)
-        .and_then(|bytes| bytes.checked_add(declared_data_bytes))
+    let expected_bytes = data_start
+        .checked_add(declared_data_bytes)
         .ok_or_else(|| invalid_prepared_bundle("declared payload length overflows"))?;
     if physical_bytes != expected_bytes {
         return Err(invalid_prepared_bundle(&format!(
@@ -1473,22 +1468,8 @@ struct PreparedBundleReceipt {
 }
 
 fn prepared_bundle_receipt(path: &Path) -> ProjectStoreResult<PreparedBundleReceipt> {
-    let mut file = fs::File::open(path)?;
-    let mut hash = Sha256::new();
-    let mut size = 0_u64;
-    let mut chunk = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut chunk)?;
-        if read == 0 {
-            break;
-        }
-        size = size.saturating_add(read as u64);
-        hash.update(&chunk[..read]);
-    }
-    Ok(PreparedBundleReceipt {
-        size,
-        sha256: format!("{:x}", hash.finalize()),
-    })
+    let (sha256, size) = crate::hashing::sha256_reader(fs::File::open(path)?)?;
+    Ok(PreparedBundleReceipt { size, sha256 })
 }
 
 #[derive(Debug, Clone)]
@@ -1771,13 +1752,17 @@ fn write_dataset_caption_sidecars(
     for item in &dataset.items {
         let image_path = dataset_item_path(project_path, dataset, item)?;
         let caption_path = image_path.with_extension("txt");
-        write_text(
-            &caption_path,
-            &format!(
-                "{}\n",
-                caption_with_trigger_words(&item.caption.text, &item.caption.trigger_words)
-            ),
-        )?;
+        let text = caption_with_trigger_words(&item.caption.text, &item.caption.trigger_words);
+        if text.trim().is_empty() {
+            // An uncaptioned image has no sidecar, including after an explicit caption clear.
+            match fs::remove_file(&caption_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            continue;
+        }
+        write_text(&caption_path, &format!("{text}\n"))?;
         sidecars.push(TrainingCaptionSidecar {
             item_id: item.id.clone(),
             image_path: item.path.clone(),
@@ -1814,6 +1799,15 @@ fn materialize_items(
             item_id,
             now,
         )?;
+        // Stage captions beside the images before the directory swap, so a save neither
+        // loses generated sidecars nor creates files for uncaptioned images.
+        let text = caption_with_trigger_words(&item.caption.text, &item.caption.trigger_words);
+        if !text.trim().is_empty() {
+            write_text(
+                &media_dir.join(format!("{}.txt", item.id)),
+                &format!("{text}\n"),
+            )?;
+        }
         items.push(item);
     }
     Ok(items)
@@ -2222,36 +2216,12 @@ fn store_item_media(
     subdir: &str,
     stem: &str,
 ) -> ProjectStoreResult<(String, PathBuf)> {
-    let source_kind = crate::media_convert::sniff_image_kind_at(&source.path);
-    let needs_transcode = source_kind.is_some_and(|kind| !kind.is_natively_supported());
-    let extension = if needs_transcode {
-        ".png".to_owned()
-    } else {
-        source
-            .path
-            .extension()
-            .and_then(|value| value.to_str())
-            .filter(|value| !value.is_empty())
-            .map(|value| format!(".{}", value.to_ascii_lowercase()))
-            .unwrap_or_else(|| ".bin".to_owned())
-    };
-    let relative_path = format!("images/{subdir}{stem}{extension}");
-    let target_path = media_dir.join(format!("{subdir}{stem}{extension}"));
-    if let Some(parent) = target_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    if needs_transcode {
-        let kind = source_kind.expect("needs_transcode implies a sniffed kind");
-        crate::media_convert::transcode_to_png(&source.path, &target_path).map_err(|error| {
-            ProjectStoreError::BadRequest(format!(
-                "Could not convert {} image to a supported format: {error}",
-                kind.label()
-            ))
-        })?;
-    } else {
-        fs::copy(&source.path, &target_path)?;
-    }
-    Ok((relative_path, target_path))
+    let ingested = crate::media_convert::ingest_image(
+        &source.path,
+        &media_dir.join(format!("{subdir}{stem}")),
+    )?;
+    let relative_path = format!("images/{subdir}{stem}.{}", ingested.extension);
+    Ok((relative_path, ingested.path))
 }
 
 fn resolve_asset_source(
@@ -2481,7 +2451,8 @@ fn index_dataset(
 ) -> ProjectStoreResult<()> {
     ensure_training_dataset_table(project_path)?;
     let rel_path = relative_string(project_path, manifest_path)?;
-    let connection = connect_project_db_migrated(project_path)?;
+    let mut db = connect_project_db_migrated(project_path)?;
+    let connection = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     connection.execute(
         "
         insert or replace into training_datasets (
@@ -2502,16 +2473,19 @@ fn index_dataset(
             dataset.updated_at,
         ],
     )?;
+    connection.commit()?;
     Ok(())
 }
 
 fn remove_dataset_index(project_path: &Path, dataset_id: &str) -> ProjectStoreResult<()> {
     ensure_training_dataset_table(project_path)?;
-    let connection = connect_project_db_migrated(project_path)?;
+    let mut db = connect_project_db_migrated(project_path)?;
+    let connection = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     connection.execute(
         "delete from training_datasets where id = ?1",
         params![dataset_id],
     )?;
+    connection.commit()?;
     Ok(())
 }
 
@@ -2647,11 +2621,7 @@ pub(crate) fn dataset_item_path(
 
 fn is_safe_file_stem(value: &str) -> bool {
     let value = value.trim();
-    !value.is_empty()
-        && value.chars().count() <= 96
-        && value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    crate::ids::is_safe_id_with_max(value, 96)
 }
 
 fn display_name_for_rename(
@@ -2731,6 +2701,103 @@ mod tests {
         let store = TrainingDatasetStore::new(project_path.to_path_buf());
         store.save_dataset(&dataset).expect("save dataset");
         store
+    }
+
+    #[test]
+    fn caption_sidecars_skip_empty_captions_and_remove_cleared_sidecars() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        ensure_training_dataset_table(dir.path()).expect("init dataset table");
+        let store = saved_dataset(dir.path());
+        let images = dataset_root(dir.path(), "ds_test").join("images");
+        fs::create_dir_all(&images).unwrap();
+        fs::write(images.join("item_1.png"), b"image").unwrap();
+        fs::write(images.join("item_2.png"), b"image").unwrap();
+        let write = |items| {
+            store
+                .write_caption_sidecars(
+                    "proj",
+                    "ds_test",
+                    TrainingDatasetCaptionSidecarsInput { items },
+                )
+                .expect("write sidecars")
+        };
+        assert!(write(Vec::new()).sidecars.is_empty());
+        assert!(!images.join("item_1.txt").exists());
+        assert!(!images.join("item_2.txt").exists());
+
+        let patch = |text: &str| TrainingDatasetCaptionSidecarItemInput {
+            item_id: "item_1".to_owned(),
+            caption: CaptionInput {
+                text: text.to_owned(),
+                source: Some(CaptionSource::Auto),
+                trigger_words: Vec::new(),
+                mode: Some(CaptionMode::Default),
+            },
+        };
+        let result = write(vec![patch("a portrait")]);
+        assert_eq!(result.sidecars.len(), 1);
+        assert_eq!(result.sidecars[0].item_id, "item_1");
+        assert_eq!(
+            fs::read_to_string(images.join("item_1.txt")).unwrap(),
+            "a portrait\n"
+        );
+        assert!(!images.join("item_2.txt").exists());
+
+        // Also clean up the newline-only files older versions wrote for uncaptioned images.
+        fs::write(images.join("item_2.txt"), "\n").unwrap();
+        assert!(write(vec![patch(" \n\t")]).sidecars.is_empty());
+        assert!(!images.join("item_1.txt").exists());
+        assert!(!images.join("item_2.txt").exists());
+        assert!(write(Vec::new()).sidecars.is_empty());
+    }
+
+    #[test]
+    fn dataset_save_preserves_background_captions_and_sidecars_but_allows_explicit_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_training_dataset_table(dir.path()).unwrap();
+        let store = saved_dataset(dir.path());
+        let images = dataset_root(dir.path(), "ds_test").join("images");
+        fs::create_dir_all(&images).unwrap();
+        fs::write(images.join("item_1.png"), b"png-bytes").unwrap();
+        let generated = json!({ "text": "a portrait", "source": "auto", "triggerWords": ["person"], "mode": "subjectOnly" });
+        fs::write(images.join("item_2.png"), b"png-bytes").unwrap();
+        store
+            .write_caption_sidecars(
+                "proj",
+                "ds_test",
+                serde_json::from_value(json!({
+                    "items": [{ "itemId": "item_1", "caption": generated }]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let mut payload = json!({
+            "name": "Renamed",
+            "preserveCaptionItemIds": ["item_1"],
+            "items": [{ "id": "item_1", "path": "training/datasets/ds_test/images/item_1.png", "caption": { "text": "", "source": "manual" } }]
+        });
+        // The stale empty caption must never overwrite the caption written after the editor loaded.
+        for _ in 0..2 {
+            let saved = store
+                .update_dataset(
+                    "proj",
+                    "ds_test",
+                    serde_json::from_value(payload.clone()).unwrap(),
+                )
+                .unwrap();
+            assert_eq!(saved.items[0].caption.text, "a portrait");
+            assert_eq!(saved.items[0].caption.mode, Some(CaptionMode::SubjectOnly));
+            assert_eq!(
+                fs::read_to_string(images.join("item_1.txt")).unwrap(),
+                "person, a portrait\n"
+            );
+        }
+        payload["preserveCaptionItemIds"] = json!([]);
+        let cleared = store
+            .update_dataset("proj", "ds_test", serde_json::from_value(payload).unwrap())
+            .unwrap();
+        assert!(cleared.items[0].caption.text.is_empty());
+        assert!(!images.join("item_1.txt").exists());
     }
 
     fn cache_entry(content_hash: &str, bucket_edge: u32) -> CachedTier0Scalars {
@@ -3560,7 +3627,8 @@ mod tests {
             .pragma_query_value(None, "busy_timeout", |row| row.get(0))
             .expect("busy_timeout pragma reads");
         assert_eq!(
-            busy_timeout, 5000,
+            busy_timeout,
+            crate::store_util::SQLITE_BUSY_TIMEOUT.as_millis() as i64,
             "training-path project.db connections get the shared 5s busy_timeout"
         );
 

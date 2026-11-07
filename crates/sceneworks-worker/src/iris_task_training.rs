@@ -15,22 +15,22 @@
 //!   (`verify_resource`: size + sha256) before anything loads — nothing downloads at training time;
 //! * the **pre-launch views** the API serves: install availability, sidecar format/alignment checks
 //!   and a per-item dataset report under the run's invalid-example policy — all through the engine's
-//!   own readers (`gen_core::iris::train::depth`, `gen_core::iris::restoration_train`).
+//!   own readers (`gen_core_iris::train::depth`, `gen_core_iris::restoration_train`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use gen_core::iris::downstream::{TaskExport, EMPTY_PROMPT_FILE};
-use gen_core::iris::restoration::RestorationResources;
-use gen_core::iris::restoration_train::{
+use gen_core::{TrainingConfig, TrainingItem, TrainingRequest, WeightsSource};
+use gen_core_iris::downstream::{TaskExport, EMPTY_PROMPT_FILE};
+use gen_core_iris::restoration::RestorationResources;
+use gen_core_iris::restoration_train::{
     self as restore_train, TrainingResource, TRAINING_RESOURCES,
 };
-use gen_core::iris::train::depth as depth_train;
-use gen_core::iris::{
+use gen_core_iris::train::depth as depth_train;
+use gen_core_iris::{
     IrisConfig, IrisTask, BACKBONE_CONFIG_FILE, BACKBONE_WEIGHTS_FILE, UPSTREAM_WEIGHTS_REPO,
     UPSTREAM_WEIGHTS_REVISION,
 };
-use gen_core::{TrainingConfig, TrainingItem, TrainingRequest, WeightsSource};
 use sceneworks_core::training::iris::depth::{
     depth_init, DEPTH_INIT_PARENT, ITEM_DEPTH_KEY as SW_ITEM_DEPTH_KEY,
 };
@@ -94,7 +94,7 @@ fn installed_generation_text_encoder(data_dir: &Path) -> Option<PathBuf> {
         .iter()
         .find(|download| {
             download.get("componentId").and_then(Value::as_str)
-                == Some(gen_core::iris::TEXT_ENCODER_COMPONENT)
+                == Some(gen_core_iris::TEXT_ENCODER_COMPONENT)
         })?;
     let snapshot = pinned_snapshot(
         data_dir,
@@ -162,11 +162,7 @@ fn catalog_id_for(component: &str) -> &'static str {
 fn sw_config_to_engine(config: &sceneworks_core::training::TrainingConfig) -> TrainingConfig {
     let advanced = &config.advanced;
     let string = |key: &str, default: &str| {
-        advanced
-            .get(key)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+        crate::payload::trimmed_string(advanced.get(key))
             .unwrap_or(default)
             .to_owned()
     };
@@ -180,7 +176,8 @@ fn sw_config_to_engine(config: &sceneworks_core::training::TrainingConfig) -> Tr
     let network = string("networkType", "full");
     TrainingConfig {
         rank: config.rank,
-        alpha: config.alpha as f32,
+        alpha: sceneworks_core::training::training_alpha_f32(&config.alpha)
+            .expect("training target preflight validates alpha before native mapping"),
         learning_rate: config.learning_rate.as_f64().unwrap_or(1e-5) as f32,
         steps: config.steps,
         batch_size: config.batch_size,
@@ -228,29 +225,15 @@ pub(crate) fn shape_task_config(
     config
 }
 
-/// A plain dataset-relative path: non-empty, relative, no `..`, no backslash.
-fn safe_relative(relative: &str) -> bool {
-    !relative.is_empty()
-        && !relative.contains('\\')
-        && Path::new(relative)
-            .components()
-            .all(|component| matches!(component, std::path::Component::Normal(_)))
-}
-
 fn resolve_under(root: &Path, relative: &str, label: &str) -> Result<PathBuf, String> {
-    if !safe_relative(relative) {
+    // Dataset sidecars store portable '/' paths, even when the trainer runs on Windows.
+    if sceneworks_core::safe_path::relative_normal_components(relative).is_err() {
         return Err(format!(
             "{label} {relative:?} is not a dataset-relative path."
         ));
     }
-    let mut path = root.to_path_buf();
-    for component in Path::new(relative).components() {
-        path.push(component);
-    }
-    if !path.is_file() {
-        return Err(format!("{label} {} does not exist.", path.display()));
-    }
-    Ok(path)
+    sceneworks_core::safe_path::resolve_local_file(root, relative)
+        .map_err(|error| format!("{label} {relative:?} is not a confined dataset file: {error}"))
 }
 
 /// One task item → the engine `TrainingItem`: the RGB image, an empty caption (not read), and its
@@ -505,7 +488,7 @@ pub(crate) fn task_load_inputs(
                         let encoder =
                             installed_generation_text_encoder(data_dir).expect("checked above");
                         components.insert(
-                            gen_core::iris::TEXT_ENCODER_COMPONENT.to_owned(),
+                            gen_core_iris::TEXT_ENCODER_COMPONENT.to_owned(),
                             WeightsSource::Dir(encoder),
                         );
                     }
@@ -689,14 +672,9 @@ pub fn iris_task_dataset_report(
     let mut items = Vec::with_capacity(dataset.items.len());
     let mut engine_items = Vec::with_capacity(dataset.items.len());
     for item in &dataset.items {
-        let image = {
-            let mut path = dataset_root.to_path_buf();
-            for component in Path::new(&item.path).components() {
-                path.push(component);
-            }
-            path
-        };
-        match task_item(objective, dataset_root, image, &item.extra) {
+        match resolve_under(dataset_root, &item.path, "image")
+            .and_then(|image| task_item(objective, dataset_root, image, &item.extra))
+        {
             Ok(engine_item) => engine_items.push(Some(engine_item)),
             Err(reason) => {
                 items.push(DatasetCheckItem {
@@ -934,11 +912,21 @@ mod tests {
         let depth = &item.model_options["depth"];
         assert_eq!(
             depth["path"],
-            json!(root.path().join("sidecars").join("a.depth.npy"))
+            json!(root
+                .path()
+                .join("sidecars")
+                .join("a.depth.npy")
+                .canonicalize()
+                .unwrap())
         );
         assert_eq!(
             depth["mask_path"],
-            json!(root.path().join("sidecars").join("a.mask.png"))
+            json!(root
+                .path()
+                .join("sidecars")
+                .join("a.mask.png")
+                .canonicalize()
+                .unwrap())
         );
         assert_eq!(depth["scale"], json!(0.001));
         assert_eq!(depth["max_depth"], json!(80.0));
@@ -954,7 +942,12 @@ mod tests {
         assert_eq!(pair.model_options.len(), 1);
         assert_eq!(
             pair.model_options["degraded_image"],
-            json!(root.path().join("sidecars").join("a.degraded.png"))
+            json!(root
+                .path()
+                .join("sidecars")
+                .join("a.degraded.png")
+                .canonicalize()
+                .unwrap())
         );
         let clean = task_item(
             IrisObjective::Restoration,
@@ -972,6 +965,16 @@ mod tests {
         let escape: sceneworks_core::contracts::ExtraFields =
             serde_json::from_value(json!({"irisDepth": {"path": "../x.npy"}})).unwrap();
         assert!(task_item(IrisObjective::Depth, root.path(), image.clone(), &escape).is_err());
+        let native_separator: sceneworks_core::contracts::ExtraFields =
+            serde_json::from_value(json!({"irisDepth": {"path": "sidecars\\a.depth.npy"}}))
+                .unwrap();
+        assert!(task_item(
+            IrisObjective::Depth,
+            root.path(),
+            image.clone(),
+            &native_separator
+        )
+        .is_err());
         let gone: sceneworks_core::contracts::ExtraFields =
             serde_json::from_value(json!({"irisDepth": {"path": "sidecars/none.npy"}})).unwrap();
         assert!(task_item(IrisObjective::Depth, root.path(), image, &gone).is_err());
@@ -1450,6 +1453,15 @@ mod tests {
             json!(restore_train::RECIPE_CLIP)
         );
         assert_eq!(bag["ema_decay"], json!(restore_train::RECIPE_EMA_DECAY));
+    }
+
+    /// Legacy task targets retain integral alpha semantics after the product surface moved to a
+    /// JSON number for MOSS fractions. Mutation: round or drop the checked bridge ⇒ red.
+    #[test]
+    fn task_alpha_maps_integral_contract_numbers_exactly() {
+        let mut config = sceneworks_core::training::iris::restore::iris_restore_target().defaults;
+        config.alpha = serde_json::Number::from(7);
+        assert_eq!(sw_config_to_engine(&config).alpha, 7.0);
     }
 
     /// The depth target's defaults ARE the engine's paper recipe (`apply_paper_recipe`): the global

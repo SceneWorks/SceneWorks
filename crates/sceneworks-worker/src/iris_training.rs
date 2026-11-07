@@ -8,7 +8,7 @@
 //! * the **unused-tail** report — upstream's single-device ranged sampler walks only the first
 //!   `640 · ⌊n / 640⌋` items of an `n > 640` dataset that is not a multiple of 640 (641–1279 items
 //!   train on 640). The trainer prints that on stderr only, so SceneWorks computes it from the SAME
-//!   `gen_core::iris::train::DataWalk` the trainer walks and surfaces it before launch (the API's
+//!   `gen_core_iris::train::DataWalk` the trainer walks and surfaces it before launch (the API's
 //!   data-walk endpoint) and in the job (progress message, structured log event and result);
 //! * the **memory floor** gate — a routed Iris training lane is never admitted unbounded: a host
 //!   under its floor row (`sceneworks_core::training::iris::floors`, GiB against a capacity in GiB)
@@ -17,25 +17,25 @@
 
 use std::path::{Path, PathBuf};
 
-use gen_core::iris::train::{DataWalk, CANONICAL_CHUNKS};
+use gen_core_iris::train::{DataWalk, CANONICAL_CHUNKS};
 use serde::Serialize;
 
 /// An Iris training run's checkpoint root, `<output_dir>/<stem>.checkpoints` — the engine's own
-/// `gen_core::iris::train::checkpoint_root`, so resume / load-from / metrics read exactly where the
+/// `gen_core_iris::train::checkpoint_root`, so resume / load-from / metrics read exactly where the
 /// trainers write.
 pub fn iris_checkpoint_root(output_dir: &Path, file_name: &str) -> PathBuf {
-    gen_core::iris::train::checkpoint_root(output_dir, file_name)
+    gen_core_iris::train::checkpoint_root(output_dir, file_name)
 }
 
 /// Every checkpoint directory an Iris training run leaves beside its export (sc-25690): the
 /// checkpoint root and the single sibling `<root>.prior` the trainers retire foreign or abandoned
-/// checkpoints into (`gen_core::iris::train::lineage::prior_checkpoint_root`). Both are part of the
+/// checkpoints into (`gen_core_iris::train::lineage::prior_checkpoint_root`). Both are part of the
 /// run's on-disk footprint, so whatever deletes a run's files deletes these too — taken from the
 /// engine contract, never re-derived here.
 pub fn iris_run_checkpoint_dirs(output_dir: &Path, file_name: &str) -> [PathBuf; 2] {
     [
         iris_checkpoint_root(output_dir, file_name),
-        gen_core::iris::train::lineage::prior_checkpoint_root(output_dir, file_name),
+        gen_core_iris::train::lineage::prior_checkpoint_root(output_dir, file_name),
     ]
 }
 
@@ -379,11 +379,7 @@ pub fn iris_plan_memory_error(
 /// small-Mac emulation. `None` off macOS.
 #[cfg(target_os = "macos")]
 pub(crate) fn mlx_training_capacity_gb() -> Option<f64> {
-    crate::mlx_fit_gate::resolve_budget(
-        crate::mlx_fit_gate::probe_total_unified_memory_gib(),
-        crate::mlx_fit_gate::mlx_memory_cap_gb(),
-    )
-    .map(|budget| budget.total_gb)
+    crate::fit_gate::unified_total_gb()
 }
 
 /// The VRAM (GB) one rank can count on, on the NVIDIA card(s) this worker owns, honoring the
@@ -394,11 +390,7 @@ pub(crate) fn mlx_training_capacity_gb() -> Option<f64> {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(crate) async fn candle_training_capacity_gb(gpu_id: &str) -> Result<f64, String> {
     worker_card_capacity_gb(gpu_id, |id| async move {
-        crate::vram_gate::apply_vram_cap(
-            crate::gpu::nvidia_vram_budget_gb(&id).await,
-            crate::vram_gate::cuda_vram_cap_gb(),
-        )
-        .map(|budget| budget.total_gb)
+        crate::fit_gate::lane_total_gb(&id).await
     })
     .await
 }
@@ -974,20 +966,10 @@ mod tests {
 /// consumer and the completion/cancel result — with only the trainer injected. A plan built by the
 /// real `sceneworks_core` target registry is what the job executes, so these pin that every
 /// offered option reaches `Trainer::train`, and what the job API sees, per backend.
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 mod job_tests {
     use crate::api_client::ApiClient;
     use crate::error::{WorkerError, WorkerResult};
-    use axum::extract::{Path as AxumPath, State};
-    use axum::response::{IntoResponse, Response};
-    use axum::routing::{get, post};
-    use axum::{Json, Router};
     use gen_core::{
         LoadSpec, Trainer, TrainerDescriptor, TrainingOutput, TrainingProgress, TrainingRequest,
         WeightsSource,
@@ -1018,7 +1000,7 @@ mod job_tests {
         /// `Ok` — the trainer's contract for a cancel after the first optimizer step.
         CancelAfterFirstStep,
         /// Train a step, publish a checkpoint, then fail at the export the way the engine does (its
-        /// publication is atomic — `gen_core::iris::train::lineage` — so no export is left at the
+        /// publication is atomic — `gen_core_iris::train::lineage` — so no export is left at the
         /// final path): the typed error, the checkpoint kept, nothing exported.
         FailsExport,
         /// Run the ENGINE's own depth dataset pass (`depth_dataset_pass`, the first thing both depth
@@ -1081,8 +1063,8 @@ mod job_tests {
             self.seen.lock().unwrap().request = Some(req.clone());
             on_progress(TrainingProgress::Preparing);
             if self.behavior == Behavior::DepthDatasetPass {
-                use gen_core::iris::train::depth as depth_train;
-                let model = gen_core::iris::IrisConfig::parse(DEPTH_CONFIG)?;
+                use gen_core_iris::train::depth as depth_train;
+                let model = gen_core_iris::IrisConfig::parse(DEPTH_CONFIG)?;
                 let plan = depth_train::DepthTrainPlan::resolve(req, &model)?;
                 depth_train::depth_dataset_pass(req, &plan, |_| {})?;
             }
@@ -1180,43 +1162,16 @@ mod job_tests {
     }
 
     async fn spawn_job_api(cancel_requested: CancelSwitch) -> (String, Posts) {
-        async fn job_route(
-            State((_, cancel)): State<(Posts, CancelSwitch)>,
-            AxumPath(job_id): AxumPath<String>,
-        ) -> Response {
-            Json(crate::tests::job_snapshot_json(&job_id, requested(&cancel))).into_response()
-        }
-        async fn progress_route(
-            State((posts, cancel)): State<(Posts, CancelSwitch)>,
-            AxumPath(job_id): AxumPath<String>,
-            Json(body): Json<Value>,
-        ) -> Response {
-            posts.lock().unwrap().push(body);
-            Json(crate::tests::job_snapshot_json(&job_id, requested(&cancel))).into_response()
-        }
-        async fn heartbeat_route(AxumPath(worker_id): AxumPath<String>) -> Response {
-            Json(json!({
-                "id": worker_id, "gpuId": "cpu", "gpuName": null, "status": "busy",
-                "currentJobId": "job-iris-train", "capabilities": [], "loadedModels": [],
-                "registeredAt": "2026-07-01T00:00:00Z", "lastSeenAt": "2026-07-01T00:00:00Z"
-            }))
-            .into_response()
-        }
-        let posts: Posts = Arc::default();
-        let app = Router::new()
-            .route("/api/v1/jobs/:job_id", get(job_route))
-            .route("/api/v1/jobs/:job_id/progress", post(progress_route))
-            .route(
-                "/api/v1/workers/:worker_id/heartbeat",
-                post(heartbeat_route),
-            )
-            .with_state((posts.clone(), cancel_requested));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        (format!("http://{address}"), posts)
+        let posts = Posts::default();
+        let app = crate::test_api_stub::routes(
+            |state: &(Posts, CancelSwitch), id, _| {
+                crate::tests::job_snapshot_json(id, requested(&state.1))
+            },
+            |state, _, value| state.0.lock().unwrap().push(value),
+            |_, id| crate::tests::worker_snapshot_json(id),
+        )
+        .with_state((posts.clone(), cancel_requested));
+        (crate::test_api_stub::serve(app).await, posts)
     }
 
     fn stage(root: &Path, repo: &str, revision: &str, file: &str) -> PathBuf {
@@ -1407,9 +1362,7 @@ mod job_tests {
                 let mut seen = loader_seen.lock().unwrap();
                 seen.loads += 1;
                 for (id, source) in &spec.components {
-                    let path = match source {
-                        WeightsSource::Dir(path) | WeightsSource::File(path) => path.clone(),
-                    };
+                    let path = crate::weights_source::WeightsSourceExt::path(source).to_path_buf();
                     seen.components.push((id.clone(), path));
                 }
                 if let WeightsSource::Dir(dir) = &spec.weights {
@@ -1501,7 +1454,7 @@ mod job_tests {
             config.resolution = 512;
             config.batch_size = 2;
             config.rank = 8;
-            config.alpha = 4;
+            config.alpha = sceneworks_core::contracts::ContractNumber::from(4);
             let advanced = &mut config.advanced;
             advanced.insert("networkType".into(), json!("lokr"));
             advanced.insert("decomposeFactor".into(), json!(4));
@@ -1857,7 +1810,7 @@ mod job_tests {
             let cancel = gen_core::CancelFlag::new();
             let flag = cancel.clone();
             let adapter = data.join("loras/lora_iris/partial.safetensors");
-            let blocking = tokio::task::spawn_blocking(move || {
+            let blocking = crate::load_progress::spawn_blocking(move || {
                 let training = |step| {
                     TrainEvent::Progress(TrainingProgress::Training {
                         step,
@@ -2587,11 +2540,11 @@ mod job_tests {
         repo: &'static str,
         file: &'static str,
         bytes: &[u8],
-    ) -> gen_core::iris::restoration_train::TrainingResource {
+    ) -> gen_core_iris::restoration_train::TrainingResource {
         use sha2::Digest;
         let revision = "0123456789abcdef0123456789abcdef01234567";
         stage_bytes(data, repo, revision, file, bytes);
-        gen_core::iris::restoration_train::TrainingResource {
+        gen_core_iris::restoration_train::TrainingResource {
             component,
             name: component,
             url: "https://example.invalid/fixture",
@@ -2652,7 +2605,7 @@ mod job_tests {
             task_dataset(&data, "restoration", 2, true),
             |c| {
                 c.rank = 8;
-                c.alpha = 4;
+                c.alpha = sceneworks_core::contracts::ContractNumber::from(4);
                 c.gradient_accumulation = 2;
                 c.steps = 40;
                 c.save_every = 8;
@@ -2671,7 +2624,7 @@ mod job_tests {
         assert_eq!(run.seen.weights.as_deref(), Some(export.as_path()));
         let mut components = run.seen.components.clone();
         components.sort();
-        let resource_path = |resource: &gen_core::iris::restoration_train::TrainingResource| {
+        let resource_path = |resource: &gen_core_iris::restoration_train::TrainingResource| {
             crate::model_jobs::huggingface_pinned_snapshot_dir(
                 &data,
                 resource.repo,
@@ -2725,7 +2678,7 @@ mod job_tests {
         let data_holder = tempfile::tempdir().unwrap();
         let data = data_holder.path().canonicalize().unwrap();
         stage_task_export(&data, "upscaler");
-        for resource in gen_core::iris::restoration_train::TRAINING_RESOURCES {
+        for resource in gen_core_iris::restoration_train::TRAINING_RESOURCES {
             stage(&data, resource.repo, resource.revision, resource.file);
         }
         let plan = task_plan(
@@ -2753,7 +2706,7 @@ mod job_tests {
         // A missing resource is named before anything is hashed.
         let missing = sceneworks_core::hf_home::huggingface_repo_cache_path(
             &data,
-            gen_core::iris::restoration_train::CRITIC_TRUNK_RESOURCE.repo,
+            gen_core_iris::restoration_train::CRITIC_TRUNK_RESOURCE.repo,
         )
         .unwrap();
         std::fs::remove_dir_all(missing).unwrap();
@@ -3066,7 +3019,7 @@ mod job_tests {
             if cancel_on_training {
                 let posts = Arc::clone(&posts);
                 let user_cancel = Arc::clone(&user_cancel);
-                tokio::spawn(async move {
+                crate::load_progress::spawn(async move {
                     loop {
                         let training = posts.lock().unwrap().iter().any(|post: &Value| {
                             post["message"]

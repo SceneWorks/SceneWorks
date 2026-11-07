@@ -21,7 +21,7 @@ This document is the contract. It exists for two people:
 
 > ## Your prompt is in the file, as you wrote it
 >
-> These six fields are recorded as authored, and are deliberately **exempt from the filesystem-path
+> These ten fields are recorded as authored, and are deliberately **exempt from the filesystem-path
 > guard** that drops every other field that looks like a location. Silently mangling someone's
 > prompt because it mentions a directory would be worse than the leak it prevents — you wrote it,
 > and you can read it back before you share. The only things removed from them are control
@@ -36,6 +36,10 @@ This document is the contract. It exists for two people:
 > | --- | --- |
 > | `prompt` | The prompt. |
 > | `negativePrompt` | The negative prompt. |
+> | `advanced.appearancePromptBatch[]` | Each pre-appearance native batch prompt. |
+> | `advanced.promptBatch[]` | Each effective native batch prompt recorded by the worker. |
+> | `advanced.appearancePrompt` | The authored prompt before Camera, Film, Looks and Lighting were composed. |
+> | `advanced.appearanceNegativePrompt` | The negative prompt before recipe contributions. |
 > | `advanced.stylePrompt` | The pre-style prompt, before a catalog style was composed onto it. |
 > | `advanced.systemMessage` | The interleaved-document system prompt, when it was edited away from the default. |
 > | `advanced.structuredPrompt.intent` | The authored intent line of a structured-caption recipe. |
@@ -335,7 +339,7 @@ in that table is not in the file. Named explicitly because these are the ones pe
   the shape of a Hugging Face repo id (`acme/mira`), which `loras[].repo` carries for real, and a
   slash turns up in free-text labels people write by hand (`Ghibli / soft light`). So a
   `loras[].name` or a `styleId` reading `Clients/Acme` is not caught and reaches the file; three or
-  more segments (`Clients/Acme/brief`) is. **Three:** it does not apply at all to the six prose
+  more segments (`Clients/Acme/brief`) is. **Three:** it does not apply at all to the ten prose
   fields, which is the callout at the top of this document.
 - **Project, job and asset identity.** `projectId`, `projectName`, `jobId`, `assetId`,
   `generationSetId`, `characterId`, `characterLookId`.
@@ -385,7 +389,14 @@ smuggled under a scalar key.
 
 | Key | Shape | What it is |
 | --- | --- | --- |
+| `flux3_layout` | `Flux3Layout` | FLUX.3 caption-only soft spatial guidance: version, ordered labeled placement/source/target boxes, null removals, coordinate spaces and attachment-instance selection. Public row fields retain their original precision; unknown provenance fields are withheld. |
+| `flux3_reference_ids` | `StringList` | Up to ten unique attachment-instance identities in submitted reference order, including distinct slots for duplicate assets. Asset paths and identifiers remain separately withheld. |
 | `mossImage` | `MossImageOptions` | Requested MOSS mode, precision, context and author controls, validated through the native contract. |
+| `mossImageAdvanced` | `MossImageAdvanced` | Edit-only exact tensor SHA256/dtype/shape requirements, negative batch and images/latents output. Installation-local asset IDs are removed; replay reacquires exact artifacts. |
+| `promptBatch` | `PromptBatch` | Bounded full native text batch retained with advanced edit row bindings. |
+| `mossImageSampleIndex` | `SampleIndex` | Server-owned original output ordinal; display provenance, scrubbed before execution. |
+| `mossImageEdit` | `MossImageEditOptions` | Authored edit reference maximum edge and cache policy; emitted and restored by Studio. |
+| `mossImageEditExecutionReport` | `MossImageEditReport` | Actual native edit receipt with the frozen adapter/config identities, ordered reference dimensions and pixel/latent hashes, effective controls and cache policy. Local adapter paths are replaced with relative filenames. Imported receipts are display metadata; replay discards them before execution. |
 | `mossImageExecutionReport` | `MossImageReport` | Actual completed native MOSS execution receipt, including frozen asset hashes and adapter application. Local adapter location is replaced with its frozen relative filename. Imported receipts are display metadata; replay discards them and computes a new receipt. |
 | `resolution` | `Scalar` | The output geometry label the studio control was set to. |
 | `structuredPrompt` | `StructuredPrompt` | A structured-caption recipe, reduced to its scalar fields. The free-form `caption` object is dropped. |
@@ -412,6 +423,10 @@ smuggled under a scalar key.
 | `faceRestore` | `Scalar` | Face-restoration opt-in. |
 | `controlMode` | `Scalar` | Control type (canny / depth / …). The control *image* rides as an input shape instead. |
 | `controlScale` | `Scalar` | Control-lock strength. |
+| `appearance` | `Appearance` | Public Camera, Film, Looks and Lighting catalog IDs; only the four typed selection fields travel. |
+| `appearancePromptBatch` | `PromptBatch` | Raw pre-appearance native batch text, separate from the worker-owned effective batch; retained for exact replay. |
+| `appearancePrompt` | `Scalar` | Raw pre-appearance prompt, preserved as bounded authored prose. |
+| `appearanceNegativePrompt` | `Scalar` | Raw pre-appearance negative prompt, preserved as bounded authored prose. |
 | `styleId` | `Scalar` | The catalog style picked. |
 | `stylePrompt` | `Scalar` | **Prose.** The raw pre-style prompt. Path-exempt — see the callout. |
 | `cnScale` | `Scalar` | Tile-ControlNet strength for the Detail pass. |
@@ -772,6 +787,8 @@ If the lint says a *builder* is unaccounted for, decide whether its lane embeds.
 | File | Function | Lane |
 | --- | --- | --- |
 | `apps/web/src/imageJobAdvanced.js` | `buildImageJobAdvanced` | The Image Studio's ~30-knob builder. |
+| `apps/web/src/mossImage.js` | `buildMossEditJobAdvanced` | The shared MOSS edit controls, prompt batches and advanced tensor inputs used by Studio and Editor. |
+| `apps/web/src/regenerateImage.js` | `imageRecipeRequest` | Background image regeneration when the original job is unavailable. Replays persisted adapter inputs, removes output receipts, and feeds the image generation and inline-upscale embedding lanes without authoring new advanced controls. |
 | `apps/web/src/imageJobs.js` | `buildEditJobBody` | The Image Editor's prompt-edit body. |
 | `apps/web/src/imageJobs.js` | `buildDetailJobBody` | The standalone Detail pass. |
 | `apps/web/src/components/CharacterAdvancedOptions.jsx` | `buildAdvanced` | The character lane's shared tuning block. |
@@ -779,7 +796,7 @@ If the lint says a *builder* is unaccounted for, decide whether its lane embeds.
 | `apps/web/src/screens/characterPanels.jsx` | `usePoseController` | The Pose Library form's extras. |
 | `apps/web/src/screens/DocumentStudio.jsx` | `submit` | The interleaved-document lane. |
 | `apps/web/src/imageJobs.js` | `buildUpscaleJobBody` | The standalone upscale job. Registered as emitting **no** `advanced` map, so the day it grows a knob the lint demands a classification. |
-| `apps/web/src/screens/VideoStudio.jsx` | `submit` | The Video Studio's ~20-knob builder. |
+| `apps/web/src/screens/videoStudio/useVideoSubmission.js` | `submit` | The Video Studio's ~20-knob builder. |
 | `apps/web/src/components/editor/useEditorGeneration.js` | `buildBasePayload` | The timeline editor's shared video payload. |
 | `apps/web/src/screens/EditorScreen.jsx` | `extendSelectedClip` | Timeline extend. |
 | `apps/web/src/screens/EditorScreen.jsx` | `replaceSelectedItem` | Timeline replace. |
@@ -789,6 +806,7 @@ If the lint says a *builder* is unaccounted for, decide whether its lane embeds.
 
 <!-- END PINNED: builders -->
 
+The test-only builder registries live in `crates/sceneworks-core/tests/common/workflow_registry.rs`.
 Adding an entry to `ADVANCED_BUILDERS` is what turns the lint on for that builder — at which point
 every key it emits needs an `allow`/`deny` decision, and a row in the table above, which
 `the_doc_lists_exactly_the_registered_builders` pins in both directions.
@@ -807,9 +825,14 @@ how to know it still can.
 | `lane` | Prose: the embedding lane this builder's payload ends up written by, so a reader can see why the keys matter. |
 | `anchors` | Keys the extractor **must** still find. The floor against an extractor that has quietly stopped understanding the file — a lint that reads zero keys and passes is the failure mode the whole registry exists to prevent. |
 | `minimum_keys` | The smallest key count the extractor may report before the lint calls itself broken. Set it well under the real count; it is a floor, not a census. |
-| `spread_of` | Identifiers spread into an `AssignedObject` or `SpreadAdvancedLiteral` initializer whose keys another registry entry already accounts for. A dotted member path (`base.advanced`) counts as one name; a call expression is refused, because its keys have no declarable name. Empty for most builders, and declared so a **new** spread of something nobody classified fails the lint instead of vanishing into it. |
+| `spread_of` | Identifiers spread into an `AssignedObject` or `SpreadAdvancedLiteral` initializer whose keys another registry entry already accounts for, or whose producers accounted for them before persistence in a recipe replay. A dotted member path (`base.advanced`) counts as one name; a call expression is refused, because its keys have no declarable name. Empty for most builders, and declared so a **new** spread of something nobody classified fails the lint instead of vanishing into it. |
 
 <!-- END PINNED: builder-fields -->
+
+The recipe replay builder is a persisted-input passthrough, so it declares `spread_of: ["raw"]`
+with no anchors and a zero new-key floor. Its original producers own the persisted keys'
+classifications. Tests assert that replay adds no keys, that a new explicit key still needs a
+classification, and that an undeclared spread or computed `advanced` access remains refused.
 
 A new variant on `AdvancedKeySource` is the step most easily missed, because nothing about writing
 `allow_from(…, AdvancedKeySource::MyBuilder, …)` reminds you that the variant also has to appear in
@@ -832,7 +855,7 @@ Until sc-16113 that list was a decision record and nothing more. It said, in its
 that no video lane could start embedding while its keys sat in it — and nothing enforced that.
 Adding a `write_workflow_chunk` + `embeddable_workflow_share` call to a real video-lane PNG write in
 `crates/sceneworks-worker/src/video_jobs/seedvr2.rs` left every lint green while all of
-`VideoStudio.jsx`'s unclassified keys were dropped from the written file, with nothing anywhere to
+`videoStudio/useVideoSubmission.js`'s unclassified keys were dropped from the written file, with nothing anywhere to
 say so.
 
 **sc-15956 is the story the gate was built for, and it did its job.** All six video builders moved
@@ -850,7 +873,7 @@ discovery scan rather than a list:
 
 ## The write seams, and what each one embeds for
 
-`WORKFLOW_WRITE_SEAMS` in `crates/sceneworks-core/src/workflow_share.rs` is what closes that. It
+`WORKFLOW_WRITE_SEAMS` in `crates/sceneworks-core/tests/common/workflow_registry.rs` is what closes that. It
 pairs every place in `sceneworks-worker` an envelope can reach a written file with the **web
 builders that feed it** — the same `(file, function)` key the two builder registries are joined on —
 and `every_worker_write_seam_declares_the_lane_it_embeds_for` refuses a seam whose builder is
@@ -861,6 +884,7 @@ deferred.
 | File | Function | What it does about the chunk |
 | --- | --- | --- |
 | `crates/sceneworks-worker/src/image_jobs.rs` | `write_image_asset` | Embeds — the one funnel every generated image is written through, for both `/image/jobs` and `/image/interleave/jobs`. |
+| `crates/sceneworks-worker/src/image_jobs/moss.rs` | `write_moss_tensor_companion` | Embeds — writes the bounded portable workflow companion for each MOSS sampled-latent output. |
 | `crates/sceneworks-worker/src/image_jobs.rs` | `upscaled_workflow_share` | Embeds — the inline-upscale sub-step's envelope: the generation payload with the applied pass overlaid. |
 | `crates/sceneworks-worker/src/image_jobs.rs` | `write_upscaled_asset` | Embeds — the inline-upscaled variant's own PNG. |
 | `crates/sceneworks-worker/src/image_jobs.rs` | `detail_workflow_share` | Embeds — the standalone detail pass's envelope. |
@@ -936,10 +960,10 @@ what is left.
 
 The back-check that every `ADVANCED_BUILDERS` entry is named by some embedding seam means the two
 halves of a new lane cannot be split across two PRs: classifying the ~15 video keys on their own
-would leave `VideoStudio.jsx::submit` registered with no seam behind it, which fails. Move the
+would leave `videoStudio/useVideoSubmission.js::submit` registered with no seam behind it, which fails. Move the
 builder up and add the `WORKFLOW_WRITE_SEAMS` entry in the same change.
 
-And `a_seam_that_embeds_for_a_deferred_builder_fails_the_build` hard-codes `VideoStudio.jsx::submit`
+And `a_seam_that_embeds_for_a_deferred_builder_fails_the_build` hard-codes `videoStudio/useVideoSubmission.js::submit`
 as its deferred example, so promoting that builder turns that mutation proof into a "did not panic
 as expected" failure. Re-point it at whatever is still deferred; the proof is that *some* deferred
 builder is refused, not that one particular one is. Both surprises are loud rather than silent,
@@ -1103,10 +1127,18 @@ Three claims outside a pinned block are checked too, because each had a way to d
   stopped having;
 - the pose **coordinate arrays** the callout-adjacent bullet and the `poses` row name are asserted
   to be exactly `POSE_FIELDS`;
-- the number of prose fields the callout says it lists ("These six fields") is asserted against the
+- the number of prose fields the callout says it lists ("These ten fields") is asserted against the
   row count of the table under it.
 
 What is **not** machine-checked is the prose in the right-hand "what it is" columns and the narrative
 sections. Those are read against the source, not derived from it. The version-behaviour table, the
 trust-boundary list and the setting's semantics are prose; the modules they describe are
 `workflow_share.rs`, `workflow_png.rs`, `project_store.rs` and `app_paths.rs`.
+
+### Native edit tensor artifacts
+
+Advanced MOSS edit inputs use project-owned `tensor` assets imported through the existing multipart assets route. Files are inert NumPy NPY versions 1–3, C-order little-endian FP32 or binary U8, rank 2–4; object/pickle, endian conversion, Fortran layout, nonfinite values, invalid headers/shapes, overflow, trailing bytes and files above 512 MiB are refused before materialization. Each input uses `{assetId, sha256}`; the server measures metadata and validates project ownership and exact bytes at enqueue and dispatch. The aggregate input budget is 1280 MiB plus bounded mask/header allowance; host admission additionally accounts for decode staging.
+
+`positive.values` and optional `positive.mask` carry [B,S,4096] FP32 and binary [B,S]. Negative embeddings follow the same shapes and match B; `negativePrompts` is mutually exclusive and has one string per row. Positive tensors replace both prompt carriers. Nonempty broadcast negative text cannot accompany supplied negative inputs; the native negative-batch request carries no broadcast value. `noise` is exact FP32 [B×count,128,H/16,W/16]; it yields nullable seed `null`, never a generated replacement seed. No separate input-latents or strength/dtype/quantization control is exposed. Context and positive training shift remain native scalar controls, distinct from schedule shift.
+
+Latent outputs are real FP32 NPY artifacts, one [1,128,H/16,W/16] file per ordered sample, without a preview. The full authored input batch/count remains in every recipe; the original sample ordinal and native batch shape are provenance. A bounded `.sceneworks-workflow.json` companion uses this same WorkflowShare envelope and inspect/resolution reducer. Asset metadata/API/MCP links bind the NPY and companion; it never appends a trailer to NPY. Same-library replay uses authorized original tensors. Portable replay retains identities and shape requirements, requires exact reacquisition, and never treats stale execution receipts as inputs.

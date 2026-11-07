@@ -1,14 +1,19 @@
+import { rustFacadeSource, rustSourceWithTests, rustFunctionSource, rustFunctionSlices } from "./lib/rust-facade-source.mjs";
 import assert from "node:assert/strict";
-import { readFile, readdir, mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { readFile, readdir, mkdtemp, mkdir, realpath, rm, symlink, writeFile, utimes, stat } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { rootTestGroups } from "./run-root-tests.mjs";
+import { proofSelection, requireManualSelection, verifyProofResult, cudaDeviceEvidence, requireMetalHeadroom, observeMetalCase, streamProofBuild } from "./ci/h3-import-native-proof.mjs";
+import { writeFileSync } from "node:fs";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
-import { selectWindowsCargoCache, ensurePhysicalCargoCache, lockedInferenceRevision, cachedInferenceRevision } from "./select-windows-cargo-cache.mjs";
+import { historyRequirements } from "./prepare-inference-history.mjs";
+import { selectWindowsCargoCache, ensurePhysicalCargoCache, lockedInferenceRevision, cachedInferenceRevision, flashAttentionBuildDirectory } from "./select-windows-cargo-cache.mjs";
 import { bindQwenPersistentCache } from "./ci/memory-catalog/bind-qwen-persistent-cache.mjs";
 
 // sc-22514 deleted the SC-18946 plan GENERATOR. Its three outputs stay as retained historical
@@ -20,10 +25,16 @@ const LTX_CAMPAIGN_PLANS = [
 ];
 
 async function source(path) {
-  return readFile(new URL(`../${path}`, import.meta.url), "utf8");
+  const entry = new URL(`../${path}`, import.meta.url);
+  return path.endsWith(".rs") ? rustFacadeSource(entry) : readFile(entry, "utf8");
 }
 
 const CANDLE_FACTS_UPLOAD_IF = "always() && (steps.verify_candle_capabilities.outcome == 'failure' || (github.event_name == 'workflow_dispatch' && inputs.capability_facts_only && steps.verify_candle_capabilities.outcome == 'success'))";
+function workflowOperations(workflow) {
+  const menu = workflow.match(/starvector_terminal_operation:[\s\S]*?options: \[([^\]]+)\]/)?.[1];
+  assert.ok(menu, "the registered manual operation menu exists");
+  return menu.split(",").map((choice) => choice.trim());
+}
 function workflowExpression(block, field = "if") {
   const expression = block.match(new RegExp(`^ +${field}: \\$\\{\\{ (.+) \\}\\}$`, "m"))?.[1];
   assert.ok(expression, `workflow must retain an evaluable ${field}`);
@@ -31,7 +42,7 @@ function workflowExpression(block, field = "if") {
 }
 function evaluateWorkflow(expression, event, inputs = {}, steps = {}) {
   const github = { event_name: event, repository: "SceneWorks/SceneWorks", event: { pull_request: { head: { repo: { full_name: "SceneWorks/SceneWorks" } } } } };
-  return Function("github", "inputs", "steps", "always", `return (${expression});`)(github, inputs, steps, () => true);
+  return Function("github", "inputs", "steps", "always", "success", `return (${expression});`)(github, inputs, steps, () => true, () => true);
 }
 
 function workflowJob(workflow, name) {
@@ -51,20 +62,341 @@ function workflowStep(job, name) {
   return job.slice(at, next === -1 ? undefined : next);
 }
 
+function assertH3RootToolchainReader(job) {
+  const reader = workflowStep(job, "Read checkout Rust toolchain");
+  assert.match(reader, /id: h3_admission_toolchain/);
+  assert.ok(reader.includes('channel = tomllib.loads(Path("rust-toolchain.toml").read_text())["toolchain"]["channel"]'));
+  assert.ok(reader.includes('if not re.fullmatch(r"[0-9]+\\.[0-9]+\\.[0-9]+", channel):'));
+  assert.match(reader, /open\(os\.environ\["GITHUB_OUTPUT"\], "a"\) as output:/);
+  assert.match(reader, /print\(f"channel=\{channel\}", file=output\)/);
+  assert.equal((reader.match(/^\s*channel\s*=/gm) ?? []).length, 1, "only the checkout TOML supplies the channel");
+  assert.doesNotMatch(reader, /\$\{\{\s*inputs\./);
+  assert.match(job, /toolchain: \$\{\{ steps\.h3_admission_toolchain\.outputs\.channel \}\}/);
+  assert.ok(job.indexOf(reader) < job.indexOf("uses: dtolnay/rust-toolchain@"), "the checkout pin is read before installing Rust");
+}
+
+test("ordinary hosted macOS CI never opts into ignored H3 model forwards", async () => {
+  const hosted = workflowJob(await source(".github/workflows/macos-mlx.yml"), "macos-checks");
+  assert.doesNotMatch(hosted, /pruned_import_native_\w+_projection_smoke|\b\w*w4(?:a8)?\w*smoke\b/i,
+    "pruned/W4 model forwards belong only in explicitly selected manual validation");
+  assert.doesNotMatch(hosted, /--ignored\b/,
+    "ordinary PR/main CI must not opt into ignored model execution, even with synthetic weights");
+  assert.match(hosted, /run: node scripts\/unit-hf-sandbox\.mjs -- cargo test -- --skip nax_16bit_sdpa_is_correct/,
+    "retain the ordinary workspace unit/math checks");
+  assert.match(hosted, /cargo clippy/,
+    "retain ordinary compilation/lint coverage");
+});
+
+test("H3 model-level forwards stay out of ordinary CI and require positive manual selection", async () => {
+  const server = await source(".github/workflows/server-candle-linux.yml");
+  assert.match(server, /^on:\n  workflow_dispatch:/m);
+  assert.doesNotMatch(server, /^  (push|pull_request|merge_group|schedule):/m);
+  for (const file of ["macos-mlx.yml", "windows-candle.yml"]) {
+    const ordinary = await source(`.github/workflows/${file}`);
+    assert.doesNotMatch(ordinary, /(?:pruned|w4a8)_import_native_(?:mlx|cuda)_projection_smoke/);
+  }
+  assert.match(await source(".github/workflows/macos-mlx.yml"), /run: node scripts\/unit-hf-sandbox\.mjs -- cargo test -- --skip nax_16bit_sdpa_is_correct/);
+  for (const backend of ["mlx", "cuda"]) {
+    const job = workflowJob(server, `h3-import-${backend}`);
+    const expression = workflowExpression(job);
+    for (const event of ["push", "pull_request", "merge_group", "workflow_dispatch"]) {
+      for (const operation of [undefined, "", "unknown-selector", ...workflowOperations(server)]) {
+        assert.equal(Boolean(evaluateWorkflow(expression, event, { starvector_terminal_operation: operation })),
+          event === "workflow_dispatch" && [`h3-import-${backend}`, "h3-import-both"].includes(operation));
+      }
+    }
+    assert.match(job, /cancel-in-progress: false/);
+    assert.match(job, /if: \$\{\{ always\(\) \}\}/);
+    assert.match(job, /if-no-files-found: error/);
+    assert.match(job, new RegExp(`node scripts/ci/h3-import-native-proof\\.mjs ${backend}`));
+  }
+  assert.match(workflowJob(server, "h3-import-mlx"), /runs-on: \[self-hosted, macOS, ARM64, rw-llm\]/);
+  assert.match(workflowJob(server, "h3-import-mlx"), /test "\$RUNNER_NAME" = nax-macos-2/);
+  assert.match(workflowJob(server, "h3-import-cuda"), /runs-on: \[self-hosted, Windows, X64, cuda\]/);
+  assert.match(workflowJob(server, "h3-import-cuda"), /group: windows-candle-gpu-real-weights/);
+  assert.match(workflowJob(server, "h3-import-cuda"), /CUDA_VISIBLE_DEVICES: "1"/);
+  assert.match(workflowJob(server, "h3-import-cuda"), /SCENEWORKS_GPU_ID: "1"/);
+  const fixture = await source("crates/sceneworks-worker/src/minimax_h3_import_fixture.rs");
+  for (const backend of ["mlx", "cuda"]) {
+    for (const name of proofSelection(backend)) {
+      const bare = name.split("::").at(-1);
+      assert.match(fixture, new RegExp(`#\\[ignore[^\\n]*\\]\\nfn ${bare}\\(`), `${bare} remains ignored in ordinary cargo test`);
+    }
+  }
+});
+
+test("H3 admission proof is a positively selected hosted CPU job with real Cargo evidence", async () => {
+  const server = await source(".github/workflows/server-candle-linux.yml");
+  const operations = workflowOperations(server);
+  for (const operation of ["h3-import-mlx", "h3-import-cuda", "h3-import-both", "h3-admission-proof"]) {
+    assert.equal(operations.filter((choice) => choice === operation).length, 1, `${operation} remains explicitly selectable`);
+  }
+  const job = workflowJob(server, "h3-admission-proof");
+  const expression = workflowExpression(job);
+  for (const event of ["push", "pull_request", "merge_group", "schedule", "workflow_dispatch"]) {
+    for (const operation of [undefined, "", "unknown-selector", ...operations]) {
+      assert.equal(Boolean(evaluateWorkflow(expression, event, { starvector_terminal_operation: operation })),
+        event === "workflow_dispatch" && operation === "h3-admission-proof");
+    }
+  }
+  // The new CPU choice cannot accidentally enter any pre-existing GPU or StarVector job.
+  const jobs = [...server.slice(server.indexOf("\njobs:")).matchAll(/^  ([A-Za-z0-9_-]+):\s*$/gm)].map((match) => match[1]);
+  for (const name of jobs.filter((name) => name !== "h3-admission-proof")) {
+    for (const operation of ["h3-admission-proof", "unknown-selector"]) {
+      assert.equal(Boolean(evaluateWorkflow(workflowExpression(workflowJob(server, name)), "workflow_dispatch", { starvector_terminal_operation: operation })), false, `${name} refuses ${operation}`);
+    }
+  }
+  assert.match(job, /runs-on: ubuntu-latest/);
+  assert.match(job, /CARGO_NET_OFFLINE: "true"/);
+  assert.match(job, /CARGO_BUILD_JOBS: "2"/);
+  assert.match(job, /python-version: "3\.12"/);
+  assertH3RootToolchainReader(job);
+  assert.match(job, /Swatinem\/rust-cache@[a-f0-9]{40}/);
+  assert.match(job, /persist-credentials: false/);
+  const fetch = workflowStep(job, "Fetch the pinned inference source, never model weights");
+  assert.match(fetch, /CARGO_NET_OFFLINE: "false"/);
+  assert.match(fetch, /cargo fetch --locked/);
+  const run = workflowStep(job, "Prove H3 admission baseline, assertion reds and restored greens on CPU");
+  assert.match(run, /set -euo pipefail/);
+  assert.match(run, /bwrap --unshare-net --unshare-pid --die-with-parent/);
+  assert.match(run, /--tmpfs "\$HOME\/\.cache\/huggingface"/);
+  assert.match(run, /--tmpfs "\$HOME\/SceneWorks\/data"/);
+  assert.match(run, /--dev \/dev/);
+  assert.match(run, /runuser --user "\$USER" --preserve-environment/);
+  assert.match(run, /python3 scripts\/ci\/h3_admission_mutation_proof\.py/);
+  assert.match(run, /--output-dir "\$H3_ADMISSION_EVIDENCE\/proof" --cfg default/);
+  assert.doesNotMatch(run, /unit_fake|--fake|runner=|CARGO_NET_OFFLINE.*false/);
+  assert.ok(job.indexOf(fetch) < job.indexOf(run));
+  assert.doesNotMatch(job, /self-hosted|windows-candle-gpu-real-weights|rw-llm|CUDA_COMPUTE_CAP|cuda-toolkit|--features backend-candle|--ignored|h3-import-native-proof/);
+  const upload = workflowStep(job, "Keep actual H3 CPU source, pin, assertions and restoration evidence");
+  assert.match(upload, /if: \$\{\{ always\(\) \}\}/);
+  assert.match(upload, /actions\/upload-artifact@[a-f0-9]{40}/);
+  assert.match(upload, /h3-admission-cpu-\$\{\{ github\.sha \}\}-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
+  assert.match(upload, /if-no-files-found: error/);
+});
+
+test("H3 derived Rust selection cannot float, use another file or run after setup", async () => {
+  const job = workflowJob(await source(".github/workflows/server-candle-linux.yml"), "h3-admission-proof");
+  const reader = workflowStep(job, "Read checkout Rust toolchain");
+  assertH3RootToolchainReader(job);
+  for (const mutated of [
+    job.replace('Path("rust-toolchain.toml")', 'Path("other-toolchain.toml")'),
+    job.replace('if not re.fullmatch', 'if re.fullmatch'),
+    job.replace("${{ steps.h3_admission_toolchain.outputs.channel }}", '"stable"'),
+    job.replace(reader, "") + "\n" + reader,
+  ]) assert.throws(() => assertH3RootToolchainReader(mutated));
+});
+
+test("H3 native proof evidence refuses zero tests, ignored tests, wrong selection and failed commands", async () => {
+  for (const backend of ["mlx", "cuda"]) {
+    for (const name of proofSelection(backend)) {
+      const good = `running 1 test\ntest ${name} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 42 filtered out;`;
+      verifyProofResult(good, name, 0);
+      for (const bad of [good.replace("1 passed", "0 passed"), good.replace("0 ignored", "1 ignored"), good.replace("0 failed", "1 failed"), good.replace("running 1 test", "running 0 tests"), good.replace(name, "unrelated_test")]) {
+        assert.throws(() => verifyProofResult(bad, name, 0));
+      }
+      assert.throws(() => verifyProofResult(good, name, 1));
+    }
+    requireManualSelection("workflow_dispatch", backend, backend);
+    requireManualSelection("workflow_dispatch", "both", backend);
+    for (const event of ["push", "pull_request", "merge_group", undefined]) assert.throws(() => requireManualSelection(event, backend, backend));
+    for (const selection of [undefined, "standard", "", backend === "mlx" ? "cuda" : "mlx"]) assert.throws(() => requireManualSelection("workflow_dispatch", selection, backend));
+  }
+  assert.throws(() => proofSelection("cpu"));
+  const runner = await source("scripts/ci/h3-import-native-proof.mjs");
+  for (const token of ["sourceSha", "inferenceSha", "fixtureSha256", "configuration", "durationMs", "receipt.json", "--exact", "--ignored", "--test-threads=1", "--no-run", "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HUGGINGFACE_HUB_CACHE", "SCENEWORKS_DATA_DIR", "tree_guard.py", '"8", "180"']) assert.ok(runner.includes(token), token);
+});
+
+test("H3 CUDA proof preserves PCI ordering and records the actual selected physical GPU", async () => {
+  const job = workflowJob(await source(".github/workflows/server-candle-linux.yml"), "h3-import-cuda");
+  assert.match(job, /^      CUDA_DEVICE_ORDER: PCI_BUS_ID$/m);
+  const env = { CUDA_DEVICE_ORDER: "PCI_BUS_ID", CUDA_VISIBLE_DEVICES: "1", SCENEWORKS_GPU_ID: "1" };
+  // NVML order deliberately disagrees with PCI order: PCI-ordered physical device 1 is GPU-high.
+  const csv = "0, GPU-high, 00000000:41:00.0, card-high, 580.1\n1, GPU-low, 00000000:01:00.0, card-low, 580.1\n";
+  const evidence = cudaDeviceEvidence(env, csv);
+  assert.equal(evidence.cudaDeviceOrder, "PCI_BUS_ID");
+  assert.deepEqual(evidence.selectedPhysicalDevice, { nvmlIndex: 0, uuid: "GPU-high", pciBusId: "00000000:41:00.0", name: "card-high", driverVersion: "580.1" });
+  for (const order of [undefined, "", "FASTEST_FIRST"]) assert.throws(() => cudaDeviceEvidence({ ...env, CUDA_DEVICE_ORDER: order }, csv));
+  assert.throws(() => cudaDeviceEvidence({ ...env, CUDA_VISIBLE_DEVICES: "0" }, csv), /physical device 1/);
+  assert.throws(() => cudaDeviceEvidence({ ...env, SCENEWORKS_GPU_ID: "0" }, csv), /SCENEWORKS_GPU_ID/);
+  assert.throws(() => cudaDeviceEvidence(env, "1, GPU-only, 00000000:01:00.0, card, 580.1"), /physical CUDA device 1/);
+  for (const malformed of ["", "0, GPU-unknown, nope, card, 580", "0, missing-uuid, 0000:01:00.0, card, 580"]) assert.throws(() => cudaDeviceEvidence(env, malformed));
+  assert.match(await source("scripts/ci/h3-import-native-proof.mjs"), /receipt\.cuda = cudaDeviceEvidence\(process\.env, inventory\)/);
+});
+
+test("H3 CUDA evidence accepts only the full observed UUID of PCI-ordered physical device 1", () => {
+  const low = "GPU-00000000-0000-0000-0000-000000000000", high = "GPU-11111111-1111-1111-1111-111111111111";
+  const rows = [`1, ${high}, 00000000:41:00.0, card-high, 580.1`, `0, ${low}, 00000000:01:00.0, card-low, 580.1`];
+  const env = {CUDA_DEVICE_ORDER:"PCI_BUS_ID", CUDA_VISIBLE_DEVICES:high, SCENEWORKS_GPU_ID:"1"};
+  for (const csv of [rows.join("\n"), [...rows].reverse().join("\n")]) {
+    const selected = cudaDeviceEvidence(env,csv);
+    assert.equal(selected.cudaVisibleDevices,high); assert.equal(selected.selectedPhysicalDevice.uuid,high);
+    assert.equal(cudaDeviceEvidence({...env,CUDA_VISIBLE_DEVICES:"1"},csv).selectedPhysicalDevice.uuid,high);
+    for (const visible of [low,"GPU-22222222-2222-2222-2222-222222222222",`${high},${low}`,"1,0","0","01","",undefined,high.slice(0,12),`${high}suffix`,`${high} `,high.replace("GPU-","gpu-"),high.replace(/1$/,"g")]) {
+      assert.throws(()=>cudaDeviceEvidence({...env,CUDA_VISIBLE_DEVICES:visible},csv));
+    }
+    for (const change of [{CUDA_DEVICE_ORDER:"FASTEST_FIRST"},{SCENEWORKS_GPU_ID:"0"},{SCENEWORKS_GPU_ID:high}]) assert.throws(()=>cudaDeviceEvidence({...env,...change},csv));
+  }
+  // NVML-index1 is NOT enough: visibility must still match the second PCI-sorted card.
+  const swapped = rows.map(row=>row.startsWith("1,")?row.replace(/^1,/,"0,"):row.replace(/^0,/,"1,")).join("\n");
+  assert.equal(cudaDeviceEvidence(env,swapped).selectedPhysicalDevice.nvmlIndex,0);
+  assert.throws(()=>cudaDeviceEvidence({...env,CUDA_VISIBLE_DEVICES:low},swapped));
+  for (const csv of [rows[0], `${rows.join("\n")}\n${rows[0]}`, rows.join("\n").replace(low,high), rows.join("\n").replace("01:00.0","41:00.0"), rows.join("\n").replace("41:00.0","invalid")]) assert.throws(()=>cudaDeviceEvidence(env,csv));
+});
+
+test("H3 dispatch queues are unique per run and leave old StarVector and ordinary keys unchanged", async () => {
+  const workflow = await source(".github/workflows/server-candle-linux.yml");
+  const root = workflow.slice(workflow.indexOf("\nconcurrency:"), workflow.indexOf("\njobs:"));
+  const expression = workflowExpression(root, "group");
+  const original = "(inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && format('server-candle-linux-{0}', github.ref) || 'starvector-terminal-bridge'";
+  assert.ok(root.includes("cancel-in-progress: ${{ inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '' }}"));
+  const evaluate = (event, operation, id, attempt = 1, selected = expression) => Function("github", "inputs", "format", `return (${selected});`)(
+    { event_name: event, ref: "refs/heads/feature", run_id: id, run_attempt: attempt }, { starvector_terminal_operation: operation },
+    (template, ...values) => template.replace(/\{(\d+)\}/g, (_, index) => values[Number(index)]));
+  // Parentheses may change when a dispatch-only arm is removed. Preserve the actual legacy
+  // keys for every event instead of freezing a byte substring of the expression's formatting.
+  const legacy = ["standard", "", "source", "provision", "readiness", "campaign", "diagnostic-candle-1b", "unknown", undefined];
+  for (const event of ["workflow_dispatch", "push", "pull_request", "merge_group", "schedule", undefined]) {
+    for (const operation of legacy) assert.equal(evaluate(event, operation, 10), evaluate(event, operation, 10, 1, original), `legacy queue changed: ${event}/${operation}`);
+    if (event !== "workflow_dispatch") for (const operation of ["h3-import-mlx", "h3-import-cuda", "h3-import-both", "h3-admission-proof", "h3-ui-proof", "h3-terminal-mlx", "h3-terminal-cuda"]) assert.equal(evaluate(event, operation, 10), "starvector-terminal-bridge", "H3 queue isolation is positively manual");
+  }
+  for (const operation of ["h3-terminal-mlx", "h3-terminal-cuda"]) {
+    assert.equal(evaluate("workflow_dispatch", operation, 10, 2), "h3-terminal-bridge-10-2");
+    assert.notEqual(evaluate("workflow_dispatch", operation, 10, 2), evaluate("workflow_dispatch", operation, 10, 3));
+  }
+  assert.equal(evaluate("workflow_dispatch", "h3-ui-proof", 10, 2), "h3-ui-hosted-10-2");
+  for (const operation of ["standard", "", "source", "provision", "readiness", "campaign", "diagnostic-candle-1b", undefined]) {
+    assert.equal(evaluate("workflow_dispatch", operation, 10), ["standard", ""].includes(operation) ? "server-candle-linux-refs/heads/feature" : "starvector-terminal-bridge");
+  }
+  for (const operation of ["h3-import-mlx", "h3-import-cuda", "h3-import-both"]) {
+    assert.equal(evaluate("workflow_dispatch", operation, 10), "h3-import-native-10");
+    assert.equal(evaluate("workflow_dispatch", operation, 11), "h3-import-native-11");
+  }
+  assert.equal(evaluate("workflow_dispatch", "h3-admission-proof", 10), "h3-admission-cpu-10");
+  assert.equal(evaluate("workflow_dispatch", "h3-admission-proof", 11), "h3-admission-cpu-11");
+  assert.equal(evaluate("push", "h3-admission-proof", 10), "starvector-terminal-bridge", "CPU dispatch isolation is positively manual, not a recurring event route");
+});
+
+test("H3 Candle proof clears an installed wrapper immediately after Rust runner preparation", async () => {
+  const job = workflowJob(await source(".github/workflows/server-candle-linux.yml"), "h3-import-cuda");
+  const clear = workflowStep(job, "Disable sccache for the heavy Candle proof build");
+  assert.match(clear, /\$env:RUSTC_WRAPPER = ''/);
+  assert.match(clear, /'RUSTC_WRAPPER=' \| Out-File -FilePath \$env:GITHUB_ENV/);
+  assert.match(job, /uses: \.\/\.github\/actions\/prepare-rust-runner\n      - name: Disable sccache/);
+  assert.ok(job.indexOf(clear) < job.indexOf("Fetch source dependencies only"));
+});
+
+test("H3 Metal proof rechecks and records available memory immediately before every case", async () => {
+  const GiB = 2 ** 30;
+  requireMetalHeadroom({ totalBytes: 128 * GiB, freePercent: 50 });
+  requireMetalHeadroom({ totalBytes: 100 * GiB, freePercent: 18 });
+  for (const observation of [{ totalBytes: 100 * GiB, freePercent: 17 }, { totalBytes: 128 * GiB, freePercent: NaN }, { totalBytes: NaN, freePercent: 100 }]) assert.throws(() => requireMetalHeadroom(observation));
+  const receipt = {};
+  const saved = [];
+  const save = () => saved.push(structuredClone(receipt));
+  observeMetalCase("first", receipt, save, () => ({ totalBytes: 128 * GiB, freePercent: 50 }));
+  assert.throws(() => observeMetalCase("second", receipt, save, () => ({ totalBytes: 128 * GiB, freePercent: 10 })));
+  assert.equal(saved.length, 2);
+  assert.equal(saved[1].memoryObservations[1].name, "second");
+  assert.equal(saved[1].memoryObservations[1].freePercent, 10);
+  const runner = await source("scripts/ci/h3-import-native-proof.mjs");
+  const cases = runner.slice(runner.indexOf("for (const name of proofSelection(backend))"));
+  assert.match(cases, /if \(backend === "mlx"\) observeMetalCase\(name, receipt, save\);\n      const result/);
+});
+
+async function waitForBuildLog(file, marker) {
+  const until = Date.now() + 3000;
+  while (Date.now() < until) {
+    const text = await readFile(file, "utf8").catch(() => "");
+    if (text.includes(marker)) return text;
+    await new Promise(resolve => setTimeout(resolve, 15));
+  }
+  assert.fail(`live compiler log never contained ${marker}`);
+}
+
+function buildEvidence(evidence) {
+  const receipt = { status: "running", cases: [] };
+  const save = () => writeFileSync(path.join(evidence, "receipt.json"), JSON.stringify(receipt));
+  return { evidence, receipt, save, env: process.env };
+}
+
+test("H3 build evidence exists before compiler completion and streams both output files live", async () => {
+  const evidence = await mkdtemp(path.join(tmpdir(), "h3-fake-build-live-"));
+  const options = buildEvidence(evidence);
+  const pending = streamProofBuild(process.execPath, ["-e", 'console.log("live-out"); console.error("live-err"); setTimeout(() => process.exit(0), 700);'], options);
+  try {
+    const initial = JSON.parse(await readFile(path.join(evidence, "receipt.json"), "utf8"));
+    assert.equal(initial.build.state, "running");
+    assert.ok(initial.build.startedAt);
+    assert.equal(initial.build.completedAt, undefined);
+    await waitForBuildLog(path.join(evidence, "build.jsonl"), "live-out");
+    await waitForBuildLog(path.join(evidence, "build.log"), "live-err");
+    assert.equal(options.receipt.build.state, "running", "diagnostics must exist while the compiler is still running");
+    assert.match(await pending, /live-out/);
+    assert.equal(options.receipt.build.state, "passed");
+    assert.ok(options.receipt.build.durationMs >= 0);
+  } finally {
+    await pending.catch(() => {});
+    await rm(evidence, { recursive: true, force: true });
+  }
+});
+
+test("H3 failed compiler preserves diagnostics and a failed build receipt", async () => {
+  const evidence = await mkdtemp(path.join(tmpdir(), "h3-fake-build-fail-"));
+  const options = buildEvidence(evidence);
+  try {
+    await assert.rejects(streamProofBuild(process.execPath, ["-e", 'console.log("partial-json"); console.error("compiler failed"); process.exit(7);'], options), /proof build failed/);
+    assert.match(await readFile(path.join(evidence, "build.log"), "utf8"), /compiler failed/);
+    const saved = JSON.parse(await readFile(path.join(evidence, "receipt.json"), "utf8"));
+    assert.equal(saved.build.state, "failed");
+    assert.equal(saved.build.status, 7);
+    assert.ok(saved.build.completedAt);
+    assert.notEqual(saved.status, "passed");
+  } finally { await rm(evidence, { recursive: true, force: true }); }
+});
+
+test("H3 bounded build timeout and interruption retain partial logs without reporting success", async () => {
+  for (const interrupt of [false, true]) {
+    const evidence = await mkdtemp(path.join(tmpdir(), "h3-fake-build-stop-"));
+    const options = { ...buildEvidence(evidence), timeoutMs: interrupt ? 5000 : 250, graceMs: 50 };
+    const listeners = process.listenerCount("SIGTERM");
+    const pending = streamProofBuild(process.execPath, ["-e", 'console.log("partial-before-stop"); setTimeout(() => process.exit(0), 2000);'], options);
+    const rejected = assert.rejects(pending, /proof build failed/);
+    try {
+      if (interrupt) {
+        await waitForBuildLog(path.join(evidence, "build.jsonl"), "partial-before-stop");
+        process.emit("SIGTERM"); // only the fake compiler is terminated, never this test process
+      }
+      await rejected;
+      const saved = JSON.parse(await readFile(path.join(evidence, "receipt.json"), "utf8"));
+      assert.equal(saved.build.state, "interrupted");
+      assert.equal(saved.build.termination, interrupt ? "SIGTERM" : "timeout");
+      assert.ok(saved.build.terminationRequestedAt);
+      assert.match(await readFile(path.join(evidence, "build.jsonl"), "utf8"), /partial-before-stop/);
+      assert.notEqual(saved.status, "passed");
+      assert.equal(process.listenerCount("SIGTERM"), listeners);
+    } finally { await rejected; await rm(evidence, { recursive: true, force: true }); }
+  }
+});
+
 test("RunPod validation provisions the same inference fixtures as PR scaffold checks", async () => {
   const publish = workflowJob(await source(".github/workflows/publish-runpod.yml"), "publish");
-  const scaffold = workflowJob(await source(".github/workflows/check.yml"), "parity-scaffold");
+  const scaffold = workflowJob(await source(".github/workflows/check.yml"), "parity-history");
   const fetchName = "Fetch the pinned inference source for the anchor-closure suite";
   const fetch = workflowStep(publish, fetchName);
-  const shellBody = (step) => step.split("\n").filter((line) => /^ {10}\S|^ {12}/.test(line)).join("\n");
-  assert.equal(shellBody(fetch), shellBody(workflowStep(scaffold, fetchName)));
+  const requirements = historyRequirements(process.cwd());
+  assert.ok(fetch.includes('--anchor-revisions'));
+  assert.ok(fetch.includes('checkout -q "$pin"'));
+  assert.ok(scaffold.includes('node scripts/prepare-inference-history.mjs'));
+  assert.ok(scaffold.includes('node scripts/scaffold-test-selection.mjs --history'));
   const validation = workflowStep(publish, "Validate scaffold and RunPod publication contracts");
   assert.ok(validation.includes("INFERENCE_REPO: ${{ runner.temp }}/inference"));
   assert.ok(validation.includes("npm run check"));
   assert.ok(publish.indexOf(fetch) < publish.indexOf(validation));
   const terminalFetchName = "Fetch the exact public inference terminal contract";
   const terminalFetch = workflowStep(publish, terminalFetchName);
-  assert.equal(shellBody(terminalFetch), shellBody(workflowStep(scaffold, terminalFetchName)));
+  assert.ok(terminalFetch.includes(`fetch --depth=2 origin ${requirements.terminal}`));
+  assert.ok(terminalFetch.includes(`rev-parse HEAD)" = ${requirements.terminal}`));
   assert.ok(terminalFetch.includes('echo "STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT=$inference_root" >> "$GITHUB_ENV"'));
   assert.ok(publish.indexOf(terminalFetch) < publish.indexOf(validation));
   const dependencies = workflowStep(publish, "Install pinned scaffold dependencies");
@@ -117,7 +449,8 @@ function assertAdvisoryGate(workflow) {
 
   const parity = workflowJob(workflow, "parity");
   assert.match(parity, /needs: \[[^\]]*supply-chain[^\]]*\]/);
-  assert.match(parity, /if \[ "\$count" -lt 5 \]; then/);
+  assert.match(parity, /run: node scripts\/check-job-relevance\.mjs --assert-results/);
+  assert.match(parity, /needs: \[[^\]]*changes[^\]]*\]/);
 }
 
 test("required parity fails closed over an unconditional advisory gate", async () => {
@@ -314,6 +647,25 @@ test("Windows Cargo cache preserves only the matching service cache and remains 
   assert.equal(caches.size, 4);
 });
 
+test("Windows FlashAttention objects persist in the listener cache, outside the deleted checkout target", () => {
+  // sc-28031: without this the vendored flash-attn kernels rebuilt from scratch in every job.
+  const directories = new Set();
+  for (let i = 1; i <= 4; i++) {
+    const runnerName = `cuda-windows${i === 1 ? "" : `-${i}`}`;
+    const selected = selectWindowsCargoCache({ runnerName, cargoHome: `D:\\cargo-home-${i}`, runnerToolCache: "C:\\tools" });
+    const directory = flashAttentionBuildDirectory(selected.cache);
+    assert.equal(directory, `${selected.cache}\\candle-flash-attn`);
+    assert.doesNotMatch(directory, /\\_work\\|\\target(\\|$)/i);
+    directories.add(directory);
+  }
+  assert.equal(directories.size, 4);
+  const fallback = selectWindowsCargoCache({ runnerName: "cuda-windows-2", runnerToolCache: "C:\\tools" });
+  assert.equal(flashAttentionBuildDirectory(fallback.cache), "C:\\tools\\SceneWorks\\cargo\\cuda-windows-2\\candle-flash-attn");
+  for (const cache of [undefined, "", "relative", "C:\\tools\\..\\shared", "\\\\server\\share"]) {
+    assert.throws(() => flashAttentionBuildDirectory(cache), /safe listener/);
+  }
+});
+
 test("Windows Cargo cache rejects another listener's cache and shared or missing homes", () => {
   for (const cargoHome of [undefined, "", "C:\\Users\\runner\\.cargo", "D:\\cargo-home-1", "relative", "\\\\server\\share", "D:\\cargo-home-2\nINJECT=value"]) {
     const selected = selectWindowsCargoCache({ runnerName: "cuda-windows-2", cargoHome, runnerToolCache: "C:\\tools" });
@@ -357,6 +709,19 @@ test("Windows Cargo cache directory guard preserves content and rejects linked o
     await assert.rejects(() => ensurePhysicalCargoCache(path.join(link, "child")), /physical persistent/);
     assert.equal(await readFile(file, "utf8"), "preserve");
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+// Inference 354b41cc put candle-flash-attn (a ~20 min nvcc build) into every backend-candle graph.
+// The selector (single mechanism, sc-28031) exports the persistent per-listener object cache; every
+// heavy compile step must run after it, and the cold-time-sized 90 min ordinary budget is pinned below.
+test("Windows candle lanes select the FlashAttention object cache before every heavy compile step", async () => {
+  const select = await source("scripts/select-windows-cargo-cache.mjs");
+  assert.match(select, /CANDLE_FLASH_ATTN_BUILD_DIR=\$\{flashAttention\}/, "the selection step exports the cache to every later compile step");
+  const job = workflowJob(await source(".github/workflows/windows-candle.yml"), "candle-worker");
+  const selectStep = workflowStep(job, "Isolate Cargo dependency checkout");
+  for (const heavy of ["Test the candle GPU worker (backend-candle)", "Check the candle sidecar builds (rust-api, backend-candle)", "Check and test the candle memory adapter (lib + memory-candle-adapter)", "Clippy (candle worker)"]) {
+    assert.ok(job.indexOf(selectStep) < job.indexOf(workflowStep(job, heavy)), `${heavy} runs after the cache is selected`);
+  }
 });
 
 test("Windows Cargo cache diagnostic distinguishes an actual locked Git commit from empty or unrelated caches", async () => {
@@ -493,13 +858,14 @@ test("the campaign sccache contract rejects removal, reordering and half-measure
     [
       "a redundant job-local CARGO_HOME is added back",
       workflow.replace(
-        "      - name: Census the profiled GPU\n",
+        "      - name: Build the candle memory adapter\n",
         "      - name: Isolate Cargo dependency checkout\n        shell: powershell\n        run: |\n"
           + '          Add-Content -Path $env:GITHUB_ENV -Value "CARGO_HOME=$jobCargoHome"\n'
-          + "      - name: Census the profiled GPU\n",
+          + "      - name: Build the candle memory adapter\n",
       ),
     ],
   ]) {
+    assert.notEqual(mutation, workflow, `${why} must modify the actual current workflow`);
     assert.throws(() => assertCampaignCandleWrapperDisabled(mutation), undefined, why);
   }
 });
@@ -544,6 +910,7 @@ function dispatchInputs(workflow) {
   assert.ok(end > start, "could not find the end of the workflow_dispatch block");
   const names = [];
   const defaults = {};
+  const types = {};
   let current = null;
   for (const line of workflow.slice(start, end).split("\n")) {
     // Deliberately permissive: GitHub allows digits, case and hyphens in an input name, and this
@@ -554,13 +921,86 @@ function dispatchInputs(workflow) {
       current = header[1];
       names.push(current);
       defaults[current] = undefined;
+      types[current] = undefined;
       continue;
     }
+    const type = current && line.match(/^ {8}type: (.*)$/);
+    if (type) types[current] = type[1].trim();
     const def = current && line.match(/^ {8}default: (.*)$/);
     if (def) defaults[current] = def[1].trim().replace(/^"|"$/g, "");
   }
-  return { names, defaults };
+  return { names, defaults, types };
 }
+
+test("Windows manual H3 opt-out defaults off and changes only that smoke condition", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const { names, defaults, types } = dispatchInputs(workflow);
+  assert.equal(names.length, 23, "the single H3 opt-out keeps the dispatch surface below GitHub's 25-input cap");
+  assert.equal(names.filter((name) => name === "skip_manual_h3_import_smoke").length, 1);
+  assert.equal(types.skip_manual_h3_import_smoke, "boolean");
+  assert.equal(defaults.skip_manual_h3_import_smoke, "false");
+  assert.match(workflow, /description: "Skip only the implicit manual MiniMax-H3 ConvRot smoke; other explicit profiles and their existing admission rules are unchanged"/);
+  assert.equal([...workflow.matchAll(/inputs\.skip_manual_h3_import_smoke\b/g)].length, 1,
+    "the opt-out must have no job-routing, device, budget or other profile effect");
+  const smoke = stepBody(workflow, "Run the synthetic MiniMax-H3 ConvRot CUDA import projection");
+  const prior = "github.event_name == 'workflow_dispatch' && !inputs.capability_facts_only && !inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_ltx_eros_acceptance && !inputs.run_epic_20738_terminal_cuda && !inputs.run_iris_worker_smoke && !inputs.run_supra2_worker_smoke";
+  const condition = workflowExpression(smoke);
+  assert.equal(condition, `${prior} && !inputs.skip_manual_h3_import_smoke`);
+  for (const event of ["push", "pull_request", "workflow_dispatch"]) {
+    for (const enabled of [undefined, false, true]) {
+      assert.equal(Boolean(evaluateWorkflow(condition, event, { skip_manual_h3_import_smoke: enabled })),
+        event === "workflow_dispatch" && enabled !== true);
+    }
+  }
+  for (const name of names.filter((name) => types[name] === "boolean" && name !== "skip_manual_h3_import_smoke")) {
+    const inputs = { [name]: true, skip_manual_h3_import_smoke: false };
+    assert.equal(Boolean(evaluateWorkflow(condition, "workflow_dispatch", inputs)),
+      Boolean(evaluateWorkflow(prior, "workflow_dispatch", inputs)), `${name} retains its original smoke policy`);
+  }
+  assert.match(smoke, /convrot_import_native_cuda_projection_smoke -- --exact --ignored --nocapture --test-threads=1/,
+    "the existing selected smoke remains intact; only its explicit opt-out is added");
+});
+
+test("Windows H3 opt-out with every model selector false runs the existing ordinary contract lane", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const { names, defaults, types } = dispatchInputs(workflow);
+  const inputs = Object.fromEntries(names.filter((name) => types[name] === "boolean")
+    .map((name) => [name, name === "skip_manual_h3_import_smoke"]));
+  for (const [name, enabled] of Object.entries(inputs)) {
+    if (name === "skip_manual_h3_import_smoke") continue;
+    assert.equal(defaults[name], "false", `${name}'s existing default is preserved`);
+    assert.equal(enabled, false, `${name} must be explicitly false in the no-model invocation`);
+  }
+  const jobs = [...workflow.slice(workflow.indexOf("\njobs:\n")).matchAll(/^  ([A-Za-z0-9_-]+):$/gm)]
+    .map((match) => match[1]);
+  assert.ok(jobs.includes("candle-worker"));
+  for (const name of jobs) {
+    assert.equal(Boolean(evaluateWorkflow(workflowExpression(workflowJob(workflow, name)), "workflow_dispatch", inputs)),
+      name === "candle-worker", `${name} follows the actual no-model invocation`);
+  }
+  const worker = workflowJob(workflow, "candle-worker");
+  const outcomes = { verify_candle_capabilities: { outcome: "success" } };
+  for (const name of COMPILE_CHAIN_STEPS) {
+    assert.equal(Boolean(evaluateWorkflow(workflowExpression(stepBody(worker, name)), "workflow_dispatch", inputs, outcomes)), true,
+      `${name} remains enabled rather than duplicating or narrowing the ordinary lane`);
+  }
+  assert.match(stepBody(worker, "Test the candle GPU worker (backend-candle)"),
+    /^ +node scripts\/unit-hf-sandbox\.mjs -- cargo test -p sceneworks-worker --features backend-candle$/m);
+  assert.match(stepBody(worker, "Check the candle sidecar builds (rust-api, backend-candle)"),
+    /cargo check -p sceneworks-rust-api --features backend-candle --tests/);
+  assert.match(stepBody(worker, "Clippy (candle worker)"),
+    /cargo clippy -p sceneworks-worker --features backend-candle --all-targets -- -D warnings/);
+  for (const step of jobSteps(worker)) {
+    if (COMPILE_CHAIN_STEPS.includes(step.name)) continue;
+    const expression = step.body.match(/^ +if: \$\{\{ (.+) \}\}$/m)?.[1];
+    if (!expression || !/inputs\.(run_|provision_snapshot|yue2_|quant_kernel_only)/.test(expression)) continue;
+    assert.equal(Boolean(evaluateWorkflow(expression, "workflow_dispatch", inputs, outcomes)), false,
+      `${step.name} must not execute a model, capture or provisioning profile in this invocation`);
+  }
+  assert.equal(Boolean(evaluateWorkflow(workflowExpression(stepBody(worker,
+    "Run the synthetic MiniMax-H3 ConvRot CUDA import projection")), "workflow_dispatch", inputs)), false);
+});
+
 
 test("windows-candle provisioning is model-parameterized, not Krea-hardcoded", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
@@ -649,18 +1089,36 @@ test("windows-candle rebuilds the exact Krea snapshot path from the generalized 
 
 // sc-18677/sc-20974/sc-21707: every timeout arm is load-bearing. Pin the whole expression the way
 // the macOS twin above pins its lane's -- otherwise either a revert to the ordinary 45m cap or the
-// terminal campaign's observed 360m cutoff passes every other test here.
+// terminal campaign's observed 360m cutoff passes every other test here. The cold-build
+// allowance was raised to 120m in sc-26850; five-rung-only dispatches share that default.
 test("windows-candle keeps the ordinary, terminal, provisioning, and five-rung timeout budgets", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   const runbook = await source("docs/epic-20738-terminal-cuda.md");
   const timeoutContract =
-    /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_ltx_eros_acceptance && 360 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_epic_20738_terminal_cuda && 720 \|\| github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && 240 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_five_rung_reference && 120 \|\| 60 \}\}/;
-  assert.match(
-    workflow,
-    // The LTX Eros arm (SC-18902, from main) keeps six hours, while the strictly serial
-    // 19-cell terminal campaign gets twelve. Provisioning, five-rung, and the 60m default stay fixed.
-    timeoutContract,
-  );
+    /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_ltx_eros_acceptance && 360 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_epic_20738_terminal_cuda && 720 \|\| github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && 240 \|\| 120 \}\}/;
+  const validateTimeout = (candidate) => {
+    assert.match(candidate, timeoutContract);
+    const job = workflowJob(candidate, "candle-worker");
+    const declared = job.match(/^ {4}timeout-minutes: ([^\n]+)$/m)?.[1];
+    const leaseBudget = job.match(/^ {6}SCENEWORKS_CUDA_EXECUTION_BUDGET_MINUTES: ([^\n]+)$/m)?.[1];
+    assert.equal(leaseBudget, declared, "the physical lease reuses the exact existing job budget");
+    const expression = workflowExpression(job, "timeout-minutes");
+    for (const [event, inputs, expected] of [
+      ["pull_request", {}, 120],
+      ["push", {}, 120],
+      ["workflow_dispatch", {}, 120],
+      ["workflow_dispatch", { run_five_rung_reference: true }, 120],
+      ["workflow_dispatch", { provision_snapshot: true, run_five_rung_reference: true }, 240],
+      ["workflow_dispatch", { provision_snapshot: true }, 240],
+      ["workflow_dispatch", { run_ltx_eros_acceptance: true }, 360],
+      ["workflow_dispatch", { run_epic_20738_terminal_cuda: true, provision_snapshot: true }, 720],
+      ["pull_request", { run_ltx_eros_acceptance: true, run_epic_20738_terminal_cuda: true }, 120],
+    ]) {
+      assert.equal(evaluateWorkflow(expression, event, inputs), expected, `${event}: ${JSON.stringify(inputs)}`);
+      assert.equal(evaluateWorkflow(workflowExpression(job, "SCENEWORKS_CUDA_EXECUTION_BUDGET_MINUTES"), event, inputs), expected);
+    }
+  };
+  validateTimeout(workflow);
   assert.match(
     runbook,
     /one strictly serial job a 720-minute hard timeout[\s\S]*no step is\s+assigned a timeout above 360 minutes/,
@@ -669,15 +1127,16 @@ test("windows-candle keeps the ordinary, terminal, provisioning, and five-rung t
 
   const terminalArm =
     "github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 720";
-  const ordinaryArm = "inputs.run_five_rung_reference && 120 || 60";
+  const ordinaryArm = "inputs.provision_snapshot && 240 || 120";
   for (const [name, mutated] of [
     ["terminal timeout regressed to 360", workflow.replace(terminalArm, terminalArm.replace("720", "360"))],
     ["terminal timeout arm removed", workflow.replace(` || ${terminalArm}`, "")],
-    ["ordinary timeout regressed to 45", workflow.replace(ordinaryArm, ordinaryArm.replace("60", "45"))],
+    ["ordinary timeout regressed to 60", workflow.replace(ordinaryArm, ordinaryArm.replace("|| 120", "|| 60"))],
+    ["ordinary timeout regressed to 45", workflow.replace(ordinaryArm, ordinaryArm.replace("|| 120", "|| 45"))],
   ]) {
     assert.notEqual(mutated, workflow, `${name} mutation must modify the workflow fixture`);
     assert.throws(
-      () => assert.match(mutated, timeoutContract),
+      () => validateTimeout(mutated),
       undefined,
       `${name} must fail the exact timeout contract`,
     );
@@ -939,19 +1398,13 @@ const NON_CERTIFYING_PROBE_SITES = new Map([
 ]);
 
 function enclosingFunctions(source) {
-  const starts = [...source.matchAll(/^(?:pub )?fn ([a-z_][a-z0-9_]*)/gm)]
-    .map((match) => ({ name: match[1], at: match.index }));
-  return (index) => starts.filter((entry) => entry.at <= index).at(-1)?.name ?? "(top level)";
+  const functions = rustFunctionSlices(source);
+  return (index) => functions.find((item) => item.start <= index && index < item.end)?.name ?? "(top level)";
 }
 
 // CI_IMPACT: pure source-contract checks for one dispatch-only probe; no CUDA or model execution.
 function assertSdxlEndpointProbeGuards(adapter) {
-  const body = (name) => {
-    const at = adapter.indexOf(`fn ${name}(`);
-    assert.ok(at >= 0, `${name} exists`);
-    const next = adapter.slice(at + 1).search(/^fn /m);
-    return adapter.slice(at, next < 0 ? undefined : at + 1 + next);
-  };
+  const body = (name) => rustFunctionSource(adapter, name);
   const binding = body("validate_sdxl_endpoint_binding");
   assert.match(binding, /!matches!\(visible, "0" \| "1"\) \|\| visible != physical \|\| !valid_sdxl_gpu_uuid\(uuid\)/);
   const uuid = body("valid_sdxl_gpu_uuid");
@@ -1021,10 +1474,7 @@ test("manual SDXL probe exception rejects missing activity, headroom, stability 
     ["sdxl_endpoint_expected_uuid", "SCENEWORKS_SDXL_EXPECTED_GPU_UUID", "UNVERIFIED_UUID"],
     ["run_sdxl_endpoint", "if context_uuid != expected", "if false"],
   ]) {
-    const start = adapter.indexOf(`fn ${owner}(`);
-    const next = adapter.slice(start + 1).search(/^fn /m);
-    const end = next < 0 ? adapter.length : start + 1 + next;
-    const original = adapter.slice(start, end);
+    const { start, end, source: original } = rustFunctionSlices(adapter).find((item) => item.name === owner);
     assert.ok(original.includes(from), `${owner} owns the mutated guard`);
     assert.throws(() => assertSdxlEndpointProbeGuards(adapter.slice(0, start) + original.replace(from, to) + adapter.slice(end)), `${owner}: ${from}`);
   }
@@ -1125,13 +1575,130 @@ test("windows-candle routes weights dispatches to a real-weights runner, like th
     candleWorker,
     /^\s*runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]/m,
   );
-  assert.ok(
-    candleWorker.includes(
-      "      group: windows-candle-gpu-${{ github.event_name == 'workflow_dispatch' && (inputs.provision_snapshot || inputs.run_five_rung_reference || inputs.run_ltx_eros_acceptance || inputs.run_epic_20738_terminal_cuda) && 'real-weights' || github.run_id }}",
-    ),
-    "real-weight dispatch profiles must share the GPU lock while ordinary runs remain unique",
+  const group = workflowExpression(candleWorker, "group");
+  const prior = "github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && 'windows-candle-gpu-real-weights' || format('windows-candle-gpu-{0}-{1}', github.run_id, github.run_attempt)";
+  assert.ok(group.endsWith(` || ${prior}`), "non-pure selections retain the exact previous routing");
+  const evaluateGroup = (expression, event, inputs) => Function("github", "inputs", "format", `return (${expression});`)(
+    {event_name:event,run_id:123,run_attempt:2}, inputs,
+    (pattern,...values)=>pattern.replace(/\{(\d+)\}/g,(_,index)=>values[Number(index)]),
   );
+  const pure = {provision_snapshot:true};
+  assert.equal(evaluateGroup(group,"workflow_dispatch",pure),"windows-candle-cpu-provision");
+  // Runtime/model selectors leave the pure-provision group. The H3 skip-only flag changes
+  // no routing: the dedicated opt-out contract above pins its only use to that smoke step.
+  // New flags still fail this exhaustive contract until explicitly classified.
+  const dispatch = candle.slice(candle.indexOf("  workflow_dispatch:"),candle.indexOf("\njobs:"));
+  const flags = [...dispatch.matchAll(/^      ([a-z_0-9]+):\n((?:        .*\n|\n)*)/gm)]
+    .filter(match=>match[2].includes("type: boolean")
+      && !["provision_snapshot", "skip_manual_h3_import_smoke"].includes(match[1]))
+    .map(match=>match[1]);
+  assert.equal(flags.length,12);
+  assert.equal(evaluateGroup(group,"workflow_dispatch",{...pure,skip_manual_h3_import_smoke:true}),
+    evaluateGroup(group,"workflow_dispatch",pure),"the smoke opt-out cannot turn pure provisioning into runtime work");
+  for(const flag of flags) {
+    assert.equal(evaluateGroup(group,"workflow_dispatch",{...pure,[flag]:true}),
+      evaluateGroup(prior,"workflow_dispatch",{...pure,[flag]:true}),`mixed ${flag} retains GPU routing`);
+  }
+  for(const event of ["pull_request","push","workflow_dispatch"]) {
+    for(const inputs of [{},{run_five_rung_reference:true},{run_iris_worker_smoke:true},
+      {provision_snapshot:true,run_five_rung_reference:true},{quant_kernel_only:true}]) {
+      assert.equal(evaluateGroup(group,event,inputs),evaluateGroup(prior,event,inputs));
+    }
+  }
   assert.match(candleWorker, /^ {6}cancel-in-progress: false$/m);
+});
+
+test("hosted-only metadata dispatch excludes every NAX runner before assignment and rejects all conflicting model flags", async () => {
+  const workflow = await source(".github/workflows/macos-mlx.yml");
+  assert.match(workflow, /hosted_only:\n +description: [^\n]+\n +required: false\n +type: boolean\n +default: false/);
+  const hosted = workflowJob(workflow, "macos-checks");
+  const nax = workflowJob(workflow, "nax-worker");
+  const condition = workflowExpression(nax);
+  const route = workflowExpression(nax, "runs-on");
+  const validation = workflowStep(hosted, "Validate hosted-only dispatch intent");
+  const validationCondition = workflowExpression(validation);
+  const flags = ["run_memory_calibration", "run_five_rung_reference", "provision_qwen_snapshot", "provision_z_image_snapshot"];
+  const events = [
+    { event_name: "workflow_dispatch" },
+    { event_name: "push" },
+    { event_name: "merge_group" },
+    { event_name: "pull_request", base: "main", sameRepo: true },
+    { event_name: "pull_request", base: "feature/sc-26233-flux3-image-klein", sameRepo: true },
+    { event_name: "pull_request", base: "main", sameRepo: false },
+  ];
+  const evaluateCondition = (candidate, event, inputs, gate = { result: "success", relevant: "true", canceled: false }) =>
+    Function("github", "inputs", "needs", "cancelled", `return (${candidate});`)(
+      { event_name: event.event_name, repository: "SceneWorks/SceneWorks", event: {
+        pull_request: { base: { ref: event.base }, head: { repo: { full_name: event.sameRepo === false ? "external/fork" : "SceneWorks/SceneWorks" } }, title: "[Mac2] metadata" },
+        head_commit: { message: "[Mac2] metadata" },
+      } }, { verification_profile: "legacy", run_moss_native_validation: false, ...inputs }, { changes: { result: gate.result, outputs: { relevant: gate.relevant } } }, () => gate.canceled,
+    );
+  const validateCondition = (candidate) => {
+    for (let mask = 0; mask < 16; mask++) {
+      const modelFlags = Object.fromEntries(flags.map((flag, i) => [flag, Boolean(mask & (1 << i))]));
+      for (const event of events) for (const hostedOnly of [undefined, false, true]) {
+        const inputs = { ...modelFlags, ...(hostedOnly === undefined ? {} : { hosted_only: hostedOnly }) };
+        const normal = event.event_name !== "merge_group" && (event.event_name !== "pull_request" || (event.base === "main" && event.sameRepo));
+        const excluded = event.event_name === "workflow_dispatch" && hostedOnly === true;
+        const selected = Boolean(evaluateCondition(candidate, event, inputs));
+        assert.equal(selected, Boolean(normal && !excluded), `${event.event_name} flags=${mask} hosted=${hostedOnly}`);
+        // GitHub evaluates a job's if before assigning runs-on. Evaluate the ACTUAL
+        // routing expression only for a selected job; excluded requests assign no runner.
+        let assignments = 0;
+        if (selected) {
+          assignments++;
+          const labels = Function("github", "inputs", "fromJSON", "startsWith", `return (${route});`)(
+            { event_name: event.event_name, event: { pull_request: { title: "[Mac2] metadata" }, head_commit: { message: "[Mac2] metadata" } } },
+            inputs, JSON.parse, (value, prefix) => String(value).startsWith(prefix),
+          );
+          assert(labels.includes("self-hosted"));
+        }
+        if (excluded) assert.equal(assignments, 0, "hosted-only may assign neither primary nor secondary self-hosted runner");
+      }
+    }
+    // The exclusion must dominate the existing fail-open relevance path, too.
+    for (const gate of [
+      { result: "failure", relevant: "false", canceled: false },
+      { result: "success", relevant: "false", canceled: false },
+      { result: "success", relevant: "true", canceled: true },
+    ]) assert.equal(Boolean(evaluateCondition(candidate, events[0], { hosted_only: true }, gate)), false);
+  };
+  validateCondition(condition);
+  for (const mutant of [
+    condition.replace(" && !(github.event_name == 'workflow_dispatch' && inputs.hosted_only)", ""),
+    condition.replace("github.event_name == 'workflow_dispatch' && inputs.hosted_only", "inputs.hosted_only"),
+    condition.replace("inputs.hosted_only", "!inputs.hosted_only"),
+  ]) assert.throws(() => validateCondition(mutant), undefined, "runner exclusion mutation must be rejected");
+  for (const event of events) for (const hostedOnly of [undefined, false, true])
+    assert.equal(Boolean(evaluateWorkflow(validationCondition, event.event_name, { hosted_only: hostedOnly })), event.event_name === "workflow_dispatch" && hostedOnly === true);
+
+  const bindings = [...validation.matchAll(/^ {10}([A-Z_]+): \$\{\{ inputs\.([a-z_]+) \}\}$/gm)];
+  assert.equal(bindings.length, 4);
+  assert.deepEqual(new Set(bindings.map(([, , input]) => input)), new Set(flags));
+  const body = validation.split("        run: |\n")[1].split("\n").map((line) => line.startsWith("          ") ? line.slice(10) : line).join("\n");
+  const runGuard = async (script, values) => {
+    const env = Object.fromEntries(["PATH", "SystemRoot", "TEMP", "TMP"].filter((key) => process.env[key] !== undefined).map((key) => [key, process.env[key]]));
+    for (const [, name, input] of bindings) env[name] = String(values[input]);
+    try { return { code: 0, ...(await promisify(execFile)("bash", ["--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script], { env, timeout: 10000 })) }; }
+    catch (error) { return { code: error.code, stdout: error.stdout, stderr: error.stderr }; }
+  };
+  for (let mask = 0; mask < 16; mask++) {
+    const values = Object.fromEntries(flags.map((flag, i) => [flag, Boolean(mask & (1 << i))]));
+    const result = await runGuard(body, values);
+    assert.equal(result.code, mask === 0 ? 0 : 1, `actual Bash input guard flags=${mask}: ${result.stderr}`);
+    if (mask) assert.match(result.stdout, /::error::hosted_only requires/);
+  }
+  for (const flag of flags) for (const invalid of ["", "TRUE", "not-a-boolean"]) {
+    const result = await runGuard(body, { ...Object.fromEntries(flags.map((key) => [key, false])), [flag]: invalid });
+    assert.equal(result.code, 1, `${flag} must fail closed on unexpected serialization`);
+  }
+  // Removing any one model/provision flag from the ACTUAL guard must be detected.
+  for (const [, name, input] of bindings) {
+    const mutant = body.replace(` ${name}`, "");
+    const result = await runGuard(mutant, { ...Object.fromEntries(flags.map((key) => [key, false])), [input]: true });
+    assert.equal(result.code, 0, `mutation ${name} demonstrates why every flag is required`);
+  }
+  assert(hosted.indexOf(validation) < hosted.indexOf("dtolnay/rust-toolchain"), "intent validation must precede the hosted build setup");
 });
 
 test("macos-mlx routes an explicit Mac2 final PR and merge push without changing manual routing", async () => {
@@ -1221,29 +1788,214 @@ test("macos-mlx routes an explicit Mac2 final PR and merge push without changing
   }
 });
 
-test("windows-candle runs the imported NVFP4 worker acceptance on the real-weights host", async () => {
-  const workflow = await source(".github/workflows/windows-candle.yml");
-  const at = workflow.indexOf("  imported-nvfp4-worker-smoke:\n");
-  assert.ok(at >= 0, "windows-candle.yml must keep the imported NVFP4 smoke job");
-  const job = jobBlock(workflow, at);
+test("macos-mlx browser fixture artifact is hosted, exclusive, and non-gating", async () => {
+  const workflow = await source(".github/workflows/macos-mlx.yml");
+  const job = workflowJob(workflow, "browser-fixture-artifact");
+  const expression = workflowExpression(job);
+  const disabled = {
+    run_memory_calibration: false,
+    run_five_rung_reference: false,
+    provision_qwen_snapshot: false,
+    provision_z_image_snapshot: false,
+    run_moss_native_validation: false,
+  };
+  const validate = (candidate, candidateJob = job) => {
+    const guard = workflowStep(candidateJob, "Reject conflicting browser fixture selectors before setup");
+    assert.ok(guard, "mixed selectors must not be a skipped-green dispatch");
+    assert.ok(candidateJob.indexOf("Reject conflicting browser fixture selectors") < candidateJob.indexOf("actions/checkout"));
+    assert.ok(candidateJob.indexOf("Reject conflicting browser fixture selectors") < candidateJob.indexOf("dtolnay/rust-toolchain"));
+    assert.match(guard, /\$\{!selector\}/);
+    assert.match(guard, /echo "::error::browser-fixture-artifact cannot be combined with \$selector"\n\s+exit 1/);
+    const run = (event, inputs = {}) => Boolean(evaluateWorkflow(candidate, event, inputs));
+    for (const event of ["push", "pull_request", "merge_group"]) {
+      assert.equal(run(event, { verification_profile: "browser-fixture-artifact", ...disabled }), false, event);
+    }
+    for (const profile of [undefined, "legacy", "facts-and-projections", "consumer-assertions", "unknown"]) {
+      assert.equal(run("workflow_dispatch", { verification_profile: profile, ...disabled }), false, String(profile));
+    }
+    assert.equal(run("workflow_dispatch", { verification_profile: "browser-fixture-artifact", ...disabled }), true);
+    for (const selector of Object.keys(disabled)) {
+      assert.equal(
+        run("workflow_dispatch", { verification_profile: "browser-fixture-artifact", ...disabled, [selector]: true }),
+        true,
+        `${selector} must reach the hosted early rejection instead of skipping green`,
+      );
+    }
+  };
+  validate(expression);
+  for (const mutant of [
+    expression.replace("inputs.verification_profile == 'browser-fixture-artifact'", "inputs.verification_profile != 'legacy'"),
+    `${expression} && !inputs.run_memory_calibration`,
+  ]) {
+    assert.throws(() => validate(mutant));
+  }
+  const rejectStep = workflowStep(job, "Reject conflicting browser fixture selectors before setup");
+  assert.throws(() => validate(expression, job.replace(rejectStep, "")));
 
-  assert.match(job, /^ {4}needs: candle-worker$/m);
-  assert.match(job, /^ {6}group: windows-candle-gpu-real-weights$/m);
-  assert.match(job, /^ {6}cancel-in-progress: false$/m);
-  assert.match(job, /^ {4}runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]$/m);
-  assert.match(job, /github\.event_name == 'push'/);
-  assert.match(job, /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/);
-  assert.doesNotMatch(job, /github\.event_name == 'workflow_dispatch'/);
-  assert.match(job, /^ {6}HF_HUB_CACHE: 'E:\\huggingface\\hub'$/m);
+  assert.match(job, /^    runs-on: macos-26$/m);
+  assert.match(job, /github\.repository == 'SceneWorks\/SceneWorks'/);
+  assert.doesNotMatch(job, /^    needs:/m);
+  assert.doesNotMatch(job, /^    continue-on-error:/m);
+  assert.match(job, /ref: \$\{\{ github\.sha \}\}/);
+  assert.match(job, /Initialize private browser fixture paths/);
+  assert.match(job, /actions\/setup-node@[0-9a-f]{40}/);
+  assert.match(job, /node-version: "20"/);
+  assert.match(job, /Validate browser fixture producer selection contracts/);
+  assert.match(job, /node --test --test-reporter=spec scripts\/platform-review-contracts\.test\.mjs scripts\/remote-macos-verification\.test\.mjs/);
+  assert.match(job, /CARGO_TARGET_DIR=\$root\/target/);
+  assert.match(job, /BROWSER_FIXTURE_OUTPUT=\$root\/output/);
+  for (const entry of [
+    'CARGO_PROFILE_DEV_DEBUG: "0"',
+    'CARGO_PROFILE_TEST_DEBUG: "0"',
+    'CARGO_PROFILE_DEV_STRIP: "false"',
+    'CARGO_PROFILE_TEST_STRIP: "false"',
+    'CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "0"',
+    'CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "0"',
+    'CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP: "none"',
+    'CARGO_PROFILE_TEST_BUILD_OVERRIDE_STRIP: "none"',
+  ]) assert.ok(job.includes(entry), entry);
+  for (const key of [
+    "cargoProfileDevDebug",
+    "cargoProfileTestDebug",
+    "cargoProfileDevStrip",
+    "cargoProfileTestStrip",
+    "cargoProfileDevBuildOverrideDebug",
+    "cargoProfileTestBuildOverrideDebug",
+    "cargoProfileDevBuildOverrideStrip",
+    "cargoProfileTestBuildOverrideStrip",
+  ]) assert.match(job, new RegExp(`"${key}": os\\.environ`));
+  assert.match(job, /cargo test --locked -p sceneworks-rust-api --lib --no-run --message-format=json/);
+  assert.match(job, /expected one sceneworks_rust_api libtest executable/);
+  assert.match(job, /tests::browser_fixture::serve_owned_manual_browser_fixture/);
+  assert.match(job, /artifact source must be the exact clean workflow SHA/);
+  assert.match(job, /cargo-artifacts\.jsonl/);
+  assert.match(job, /producer-contract-node-version\.txt/);
+  assert.match(job, /producer-contract-tests\.txt/);
+  assert.match(job, /producerContractCommand/);
+  assert.match(job, /producerContractNodeVersion/);
+  assert.match(job, /PMETAL_METALLIB_PATH/);
+  assert.match(job, /Exact prebuilt unavailable; compiling the pinned MLX source/);
+  assert.match(job, /pmetal-mlx-sys-\*\/out\/build\/lib\/mlx\.metallib/);
+  assert.match(job, /build-companion\.json/);
+  assert.match(job, /runtimeRequirementValidated/);
+  assert.doesNotMatch(job, /metallibLaunchEnv/);
+  const upload = workflowStep(job, "Upload complete browser fixture artifact");
+  assert.match(upload, /uses: actions\/upload-artifact@[0-9a-f]{40}\b/);
+  assert.match(upload, /name: rust-api-browser-libtest-\$\{\{ github\.sha \}\}-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
+  assert.match(upload, /path: \$\{\{ env\.BROWSER_FIXTURE_OUTPUT \}\}/);
+  assert.match(upload, /if-no-files-found: error/);
+
   assert.match(
-    job,
-    /^ {6}SCENEWORKS_IMPORTED_NVFP4_CHECKPOINT: 'E:\\huggingface\\hub\\models--Comfy-Org--Krea-2\\snapshots\\952f49d49653cb42e7d6cf7cbfad74738073ec7d\\diffusion_models\\krea2_turbo_nvfp4\.safetensors'$/m,
+    workflow,
+    /options: \[legacy, facts-and-projections, consumer-assertions, browser-fixture-artifact, nax-kernel-guard\]/,
   );
-  assert.match(
-    job,
-    /cargo test -p sceneworks-worker --features backend-candle --release imported_nvfp4_worker_gpu_smoke -- --ignored --nocapture --test-threads=1/,
-  );
-  assert.doesNotMatch(job, /continue-on-error:/);
+});
+
+test("imported NVFP4 model proof is explicitly manual at both reachable endpoints", async () => {
+  const ordinary = await source(".github/workflows/windows-candle.yml");
+  const standalone = await source(".github/workflows/imported-nvfp4-validation.yml");
+  const { names, defaults } = dispatchInputs(ordinary);
+  assert.ok(names.includes("run_imported_nvfp4_proof") && names.length <= 25);
+  assert.equal(defaults.run_imported_nvfp4_proof, "false");
+  const events = standalone.slice(standalone.indexOf("\non:\n") + 1, standalone.indexOf("\npermissions:"));
+  assert.match(events, /^on:\n  workflow_dispatch:\s*$/);
+  assert.doesNotMatch(events, /pull_request|push|schedule|workflow_call/);
+  const bridge = workflowJob(ordinary, "imported-nvfp4-worker-smoke");
+  const validateBridge = (job) => {
+    assert.match(job, /^ {4}if: \$\{\{ github\.event_name == 'workflow_dispatch' && !inputs\.capability_facts_only && inputs\.run_imported_nvfp4_proof && !\(github\.event_name == 'workflow_dispatch' && inputs\.quant_kernel_only\) && !inputs\.run_moss_native_validation \}\}$/m);
+    assert.doesNotMatch(job, /github\.event_name == 'push'|github\.event\.pull_request/);
+  };
+  validateBridge(bridge);
+  assert.throws(() => validateBridge(bridge.replace("github.event_name == 'workflow_dispatch'", "github.event_name == 'push'")));
+  const standaloneJob = workflowJob(standalone, "imported-nvfp4-worker-smoke");
+  for (const job of [bridge, standaloneJob]) {
+    assert.doesNotMatch(job, /^ {4}needs:/m);
+    assert.match(job, /^ {6}group: imported-nvfp4-proof-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}$/m);
+    assert.match(job, /^ {6}cancel-in-progress: false$/m);
+    assert.match(job, /^ {4}runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]$/m);
+    assert.match(job, /^ {6}HF_HUB_CACHE: 'E:\\huggingface\\hub'$/m);
+    assert.match(job, /SCENEWORKS_IMPORTED_NVFP4_CHECKPOINT: 'E:\\huggingface\\hub\\models--Comfy-Org--Krea-2\\snapshots\\952f49d49653cb42e7d6cf7cbfad74738073ec7d\\diffusion_models\\krea2_turbo_nvfp4\.safetensors'/);
+    assert.match(job, /python -I scripts\/ci\/imported-nvfp4-cuda-guard\.py/);
+    // CI_IMPACT: source-only scope checks; runner context is valid in steps, not job env.
+    assert.doesNotMatch(job.slice(0, job.indexOf("    steps:")), /\$\{\{ runner\./);
+    const execute = workflowStep(job, "Run the imported NVFP4 worker smoke");
+    for (const [name, directory] of [["OUTPUT", "proof"], ["RESOURCE", "resource"]]) {
+      assert.ok(execute.includes(`MODEL_PROOF_${name}_DIR: '\${{ runner.temp }}\\imported-nvfp4-${directory}-\${{ github.run_id }}-\${{ github.run_attempt }}'`));
+    }
+    const upload = workflowStep(job, "Upload only bounded owned model-validation evidence");
+    assert.ok(upload.includes("path: ${{ runner.temp }}\\imported-nvfp4-proof-${{ github.run_id }}-${{ github.run_attempt }}/artifact"));
+    assert.doesNotMatch(job, /cargo (?:test|run).*imported_nvfp4_worker_gpu_smoke|continue-on-error:/);
+  }
+  const reject = workflowStep(bridge, "Refuse combined imported NVFP4 proof profiles");
+  assert.match(reject, /if \(\$otherProfiles -contains 'true'\) \{ throw/);
+  assert.ok(bridge.indexOf(reject) < bridge.indexOf("python -I scripts/ci/imported-nvfp4-cuda-guard.py"));
+  for (const name of ["candle-worker", "yue2-terminal-cuda", "iris-worker-smoke"]) {
+    assert.match(workflowJob(ordinary, name), /^ {4}if: .*!(?:\(github\.event_name == 'workflow_dispatch' && )?inputs\.run_imported_nvfp4_proof/m);
+  }
+});
+
+test("ordinary scaffold CI explicitly runs the CPU-only imported NVFP4 proof policy suite", async () => {
+  const scripts = JSON.parse(await source("package.json")).scripts;
+  assert.equal(rootTestGroups().flat().filter((arg) => arg === "scripts/ci/imported-nvfp4-proof.test.mjs").length, 1);
+  assert.doesNotMatch(scripts.check, /node scripts\/ci\/imported-nvfp4-proof\.mjs|imported-nvfp4-cuda-guard\.py/);
+  assert.match(await source(".github/workflows/check.yml"), /npm run check/);
+});
+
+test("merged Supra2 manual cases retain physical CUDA ownership and facts-only exclusion", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const job = workflowJob(workflow, "supra2-worker-smoke");
+  assert.equal(evaluateWorkflow(workflowExpression(job), "workflow_dispatch",
+    { run_supra2_worker_smoke: true, capability_facts_only: true }), false);
+  assert.match(job, /CUDA_VISIBLE_DEVICES: "1"/);
+  assert.match(job, /group: windows-candle-gpu-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}-supra2-worker-smoke/);
+  for (const actor of ["convert", "smoke", "lifecycle", "matrix"]) {
+    assert.ok(job.includes(`python -I scripts/ci/windows_cuda_execution.py --actor supra2-${actor} --budget-minutes 120 --cuda-ordinals 0 -- cmd /c scripts\\ci\\supra2-candle-real-weights\\run-one.cmd`));
+  }
+  assert.doesNotMatch(job, /\n\s*call scripts\\ci\\supra2-candle-real-weights\\run-one.cmd/);
+});
+
+test("fixed physical CUDA ownership guard has CPU-only mock coverage in ordinary scaffold CI", async () => {
+  const python = process.platform === "win32" ? "python" : "python3";
+  for (const name of ["test_imported_nvfp4_cuda_guard.py", "test_windows_cuda_execution.py"]) {
+    const suite = fileURLToPath(new URL(`./ci/${name}`, import.meta.url));
+    const { stdout, stderr } = await promisify(execFile)(python, ["-I", suite], { maxBuffer: 1024 * 1024 });
+    assert.match(stdout + stderr, /Ran [1-9][0-9]* tests/);
+    assert.match(stdout + stderr, /\bOK\b/);
+    assert.doesNotMatch(stdout + stderr, /skipped=/);
+  }
+});
+
+test("ordinary CUDA tests retain the full suite while the unchanged kernel is dispatch-only", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const step = workflowStep(workflowJob(workflow, "candle-worker"), "Test the candle GPU worker (backend-candle)");
+  assert.match(step, /cargo test -p sceneworks-worker --features backend-candle --no-run/);
+  assert.match(step, /^\s+node scripts\/unit-hf-sandbox\.mjs -- cargo test -p sceneworks-worker --features backend-candle\s*$/m);
+  assert.doesNotMatch(step, /SCENEWORKS_CUDA_KERNEL_REQUIRED|windows_cuda_execution|--skip|--lib|--test /);
+  const kernel = await source("crates/sceneworks-worker/tests/cuda_quant_smoke.rs");
+  assert.match(kernel, /#\[test\]\n#\[ignore = "inference kernel; run the windows-candle quant_kernel_only dispatch"\]\nfn cuda_qmatmul_matches_cpu/);
+  assert.match(kernel, /SCENEWORKS_CUDA_KERNEL_REQUIRED/);
+  assert.ok(kernel.indexOf("required CUDA kernel validation") < kernel.indexOf("SKIP cuda_qmatmul_matches_cpu"));
+  assert.doesNotMatch(kernel, /MODEL_INFERENCE_BODY_COMPLETED|MODEL_INFERENCE_DEVICE/);
+  const manual = workflowJob(workflow, "quant-kernel");
+  assert.match(manual, /if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.quant_kernel_only && !inputs\.run_moss_native_validation \}\}/);
+  assert.match(manual, /runs-on: \[self-hosted, Windows, X64, cuda\]/);
+  assert.match(manual, /cancel-in-progress: false/);
+  assert.match(manual, /cargo test --locked -p sceneworks-worker --features backend-candle --test cuda_quant_smoke --no-run/);
+  assert.match(manual, /python -I scripts\/ci\/cuda_quant_kernel_validation\.py --physical-index %KERNEL_PHYSICAL_INDEX%/);
+  assert.ok(manual.indexOf("--check-dispatch") < manual.indexOf("uses: ./.github/actions/prepare-rust-runner"));
+  const kernelStep = workflowStep(manual, "Compile then run exactly the ignored quant kernel");
+  assert.match(kernelStep, /shell: cmd/);
+  assert.match(kernelStep, /call "C:\\Program Files \(x86\)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64\.bat"/);
+  assert.match(kernelStep, /set NVCC_CCBIN=%VCToolsInstallDir%bin\\Hostx64\\x64/);
+  assert.ok(kernelStep.indexOf("--no-run") < kernelStep.indexOf("python -I scripts/ci/cuda_quant_kernel_validation.py"));
+  for (const name of ["candle-worker", "imported-nvfp4-worker-smoke", "yue2-terminal-cuda", "iris-worker-smoke", "supra2-worker-smoke"]) {
+    const route = workflowExpression(workflowJob(workflow, name));
+    assert.equal(evaluateWorkflow(route, "workflow_dispatch", { quant_kernel_only: true,
+      run_yue2_terminal_cuda: true, run_imported_nvfp4_proof: true, run_iris_worker_smoke: true,
+      run_supra2_worker_smoke: true }), false, name);
+  }
+  const helper = await source("scripts/ci/cuda_quant_kernel_validation.py");
+  assert.doesNotMatch(helper, /claim_uuids|prepared_components|sample_baseline|guard\.idle|PUBLIC/);
 });
 
 // One job's text: from its header to the next top-level job header (or the end of the file), so a
@@ -1254,7 +2006,7 @@ function jobBlock(workflow, at) {
   return workflow.slice(at, next === -1 ? undefined : at + 1 + next + 1);
 }
 
-test("automatic Windows Candle jobs select physical GPU 1, never the owner's GPU 0", async () => {
+test("Windows Candle and manual NVFP4 jobs keep their physical GPU choices explicit", async () => {
   const candle = await source(".github/workflows/windows-candle.yml");
   const worker = jobBlock(candle, candle.indexOf("  candle-worker:\n"));
   const imported = jobBlock(candle, candle.indexOf("  imported-nvfp4-worker-smoke:\n"));
@@ -1264,6 +2016,7 @@ test("automatic Windows Candle jobs select physical GPU 1, never the owner's GPU
     assert.equal(evaluateWorkflow(route, event), expected, event);
     assert.equal(evaluateWorkflow(route, event, { capability_facts_only: false }), expected, event);
   }
+  assert.equal(evaluateWorkflow(route, "workflow_dispatch", { run_imported_nvfp4_proof: true }), "1");
   assert.match(imported, /^ {6}CUDA_DEVICE_ORDER: PCI_BUS_ID$/m);
   assert.match(imported, /^ {6}CUDA_VISIBLE_DEVICES: "1"$/m);
 
@@ -1297,8 +2050,8 @@ test("windows-candle runs the YuE2 terminal acceptance and profile only on dispa
   const at = workflow.indexOf("  yue2-terminal-cuda:\n");
   assert.ok(at >= 0, "windows-candle.yml must keep the YuE2 terminal job");
   const job = jobBlock(workflow, at);
-  assert.match(job, /^ {4}if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_yue2_terminal_cuda && !inputs\.capability_facts_only \}\}$/m);
-  assert.match(job, /^ {6}group: windows-candle-gpu-real-weights$/m);
+  assert.match(job, /^ {4}if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_yue2_terminal_cuda && !inputs\.capability_facts_only && !inputs\.run_imported_nvfp4_proof && !\(github\.event_name == 'workflow_dispatch' && inputs\.quant_kernel_only\) && !inputs\.run_moss_native_validation \}\}$/m);
+  assert.match(job, /^ {6}group: windows-candle-gpu-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}-yue2-terminal-cuda$/m);
   assert.match(job, /^ {6}cancel-in-progress: false$/m);
   assert.match(job, /^ {4}runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]$/m);
   // A fresh per-run Hugging Face home: the shared runner hub is never cold-install evidence, so no
@@ -1584,6 +2337,19 @@ const COMPILE_CHAIN_STEPS = [
 // The ORDERED view of the job's steps. `stepBody()` above finds one step by name; this keeps
 // position, and keeps the `uses:`-only steps (checkout, prepare-rust-runner) that have no name at
 // all and so are invisible to `stepBody`.
+function unwrapCudaCargoCommands(text) {
+  // Preserve the underlying compiled/tested graph behind the one known resource
+  // boundary. Never treat an echo, arbitrary wrapper, or quoted prose as Cargo.
+  return text.replace(/^(\s*(?:run: )?)python -I scripts\/ci\/windows_cuda_execution\.py [^\n]*? -- (?=cargo\s)/gm, "$1");
+}
+
+test("CUDA execution boundaries cannot hide Cargo test coverage or widen quoted prose", () => {
+  const command = "          python -I scripts/ci/windows_cuda_execution.py --actor worker-tests --budget-minutes 60 --cuda-ordinals 0 -- cargo test -p sceneworks-worker --features backend-candle";
+  assert.equal(unwrapCudaCargoCommands(command).trim(), "cargo test -p sceneworks-worker --features backend-candle");
+  const prose = `          echo '${command.trim()}'`;
+  assert.equal(unwrapCudaCargoCommands(prose), prose);
+});
+
 function jobSteps(workflow) {
   const start = workflow.indexOf("\n    steps:\n");
   assert.ok(start >= 0, "windows-candle.yml must keep a steps: block");
@@ -1600,7 +2366,7 @@ function jobSteps(workflow) {
       body: chunk,
       // A cargo COMMAND, line-initial, so an `echo`ed fix-it message that merely QUOTES
       // `cargo run -p sceneworks-worker` (the restamp step has one) counts as the prose it is.
-      cargo: chunk.split("\n").some((line) => /^\s+(run: )?cargo\s/.test(line)),
+      cargo: unwrapCudaCargoCommands(chunk).split("\n").some((line) => /^\s+(run: )?(?:node scripts\/unit-hf-sandbox\.mjs -- )?cargo\s/.test(line)),
     });
     at = next;
   }
@@ -1761,12 +2527,42 @@ test("Windows CUDA runs the Candle adapter's platform-only unit tests", async ()
   // NO `--bin` selector (sc-18808 review): it excludes the crate's LIB test target, and the crate
   // is outside `default-members`, so a plain `cargo test` never reaches it either. Under the old
   // selector the shared protocol guards in src/lib.rs executed in ZERO lanes on either platform.
-  assert.match(workflow, /^ +cargo test -p sceneworks-memory-adapter --features candle %capability_facts_test_args%$/m);
+  assert.match(workflow, /^ +node scripts\/unit-hf-sandbox\.mjs -- cargo test -p sceneworks-memory-adapter --features candle %capability_facts_test_args%$/m);
   assert.doesNotMatch(
     workflow,
     /cargo test -p sceneworks-memory-adapter --features candle --bin/,
     "a --bin selector on the TEST step drops the lib target, where the shared protocol guards live",
   );
+});
+
+test("hosted macOS bounds the complete cold native pipeline at two hours", async (t) => {
+  const workflow = await source(".github/workflows/macos-mlx.yml");
+  const hosted = workflowJob(workflow, "macos-checks");
+  const budget = "    timeout-minutes: 120\n";
+  const validate = (candidate) => {
+    const job = workflowJob(candidate, "macos-checks");
+    assert.match(job, /^    timeout-minutes: 120$/m, "the hosted cold-build budget stays finite and sufficient");
+    assert.match(job, /^    runs-on: macos-26$/m);
+    for (const command of [
+      "cargo build -p sceneworks-worker",
+      "cargo clippy --all-targets -- -D warnings",
+      "cargo clippy -p sceneworks-memory-adapter --features mlx --all-targets -- -D warnings",
+      "node scripts/unit-hf-sandbox.mjs -- cargo test -p sceneworks-memory-adapter --features mlx",
+      "node scripts/unit-hf-sandbox.mjs -- cargo test -- --skip nax_16bit_sdpa_is_correct",
+    ]) assert.ok(job.includes(`run: ${command}\n`), command);
+  };
+  validate(workflow);
+  assert.equal(hosted.split(budget).length - 1, 1);
+  for (const [name, replacement] of [
+    ["MAC-cold-budget-90", "    timeout-minutes: 90\n"],
+    ["MAC-cold-budget-missing", ""],
+    ["MAC-cold-budget-platform-maximum", "    timeout-minutes: 360\n"],
+  ]) await t.test(name, () => {
+    const mutant = workflow.replace(hosted, hosted.replace(budget, replacement));
+    assert.notEqual(mutant, workflow);
+    assert.throws(() => validate(mutant));
+    validate(workflow); // Restored source is GREEN; no workflow file is mutated by this test.
+  });
 });
 
 // The MLX twin of the pin above (sc-18250). The adapter crate sits outside the workspace
@@ -1786,7 +2582,7 @@ test("macOS MLX runs the MLX adapter's platform-only unit tests", async () => {
   // lane's platform surface.
   assert.match(
     hosted,
-    /^ {6}- name: Test the MLX memory adapter \(lib \+ memory-mlx-adapter\)\n {8}run: cargo test -p sceneworks-memory-adapter --features mlx$/m,
+    /^ {6}- name: Test the MLX memory adapter \(lib \+ memory-mlx-adapter\)\n {8}run: node scripts\/unit-hf-sandbox\.mjs -- cargo test -p sceneworks-memory-adapter --features mlx$/m,
   );
   assert.doesNotMatch(
     hosted,
@@ -1829,11 +2625,15 @@ test("the PR-reachable candle lane typechecks the memory adapter's TESTS, not ju
   assert.match(await source("package.json"), /"rust:check:candle": "node scripts\/check-candle-build\.mjs"/);
 });
 
-test("Docker relevance gate paginates and checks for truncated file lists", async () => {
+test("Docker relevance step consumes the exhaustive shared diff and fails safe on missing selection", async () => {
   const workflow = await source(".github/workflows/check.yml");
-  assert.match(workflow, /gh api --paginate/);
-  assert.match(workflow, /docker-smoke-relevance\.mjs --expected-count/);
-  assert.doesNotMatch(workflow, /gh pr view .*--json files/);
+  const gate = workflowStep(workflowJob(workflow, "parity-docker"), "Decide whether to run the Docker runtime smoke");
+  assert.match(gate, /SELECTED: \$\{\{ needs.changes.outputs.docker \}\}/);
+  assert.match(gate, /if \[ "\$SELECTED" = "false" \]; then/);
+  assert.match(gate, /else\n            echo "run=true"/);
+  const selector = await source("scripts/check-job-relevance.mjs");
+  assert.match(selector, /"--name-only", "--no-renames", "-z"/);
+  assert.match(selector, /dockerSmokeDecision\(files.length, files\)/);
 });
 
 test("every release job is confined to refs/tags/v", async () => {
@@ -2127,7 +2927,10 @@ test("macOS memory-strategy calibration dispatch is opt-in and secret-scoped", a
     workflow,
     /"\$RUNNER_TEMP\/qwen-provision-venv\/bin\/python" -m pip install/,
   );
-  assert.match(workflow, /huggingface_hub==0\.36\.0/);
+  assert.match(await source(".github/requirements-hf.txt"), /^huggingface_hub==0\.36\.0$/m);
+  assert.equal((workflow.match(/-r \.github\/requirements-hf\.txt/g) ?? []).length, 2);
+  const windows = await source(".github/workflows/windows-candle.yml");
+  assert.equal((windows.match(/-r \.github\/requirements-hf\.txt/g) ?? []).length, 3);
   assert.match(workflow, /from huggingface_hub import snapshot_download/);
   assert.match(workflow, /repo_id="SceneWorks\/qwen-image-mlx"/);
   assert.match(workflow, /revision=os\.environ\["QWEN_REVISION"\]/);
@@ -2265,16 +3068,10 @@ test("MLX calibration probe derives the production wired ceiling without guessin
 test("memory adapters bind every emitted overlay verdict to the requested target", async () => {
   const mlx = await source("crates/sceneworks-memory-adapter/src/bin/mlx.rs");
   const candle = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
-  const krea = mlx.slice(mlx.indexOf("fn run_krea_control("), mlx.indexOf("fn run_qwen("));
-  const qwen = mlx.slice(mlx.indexOf("fn run_qwen_vae_probe("), mlx.indexOf("fn run(request:"));
-  const candleReference = candle.slice(
-    candle.indexOf("fn run_five_rung_reference("),
-    candle.indexOf("fn run(request:"),
-  );
-  const candleLtx25 = candle.slice(
-    candle.indexOf("fn run_ltx25_capture("),
-    candle.indexOf("const FIVE_RUNG_FIXTURE_PREFIX"),
-  );
+  const krea = rustFunctionSource(mlx, "run_krea_control");
+  const qwen = ["run_qwen_vae_probe", "run_qwen_provider"].map((name) => rustFunctionSource(mlx, name)).join("\n");
+  const candleReference = ["run_five_rung_reference", "run_five_rung_batch"].map((name) => rustFunctionSource(candle, name)).join("\n");
+  const candleLtx25 = rustFunctionSource(candle, "run_ltx25_capture");
 
   assert.match(
     krea,
@@ -2314,15 +3111,7 @@ test("memory adapters bind every emitted overlay verdict to the requested target
   // new arm, and a `>= 1` per builder stops noticing one specific arm's builder call being dropped.
   // So the claim is PER ARM: each function that assembles a `PlainGatedFragment` must reach a
   // builder in its OWN body.
-  const candleFunctions = new Map();
-  for (const match of candle.matchAll(/^fn ([a-z0-9_]+)[(<]/gm)) {
-    const start = match.index;
-    const next = candle.indexOf("\nfn ", start + 1);
-    candleFunctions.set(
-      match[1],
-      candle.slice(start, next === -1 ? candle.length : next),
-    );
-  }
+  const candleFunctions = new Map(rustFunctionSlices(candle).map((item) => [item.name, item.source]));
   const gatedEmitters = [...candleFunctions].filter(([, body]) =>
     body.includes("protocol::PlainGatedFragment {"),
   );
@@ -2352,10 +3141,7 @@ test("memory adapters bind every emitted overlay verdict to the requested target
   assert.match(qwenEdit, /\("builtInAdapters", "count", loaded_adapters as u64\)/);
   assert.match(qwenEdit, /overlay: \(loaded_adapters > 0\)\.then\(\|\| "lora"\.to_owned\(\)\)/);
   // The MLX twin publishes the same claims off its own loaded stack.
-  const mlxQwenEdit = mlx.slice(
-    mlx.indexOf("fn run_qwen_edit_provider("),
-    mlx.indexOf("\nfn ", mlx.indexOf("fn run_qwen_edit_provider(") + 1),
-  );
+  const mlxQwenEdit = rustFunctionSource(mlx, "run_qwen_edit_provider");
   assert.match(mlxQwenEdit, /let loaded_adapters = spec\.adapters\.len\(\);/);
   assert.match(mlxQwenEdit, /let overlay_scenario = if loaded_adapters > 0 \{/);
   assert.match(mlxQwenEdit, /\("builtInAdapters", "count", loaded_adapters as u64\)/);
@@ -2501,7 +3287,7 @@ test("macOS lanes lint every crate they ship, in the configuration they ship it"
   // `origin/main` would not build on Apple Silicon.
   //
   // The Linux `parity` lane CANNOT catch that class of bug: image_jobs.rs gates
-  // `include!("image_jobs/base.rs")` on `any(macos, all(not(macos), backend-candle))`,
+  // `include!("image_jobs/memory.rs")` on `any(macos, all(not(macos), backend-candle))`,
   // so on Linux without candle the file is not compiled at all. Verified by reverting
   // the sc-17007 `cfg` and running each lane's own command — macOS exits 101, the
   // Linux target exits 0. macOS+default is the ONLY configuration in the fleet that
@@ -2522,14 +3308,21 @@ test("macOS lanes lint every crate they ship, in the configuration they ship it"
   // would re-dark macOS-conditional code in sceneworks-core / rust-api / image-quality,
   // which is precisely what sc-17026 fixed.
   const NAX_TEST = "nax_16bit_sdpa_is_correct";
-  assert.match(mlx, new RegExp(`^\\s+run: cargo test -- --skip ${NAX_TEST}$`, "m"));
+  assert.match(mlx, new RegExp(`^\\s+run: node scripts/unit-hf-sandbox\\.mjs -- cargo test -- --skip ${NAX_TEST}$`, "m"));
   // The one exemption is the targeted guard invocation below; a bare narrowing of the
   // suite to the single crate is still forbidden.
   assert.doesNotMatch(mlx, /run: cargo test -p sceneworks-worker\s*$/m);
   // ...and the skipped test must demonstrably run somewhere. Without this, deleting the
   // self-hosted half would drop the entire NAX verdict while every lane stayed green —
   // the same declared-but-unreachable trap as sc-17026, one job over.
-  assert.match(mlx, /^\s+run: cargo test -p sceneworks-worker --test nax_guard$/m);
+  assert.match(mlx, /^\s+run: cargo test -p sceneworks-worker --test nax_guard --no-run$/m);
+  assert.doesNotMatch(mlx, /unit-hf-sandbox\.mjs -- cargo test -p sceneworks-worker --test nax_guard/);
+  const manualNax = await source(".github/workflows/nax-kernel-validation.yml");
+  assert.match(manualNax, /python3\.12 -I scripts\/ci\/metal_execution_lock\.py --wait-seconds 2700 --/);
+  assert.match(manualNax, /node scripts\/unit-hf-sandbox\.mjs -- cargo test -p sceneworks-worker --test nax_guard/);
+  assert.doesNotMatch(manualNax, /--test nax_guard --no-run/);
+  assert.match(mlx, /inputs\.verification_profile == 'nax-kernel-guard'/);
+  assert.match(mlx, /uses: \.\/\.github\/workflows\/nax-kernel-validation\.yml/);
   // Running the command is only half of it — the lane must actually TRIGGER for the
   // crates it now lints. apps/rust-api carries the largest macOS-conditional surface
   // outside the worker and is NOT under `crates/**`, so without this path entry the
@@ -2540,7 +3333,7 @@ test("macOS lanes lint every crate they ship, in the configuration they ship it"
   // where an inherited mlx_fit_gate failure (sc-17037) meant the widened clippy never
   // executed. Lint coverage gated behind a fully green test suite is not coverage.
   const clippyAt = mlx.indexOf("run: cargo clippy --all-targets -- -D warnings");
-  const testAt = mlx.indexOf(`run: cargo test -- --skip ${NAX_TEST}`);
+  const testAt = mlx.indexOf(`run: node scripts/unit-hf-sandbox.mjs -- cargo test -- --skip ${NAX_TEST}`);
   assert.ok(clippyAt > 0, "macos-mlx.yml must lint every default member");
   assert.ok(testAt > 0, "macos-mlx.yml must run the workspace tests");
   assert.ok(clippyAt < testAt, "macos-mlx.yml must run clippy BEFORE cargo test");
@@ -2603,7 +3396,9 @@ test("the MLX memory adapter is guarded on a PR lane, like its Candle twin", asy
   // The guard must sit on the unconditional PR path, not behind the dispatch-only
   // calibration steps — that placement is exactly the hole this closes.
   const guard = mlx.indexOf("cargo clippy -p sceneworks-memory-adapter");
-  const firstDispatchOnly = mlx.indexOf("if: ${{ github.event_name == 'workflow_dispatch'");
+  // Hosted-only input validation is an early dispatch guard, not an optional model run.
+  // The unconditional lint must precede the actual calibration/provisioning job steps.
+  const firstDispatchOnly = mlx.indexOf("if: ${{ github.event_name == 'workflow_dispatch'", mlx.indexOf("  nax-worker:"));
   assert.ok(guard > 0, "macos-mlx.yml must clippy the MLX memory adapter");
   assert.ok(firstDispatchOnly > 0, "macos-mlx.yml must still have dispatch-only calibration steps");
   assert.ok(guard < firstDispatchOnly, "MLX adapter guard must precede the dispatch-only steps");
@@ -2820,9 +3615,17 @@ test("Windows facts-only capture hides CUDA and compiles both runtime test suite
     ["Check and test the candle memory adapter (lib + memory-candle-adapter)", "cargo test -p sceneworks-memory-adapter --features candle"],
   ]) {
     const step = workflowStep(worker, name);
+    if (name === "Test the candle GPU worker (backend-candle)") {
+      const compile = step.indexOf(`${command} --no-run`);
+      const exit = step.indexOf('if "%CAPABILITY_FACTS_ONLY%"=="true" exit /b 0');
+      const execute = step.indexOf(`\n          node scripts/unit-hf-sandbox.mjs -- ${command}\n`);
+      assert.ok(compile >= 0 && exit > compile && execute > exit,
+        "facts-only compiles, then exits before the full ordinary test execution");
+      continue;
+    }
     assert.ok(step.includes('set "capability_facts_test_args="'));
-    assert.ok(step.includes(`set "capability_facts_test_args="\n          if "%CAPABILITY_FACTS_ONLY%"=="true" set "capability_facts_test_args=--no-run"\n          ${command} %capability_facts_test_args%`));
-    assert.deepEqual(step.split("\n").filter(line => line.trim().startsWith("cargo test ")).map(line => line.trim()), [`${command} %capability_facts_test_args%`]);
+    assert.ok(step.includes(`set "capability_facts_test_args="\n          if "%CAPABILITY_FACTS_ONLY%"=="true" set "capability_facts_test_args=--no-run"\n          node scripts/unit-hf-sandbox.mjs -- ${command} %capability_facts_test_args%`));
+    assert.deepEqual(step.split("\n").filter(line => line.trim().startsWith("node scripts/unit-hf-sandbox.mjs -- cargo test ")).map(line => line.trim()), [`node scripts/unit-hf-sandbox.mjs -- ${command} %capability_facts_test_args%`]);
   }
   assert.match(workflowStep(worker, "Check the candle sidecar builds (rust-api, backend-candle)"), /cargo check -p sceneworks-rust-api --features backend-candle/);
   assert.match(workflowStep(worker, "Clippy (candle worker)"), /cargo clippy -p sceneworks-worker --features backend-candle --all-targets -- -D warnings/);
@@ -2834,7 +3637,7 @@ test("Windows facts-only capture hides CUDA and compiles both runtime test suite
 test("Windows facts-only capture rejects mixed profiles and cannot escape through terminal always steps or other GPU jobs", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   const worker = workflowJob(workflow, "candle-worker");
-  const flags = ["run_five_rung_reference", "provision_snapshot", "run_ltx_eros_acceptance", "run_epic_20738_terminal_cuda", "run_yue2_terminal_cuda", "yue2_acceptance_only", "yue2_fp8_profile_only", "run_iris_worker_smoke", "run_supra2_worker_smoke"];
+  const flags = ["run_five_rung_reference", "provision_snapshot", "run_ltx_eros_acceptance", "run_epic_20738_terminal_cuda", "run_yue2_terminal_cuda", "yue2_acceptance_only", "yue2_fp8_profile_only", "run_iris_worker_smoke", "run_supra2_worker_smoke", "run_imported_nvfp4_proof"];
   const validation = workflowStep(worker, "Refuse combined manual measurement profiles");
   const refusal = validation.slice(validation.indexOf("if ($env:CAPABILITY_FACTS_ONLY"), validation.indexOf("if ($env:YUE2_ACCEPTANCE_ONLY"));
   assert.match(refusal, /-contains 'true'/);
@@ -2967,11 +3770,14 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
         // and not symmetry for its own sake.
         "config/engine-capabilities/audio/capabilities.candle.json",
         "scripts/compare-engine-capability-facts.mjs", // invoked directly by the native verification step
+        "scripts/moss-native-api-validation*.mjs", // normal pre-compiler Node probe executes this test/reader family
+        "scripts/moss-training-acceptance*.mjs", // that same probe imports the native supervisor and exact-PID reader
         "Cargo.toml", // workspace graph + lints: changes what every invocation here resolves
         "Cargo.lock", // dependency pins, incl. the inference revision the whole lane compiles
         "rust-toolchain.toml", // no toolchain action on this lane; cargo auto-selects this pin
         ".cargo/config.toml", // git-fetch-with-cli, without which the token-injected inference fetch breaks
         ".github/actions/prepare-rust-runner/**", // the job's own first step
+        ".github/actions/cleanup-runner-storage/**", // registered post action; Windows guard tests exercise its Cargo locks and path checks
         ".github/workflows/windows-candle.yml", // the lane itself
       ],
     },
@@ -3022,11 +3828,11 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
     // Strip comment lines, then re-join backslash line continuations so a `-p <pkg>` split
     // across lines cannot degrade into a "package-less" invocation (which the rule below
     // would over-widen into the whole default-member set).
-    const executable = prSteps
+    const executable = unwrapCudaCargoCommands(prSteps
       .split("\n")
       .filter((line) => !/^\s*#/.test(line))
       .join("\n")
-      .replace(/\\\n\s*/g, " ");
+      .replace(/\\\n\s*/g, " "));
     // LINE-INITIAL commands only. An `echo`ed fix-it message that merely QUOTES a
     // package-less `cargo test` must not count as a workspace-wide build — counting it
     // would quietly widen `covered` to every default member and defuse this whole guard.
@@ -3153,6 +3959,12 @@ test("the Rust toolchain is pinned to one concrete version, everywhere", async (
     );
     for (const value of inputs) {
       inputsSeen += 1;
+      if (file === "server-candle-linux.yml" && value === "${{ steps.h3_admission_toolchain.outputs.channel }}") {
+        // This one manual CPU route reads the checkout pin directly, so a main toolchain sync
+        // cannot leave a stale literal. Other expressions/floating channels remain forbidden.
+        assertH3RootToolchainReader(workflowJob(workflow, "h3-admission-proof"));
+        continue;
+      }
       assert.equal(
         value,
         `"${pin}"`,
@@ -3969,11 +4781,11 @@ test("the Candle turnkey member table folds the tier quant per member, and never
   // way for every one of the five members, so neither copy can be edited alone. The Rust guard
   // (`packed_turnkeys_keep_load_quantization_none_for_every_public_route`) is cfg'd to a non-macOS
   // candle build and cannot run on the host that writes either file.
-  const worker = await source("crates/sceneworks-worker/src/image_jobs/base.rs");
+  const worker = await source("crates/sceneworks-worker/src/image_jobs/memory.rs");
   const carveOut =
     /\/\/ Keep the load instruction empty while retaining the resolved artifact bits for the recipe\n[\s\S]*?if matches!\(\n\s+request\.model\.as_str\(\),\n([\s\S]*?)\n\s+\) \{\n\s+return \(None, resolved_bits\);/
       .exec(worker);
-  assert.ok(carveOut, "image_jobs/base.rs must still carve packed turnkeys out of the quant fold");
+  assert.ok(carveOut, "image_jobs/memory.rs must still carve packed turnkeys out of the quant fold");
   const carved = new Set([...carveOut[1].matchAll(/"([a-z0-9_]+)"/g)].map(([, id]) => id));
   assert.ok(carved.has("chroma1_hd"), "the parsed carve-out is the packed-turnkey list");
   for (const member of members) {
@@ -4119,12 +4931,11 @@ test("the MLX LTX arm's manifest constants match the shipped ltx_2_3 limits", as
     /const LTX_FRAME_ENVELOPE: \(u32, u32\) = ltx_frame_envelope\(\);/,
     "the frame envelope must stay DERIVED from the declared arrays, not written down",
   );
-  const envelopeTestAt = adapter.indexOf(
-    "fn ltx_frame_envelope_is_derived_from_the_declared_durations_and_fps(",
-  );
-  assert.ok(envelopeTestAt >= 0, "the envelope derivation test must still exist");
+  const adapterWithTests = await rustSourceWithTests(new URL(
+    "../crates/sceneworks-memory-adapter/src/bin/mlx.rs", import.meta.url,
+  ));
   assert.match(
-    adapter.slice(envelopeTestAt, envelopeTestAt + 600),
+    rustFunctionSource(adapterWithTests, "ltx_frame_envelope_is_derived_from_the_declared_durations_and_fps"),
     new RegExp(
       `assert_eq!\\(LTX_FRAME_ENVELOPE, \\(${Math.min(...reachable)}, ${Math.max(...reachable)}\\)\\)`,
     ),
@@ -4148,14 +4959,8 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
     "the conservative canary stop must remain byte-bound to SC-18808 co-staged arithmetic",
   );
 
-  const campaign = adapter.slice(
-    adapter.indexOf("fn run_ltx_with_admission("),
-    adapter.indexOf("fn campaign_entry_diagnostic("),
-  );
-  const ordinary = adapter.slice(
-    adapter.indexOf("fn run_ltx(request:"),
-    adapter.indexOf("fn run(request:"),
-  );
+  const campaign = rustFunctionSource(adapter, "run_ltx_with_admission");
+  const ordinary = rustFunctionSource(adapter, "run_ltx");
   assert.match(
     ordinary,
     /run_ltx_with_admission\(request, LtxRunAdmission::Ordinary, &mut phases\)/,
@@ -4222,10 +5027,7 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
     ordinary,
     /LTX_(?:CANARY|PRODUCT_CANARY)_FIXTURE|diagnostic_(?:product_envelope_)?canary_complete/,
   );
-  const campaignEntry = adapter.slice(
-    adapter.indexOf("fn run_ltx_campaign_entry("),
-    adapter.indexOf("fn run_ltx(request:"),
-  );
+  const campaignEntry = rustFunctionSource(adapter, "run_ltx_campaign_entry");
   for (const required of [
     "prevalidate_ltx_campaign_entry(request)?",
     "consume_ltx_canary_watchdog_attestation(request)?",
@@ -4252,10 +5054,7 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
       < campaignEntry.indexOf("consume_ltx_canary_watchdog_attestation(request)?"),
     "the exact campaign row must be validated before the watchdog releases model allocation",
   );
-  const boundedCarrier = adapter.slice(
-    adapter.indexOf("fn run_ltx_bounded_carrier_proof("),
-    adapter.indexOf("fn run_ltx_campaign_entry("),
-  );
+  const boundedCarrier = rustFunctionSource(adapter, "run_ltx_bounded_carrier_proof");
   for (const required of [
     "prevalidate_ltx_bounded_carrier_proof(request)?",
     "start_lease_for(&LTX_BOUNDED_CARRIER_PHASE_NAMES)?",
@@ -4278,10 +5077,7 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
   assert.equal((boundedCarrier.match(/scoped_generate\(/g) ?? []).length, 1,
     "SC-20254 must contain exactly one full-A/V render call");
   assert.match(adapter, /LTX_BOUNDED_CARRIER_ACTION => run_ltx_bounded_carrier_proof\(&request\)/);
-  const boundedCampaign = adapter.slice(
-    adapter.indexOf("fn run_ltx_bounded_campaign_entry("),
-    adapter.indexOf("fn run_ltx(request:"),
-  );
+  const boundedCampaign = rustFunctionSource(adapter, "run_ltx_bounded_campaign_entry");
   for (const required of [
     "prevalidate_ltx_bounded_campaign_entry(request)?",
     "consume_ltx_canary_watchdog_attestation(request)?",
@@ -4311,10 +5107,7 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
     "SC-20318 must reject a mismatched watchdog phase profile before model resolution",
   );
 
-  const canary = adapter.slice(
-    adapter.indexOf("fn validate_ltx_canary_plan_for("),
-    adapter.indexOf("/// The `mlx:ltx_2_3` SC-18946 arm"),
-  );
+  const canary = ["validate_ltx_canary_plan_for", "run_ltx_canary_for"].map((name) => rustFunctionSource(adapter, name)).join("\n");
   for (const required of [
     "_diagnosticOnly",
     'Some("fixture")',
@@ -4364,32 +5157,20 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
     'Self::Safety => "a sunlit pine branch, static camera"',
     'Self::ProductEnvelope => "sc-20169-product-envelope"',
   ]) assert.ok(profiles.includes(required), `diagnostic profiles must retain ${required}`);
-  const generationRequest = adapter.slice(
-    adapter.indexOf("fn ltx_canary_generation_request_for("),
-    adapter.indexOf("fn ltx_load_spec("),
-  );
+  const generationRequest = rustFunctionSource(adapter, "ltx_canary_generation_request_for");
   assert.match(
     generationRequest,
     /video_mode: profile\.video_mode\(\)\.map\(str::to_owned\)/,
     "the canary must skip the downstream audio decoder and vocoder",
   );
-  const admissionBridge = adapter.slice(
-    adapter.indexOf("fn ltx_canary_request_for_provider_admission("),
-    adapter.indexOf("fn ltx_load_spec("),
-  );
+  const admissionBridge = ["ltx_canary_request_for_provider_admission", "restore_ltx_canary_no_audio_after_configuration", "scoped_generate_ltx_no_audio_canary"].map((name) => rustFunctionSource(adapter, name)).join("\n");
   assert.match(admissionBridge, /request\.video_mode = None;/);
   assert.match(admissionBridge, /request\.video_mode = Some\("no_audio"\.to_owned\(\)\);/);
   assert.match(admissionBridge, /scoped_generate_observed_after_configuration\(/);
-  const genericScope = adapter.slice(
-    adapter.indexOf("fn scoped_generate_observed("),
-    adapter.indexOf("fn scoped_generate_observed_after_configuration("),
-  );
+  const genericScope = rustFunctionSource(adapter, "scoped_generate_observed");
   assert.match(genericScope, /None,/,
     "ordinary production generation must not gain the canary-only post-configure override");
-  const configuredScope = adapter.slice(
-    adapter.indexOf("fn scoped_generate_observed_after_configuration("),
-    adapter.indexOf("/// Combine the generator and request-scope terminals"),
-  );
+  const configuredScope = rustFunctionSource(adapter, "scoped_generate_observed_after_configuration");
   assert.ok(
     configuredScope.indexOf(".configure_request(&mut request)")
       < configuredScope.indexOf("after_configuration(&mut request)"),
@@ -4403,10 +5184,7 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
   for (const lifecycle of ["enter_phase", "leave_phase", "scope.finish", "settle_scoped_generation"]) {
     assert.ok(configuredScope.includes(lifecycle), `canary scope must retain ${lifecycle}`);
   }
-  const diagnosticRun = adapter.slice(
-    adapter.indexOf("fn run_ltx_canary_for("),
-    adapter.indexOf("/// The `mlx:ltx_2_3` SC-18946 arm"),
-  );
+  const diagnosticRun = rustFunctionSource(adapter, "run_ltx_canary_for");
   assert.match(
     diagnosticRun,
     /LtxCanaryProfile::ProductEnvelope => scoped_generate\(/,
@@ -4516,21 +5294,12 @@ test("the SC-20318 provider phase profile is exact across runner, watchdog and a
 
 test("the MLX FLUX.2 calibration arm is bound to the direct reference-free T2I contract", async () => {
   const adapter = await source("crates/sceneworks-memory-adapter/src/bin/mlx.rs");
-  const context = adapter.slice(
-    adapter.indexOf("fn flux2_admission_context("),
-    adapter.indexOf("fn flux2_complete_sweep("),
-  );
+  const context = rustFunctionSource(adapter, "flux2_admission_context");
   // sc-22727 generalized `run_flux2_dev` to the whole family (`run_flux2`), resolved from the
   // plan's `(provider, modelId)`; the reference-free T2I claim below is unchanged and now covers
   // every member.
-  const arm = adapter.slice(
-    adapter.indexOf("fn run_flux2("),
-    adapter.indexOf("fn validate_z_image_batch("),
-  );
-  const table = adapter.slice(
-    adapter.indexOf("struct Flux2Arm {"),
-    adapter.indexOf("fn validate_flux2_target("),
-  );
+  const arm = rustFunctionSource(adapter, "run_flux2");
+  const table = adapter.match(/struct Flux2Arm \{[\s\S]*?\n\}/)?.[0] ?? "";
 
   assert.ok(context.length > 0 && arm.length > 0 && table.length > 0, "FLUX.2 adapter seams must exist");
   assert.match(context, /mode: MemoryMode::TextToImage/);
@@ -4663,7 +5432,7 @@ function mlxJobSteps(workflow, job) {
 // it changed jobs, and the `laneExits` assertion below (which counts the WHOLE FILE) is what
 // caught it: that assertion exists precisely so a guard living outside the scanned job cannot
 // ship unpinned, and the fix it asks for is to enumerate that job, which is this.
-const MLX_GUARD_JOBS = ["macos-checks", "nax-worker"];
+const MLX_GUARD_JOBS = ["macos-checks", "nax-worker", "moss-native-api-mlx", "browser-fixture-artifact"];
 
 function mlxGuardSteps(workflow) {
   return MLX_GUARD_JOBS.flatMap((job) => mlxJobSteps(workflow, job));
@@ -4676,6 +5445,26 @@ function mlxGuardSteps(workflow) {
 // string from an `else` fallthrough and from a following `-d` re-check, and the two
 // "Validate ..." steps share both the `INFERENCE_PIN` condition and its message.
 const MLX_FATAL_GUARDS = [
+  {
+    step: "Reject conflicting browser fixture selectors before setup",
+    detects: "a selected browser artifact dispatch combined with any legacy model or calibration selector",
+    branch: ['if [ "${!selector}" = "true" ]; then'],
+    diagnostic: /^echo "::error::browser-fixture-artifact cannot be combined with \$selector"$/,
+  },
+  {
+    step: "Refuse conflicting MOSS validation inputs before compiler setup",
+    detects: "a MOSS model-validation dispatch combined with another profile or provisioning selector",
+    branch: [
+      'if [ "$HOSTED_ONLY" = true ] || [ "$VERIFICATION_PROFILE" != legacy ] || [ "$RUN_MEMORY_CALIBRATION" = true ] || [ "$RUN_FIVE_RUNG_REFERENCE" = true ] || [ "$PROVISION_QWEN_SNAPSHOT" = true ] || [ "$PROVISION_Z_IMAGE_SNAPSHOT" = true ]; then',
+    ],
+    diagnostic: /^echo '::error::MOSS native validation must be dispatched alone:/,
+  },
+  {
+    step: "Validate hosted-only dispatch intent",
+    detects: "a hosted-only artifact dispatch combined with calibration, provisioning, or an unexpected model-flag serialization",
+    branch: ['if [ "${!flag}" != "false" ]; then'],
+    diagnostic: /^echo "::error::hosted_only requires \$flag=false;/,
+  },
   {
     step: "Verify capabilities.mlx.json content against a fresh dump",
     detects: "the checked-in MLX facts file differs in capability content from a fresh dump at this pin",
@@ -4845,6 +5634,9 @@ const MLX_FATAL_GUARDS = [
 // backed tests fail closed, and `always()` lets the producer and its paired upload still run so
 // the fresh facts can be committed, instead of deadlocking the bootstrap.
 const MLX_GUARD_STEP_REACHABILITY = {
+  "Reject conflicting browser fixture selectors before setup": null,
+  "Refuse conflicting MOSS validation inputs before compiler setup": null,
+  "Validate hosted-only dispatch intent": "if: ${{ github.event_name == 'workflow_dispatch' && inputs.hosted_only }}",
   "Verify capabilities.mlx.json content against a fresh dump": "if: ${{ always() }}",
   "Validate Qwen provisioning mode": "if: ${{ github.event_name == 'workflow_dispatch' }}",
   "Validate Z-Image provisioning mode": "if: ${{ github.event_name == 'workflow_dispatch' }}",
@@ -5515,4 +6307,63 @@ test("the rejected LTX Eros CUDA baseline keeps renderer and product timelines d
       `${mutation.name} must be killed by the acceptance contract`,
     );
   }
+});
+
+
+test("hosted macOS aligns dev/test and proc-macro debug settings", async () => {
+  const hosted = workflowJob(await source(".github/workflows/macos-mlx.yml"), "macos-checks");
+  for (const profile of ["DEV", "TEST", "DEV_BUILD_OVERRIDE", "TEST_BUILD_OVERRIDE"]) {
+    assert.ok(hosted.includes(`CARGO_PROFILE_${profile}_DEBUG: line-tables-only`), profile);
+  }
+});
+
+
+test("hosted parity Rust keeps lean profiles and cache restores compatible without weakening checks", async () => {
+  const job = workflowJob(await source(".github/workflows/check.yml"), "parity-rust");
+  const expected = {
+    CARGO_PROFILE_DEV_DEBUG: "line-tables-only", CARGO_PROFILE_TEST_DEBUG: "line-tables-only",
+    CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "line-tables-only", CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "line-tables-only",
+    CARGO_INCREMENTAL: "0", CARGO_BUILD_JOBS: "2", CARGO_NET_OFFLINE: "true", SCENEWORKS_REQUIRE_FFMPEG: "1",
+  };
+  function validate(candidate) {
+    const settings = Object.fromEntries([...candidate.slice(0, candidate.indexOf("\n    steps:")).matchAll(/^      ([A-Z_]+): (.+)$/gm)]
+      .map(([, key, value]) => [key, value.replace(/^"|"$/g, "")]));
+    for (const [key, value] of Object.entries(expected)) assert.equal(settings[key], value, key);
+    const cache = candidate.match(/      - uses: Swatinem\/rust-cache@[^\n]+[\s\S]*?(?=\n      - )/)?.[0];
+    assert.ok(cache, "existing Rust cache remains selected");
+    assert.match(cache, /prefix-key: v1-rust-parity-lean/);
+    assert.match(cache, /add-rust-environment-hash-key: true/);
+    assert.match(cache, /save-if: \$\{\{ github\.ref == 'refs\/heads\/main' \}\}/);
+    assert.doesNotMatch(cache, /v0-rust/);
+    assert.match(candidate, /run: cargo fetch --locked/);
+    assert.match(candidate, /run: bash scripts\/ensure-ci-ffmpeg\.sh/);
+    assert.match(candidate, /run: node scripts\/unit-hf-sandbox\.mjs -- npm run rust:check/);
+    assert.match(candidate, /run: python -m pytest -q -m e2e --strict-markers/);
+    assert.match(candidate, /run: python -m pytest -q -m parity --strict-markers/);
+    return settings;
+  }
+  const settings = validate(job);
+  for (const [before, after] of [
+    ["CARGO_PROFILE_DEV_DEBUG: line-tables-only", 'CARGO_PROFILE_DEV_DEBUG: "2"'],
+    ["CARGO_PROFILE_TEST_DEBUG: line-tables-only", 'CARGO_PROFILE_TEST_DEBUG: "2"'],
+    ["CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: line-tables-only", 'CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "2"'],
+    ["CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: line-tables-only", 'CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "2"'],
+    ['CARGO_INCREMENTAL: "0"', 'CARGO_INCREMENTAL: "1"'],
+    ["prefix-key: v1-rust-parity-lean", "prefix-key: v0-rust"],
+    ["add-rust-environment-hash-key: true", "add-rust-environment-hash-key: false"],
+  ]) assert.throws(() => validate(job.replace(before, after)), before);
+
+  // Execute only the assembled environment wrapper with a metadata-only Node child.
+  // This checks inheritance into the actual command boundary, never invoking Cargo/models.
+  const temporary = await mkdtemp(path.join(await realpath(tmpdir()), "parity-rust-profile-"));
+  try {
+    const executable = fileURLToPath(new URL("./unit-hf-sandbox.mjs", import.meta.url));
+    const program = `console.log(JSON.stringify(Object.fromEntries(${JSON.stringify(Object.keys(expected))}.map(key => [key, process.env[key]]))))`;
+    const { stdout } = await promisify(execFile)(process.execPath, [executable, "--", process.execPath, "-e", program], {
+      cwd: fileURLToPath(new URL("..", import.meta.url)),
+      env: { ...process.env, ...settings, RUNNER_TEMP: temporary, GITHUB_RUN_ID: "1", GITHUB_RUN_ATTEMPT: "1", GITHUB_JOB: "parity-rust" },
+      timeout: 5000,
+    });
+    assert.deepEqual(JSON.parse(stdout), expected);
+  } finally { await rm(temporary, { recursive: true, force: true }); }
 });

@@ -259,6 +259,25 @@ export function datasetPayload({
   };
 }
 
+// Keep background caption results when saving an unrelated edit from a stale editor.
+// Explicit local caption edits (including clearing a caption) still take precedence.
+export function preserveUneditedDatasetCaptions(payload, baseline) {
+  const before = new Map((baseline?.items ?? []).map((item) => [item.id, item]));
+  const captionValue = (caption) => JSON.stringify([
+    caption?.text ?? "",
+    caption?.source ?? "manual",
+    caption?.triggerWords ?? [],
+    caption?.mode ?? null,
+  ]);
+  return {
+    ...payload,
+    preserveCaptionItemIds: payload.items.filter((item) => {
+      const original = before.get(item.id);
+      return original && captionValue(item.caption) === captionValue(original.caption);
+    }).map((item) => item.id),
+  };
+}
+
 // ---------------------------------------------------------------------------------------------
 // Instruction-edit pairs (sc-24161, epic 24107). An edit-pair dataset item is the item image (the
 // edit TARGET) + its caption (the edit INSTRUCTION) + 1..N ORDERED reference images, stored on the

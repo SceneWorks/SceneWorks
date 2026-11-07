@@ -31,15 +31,19 @@ use crate::checkpoint_import::{
 pub use crate::checkpoint_import::CheckpointContainerV1;
 use crate::checkpoint_plan_store::portable_relative_path_parts;
 
+#[cfg(test)]
+thread_local! {
+    static FAMILY_QUERY_WEIGHT_READS: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
+}
+
 const MAX_DISCOVERY_ENTRIES: usize = 4096;
 const MAX_DISCOVERY_DEPTH: usize = 8;
-const MAX_SAFETENSORS_HEADER_BYTES: u64 = 100_000_000;
-const MAX_JSON_DESCRIPTOR_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_SAFETENSORS_HEADER_BYTES: u64 = crate::safetensors::MAX_HEADER_BYTES;
+pub(crate) const MAX_JSON_DESCRIPTOR_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_GGUF_DESCRIPTOR_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_GGUF_ITEMS: u64 = 1_000_000;
 const MAX_GGUF_STRING_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_GGUF_ARRAY_DEPTH: usize = 16;
-const HASH_BUFFER_BYTES: usize = 1024 * 1024;
 const MAX_AGGREGATE_TENSOR_NAMES: usize = 65_536;
 const MAX_AGGREGATE_TENSOR_NAME_BYTES: usize = 32 * 1024 * 1024;
 const MAX_AGGREGATE_EVIDENCE_STRING_BYTES: usize = 64 * 1024 * 1024;
@@ -154,6 +158,7 @@ pub struct CheckpointInspectionRequestV1 {
     pub root_path: PathBuf,
     pub relative_path: PathBuf,
     pub ownership: CheckpointOwnershipV1,
+    pub context: BTreeMap<String, Value>,
 }
 
 impl CheckpointInspectionRequestV1 {
@@ -235,6 +240,7 @@ impl CheckpointInspectionRequestV1 {
             root_path,
             relative_path,
             ownership,
+            context: BTreeMap::new(),
         })
     }
 }
@@ -417,6 +423,84 @@ pub fn discover_checkpoint(request: &CheckpointInspectionRequestV1) -> Checkpoin
     }
 }
 
+/// Read-only family query over an ALREADY discovered checkpoint. This reuses aggregate shard/config
+/// evidence without reopening weight headers or hashing payloads. Unknown or ambiguous evidence is
+/// None, never a capability guess; full compilation remains authoritative for dialects and races.
+pub fn discovered_checkpoint_family(
+    request: &CheckpointInspectionRequestV1,
+    discovery: &CheckpointDiscoveryV1,
+) -> Result<Option<String>, Vec<CheckpointDiagnosticV1>> {
+    if discovery
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == CheckpointDiagnosticSeverityV1::Error)
+    {
+        return Err(discovery.diagnostics.clone());
+    }
+    let Some(resolved) = resolve_input(request) else {
+        return Err(vec![CheckpointDiagnosticV1::error(
+            CheckpointDiagnosticCodeV1::SourceChangedDuringInspection,
+            path_to_portable_string(&request.relative_path),
+            "checkpoint source changed after bounded discovery",
+        )]);
+    };
+    if !resolved
+        .canonical_target
+        .starts_with(&resolved.canonical_root)
+    {
+        return Err(vec![CheckpointDiagnosticV1::error(
+            CheckpointDiagnosticCodeV1::PathEscapesRoot,
+            path_to_portable_string(&request.relative_path),
+            "checkpoint source resolves outside its declared root",
+        )]);
+    }
+    // A conclusive fused-checkpoint header is stronger than a contradictory loose config label.
+    // Generic transformer shard evidence is not: preserve the aggregate H3 path for those shards.
+    if resolved.canonical_target.is_file() && discovery.candidates.len() == 1 {
+        let candidate = &discovery.candidates[0];
+        if candidate.header_role.as_deref() == Some("checkpoint") {
+            if let Some(family) = &candidate.header_family {
+                return Ok(Some(family.clone()));
+            }
+        }
+    }
+    let mut diagnostics = Vec::new();
+    let h3 = discovery_has_h3_family(&resolved, discovery, &mut diagnostics);
+    if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity == CheckpointDiagnosticSeverityV1::Error)
+    {
+        return Err(diagnostics);
+    }
+    if h3 {
+        return Ok(Some("minimax-h3".into()));
+    }
+    let mut candidates: Vec<_> = discovery
+        .candidates
+        .iter()
+        .filter(|candidate| {
+            matches!(
+                candidate.header_role.as_deref(),
+                Some("transformer" | "checkpoint")
+            )
+        })
+        .collect();
+    if candidates.is_empty() {
+        candidates.extend(discovery.candidates.iter());
+    }
+    let mut family: Option<&str> = None;
+    for candidate in candidates {
+        let Some(detected) = candidate.header_family.as_deref() else {
+            return Ok(None);
+        };
+        if family.is_some_and(|known| known != detected) {
+            return Ok(None);
+        }
+        family = Some(detected);
+    }
+    Ok(family.map(str::to_owned))
+}
+
 /// Bounded, header-only discovery of every checkpoint candidate an approved linked-library root
 /// holds (epic 20398, sc-20635).
 ///
@@ -534,11 +618,11 @@ pub fn inspect_checkpoint_with_hook(
         return result;
     }
 
-    let first_pass = inspect_discovered_pass(&resolved, &discovery);
+    let first_pass = inspect_discovered_pass(&resolved, &discovery, &request.context);
     hook(CheckpointInspectionEventV1::FirstExactBytePassComplete);
-    let second_pass = inspect_discovered_pass(&resolved, &discovery);
+    let second_pass = inspect_discovered_pass(&resolved, &discovery, &request.context);
     hook(CheckpointInspectionEventV1::SecondExactBytePassComplete);
-    let final_pass = inspect_discovered_pass(&resolved, &discovery);
+    let final_pass = inspect_discovered_pass(&resolved, &discovery, &request.context);
     result.diagnostics.extend(final_pass.diagnostics);
     compare_exact_byte_passes(
         &first_pass.observations,
@@ -623,6 +707,7 @@ pub fn inspect_checkpoint_with_hook(
         &family,
         &fingerprint,
         &result.evidence,
+        final_pass.context,
     ) {
         Ok((inventory, plan)) => {
             result.inventory = inventory;
@@ -648,6 +733,7 @@ struct InspectionPass {
     aggregate_tensor_name_bytes: usize,
     aggregate_evidence_string_bytes: usize,
     evidence_budget_exhausted: bool,
+    context: BTreeMap<String, Value>,
 }
 
 impl InspectionPass {
@@ -711,11 +797,46 @@ struct ArtifactObservation {
     snapshot: ArtifactSnapshot,
 }
 
+/// Aggregate family evidence shared by the read-only query and full inspection. A shard need not
+/// contain every family marker; the complete inventory is still validated only by inspection.
+fn discovery_has_h3_family(
+    resolved: &ResolvedInput,
+    discovery: &CheckpointDiscoveryV1,
+    diagnostics: &mut Vec<CheckpointDiagnosticV1>,
+) -> bool {
+    discovery
+        .candidates
+        .iter()
+        .any(|candidate| candidate.header_family.as_deref() == Some("minimax-h3"))
+        || discovery.descriptor_paths.iter().any(|relative| {
+            if Path::new(relative)
+                .file_name()
+                .and_then(|name| name.to_str())
+                != Some("config.json")
+            {
+                return false;
+            }
+            let Some(path) = resolve_confined_artifact(resolved, relative, diagnostics) else {
+                return false;
+            };
+            crate::minimax_h3_codec::read_h3_descriptor(&path)
+                .ok()
+                .is_some_and(|config| {
+                    config.get("_class_name").and_then(Value::as_str)
+                        == Some(crate::base_weights::MINIMAX_H3_TRANSFORMER_CLASS)
+                })
+        })
+}
+
 fn inspect_discovered_pass(
     resolved: &ResolvedInput,
     discovery: &CheckpointDiscoveryV1,
+    context: &BTreeMap<String, Value>,
 ) -> InspectionPass {
-    let mut pass = InspectionPass::default();
+    let mut pass = InspectionPass {
+        context: context.clone(),
+        ..Default::default()
+    };
     let candidate_by_path = discovery
         .candidates
         .iter()
@@ -723,6 +844,7 @@ fn inspect_discovered_pass(
         .collect::<BTreeMap<_, _>>();
     let mut tensor_tables = BTreeMap::new();
     let mut indices = Vec::new();
+    let h3_context = discovery_has_h3_family(resolved, discovery, &mut pass.diagnostics);
 
     for candidate in &discovery.candidates {
         let Some(path) =
@@ -777,6 +899,14 @@ fn inspect_discovered_pass(
                 tensor_names = validated.tensor_names;
             }
             Err(mut diagnostics) => pass.diagnostics.append(&mut diagnostics),
+        }
+        if h3_context && candidate.container == CheckpointContainerV1::Safetensors {
+            // A complete H3 inventory below proves every canonical tensor, including shards whose
+            // local `adaln_proj` subset resembles another family in isolation.
+            family = Some("minimax-h3".into());
+            if validated_role.is_none() {
+                validated_role = Some("transformer".into());
+            }
         }
         if candidate.container == CheckpointContainerV1::Gguf
             && path_role.is_none()
@@ -900,6 +1030,89 @@ fn inspect_discovered_pass(
         &tensor_tables,
         &mut pass.diagnostics,
     );
+    if h3_context {
+        if context.get("sourceEncoding").is_some_and(|encoding| {
+            !matches!(encoding.as_str(), Some("convrot_int8" | "asym_w4a8_int8"))
+        }) {
+            pass.diagnostics.push(CheckpointDiagnosticV1::error(
+                CheckpointDiagnosticCodeV1::ContractViolation,
+                None,
+                "unknown MiniMax-H3 source encoding in plan context",
+            ));
+        }
+        let files: Vec<_> = pass
+            .observations
+            .iter()
+            .map(|artifact| {
+                (
+                    discovery
+                        .internal_paths
+                        .get(&artifact.relative_path)
+                        .cloned()
+                        .unwrap_or_else(|| artifact.relative_path.clone()),
+                    artifact.canonical_path.clone(),
+                )
+            })
+            .collect();
+        // Retained source-owned bindings are not permission to drop the source config on rescan.
+        // Only an explicitly selected base can supply a fallback when no current source claim exists.
+        let source_owned = files.iter().any(|(name, path)| {
+            name.rsplit('/').next() == Some("config.json")
+                || (path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("safetensors"))
+                    && crate::lora_family::read_safetensors_header(path)
+                        .ok()
+                        .is_some_and(|h| {
+                            h.get("__metadata__")
+                                .and_then(|m| m.get("h3_config"))
+                                .is_some()
+                        }))
+        });
+        let fallback = if !source_owned
+            && context
+                .get("transformerConfig")
+                .is_some_and(|b| b["provenance"]["kind"] == "selected-base")
+        {
+            crate::minimax_h3_import::bound_config(context)
+        } else {
+            Ok(None)
+        };
+        match fallback.and_then(|config| {
+            crate::minimax_h3_codec::H3SourceInventory::from_files_with_config(&files, config)
+        }) {
+            Ok(inventory) => {
+                // Reinspection derives source precision anew; a previous declaration cannot turn
+                // floating-point tensors into a native packed checkpoint.
+                pass.context.remove("sourceEncoding");
+                if let Some(encoding) = inventory.source_encoding() {
+                    pass.context
+                        .insert("sourceEncoding".into(), serde_json::json!(encoding));
+                }
+                // The reduced AdaLN binding is derived from the CURRENT operand bytes, never
+                // inherited: a stale or forged declaration cannot survive reinspection.
+                pass.context.remove("adalnPruning");
+                if let Some(pruning) = &inventory.pruning {
+                    pass.context
+                        .insert("adalnPruning".into(), pruning.to_json());
+                }
+                let provenance = if source_owned {
+                    serde_json::json!({"kind":"source"})
+                } else {
+                    context["transformerConfig"]["provenance"].clone()
+                };
+                pass.context.insert(
+                    "transformerConfig".into(),
+                    crate::minimax_h3_import::config_binding(inventory.config.0, provenance),
+                );
+            }
+            Err(message) => pass.diagnostics.push(CheckpointDiagnosticV1::error(
+                CheckpointDiagnosticCodeV1::ContractViolation,
+                None,
+                message,
+            )),
+        }
+    }
     pass.evidence
         .sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     pass.observations
@@ -1129,6 +1342,7 @@ fn compile_inventory(
     family: &str,
     fingerprint: &str,
     evidence: &[CheckpointArtifactEvidenceV1],
+    context: BTreeMap<String, Value>,
 ) -> Result<(CheckpointInventoryV1, ImportPlanV1), String> {
     let mut layers = Vec::with_capacity(evidence.len());
     for artifact in evidence {
@@ -1198,8 +1412,12 @@ fn compile_inventory(
     plan_id_hasher.update(request.checkpoint_id.as_bytes());
     plan_id_hasher.update(b"\0");
     plan_id_hasher.update(fingerprint.as_bytes());
+    if !context.is_empty() {
+        plan_id_hasher.update(serde_json::to_vec(&context).map_err(|e| e.to_string())?);
+    }
     let plan_id = format!("checkpoint-plan-{:x}", plan_id_hasher.finalize());
-    let plan = ImportPlanV1::new(plan_id, family, layers).map_err(|error| error.to_string())?;
+    let mut plan = ImportPlanV1::new(plan_id, family, layers).map_err(|error| error.to_string())?;
+    plan.context = context;
     let record = CheckpointCatalogRecordV1::from_plan(request.checkpoint_id.clone(), &plan)
         .map_err(|error| error.to_string())?;
     let inventory = CheckpointInventoryV1::new(vec![record]).map_err(|error| error.to_string())?;
@@ -1456,6 +1674,228 @@ fn discover_weight(
     }
 }
 
+#[cfg(test)]
+mod family_query_tests {
+    use super::*;
+    use serde_json::json;
+
+    const H3_KEYS: &[&str] = &[
+        "token_refiner.refiner_blocks.0.attn.to_qkv.weight",
+        "audio_proj_in.weight",
+        "transformer_blocks.0.adaln_proj.linear.weight",
+    ];
+    const SDXL_KEYS: &[&str] = &[
+        "model.diffusion_model.input_blocks.7.0.out_layers.3.weight",
+        "model.diffusion_model.middle_block.1.transformer_blocks.0.attn1.to_q.weight",
+        "conditioner.embedders.0.transformer.text_model.embeddings.token_embedding.weight",
+        "conditioner.embedders.1.model.transformer.resblocks.9.attn.in_proj_weight",
+        "first_stage_model.encoder.conv_in.weight",
+        "first_stage_model.decoder.conv_out.weight",
+    ];
+
+    fn weights(path: &Path, keys: &[&str]) {
+        let mut header = serde_json::Map::new();
+        for (index, key) in keys.iter().enumerate() {
+            header.insert(
+                (*key).into(),
+                json!({"dtype":"F16","shape":[1],"data_offsets":[index*2,index*2+2]}),
+            );
+        }
+        let header = serde_json::to_vec(&header).unwrap();
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend(header);
+        bytes.extend(vec![0_u8; keys.len() * 2]);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn query(root: &Path, relative: &str) -> Result<Option<String>, Vec<CheckpointDiagnosticV1>> {
+        let request =
+            CheckpointInspectionRequestV1::linked("family-query", root, relative, "root-family")
+                .unwrap();
+        let discovery = discover_checkpoint(&request);
+        let before = FAMILY_QUERY_WEIGHT_READS.with(std::cell::Cell::get);
+        let result = discovered_checkpoint_family(&request, &discovery);
+        assert_eq!(
+            FAMILY_QUERY_WEIGHT_READS.with(std::cell::Cell::get),
+            before,
+            "query must not reopen weight headers or invoke any whole-file snapshot/hash reader"
+        );
+        result
+    }
+
+    #[test]
+    fn supported_header_layouts_share_family_evidence_without_extra_weight_reads() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        weights(&root.join("renamed-native.safetensors"), H3_KEYS);
+        let comfy: Vec<_> = H3_KEYS
+            .iter()
+            .map(|key| format!("model.diffusion_model.{key}"))
+            .collect();
+        weights(
+            &root.join("renamed-comfy.safetensors"),
+            &comfy.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        weights(
+            &root.join("diffusers/diffusion_pytorch_model.safetensors"),
+            H3_KEYS,
+        );
+        weights(&root.join("sharded/one.safetensors"), &H3_KEYS[..1]);
+        weights(&root.join("sharded/two.safetensors"), &H3_KEYS[1..]);
+        for directory in ["diffusers", "sharded"] {
+            std::fs::write(
+                root.join(directory).join("config.json"),
+                json!({"_class_name":crate::base_weights::MINIMAX_H3_TRANSFORMER_CLASS})
+                    .to_string(),
+            )
+            .unwrap();
+        }
+        let index = BTreeMap::from([
+            (H3_KEYS[0], "one.safetensors"),
+            (H3_KEYS[1], "two.safetensors"),
+            (H3_KEYS[2], "two.safetensors"),
+        ]);
+        std::fs::write(
+            root.join("sharded/diffusion_pytorch_model.safetensors.index.json"),
+            json!({"weight_map":index}).to_string(),
+        )
+        .unwrap();
+        for relative in [
+            "renamed-native.safetensors",
+            "renamed-comfy.safetensors",
+            "diffusers",
+            "sharded",
+        ] {
+            assert_eq!(
+                query(root, relative).unwrap().as_deref(),
+                Some("minimax-h3"),
+                "{relative}"
+            );
+        }
+        weights(&root.join("unknown.safetensors"), &["unrecognized.weight"]);
+        assert_eq!(
+            query(root, "unknown.safetensors").unwrap(),
+            None,
+            "unknown dialect evidence remains the full compiler's responsibility"
+        );
+        weights(&root.join("ambiguous/sdxl.safetensors"), SDXL_KEYS);
+        weights(
+            &root.join("ambiguous/krea.safetensors"),
+            &["model.diffusion_model.txtfusion.projector.weight"],
+        );
+        assert_eq!(
+            query(root, "ambiguous").unwrap(),
+            None,
+            "conflicting non-H3 evidence is not a local capability guess"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn escaped_family_query_refuses_before_any_weight_read() {
+        let library = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        weights(&outside.path().join("foreign.safetensors"), SDXL_KEYS);
+        std::os::unix::fs::symlink(
+            outside.path().join("foreign.safetensors"),
+            library.path().join("escape.safetensors"),
+        )
+        .unwrap();
+        let before = FAMILY_QUERY_WEIGHT_READS.with(std::cell::Cell::get);
+        let error = query(library.path(), "escape.safetensors").unwrap_err();
+        assert!(error
+            .iter()
+            .any(|diagnostic| diagnostic.code == CheckpointDiagnosticCodeV1::PathEscapesRoot));
+        assert_eq!(
+            FAMILY_QUERY_WEIGHT_READS.with(std::cell::Cell::get),
+            before,
+            "escaped source must not be opened by discovery or the query"
+        );
+    }
+
+    fn file_tree(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        fn visit(root: &Path, directory: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    visit(root, &entry.path(), files);
+                } else {
+                    files.insert(
+                        entry.path().strip_prefix(root).unwrap().to_owned(),
+                        std::fs::read(entry.path()).unwrap(),
+                    );
+                }
+            }
+        }
+        let mut files = BTreeMap::new();
+        visit(root, root, &mut files);
+        files
+    }
+
+    #[test]
+    fn refused_family_query_preserves_existing_plan_registry_and_source_bytes() {
+        let temporary = tempfile::tempdir().unwrap();
+        let library = temporary.path().join("library");
+        let data = temporary.path().join("data");
+        weights(&library.join("owned.safetensors"), SDXL_KEYS);
+        let store = crate::checkpoint_plan_store::CheckpointPlanStore::open(&data);
+        let root = store.approve_root(&library).unwrap();
+        let compiled = store
+            .compile_linked(&root.root_id, "owned.safetensors")
+            .unwrap();
+        assert_eq!(compiled.plan.family, "sdxl");
+        std::fs::write(
+            library.join("config.json"),
+            json!({"_class_name":crate::base_weights::MINIMAX_H3_TRANSFORMER_CLASS}).to_string(),
+        )
+        .unwrap();
+        let before = file_tree(temporary.path());
+        let request = CheckpointInspectionRequestV1::linked(
+            &compiled.checkpoint_id,
+            &library,
+            "owned.safetensors",
+            &root.root_id,
+        )
+        .unwrap();
+        let discovery = discover_checkpoint(&request);
+        let reads = FAMILY_QUERY_WEIGHT_READS.with(std::cell::Cell::get);
+        let family = discovered_checkpoint_family(&request, &discovery).unwrap();
+        let declaration =
+            json!({"family":"minimax-h3","baseModel":"minimax_h3","minimaxH3Partition":"fl2va"});
+        assert!(crate::minimax_h3_import::validate_declared_source_family(
+            declaration.as_object().unwrap(),
+            family.as_deref()
+        )
+        .unwrap_err()
+        .contains("sdxl"));
+        assert_eq!(
+            FAMILY_QUERY_WEIGHT_READS.with(std::cell::Cell::get),
+            reads,
+            "family refusal adds no header or payload reads"
+        );
+        assert_eq!(
+            file_tree(temporary.path()),
+            before,
+            "no source/cache/registry/plan/marker mutation or new persisted artifact is permitted"
+        );
+        assert_eq!(
+            store.record(&compiled.checkpoint_id).unwrap(),
+            compiled.record
+        );
+        assert_eq!(
+            store
+                .plan(&compiled.checkpoint_id, &compiled.plan.plan_id)
+                .unwrap(),
+            compiled.plan
+        );
+        assert!(
+            store.resolve(&compiled.checkpoint_id).is_ok(),
+            "refusal cannot invalidate the existing owner's valid source"
+        );
+    }
+}
+
 struct SafetensorsDiscoveryError {
     code: CheckpointDiagnosticCodeV1,
     message: String,
@@ -1465,44 +1905,38 @@ fn discover_safetensors_header(
     path: &Path,
     file_len: u64,
 ) -> Result<Value, SafetensorsDiscoveryError> {
+    #[cfg(test)]
+    FAMILY_QUERY_WEIGHT_READS.with(|counter| {
+        let (headers, payloads) = counter.get();
+        counter.set((headers + 1, payloads));
+    });
     let mut file = File::open(path).map_err(|error| SafetensorsDiscoveryError {
         code: CheckpointDiagnosticCodeV1::Io,
         message: format!("safetensors candidate could not be opened: {error}"),
     })?;
-    let mut length_bytes = [0_u8; 8];
-    file.read_exact(&mut length_bytes)
-        .map_err(|_| SafetensorsDiscoveryError {
-            code: CheckpointDiagnosticCodeV1::TruncatedHeader,
-            message: "safetensors candidate is truncated before its header length".to_owned(),
-        })?;
-    let header_len = u64::from_le_bytes(length_bytes);
-    if header_len == 0 || header_len > MAX_SAFETENSORS_HEADER_BYTES {
-        return Err(SafetensorsDiscoveryError {
-            code: CheckpointDiagnosticCodeV1::HeaderTooLarge,
-            message: format!(
-                "safetensors header length {header_len} is outside the discovery bound"
-            ),
-        });
+    crate::safetensors::read_header(
+        &mut file,
+        file_len,
+        MAX_SAFETENSORS_HEADER_BYTES,
+        crate::safetensors::HeaderJsonPolicy::Standard,
+    )
+    .map(|header| header.value)
+    .map_err(safetensors_header_error)
+}
+
+fn safetensors_header_error(error: crate::safetensors::HeaderError) -> SafetensorsDiscoveryError {
+    use crate::safetensors::HeaderError;
+    let code = match &error {
+        HeaderError::Io(_) => CheckpointDiagnosticCodeV1::Io,
+        HeaderError::Truncated => CheckpointDiagnosticCodeV1::TruncatedHeader,
+        HeaderError::InvalidLength(_) => CheckpointDiagnosticCodeV1::HeaderTooLarge,
+        HeaderError::DuplicateKey(_) => CheckpointDiagnosticCodeV1::DuplicateKey,
+        HeaderError::Malformed(_) => CheckpointDiagnosticCodeV1::MalformedMetadata,
+    };
+    SafetensorsDiscoveryError {
+        code,
+        message: error.to_string(),
     }
-    if 8_u64
-        .checked_add(header_len)
-        .is_none_or(|end| end > file_len)
-    {
-        return Err(SafetensorsDiscoveryError {
-            code: CheckpointDiagnosticCodeV1::TruncatedHeader,
-            message: "safetensors descriptor bytes are truncated".to_owned(),
-        });
-    }
-    let mut header = vec![0_u8; header_len as usize];
-    file.read_exact(&mut header)
-        .map_err(|_| SafetensorsDiscoveryError {
-            code: CheckpointDiagnosticCodeV1::TruncatedHeader,
-            message: "safetensors descriptor bytes are truncated".to_owned(),
-        })?;
-    serde_json::from_slice(&header).map_err(|error| SafetensorsDiscoveryError {
-        code: CheckpointDiagnosticCodeV1::MalformedMetadata,
-        message: format!("safetensors descriptor is malformed JSON: {error}"),
-    })
 }
 
 #[derive(Default)]
@@ -1519,60 +1953,23 @@ fn validate_safetensors(
     file_len: u64,
     relative_path: Option<String>,
 ) -> Result<ValidatedArtifact, Vec<CheckpointDiagnosticV1>> {
-    let Some(header_len_bytes) = prefix.get(..8) else {
-        return Err(vec![CheckpointDiagnosticV1::error(
-            CheckpointDiagnosticCodeV1::TruncatedHeader,
-            relative_path,
-            "safetensors file is truncated before its 8-byte header length",
-        )]);
-    };
-    let header_len = u64::from_le_bytes(header_len_bytes.try_into().unwrap());
-    if header_len == 0 || header_len > MAX_SAFETENSORS_HEADER_BYTES {
-        return Err(vec![CheckpointDiagnosticV1::error(
-            CheckpointDiagnosticCodeV1::HeaderTooLarge,
-            relative_path,
-            format!(
-                "safetensors header length {header_len} is outside the 1..={MAX_SAFETENSORS_HEADER_BYTES} bound"
-            ),
-        )]);
-    }
-    let Some(data_start) = 8_u64.checked_add(header_len) else {
-        return Err(vec![CheckpointDiagnosticV1::error(
-            CheckpointDiagnosticCodeV1::InvalidTensorRange,
-            relative_path,
-            "safetensors header length overflows the file address space",
-        )]);
-    };
-    if data_start > file_len {
-        return Err(vec![CheckpointDiagnosticV1::error(
-            CheckpointDiagnosticCodeV1::TruncatedHeader,
-            relative_path,
-            format!(
-                "safetensors header ends at byte {data_start}, beyond the {file_len}-byte file"
-            ),
-        )]);
-    }
-    let Some(header) = prefix.get(8..data_start as usize) else {
-        return Err(vec![CheckpointDiagnosticV1::error(
-            CheckpointDiagnosticCodeV1::TruncatedHeader,
-            relative_path,
-            "safetensors descriptor bytes are truncated",
-        )]);
-    };
-    let value = strict_json(header).map_err(|error| {
+    let header = crate::safetensors::read_header(
+        &mut std::io::Cursor::new(prefix),
+        file_len,
+        MAX_SAFETENSORS_HEADER_BYTES,
+        crate::safetensors::HeaderJsonPolicy::RejectDuplicateKeys,
+    )
+    .map_err(|error| {
+        let error = safetensors_header_error(error);
         vec![CheckpointDiagnosticV1::error(
             error.code,
             relative_path.clone(),
-            format!("invalid safetensors descriptor: {}", error.message),
+            error.message,
         )]
     })?;
-    let Some(entries) = value.as_object() else {
-        return Err(vec![CheckpointDiagnosticV1::error(
-            CheckpointDiagnosticCodeV1::MalformedMetadata,
-            relative_path,
-            "safetensors descriptor must be a JSON object",
-        )]);
-    };
+    let data_start = header.data_start;
+    let value = header.value;
+    let entries = value.as_object().expect("shared reader requires an object");
 
     let mut diagnostics = Vec::new();
     if let Some(metadata) = entries.get("__metadata__") {
@@ -1610,7 +2007,7 @@ fn validate_safetensors(
         let Some(bits_per_element) = tensor
             .get("dtype")
             .and_then(Value::as_str)
-            .and_then(safetensors_dtype_bits)
+            .and_then(crate::safetensors::dtype_bits)
         else {
             diagnostics.push(CheckpointDiagnosticV1::error(
                 CheckpointDiagnosticCodeV1::UnsupportedTensorType,
@@ -1748,19 +2145,6 @@ fn validate_safetensors(
         declared_tensor_bytes: Some(data_len),
         tensor_names,
     })
-}
-
-fn safetensors_dtype_bits(dtype: &str) -> Option<u64> {
-    match dtype {
-        "F4" => Some(4),
-        "F6_E2M3" | "F6_E3M2" => Some(6),
-        "BOOL" | "U8" | "I8" | "F8_E4M3" | "F8_E5M2" | "F8_E8M0" | "F8_E4M3FNUZ"
-        | "F8_E5M2FNUZ" => Some(8),
-        "U16" | "I16" | "F16" | "BF16" => Some(16),
-        "U32" | "I32" | "F32" => Some(32),
-        "U64" | "I64" | "F64" | "C64" => Some(64),
-        _ => None,
-    }
 }
 
 #[derive(Default)]
@@ -1966,10 +2350,20 @@ fn validate_json_descriptor(
     }
     dialects.sort();
     dialects.dedup();
-    let families = dialects
+    let explicit_families = dialects
         .iter()
-        .filter_map(|value| normalize_family(value))
+        .filter_map(|value| crate::model_family::exact_identity(value).map(str::to_owned))
         .collect::<BTreeSet<_>>();
+    let families = if explicit_families.is_empty() {
+        dialects
+            .iter()
+            .filter_map(|value| normalize_family(value))
+            .collect::<BTreeSet<_>>()
+    } else {
+        // A generic pipeline-class substring is weaker evidence than an explicit generation or
+        // family identity. Preserve conflicting exact declarations as a diagnostic below.
+        explicit_families
+    };
     if families.len() > 1 {
         return Err(CheckpointDiagnosticV1::error(
             CheckpointDiagnosticCodeV1::FamilyDialectConflict,
@@ -2004,34 +2398,7 @@ fn collect_strings(value: &Value, output: &mut Vec<String>) {
 }
 
 fn normalize_family(value: &str) -> Option<String> {
-    let lower = value.to_ascii_lowercase();
-    for (needle, family) in [
-        ("stable diffusion xl", "sdxl"),
-        ("stablediffusionxl", "sdxl"),
-        ("sdxl", "sdxl"),
-        ("qwenimage", "qwen-image"),
-        ("qwen_image", "qwen-image"),
-        ("qwen-image", "qwen-image"),
-        ("flux2", "flux2"),
-        ("flux.2", "flux2"),
-        ("flux", "flux"),
-        ("wan", "wan-video"),
-        ("z_image", "z-image"),
-        ("z-image", "z-image"),
-        ("mageflow", "mage-flow"),
-        ("mage_flow", "mage-flow"),
-        ("mage-flow", "mage-flow"),
-        ("krea", "krea_2"),
-        ("ltx", "ltx-video"),
-        ("ideogram", "ideogram"),
-        ("anima", "anima"),
-        ("cosmos", "anima"),
-    ] {
-        if lower.contains(needle) {
-            return Some(family.to_owned());
-        }
-    }
-    None
+    crate::model_family::checkpoint_descriptor_family(value)
 }
 
 fn is_auxiliary_family(family: &str) -> bool {
@@ -2249,31 +2616,25 @@ impl FileStamp {
 }
 
 fn snapshot_file(path: &Path, prefix_limit: u64) -> std::io::Result<ArtifactSnapshot> {
+    #[cfg(test)]
+    FAMILY_QUERY_WEIGHT_READS.with(|counter| {
+        let (headers, payloads) = counter.get();
+        counter.set((headers, payloads + 1));
+    });
     let mut file = File::open(path)?;
     let before = FileStamp::from_metadata(&file.metadata()?);
-    let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
-    let mut hasher = Sha256::new();
     let mut prefix = Vec::new();
-    let mut size_bytes = 0_u64;
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
+    let (sha256, size_bytes) = crate::hashing::sha256_reader_with(&mut file, |_, event| {
+        if let crate::hashing::ReadEvent::After(bytes) = event {
+            let remaining = prefix_limit.saturating_sub(prefix.len() as u64) as usize;
+            prefix.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
         }
-        hasher.update(&buffer[..read]);
-        size_bytes = size_bytes.checked_add(read as u64).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "artifact size overflows u64",
-            )
-        })?;
-        let remaining = prefix_limit.saturating_sub(prefix.len() as u64) as usize;
-        prefix.extend_from_slice(&buffer[..read.min(remaining)]);
-    }
+        Ok(())
+    })?;
     let after = FileStamp::from_metadata(&file.metadata()?);
     let stable = before == after && size_bytes == after.len;
     Ok(ArtifactSnapshot {
-        sha256: format!("{:x}", hasher.finalize()),
+        sha256,
         size_bytes,
         prefix,
         before,
@@ -3027,5 +3388,53 @@ impl<'a> ByteReader<'a> {
             _ => return Err(format!("unsupported GGUF metadata value type {value_type}")),
         }
         .ok_or_else(|| "truncated metadata value".to_owned())
+    }
+}
+
+#[cfg(test)]
+mod canonical_descriptor_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn exact_generation_outweighs_generic_class_and_exact_conflicts_remain_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("model")).unwrap();
+        let request =
+            CheckpointInspectionRequestV1::linked("fixture", temp.path(), "model", "root").unwrap();
+        let resolved = resolve_input(&request).unwrap();
+        for (class, family) in [
+            ("QwenImagePipeline", "qwen-image-2-1"),
+            ("KreaPipeline", "krea-realtime"),
+        ] {
+            let raw =
+                serde_json::to_vec(&json!({"_class_name":class,"architecture":family})).unwrap();
+            let evidence = validate_json_descriptor(
+                &resolved,
+                &temp.path().join("model/config.json"),
+                "model/config.json",
+                &raw,
+                raw.len() as u64,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(evidence.family.as_deref(), Some(family));
+        }
+        let raw =
+            serde_json::to_vec(&json!({"architectures":["qwen-image", "qwen-image-2-1"]})).unwrap();
+        let error = validate_json_descriptor(
+            &resolved,
+            &temp.path().join("model/config.json"),
+            "model/config.json",
+            &raw,
+            raw.len() as u64,
+            &mut Vec::new(),
+        )
+        .err()
+        .expect("conflicting explicit families must be refused");
+        assert_eq!(
+            error.code,
+            CheckpointDiagnosticCodeV1::FamilyDialectConflict
+        );
     }
 }

@@ -15,7 +15,7 @@
 //! Gated on the SUPERSET of the two smoke lanes (`test` AND (macOS OR the off-Mac candle build)) so the
 //! module compiles exactly where at least one smoke that imports it does, and nowhere else.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use gen_core::Image;
 
@@ -83,11 +83,9 @@ pub(crate) const DEGENERATE_STD_FLOOR_TIGHT: f64 = 20.0;
 /// whitespace-only. Trims the value. Filtering set-but-empty values keeps a bare `FOO_STEPS=` (or a
 /// whitespace-only value) from feeding `""` into a downstream `.parse()` and panicking (sc-8924).
 pub(crate) fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key)
-        .ok()
-        .map(|v| v.trim().to_string())
+    env_value(key)
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| default.to_string())
+        .unwrap_or_else(|| default.to_owned())
 }
 
 /// Per-pixel mean over the RGB buffer — the "is it black?" floor check, reported for the record.
@@ -435,6 +433,161 @@ pub(crate) fn save_png(img: &Image, path: &Path) {
         .unwrap_or_else(|e| panic!("save {}: {e}", path.display()));
 }
 
+/// The required retained-PNG path for one FLUX 3 footprint cell:
+/// `$FLUX3_FOOTPRINT_OUT_DIR/<model>_<tier>_<backend>.png`.
+///
+/// The campaign is terminal evidence, not ordinary CI, so the artifact directory is REQUIRED and
+/// must be absolute and outside the checkout. Failing here (rather than writing into the repo or
+/// silently skipping the artifact) keeps a measurement from being reported without its quality
+/// artifact.
+pub(crate) fn flux3_footprint_png_path(
+    model: &str,
+    tier: &str,
+    backend: &str,
+) -> std::path::PathBuf {
+    let raw = std::env::var("FLUX3_FOOTPRINT_OUT_DIR").unwrap_or_else(|_| {
+        panic!(
+            "FLUX3_FOOTPRINT_OUT_DIR is required: set it to an absolute directory OUTSIDE the checkout so the measured cell's PNG is retained (got nothing)"
+        )
+    });
+    let dir = std::path::PathBuf::from(raw.trim());
+    assert!(
+        dir.is_absolute(),
+        "FLUX3_FOOTPRINT_OUT_DIR must be an absolute path outside the checkout, got {}",
+        dir.display()
+    );
+    // Resolve the path (including any not-yet-created tail) BEFORE creating it: a bad env var must
+    // not be able to create a directory inside the worktree.
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crate manifest sits under the repository root");
+    let canonical_repo =
+        std::fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
+    let resolved_dir = canonicalize_allow_missing(&normalize_lexically(&dir));
+    assert!(
+        !resolved_dir.starts_with(&canonical_repo),
+        "FLUX3_FOOTPRINT_OUT_DIR must be outside the repository ({} is inside {})",
+        resolved_dir.display(),
+        canonical_repo.display()
+    );
+    std::fs::create_dir_all(&dir)
+        .unwrap_or_else(|e| panic!("create FLUX3_FOOTPRINT_OUT_DIR {}: {e}", dir.display()));
+    let canonical_dir = std::fs::canonicalize(&dir)
+        .unwrap_or_else(|e| panic!("canonicalize {}: {e}", dir.display()));
+    canonical_dir.join(format!("{model}_{tier}_{backend}.png"))
+}
+
+/// Resolve `.`/`..` lexically so a not-yet-created path is compared in its normalized form. The
+/// existing prefix is then canonicalized against the real filesystem (symlinks), and the pure
+/// lexical tail is re-appended by [`canonicalize_allow_missing`].
+fn normalize_lexically(path: &Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(std::path::MAIN_SEPARATOR.to_string()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(name) => out.push(name),
+        }
+    }
+    out
+}
+
+/// Canonicalize the deepest existing ancestor and re-append the missing tail, so a path that does
+/// not exist yet is still resolved against the real filesystem (symlinks) before creation.
+fn canonicalize_allow_missing(path: &Path) -> std::path::PathBuf {
+    let mut missing = Vec::new();
+    let mut current = path;
+    loop {
+        match std::fs::canonicalize(current) {
+            Ok(mut base) => {
+                for component in missing.iter().rev() {
+                    base.push(component);
+                }
+                return base;
+            }
+            Err(_) => match current.parent() {
+                Some(parent) => {
+                    if let Some(name) = current.file_name() {
+                        missing.push(name.to_owned());
+                    }
+                    current = parent;
+                }
+                None => return path.to_path_buf(),
+            },
+        }
+    }
+}
+
+/// The receipt's `fit` object for a FLUX 3 campaign cell (sc-26243): the measured peak paired with
+/// the model/tier's declared minimum-memory floor from the same builtin manifest entry the cell
+/// resolves through. `lowestFitBytes` is the tighter of the two; a tier with no declared floor
+/// records `null` and a measured-peak-only basis rather than an invented one.
+pub(crate) fn flux3_fit_receipt(
+    entry: &serde_json::Value,
+    lane: &str,
+    tier: &str,
+    measured_peak_bytes: u64,
+) -> serde_json::Value {
+    let declared_gb = entry
+        .get(lane)
+        .and_then(|block| block.get("minMemoryGbByTier"))
+        .and_then(|tiers| tiers.get(tier))
+        .and_then(serde_json::Value::as_f64);
+    match declared_gb {
+        Some(gb) => {
+            let declared_bytes = (gb * crate::fit_gate::BYTES_PER_GIB).round() as u64;
+            let model = entry
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<unknown>");
+            serde_json::json!({
+                "measuredPeakBytes": measured_peak_bytes,
+                "declaredMinMemoryBytes": declared_bytes,
+                "declaredMinSource": format!(
+                    "config/manifests/builtin.models.jsonc#models[id={model}].{lane}.minMemoryGbByTier.{tier}"
+                ),
+                "lowestFitBytes": measured_peak_bytes.max(declared_bytes),
+                "basis": format!(
+                    "max(measuredPeakBytes, {lane}.minMemoryGbByTier[{tier}] = {gb} GiB)"
+                ),
+            })
+        }
+        None => serde_json::json!({
+            "measuredPeakBytes": measured_peak_bytes,
+            "declaredMinMemoryBytes": serde_json::Value::Null,
+            "declaredMinSource": serde_json::Value::Null,
+            "lowestFitBytes": measured_peak_bytes,
+            "basis": "measured-peak-only",
+        }),
+    }
+}
+
+/// Lowercase hex SHA-256 of an on-disk artifact (the retained-PNG receipt).
+pub(crate) fn sha256_file_hex(path: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)
+        .unwrap_or_else(|e| panic!("open {} for sha256: {e}", path.display()));
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1 << 20];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .unwrap_or_else(|e| panic!("read {} for sha256: {e}", path.display()));
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
 /// GPU-free structural coverage for the video-lane motion metric (sc-11992). The smoke that consumes
 /// [`mean_abs_frame_delta`] is `#[ignore]`d and needs ~50 GB of weights, so these tests pin the
 /// metric's two load-bearing properties against synthetic frames: a frozen pair scores EXACTLY 0
@@ -688,6 +841,140 @@ mod ghost_guard_tests {
         fft_2d(&mut re, &mut im, n, true);
         for (a, b) in orig.iter().zip(re.iter()) {
             assert!((a - b).abs() < 1e-9, "fft round-trip drift: {a} vs {b}");
+        }
+    }
+}
+
+/// A required smoke path, trimming shell assignment whitespace.
+pub(crate) fn env_path(key: &str) -> PathBuf {
+    PathBuf::from(required_path_value(key).trim())
+}
+
+/// A required path whose literal whitespace is meaningful to the caller.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn env_path_raw(key: &str) -> PathBuf {
+    PathBuf::from(required_path_value(key))
+}
+
+fn required_path_value(key: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| panic!("set ${key}"))
+}
+
+/// Standard HF-CLI cache fallback; explicit overrides use the production HF resolver.
+pub(crate) fn hub_cache_root() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    let default = home.map(|home| PathBuf::from(home).join(".cache/huggingface/hub"));
+    let root = sceneworks_core::hf_home::huggingface_hub_cache_dir_or_else(|| {
+        default.clone().unwrap_or_default()
+    });
+    (!root.as_os_str().is_empty()).then_some(root)
+}
+
+/// Find an existing cached snapshot; the caller owns completeness, tier and format checks.
+pub(crate) fn cached_snapshot(repo: &str, accepts: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    cached_snapshot_at(&hub_cache_root()?, repo, accepts)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn cached_tier_dir(repo: &str, tier: &str, sentinel: &str) -> Option<PathBuf> {
+    cached_snapshot(repo, |root| root.join(tier).join(sentinel).is_file())
+        .map(|root| root.join(tier))
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn env_or_allow_empty(key: &str, default: &str) -> String {
+    env_value(key).unwrap_or_else(|| default.to_owned())
+}
+fn env_value(key: &str) -> Option<String> {
+    std::env::var(key).ok().map(|v| v.trim().to_owned())
+}
+
+pub(crate) fn cached_snapshot_at(
+    hub: &Path,
+    repo: &str,
+    accepts: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    let repo_dir = if repo.starts_with("models--") {
+        repo.to_owned()
+    } else {
+        format!("models--{}", repo.replace('/', "--"))
+    };
+    std::fs::read_dir(hub.join(repo_dir).join("snapshots"))
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|root| accepts(root))
+}
+
+#[cfg(test)]
+mod cache_contracts {
+    use super::*;
+    #[test]
+    fn cached_snapshot_respects_overrides_and_caller_completeness_without_loading_weights() {
+        let root = tempfile::tempdir().unwrap();
+        let primary = root.path().join("primary");
+        let alias = root.path().join("alias");
+        let home = root.path().join("home");
+        let legacy = root.path().join("legacy");
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", primary.to_str().unwrap()),
+            ("HUGGINGFACE_HUB_CACHE", alias.to_str().unwrap()),
+            ("HF_HOME", home.to_str().unwrap()),
+            ("HOME", legacy.to_str().unwrap()),
+        ]);
+        assert_eq!(hub_cache_root(), Some(primary.clone()));
+        let snapshot = primary.join("models--owner--repo/snapshots/revision");
+        std::fs::create_dir_all(snapshot.join("q4/transformer")).unwrap();
+        assert!(cached_snapshot("owner/repo", |root| root
+            .join("q4/transformer/config.json")
+            .is_file())
+        .is_none());
+        std::fs::write(
+            snapshot.join("q4/transformer/config.json"),
+            b"fixture metadata only",
+        )
+        .unwrap();
+        assert_eq!(
+            cached_snapshot("owner/repo", |root| root
+                .join("q4/transformer/config.json")
+                .is_file()),
+            Some(snapshot.clone())
+        );
+        assert_eq!(
+            cached_snapshot("models--owner--repo", |root| root
+                .join("q4/transformer")
+                .is_dir()),
+            Some(snapshot)
+        );
+        std::env::remove_var("HF_HUB_CACHE");
+        assert_eq!(hub_cache_root(), Some(alias));
+        std::env::remove_var("HUGGINGFACE_HUB_CACHE");
+        assert_eq!(hub_cache_root(), Some(home.join("hub")));
+        std::env::remove_var("HF_HOME");
+        assert_eq!(
+            hub_cache_root(),
+            Some(legacy.join(".cache/huggingface/hub"))
+        );
+    }
+
+    #[test]
+    fn smoke_environment_policies_keep_trimming_and_empty_value_distinctions() {
+        let _env = crate::test_env::EnvVars::set(&[
+            ("SMOKE_HELPER_PATH", "  path with spaces  "),
+            ("SMOKE_HELPER_EMPTY", "   "),
+        ]);
+        assert_eq!(
+            env_path("SMOKE_HELPER_PATH"),
+            PathBuf::from("path with spaces")
+        );
+        assert_eq!(env_or("SMOKE_HELPER_EMPTY", "default"), "default");
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        {
+            assert_eq!(
+                env_path_raw("SMOKE_HELPER_PATH"),
+                PathBuf::from("  path with spaces  ")
+            );
+            assert_eq!(env_or_allow_empty("SMOKE_HELPER_EMPTY", "default"), "");
         }
     }
 }

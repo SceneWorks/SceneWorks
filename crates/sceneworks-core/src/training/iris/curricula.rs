@@ -1,7 +1,7 @@
 //! Iris-3B curricula, representation alignment, validation and distributed execution — the
 //! SceneWorks half of the S11 trainer contract (story sc-25689, epic sc-25678).
 //!
-//! The engine contract is `gen_core::iris::train` at the pinned inference revision: the options bag
+//! The engine contract is `gen_core_iris::train` at the pinned inference revision: the options bag
 //! (`model_options["iris"]`) gains the curriculum (`stage`, `parent_stage`, `run_name`, `tracking`),
 //! data-shape (`shape_policy`, `aspect_ratio_bucket`, `shape_align`, `shape_max_ratio`), RoPE law
 //! (`rope_aspect`), representation alignment (`repa`), activation checkpointing
@@ -137,7 +137,7 @@ pub const DIST_WORLD_CLIENT_KEYS: [&str; 5] = [
     "cancel_grace_secs",
 ];
 /// The `dist.world` wait bounds a client may set (seconds). The engine refuses `0` for each
-/// (`gen_core::iris::train::dist`, sc-25690: a zero cancel grace would end the cancel agreement's
+/// (`gen_core_iris::train::dist`, sc-25690: a zero cancel grace would end the cancel agreement's
 /// own wait at its first poll), so each is a whole number of at least 1.
 pub const DIST_WORLD_WAIT_KEYS: [&str; 3] = [
     "timeout_secs",
@@ -150,7 +150,7 @@ pub const MAX_IRIS_RANKS: u64 = 16;
 pub const DEFAULT_DIST_TIMEOUT_SECS: u64 = 5400;
 
 /// The dataset-item extra key (and engine `TrainingItem.model_options` key) assigning an item to the
-/// holdout set (`gen_core::iris::train::holdout::ITEM_SPLIT_KEY`).
+/// holdout set (`gen_core_iris::train::holdout::ITEM_SPLIT_KEY`).
 pub const ITEM_SPLIT_KEY: &str = "split";
 pub const ITEM_SPLIT_HOLDOUT: &str = "holdout";
 pub const ITEM_SPLIT_TRAIN: &str = "train";
@@ -159,10 +159,10 @@ pub const ITEM_SPLIT_TRAIN: &str = "train";
 /// mirror of the release teacher `dinov2_vitb14`). Installed separately in the Model Manager, never
 /// part of any inference closure.
 pub const IRIS_REPA_TEACHER_MODEL_ID: &str = "iris_repa_teacher_dinov2_base";
-/// `gen_core::iris::train::repa::DINOV2_BASE_HF_REPO` / `DINOV2_BASE_HF_REVISION`.
+/// `gen_core_iris::train::repa::DINOV2_BASE_HF_REPO` / `DINOV2_BASE_HF_REVISION`.
 pub const IRIS_REPA_TEACHER_REPO: &str = "facebook/dinov2-base";
 pub const IRIS_REPA_TEACHER_REVISION: &str = "f9e44c814b77203eaa57a6bdbbd535f21ede1415";
-/// `gen_core::iris::train::repa::TEACHER_WEIGHTS_FILE`.
+/// `gen_core_iris::train::repa::TEACHER_WEIGHTS_FILE`.
 pub const IRIS_REPA_TEACHER_FILE: &str = "model.safetensors";
 /// The pinned file's exact size and sha256 (the Hugging Face LFS pointer at the pinned revision).
 pub const IRIS_REPA_TEACHER_SIZE_BYTES: u64 = 346_345_912;

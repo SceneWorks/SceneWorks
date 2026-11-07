@@ -2,11 +2,12 @@
 // stage timing, WAV evidence, memory parsing, record validation and summary rendering. The driver's
 // service half (API + worker + real renders) runs only on the terminal hosts.
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { platformFixtureSkip } from "./test-platform-capabilities.mjs";
 
 import { detPow2, detSin, generateSilence, generateTestRecording, MELODY, RECORDING_GENERATOR_ID } from "./lib/yue2-test-recording.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
@@ -802,11 +803,30 @@ test("cover evidence binds both reviewed modes to the recording and unloaded tra
 
 // The acceptance completion client is exercised against a real local socket. The fake guard
 // controls protocol transitions explicitly; no timer is used to guess whether DONE was sent.
-async function completionServer(t, { helloProtocol = "sceneworks-memory-watchdog-completion-v1" } = {}) {
+// docs/epic-22988-yue2-terminal.md (Metal, lines 141-185) requires durable
+// evidence before the POSIX footprint watchdog's DONE. Windows CUDA runs the
+// unguarded driver directly (windows-candle.yml); it has no directory-fsync
+// completion contract. Protocol-only assertions still use real Windows IPC.
+const DIRECTORY_FSYNC_COMPLETION_TESTS = new Set([
+  "acceptance completion syncs evidence and waits for the matching final-sample ack",
+  "acceptance completion fails closed for foreign-ack",
+  "acceptance completion fails closed for lost-guard",
+]);
+function completionFixtureOptions(name, platform = process.platform) {
+  return { skip: DIRECTORY_FSYNC_COMPLETION_TESTS.has(name)
+    ? platformFixtureSkip("posix-directory-fsync", platform) : false };
+}
+function completionEndpoint(directory, platform = process.platform) {
+  return platform === "win32"
+    ? String.raw`\\.\pipe\sceneworks-yue2-${process.pid}-${path.basename(directory)}`
+    : path.join(directory, "guard.sock");
+}
+
+async function completionServer(t, { helloProtocol = "sceneworks-memory-watchdog-completion-v1", endpointFor = completionEndpoint } = {}) {
   const { createServer } = await import("node:net");
   const { connectWatchdogCompletion } = await import("./lib/watchdog-completion.mjs");
   const dir = await mkdtemp(path.join(os.tmpdir(), "yue2-done-"));
-  const socketPath = path.join(dir, "guard.sock");
+  const socketPath = endpointFor(dir);
   const nonce = "c".repeat(64);
   let connection, resolveDone, resolveConnected;
   const done = new Promise((resolve) => { resolveDone = resolve; });
@@ -831,18 +851,25 @@ async function completionServer(t, { helloProtocol = "sceneworks-memory-watchdog
     socket.write(`${JSON.stringify({ protocol: helloProtocol, nonce })}\n`);
     resolveConnected();
   });
-  await new Promise((resolve) => server.listen(socketPath, resolve));
-  const ready = connectWatchdogCompletion({ socketPath, timeoutMs: 5000 });
+  // Register owned cleanup BEFORE listen, including the listen-error path.
   t.after(async () => {
     connection?.destroy();
-    await new Promise((resolve) => server.close(resolve));
+    if (server.listening) await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     await rm(dir, { recursive: true, force: true });
   });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, () => {
+      server.removeListener("error", reject);
+      resolve();
+    });
+  });
+  const ready = connectWatchdogCompletion({ socketPath, timeoutMs: 5000 });
   await connected;
   return { dir, nonce, connection, ready, done, messages };
 }
 
-test("acceptance completion syncs evidence and waits for the matching final-sample ack", async (t) => {
+test("acceptance completion syncs evidence and waits for the matching final-sample ack", completionFixtureOptions("acceptance completion syncs evidence and waits for the matching final-sample ack"), async (t) => {
   const { syncEvidence } = await import("./lib/watchdog-completion.mjs");
   const fixture = await completionServer(t);
   const client = await fixture.ready;
@@ -871,7 +898,7 @@ test("acceptance completion refuses unreadable evidence without sending DONE", a
 });
 
 for (const outcome of ["foreign-ack", "lost-guard"]) {
-  test(`acceptance completion fails closed for ${outcome}`, async (t) => {
+  test(`acceptance completion fails closed for ${outcome}`, completionFixtureOptions(`acceptance completion fails closed for ${outcome}`), async (t) => {
     const fixture = await completionServer(t);
     const client = await fixture.ready;
     const evidence = path.join(fixture.dir, "evidence");
@@ -897,4 +924,48 @@ test("unguarded acceptance completion remains optional", async () => {
   const client = await connectWatchdogCompletion({ socketPath: "" });
   await client.complete("unused");
   client.close();
+});
+
+
+test("completion fixture endpoints preserve POSIX sockets and use unique Windows named pipes", () => {
+  const directory = path.join(os.tmpdir(), "yue2-done-unique");
+  for (const platform of ["linux", "darwin"]) {
+    assert.equal(completionEndpoint(directory, platform), path.join(directory, "guard.sock"));
+  }
+  const endpoint = completionEndpoint(directory, "win32");
+  assert.ok(endpoint.startsWith("\\\\.\\pipe\\"));
+  assert.ok(endpoint.includes(String(process.pid)));
+  assert.notEqual(endpoint, completionEndpoint(`${directory}-other`, "win32"));
+});
+
+test("only three Metal durability fixtures exclude Windows; supported protocol checks stay enabled", () => {
+  const names = [
+    "acceptance completion syncs evidence and waits for the matching final-sample ack",
+    "acceptance completion fails closed for foreign-ack",
+    "acceptance completion fails closed for lost-guard",
+    "acceptance completion refuses unreadable evidence without sending DONE",
+    "acceptance refuses the allocation-attestation protocol in completion mode",
+    "unguarded acceptance completion remains optional",
+  ];
+  for (const platform of ["linux", "darwin"]) {
+    for (const name of names) assert.equal(completionFixtureOptions(name, platform).skip, false);
+  }
+  assert.equal(names.filter((name) => completionFixtureOptions(name, "win32").skip).length, 3);
+  for (const name of names.slice(0, 3)) assert.match(completionFixtureOptions(name, "win32").skip, /POSIX.*directory fsync/);
+  for (const name of names.slice(3)) assert.equal(completionFixtureOptions(name, "win32").skip, false);
+});
+
+
+test("completion listen errors reject and remove only the owned fixture directory", async (t) => {
+  let ownedRoot;
+  await t.test("invalid real endpoint", async (fixtureTest) => {
+    await assert.rejects(completionServer(fixtureTest, {
+      endpointFor(directory) {
+        ownedRoot = directory;
+        return path.join(directory, "absent-parent", "guard.sock");
+      },
+    }), (error) => ["EACCES", "ENOENT"].includes(error.code));
+  });
+  assert.ok(ownedRoot);
+  await assert.rejects(stat(ownedRoot), { code: "ENOENT" });
 });

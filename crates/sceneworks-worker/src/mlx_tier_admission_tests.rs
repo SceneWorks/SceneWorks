@@ -91,6 +91,7 @@ fn inputs(width: u32, height: u32, count: u32) -> MlxRequestInputs {
         conditioning_windows: None,
         negative_branch: false,
         prefix_kv_cache_eligible: false,
+        reference_resources: None,
     }
 }
 
@@ -135,6 +136,7 @@ fn select_with_loaded_parity(
         total_peak,
         0,
         &[],
+        None,
         None,
     );
     let loaded_budget = if load_policy == OffloadPolicy::Resident {
@@ -403,6 +405,7 @@ fn exact_measured_candidate_excluded_by_foreign_reserve_is_a_retryable_tier_refu
             0,
             &[],
             Some(&bundle),
+            None,
         )
     };
     let error = rejected(select(constrained));
@@ -636,6 +639,7 @@ fn resident_tier_probe_preserves_actual_loaded_allowance_without_discounting_pip
             0,
             &[],
             None,
+            None,
         )
     };
     // The naive pre-load extraction applied the loaded calculation without its real resident
@@ -684,6 +688,7 @@ fn resident_tier_probe_preserves_actual_loaded_allowance_without_discounting_pip
         total_peak,
         0,
         &[],
+        None,
         None,
     ));
 }

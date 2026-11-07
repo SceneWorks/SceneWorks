@@ -13,7 +13,8 @@ import { createContext, useContext } from "react";
 //   openSheet({ title, body })                     — a screen-supplied body in the same chrome
 //   closeSheet()
 //   openGuide()
-//   openPreview(asset, { play })  — `play: true` opens an audio asset already playing
+//   openPreview(asset, { play, scope })  — `play: true` opens an audio asset already playing;
+//                         `scope` is the list it was opened from, for prev/next navigation
 //   loadedTakeId        — the audio asset the preview last loaded, so the Assets grid can
 //                         ring it (epic 14361). Only the id: the transport lives in the
 //                         viewer, so playback ticks don't re-render every screen.

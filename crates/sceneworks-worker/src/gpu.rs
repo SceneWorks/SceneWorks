@@ -14,7 +14,7 @@ fn extend_capabilities_unique(
 
 pub(crate) async fn discover_gpu(settings: &Settings, health: &GpuHealth) -> DiscoveredGpu {
     let requested_gpu_id = settings.gpu_id.as_str();
-    if requested_gpu_id == "cpu" {
+    if is_cpu_worker(requested_gpu_id) {
         return cpu_gpu();
     }
     // Apple-Silicon native MLX GPU worker (epic 3018): an explicit `mlx` gpu id
@@ -299,6 +299,28 @@ pub(crate) fn with_candle_capabilities(
                 gpu.capabilities
                     .push(WorkerCapability::Unknown(NVFP4_CAPABILITY.to_owned()));
             }
+            // FLUX 3 publisher FP8R eligibility marker (sc-26241): the linked provider advertises
+            // `Quant::Fp8Rowwise` AND the GPU clears its sm_89 floor (the inference
+            // `DitFormat::check_device` rule). The scheduler requires it for an FP8R job, so a
+            // worker that would refuse the package at load never claims it.
+            if fp8r_worker_eligible(compute_cap) {
+                gpu.capabilities
+                    .push(WorkerCapability::Unknown(FP8R_CAPABILITY.to_owned()));
+            }
+            // Unlike the older generic NVFP4 marker (used by other families too), this one
+            // additionally proves that the linked FLUX 3 provider advertises NVFP4.
+            if compute_cap_meets_nvfp4(compute_cap)
+                && crate::engines::mlx_model("flux3_klein").is_some_and(|model| {
+                    model
+                        .descriptor
+                        .capabilities
+                        .supported_quants
+                        .contains(&gen_core::Quant::Nvfp4)
+                })
+            {
+                gpu.capabilities
+                    .push(WorkerCapability::Unknown("flux3_nvfp4".to_owned()));
+            }
         }
     }
     gpu
@@ -493,20 +515,14 @@ pub(crate) async fn nvidia_compute_cap(gpu_id: &str) -> Option<f32> {
     if gpu_id.trim().is_empty() || gpu_id == "auto" || gpu_id == "cpu" {
         return None;
     }
-    let output = tokio::time::timeout(
-        Duration::from_secs(3),
-        Command::new("nvidia-smi")
-            .arg(format!("--id={gpu_id}"))
-            .args(["--query-gpu=compute_cap", "--format=csv,noheader,nounits"])
-            .output(),
-    )
-    .await;
-    match output {
-        Ok(Ok(output)) if output.status.success() => {
-            parse_selected_compute_cap(&String::from_utf8_lossy(&output.stdout))
-        }
-        _ => None,
-    }
+    let mut command = Command::new("nvidia-smi");
+    command
+        .arg(format!("--id={gpu_id}"))
+        .args(["--query-gpu=compute_cap", "--format=csv,noheader,nounits"]);
+    let output = run_bounded_command(command, Duration::from_secs(3))
+        .await
+        .ok()?;
+    parse_selected_compute_cap(&String::from_utf8_lossy(&output.stdout))
 }
 
 pub(crate) fn parse_selected_compute_cap(output: &str) -> Option<f32> {
@@ -552,7 +568,7 @@ pub(crate) const NVFP4_CAPABILITY: &str = "nvfp4";
 /// (`CUDA_COMPUTE_CAP=120` emits sm_120 SASS + compute_120 PTX, not sm_100) nor validated on it — so
 /// `10.0 < 12.0` keeps it off the tier by construction rather than by accident.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const NVFP4_MIN_COMPUTE_CAP: f32 = 12.0;
+pub(crate) const NVFP4_MIN_COMPUTE_CAP: f32 = 12.0;
 
 /// Whether a probed compute cap clears the NVFP4 sm_120 floor. `None` (no probe — CPU / non-NVIDIA /
 /// nvidia-smi absent) ⇒ ineligible, so an unprobed host never routes an FP4 load at hardware that
@@ -560,6 +576,31 @@ const NVFP4_MIN_COMPUTE_CAP: f32 = 12.0;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(crate) fn compute_cap_meets_nvfp4(cap: Option<f32>) -> bool {
     cap.is_some_and(|c| c >= NVFP4_MIN_COMPUTE_CAP)
+}
+
+/// The advertised marker capability meaning "this candle worker can run a publisher FP8 rowwise
+/// package" (sc-26241). Its name is the request tier key the scheduler requires for such a job
+/// ([`sceneworks_core::image_request::Flux3Tier::required_worker_capability`]).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) const FP8R_CAPABILITY: &str = sceneworks_core::image_request::FP8R_QUANT_TIER;
+
+/// The FP8R device floor: compute capability 8.9 (Ada), mirroring the inference
+/// `DitFormat::check_device` rule for `Fp8Rowwise`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) const FP8R_MIN_COMPUTE_CAP: f32 = 8.9;
+
+/// Whether this worker can run FP8R: its GPU clears the floor AND the linked FLUX 3 provider
+/// advertises the tier (only the CUDA build does). `None` (no probe) ⇒ ineligible.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn fp8r_worker_eligible(cap: Option<f32>) -> bool {
+    cap.is_some_and(|c| c >= FP8R_MIN_COMPUTE_CAP)
+        && crate::engines::mlx_model("flux3_klein").is_some_and(|model| {
+            model
+                .descriptor
+                .capabilities
+                .supported_quants
+                .contains(&gen_core::Quant::Fp8Rowwise)
+        })
 }
 
 /// Process-wide cache of the selected GPU's startup compute-cap probe, published by [`discover_gpu`].
@@ -636,7 +677,7 @@ type GpuUtilizationCache =
     tokio::sync::Mutex<HashMap<String, (Instant, Option<WorkerUtilizationSnapshot>)>>;
 
 pub(crate) async fn gpu_utilization(gpu_id: &str) -> Option<WorkerUtilizationSnapshot> {
-    if gpu_id == "cpu" {
+    if is_cpu_worker(gpu_id) {
         return None;
     }
     static CACHE: std::sync::OnceLock<GpuUtilizationCache> = std::sync::OnceLock::new();
@@ -761,33 +802,92 @@ pub(crate) async fn query_mlx_utilization() -> Option<WorkerUtilizationSnapshot>
     mlx_utilization_from(total_mb, used_mb, gpu_load_percent)
 }
 
+#[cfg(target_os = "macos")]
+static PHYSICAL_MEMORY_BYTES: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+/// Physical RAM, cached after the first successful bounded read. Failure is retried, never cached.
+/// The synchronous accessor also serves admission callers that have no Tokio runtime.
+pub(crate) fn total_unified_memory_bytes() -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(bytes) = PHYSICAL_MEMORY_BYTES.get() {
+            return Some(*bytes);
+        }
+        static PROBE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _probe = PROBE.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(bytes) = PHYSICAL_MEMORY_BYTES.get() {
+            return Some(*bytes);
+        }
+        let bytes = probe_physical_memory_bytes()?;
+        let _ = PHYSICAL_MEMORY_BYTES.set(bytes);
+        Some(bytes)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn probe_physical_memory_bytes() -> Option<u64> {
+    let mut command = std::process::Command::new("sysctl");
+    command.args(["-n", "hw.memsize"]);
+    let output = run_bounded_sync_probe(command, Duration::from_secs(2))?;
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|bytes| *bytes > 0)
+}
+
+/// Small-output probe only: timeout/error always kills AND waits for the child. This synchronous
+/// primitive is needed by cache-thread admission and never enters a nested async runtime.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn run_bounded_sync_probe(
+    mut command: std::process::Command,
+    timeout: Duration,
+) -> Option<std::process::Output> {
+    use std::process::Stdio;
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .ok()
+                    .filter(|out| out.status.success())
+            }
+            Ok(None) if started.elapsed() < timeout => std::thread::sleep(
+                Duration::from_millis(10).min(timeout.saturating_sub(started.elapsed())),
+            ),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
 /// Total unified memory (MB) via `sysctl -n hw.memsize`. The machine's physical RAM never changes at
 /// runtime, so the first successful read is cached process-wide and every subsequent call (each
 /// heartbeat) skips the subprocess entirely (sc-8928). A failed probe is NOT cached — it re-probes
 /// next time.
 #[cfg(target_os = "macos")]
 async fn sysctl_memsize_mb() -> Option<u64> {
-    static MEMSIZE_MB: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    if let Some(cached) = MEMSIZE_MB.get() {
-        return Some(*cached);
+    if let Some(bytes) = PHYSICAL_MEMORY_BYTES.get() {
+        return Some(bytes / (1024 * 1024));
     }
-    let output = tokio::time::timeout(
-        Duration::from_secs(2),
-        Command::new("sysctl").args(["-n", "hw.memsize"]).output(),
-    )
-    .await;
-    let mb = match output {
-        Ok(Ok(output)) if output.status.success() => String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .parse::<u64>()
-            .ok()
-            .map(|bytes| bytes / (1024 * 1024)),
-        _ => None,
-    };
-    if let Some(mb) = mb {
-        let _ = MEMSIZE_MB.set(mb);
-    }
-    mb
+    tokio::task::spawn_blocking(total_unified_memory_bytes)
+        .await
+        .ok()
+        .flatten()
+        .map(|bytes| bytes / (1024 * 1024))
 }
 
 /// Total unified memory in GB (`sysctl hw.memsize`), for per-job memory-budget guards such as the
@@ -804,18 +904,11 @@ pub(crate) async fn total_unified_memory_gb() -> Option<f64> {
 /// privileges). Empty when ioreg is unavailable.
 #[cfg(target_os = "macos")]
 async fn ioreg_accelerator_stats() -> BTreeMap<String, u64> {
-    let output = tokio::time::timeout(
-        Duration::from_secs(3),
-        Command::new("ioreg")
-            .args(["-r", "-c", "IOAccelerator", "-d", "1"])
-            .output(),
-    )
-    .await;
-    match output {
-        Ok(Ok(output)) if output.status.success() => {
-            parse_ioreg_accelerator_stats(&String::from_utf8_lossy(&output.stdout))
-        }
-        _ => BTreeMap::new(),
+    let mut command = Command::new("ioreg");
+    command.args(["-r", "-c", "IOAccelerator", "-d", "1"]);
+    match run_bounded_command(command, Duration::from_secs(3)).await {
+        Ok(output) => parse_ioreg_accelerator_stats(&String::from_utf8_lossy(&output.stdout)),
+        Err(_) => BTreeMap::new(),
     }
 }
 
@@ -882,14 +975,10 @@ async fn ioreg_gpu_load() -> Option<f64> {
 /// page size or the required counters can't be read.
 #[cfg(target_os = "macos")]
 async fn vm_stat_used_mb() -> Option<u64> {
-    let output =
-        tokio::time::timeout(Duration::from_secs(2), Command::new("vm_stat").output()).await;
-    match output {
-        Ok(Ok(output)) if output.status.success() => {
-            system_used_mb_from_vm_stat(&String::from_utf8_lossy(&output.stdout))
-        }
-        _ => None,
-    }
+    let output = run_bounded_command(Command::new("vm_stat"), Duration::from_secs(2))
+        .await
+        .ok()?;
+    system_used_mb_from_vm_stat(&String::from_utf8_lossy(&output.stdout))
 }
 
 /// The page size (bytes) from the `vm_stat` header `(page size of N bytes)`.
@@ -1153,10 +1242,48 @@ pub(crate) fn fallback_gpu(gpu_id: &str) -> DiscoveredGpu {
     }
 }
 
+// Preserve the existing trim/"0" parser and all legacy truthy values. The one
+// explicit preparation scope is narrower, never a way to enable GPU work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UtilityJobScope {
+    Disabled,
+    All,
+    ModelDownload,
+}
+
+pub(crate) fn utility_job_scope(value: Option<&str>) -> UtilityJobScope {
+    match value.map(str::trim) {
+        Some("0") => UtilityJobScope::Disabled,
+        Some("model_download") => UtilityJobScope::ModelDownload,
+        _ => UtilityJobScope::All,
+    }
+}
+
+// Settings and the API's in-process override already trim/default the id. Keep
+// the exact CPU identity used by discovery and utilization (not case-folding).
+pub(crate) fn is_cpu_worker(gpu_id: &str) -> bool {
+    gpu_id == "cpu"
+}
+
+pub(crate) fn worker_capabilities_for_scope(
+    gpu: &DiscoveredGpu,
+    scope: UtilityJobScope,
+) -> Vec<WorkerCapability> {
+    if scope == UtilityJobScope::ModelDownload {
+        return if is_cpu_worker(&gpu.id) && gpu.capabilities.contains(&WorkerCapability::Cpu) {
+            vec![WorkerCapability::Cpu, WorkerCapability::ModelDownload]
+        } else {
+            Vec::new()
+        };
+    }
+    worker_capabilities_with_utility(gpu, scope == UtilityJobScope::All)
+}
+
 pub(crate) fn worker_capabilities(gpu: &DiscoveredGpu) -> Vec<WorkerCapability> {
-    let utility_jobs_enabled =
-        std::env::var("SCENEWORKS_UTILITY_JOBS").map_or(true, |value| value.trim() != "0");
-    worker_capabilities_with_utility(gpu, utility_jobs_enabled)
+    worker_capabilities_for_scope(
+        gpu,
+        utility_job_scope(std::env::var("SCENEWORKS_UTILITY_JOBS").ok().as_deref()),
+    )
 }
 
 pub(crate) fn worker_capabilities_with_utility(
@@ -1214,27 +1341,7 @@ pub(crate) fn cpu_worker_id(base_worker_id: &str) -> String {
     format!("{base}-cpu")
 }
 
-pub(crate) fn slugify_worker_id_part(value: &str, fallback: &str) -> String {
-    let mut output = String::new();
-    let mut previous_dash = false;
-    for character in value.chars() {
-        if character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-') {
-            output.push(character);
-            previous_dash = false;
-        } else if !previous_dash && !output.is_empty() {
-            output.push('-');
-            previous_dash = true;
-        }
-    }
-    while output.ends_with('-') {
-        output.pop();
-    }
-    if output.is_empty() {
-        fallback.to_owned()
-    } else {
-        output
-    }
-}
+pub(crate) use sceneworks_core::slug::slugify_worker_id_part;
 
 #[cfg(all(test, target_os = "macos"))]
 mod mlx_utilization_tests {
@@ -1354,5 +1461,137 @@ Pages occupied by compressor:                2483449.
         assert!(used <= total, "used {used} must not exceed total {total}");
         assert_eq!(snapshot.memory_free_mb, Some(total - used));
         eprintln!("live mlx utilization snapshot: {snapshot:?}");
+    }
+}
+
+#[cfg(test)]
+mod preparation_scope_tests {
+    use super::*;
+    #[test]
+    fn cpu_preparation_scope_preserves_legacy_parser_and_capabilities() {
+        for value in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("true"),
+            Some("false"),
+            Some("anything"),
+        ] {
+            assert_eq!(utility_job_scope(value), UtilityJobScope::All);
+            assert_eq!(
+                worker_capabilities_for_scope(&cpu_gpu(), utility_job_scope(value)),
+                worker_capabilities_with_utility(&cpu_gpu(), true)
+            );
+        }
+        assert_eq!(utility_job_scope(Some(" 0 ")), UtilityJobScope::Disabled);
+        assert_eq!(
+            worker_capabilities_for_scope(&cpu_gpu(), UtilityJobScope::Disabled),
+            worker_capabilities_with_utility(&cpu_gpu(), false)
+        );
+        assert_eq!(
+            worker_capabilities_for_scope(&cpu_gpu(), utility_job_scope(Some("model_download"))),
+            vec![WorkerCapability::Cpu, WorkerCapability::ModelDownload]
+        );
+        for id in ["0", "1", "mlx", "auto", "CPU", " cpu "] {
+            assert!(!is_cpu_worker(id));
+            assert!(worker_capabilities_for_scope(
+                &fallback_gpu(id),
+                UtilityJobScope::ModelDownload
+            )
+            .is_empty());
+            assert_eq!(
+                worker_capabilities_for_scope(&fallback_gpu(id), UtilityJobScope::All),
+                worker_capabilities_with_utility(&fallback_gpu(id), true)
+            );
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod bounded_probe_tests {
+    use super::*;
+    use nix::{sys::signal::kill, unistd::Pid};
+
+    fn fake_probe(pid_file: &Path) -> Command {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "echo $$ > \"$1\"; exec sleep 30", "probe"])
+            .arg(pid_file);
+        command
+    }
+    async fn assert_reaped(pid_file: &Path) {
+        let pid: i32 = std::fs::read_to_string(pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        for _ in 0..100 {
+            if kill(Pid::from_raw(pid), None).is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("bounded probe child {pid} is still alive or unreaped");
+    }
+    #[tokio::test]
+    async fn timeout_kills_and_reaps_async_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid = dir.path().join("pid");
+        assert!(matches!(
+            run_bounded_command(fake_probe(&pid), Duration::from_millis(200)).await,
+            Err(GpuDiscoveryFailure::Timeout)
+        ));
+        assert_reaped(&pid).await;
+    }
+    #[tokio::test]
+    async fn cancellation_kills_and_reaps_async_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid = dir.path().join("pid");
+        let command = fake_probe(&pid);
+        let job = tokio::spawn(run_bounded_command(command, Duration::from_secs(30)));
+        for _ in 0..100 {
+            if pid.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(pid.exists());
+        job.abort();
+        assert!(job.await.unwrap_err().is_cancelled());
+        assert_reaped(&pid).await;
+    }
+    #[tokio::test]
+    async fn probe_success_and_nonzero_exit_are_distinct() {
+        let mut success = Command::new("sh");
+        success.args(["-c", "printf 137438953472"]);
+        let output = run_bounded_command(success, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(output.stdout, b"137438953472");
+        let mut failure = Command::new("sh");
+        failure.args(["-c", "exit 7"]);
+        assert!(matches!(
+            run_bounded_command(failure, Duration::from_secs(1)).await,
+            Err(GpuDiscoveryFailure::NonZeroExit)
+        ));
+    }
+    #[tokio::test]
+    async fn sync_probe_timeout_kills_and_waits_and_success_keeps_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid = dir.path().join("pid");
+        let mut command = std::process::Command::new("sh");
+        command
+            .args(["-c", "echo $$ > \"$1\"; exec sleep 30", "probe"])
+            .arg(&pid);
+        assert!(run_bounded_sync_probe(command, Duration::from_millis(200)).is_none());
+        assert_reaped(&pid).await;
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "printf 137438953472"]);
+        assert_eq!(
+            run_bounded_sync_probe(command, Duration::from_secs(1))
+                .unwrap()
+                .stdout,
+            b"137438953472"
+        );
     }
 }

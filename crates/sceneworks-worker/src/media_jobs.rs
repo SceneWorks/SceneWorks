@@ -1,54 +1,11 @@
 use super::*;
 
-/// Maximum wall-clock lifetime of one FFmpeg child. Timeline exports and CPU transcodes can
-/// legitimately run much longer than model inference, so the default is deliberately generous;
-/// the important invariant is that a wedged child is finite. Operators can lower or raise it with
-/// `SCENEWORKS_FFMPEG_TIMEOUT_SECONDS`. Zero/invalid values fail closed to this bounded default
-/// rather than disabling the watchdog.
-const FFMPEG_EXECUTION_TIMEOUT: Duration = Duration::from_secs(12 * 60 * 60);
-/// An operator override remains finite and representable as a Tokio deadline. Seven days is far
-/// beyond a legitimate SceneWorks export while preventing a typo such as `u64::MAX` from either
-/// panicking in `Instant + Duration` or effectively disabling the watchdog.
-pub(crate) const FFMPEG_EXECUTION_TIMEOUT_MAX: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-const FFMPEG_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-const FFMPEG_TIMEOUT_SECONDS_ENV: &str = "SCENEWORKS_FFMPEG_TIMEOUT_SECONDS";
-
-pub(crate) fn ffmpeg_execution_timeout_from(raw: Option<&str>) -> Duration {
-    raw.and_then(|value| value.trim().parse::<u64>().ok())
-        .filter(|seconds| *seconds > 0)
-        .map(Duration::from_secs)
-        .unwrap_or(FFMPEG_EXECUTION_TIMEOUT)
-        .min(FFMPEG_EXECUTION_TIMEOUT_MAX)
-}
-
-fn ffmpeg_execution_timeout() -> Duration {
-    ffmpeg_execution_timeout_from(std::env::var(FFMPEG_TIMEOUT_SECONDS_ENV).ok().as_deref())
-}
-
-fn ffmpeg_timeout_io_error(timeout: Duration) -> std::io::Error {
-    std::io::Error::new(
-        std::io::ErrorKind::TimedOut,
-        format!("FFmpeg execution exceeded its {timeout:?} deadline."),
-    )
-}
-
-fn checked_deadline_from(now: tokio::time::Instant, timeout: Duration) -> tokio::time::Instant {
-    // If an exotic runtime Instant cannot represent even the capped duration, expiring immediately
-    // is safer than panicking or silently running without a deadline.
-    now.checked_add(timeout).unwrap_or(now)
-}
-
-pub(crate) fn ffmpeg_execution_deadline(requested: Duration) -> (tokio::time::Instant, Duration) {
-    let effective = if requested.is_zero() {
-        FFMPEG_EXECUTION_TIMEOUT
-    } else {
-        requested.min(FFMPEG_EXECUTION_TIMEOUT_MAX)
-    };
-    (
-        checked_deadline_from(tokio::time::Instant::now(), effective),
-        effective,
-    )
-}
+use sceneworks_core::media_process::ffmpeg_execution_timeout;
+#[cfg(test)]
+pub(crate) use sceneworks_core::media_process::{
+    ffmpeg_execution_deadline, ffmpeg_execution_timeout_from, ffmpeg_timeout_io_error,
+    FFMPEG_EXECUTION_TIMEOUT_MAX,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct TimelineExportRequest {
@@ -302,9 +259,9 @@ where
 
     let sidecar_path = media_path.with_extension("sceneworks.json");
     let project_id = required_payload_string(&job.payload, "projectId")?;
-    source
+    let asset = source
         .store
-        .persist_native_asset_sidecar(project_id, &sidecar_path, &asset)?;
+        .persist_native_asset_sidecar(project_id, &sidecar_path, asset)?;
 
     Ok((asset_id, asset, extra))
 }
@@ -693,10 +650,7 @@ pub(crate) async fn run_person_detect(
 /// (native MLX, epic 3482 / sc-3633) AND the off-Mac candle GPU-worker lane (`ort`/CUDA,
 /// sc-5498); identical body — the platform backend is chosen inside `person_jobs`. A
 /// candle-disabled off-Mac build refuses the job (the stub below).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn run_yolo11_person_detect(
     api: &ApiClient,
     settings: &Settings,
@@ -719,7 +673,7 @@ async fn run_yolo11_person_detect(
         "",
         "person detect task",
         crate::no_cancel_ack(),
-        tokio::task::spawn_blocking(move || {
+        crate::load_progress::spawn_blocking(move || {
             crate::person_jobs::detect_people_blocking(weights, frame_path, conf)
         }),
     )
@@ -729,7 +683,7 @@ async fn run_yolo11_person_detect(
     Ok((boxes, result.device))
 }
 
-#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 async fn run_yolo11_person_detect(
     _api: &ApiClient,
     _settings: &Settings,
@@ -783,11 +737,7 @@ pub(crate) fn asset_is_image_source(asset: &Value) -> bool {
 /// the render paths do. Shared by both probes so a lane that points at a bundled ffmpeg cannot end
 /// up probing one binary and rendering with another.
 fn resolve_probe_program(ffmpeg: &str) -> String {
-    let configured = match std::env::var("SCENEWORKS_FFMPEG") {
-        Ok(path) if ffmpeg == "ffmpeg" && !path.trim().is_empty() => path,
-        _ => ffmpeg.to_owned(),
-    };
-    sceneworks_core::media_convert::resolve_ffmpeg_program(&configured).into_owned()
+    sceneworks_core::media_process::ffmpeg_program(ffmpeg)
 }
 
 /// Parse an ffmpeg `HH:MM:SS.ms` clock into seconds.
@@ -818,6 +768,71 @@ fn parse_ffmpeg_measured_time(stderr: &str) -> Option<f64> {
     })
 }
 
+/// Input stream declarations must survive independently of the diagnostic tail. Shared with the
+/// H3 reference decoder, which must not mistake an output audio stream for source audio.
+#[derive(Default)]
+pub(crate) struct FfmpegInputStreams {
+    input: bool,
+    finished: bool,
+    pub(crate) audio: bool,
+}
+
+impl FfmpegInputStreams {
+    pub(crate) fn read_line(&mut self, line: &str) {
+        if self.finished {
+            return;
+        }
+        if !self.input {
+            if !line.trim_start().starts_with("Input #") {
+                return;
+            }
+            self.input = true;
+        }
+        if line.trim_start().starts_with("Output #") {
+            self.finished = true;
+            return;
+        }
+        self.audio |= line.contains("Stream #") && line.contains(": Audio:");
+    }
+}
+
+#[derive(Default)]
+struct FfmpegProbeMetadata {
+    input_streams: FfmpegInputStreams,
+    saw_header_duration: bool,
+    header_duration: Option<f64>,
+    measured_time: Option<f64>,
+    frame_count: Option<usize>,
+}
+
+impl FfmpegProbeMetadata {
+    fn read_line(&mut self, line: &str) {
+        self.input_streams.read_line(line);
+        // Preserve the old first-header policy, including an initial Duration: N/A.
+        if !self.saw_header_duration && line.contains("Duration:") {
+            self.saw_header_duration = true;
+            self.header_duration = parse_ffmpeg_header_duration(line);
+        }
+        if let Some(time) = parse_ffmpeg_measured_time(line) {
+            self.measured_time = Some(time);
+        }
+        if let Some(frames) = parse_ffmpeg_frame_count(line) {
+            self.frame_count = Some(frames);
+        }
+    }
+}
+
+async fn read_ffmpeg_probe_stderr(
+    pipe: tokio::process::ChildStderr,
+) -> std::io::Result<sceneworks_core::media_process::ParsedStderr<FfmpegProbeMetadata>> {
+    sceneworks_core::media_process::read_stderr_lines(
+        pipe,
+        FfmpegProbeMetadata::default(),
+        FfmpegProbeMetadata::read_line,
+    )
+    .await
+}
+
 /// Measure the seekable duration of `source_path` so [`frame_seek_timestamp`] has a real bound to
 /// clamp against (sc-19549).
 ///
@@ -841,7 +856,13 @@ async fn probe_source_duration(ffmpeg: &str, source_path: &Path) -> WorkerResult
 
     let mut header = Command::new(&program);
     header.args(["-hide_banner", "-i", &path]);
-    let header = run_ffmpeg_probe_command(header).await.map_err(|error| {
+    let header = run_ffmpeg_probe_command_with_stderr(
+        header,
+        ffmpeg_execution_timeout(),
+        read_ffmpeg_probe_stderr,
+    )
+    .await
+    .map_err(|error| {
         if error.kind() == std::io::ErrorKind::TimedOut {
             WorkerError::Io(error)
         } else {
@@ -850,8 +871,7 @@ async fn probe_source_duration(ffmpeg: &str, source_path: &Path) -> WorkerResult
             ))
         }
     })?;
-    let header_stderr = String::from_utf8_lossy(&header.stderr).into_owned();
-    if let Some(duration) = parse_ffmpeg_header_duration(&header_stderr) {
+    if let Some(duration) = header.stderr.data.header_duration {
         return Ok(duration);
     }
 
@@ -867,7 +887,13 @@ async fn probe_source_duration(ffmpeg: &str, source_path: &Path) -> WorkerResult
         "null",
         "-",
     ]);
-    let measured = run_ffmpeg_probe_command(measured).await.map_err(|error| {
+    let measured = run_ffmpeg_probe_command_with_stderr(
+        measured,
+        ffmpeg_execution_timeout(),
+        read_ffmpeg_probe_stderr,
+    )
+    .await
+    .map_err(|error| {
         if error.kind() == std::io::ErrorKind::TimedOut {
             WorkerError::Io(error)
         } else {
@@ -876,12 +902,11 @@ async fn probe_source_duration(ffmpeg: &str, source_path: &Path) -> WorkerResult
             ))
         }
     })?;
-    let measured_stderr = String::from_utf8_lossy(&measured.stderr).into_owned();
-    parse_ffmpeg_measured_time(&measured_stderr).ok_or_else(|| {
+    measured.stderr.data.measured_time.ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
             "Could not determine the duration of {path}: ffmpeg reported neither a container \
              duration nor a measured time. ffmpeg said: {}",
-            ffmpeg_stderr_tail(&measured_stderr)
+            ffmpeg_stderr_tail(&String::from_utf8_lossy(measured.stderr.as_ref()))
         ))
     })
 }
@@ -988,10 +1013,7 @@ struct PersonTrackOutcome {
 /// orchestrator can't infer from the tracking result. `device_default` is the fallback device label
 /// used only if no frame reports one (zero-frame case); every frame's real device overrides it.
 /// `backend_label` / `segmenter_label` populate `tracker_meta`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 struct PersonTrackBackend {
     /// Fallback `tracker_meta.device` (macOS = `"mlx"`, off-Mac candle = `"cuda"`), overridden by
     /// the detector's real per-frame device.
@@ -1014,10 +1036,7 @@ struct PersonTrackBackend {
 /// every rendered frame's real device overrides `device_default`, so the default only shows through
 /// in the (unreachable) zero-frame case. The work dir is cleaned up on both the not-found error path
 /// and the success path.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 async fn assemble_real_person_track_shared<F, Fut>(
     api: &ApiClient,
@@ -1086,10 +1105,7 @@ where
 /// remove the staged-frame `work_dir` on every exit path (success or error, sc-8912). Returns the
 /// assembled track; the not-found case is still a typed `InvalidPayload` error (cleanup now happens
 /// in the caller, so this no longer removes the dir itself).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 async fn assemble_real_person_track_body<F, Fut>(
     api: &ApiClient,
@@ -1146,7 +1162,7 @@ where
         check_cancel(api, &job.id, "Person tracking canceled during sampling.").await?;
         let weights_for_frame = weights.to_path_buf();
         let frame_for_task = frame_path.clone();
-        let result = tokio::task::spawn_blocking(move || {
+        let result = crate::load_progress::spawn_blocking(move || {
             crate::person_jobs::detect_people_blocking(weights_for_frame, frame_for_task, conf)
         })
         .await
@@ -1218,20 +1234,14 @@ where
 /// Render dimensions of the sampled track frames (`render_frame_png` above), and therefore the
 /// size of the masks the SAM segmenter emits. Shared by the macOS (SAM2/SAM3) and off-Mac candle
 /// (SAM3, sc-6247) segmentation passes.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const TRACK_FRAME_SIZE: (u32, u32) = (1280, 720);
 
 /// The clip a segmenter backend is asked to mask: the `first..=last` detected-span frame paths and
 /// their per-frame ByteTrack box anchors (`None` on the gap frames a video predictor fills from its
 /// memory bank). Handed to the backend closure so it can drive its own model without knowing the
 /// span math, sidecar layout, or PNG contract.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) struct SegmentClip {
     /// Rendered frame paths for `first..=last`, index-aligned with `anchors`.
     pub(crate) clip_paths: Vec<PathBuf>,
@@ -1243,10 +1253,7 @@ pub(crate) struct SegmentClip {
 /// shared orchestrator can distinguish the three outcomes without overloading `Ok(vec![])`:
 /// a user cancel is terminal for the whole job, a weights/engine failure degrades to box masks, and
 /// masks are the success path.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) enum SegmentOutcome {
     /// One binary mask per clip frame (detected + gap), index-aligned with `SegmentClip::clip_paths`.
     Masks(Vec<Vec<u8>>),
@@ -1273,10 +1280,7 @@ pub(crate) enum SegmentOutcome {
 /// Kept cfg-free next to the shared orchestrator so both lanes roll up identically without reaching
 /// into a per-backend, per-lane segmenter module (`person_segment` is Mac-only; the candle rollup
 /// lives in `person_segment_sam3_candle`).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn mask_rollup_state(generated: usize, detected_total: usize) -> &'static str {
     if generated == 0 {
         "degraded"
@@ -1307,10 +1311,7 @@ pub(crate) fn mask_rollup_state(generated: usize, detected_total: usize) -> &'st
 /// so the keepalive inside the closure pings `Busy` every interval AND polls for a user cancel;
 /// that cancel is terminal for the whole job (never a degrade), any other failure keeps the degrade
 /// contract.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn segment_assembly_frames<F, Fut>(
     api: &ApiClient,
@@ -1433,13 +1434,14 @@ where
         })
         .collect();
     let (width, height) = TRACK_FRAME_SIZE;
-    let written =
-        match tokio::task::spawn_blocking(move || write_track_mask_pngs(width, height, pending))
-            .await
-        {
-            Ok(written) => written,
-            Err(_) => return Ok("degraded"),
-        };
+    let written = match crate::load_progress::spawn_blocking(move || {
+        write_track_mask_pngs(width, height, pending)
+    })
+    .await
+    {
+        Ok(written) => written,
+        Err(_) => return Ok("degraded"),
+    };
 
     let mut generated = 0usize;
     for (assembly_idx, rel) in written {
@@ -1500,7 +1502,7 @@ async fn run_macos_segmenter(
                 cancel_message,
                 "person segment task",
                 crate::no_cancel_ack(),
-                tokio::task::spawn_blocking(move || {
+                crate::load_progress::spawn_blocking(move || {
                     crate::person_segment_sam3::segment_track_blocking(
                         model,
                         tokenizer,
@@ -1533,7 +1535,7 @@ async fn run_macos_segmenter(
                 cancel_message,
                 "person segment task",
                 crate::no_cancel_ack(),
-                tokio::task::spawn_blocking(move || {
+                crate::load_progress::spawn_blocking(move || {
                     crate::person_segment::propagate_track_blocking(
                         weights,
                         clip_paths,
@@ -1591,7 +1593,7 @@ async fn run_candle_segmenter(
         "Person tracking canceled during segmentation.",
         "person segment task",
         crate::no_cancel_ack(),
-        tokio::task::spawn_blocking(move || {
+        crate::load_progress::spawn_blocking(move || {
             crate::person_segment_sam3_candle::segment_track_blocking(
                 model,
                 tokenizer,
@@ -1616,10 +1618,7 @@ async fn run_candle_segmenter(
 /// returning the `(assembly_idx, rel)` of the frames that were written. A single frame's failure is
 /// non-fatal (matches Python's per-frame `except: continue`); it keeps `mask: null` and falls back
 /// to a box mask at replacement time. Shared by the macOS and off-Mac candle segmentation passes.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn write_track_mask_pngs(
     width: u32,
     height: u32,
@@ -1716,7 +1715,7 @@ async fn assemble_real_person_track(
     .await
 }
 
-#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 #[allow(clippy::too_many_arguments)]
 async fn assemble_real_person_track(
     _api: &ApiClient,
@@ -1933,8 +1932,7 @@ pub(crate) async fn run_person_track(
         tracker_meta,
     } = outcome;
 
-    let track_name =
-        optional_payload_string(&job.payload, "trackName").unwrap_or("Selected person");
+    let track_name = optional_payload_text(&job.payload, "trackName").unwrap_or("Selected person");
     let representative_frame_asset_id = job
         .payload
         .get("representativeFrameAssetId")
@@ -2421,6 +2419,7 @@ impl TimelineExport<'_> {
                 "ffmpeg",
                 &picture_path,
                 &audio,
+                self.spec.fps,
                 &output_path,
                 Some(self.context),
             )
@@ -2441,8 +2440,11 @@ impl TimelineExport<'_> {
         );
         let sidecar_path = output_path.with_extension("sceneworks.json");
         let asset_id = required_value_str(&asset, "id")?.to_owned();
-        self.store
-            .persist_native_asset_sidecar(&self.request.project_id, &sidecar_path, &asset)?;
+        let asset = self.store.persist_native_asset_sidecar(
+            &self.request.project_id,
+            &sidecar_path,
+            asset,
+        )?;
 
         let mut result = JsonObject::new();
         result.insert("assetIds".to_owned(), json!([asset_id]));
@@ -2567,7 +2569,7 @@ pub(crate) fn export_request_from_job(job: &JobSnapshot) -> WorkerResult<Timelin
     Ok(TimelineExportRequest {
         project_id: required_payload_string(&job.payload, "projectId")?.to_owned(),
         timeline_id: required_payload_string(&job.payload, "timelineId")?.to_owned(),
-        timeline_name: optional_payload_string(&job.payload, "timelineName")
+        timeline_name: optional_payload_text(&job.payload, "timelineName")
             .unwrap_or("Timeline")
             .to_owned(),
         timeline_path: required_payload_string(&job.payload, "timelinePath")?.to_owned(),
@@ -2608,10 +2610,7 @@ fn frame_scale_pad_filter(width: u32, height: u32) -> String {
 /// EVERY caller to the slow accurate-seek fallback — a real regression that hid behind the
 /// documented non-fatal `None`, because the bundled 7.1 and current 9.0.1 both print `frame=`
 /// either way. Decoding reports `frame=   48` on all three builds (sc-19549).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 async fn probe_source_frame_count(ffmpeg: &str, source_path: &Path) -> WorkerResult<Option<usize>> {
     let program = resolve_probe_program(ffmpeg);
     let mut command = Command::new(&program);
@@ -2628,15 +2627,18 @@ async fn probe_source_frame_count(ffmpeg: &str, source_path: &Path) -> WorkerRes
     probe_source_frame_count_command_with_timeout(command, ffmpeg_execution_timeout()).await
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 pub(crate) async fn probe_source_frame_count_command_with_timeout(
     command: Command,
     execution_timeout: Duration,
 ) -> WorkerResult<Option<usize>> {
-    let output = match run_ffmpeg_probe_command_with_timeout(command, execution_timeout).await {
+    let output = match run_ffmpeg_probe_command_with_stderr(
+        command,
+        execution_timeout,
+        read_ffmpeg_probe_stderr,
+    )
+    .await
+    {
         Ok(output) => output,
         Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
             return Err(WorkerError::Io(error));
@@ -2644,16 +2646,11 @@ pub(crate) async fn probe_source_frame_count_command_with_timeout(
         Err(_) => return Ok(None),
     };
     // ffmpeg writes `frame=<N>` progress lines to stderr; the last one is the final decoded count.
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Ok(parse_ffmpeg_frame_count(&stderr))
+    Ok(output.stderr.data.frame_count)
 }
 
 /// Extract the last `frame=<N>` counter ffmpeg prints to stderr (the progress token may be padded
 /// with spaces, e.g. `frame=  12`). Split into its own pure fn so it is unit-testable without ffmpeg.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
 fn parse_ffmpeg_frame_count(stderr: &str) -> Option<usize> {
     stderr.rmatch_indices("frame=").find_map(|(idx, _)| {
         stderr[idx + "frame=".len()..]
@@ -2706,10 +2703,7 @@ fn parse_ffmpeg_frame_count(stderr: &str) -> Option<usize> {
 /// produced. In the single-pass path, if the source is shorter than the grid implies and ffmpeg
 /// emits fewer than `count` frames, the last real frame is cloned forward so every sample index has
 /// a readable frame (the tracker records the logical `timestamps[i]` regardless).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 async fn render_track_frames(
     ffmpeg: &str,
@@ -2830,10 +2824,7 @@ async fn render_track_frames(
 /// sub-cadence-fps sources the forward-only `select` exhausts the clip early and diverges grossly, which
 /// is exactly why [`render_track_frames`] gates this path behind the probe. Callers other than the gated
 /// wrapper (i.e. tests) must respect that.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 async fn render_track_frames_single_pass(
     ffmpeg: &str,
@@ -2933,10 +2924,7 @@ async fn render_track_frames_single_pass(
 /// rendered frame is cloned forward instead of hard-erroring. That mirrors the single-pass path's own
 /// short-source tail handling and matches pre-PR frame *selection* for every sample pre-PR produced,
 /// while never failing the job on a short clip (the tracker still records the logical `timestamps[i]`).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 async fn render_track_frames_per_frame(
     ffmpeg: &str,
@@ -2982,10 +2970,7 @@ async fn render_track_frames_per_frame(
 /// Accurate-seek one frame like [`render_frame_png`], but instead of erroring when ffmpeg emits no
 /// output (a seek past the last real frame on a short/low-fps clip), return `Ok(false)` so the caller
 /// can decide whether to clone the previous frame forward. `Ok(true)` means the frame was written.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn try_render_frame_png(
     ffmpeg: &str,
     source_path: &Path,
@@ -3457,14 +3442,25 @@ pub(crate) fn audio_source_filter(input: usize, source: &ResolvedAudioSource) ->
 /// mean nothing. With it off, `volume=` is the only thing that sets a level — which is the whole
 /// point of giving dialogue, ambience and music independent faders.
 ///
-/// `apad` closes the other half: the mix is padded with silence so it always outlasts the picture,
-/// and `-shortest` then cuts the file at the last video frame. Without the pad, `-shortest` would
-/// end the FILE when the audio ran out and truncate the picture.
+/// The final pad AND trim have an intrinsic sample-exact EOF at the finished CFR picture's
+/// measured frame count. A bare `apad` is infinite and makes termination depend solely on muxer
+/// `-shortest` scheduling. Bounding both ends preserves short/empty-source silence and clips long
+/// audio without that unnecessary dependency. The original intermittent FFmpeg stall's exact
+/// scheduler race is not proven; this is deterministic termination hardening.
 ///
 /// [`MIX_LIMITER`] is the third leg. `normalize=0` sums N inputs, and the harness's own defaults
 /// (dialogue 1.0 + ambience 0.35 + music 0.2) peak at 1.55 — the AAC encoder hard-clips anything
 /// above full scale, and clipping distortion is not "their gain choices, audibly" (sc-22712).
-pub(crate) fn audio_mix_filter(sources: &[ResolvedAudioSource]) -> String {
+pub(crate) fn audio_mix_filter(
+    sources: &[ResolvedAudioSource],
+    picture_samples: u64,
+) -> WorkerResult<String> {
+    if sources.is_empty() || picture_samples == 0 || picture_samples > i64::MAX as u64 {
+        return Err(WorkerError::InvalidPayload("Timeline audio requires sources and a positive, finite signed-64-bit picture sample count.".to_owned()));
+    }
+    let ending = format!(
+        "{MIX_LIMITER},aresample=48000,apad=whole_len={picture_samples},atrim=end_sample={picture_samples}[aout]"
+    );
     let mut chains: Vec<String> = sources
         .iter()
         .enumerate()
@@ -3474,14 +3470,34 @@ pub(crate) fn audio_mix_filter(sources: &[ResolvedAudioSource]) -> String {
         .map(|index| format!("[a{index}]"))
         .collect();
     if sources.len() == 1 {
-        chains.push(format!("{labels}{MIX_LIMITER},apad[aout]"));
+        chains.push(format!("{labels}{ending}"));
     } else {
         chains.push(format!(
-            "{labels}amix=inputs={}:normalize=0:dropout_transition=0,{MIX_LIMITER},apad[aout]",
+            "{labels}amix=inputs={}:normalize=0:dropout_transition=0,{ending}",
             sources.len()
         ));
     }
-    chains.join(";")
+    Ok(chains.join(";"))
+}
+
+/// Convert the actual decoded frame count of our finished CFR picture to a 48 kHz EOF.
+/// Round UP by at most one sample, never truncate a video tail. Do not use FFmpeg's header
+/// `Duration`: its centisecond rounding makes 248 frames at 24 fps read 10.33 instead of 248/24.
+fn picture_audio_samples(frames: usize, fps: u32) -> WorkerResult<u64> {
+    let samples = u64::try_from(frames)
+        .ok()
+        .filter(|frames| *frames > 0)
+        .and_then(|frames| frames.checked_mul(48_000))
+        .filter(|_| fps > 0)
+        .map(|numerator| numerator.div_ceil(u64::from(fps)))
+        .filter(|samples| *samples > 0 && *samples <= i64::MAX as u64)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "Finished timeline picture has an invalid or overflowing frame/sample clock."
+                    .to_owned(),
+            )
+        })?;
+    Ok(samples)
 }
 
 /// Arguments for the audio pass: take the finished picture, mix every placed source over it, and
@@ -3499,6 +3515,7 @@ pub(crate) fn audio_mix_args(
     ffmpeg: &str,
     picture_path: &Path,
     sources: &[ResolvedAudioSource],
+    picture_samples: u64,
     output_path: &Path,
 ) -> WorkerResult<Vec<String>> {
     if sources.is_empty() {
@@ -3518,7 +3535,7 @@ pub(crate) fn audio_mix_args(
     }
     args.extend([
         "-filter_complex".to_owned(),
-        audio_mix_filter(sources),
+        audio_mix_filter(sources, picture_samples)?,
         "-map".to_owned(),
         "0:v".to_owned(),
         "-map".to_owned(),
@@ -3546,11 +3563,46 @@ pub(crate) async fn mux_audio(
     ffmpeg: &str,
     picture_path: &Path,
     sources: &[ResolvedAudioSource],
+    picture_fps: u32,
     output_path: &Path,
     context: Option<FfmpegContext<'_>>,
 ) -> WorkerResult<()> {
+    if let Some(context) = context {
+        if cancel_requested_peek(context.api, context.job_id).await {
+            mark_job_canceled(context.api, context.job_id, context.cancel_message).await?;
+            return Err(WorkerError::Canceled(context.cancel_message.to_owned()));
+        }
+    }
+    // This is our already-rendered CFR picture, not an arbitrary VFR input. Count its ACTUAL
+    // frames after concat/crossfade, rather than using the pre-crossfade timeline sum or a
+    // centisecond-rounded container header. Failure is typed, never an infinite-pad fallback.
+    // Use the ordinary runner with the SAME job context: cancellation/heartbeat failure during
+    // this decode kills/reaps its owned child and returns before the audio pass can start.
+    let measured = run_ffmpeg_with_stderr(
+        vec![
+            ffmpeg.to_owned(),
+            "-hide_banner".into(),
+            "-i".into(),
+            picture_path.display().to_string(),
+            "-map".into(),
+            "0:v:0".into(),
+            "-f".into(),
+            "null".into(),
+            "-".into(),
+        ],
+        context,
+        read_ffmpeg_probe_stderr,
+    )
+    .await?;
+    let frames = measured.data.frame_count.ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "Could not measure finished timeline picture frames: {}",
+            picture_path.display()
+        ))
+    })?;
+    let samples = picture_audio_samples(frames, picture_fps)?;
     run_ffmpeg(
-        audio_mix_args(ffmpeg, picture_path, sources, output_path)?,
+        audio_mix_args(ffmpeg, picture_path, sources, samples, output_path)?,
         context,
     )
     .await
@@ -3569,12 +3621,16 @@ async fn source_has_audio_stream(ffmpeg: &str, source_path: &Path) -> bool {
     let program = resolve_probe_program(ffmpeg);
     let mut command = Command::new(&program);
     command.args(["-hide_banner", "-i", &source_path.display().to_string()]);
-    let Ok(output) = run_ffmpeg_probe_command(command).await else {
+    let Ok(output) = run_ffmpeg_probe_command_with_stderr(
+        command,
+        ffmpeg_execution_timeout(),
+        read_ffmpeg_probe_stderr,
+    )
+    .await
+    else {
         return false;
     };
-    String::from_utf8_lossy(&output.stderr)
-        .lines()
-        .any(|line| line.contains("Stream #") && line.contains(": Audio:"))
+    output.stderr.data.input_streams.audio
 }
 
 pub(crate) fn output_dimensions(aspect_ratio: &str, resolution: u32) -> (u32, u32) {
@@ -4075,343 +4131,107 @@ async fn run_ffmpeg_capture_stderr_inner(
     stdin_chunks: Option<Vec<Vec<u8>>>,
     execution_timeout: Duration,
 ) -> WorkerResult<String> {
+    let stderr = run_ffmpeg_with_stderr_inner(
+        args,
+        context,
+        stdin_chunks,
+        execution_timeout,
+        sceneworks_core::media_process::read_stderr_tail,
+    )
+    .await?;
+    Ok(String::from_utf8_lossy(&stderr).into_owned())
+}
+
+pub(crate) async fn run_ffmpeg_with_stderr<G, H, S>(
+    args: Vec<String>,
+    context: Option<FfmpegContext<'_>>,
+    read_stderr: G,
+) -> WorkerResult<S>
+where
+    G: FnOnce(tokio::process::ChildStderr) -> H,
+    H: std::future::Future<Output = std::io::Result<S>> + Send + 'static,
+    S: AsRef<[u8]> + Send + 'static,
+{
+    run_ffmpeg_with_stderr_inner(args, context, None, ffmpeg_execution_timeout(), read_stderr).await
+}
+
+async fn run_ffmpeg_with_stderr_inner<G, H, S>(
+    args: Vec<String>,
+    context: Option<FfmpegContext<'_>>,
+    stdin_chunks: Option<Vec<Vec<u8>>>,
+    execution_timeout: Duration,
+    read_stderr: G,
+) -> WorkerResult<S>
+where
+    G: FnOnce(tokio::process::ChildStderr) -> H,
+    H: std::future::Future<Output = std::io::Result<S>> + Send + 'static,
+    S: AsRef<[u8]> + Send + 'static,
+{
     let Some((program, arguments)) = args.split_first() else {
         return Err(WorkerError::InvalidPayload(
             "FFmpeg command is empty.".to_owned(),
         ));
     };
-    // Let the host override the default ffmpeg binary via SCENEWORKS_FFMPEG. The
-    // desktop app sets this to the venv's bundled imageio-ffmpeg (it ships no
-    // system ffmpeg); the server stack / Docker leave it unset and use the
-    // caller's "ffmpeg" on PATH.
-    let configured_program = match std::env::var("SCENEWORKS_FFMPEG") {
-        Ok(path) if program.as_str() == "ffmpeg" && !path.trim().is_empty() => path,
-        _ => program.clone(),
-    };
-    // On Windows an ffmpeg reached through a symlink/reparse point (e.g. WinGet's
-    // `…\WinGet\Links\ffmpeg.exe` shim) cannot be launched under redirection-trust enforcement:
-    // CreateProcess returns ERROR_UNTRUSTED_MOUNT_POINT (os error 448), the same wall HF-cache
-    // symlinks hit in the model loaders. Resolve it to the real (non-reparse) target first; a
-    // no-op for a plain binary and on every other platform.
-    let resolved_program =
-        sceneworks_core::media_convert::resolve_ffmpeg_program(&configured_program);
-    let mut command = Command::new(resolved_program.as_ref());
-    command
-        .args(arguments)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    if stdin_chunks.is_some() {
-        command.stdin(Stdio::piped());
-    } else {
-        command.stdin(Stdio::null());
-    }
-    let mut child = command
-        // sc-8804/sc-21742: every ordinary timeout/heartbeat/cancel return explicitly kills and
-        // reaps below. Keep kill-on-drop as the panic/unwind backstop: a Tokio child otherwise keeps
-        // running after its handle is dropped and could continue writing a partial output file.
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|error| {
-            WorkerError::Engine(format!(
-                "Failed to start FFmpeg. Ensure ffmpeg is installed and on PATH: {error}"
-            ))
-        })?;
-
-    let mut stdin_task = stdin_chunks.map(|chunks| {
-        let mut stdin = child
-            .stdin
-            .take()
-            .expect("piped FFmpeg stdin is available after spawn");
-        tokio::spawn(async move {
-            for chunk in chunks {
-                stdin.write_all(&chunk).await?;
-            }
-            stdin.shutdown().await
-        })
-    });
-    let mut stderr = child.stderr.take();
-    let mut stderr_task = Some(tokio::spawn(async move {
-        let mut bytes = Vec::new();
-        if let Some(stderr) = stderr.as_mut() {
-            let _ = stderr.read_to_end(&mut bytes).await;
-        }
-        bytes
-    }));
-
-    let (deadline, execution_timeout) = ffmpeg_execution_deadline(execution_timeout);
-
-    let status = if let Some(context) = context {
+    let mut command = Command::new(sceneworks_core::media_process::ffmpeg_program(program));
+    command.args(arguments);
+    let control = async {
+        let Some(context) = context else {
+            return std::future::pending::<WorkerError>().await;
+        };
         let mut interval = tokio::time::interval(progress_report_interval(context.settings));
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
-            tokio::select! {
-                status = child.wait() => match status {
-                    Ok(status) => break status,
-                    Err(error) => {
-                        let cleanup = stop_ffmpeg_child(
-                            &mut child,
-                            &mut stdin_task,
-                            &mut stderr_task,
-                        ).await;
-                        return Err(worker_error_with_cleanup(WorkerError::Io(error), cleanup));
-                    }
-                },
-                _ = tokio::time::sleep_until(deadline) => {
-                    let cleanup = stop_ffmpeg_child(
-                        &mut child,
-                        &mut stdin_task,
-                        &mut stderr_task,
-                    ).await;
-                    return Err(worker_error_with_cleanup(
-                        WorkerError::Io(ffmpeg_timeout_io_error(execution_timeout)),
-                        cleanup,
-                    ));
-                }
-                _ = interval.tick() => {
-                    let control = tokio::time::timeout_at(deadline, async {
-                        heartbeat(
-                            context.api,
-                            context.settings,
-                            WorkerStatus::Busy,
-                            Some(context.job_id),
-                        ).await?;
-                        Ok::<bool, WorkerError>(
-                            cancel_requested_peek(context.api, context.job_id).await,
-                        )
-                    }).await;
-                    match control {
-                        Err(_) => {
-                            let cleanup = stop_ffmpeg_child(
-                                &mut child,
-                                &mut stdin_task,
-                                &mut stderr_task,
-                            ).await;
-                            return Err(worker_error_with_cleanup(
-                                WorkerError::Io(ffmpeg_timeout_io_error(execution_timeout)),
-                                cleanup,
-                            ));
-                        }
-                        Ok(Err(error)) => {
-                            let cleanup = stop_ffmpeg_child(
-                                &mut child,
-                                &mut stdin_task,
-                                &mut stderr_task,
-                            ).await;
-                            return Err(worker_error_with_cleanup(error, cleanup));
-                        }
-                        Ok(Ok(true)) => {
-                            let cleanup = stop_ffmpeg_child(
-                                &mut child,
-                                &mut stdin_task,
-                                &mut stderr_task,
-                            ).await;
-                            if let Err(error) = mark_job_canceled(
-                                context.api,
-                                context.job_id,
-                                context.cancel_message,
-                            ).await {
-                                return Err(worker_error_with_cleanup(error, cleanup));
-                            }
-                            return Err(worker_error_with_cleanup(
-                                WorkerError::Canceled(context.cancel_message.to_owned()),
-                                cleanup,
-                            ));
-                        }
-                        Ok(Ok(false)) => {}
+            interval.tick().await;
+            if let Err(error) = heartbeat(
+                context.api,
+                context.settings,
+                WorkerStatus::Busy,
+                Some(context.job_id),
+            )
+            .await
+            {
+                return error;
+            }
+            if cancel_requested_peek(context.api, context.job_id).await {
+                return WorkerError::Canceled(context.cancel_message.to_owned());
+            }
+        }
+    };
+    let output = sceneworks_core::media_process::run_command_with_stderr(
+        command,
+        stdin_chunks,
+        execution_timeout,
+        control,
+        sceneworks_core::media_process::discard_stdout,
+        read_stderr,
+    )
+    .await;
+    let output = match output {
+        Ok(output) => output,
+        Err(sceneworks_core::media_process::ProcessError::Control(error, cleanup)) => {
+            // The neutral runner has already killed and reaped before the terminal update.
+            if matches!(error, WorkerError::Canceled(_)) {
+                if let Some(context) = context {
+                    if let Err(error) =
+                        mark_job_canceled(context.api, context.job_id, context.cancel_message).await
+                    {
+                        return Err(worker_error_with_cleanup(error, cleanup));
                     }
                 }
             }
+            return Err(worker_error_with_cleanup(error, cleanup));
         }
-    } else {
-        match tokio::time::timeout_at(deadline, child.wait()).await {
-            Ok(Ok(status)) => status,
-            Ok(Err(error)) => {
-                let cleanup =
-                    stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
-                return Err(worker_error_with_cleanup(WorkerError::Io(error), cleanup));
-            }
-            Err(_) => {
-                let cleanup =
-                    stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
-                return Err(worker_error_with_cleanup(
-                    WorkerError::Io(ffmpeg_timeout_io_error(execution_timeout)),
-                    cleanup,
-                ));
-            }
+        Err(error @ sceneworks_core::media_process::ProcessError::Spawn(_)) => {
+            return Err(WorkerError::Engine(error.to_string()));
+        }
+        Err(sceneworks_core::media_process::ProcessError::Io(error)) => {
+            return Err(WorkerError::Io(error))
         }
     };
-
-    let stderr = match join_ffmpeg_task_until(&mut stderr_task, deadline).await {
-        Ok(stderr) => stderr,
-        Err(FfmpegTaskDeadlineError::TimedOut) => {
-            let cleanup = stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
-            return Err(worker_error_with_cleanup(
-                WorkerError::Io(ffmpeg_timeout_io_error(execution_timeout)),
-                cleanup,
-            ));
-        }
-        Err(FfmpegTaskDeadlineError::Join(error)) => {
-            let cleanup = stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
-            return Err(worker_error_with_cleanup(
-                task_join_error("ffmpeg stderr reader task", error),
-                cleanup,
-            ));
-        }
-    };
-    let stderr = String::from_utf8_lossy(&stderr);
-    if status.success() {
-        if stdin_task.is_some() {
-            let result = match join_ffmpeg_task_until(&mut stdin_task, deadline).await {
-                Ok(result) => result,
-                Err(FfmpegTaskDeadlineError::TimedOut) => {
-                    let cleanup =
-                        stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
-                    return Err(worker_error_with_cleanup(
-                        WorkerError::Io(ffmpeg_timeout_io_error(execution_timeout)),
-                        cleanup,
-                    ));
-                }
-                Err(FfmpegTaskDeadlineError::Join(error)) => {
-                    let cleanup =
-                        stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
-                    return Err(worker_error_with_cleanup(
-                        task_join_error("ffmpeg stdin writer task", error),
-                        cleanup,
-                    ));
-                }
-            };
-            result.map_err(WorkerError::Io)?;
-        }
-        return Ok(stderr.into_owned());
+    if let Some(detail) = output.failure_detail() {
+        return Err(WorkerError::Engine(detail));
     }
-    if stdin_task.is_some() {
-        match abort_ffmpeg_task_until(&mut stdin_task, deadline).await {
-            Ok(()) => {}
-            Err(FfmpegTaskDeadlineError::TimedOut) => {
-                let cleanup =
-                    stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
-                return Err(worker_error_with_cleanup(
-                    WorkerError::Io(ffmpeg_timeout_io_error(execution_timeout)),
-                    cleanup,
-                ));
-            }
-            Err(FfmpegTaskDeadlineError::Join(error)) => {
-                let cleanup =
-                    stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
-                return Err(worker_error_with_cleanup(
-                    task_join_error("ffmpeg stdin writer task", error),
-                    cleanup,
-                ));
-            }
-        }
-    }
-    let bounded = bounded_tail(&stderr, 10, 2000);
-    if bounded.trim().is_empty() {
-        Err(WorkerError::Engine(
-            "FFmpeg command failed without stderr output.".to_owned(),
-        ))
-    } else {
-        Err(WorkerError::Engine(bounded))
-    }
-}
-
-enum FfmpegTaskDeadlineError {
-    TimedOut,
-    Join(tokio::task::JoinError),
-}
-
-async fn join_ffmpeg_task_until<T>(
-    task: &mut Option<tokio::task::JoinHandle<T>>,
-    deadline: tokio::time::Instant,
-) -> Result<T, FfmpegTaskDeadlineError> {
-    let mut handle = task
-        .take()
-        .expect("FFmpeg pipe task exists until joined or aborted");
-    match tokio::time::timeout_at(deadline, &mut handle).await {
-        Ok(Ok(output)) => Ok(output),
-        Ok(Err(error)) => Err(FfmpegTaskDeadlineError::Join(error)),
-        Err(_) => {
-            *task = Some(handle);
-            Err(FfmpegTaskDeadlineError::TimedOut)
-        }
-    }
-}
-
-async fn abort_ffmpeg_task_until<T>(
-    task: &mut Option<tokio::task::JoinHandle<T>>,
-    deadline: tokio::time::Instant,
-) -> Result<(), FfmpegTaskDeadlineError> {
-    let Some(mut handle) = task.take() else {
-        return Ok(());
-    };
-    handle.abort();
-    match tokio::time::timeout_at(deadline, &mut handle).await {
-        Ok(Ok(_)) => Ok(()),
-        Ok(Err(error)) if error.is_cancelled() => Ok(()),
-        Ok(Err(error)) => Err(FfmpegTaskDeadlineError::Join(error)),
-        Err(_) => {
-            *task = Some(handle);
-            Err(FfmpegTaskDeadlineError::TimedOut)
-        }
-    }
-}
-
-fn task_cleanup_detail(label: &str, error: FfmpegTaskDeadlineError) -> String {
-    match error {
-        FfmpegTaskDeadlineError::TimedOut => {
-            format!("{label} did not stop within {FFMPEG_TEARDOWN_TIMEOUT:?}")
-        }
-        FfmpegTaskDeadlineError::Join(error) => format!("{label} failed to join: {error}"),
-    }
-}
-
-/// Explicitly terminate and reap the child, then stand down both pipe tasks. `kill_on_drop` remains
-/// a panic/unwind backstop, but ordinary timeout/heartbeat/cancel paths never rely on drop semantics
-/// and never leave a detached stdin or stderr task behind.
-async fn stop_ffmpeg_child(
-    child: &mut Child,
-    stdin_task: &mut Option<tokio::task::JoinHandle<std::io::Result<()>>>,
-    stderr_task: &mut Option<tokio::task::JoinHandle<Vec<u8>>>,
-) -> Option<String> {
-    let deadline = checked_deadline_from(tokio::time::Instant::now(), FFMPEG_TEARDOWN_TIMEOUT);
-    let mut details = Vec::new();
-    if let Err(error) = abort_ffmpeg_task_until(stdin_task, deadline).await {
-        details.push(task_cleanup_detail("FFmpeg stdin writer", error));
-    }
-    if let Err(error) = abort_ffmpeg_task_until(stderr_task, deadline).await {
-        details.push(task_cleanup_detail("FFmpeg stderr reader", error));
-    }
-
-    let mut child_reaped = false;
-    match child.try_wait() {
-        Ok(Some(_)) => child_reaped = true,
-        Ok(None) => {}
-        Err(error) => details.push(format!("could not inspect FFmpeg child status: {error}")),
-    }
-    if !child_reaped {
-        let kill_error = child.start_kill().err();
-        match tokio::time::timeout_at(deadline, child.wait()).await {
-            // `start_kill` can lose a benign child-exited race. A successful wait proves that race
-            // was safe and that the child was reaped, so the transient kill error is not reported.
-            Ok(Ok(_)) => {}
-            Ok(Err(wait_error)) => {
-                if let Some(kill_error) = kill_error {
-                    details.push(format!("could not kill FFmpeg child: {kill_error}"));
-                }
-                details.push(format!("could not reap FFmpeg child: {wait_error}"));
-            }
-            Err(_) => {
-                if let Some(kill_error) = kill_error {
-                    details.push(format!("could not kill FFmpeg child: {kill_error}"));
-                }
-                details.push(format!(
-                    "FFmpeg child was not reaped within {FFMPEG_TEARDOWN_TIMEOUT:?}"
-                ));
-            }
-        }
-    }
-
-    (!details.is_empty()).then(|| details.join("; "))
+    Ok(output.stderr)
 }
 
 fn worker_error_with_cleanup(error: WorkerError, cleanup: Option<String>) -> WorkerError {
@@ -4443,17 +4263,6 @@ fn worker_error_with_cleanup(error: WorkerError, cleanup: Option<String>) -> Wor
         // above keeps the cleanup failure observable while preserving the primary classification.
         other => other,
     }
-}
-
-fn io_error_with_cleanup(error: std::io::Error, cleanup: Option<String>) -> std::io::Error {
-    let Some(cleanup) = cleanup else {
-        return error;
-    };
-    tracing::error!(cleanup = %cleanup, "FFmpeg teardown reported an additional failure");
-    std::io::Error::new(
-        error.kind(),
-        format!("{error} FFmpeg cleanup also failed: {cleanup}"),
-    )
 }
 
 #[cfg(test)]
@@ -4488,68 +4297,49 @@ mod ffmpeg_cleanup_error_tests {
     }
 }
 
-async fn run_ffmpeg_probe_command(command: Command) -> std::io::Result<std::process::Output> {
-    run_ffmpeg_probe_command_with_timeout(command, ffmpeg_execution_timeout()).await
-}
-
 /// The duration/frame-count probes used to call `Command::output()` directly. Keep their output
 /// contract while exposing the same explicit timeout → kill → reap lifecycle as the shared runner.
+#[cfg(test)]
 pub(crate) async fn run_ffmpeg_probe_command_with_timeout(
-    mut command: Command,
+    command: Command,
     execution_timeout: Duration,
 ) -> std::io::Result<std::process::Output> {
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let mut child = command.spawn()?;
-    let mut stdin_task: Option<tokio::task::JoinHandle<std::io::Result<()>>> = None;
-    let mut stderr = child.stderr.take();
-    let mut stderr_task = Some(tokio::spawn(async move {
-        let mut bytes = Vec::new();
-        if let Some(stderr) = stderr.as_mut() {
-            let _ = stderr.read_to_end(&mut bytes).await;
-        }
-        bytes
-    }));
-
-    let (deadline, execution_timeout) = ffmpeg_execution_deadline(execution_timeout);
-    let status = match tokio::time::timeout_at(deadline, child.wait()).await {
-        Ok(Ok(status)) => status,
-        Ok(Err(error)) => {
-            let cleanup = stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
-            return Err(io_error_with_cleanup(error, cleanup));
-        }
-        Err(_) => {
-            let cleanup = stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
-            return Err(io_error_with_cleanup(
-                ffmpeg_timeout_io_error(execution_timeout),
-                cleanup,
-            ));
-        }
-    };
-    let stderr = match join_ffmpeg_task_until(&mut stderr_task, deadline).await {
-        Ok(stderr) => stderr,
-        Err(FfmpegTaskDeadlineError::TimedOut) => {
-            let cleanup = stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
-            return Err(io_error_with_cleanup(
-                ffmpeg_timeout_io_error(execution_timeout),
-                cleanup,
-            ));
-        }
-        Err(FfmpegTaskDeadlineError::Join(error)) => {
-            let cleanup = stop_ffmpeg_child(&mut child, &mut stdin_task, &mut stderr_task).await;
-            return Err(io_error_with_cleanup(
-                std::io::Error::other(format!("ffmpeg stderr reader task: {error}")),
-                cleanup,
-            ));
-        }
-    };
+    let output = run_ffmpeg_probe_command_with_stderr(
+        command,
+        execution_timeout,
+        sceneworks_core::media_process::read_stderr_tail,
+    )
+    .await?;
     Ok(std::process::Output {
-        status,
+        status: output.status,
         stdout: Vec::new(),
-        stderr,
+        stderr: output.stderr,
+    })
+}
+
+async fn run_ffmpeg_probe_command_with_stderr<G, H, S>(
+    command: Command,
+    execution_timeout: Duration,
+    read_stderr: G,
+) -> std::io::Result<sceneworks_core::media_process::ProcessOutput<(), S>>
+where
+    G: FnOnce(tokio::process::ChildStderr) -> H,
+    H: std::future::Future<Output = std::io::Result<S>> + Send + 'static,
+    S: AsRef<[u8]> + Send + 'static,
+{
+    sceneworks_core::media_process::run_command_with_stderr(
+        command,
+        None,
+        execution_timeout,
+        std::future::pending::<std::convert::Infallible>(),
+        sceneworks_core::media_process::discard_stdout,
+        read_stderr,
+    )
+    .await
+    .map_err(|error| match error {
+        sceneworks_core::media_process::ProcessError::Spawn(error)
+        | sceneworks_core::media_process::ProcessError::Io(error) => error,
+        sceneworks_core::media_process::ProcessError::Control(never, _) => match never {},
     })
 }
 
@@ -4572,6 +4362,112 @@ pub(crate) async fn run_ffmpeg_with_stdin_chunks_and_timeout(
     run_ffmpeg_capture_stderr_inner(args, context, Some(chunks), execution_timeout)
         .await
         .map(|_| ())
+}
+
+#[cfg(test)]
+mod streaming_probe_tests {
+    use super::*;
+
+    #[test]
+    fn structured_probe_metadata_survives_long_diagnostics_and_chunk_boundaries() {
+        let mut log = String::from(
+            "Input #0, mov, from 'source.mp4':\n  Duration: 00:00:12.50, start: 0\n  Stream #0:1: Audio: aac\nOutput #0, null, to '-':\nframe= 300 time=00:00:12.50\r",
+        );
+        log.push_str(&"unrelated diagnostic ".repeat(20_000));
+        log.push_str("\nfinished\n");
+        let limit = sceneworks_core::media_process::STDERR_LIMIT;
+        assert!(log.len() > 4 * limit);
+        assert!(!log[log.len() - limit..].contains("Audio:"));
+        for size in [7, 8192, log.len()] {
+            let mut parser = sceneworks_core::media_process::ParsedStderr::new(
+                FfmpegProbeMetadata::default(),
+                FfmpegProbeMetadata::read_line,
+            );
+            for chunk in log.as_bytes().chunks(size) {
+                parser.push(chunk);
+                assert!(parser.buffered_log_bytes() <= 2 * limit);
+            }
+            let output = parser.complete();
+            assert!(output.as_ref().len() <= limit);
+            assert!(output.data.input_streams.audio);
+            assert_eq!(output.data.header_duration, Some(12.5));
+            assert_eq!(output.data.measured_time, Some(12.5));
+            assert_eq!(output.data.frame_count, Some(300));
+        }
+    }
+
+    #[test]
+    fn structured_probe_preserves_unknown_header_and_rejects_output_only_audio() {
+        let mut metadata = FfmpegProbeMetadata::default();
+        for line in [
+            "Input #0, rawvideo, from 'source':",
+            "Duration: N/A, start: 0",
+            "Output #0, null, to '-':",
+            "Duration: 00:00:99.00, start: 0",
+            "Stream #0:1: Audio: pcm_s16le",
+            "frame= 2 time=00:00:00.08",
+            "frame= 3 time=00:00:00.12",
+        ] {
+            metadata.read_line(line);
+        }
+        assert!(!metadata.input_streams.audio);
+        assert_eq!(metadata.header_duration, None);
+        assert_eq!(metadata.measured_time, Some(0.12));
+        assert_eq!(metadata.frame_count, Some(3));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn source_probes_retain_early_metadata_through_the_shared_process_runner() {
+        use std::os::unix::fs::PermissionsExt;
+        let _env = crate::test_env::EnvVars::set(&[("SCENEWORKS_FFMPEG", "")]);
+        let scratch = tempfile::tempdir().unwrap();
+        let program = scratch.path().join("ffmpeg-fixture");
+        let script = r#"#!/bin/sh
+case "$*" in
+  *headerless*)
+    case "$*" in
+      *-map*) printf 'frame= 72 time=00:00:03.00\r' >&2 ;;
+      *) printf 'Input #0, rawvideo:\nDuration: N/A, start: 0\n' >&2 ;;
+    esac ;;
+  *) printf 'Input #0, mov:\nDuration: 00:00:12.50, start: 0\nStream #0:1: Audio: aac\nframe= 300 time=00:00:12.50\r' >&2 ;;
+esac
+i=0
+while [ "$i" -lt 4096 ]; do
+  printf 'unrelated diagnostic after structured metadata\n' >&2
+  i=$((i + 1))
+done
+exit 1
+"#;
+        std::fs::write(&program, script).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let ffmpeg = program.to_str().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            assert!(source_has_audio_stream(ffmpeg, Path::new("source.mp4")).await);
+            assert_eq!(
+                probe_source_duration(ffmpeg, Path::new("source.mp4"))
+                    .await
+                    .unwrap(),
+                12.5
+            );
+            assert_eq!(
+                probe_source_duration(ffmpeg, Path::new("headerless"))
+                    .await
+                    .unwrap(),
+                3.0
+            );
+            let mut command = Command::new(&program);
+            command.arg("source.mp4");
+            assert_eq!(
+                probe_source_frame_count_command_with_timeout(command, Duration::from_secs(5))
+                    .await
+                    .unwrap(),
+                Some(300)
+            );
+        })
+        .await
+        .expect("bounded metadata-only fixture processes");
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -4759,7 +4655,7 @@ mod person_track_e2e_tests {
             .expect("ffmpeg renders the sample frame");
             let weights_for_frame = det_weights.clone();
             let frame_for_task = frame_path.clone();
-            let result = tokio::task::spawn_blocking(move || {
+            let result = crate::load_progress::spawn_blocking(move || {
                 crate::person_jobs::detect_people_blocking(weights_for_frame, frame_for_task, 0.25)
             })
             .await
@@ -4915,7 +4811,7 @@ mod person_track_e2e_tests {
             //    detected span with the video predictor (sc-3715).
             let seg_weights = crate::person_segment::require_segmenter_weights(&settings)
                 .expect("sam2 weights provisioned");
-            let masks = tokio::task::spawn_blocking(move || {
+            let masks = crate::load_progress::spawn_blocking(move || {
                 crate::person_segment::propagate_track_blocking(
                     seg_weights,
                     clip_paths,
@@ -5021,7 +4917,7 @@ mod person_track_e2e_tests {
                 crate::person_segment_sam3::require_segmenter_weights(&settings)
                     .expect("sam3 weights provisioned");
             let (cp3, an3) = (clip_paths.clone(), anchors.clone());
-            let sam3 = tokio::task::spawn_blocking(move || {
+            let sam3 = crate::load_progress::spawn_blocking(move || {
                 crate::person_segment_sam3::segment_track_blocking(
                     sam3_model, sam3_tok, cp3, an3, None, None,
                 )
@@ -5065,7 +4961,7 @@ mod person_track_e2e_tests {
                     }
                 };
             let (cp2, an2) = (clip_paths.clone(), anchors.clone());
-            let sam2 = tokio::task::spawn_blocking(move || {
+            let sam2 = crate::load_progress::spawn_blocking(move || {
                 crate::person_segment::propagate_track_blocking(sam2_weights, cp2, an2, None, None)
             })
             .await
@@ -5175,8 +5071,8 @@ mod person_track_e2e_tests {
             1280,
             720,
             FfmpegContext {
-                api: &ApiClient::new(&crate::Settings::from_env()),
-                settings: &crate::Settings::from_env(),
+                api: &ApiClient::new(&crate::test_env::offline_settings()),
+                settings: &crate::test_env::offline_settings(),
                 job_id: "render-track-frames-verify",
                 cancel_message: "",
             },
@@ -5273,8 +5169,8 @@ mod person_track_e2e_tests {
             1280,
             720,
             FfmpegContext {
-                api: &ApiClient::new(&crate::Settings::from_env()),
-                settings: &crate::Settings::from_env(),
+                api: &ApiClient::new(&crate::test_env::offline_settings()),
+                settings: &crate::test_env::offline_settings(),
                 job_id: "render-track-frames-ungated",
                 cancel_message: "",
             },
@@ -6555,7 +6451,7 @@ mod timeline_audio_mix_tests {
             mux_segments("ffmpeg", &segments, dir, &picture, None)
                 .await
                 .expect("picture muxes");
-            mux_audio("ffmpeg", &picture, &sources, &output, None)
+            mux_audio("ffmpeg", &picture, &sources, spec.fps, &output, None)
                 .await
                 .expect("audio mixes");
         }
@@ -6783,15 +6679,349 @@ mod timeline_audio_mix_tests {
                 media_path: PathBuf::from(format!("{id}.wav")),
             })
             .collect();
-        let filter = audio_mix_filter(&sources);
+        let filter = audio_mix_filter(&sources, 48_000).expect("finite mix");
         assert!(
             filter.contains("amix=inputs=2:normalize=0"),
             "the mix must not renormalise: {filter}"
         );
         assert!(
-            filter.ends_with("apad[aout]"),
-            "the mix must be padded so -shortest cuts on the PICTURE, not on the audio: {filter}"
+            filter.ends_with("apad=whole_len=48000,atrim=end_sample=48000[aout]"),
+            "the graph must reach its own picture-bounded EOF, not rely on -shortest: {filter}"
         );
+    }
+
+    #[test]
+    fn picture_audio_eof_is_checked_frame_exact_and_rounded_only_up() {
+        assert_eq!(picture_audio_samples(248, 24).unwrap(), 496_000);
+        assert_eq!(picture_audio_samples(1, 29).unwrap(), 1_656);
+        for (frames, fps) in [(0, 24), (248, 0), (usize::MAX, 1)] {
+            assert!(picture_audio_samples(frames, fps).is_err());
+        }
+        let segments = [
+            TimelineSegment {
+                path: "a".into(),
+                duration: 2.0,
+                transition: None,
+                transition_duration: 0.0,
+            },
+            TimelineSegment {
+                path: "b".into(),
+                duration: 2.0,
+                transition: Some("crossfade".into()),
+                transition_duration: 1.0,
+            },
+        ];
+        let timing = PictureTiming::from_segments(&segments);
+        assert_eq!(timing.duration(), 3.0);
+        assert_eq!(picture_audio_samples(72, 24).unwrap(), 144_000);
+        assert_ne!(
+            picture_audio_samples(72, 24).unwrap(),
+            192_000,
+            "pre-crossfade timeline sum is not the picture clock"
+        );
+    }
+
+    async fn finite_fixture_picture(path: &Path, frames: u32) {
+        assert!(frames > 0 && frames <= 248);
+        let args = lavfi(
+            &["testsrc2=size=320x180:rate=24"],
+            &[
+                "-frames:v",
+                &frames.to_string(),
+                "-pix_fmt",
+                "yuv420p",
+                "-an",
+            ],
+            path,
+        );
+        run_ffmpeg_capture_stderr_inner(args, None, None, Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert!(std::fs::metadata(path).unwrap().len() < 16 * 1024 * 1024);
+    }
+
+    fn finite_fixture_wave(path: &Path, seconds: f64, rate: u32, hz: u32) {
+        assert!(seconds.is_finite() && (0.0..=32.0).contains(&seconds));
+        assert!([8000, 44100, 48000].contains(&rate));
+        let count = (seconds * f64::from(rate)).round() as u32;
+        let size = count.checked_mul(2).unwrap();
+        assert!(size <= 4 * 1024 * 1024);
+        let mut bytes = Vec::with_capacity(size as usize + 44);
+        bytes.extend(b"RIFF");
+        bytes.extend((36 + size).to_le_bytes());
+        bytes.extend(b"WAVEfmt ");
+        bytes.extend(16u32.to_le_bytes());
+        bytes.extend(1u16.to_le_bytes());
+        bytes.extend(1u16.to_le_bytes());
+        bytes.extend(rate.to_le_bytes());
+        bytes.extend((rate * 2).to_le_bytes());
+        bytes.extend(2u16.to_le_bytes());
+        bytes.extend(16u16.to_le_bytes());
+        bytes.extend(b"data");
+        bytes.extend(size.to_le_bytes());
+        for index in 0..count {
+            let value = (4000.0
+                * (2.0 * std::f64::consts::PI * f64::from(hz) * f64::from(index) / f64::from(rate))
+                    .sin()) as i16;
+            bytes.extend(value.to_le_bytes());
+        }
+        std::fs::write(path, bytes).unwrap();
+        assert_eq!(std::fs::metadata(path).unwrap().len(), u64::from(size) + 44);
+    }
+
+    #[tokio::test]
+    async fn finite_audio_graph_reaches_exact_eof_without_shortest_for_zero_short_and_long_inputs()
+    {
+        if !ffmpeg_reachable() {
+            return;
+        }
+        let dir = scratch("finite_audio_graph_");
+        let picture = dir.path().join("picture.mp4");
+        finite_fixture_picture(&picture, 248).await;
+        let frames = probe_source_frame_count("ffmpeg", &picture)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(frames, 248);
+        let samples = picture_audio_samples(frames, 24).unwrap();
+        assert_eq!(
+            samples, 496_000,
+            "not the centisecond header's 495840 samples"
+        );
+        for (index, (seconds, rate)) in [0.0, 0.125, 15.0]
+            .into_iter()
+            .flat_map(|seconds| {
+                [8000, 44100, 48000]
+                    .into_iter()
+                    .map(move |rate| (seconds, rate))
+            })
+            .enumerate()
+        {
+            let wav = dir.path().join(format!("source_{index}.wav"));
+            finite_fixture_wave(&wav, seconds, rate, 440);
+            let sources = [ResolvedAudioSource {
+                media_path: wav.clone(),
+                placement: AudioPlacement {
+                    asset_id: "audio".into(),
+                    track_id: "track_audio".into(),
+                    role: "music".into(),
+                    source_in: 0.0,
+                    source_out: seconds,
+                    picture_start: 0.0,
+                    span: seconds,
+                    speed: 1.0,
+                    gain: 1.0,
+                    fade_in: 0.0,
+                    fade_out: 0.0,
+                    generated: false,
+                },
+            }];
+            let graph = audio_mix_filter(&sources, samples).unwrap();
+            assert!(graph
+                .ends_with("aresample=48000,apad=whole_len=496000,atrim=end_sample=496000[aout]"));
+            let output = dir.path().join(format!("audio_{index}.pcm"));
+            let args = vec![
+                "ffmpeg".into(),
+                "-y".into(),
+                "-i".into(),
+                picture.display().to_string(),
+                "-i".into(),
+                wav.display().to_string(),
+                "-filter_complex".into(),
+                graph,
+                "-map".into(),
+                "[aout]".into(),
+                "-vn".into(),
+                "-c:a".into(),
+                "pcm_s16le".into(),
+                "-f".into(),
+                "s16le".into(),
+                output.display().to_string(),
+            ];
+            assert!(!args.iter().any(|arg| arg == "-shortest"));
+            run_ffmpeg_capture_stderr_inner(args, None, None, Duration::from_secs(10))
+                .await
+                .expect("the graph must terminate intrinsically, even without -shortest");
+            assert_eq!(
+                std::fs::metadata(output).unwrap().len(),
+                samples * 2 * 2,
+                "exact stereo PCM sample count for input duration {seconds} at {rate} Hz"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn finished_picture_cancel_stops_before_starting_probe_or_mix() {
+        use axum::{
+            routing::{get, post},
+            Json, Router,
+        };
+        let app = Router::new()
+            .route(
+                "/api/v1/jobs/picture-cancel",
+                get(|| async { Json(crate::tests::job_snapshot_json("picture-cancel", true)) }),
+            )
+            .route(
+                "/api/v1/jobs/picture-cancel/progress",
+                post(|| async { Json(crate::tests::job_snapshot_json("picture-cancel", true)) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server =
+            crate::load_progress::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut settings = crate::tests::test_settings("http://127.0.0.1:9".into(), None);
+        settings.api_url = format!("http://{address}");
+        settings.gpu_id = "cpu".into();
+        let api = ApiClient::new(&settings);
+        let dir = scratch("canceled_picture_");
+        let output = dir.path().join("must-not-exist.mp4");
+        let context = FfmpegContext {
+            api: &api,
+            settings: &settings,
+            job_id: "picture-cancel",
+            cancel_message: "cancel before picture decode",
+        };
+        let result = mux_audio(
+            "must-not-start-canceled-picture-probe",
+            &dir.path().join("missing.mp4"),
+            &[],
+            24,
+            &output,
+            Some(context),
+        )
+        .await;
+        assert!(matches!(result, Err(WorkerError::Canceled(_))));
+        assert!(!output.exists());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn finished_picture_probe_failure_stops_before_audio_mix_or_header_fallback() {
+        if !ffmpeg_reachable() {
+            return;
+        }
+        let dir = scratch("bad_finished_picture_");
+        let picture = dir.path().join("broken.mp4");
+        let output = dir.path().join("must-not-exist.mp4");
+        std::fs::write(&picture, b"not a rendered picture").unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            mux_audio("ffmpeg", &picture, &[], 24, &output, None),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(matches!(error, WorkerError::Engine(_)), "{error}");
+        assert!(!output.exists());
+    }
+
+    #[tokio::test]
+    async fn finite_three_source_mix_preserves_248_picture_frames_and_crossfade_clock() {
+        if !ffmpeg_reachable() {
+            return;
+        }
+        let dir = scratch("finite_three_source_mix_");
+        let root = dir.path();
+        let seconds = 124.0 / 24.0;
+        finite_fixture_picture(&root.join("a.mp4"), 124).await;
+        finite_fixture_picture(&root.join("b.mp4"), 124).await;
+        for (name, duration, hz) in [
+            ("room", 32.0, 100),
+            ("music", 32.0, 250),
+            ("line", 1.5, 400),
+        ] {
+            finite_fixture_wave(&root.join(format!("{name}.wav")), duration, 8000, hz);
+        }
+        for crossfade in [false, true] {
+            let segments = [
+                TimelineSegment {
+                    path: root.join("a.mp4"),
+                    duration: seconds,
+                    transition: None,
+                    transition_duration: 0.0,
+                },
+                TimelineSegment {
+                    path: root.join("b.mp4"),
+                    duration: seconds,
+                    transition: crossfade.then(|| "crossfade".into()),
+                    transition_duration: 1.0,
+                },
+            ];
+            let timing = PictureTiming::from_segments(&segments);
+            let picture = root.join(format!("picture_{crossfade}.mp4"));
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                mux_segments("ffmpeg", &segments, root, &picture, None),
+            )
+            .await
+            .expect("bounded fixture mux")
+            .unwrap();
+            let frames = probe_source_frame_count("ffmpeg", &picture)
+                .await
+                .unwrap()
+                .unwrap();
+            if crossfade {
+                assert!(
+                    (223..=225).contains(&frames),
+                    "encoded xfade boundary may differ by a frame: {frames}"
+                );
+            } else {
+                assert_eq!(frames, 248);
+            }
+            let samples = picture_audio_samples(frames, 24).unwrap();
+            assert_eq!(
+                samples,
+                frames as u64 * 2000,
+                "actual post-encode clock, not theoretical overlap duration"
+            );
+            if crossfade {
+                assert_ne!(
+                    samples, 496_000,
+                    "must not use the pre-crossfade timeline sum"
+                );
+            } else {
+                assert_eq!(samples, 496_000);
+            }
+            assert!((timing.duration() - frames as f64 / 24.0).abs() <= 1.0 / 24.0 + 1e-9);
+            let sources: Vec<_> = [
+                ("room", 32.0, 0.35, 0.0),
+                ("music", 32.0, 0.2, 0.0),
+                ("line", 1.5, 1.0, 6.367),
+            ]
+            .into_iter()
+            .map(|(name, duration, gain, start)| ResolvedAudioSource {
+                media_path: root.join(format!("{name}.wav")),
+                placement: AudioPlacement {
+                    asset_id: name.into(),
+                    track_id: format!("track_{name}"),
+                    role: name.into(),
+                    source_in: 0.0,
+                    source_out: duration,
+                    picture_start: start,
+                    span: duration,
+                    speed: 1.0,
+                    gain,
+                    fade_in: 0.0,
+                    fade_out: 0.0,
+                    generated: false,
+                },
+            })
+            .collect();
+            let output = root.join(format!("mix_{crossfade}.mp4"));
+            let mut args = audio_mix_args("ffmpeg", &picture, &sources, samples, &output).unwrap();
+            // Prove intrinsic graph EOF: do not let -shortest hide an infinite-pad regression.
+            args.retain(|arg| arg != "-shortest");
+            run_ffmpeg_capture_stderr_inner(args, None, None, Duration::from_secs(10))
+                .await
+                .unwrap();
+            assert_eq!(
+                probe_source_frame_count("ffmpeg", &output).await.unwrap(),
+                Some(frames),
+                "video stays copy-only and frame-exact"
+            );
+            let decoded = decode_window(&output, 0.0, frames as f64 / 24.0 + 1.0);
+            assert!((decoded.len() as i64-samples as i64).abs()<=1024,"AAC tail is at most one codec frame, not the pre-crossfade timeline: {} vs {samples}",decoded.len());
+        }
     }
 
     /// The same inheritance hazard `a_crossfaded_export_does_not_inherit_a_clips_recipe` measured,
@@ -6819,6 +7049,7 @@ mod timeline_audio_mix_tests {
             "ffmpeg",
             Path::new("picture.mp4"),
             &sources,
+            48_000,
             Path::new("out.mp4"),
         )
         .expect("one source mixes");

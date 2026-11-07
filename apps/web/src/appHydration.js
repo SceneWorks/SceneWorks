@@ -4,10 +4,6 @@
 // keeps startup/network behavior reviewable and gives tests a deterministic request
 // contract. Global domains survive project switches; project domains are keyed by the
 // active project and are reset/reloaded only when a consumer route needs them.
-export const GLOBAL_HYDRATION_DOMAINS = Object.freeze(
-  new Set(["models", "trainingTargets", "trainingPresets"]),
-);
-
 export const PROJECT_HYDRATION_DOMAINS = Object.freeze(
   new Set([
     "assets",
@@ -67,7 +63,7 @@ const DEFERRED_ROUTE_DOMAINS = Object.freeze({
 });
 
 const SIMPLE_ROUTE_DOMAINS = Object.freeze({
-  image: ["assets", "models", "loras"],
+  image: ["assets", "models", "loras", "characters"],
   video: ["assets", "models"],
   audio: ["assets", "models"],
   assets: ["assets"],

@@ -1,12 +1,927 @@
-use super::*;
+#[cfg(target_os = "macos")]
+use super::adapter_id;
+#[cfg(native_lane)]
+use super::adapters::classify_adapter;
+#[cfg(native_lane)]
+use super::adapters::resolve_adapters;
+#[cfg(all(
+    native_lane,
+    any(native_lane, test),
+    any(native_lane, all(unix, native_lane))
+))]
+use super::adapters::resolve_prepared_adapters;
+#[cfg(target_os = "macos")]
+use super::adapters::PreparedAdapters;
+#[cfg(native_lane)]
+use super::apply_inline_iris_restore;
+#[cfg(target_os = "macos")]
+use super::artifact_resolution::boogu_model_subdir;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use super::{
-    flux1_control_candle::*, flux2_comfyui_candle::*, flux2_control_candle::*,
-    flux2_edit_candle::*, flux_ipadapter::*, kolors_control::*, kolors_ipadapter::*,
-    krea_control_candle::*, pulid_candle::*, qwen_control::*, qwen_edit_candle::*,
-    sdxl_ipadapter::*, zimage_control::*,
-};
+use super::artifact_resolution::candle_weights_gap;
+#[cfg(target_os = "macos")]
+use super::artifact_resolution::ideogram_model_subdir;
+#[cfg(native_lane)]
+use super::artifact_resolution::ideogram_tier_subdir;
+#[cfg(native_lane)]
+use super::artifact_resolution::model_repo;
+#[cfg(target_os = "macos")]
+use super::artifact_resolution::resolve_flux_ip_adapter_dir;
+#[cfg(native_lane)]
+use super::artifact_resolution::resolve_weights_dir;
+#[cfg(native_lane)]
+use super::artifact_resolution::turnkey_tier_revision;
+#[cfg(native_lane)]
+use super::artifact_resolution::BOOGU_MLX_TURNKEY_REVISION;
+#[cfg(native_lane)]
+use super::artifact_resolution::IDEOGRAM_MLX_TURNKEY_REVISION;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::artifact_resolution::KREA_MLX_TURNKEY_REVISION;
+use super::backend_label;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::bernini::bernini_adapter_resident_bytes;
+#[cfg(target_os = "macos")]
+use super::bernini::bernini_image_available;
+#[cfg(target_os = "macos")]
+use super::bernini::bernini_image_engine_task;
+#[cfg(native_lane)]
+use super::bernini::bernini_image_generate_one;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::bernini::candle_bernini_snapshot_ok;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::bernini::candle_bernini_tier_order;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::bernini::candle_bernini_tier_quant;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::bernini::candle_bernini_tree_present;
+#[cfg(target_os = "macos")]
+use super::bernini::resolve_bernini_image_quant;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::bernini::resolve_candle_bernini_tier_dir_and_quant;
+use super::cached_lora_hash_for_file;
+use super::cached_model_hash_for_file;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::candle::resolve_candle_lane_inputs;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::candle_strict_control::CandleStrictControl;
+#[cfg(target_os = "macos")]
+use super::checkpoint_plan::checkpoint_plan_adapter;
+#[cfg(target_os = "macos")]
+use super::checkpoint_plan::checkpoint_plan_backend_eligible;
+#[cfg(target_os = "macos")]
+use super::checkpoint_plan::checkpoint_plan_bespoke_primary_pin;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::checkpoint_plan::checkpoint_plan_bespoke_roles;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::checkpoint_plan::checkpoint_plan_candle_companion_dirs;
+#[cfg(native_lane)]
+use super::checkpoint_plan::checkpoint_plan_component_from_layers;
+#[cfg(native_lane)]
+use super::checkpoint_plan::checkpoint_plan_entry_source_shape;
+#[cfg(native_lane)]
+use super::checkpoint_plan::checkpoint_plan_lane_source_shape;
+#[cfg(target_os = "macos")]
+use super::checkpoint_plan::checkpoint_plan_layer_roles;
+#[cfg(native_lane)]
+use super::checkpoint_plan::checkpoint_plan_load_spec;
+#[cfg(target_os = "macos")]
+use super::checkpoint_plan::checkpoint_plan_memory_inputs;
+#[cfg(native_lane)]
+use super::checkpoint_plan::checkpoint_plan_negative_prompt;
+#[cfg(native_lane)]
+use super::checkpoint_plan::checkpoint_plan_primary_selection;
+#[cfg(native_lane)]
+use super::checkpoint_plan::checkpoint_plan_source_shape;
+#[cfg(native_lane)]
+use super::checkpoint_plan::checkpoint_plan_unconsumed_layers;
+#[cfg(native_lane)]
+use super::checkpoint_plan::prepare_checkpoint_plan_sources;
+#[cfg(native_lane)]
+use super::checkpoint_plan::request_is_checkpoint_plan_backed;
+#[cfg(native_lane)]
+use super::checkpoint_plan::PreparedCheckpointPlanSources;
+#[cfg(native_lane)]
+use super::checkpoint_plan::CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS;
+#[cfg(native_lane)]
+use super::checkpoint_plan::CHECKPOINT_PLAN_RESIDENT_BASE_TIERS;
+use super::civitai_lora_key;
+#[cfg(target_os = "macos")]
+use super::conditioning::angle_prompt_augment;
+#[cfg(target_os = "macos")]
+use super::conditioning::augment_prompt_for_angle;
+#[cfg(target_os = "macos")]
+use super::conditioning::boogu_edit_reference_ids;
+#[cfg(native_lane)]
+use super::conditioning::build_qwen_image_2_1_conditioning;
+#[cfg(target_os = "macos")]
+use super::conditioning::build_reference_conditioning;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::conditioning::candle_conditioned_edit_work;
+#[cfg(target_os = "macos")]
+use super::conditioning::edit_grouping;
+#[cfg(target_os = "macos")]
+use super::conditioning::edit_reference_ids;
+#[cfg(native_lane)]
+use super::conditioning::guard_qwen_image_2_1_lane_slots;
+#[cfg(target_os = "macos")]
+use super::conditioning::identity_strength;
+#[cfg(target_os = "macos")]
+use super::conditioning::is_mage_edit_model;
+#[cfg(native_lane)]
+use super::conditioning::is_qwen_image_2_1_edit;
+#[cfg(target_os = "macos")]
+use super::conditioning::load_reference_alpha;
+#[cfg(target_os = "macos")]
+use super::conditioning::load_reference_image;
+#[cfg(target_os = "macos")]
+use super::conditioning::load_reference_image_with;
+#[cfg(target_os = "macos")]
+use super::conditioning::mage_edit_reference_ids;
+#[cfg(native_lane)]
+use super::conditioning::parse_poses;
+#[cfg(native_lane)]
+use super::conditioning::pose_entries;
+#[cfg(native_lane)]
+use super::conditioning::qwen_image_2_1_reference_ids;
+#[cfg(target_os = "macos")]
+use super::conditioning::resolve_character_image_likeness_source;
+#[cfg(target_os = "macos")]
+use super::conditioning::resolve_control_identity_source;
+#[cfg(target_os = "macos")]
+use super::conditioning::resolve_generic_lane_conditioning;
+#[cfg(target_os = "macos")]
+use super::conditioning::resolve_generic_lane_inputs;
+#[cfg(target_os = "macos")]
+use super::conditioning::resolve_qwen_image_2_1_edit;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::conditioning::resolve_sensenova_candle_true_cfg;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::conditioning::sensenova_edit_candle_reference_ids;
+#[cfg(target_os = "macos")]
+use super::conditioning::should_fit_edit_source;
+#[cfg(target_os = "macos")]
+use super::conditioning::EditGrouping;
+#[cfg(target_os = "macos")]
+use super::conditioning::FlattenPolicy;
+#[cfg(native_lane)]
+use super::conditioning::PoseInput;
+#[cfg(native_lane)]
+use super::conditioning::QwenImage21Reference;
+#[cfg(target_os = "macos")]
+use super::conditioning::BOOGU_MAX_EDIT_REFERENCES;
+#[cfg(target_os = "macos")]
+use super::conditioning::MAX_EDIT_REFERENCES;
+#[cfg(native_lane)]
+use super::detail::compose_feathered;
+#[cfg(native_lane)]
+use super::detail::detail_feather;
+#[cfg(native_lane)]
+use super::detail::engine_dim;
+#[cfg(native_lane)]
+use super::detail::refine_tiled_detail;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::detail::resolve_candle_detail_components;
+#[cfg(native_lane)]
+use super::detail::DetailParams;
+#[cfg(native_lane)]
+use super::detail::DetailTileRefiner;
+use super::detail_workflow_share;
+use super::dispatch_legacy_fallback;
+#[cfg(native_lane)]
+use super::events::consume_gen_events;
+#[cfg(native_lane)]
+use super::events::encode_preview_data_url;
+#[cfg(native_lane)]
+use super::events::record_prompt_enhancement_report;
+#[cfg(native_lane)]
+use super::events::slim_step_result_with_preview;
+#[cfg(native_lane)]
+use super::events::take_prompt_enhancement_fact;
+#[cfg(native_lane)]
+use super::events::PreviewSlot;
+#[cfg(native_lane)]
+use super::events::PromptEnhancementReports;
+use super::existing_lora_install_marker;
+#[cfg(target_os = "macos")]
+use super::flux1_control::flux1_control_generate_one;
+#[cfg(target_os = "macos")]
+use super::flux1_control::flux1_control_load;
+#[cfg(target_os = "macos")]
+use super::flux1_control::flux1_control_repo_file;
+#[cfg(target_os = "macos")]
+use super::flux1_control::FLUX1_CONTROL_FILE;
+#[cfg(target_os = "macos")]
+use super::flux1_control::FLUX1_CONTROL_REVISION;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux1_control_candle::flux1_control_adapter_source_bytes;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux1_control_candle::flux1_control_candle_repo_file;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux1_control_candle::flux1_strict_control_test_fixture;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux1_control_candle::is_flux1_control_model;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux1_control_candle::FLUX1_CONTROL_CANDLE_BASE_REPO;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux1_control_candle::FLUX1_CONTROL_CANDLE_DEFAULT_SCALE;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux1_control_candle::FLUX1_CONTROL_CANDLE_ENGINE;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux1_control_candle::FLUX1_CONTROL_CANDLE_ENGINE_ID;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux1_control_candle::FLUX1_CONTROL_CANDLE_REVISION;
+#[cfg(target_os = "macos")]
+use super::flux2::build_edit_conditioning;
+#[cfg(target_os = "macos")]
+use super::flux2::fit_edit_references;
+#[cfg(target_os = "macos")]
+use super::flux2::flux2_control_generate_one_scoped;
+#[cfg(target_os = "macos")]
+use super::flux2::flux2_control_load;
+#[cfg(target_os = "macos")]
+use super::flux2::flux2_control_raw_settings;
+#[cfg(target_os = "macos")]
+use super::flux2::flux2_control_repo_file;
+#[cfg(target_os = "macos")]
+use super::flux2::flux2_control_scale;
+#[cfg(target_os = "macos")]
+use super::flux2::flux2_dev_edit_memory_context;
+#[cfg(target_os = "macos")]
+use super::flux2::flux2_edit_conditioning_reference_count;
+#[cfg(target_os = "macos")]
+use super::flux2::flux2_edit_engine_id;
+#[cfg(target_os = "macos")]
+use super::flux2::flux2_edit_generate_one;
+#[cfg(target_os = "macos")]
+use super::flux2::flux2_edit_image_guidance;
+#[cfg(target_os = "macos")]
+use super::flux2::flux2_edit_reference_ids;
+#[cfg(target_os = "macos")]
+use super::flux2::flux2_edit_resolved_quant;
+#[cfg(target_os = "macos")]
+use super::flux2::flux2_edit_route_mode;
+#[cfg(target_os = "macos")]
+use super::flux2::flux2_edit_text_guidance;
+#[cfg(target_os = "macos")]
+use super::flux2::flux2_edit_uses_provider_memory_safety;
+#[cfg(target_os = "macos")]
+use super::flux2::plan_edit_batch;
+#[cfg(target_os = "macos")]
+use super::flux2::FLUX2_CONTROL_FILE;
+#[cfg(target_os = "macos")]
+use super::flux2::FLUX2_CONTROL_REVISION;
+#[cfg(target_os = "macos")]
+use super::flux2::FLUX2_DEV_CONTROL_ENGINE_ID;
+#[cfg(target_os = "macos")]
+use super::flux2::MAX_KLEIN_EDIT_REFERENCES;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_comfyui_candle;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_comfyui_candle::flux2_comfyui_quant;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_comfyui_candle::FLUX2_COMFYUI_DEFAULT_QUANT;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_control_candle::flux2_control_adapter_source_bytes;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_control_candle::flux2_control_candle_repo_file;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_control_candle::flux2_strict_control_test_fixture;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_control_candle::FLUX2_CONTROL_CANDLE_DEFAULT_SCALE;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_control_candle::FLUX2_CONTROL_CANDLE_ENGINE;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_control_candle::FLUX2_CONTROL_CANDLE_ENGINE_ID;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_control_candle::FLUX2_CONTROL_CANDLE_REVISION;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_control_candle_available;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_edit_candle::flux2_edit_adapter_source_bytes;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_edit_candle::flux2_edit_candle_mode;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_edit_candle::flux2_edit_candle_reference_ids;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_edit_candle::flux2_edit_candle_repo;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_edit_candle::is_flux2_edit_candle_model;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_edit_candle::resolve_flux2_edit_candle_base;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux2_edit_candle_available;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux_ipadapter::FLUX_IPADAPTER_ADAPTER_REVISION;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::flux_ipadapter::FLUX_IPADAPTER_ENCODER_REVISION;
+#[cfg(target_os = "macos")]
+use super::geometry::fit_engine_image;
+#[cfg(native_lane)]
+use super::geometry::fit_rgb;
+use super::imported_checkpoint_file_for_share;
+#[cfg(native_lane)]
+use super::instantid::instantid_revision;
+#[cfg(target_os = "macos")]
+use super::instantid::INSTANTID_ARCFACE_FILE;
+#[cfg(native_lane)]
+use super::instantid::INSTANTID_CONTROLNET_REVISION;
+#[cfg(target_os = "macos")]
+use super::instantid::INSTANTID_CONTROLNET_SCALE;
+#[cfg(target_os = "macos")]
+use super::instantid::INSTANTID_DEFAULT_GUIDANCE;
+#[cfg(target_os = "macos")]
+use super::instantid::INSTANTID_DEFAULT_STEPS;
+#[cfg(target_os = "macos")]
+use super::instantid::INSTANTID_IP_ADAPTER_FILE;
+#[cfg(target_os = "macos")]
+use super::instantid::INSTANTID_IP_SCALE;
+#[cfg(native_lane)]
+use super::instantid::INSTANTID_MLX_REPO;
+#[cfg(native_lane)]
+use super::instantid::INSTANTID_MLX_REVISION;
+#[cfg(native_lane)]
+use super::instantid::INSTANTID_OPENPOSE_REVISION;
+#[cfg(target_os = "macos")]
+use super::instantid::INSTANTID_SCRFD_FILE;
+#[cfg(native_lane)]
+use super::instantid::PULID_ADAPTER_REVISION;
+#[cfg(native_lane)]
+use super::instantid::PULID_MLX_REVISION;
+#[cfg(native_lane)]
+use super::iris_upscale_overlay;
+#[cfg(target_os = "macos")]
+use super::kolors::kolors_control_available;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::kolors_control::kolors_control_repo_file;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::kolors_control::kolors_strict_control_test_fixture;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::kolors_control::KOLORS_CONTROL_ENGINE;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::kolors_control::KOLORS_CONTROL_ENGINE_ID;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::kolors_control::KOLORS_CONTROL_REVISION;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::kolors_ipadapter::KOLORS_IPADAPTER_REVISION;
+#[cfg(target_os = "macos")]
+use super::krea_control::krea_control_calibration_provenance;
+#[cfg(target_os = "macos")]
+use super::krea_control::krea_control_generate_one;
+#[cfg(target_os = "macos")]
+use super::krea_control::krea_control_memory_inputs;
+#[cfg(target_os = "macos")]
+use super::krea_control::krea_control_overlay_repo_file;
+#[cfg(target_os = "macos")]
+use super::krea_control::krea_control_payload_overlay_path;
+#[cfg(target_os = "macos")]
+use super::krea_control::krea_control_spec;
+#[cfg(target_os = "macos")]
+use super::krea_control::resolve_krea_control_base;
+#[cfg(target_os = "macos")]
+use super::krea_control::KREA_CONTROL_BASE_REVISION;
+#[cfg(target_os = "macos")]
+use super::krea_control::KREA_CONTROL_DEFAULT_SCALE;
+#[cfg(target_os = "macos")]
+use super::krea_control::KREA_CONTROL_ENGINE_ID;
+#[cfg(target_os = "macos")]
+use super::krea_control::KREA_CONTROL_MLX_REPO;
+#[cfg(target_os = "macos")]
+use super::krea_control::KREA_CONTROL_OVERLAY_FILE;
+#[cfg(target_os = "macos")]
+use super::krea_control::KREA_CONTROL_OVERLAY_PIN;
+#[cfg(target_os = "macos")]
+use super::krea_control::KREA_CONTROL_OVERLAY_REVISION;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::krea_control_candle::krea_control_overlay_repo_file;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::krea_control_candle::krea_control_payload_overlay_path;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::krea_control_candle::krea_strict_control_test_fixture;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::krea_control_candle::resolve_krea_control_base;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::krea_control_candle::KREA_CONTROL_OVERLAY_REVISION;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::krea_control_candle_available;
+#[cfg(target_os = "macos")]
+use super::krea_edit::krea_edit_generate_one;
+#[cfg(target_os = "macos")]
+use super::krea_imported::drive_krea_imported_mlx_items;
+#[cfg(native_lane)]
+use super::krea_imported::imported_model_quant;
+#[cfg(native_lane)]
+use super::krea_imported::is_single_file_checkpoint;
+#[cfg(native_lane)]
+use super::krea_imported::krea_imported_available;
+#[cfg(target_os = "macos")]
+use super::krea_imported::krea_imported_base_tier_complete;
+#[cfg(native_lane)]
+use super::krea_imported::krea_imported_conditioning;
+#[cfg(target_os = "macos")]
+use super::krea_imported::krea_imported_control_available;
+#[cfg(native_lane)]
+use super::krea_imported::krea_imported_img2img_requested;
+#[cfg(target_os = "macos")]
+use super::krea_imported::krea_imported_memory_inputs;
+#[cfg(native_lane)]
+use super::krea_imported::krea_imported_raw_settings;
+#[cfg(target_os = "macos")]
+use super::krea_imported::krea_imported_request_shape_available;
+#[cfg(target_os = "macos")]
+use super::krea_imported::pin_krea_imported_payload_control_overlay;
+#[cfg(target_os = "macos")]
+use super::krea_imported::prepare_krea_imported_control_sources;
+#[cfg(target_os = "macos")]
+use super::krea_imported::prepare_krea_imported_sources;
+#[cfg(target_os = "macos")]
+use super::krea_imported::resolve_imported_krea_dit;
+#[cfg(target_os = "macos")]
+use super::krea_imported::resolve_imported_krea_dit_pin;
+#[cfg(native_lane)]
+use super::krea_imported::resolve_krea_imported_base_tier;
+#[cfg(target_os = "macos")]
+use super::krea_imported::resolve_krea_imported_control_overlay;
+#[cfg(not(test))]
+use super::krea_imported::resolve_krea_imported_control_overlay;
+#[cfg(native_lane)]
+use super::krea_imported::resolve_krea_imported_edit_conditioning;
+#[cfg(target_os = "macos")]
+use super::krea_imported::PreparedKreaImportedControlSources;
+#[cfg(native_lane)]
+use super::krea_imported::PreparedKreaImportedSources;
+#[cfg(native_lane)]
+use super::krea_imported::KREA_IMPORTED_BASE_REPO;
+#[cfg(native_lane)]
+use super::krea_imported::KREA_IMPORTED_BASE_TIER;
+#[cfg(not(test))]
+use super::krea_imported::KREA_IMPORTED_ENGINE;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::krea_imported::KREA_IMPORTED_ENGINE;
+#[cfg(target_os = "macos")]
+use super::krea_multiphase::build_generation_phases;
+#[cfg(native_lane)]
+use super::krea_multiphase::ensure_multiphase_job_shape;
+#[cfg(target_os = "macos")]
+use super::krea_multiphase::krea_multiphase_generate_one;
+#[cfg(native_lane)]
+use super::krea_multiphase::multiphase_load_quant;
+#[cfg(target_os = "macos")]
+use super::krea_multiphase::parse_multiphase_specs;
+#[cfg(target_os = "macos")]
+use super::krea_multiphase::request_has_multiphase;
+#[cfg(target_os = "macos")]
+use super::krea_multiphase::MultiPhaseSpec;
+#[cfg(target_os = "macos")]
+use super::krea_multiphase::PhaseLoraRef;
+#[cfg(target_os = "macos")]
+use super::krea_turbo_raw::lora_declares_accelerator_role;
+#[cfg(native_lane)]
+use super::krea_turbo_raw::KREA_RAW_MODEL_ID;
+#[cfg(native_lane)]
+use super::krea_turbo_raw::KREA_TURBO_ENGINE_ID;
+#[cfg(native_lane)]
+use super::lane_controls;
+#[cfg(native_lane)]
+use super::load_spec::attach_manifest_text_encoder;
+#[cfg(target_os = "macos")]
+use super::load_spec::attach_selected_decoder;
+#[cfg(target_os = "macos")]
+use super::load_spec::load_control_engine;
+#[cfg(target_os = "macos")]
+use super::load_spec::load_engine;
+#[cfg(native_lane)]
+use super::load_spec::load_spec;
+use super::lora_weight;
+#[cfg(target_os = "macos")]
+use super::mage_finetuned::mage_finetuned_available;
+#[cfg(native_lane)]
+use super::mage_finetuned::mage_finetuned_generation_request;
+#[cfg(target_os = "macos")]
+use super::mage_finetuned::mage_finetuned_memory_load_shape_with;
+#[cfg(target_os = "macos")]
+use super::mage_finetuned::prepare_mage_finetuned_transformer;
+#[cfg(native_lane)]
+use super::mage_finetuned::resolve_mage_finetuned_transformer;
+#[cfg(target_os = "macos")]
+use super::mage_finetuned::resolve_plan_backed_mage_finetuned_transformer;
+#[cfg(native_lane)]
+use super::mage_finetuned::MAGE_FINETUNED_BASE_MODEL;
+#[cfg(native_lane)]
+use super::mage_finetuned::MAGE_FINETUNED_COMPONENT_TIER;
+#[cfg(target_os = "macos")]
+use super::mage_finetuned::MAGE_FINETUNED_MEMORY_ROUTE;
+#[cfg(target_os = "macos")]
+use super::mage_finetuned::MAGE_FLOW_PLAN_FAMILY;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::memory::downtier_candidate_tiers;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::memory::flux2_klein_reference_bearing_mode;
+#[cfg(native_lane)]
+use super::memory::krea_turbo_memory_route;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::min_quality_floor;
+#[cfg(native_lane)]
+use super::mlx_model;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::nvfp4_requested;
+use super::parse_prompt_enhancement_fields;
+#[cfg(native_lane)]
+use super::prompt_enhancement_fact;
+#[cfg(target_os = "macos")]
+use super::pulid::pulid_identity_weights;
+#[cfg(target_os = "macos")]
+use super::pulid::PulidWeights;
+#[cfg(target_os = "macos")]
+use super::pulid::PULID_ADAPTER_FILE;
+#[cfg(target_os = "macos")]
+use super::pulid::PULID_ADAPTER_REPO;
+#[cfg(target_os = "macos")]
+use super::pulid::PULID_BISENET_FILE;
+#[cfg(target_os = "macos")]
+use super::pulid::PULID_EVA_FILE;
+#[cfg(target_os = "macos")]
+use super::pulid::PULID_MLX_REPO;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::pulid_candle::pulid_candle_revision;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::pulid_candle::PULID_CANDLE_ADAPTER_REVISION;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::pulid_candle::PULID_CANDLE_FACE_REPO;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::pulid_candle::PULID_CANDLE_FACE_REVISION;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::pulid_candle::PULID_CANDLE_MLX_REVISION;
+#[cfg(target_os = "macos")]
+use super::quantization::mlx_load_quant_for_resolved_artifact;
+#[cfg(target_os = "macos")]
+use super::quantization::resolve_quant;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::quantization::tier_key_from_resolved_dir;
+#[cfg(target_os = "macos")]
+use super::qwen::qwen_control_generate_one;
+#[cfg(target_os = "macos")]
+use super::qwen::qwen_control_load;
+#[cfg(target_os = "macos")]
+use super::qwen::qwen_control_raw_settings;
+#[cfg(target_os = "macos")]
+use super::qwen::qwen_edit_engine_id;
+#[cfg(target_os = "macos")]
+use super::qwen::qwen_edit_generate_one;
+#[cfg(target_os = "macos")]
+use super::qwen::qwen_edit_lightning;
+#[cfg(target_os = "macos")]
+use super::qwen::qwen_edit_reference_ids;
+#[cfg(target_os = "macos")]
+use super::qwen::resolve_qwen_control_weights;
+#[cfg(target_os = "macos")]
+use super::qwen::resolve_qwen_edit_guidance;
+#[cfg(target_os = "macos")]
+use super::qwen::QWEN_CONTROL_ENGINE_ID;
+#[cfg(target_os = "macos")]
+use super::qwen::QWEN_LIGHTNING_LORA_REVISION;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::qwen_comfyui_candle;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::qwen_control::qwen_control_repo_file;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::qwen_control::qwen_strict_control_test_fixture;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::qwen_control::QWEN_CONTROL_DEFAULT_REPO;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::qwen_control::QWEN_CONTROL_DEFAULT_SCALE;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::qwen_control::QWEN_CONTROL_ENGINE;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::qwen_control::QWEN_CONTROL_ENGINE_ID;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::qwen_control::QWEN_CONTROL_REVISION;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::qwen_edit_candle::QWEN_EDIT_CANDLE_LIGHTNING_LORA_REVISION;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::qwen_edit_candle_available;
+use super::reattach_alpha;
+#[cfg(native_lane)]
+use super::render::build_lane_conditioning;
+#[cfg(native_lane)]
+use super::render::build_lane_conditioning_with_alpha;
+#[cfg(target_os = "macos")]
+use super::render::generate_one;
+#[cfg(native_lane)]
+use super::render::generate_one_with_hires;
+#[cfg(native_lane)]
+use super::render::hires_first_pass_context;
+#[cfg(native_lane)]
+use super::render::hires_fix_reference_count;
+#[cfg(native_lane)]
+use super::render::lane_reference_count;
+#[cfg(native_lane)]
+use super::render::HiresFixPlan;
+use super::resolve_adapter_file;
+use super::resolve_pinned_native_package;
+#[cfg(native_lane)]
+use super::resolve_prepared_adapter_file;
+use super::resolve_seed;
+use super::resolved_sampler_for_share;
+use super::resolved_steps_for_share;
+#[cfg(native_lane)]
+use super::routing::imported_base_snapshot_companions;
+#[cfg(native_lane)]
+use super::routing::imported_generate_request_has_unsupported_shape;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::routing::prepare_candle_image_route;
+#[cfg(target_os = "macos")]
+use super::routing::prepare_image_route;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::routing::resolve_candle_image_route;
+#[cfg(target_os = "macos")]
+use super::routing::resolve_image_route;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::routing::CandleImageRoute;
+#[cfg(target_os = "macos")]
+use super::routing::ImageRoute;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::routing::PreparedCandleImageRoute;
+#[cfg(target_os = "macos")]
+use super::routing::PreparedImageRoute;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::routing::WIRED_CANDLE_POSE_FAMILIES;
+#[cfg(target_os = "macos")]
+use super::routing::WIRED_MLX_POSE_FAMILIES;
+#[cfg(native_lane)]
+use super::sampling::mlx_raw_settings;
+#[cfg(target_os = "macos")]
+use super::sampling::recover_ideogram_placeholder;
+#[cfg(native_lane)]
+use super::sampling::recover_ideogram_placeholder_with;
+#[cfg(native_lane)]
+use super::sampling::resolve_advanced_or_manifest_f32;
+#[cfg(native_lane)]
+use super::sampling::resolve_advanced_or_manifest_f32_with;
+#[cfg(native_lane)]
+use super::sampling::resolve_advanced_or_manifest_u32;
+#[cfg(native_lane)]
+use super::sampling::resolve_advanced_or_manifest_u32_with;
+#[cfg(native_lane)]
+use super::sampling::resolve_guidance;
+#[cfg(native_lane)]
+use super::sampling::resolve_negative_prompt;
+#[cfg(native_lane)]
+use super::sampling::resolve_steps;
+#[cfg(target_os = "macos")]
+use super::sampling::resolve_true_cfg;
+#[cfg(target_os = "macos")]
+use super::sampling::uses_true_cfg;
+#[cfg(target_os = "macos")]
+use super::sdxl::sdxl_sub_mode;
+#[cfg(target_os = "macos")]
+use super::sdxl::SdxlSubMode;
+#[cfg(native_lane)]
+use super::sdxl_control::SDXL_CONTROL_ENGINE_ID;
+#[cfg(native_lane)]
+use super::sdxl_control::SDXL_CONTROL_MODELS;
+#[cfg(native_lane)]
+use super::sdxl_control::SDXL_CONTROL_REPO;
+#[cfg(native_lane)]
+use super::sdxl_imported::mirror_cached_sdxl_component_file;
+#[cfg(native_lane)]
+use super::sdxl_imported::mirror_cached_sdxl_component_file_with_copy;
+#[cfg(target_os = "macos")]
+use super::sdxl_imported::prepare_sdxl_imported_sources;
+#[cfg(all(native_lane, all(windows, feature = "backend-candle")))]
+use super::sdxl_imported::promote_cached_sdxl_component;
+#[cfg(target_os = "macos")]
+use super::sdxl_imported::resolve_imported_sdxl_file;
+#[cfg(target_os = "macos")]
+use super::sdxl_imported::resolve_imported_sdxl_pin;
+#[cfg(target_os = "macos")]
+use super::sdxl_imported::sdxl_imported_available;
+#[cfg(target_os = "macos")]
+use super::sdxl_imported::sdxl_imported_request_shape_available;
+#[cfg(native_lane)]
+use super::sdxl_imported::SDXL_CLIP_BIGG_REVISION;
+#[cfg(native_lane)]
+use super::sdxl_imported::SDXL_CLIP_L_REPO;
+#[cfg(native_lane)]
+use super::sdxl_imported::SDXL_CLIP_L_REVISION;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::sdxl_ipadapter::SDXL_IPADAPTER_REVISION;
+#[cfg(target_os = "macos")]
+use super::sensenova::resolve_sensenova_img_cfg;
+#[cfg(target_os = "macos")]
+use super::sensenova::resolve_sensenova_timestep_shift;
+#[cfg(target_os = "macos")]
+use super::sensenova::sensenova_dim;
+#[cfg(target_os = "macos")]
+use super::sensenova::sensenova_edit_available;
+#[cfg(target_os = "macos")]
+use super::sensenova::sensenova_edit_generate_one;
+#[cfg(native_lane)]
+use super::slim_step_result;
+use super::split_alpha;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::standard_tier_subdir;
+#[cfg(native_lane)]
+use super::stream::drive_gen_items;
+#[cfg(native_lane)]
+use super::stream::drive_gen_items_scored_reported;
+#[cfg(native_lane)]
+use super::stream::preview_sink_for;
+#[cfg(target_os = "macos")]
+use super::stream::release_gen_cache_between_items;
+#[cfg(not(test))]
+use super::stream::release_gen_cache_between_items;
+#[cfg(target_os = "macos")]
+use super::stream::without_mlx_cache_release_for_headless_test;
+#[cfg(native_lane)]
+use super::stream::GenEvent;
+use super::streaming_result;
+#[cfg(target_os = "macos")]
+use super::strict_control::build_control_conditioning;
+#[cfg(target_os = "macos")]
+use super::strict_control::control_source_asset_id;
+#[cfg(native_lane)]
+use super::strict_control::preprocess_control_entry;
+#[cfg(native_lane)]
+use super::strict_control::requested_control_kind;
+#[cfg(native_lane)]
+use super::strict_control::resolve_user_control_map;
+#[cfg(target_os = "macos")]
+use super::strict_control::strict_control_default_repo;
+#[cfg(native_lane)]
+use super::strict_control::strict_control_engine;
+#[cfg(native_lane)]
+use super::strict_control::trusted_control_weight_revision;
+#[cfg(native_lane)]
+use super::strict_control::validate_control_kind;
+use super::stub_raw_settings;
+use super::stub_rgb8;
+use super::upscaled_workflow_share;
+use super::validate_flux3_layout_request;
+use super::validate_hires_fix_request;
+use super::validate_prompt_enhancement_request;
+use super::workflow_source;
+use super::write_image_asset;
+#[cfg(native_lane)]
+use super::write_upscaled_asset;
+#[cfg(target_os = "macos")]
+use super::zimage::augment_prompt_for_pose;
+#[cfg(target_os = "macos")]
+use super::zimage::resolve_base_control_weights;
+#[cfg(target_os = "macos")]
+use super::zimage::resolve_control_scale;
+#[cfg(target_os = "macos")]
+use super::zimage::resolve_control_weights;
+#[cfg(target_os = "macos")]
+use super::zimage::zimage_base_control_generate_one;
+#[cfg(target_os = "macos")]
+use super::zimage::zimage_base_control_load;
+#[cfg(target_os = "macos")]
+use super::zimage::zimage_control_generate_one;
+#[cfg(target_os = "macos")]
+use super::zimage::zimage_control_load;
+#[cfg(target_os = "macos")]
+use super::zimage::CHARACTER_ANGLE_SET_ORDER;
+#[cfg(target_os = "macos")]
+use super::zimage::POSE_SKELETON_PROMPT;
+#[cfg(target_os = "macos")]
+use super::zimage::ZIMAGE_CONTROL_ENGINE_ID;
+#[cfg(target_os = "macos")]
+use super::zimage::ZIMAGE_CONTROL_FILE;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_comfyui_candle;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::is_zimage_base_model;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::is_zimage_control_model;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::zimage_control_base_default_repo;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::zimage_control_guidance;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::zimage_control_repo_file;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::zimage_control_steps;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::zimage_strict_control_test_cfg;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::zimage_strict_control_test_fixture;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::ZIMAGE_CTRL_BASE_DEFAULT_GUIDANCE;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::ZIMAGE_CTRL_BASE_DEFAULT_STEPS;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::ZIMAGE_CTRL_BASE_ENGINE_ID;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::ZIMAGE_CTRL_BASE_REVISION;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::ZIMAGE_CTRL_DEFAULT_SCALE;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::ZIMAGE_CTRL_DEFAULT_STEPS;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::ZIMAGE_CTRL_ENGINE;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::ZIMAGE_CTRL_ENGINE_ID;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_control::ZIMAGE_CTRL_REVISION;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::zimage_identity_candle_strength;
+#[cfg(native_lane)]
+use super::AdapterKind;
+#[cfg(native_lane)]
+use super::AdapterSpec;
+use super::Arc;
+#[cfg(native_lane)]
+use super::CancelFlag;
+#[cfg(native_lane)]
+use super::Conditioning;
+#[cfg(native_lane)]
+use super::ControlKind;
+use super::GeneratedPixels;
+#[cfg(native_lane)]
+use super::GenerationOutput;
+#[cfg(native_lane)]
+use super::GenerationRequest;
+#[cfg(native_lane)]
+use super::Generator;
+#[cfg(target_os = "macos")]
+use super::IdentityWeights;
+#[cfg(native_lane)]
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+#[cfg(target_os = "macos")]
+use super::InstantId;
+#[cfg(not(test))]
+use super::InstantId;
+#[cfg(target_os = "macos")]
+use super::InstantIdPaths;
+#[cfg(not(test))]
+use super::InstantIdPaths;
+#[cfg(target_os = "macos")]
+use super::InstantIdRequest;
+#[cfg(not(test))]
+use super::InstantIdRequest;
+#[cfg(native_lane)]
+use super::LoadSpec;
+#[cfg(native_lane)]
+use super::Progress;
+#[cfg(native_lane)]
+use super::PromptEnhance;
+#[cfg(native_lane)]
+use super::Quant;
+#[cfg(target_os = "macos")]
+use super::Weights;
+#[cfg(native_lane)]
+use super::WeightsSource;
+use super::WorkflowLora;
+use super::PREFIX_KV_CACHE_RESULT_KEY;
+use super::STUB_ADAPTER;
+use crate::model_file_identity;
+use crate::safe_download_dir;
+#[cfg(native_lane)]
+use crate::strip_jsonc_comments;
+#[cfg(native_lane)]
+use crate::ApiClient;
+#[cfg(target_os = "macos")]
+use crate::Duration;
+#[cfg(native_lane)]
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+#[cfg(native_lane)]
+use crate::PathBuf;
+#[cfg(native_lane)]
+use crate::ProjectStore;
+use crate::Settings;
+use crate::Sha256;
+use crate::Value;
+use crate::WorkerError;
+#[cfg(native_lane)]
+use crate::WorkerResult;
+use crate::INSTALL_MARKER;
+#[cfg(native_lane)]
+use sceneworks_core::checkpoint_import::CheckpointContainerV1;
 use serde_json::json;
+use sha2::Digest;
+
+#[test]
+fn flux3_layout_raw_queue_refuses_unsupported_models_and_malformed_boxes_before_dispatch() {
+    for payload in [
+        json!({"model":"flux2_dev","advanced":{"flux3_layout":{"version":1,"boxes":[{"id":"a","bbox":[0,0,1,1]}]}}}),
+        json!({"model":"flux3_klein","advanced":{"flux3_layout":{"version":1,"boxes":[{"id":"a","bbox":[0,false,1,1]}]}}}),
+        json!({"model":"flux3_klein","referenceAssetIds":["same","same"],"advanced":{"flux3_reference_ids":["slot","slot"]}}),
+    ] {
+        let request = ImageRequest::from_payload(payload.as_object().unwrap());
+        assert!(matches!(
+            validate_flux3_layout_request(&request),
+            Err(WorkerError::InvalidPayload(_))
+        ));
+    }
+    let valid = json!({"model":"flux3_klein","advanced":{"flux3_layout":{"version":1,"boxes":[{"id":"a","desc":"cat","bbox":[0.1,0.2,0.7,0.8]}]}}});
+    assert!(
+        validate_flux3_layout_request(&ImageRequest::from_payload(valid.as_object().unwrap()))
+            .is_ok()
+    );
+}
 
 #[cfg(target_os = "macos")]
 fn assert_route_retarget_artifact_seal_mismatch(
@@ -92,14 +1007,11 @@ fn every_candle_text_encoder_route_resolves_from_the_runtime_registry() {
     );
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn default_and_absent_text_encoder_selection_leave_load_spec_untouched() {
     let dir = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
     let default_request = request(json!({
         "projectId": "p",
@@ -139,14 +1051,11 @@ fn default_and_absent_text_encoder_selection_leave_load_spec_untouched() {
 /// rejects a selected encoder with no API resolution before any fit, admission, cache, or provider
 /// load can proceed. That makes a formatting-only route refactor irrelevant while preserving the
 /// fail-closed contract the old scan intended to protect.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn every_specialized_text_encoder_engine_rejects_an_unresolved_selection_before_load() {
     let root = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
 
     for engine_id in [
@@ -192,20 +1101,234 @@ fn every_specialized_text_encoder_engine_rejects_an_unresolved_selection_before_
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use crate::test_env::EnvVars;
 
 fn request(value: Value) -> ImageRequest {
     ImageRequest::from_payload(&value.as_object().cloned().unwrap())
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+/// Execute the actual production dispatch/fallback seam, not a copy of its classification.
+/// Mutations: delete require_legacy_fallback_allowed CALL inside it, or remove the root callsite.
+#[tokio::test]
+async fn flux3_missing_native_handler_never_invokes_procedural_fallback() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let production = include_str!("../image_jobs.rs");
+    let call = production
+        .find("dispatch_legacy_fallback(&request.model, handled,")
+        .expect("real dispatcher calls the shared decision seam");
+    let stub = production[call..]
+        .find("generate_stub_stream(")
+        .expect("real stub closure is guarded");
+    assert!(stub > 0);
+    for model in ["flux3_klein", "flux3_klein_base"] {
+        let called = AtomicBool::new(false);
+        let error = dispatch_legacy_fallback(model, false, || async {
+            called.store(true, Ordering::Relaxed);
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, WorkerError::InvalidPayload(message) if message.contains("unsupported") && message.contains(model))
+        );
+        assert!(
+            !called.load(Ordering::Relaxed),
+            "{model} produced fake procedural success"
+        );
+        dispatch_legacy_fallback(model, true, || async {
+            called.store(true, Ordering::Relaxed);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(!called.load(Ordering::Relaxed));
+    }
+    let called = AtomicBool::new(false);
+    dispatch_legacy_fallback("test_stub_model", false, || async {
+        called.store(true, Ordering::Relaxed);
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert!(
+        called.load(Ordering::Relaxed),
+        "legacy non-FLUX3 stub behavior must remain"
+    );
+}
+
+#[test]
+fn flux3_weights_require_exact_receipts_and_never_fall_back_to_distilled_or_cache_head() {
+    let root = tempfile::tempdir().unwrap();
+    let hub = root.path().join("hub");
+    std::fs::create_dir_all(&hub).unwrap();
+    let _hf = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", hub.to_str().unwrap()),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+    ]);
+    let repo = "black-forest-labs/flux-3-image-klein-base";
+    let revision = "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4";
+    let stage = |repo: &str, revision: &str| {
+        let library = sceneworks_core::hf_home::model_source_library(root.path());
+        let cache = library.repository_root(repo).unwrap();
+        let snapshot = library
+            .snapshots_root_from_repository_root(&cache)
+            .unwrap()
+            .join(revision);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(
+            snapshot.join("model.safetensors"),
+            b"tiny source fixture, not model weights",
+        )
+        .unwrap();
+        std::fs::create_dir_all(snapshot.join("text_encoder")).unwrap();
+        for file in [
+            "config.json",
+            "ae.safetensors",
+            "text_encoder/config.json",
+            "text_encoder/tokenizer.json",
+            "text_encoder/tokenizer_config.json",
+            "text_encoder/model-00001-of-00002.safetensors",
+            "text_encoder/model-00002-of-00002.safetensors",
+        ] {
+            std::fs::write(snapshot.join(file), b"{}").unwrap();
+        }
+        std::fs::write(snapshot.join("text_encoder/model.safetensors.index.json"), serde_json::to_vec(&json!({"weight_map":{"first":"model-00001-of-00002.safetensors","last":"model-00002-of-00002.safetensors"}})).unwrap()).unwrap();
+        std::fs::create_dir_all(cache.join("refs")).unwrap();
+        std::fs::write(cache.join("refs/main"), revision).unwrap();
+        snapshot
+    };
+    let expected = stage(repo, revision);
+    let write_receipt = |repo: &str, revision: &str, snapshot: &std::path::Path| {
+        let marker = root.path().join("models").join("flux3_klein_base");
+        std::fs::create_dir_all(&marker).unwrap();
+        let stamp =
+            crate::model_jobs::resolved_files_tree_stamp(snapshot, &["model.safetensors"]).unwrap();
+        std::fs::write(marker.join(crate::INSTALL_MARKER), serde_json::to_vec(&json!({
+            "schemaVersion":2,"repo":repo,"modelId":"flux3_klein_base","variant":"default",
+            "snapshotRevision":revision,"resolvedFiles":["model.safetensors"],"artifactTreeStamp":stamp
+        })).unwrap()).unwrap();
+    };
+    let resolve =
+        || resolve_pinned_native_package(root.path(), repo, revision, "flux3_klein_base", None);
+    let error = resolve().unwrap_err();
+    assert!(error.to_string().contains("exact-revision install receipt"));
+    let distilled_repo = "black-forest-labs/flux-3-image-klein";
+    let distilled_revision = "8454017f9ebaada30c998fccd9f67a80c7580f68";
+    let distilled = stage(distilled_repo, distilled_revision);
+    write_receipt(distilled_repo, distilled_revision, &distilled);
+    assert!(resolve().is_err());
+    let wrong_revision = "0000000000000000000000000000000000000000";
+    let wrong = stage(repo, wrong_revision);
+    write_receipt(repo, wrong_revision, &wrong);
+    assert!(resolve().is_err());
+    write_receipt(repo, revision, &expected);
+    // Compare filesystem identity, not Windows path spelling (`\\?\` extended form).
+    assert_eq!(
+        std::fs::canonicalize(resolve().unwrap()).unwrap(),
+        std::fs::canonicalize(&expected).unwrap()
+    );
+    std::fs::remove_file(expected.join("ae.safetensors")).unwrap();
+    assert!(resolve()
+        .unwrap_err()
+        .to_string()
+        .contains("ae.safetensors"));
+    std::fs::write(expected.join("ae.safetensors"), b"{}").unwrap();
+    std::fs::remove_file(expected.join("text_encoder/model-00002-of-00002.safetensors")).unwrap();
+    assert!(resolve()
+        .unwrap_err()
+        .to_string()
+        .contains("model-00002-of-00002.safetensors"));
+    std::fs::write(
+        expected.join("text_encoder/model-00002-of-00002.safetensors"),
+        b"{}",
+    )
+    .unwrap();
+    let wrong_override = root.path().join("models/another-checkpoint");
+    std::fs::create_dir_all(&wrong_override).unwrap();
+    assert!(resolve_pinned_native_package(
+        root.path(),
+        repo,
+        revision,
+        "flux3_klein_base",
+        Some(&wrong_override)
+    )
+    .is_err());
+    std::fs::write(
+        expected.join("model.safetensors"),
+        b"changed under same snapshot path",
+    )
+    .unwrap();
+    assert!(resolve().is_err());
+}
+
+#[test]
+fn flux3_enhancement_worker_guard_remains_authoritative_for_actual_native_availability() {
+    let _env = crate::test_env::env_lock();
+    let mut settings = crate::test_env::offline_settings();
+    settings.backend_candle_enabled = false;
+    for model in ["flux3_klein", "flux3_klein_base"] {
+        let req = request(
+            json!({"model":model,"mode":"text_to_image","prompt":"a fox","advanced":{"enhancePrompt":true,"enhanceMaxTokens":3584}}),
+        );
+        let result = validate_prompt_enhancement_request(&req, &settings);
+        #[cfg(target_os = "macos")]
+        assert!(result.is_ok(), "{result:?}");
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("enabled native Candle"));
+        #[cfg(not(native_lane))]
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("native MLX or Candle"));
+    }
+}
+
+#[test]
+fn flux3_enhancement_uses_the_same_ordered_reference_shape_without_loading_assets() {
+    let _env = crate::test_env::env_lock();
+    let mut settings = crate::test_env::offline_settings();
+    settings.backend_candle_enabled = true;
+    for model in ["flux3_klein", "flux3_klein_base"] {
+        for mode in ["text_to_image", "edit_image", "character_image"] {
+            let req = request(
+                json!({"model":model,"mode":mode,"referenceAssetIds":vec!["duplicate-slot";10],"advanced":{"enhancePrompt":true}}),
+            );
+            let result = validate_prompt_enhancement_request(&req, &settings);
+            #[cfg(native_lane)]
+            assert!(result.is_ok(), "{model}/{mode}: {result:?}");
+            #[cfg(not(native_lane))]
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("native MLX or Candle"));
+        }
+        for extra in [
+            json!({"referenceAssetIds":vec!["same";11]}),
+            json!({"referenceAssetIds":["a",null]}),
+            json!({"referenceAssetId":"a","maskAssetId":"mask"}),
+            json!({"referenceAssetId":"a","advanced":{"enhancePrompt":true,"referenceStrength":1.0}}),
+        ] {
+            let mut payload =
+                json!({"model":model,"mode":"edit_image","advanced":{"enhancePrompt":true}})
+                    .as_object()
+                    .unwrap()
+                    .clone();
+            payload.extend(extra.as_object().unwrap().clone());
+            assert!(validate_prompt_enhancement_request(
+                &ImageRequest::from_payload(&payload),
+                &settings
+            )
+            .is_err());
+        }
+    }
+}
+
+#[cfg(native_lane)]
 #[test]
 fn mage_and_comfy_shared_generate_shape_reject_material_imported_control_intent() {
     assert!(!imported_generate_request_has_unsupported_shape(&request(
@@ -243,7 +1366,7 @@ fn batch_detail_preflight_selects_dense_bf16_and_resolves_authoritative_componen
     let hub = root.path().join("hub");
     std::fs::create_dir_all(&hub).expect("hub dir creates");
     let _hf = isolate_hf_hub_cache_to(&hub);
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
     settings.backend_candle_enabled = true;
 
@@ -441,10 +1564,7 @@ fn hires_fix_preflight_accepts_img2img_models_and_rejects_conflicts() {
     validate_hires_fix_request(&no_block).expect("no hiresFix block, no refusal");
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 struct HiresProbeGenerator {
     descriptor: gen_core::ModelDescriptor,
     requests: std::sync::Mutex<Vec<GenerationRequest>>,
@@ -454,16 +1574,10 @@ struct HiresProbeGenerator {
     contexts: std::sync::Mutex<Vec<gen_core::MemoryRunContext>>,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 struct ProbeMemoryRequestScope;
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl gen_core::MemoryRequestScope for ProbeMemoryRequestScope {
     fn configure_request(&mut self, _request: &mut GenerationRequest) -> gen_core::Result<()> {
         Ok(())
@@ -503,10 +1617,7 @@ impl gen_core::MemoryRequestScope for ProbeMemoryRequestScope {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl HiresProbeGenerator {
     fn new() -> Self {
         Self {
@@ -527,10 +1638,7 @@ impl HiresProbeGenerator {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl Generator for HiresProbeGenerator {
     fn descriptor(&self) -> &gen_core::ModelDescriptor {
         &self.descriptor
@@ -587,19 +1695,13 @@ impl Generator for HiresProbeGenerator {
 /// A provider-facing Krea fixture that rejects any attempt to open an optimized request scope.
 /// Hires must stay on the established fallback because candle-gen-krea does not support the
 /// img2img refinement request under its memory-strategy scope.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 struct StrictKreaHiresFallbackGenerator {
     probe: HiresProbeGenerator,
     memory_scope_attempts: std::sync::atomic::AtomicUsize,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl StrictKreaHiresFallbackGenerator {
     fn new() -> Self {
         let mut probe = HiresProbeGenerator::new();
@@ -613,10 +1715,7 @@ impl StrictKreaHiresFallbackGenerator {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl Generator for StrictKreaHiresFallbackGenerator {
     fn descriptor(&self) -> &gen_core::ModelDescriptor {
         self.probe.descriptor()
@@ -658,10 +1757,7 @@ impl Generator for StrictKreaHiresFallbackGenerator {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn hires_memory_context(selection: gen_core::MemorySelection) -> gen_core::MemoryRunContext {
     gen_core::MemoryRunContext {
         selection,
@@ -694,10 +1790,7 @@ fn hires_memory_context(selection: gen_core::MemorySelection) -> gen_core::Memor
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn hires_fix_runs_two_passes_with_scaled_first_pass_reference_and_monotonic_progress() {
     let generator = HiresProbeGenerator::new();
@@ -776,10 +1869,7 @@ fn hires_fix_runs_two_passes_with_scaled_first_pass_reference_and_monotonic_prog
     );
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn hires_prompt_enhancement_runs_and_reports_only_on_the_final_persisted_pass() {
     let generator = HiresProbeGenerator::new();
@@ -841,10 +1931,7 @@ fn hires_prompt_enhancement_runs_and_reports_only_on_the_final_persisted_pass() 
     assert_eq!(reports.lock().unwrap().len(), 1);
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn krea_hires_fallback_completes_both_passes_without_an_unsupported_request_scope() {
     let generator = StrictKreaHiresFallbackGenerator::new();
@@ -954,10 +2041,7 @@ fn krea_hires_fallback_completes_both_passes_without_an_unsupported_request_scop
 /// mode/reference/geometry identity under the same conservative strategy. This grades what each
 /// pass declared against what that same pass sent, so neither side can be restated wrongly without
 /// the test failing.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn every_hires_pass_declares_the_geometry_that_pass_actually_sends() {
     let generator = HiresProbeGenerator::new();
@@ -1082,7 +2166,7 @@ fn ideogram_selection_telemetry_binds_each_pass_to_the_full_physical_identity() 
     // Architecture tripwire retained: real rendering cannot cheaply expose both serialised
     // per-pass telemetry records on this host; this guards the non-runtime payload schema that
     // binds a receipt to its physical pass identity.
-    let source = include_str!("base.rs");
+    let source = include_str!("candle.rs");
     let telemetry = source
         .split_once("let passes = match hires_first_pass_memory_context.as_ref()")
         .expect("Ideogram per-pass telemetry")
@@ -1239,6 +2323,7 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
                 req.width,
                 req.height,
                 1,
+                gen_core::GenerationRequest::default(),
                 case.conditioning,
                 None,
                 None,
@@ -1388,10 +2473,17 @@ fn dedicated_krea_edit_and_multiphase_helpers_open_the_exact_mlx_request_scope()
         }
     };
 
+    let sampling_controls = GenerationRequest {
+        sampler: Some("heun".into()),
+        scheduler: Some("karras".into()),
+        scheduler_shift: Some(33.375),
+        ..Default::default()
+    };
     let edit_generator = HiresProbeGenerator::new();
     let edit = evaluation(gen_core::MemoryMode::Edit, 2, true, false);
     krea_edit_generate_one(
         &edit_generator,
+        &sampling_controls,
         "edit",
         None,
         4,
@@ -1427,6 +2519,9 @@ fn dedicated_krea_edit_and_multiphase_helpers_open_the_exact_mlx_request_scope()
     );
     let edit_request = edit_generator.requests.lock().unwrap();
     assert!(edit_request[0].use_pid);
+    assert_eq!(edit_request[0].scheduler_shift, Some(33.375));
+    assert_eq!(edit_request[0].sampler.as_deref(), Some("heun"));
+    assert_eq!(edit_request[0].scheduler.as_deref(), Some("karras"));
     assert_eq!(edit_request[0].image_reference_count(), 2);
     assert!(edit_request[0]
         .memory
@@ -1437,6 +2532,7 @@ fn dedicated_krea_edit_and_multiphase_helpers_open_the_exact_mlx_request_scope()
     let phase = evaluation(gen_core::MemoryMode::TextToImage, 0, false, true);
     krea_multiphase_generate_one(
         &phase_generator,
+        &sampling_controls,
         "phases",
         None,
         4,
@@ -1462,6 +2558,9 @@ fn dedicated_krea_edit_and_multiphase_helpers_open_the_exact_mlx_request_scope()
     );
     let phase_request = phase_generator.requests.lock().unwrap();
     assert!(phase_request[0].phases.is_some());
+    assert_eq!(phase_request[0].scheduler_shift, Some(33.375));
+    assert_eq!(phase_request[0].sampler.as_deref(), Some("heun"));
+    assert_eq!(phase_request[0].scheduler.as_deref(), Some("karras"));
     assert!(phase_request[0]
         .memory
         .is_some_and(|memory| memory.stream_transformer_blocks));
@@ -1580,10 +2679,7 @@ fn imported_krea_request_inputs_cover_t2i_img2img_edit_and_hires() {
 /// ALTERNATIVE to the source reference rather than an addition, so an Ideogram 4 inpaint/outpaint
 /// edit declared one reference and sent two. That is inert only for as long as its provider has not
 /// adopted the shared request scope; the moment it does, the render is refused.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn lane_reference_count_matches_the_conditioning_the_lane_builds() {
     // Built inline rather than with the macOS-gated `control_fixture`: this gate must hold on the
@@ -1675,7 +2771,7 @@ fn job_weight_resolution_uses_receipt_after_manifest_filename_change() {
         "manifestFiles": ["q4/transformer/old-*.safetensors", "q4/model_index.json"],
         "resolvedFiles": ["q4/transformer/old-1.safetensors", "q4/transformer/old-2.safetensors", "q4/model_index.json"]
     })).unwrap()).unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
     // This is the job-time manifest snapshot after a catalog bump: only the new names are declared.
     let req = request(json!({
@@ -1696,7 +2792,7 @@ fn job_weight_resolution_uses_receipt_after_manifest_filename_change() {
 /// download is the bare single-file transformer and whose conversion borrows the base klein's
 /// text encoder / VAE / tokenizer. `modelPath` is ABSENT — the API only injects it once the
 /// conversion has produced a local dir — which is exactly the unconverted state.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn unconverted_true_v2_request() -> ImageRequest {
     request(json!({
         "projectId": "p", "model": "flux2_klein_9b_true_v2", "prompt": "a lighthouse",
@@ -1721,11 +2817,11 @@ fn unconverted_true_v2_request() -> ImageRequest {
 /// than falling through to its raw single-file source snapshot and dying deep in the loader with
 /// candle-gen's "snapshot missing the text_encoder/ component directory", which names an internal
 /// path and no remedy. This is the failure the 2026-08-18 model sweep reported.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 #[test]
 fn unconverted_convert_at_install_model_fails_with_an_actionable_error() {
     let root = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
 
     let error = resolve_weights_dir(&unconverted_true_v2_request(), &settings)
@@ -1756,11 +2852,11 @@ fn unconverted_convert_at_install_model_fails_with_an_actionable_error() {
 /// The preflight is a gate on the UNCONVERTED state only. Once the conversion has run, the API
 /// injects the converted dir as `modelPath` and resolution returns it unchanged — the preflight is
 /// never consulted, so a converted install renders exactly as before.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 #[test]
 fn converted_convert_at_install_model_resolves_its_injected_model_path() {
     let root = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
     let converted = root
         .path()
@@ -1800,7 +2896,7 @@ fn converted_convert_at_install_model_resolves_its_injected_model_path() {
 #[test]
 fn off_mac_anima_is_not_refused_by_the_unconverted_preflight() {
     let root = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
     let req = request(json!({
         "projectId": "p", "model": "anima_base", "prompt": "a lighthouse",
@@ -1831,11 +2927,11 @@ fn off_mac_anima_is_not_refused_by_the_unconverted_preflight() {
 /// the sceneworks-core drift guards), not a synthetic stand-in: a hand-written entry with no `mlx`
 /// block passes this vacuously and would keep passing after a manifest edit that added
 /// `requiresConversion` to either turnkey — exactly the drift the guard exists to catch.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 #[test]
 fn builtin_flux2_klein_snapshot_resolution_is_untouched() {
     let root = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
     for model in ["flux2_klein_9b", "flux2_klein_9b_kv"] {
         let entry = crate::tests::builtin_model_entry(model);
@@ -1911,7 +3007,7 @@ fn candle_dispatch_outcome(request: &ImageRequest, settings: &Settings) -> Candl
 #[test]
 fn unconverted_edit_image_job_is_refused_at_dispatch_never_stubbed() {
     let root = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
     settings.backend_candle_enabled = true;
 
@@ -1971,7 +3067,7 @@ fn unconverted_edit_image_job_is_refused_at_dispatch_never_stubbed() {
 #[test]
 fn unconverted_non_edit_modes_keep_their_existing_candle_route() {
     let root = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
     settings.backend_candle_enabled = true;
 
@@ -2002,7 +3098,7 @@ fn unconverted_non_edit_modes_keep_their_existing_candle_route() {
 #[test]
 fn converted_edit_image_job_still_reaches_the_flux2_edit_lane() {
     let root = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
     settings.backend_candle_enabled = true;
     let converted = root
@@ -2211,7 +3307,7 @@ fn write_image_asset_confines_malicious_model_id() {
 /// Worker settings pointed at a scratch config dir, so the embed toggle can be written and read
 /// without touching the real install's `ui-preferences.json`.
 fn settings_with_config_dir(config_dir: &Path) -> Settings {
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.config_dir = config_dir.to_path_buf();
     settings
 }
@@ -2377,6 +3473,54 @@ fn lora_resource_keys_come_from_exact_filenames_and_stay_unique() {
 }
 
 #[test]
+fn flux3_worker_adapter_selection_is_declared_and_confined() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut settings = settings_with_config_dir(&temp.path().join("config"));
+    settings.data_dir = temp.path().join("data");
+    let dir = settings.data_dir.join("loras/selected");
+    std::fs::create_dir_all(&dir).unwrap();
+    let selected = dir.join("final.safetensors");
+    std::fs::write(&selected, b"selected file").unwrap();
+    std::fs::write(dir.join("other.safetensors"), b"wrong sibling").unwrap();
+    for model in ["flux3_klein_base", "flux3_klein"] {
+        let record = json!({"installedPath":dir,"files":["final.safetensors"]});
+        let file = resolve_adapter_file(&record, &settings, model).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(file).unwrap(),
+            std::fs::canonicalize(&selected).unwrap()
+        );
+        for name in [
+            "../outside.safetensors".to_owned(),
+            selected.canonicalize().unwrap().display().to_string(),
+            "missing.safetensors".into(),
+        ] {
+            let invalid = json!({"installedPath":dir,"files":[name]});
+            assert!(
+                resolve_adapter_file(&invalid, &settings, model).is_err(),
+                "{model}/{name}"
+            );
+        }
+    }
+    let external = temp.path().join("outside.safetensors");
+    std::fs::write(&external, b"outside adapter root").unwrap();
+    let link = dir.join("link.safetensors");
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(&external, &link);
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_file(&external, &link);
+    if linked.is_ok() {
+        for model in ["flux3_klein_base", "flux3_klein"] {
+            assert!(resolve_adapter_file(
+                &json!({"installedPath":dir,"files":["link.safetensors"]}),
+                &settings,
+                model
+            )
+            .is_err());
+        }
+    }
+}
+
+#[test]
 fn lora_attribution_resolves_the_manifest_declared_inference_file() {
     let dir = tempfile::tempdir().unwrap();
     let mut settings = settings_with_config_dir(&dir.path().join("config"));
@@ -2394,7 +3538,7 @@ fn lora_attribution_resolves_the_manifest_declared_inference_file() {
     });
     assert_eq!(lora_weight(&raw), 0.7);
     assert_eq!(
-        resolve_adapter_file(&raw, &settings).unwrap(),
+        resolve_adapter_file(&raw, &settings, "test").unwrap(),
         std::fs::canonicalize(final_file).unwrap(),
         "attribution and inference must choose the same manifest-declared adapter"
     );
@@ -2861,19 +4005,18 @@ fn client_sampler_fields_cannot_suppress_the_imported_krea_execution_fact() {
     assert!(!parameters.contains("dpmpp_2m"), "{parameters:?}");
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn imported_krea_records_the_sampler_it_explicitly_executes() {
-    let req = request(json!({
-        "projectId": "p",
-        "model": "kreamania_v4_int8",
-        "advanced": { "sampler": "not-the-runtime-sampler" }
-    }));
-    let raw = krea_imported_raw_settings(&req, 8, false, 0, None);
-    assert_eq!(raw.get("resolvedSampler"), Some(&json!("euler")));
+    for (advanced, expected) in [(json!({}), "euler"), (json!({"sampler":"heun"}), "heun")] {
+        let req = request(json!({
+            "projectId": "p",
+            "model": "kreamania_v4_int8",
+            "advanced": advanced
+        }));
+        let raw = krea_imported_raw_settings(&req, 8, false, 0, None);
+        assert_eq!(raw.get("resolvedSampler"), Some(&json!(expected)));
+    }
 }
 
 /// Turning the setting off writes the file SceneWorks writes today, to the byte.
@@ -3242,10 +4385,45 @@ fn streaming_result_carries_facts_for_api_persistence() {
     assert_eq!(result["adapter"], json!(plan.adapter));
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+/// sc-8953 follow-through (2026-10-27): the STEP-tick result omits the accumulated fact sets
+/// (`assetWrites` / `generationSet` / `prefixKvCache`) on purpose — the per-step cadence is
+/// steps × images and the accumulated set had begun OOM-killing the WebView2 renderer
+/// mid-batch. The slim shape keeps every key a RUNNING job's UI consumes.
+///
+/// Gated like `slim_step_result` itself (macOS / the candle lane) so the default lane
+/// never dead-code warns and the parity lane never sees an out-of-scope symbol.
+#[cfg(native_lane)]
+#[test]
+fn slim_step_result_omits_the_accumulated_fact_sets() {
+    // `count: 8` is the payload-sanity clamp (`MAX_COUNT`), but the assertion is on the
+    // PLAN's field, not the literal — a large real batch (a 260-image angle set) streams
+    // the same shape with a bigger `expectedCount`.
+    let plan = ImagePlan::new(&request(
+        json!({ "projectId": "p", "prompt": "x", "count": 8 }),
+    ));
+    let result = slim_step_result(&plan);
+    // The accumulated sets the API would otherwise re-serialize and re-broadcast
+    // per step — all absent.
+    assert!(
+        !result.contains_key("assetWrites"),
+        "slim step result must not deep-clone the accumulated asset writes"
+    );
+    assert!(
+        !result.contains_key("generationSet"),
+        "slim step result must not carry the generation-set fact"
+    );
+    assert!(
+        !result.contains_key("prefixKvCache"),
+        "slim step result must not carry the prefix-KV-cache summary"
+    );
+    // The running-UI identity keys stay present.
+    assert_eq!(result["generationSetId"], json!(plan.genset_id));
+    assert_eq!(result["expectedCount"], json!(plan.image_count));
+    assert_eq!(result["adapter"], json!(plan.adapter));
+    assert_eq!(result["model"], json!(plan.request.model));
+}
+
+#[cfg(native_lane)]
 #[test]
 fn ideogram_placeholder_recovery_handles_clean_recover_and_exhaustion() {
     let cancel = CancelFlag::new();
@@ -3314,10 +4492,7 @@ fn ideogram_placeholder_recovery_handles_clean_recover_and_exhaustion() {
     assert_eq!(exhausted.0, crate::ideogram_caption::recovery_seed(11, 1));
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn ideogram_placeholder_recovery_honors_cancel_and_propagates_errors() {
     let cancelled = CancelFlag::new();
@@ -3384,14 +4559,21 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
         1,
         "candle route and payload File tokens must be prepared exactly once per job"
     );
-    let route_binding = run_job
-        .find("let route = prepare_candle_image_route")
-        .expect("one route binding");
+    let route_preparation = run_job
+        .find("prepare_candle_image_route(")
+        .expect("one candle route preparation");
+    let route_binding = run_job[..route_preparation]
+        .rfind("let route = {")
+        .expect("the prepared candle route is bound once");
+    assert!(
+        run_job[route_binding..route_preparation].contains("prepare_image_route_with_progress("),
+        "candle route preparation must report real source-verification progress"
+    );
     let plan_use = run_job[route_binding..]
         .find("ImagePlan::with_count_and_adapter")
         .expect("the resolved route feeds the plan");
     let dispatch_use = run_job[route_binding..]
-        .find("let handled = match route")
+        .find("dispatch::execute_candle_image_route(")
         .expect("the same resolved route feeds dispatch");
     assert!(
         plan_use < dispatch_use,
@@ -3410,8 +4592,27 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
         ),
         "the prepared candle route must supply the adapter label"
     );
+    let dispatch = include_str!("dispatch.rs");
+    let candle_dispatch = dispatch
+        .split_once("async fn execute_candle_image_route(")
+        .expect("Candle route executor")
+        .1
+        .split_once("\n}\n")
+        .expect("Candle route executor end")
+        .0;
+    assert_eq!(
+        run_job
+            .matches("dispatch::execute_candle_image_route(")
+            .count(),
+        1
+    );
+    assert!(
+        !dispatch.contains("prepare_candle_image_route(")
+            && !dispatch.contains("prepare_image_route("),
+        "executors consume the single prepared route and must not resolve its pins again"
+    );
     let pose_reject = between(
-        run_job,
+        candle_dispatch,
         "CandleImageRoute::PoseReject => {",
         "CandleImageRoute::PoseControlBaseMissing => {",
     );
@@ -3420,23 +4621,30 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
         "PoseReject must terminate dispatch with a typed payload error"
     );
     let pose_reject_dispatch = run_job
-        .find("CandleImageRoute::PoseReject => {")
-        .expect("PoseReject dispatch arm");
+        .find("dispatch::execute_candle_image_route(")
+        .expect("the executor containing the terminal PoseReject branch");
     let stub_fallback = run_job
-        .find("if !handled {\n        if request.hires_fix.enabled")
-        .expect("procedural-stub fallback");
+        .find("dispatch_legacy_fallback(&request.model, handled, || async {")
+        .expect("model-bound guarded procedural-stub fallback");
+    assert_eq!(
+        run_job.matches("generate_stub_stream(").count(),
+        1,
+        "the single procedural stub must remain inside the guarded fallback"
+    );
+    let stub_call = run_job
+        .find("generate_stub_stream(")
+        .expect("single stub invocation");
+    assert!(
+        stub_fallback < stub_call,
+        "the model-bound no-fallback guard must run before the procedural stub"
+    );
     assert!(
         pose_reject_dispatch < stub_fallback,
         "PoseReject dispatch must execute before the procedural-stub fallback"
     );
 
-    let base = include_str!("base.rs");
-    let mlx_stream = between(
-        base,
-        "async fn generate_stream(",
-        "\nasync fn generate_candle_stream(",
-    );
-    let candle_stream = between(base, "async fn generate_candle_stream(", "\nfn lora_label(");
+    let mlx_stream = include_str!("mlx.rs");
+    let candle_stream = include_str!("candle.rs");
     assert_eq!(
         mlx_stream.matches("recover_ideogram_placeholder(").count(),
         1,
@@ -3481,9 +4689,19 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
         shared_krea_selection < shared_krea_resident && shared_krea_resident < legacy_gate,
         "the shared selector must make Krea's resident decision before the legacy defense gate"
     );
+    let render_source = include_str!("render.rs");
+    let render_surface = between(
+        render_source,
+        "pub(super) fn render_on_surface(",
+        "pub(super) fn resolve_hires_fix_plan(",
+    );
     assert!(
         candle_stream.contains("memory_strategy_context.as_ref()")
-            && base.contains("crate::memory_strategy::generate_with_scope("),
+            && candle_stream.contains("generate_one_with_hires_on_surface(")
+            && render_source.contains("render_on_surface(")
+            && render_surface.contains("crate::memory_strategy::generate_with_scope_report(")
+            && render_surface
+                .contains("            memory_strategy_context,\n            on_progress,"),
         "the selected Krea contract must reach provider safety and lifecycle hooks"
     );
     let probes: Vec<usize> = candle_stream
@@ -3645,10 +4863,7 @@ fn steps_default_is_family_default_and_clamps() {
 // backend-candle lanes. These lock the four behaviors the per-lane inline closures had:
 // advanced wins, manifest is the fallback, absent → the (unclamped) default, and the
 // advanced-or-manifest value is clamped to the caller's range while garbage parses to the default.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn resolve_advanced_or_manifest_u32_precedence_and_clamp() {
     // advanced present wins and is clamped to the caller's range.
@@ -3718,10 +4933,7 @@ fn resolve_advanced_or_manifest_u32_precedence_and_clamp() {
     );
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn resolve_advanced_or_manifest_f32_precedence_and_clamp() {
     // advanced present wins and is clamped to the caller's range.
@@ -3741,7 +4953,7 @@ fn resolve_advanced_or_manifest_f32_precedence_and_clamp() {
             5.0,
             0.0..=30.0,
         ),
-        30.0
+        99.0
     );
     // A numeric string parses just like a JSON float.
     assert_eq!(
@@ -3761,7 +4973,7 @@ fn resolve_advanced_or_manifest_f32_precedence_and_clamp() {
             5.0,
             0.0..=30.0,
         ),
-        30.0
+        99.0
     );
     // Both absent → the per-lane default.
     assert_eq!(
@@ -3790,10 +5002,7 @@ fn resolve_advanced_or_manifest_f32_precedence_and_clamp() {
 // (`flux_ipadapter`, `qwen_edit_candle`/`zimage_control` per-variant steps). Same
 // precedence/clamp contract as the const twins, PLUS: the `default_fn` fires ONLY when both
 // advanced and manifest are absent (a present advanced/manifest value must short-circuit it).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn resolve_advanced_or_manifest_u32_with_precedence_clamp_and_lazy_default() {
     use std::cell::Cell;
@@ -3872,10 +5081,7 @@ fn resolve_advanced_or_manifest_u32_with_precedence_clamp_and_lazy_default() {
     assert!(called.get(), "garbage advanced falls through to default_fn");
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn resolve_advanced_or_manifest_f32_with_precedence_clamp_and_lazy_default() {
     use std::cell::Cell;
@@ -3886,7 +5092,7 @@ fn resolve_advanced_or_manifest_f32_with_precedence_clamp_and_lazy_default() {
     // differs from the u32 twin (whose closure is the whole-chain fallback and fires only when BOTH are
     // absent). These asserts lock that preserved semantic.
 
-    // advanced present wins and is clamped; manifest absent so default_fn still runs to build the
+    // advanced present wins without a recommendation clamp; manifest absent so default_fn still runs to build the
     // (discarded) manifest fallback — byte-identical to the pre-fold inline code.
     let called = Cell::new(false);
     assert_eq!(
@@ -3899,14 +5105,14 @@ fn resolve_advanced_or_manifest_f32_with_precedence_clamp_and_lazy_default() {
             },
             0.0..=30.0,
         ),
-        30.0
+        99.0
     );
     assert!(
         called.get(),
         "f32 default_fn builds the manifest fallback whenever the manifest key is absent"
     );
 
-    // manifest supplies the effective default (clamped) — default_fn NOT invoked.
+    // manifest supplies the effective default — default_fn NOT invoked.
     let called = Cell::new(false);
     assert_eq!(
         resolve_advanced_or_manifest_f32_with(
@@ -3918,7 +5124,7 @@ fn resolve_advanced_or_manifest_f32_with_precedence_clamp_and_lazy_default() {
             },
             0.0..=30.0,
         ),
-        30.0
+        99.0
     );
     assert!(
         !called.get(),
@@ -4143,7 +5349,7 @@ fn sensenova_edit_available_needs_a_reference() {
     // Plain T2I (no reference) is NOT the edit path — it rides the base mlx path.
     assert!(!sensenova_edit_available(
         &request(json!({ "projectId": "p", "model": "sensenova_u1_8b", "prompt": "a fox" })),
-        &Settings::from_env()
+        &crate::test_env::offline_settings()
     ));
     // edit_image needs a source; character_image needs a reference. (Weights may be
     // absent in CI, so only assert the negative/structural cases here.)
@@ -4357,7 +5563,7 @@ fn bernini_image_task_and_quant_mapping() {
     // any weight resolution), so a different model never diverts here.
     assert!(!bernini_image_available(
         &request(json!({ "projectId": "p", "model": "z_image_turbo", "prompt": "p" })),
-        &Settings::from_env()
+        &crate::test_env::offline_settings()
     ));
 }
 
@@ -5068,7 +6274,7 @@ fn resolve_negative_prompt_only_for_true_cfg_families() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn resolve_guidance_none_for_distilled_set_for_dev() {
+fn resolve_guidance_keeps_native_defaults_and_explicit_overrides() {
     let schnell = mlx_model("flux_schnell").unwrap();
     let dev = mlx_model("flux_dev").unwrap();
     let zimage = mlx_model("z_image_turbo").unwrap();
@@ -5079,7 +6285,7 @@ fn resolve_guidance_none_for_distilled_set_for_dev() {
     );
     assert_eq!(
         resolve_guidance(&request(json!({ "projectId": "p" })), &zimage),
-        None
+        Some(0.0)
     );
     // flux dev defaults to 3.5, overridable via advanced.guidanceScale.
     assert_eq!(
@@ -6242,10 +7448,7 @@ fn kolors_real_weights_ip_adapter_generates_one_image() {
 }
 
 /// A deterministic synthetic RGB [`Image`] from a per-pixel `(x, y) -> [r, g, b]` closure.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn synthetic_rgb(w: u32, h: u32, f: impl Fn(u32, u32) -> [u8; 3]) -> Image {
     let mut pixels = vec![0u8; (w * h * 3) as usize];
     for y in 0..h {
@@ -6361,7 +7564,7 @@ fn kolors_real_weights_pose_generates_one_image() {
 #[cfg(target_os = "macos")]
 #[test]
 fn kolors_pose_lane_requires_reference_identity_for_scoring() {
-    let settings = Settings::from_env();
+    let settings = crate::test_env::offline_settings();
     // No referenceAssetId ⇒ the scoring lane is never entered (the gate is false before weights matter).
     let no_reference = request(json!({
         "projectId": "p", "model": "kolors",
@@ -7035,6 +8238,7 @@ fn sc3031_ab_dump_pose() {
     let conditioning = build_control_conditioning(control, ControlKind::Pose, control_scale, None);
     let (ow, oh, pixels) = zimage_control_generate_one(
         generator.as_ref(),
+        &gen_core::GenerationRequest::default(),
         &req.prompt,
         w,
         h,
@@ -7214,7 +8418,7 @@ fn zimage_control_real_weights_generates_one_pose() {
     .flatten()
     .map(|entry| entry.path())
     .find(|path| path.is_dir())
-    .map(|dir| dir.join(super::ZIMAGE_CONTROL_FILE))
+    .map(|dir| dir.join(super::zimage::ZIMAGE_CONTROL_FILE))
     .filter(|path| path.exists())
     .expect("control weights file");
 
@@ -7261,6 +8465,7 @@ fn zimage_control_real_weights_generates_one_pose() {
     let conditioning = build_control_conditioning(control, ControlKind::Pose, 0.9, None);
     let (w, h, pixels) = zimage_control_generate_one(
         generator.as_ref(),
+        &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
         512,
         512,
@@ -7299,7 +8504,7 @@ fn zimage_base_control_real_weights_generates_per_mode() {
     .flatten()
     .map(|entry| entry.path())
     .find(|path| path.is_dir())
-    .map(|dir| dir.join(super::ZIMAGE_BASE_CONTROL_FILE))
+    .map(|dir| dir.join(super::zimage::ZIMAGE_BASE_CONTROL_FILE))
     .filter(|path| path.exists())
     .expect("base control weights file");
 
@@ -7322,6 +8527,7 @@ fn zimage_base_control_real_weights_generates_per_mode() {
         let mut steps_seen = 0u32;
         let (ow, oh, pixels) = zimage_base_control_generate_one(
             generator.as_ref(),
+            &gen_core::GenerationRequest::default(),
             "a person standing in a meadow",
             None,
             w,
@@ -7362,7 +8568,7 @@ fn qwen_control_real_weights_generates_one_pose() {
     // sc-9870: packed control tier — the Q8 base pairs with the q8/ overlay subdir.
     let control = hf_snapshot("models--SceneWorks--qwen-image-2512-fun-controlnet-union")
         .join("q8")
-        .join(super::QWEN_CONTROL_FILE);
+        .join(super::qwen::QWEN_CONTROL_FILE);
     assert!(
         control.exists(),
         "Qwen control weights missing: {control:?}"
@@ -7410,6 +8616,7 @@ fn qwen_control_real_weights_generates_one_pose() {
     let conditioning = build_control_conditioning(control, ControlKind::Pose, 0.9, None);
     let (w, h, pixels) = qwen_control_generate_one(
         generator.as_ref(),
+        &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
         Some("blurry, low quality".to_owned()),
         512,
@@ -7518,7 +8725,7 @@ fn flux2_edit_engine_id_maps_variants() {
 #[test]
 fn flux2_klein_edit_route_owns_invalid_cardinality_and_preflight_refuses_it() {
     let weights = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = weights.path().to_path_buf();
     let model_path = weights.path().to_string_lossy().to_string();
     let references = |count: usize| {
@@ -7658,14 +8865,12 @@ fn flux2_edit_memory_tier_follows_the_resolved_fallback_directory() {
 
 // ---- sc-6135: FLUX.2-dev caption-upsampling (enhance_prompt) threading ------------------------
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn prompt_enhance_reads_advanced_settings() {
     // Absent → disabled with no overrides (the default for every model/job).
     let off = PromptEnhance::from_advanced(
+        "flux2_dev",
         &request(json!({
             "projectId": "p", "model": "flux2_dev", "prompt": "a fox"
         }))
@@ -7678,7 +8883,7 @@ fn prompt_enhance_reads_advanced_settings() {
 
     // The dev Image-Studio toggle sets `enhancePrompt`; optional temperature / max-tokens follow
     // (same keys as the LTX-2.3 video path).
-    let on = PromptEnhance::from_advanced(&request(json!({
+    let on = PromptEnhance::from_advanced("flux2_dev", &request(json!({
         "projectId": "p", "model": "flux2_dev", "prompt": "a fox",
         "advanced": { "enhancePrompt": true, "enhanceTemperature": 0.2, "enhanceMaxTokens": 256 }
     }))
@@ -7692,7 +8897,7 @@ fn prompt_enhance_reads_advanced_settings() {
 #[test]
 fn prompt_enhance_rejects_untyped_unbounded_and_unsupported_routes() {
     #[allow(unused_mut)]
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     {
         settings.backend_candle_enabled = true;
@@ -7716,10 +8921,12 @@ fn prompt_enhance_rejects_untyped_unbounded_and_unsupported_routes() {
             "worker-owned",
         ),
     ] {
-        let error =
-            parse_prompt_enhancement_fields(&request(json!({ "advanced": advanced })).advanced)
-                .expect_err("invalid settings reject")
-                .to_string();
+        let error = parse_prompt_enhancement_fields(
+            "flux2_dev",
+            &request(json!({ "advanced": advanced })).advanced,
+        )
+        .expect_err("invalid settings reject")
+        .to_string();
         assert!(error.contains(expected), "{error}");
     }
 
@@ -7856,10 +9063,7 @@ fn prompt_enhance_rejects_untyped_unbounded_and_unsupported_routes() {
             .contains("enabled native Candle"));
     }
 
-    #[cfg(not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )))]
+    #[cfg(not(native_lane))]
     {
         let backendless = request(json!({
             "model": "flux2_dev",
@@ -7873,10 +9077,7 @@ fn prompt_enhance_rejects_untyped_unbounded_and_unsupported_routes() {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn prompt_enhancement_fact_records_effective_prompt_and_safe_fallback_honestly() {
     let enhanced = prompt_enhancement_fact(
@@ -7947,10 +9148,7 @@ fn prompt_enhancement_fact_records_effective_prompt_and_safe_fallback_honestly()
     .contains("absent outcome"));
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn prompt_enhancement_reports_are_exactly_once_and_bound_to_an_image() {
     fn enhanced(original: &str, effective: &str) -> gen_core::PromptEnhancementReport {
@@ -8001,10 +9199,10 @@ fn prompt_enhancement_reports_are_exactly_once_and_bound_to_an_image() {
     .unwrap_err()
     .to_string()
     .contains("duplicate"));
-    let fact = take_prompt_enhancement_fact(&mut reports, 0)
+    let fact = take_prompt_enhancement_fact(&mut reports, 0, "flux2_dev")
         .expect("the report remains available for its image");
     assert_eq!(fact["effectivePrompt"], "a red fox");
-    assert!(take_prompt_enhancement_fact(&mut reports, 0)
+    assert!(take_prompt_enhancement_fact(&mut reports, 0, "flux2_dev")
         .unwrap_err()
         .to_string()
         .contains("no prompt-enhancement report"));
@@ -8018,7 +9216,7 @@ fn prompt_enhancement_reports_are_exactly_once_and_bound_to_an_image() {
         enhanced("another prompt", "a red fox"),
     )
     .expect("the carrier accepts the typed provider report");
-    assert!(take_prompt_enhancement_fact(&mut reports, 0)
+    assert!(take_prompt_enhancement_fact(&mut reports, 0, "flux2_dev")
         .unwrap_err()
         .to_string()
         .contains("did not match"));
@@ -8032,7 +9230,7 @@ fn prompt_enhancement_reports_are_exactly_once_and_bound_to_an_image() {
         enhanced("a fox", "a fox"),
     )
     .expect("the carrier accepts the typed provider report");
-    assert!(take_prompt_enhancement_fact(&mut reports, 0)
+    assert!(take_prompt_enhancement_fact(&mut reports, 0, "flux2_dev")
         .unwrap_err()
         .to_string()
         .contains("did not rewrite"));
@@ -8058,11 +9256,11 @@ fn prompt_enhancement_reports_are_exactly_once_and_bound_to_an_image() {
     )
     .expect("first image report is accepted second");
     assert_eq!(
-        take_prompt_enhancement_fact(&mut reports, 0).unwrap()["effectivePrompt"],
+        take_prompt_enhancement_fact(&mut reports, 0, "flux2_dev").unwrap()["effectivePrompt"],
         "a fox in snowfall"
     );
     assert_eq!(
-        take_prompt_enhancement_fact(&mut reports, 1).unwrap()["effectivePrompt"],
+        take_prompt_enhancement_fact(&mut reports, 1, "flux2_dev").unwrap()["effectivePrompt"],
         "a moonlit owl"
     );
 }
@@ -8126,7 +9324,7 @@ fn flux2_control_repo_file_defaults_and_rejects_arbitrary_overrides() {
 #[cfg(target_os = "macos")]
 #[test]
 fn mlx_control_weight_filenames_reject_traversal() {
-    let settings = Settings::from_env();
+    let settings = crate::test_env::offline_settings();
     for filename in ["../../etc/hosts", "/etc/hosts", "sub/x.safetensors", ".."] {
         let req = request(json!({
             "projectId": "p",
@@ -8176,7 +9374,7 @@ fn mlx_control_weight_filenames_reject_traversal() {
 #[cfg(target_os = "macos")]
 #[test]
 fn mlx_control_weight_repositories_are_exactly_trusted() {
-    let settings = Settings::from_env();
+    let settings = crate::test_env::offline_settings();
     let arbitrary = request(json!({
         "projectId": "p",
         "advanced": {
@@ -8237,7 +9435,7 @@ fn mlx_control_weight_cache_reads_only_the_pinned_revision() {
     let hub = root.path().join("hub");
     std::fs::create_dir_all(&hub).unwrap();
     let _hf = isolate_hf_hub_cache_to(&hub);
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
 
     let artifact = sceneworks_core::control_weights::shipped_control_weight(
@@ -8275,10 +9473,7 @@ fn mlx_control_weight_cache_reads_only_the_pinned_revision() {
 
 /// Registered user/project overlays remain supported, but only after the API
 /// canonicalized an overlayId and supplied an immutable revision.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn registered_control_overlay_requires_catalog_authority_and_pin() {
     let authorized = request(json!({
@@ -8340,15 +9535,12 @@ fn registered_control_overlay_requires_catalog_authority_and_pin() {
 /// twin the current build compiles (MLX on macOS / candle off-Mac — both define the same-named helper):
 /// an out-of-root path is rejected with the house `InvalidPayload`, a path under the data dir resolves,
 /// and an absent key yields `None`. Mirrors `app_managed_helpers_resolve_symlinks_before_root_check`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn krea_control_payload_overlay_path_confines_to_app_root() {
     let data = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = data.path().to_path_buf();
     settings.external_model_roots = Vec::new();
 
@@ -8394,7 +9586,7 @@ fn krea_imported_payload_control_overlay_pins_the_lexical_entry() {
 
     let data = tempfile::tempdir().expect("data root");
     let outside = tempfile::tempdir().expect("outside root");
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = data.path().to_path_buf();
     settings.external_model_roots = Vec::new();
 
@@ -8470,7 +9662,7 @@ fn prepared_krea_imported_route_rejects_selection_to_dispatch_retarget() {
     use std::os::unix::fs::symlink;
 
     let data = tempfile::tempdir().expect("data root");
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = data.path().to_path_buf();
     settings.external_model_roots = Vec::new();
 
@@ -8521,6 +9713,73 @@ fn prepared_krea_imported_route_rejects_selection_to_dispatch_retarget() {
     assert_route_retarget_artifact_seal_mismatch(error, "test imported route", &sealed_path);
 }
 
+/// A direct legacy adapter must retain its lexical entry even when confinement resolves a
+/// filesystem alias. A distinct sibling and an alias retarget must never pass as that entry.
+#[cfg(native_lane)]
+#[test]
+fn legacy_direct_adapter_pin_retains_lexical_alias_and_rejects_retarget() {
+    fn link_directory(target: &Path, link: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).expect("directory symlink fixture");
+        #[cfg(windows)]
+        {
+            let result = std::process::Command::new("cmd.exe")
+                .args(["/d", "/c", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .expect("create directory junction fixture");
+            assert!(
+                result.status.success(),
+                "junction creation failed: {result:?}"
+            );
+        }
+    }
+    fn unlink_directory(link: &Path) {
+        #[cfg(unix)]
+        std::fs::remove_file(link).expect("remove directory symlink");
+        #[cfg(windows)]
+        std::fs::remove_dir(link).expect("remove directory junction without traversing it");
+    }
+
+    let data = tempfile::tempdir().expect("data root");
+    let mut settings = crate::test_env::offline_settings();
+    settings.data_dir = data.path().to_path_buf();
+    settings.external_model_roots = Vec::new();
+    let first = data.path().join("loras").join("first");
+    let second = data.path().join("loras").join("second");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    write_min_lora(&first.join("adapter.safetensors"));
+    write_min_lora(&second.join("adapter.safetensors"));
+    let alias = data.path().join("loras").join("selected");
+    link_directory(&first, &alias);
+    let lexical = alias.join("adapter.safetensors");
+    let sibling = second.join("adapter.safetensors");
+    let pin = resolve_prepared_adapter_file(
+        &json!({ "path": lexical.display().to_string() }),
+        &settings,
+        "imported_krea_control_route_pin",
+    )
+    .expect("validated legacy adapter is pinned");
+    assert_eq!(pin.loader_path(), lexical);
+    assert_eq!(
+        pin.canonical_target_path(),
+        first.join("adapter.safetensors").canonicalize().unwrap()
+    );
+    assert_ne!(pin.canonical_target_path(), sibling.canonicalize().unwrap());
+    pin.ensure_unchanged().expect("original alias is unchanged");
+
+    unlink_directory(&alias);
+    link_directory(&second, &alias);
+    let refused = pin.ensure_unchanged().is_err();
+    unlink_directory(&alias);
+    assert!(
+        refused,
+        "retargeted lexical adapter must invalidate its token"
+    );
+}
+
 /// The strict-pose imported route owns three independently mutable payload classes: the primary DiT,
 /// control overlay, and ordered LoRA/LoKr stack. Prove the production route carries the exact lexical
 /// token for every non-primary file and that replacing either the overlay or either adapter is rejected.
@@ -8528,7 +9787,7 @@ fn prepared_krea_imported_route_rejects_selection_to_dispatch_retarget() {
 #[test]
 fn prepared_krea_imported_control_route_owns_overlay_and_adapter_tokens() {
     let data = tempfile::tempdir().expect("data root");
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = data.path().to_path_buf();
     settings.external_model_roots = Vec::new();
 
@@ -8749,6 +10008,7 @@ fn flux2_dev_control_real_weights_generates_one_pose() {
     let conditioning = build_control_conditioning(control, ControlKind::Pose, 0.75, None);
     let (w, h, pixels) = flux2_control_generate_one_scoped(
         generator.as_ref(),
+        &gen_core::GenerationRequest::default(),
         // A directly-loaded generator has no live request evaluation to admit against; production
         // always supplies one (see `generate_flux2_dev_control_stream`).
         None,
@@ -8830,6 +10090,7 @@ fn flux1_dev_control_real_weights_generates_each_mode() {
         let conditioning = build_control_conditioning(control_map.clone(), kind.clone(), 0.7, None);
         let (w, h, pixels) = flux1_control_generate_one(
             generator.as_ref(),
+            &gen_core::GenerationRequest::default(),
             "a person standing in a meadow, photorealistic",
             512,
             512,
@@ -9130,10 +10391,7 @@ fn mage_edit_request_shape_reaches_each_registered_engine() {
 /// Un-gated from `cfg(target_os = "macos")` on purpose — the resolver compiles and runs on the
 /// candle lane too (`cfg(any(macos, backend-candle))`), and the Mage twin above being Mac-only is
 /// the reason its ordering contract is unexercised off-Mac.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn qwen_image_2_1_reference_ids_are_source_then_mask_then_submitted_order() {
     assert_eq!(
@@ -9208,10 +10466,7 @@ fn qwen_image_2_1_reference_ids_are_source_then_mask_then_submitted_order() {
 /// list and the worker would render another — an 11th reference could be admitted, or the images
 /// could arrive numbered differently than the prompt says. Neither is visible from either side
 /// alone, so it is pinned from outside both.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn qwen_image_2_1_worker_and_router_agree_on_the_reference_order() {
     for payload in [
@@ -9322,10 +10577,7 @@ fn qwen_image_2_1_worker_and_router_agree_on_the_reference_order() {
 /// The conditioning list itself: RGB references become `Reference` (one) / `MultiReference` (many),
 /// in order, and **never** a `Conditioning::Mask` — the engine does not declare that kind and
 /// refuses it by name, telling the caller to send the mask as an ordinary extra reference instead.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn qwen_image_2_1_conditioning_is_ordered_references_and_never_a_mask() {
     let image = |seed: i64| gen_core::Image {
@@ -9398,10 +10650,7 @@ fn qwen_image_2_1_conditioning_is_ordered_references_and_never_a_mask() {
 /// `build_lane_conditioning` then turns into the conditioning list — so the dedicated builder would
 /// be decorative if the two ever disagreed. This is what makes it honest to state the contract in
 /// one place and wire the other.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn qwen_image_2_1_lane_conditioning_matches_the_dedicated_builder() {
     for count in [1usize, 2, 10] {
@@ -9434,10 +10683,7 @@ fn qwen_image_2_1_lane_conditioning_matches_the_dedicated_builder() {
 /// The VAE encodes all four channels (S4 contract), so flattening the alpha away would send a
 /// DIFFERENT request. The mixed list is emitted per entry — a `MultiReference` holds only RGB — and
 /// the generic lane (what actually RUNS) must build exactly what the dedicated builder builds.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn qwen_image_2_1_alpha_reference_travels_as_reference_rgba_in_its_slot() {
     // The pinned provider must actually declare the carrier this builds, on the registered
@@ -9519,10 +10765,7 @@ fn qwen_image_2_1_alpha_reference_travels_as_reference_rgba_in_its_slot() {
 /// `resolve_generic_lane_conditioning` (or to the candle lane's `edit_mask` pair). Without the
 /// guard that change ships a `Conditioning::Mask` to an engine that refuses the kind by name, and
 /// every existing test stays green.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn qwen_image_2_1_lane_slots_refuse_a_mask_or_a_strength_bearing_reference() {
     let edit = request(json!({
@@ -9570,19 +10813,13 @@ fn qwen_image_2_1_lane_slots_refuse_a_mask_or_a_strength_bearing_reference() {
 
 /// The solid colour of each fixture asset, in the ORDER the engine must number them: the source
 /// (`<image1>`), the mask as an ordinary reference (`<image2>`), then the submitted reference.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const QWEN_EDIT_FIXTURE_COLOURS: [[u8; 3]; 3] = [[200, 30, 30], [250, 250, 250], [30, 30, 200]];
 
 /// sc-24110 — a real project holding three solid-colour PNGs, so the LIVE lane resolvers read real
 /// assets through the real `ProjectStore` + `safe_project_path` confinement, and each image's
 /// identity stays readable from its bytes after the lane's geometry fit.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 struct QwenImage21EditFixture {
     _data: tempfile::TempDir,
     settings: Settings,
@@ -9592,14 +10829,11 @@ struct QwenImage21EditFixture {
     ids: Vec<String>,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl QwenImage21EditFixture {
     fn new() -> Self {
         let data = tempfile::tempdir().unwrap();
-        let mut settings = Settings::from_env();
+        let mut settings = crate::test_env::offline_settings();
         settings.data_dir = data.path().to_path_buf();
         let store = ProjectStore::new(settings.data_dir.clone(), "worker");
         let project = store.create_project("sc24110-qwen-image-2-1-edit").unwrap();
@@ -9653,10 +10887,7 @@ impl QwenImage21EditFixture {
 
 /// The centre pixel of an RGB8 engine image — the fixture colours are solid, so this names WHICH
 /// asset an emitted image is, whatever the lane's fit did to its edges.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn qwen_edit_centre_rgb(image: &Image) -> [u8; 3] {
     let offset = (((image.height / 2) * image.width + image.width / 2) * 3) as usize;
     [
@@ -9669,10 +10900,7 @@ fn qwen_edit_centre_rgb(image: &Image) -> [u8; 3] {
 /// Assert on the conditioning a lane EMITS for the fixture's edit: one ordered `MultiReference`
 /// whose images are the source at `<image1>`, the mask at `<image2>` and the reference at
 /// `<image3>` — the duplicated working image occupying ONE slot — and no `Conditioning::Mask`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn assert_qwen_edit_emits_the_ordered_list(emitted: &[Conditioning], lane: &str) {
     assert!(
         !emitted
@@ -9897,10 +11125,7 @@ fn qwen_image_2_1_live_candle_lane_emits_source_then_mask_as_references_and_neve
 ///
 /// Armed against: restoring `fit_engine_image(source, request.width, request.height, …)` (and the
 /// matching alpha fit) in `resolve_qwen_image_2_1_edit` — the emitted dims become 64×36.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn qwen_image_2_1_portrait_reference_request(
     fit_mode: &str,
 ) -> (QwenImage21EditFixture, ImageRequest) {
@@ -9939,10 +11164,7 @@ fn qwen_image_2_1_portrait_reference_request(
     (fixture, edit)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn assert_qwen_image_2_1_native_geometry(emitted: &[Conditioning], lane: &str, fit_mode: &str) {
     match emitted {
         [Conditioning::Reference { image: source, .. }, Conditioning::ReferenceRgba {
@@ -10013,10 +11235,7 @@ fn qwen_image_2_1_live_candle_lane_sends_references_at_native_geometry() {
 /// sc-24114 — the declared `image_to_image` operation under its own mode is a 1-reference edit in
 /// upstream terms: the lane emits exactly ONE strength-less `Conditioning::Reference` (never the
 /// img2img-init slot, which carries a strength 2.1 refuses).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn qwen_image_2_1_image_to_image_request(fixture: &QwenImage21EditFixture) -> ImageRequest {
     request(json!({
         "projectId": fixture.project_id,
@@ -10029,10 +11248,7 @@ fn qwen_image_2_1_image_to_image_request(fixture: &QwenImage21EditFixture) -> Im
     }))
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn assert_qwen_image_2_1_one_reference(emitted: &[Conditioning], lane: &str) {
     match emitted {
         [Conditioning::Reference {
@@ -10199,7 +11415,7 @@ async fn qwen_image_2_1_edit_reports_generating_progress_then_acknowledges_a_can
     let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(32);
     let task_generator = Arc::clone(&generator);
     let task_cancel = cancel.clone();
-    let blocking = tokio::task::spawn_blocking(move || {
+    let blocking = crate::load_progress::spawn_blocking(move || {
         drive_gen_items_scored_reported(
             tx,
             [11_i64, 12],
@@ -10371,6 +11587,7 @@ fn flux2_edit_real_weights_generates_one_image() {
     let mut steps_seen = 0u32;
     let (w, h, pixels) = flux2_edit_generate_one(
         generator.as_ref(),
+        &gen_core::GenerationRequest::default(),
         false,
         false,
         None,
@@ -10544,10 +11761,7 @@ fn plan_edit_batch_expands_and_gates_per_grouping() {
 
 /// Minimal valid safetensors (8-byte LE header length + JSON header). No `networkType`, so
 /// `classify_adapter` reports `Lora`; the resolver only reads the header, so empty tensors are fine.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn write_min_lora(path: &std::path::Path) {
     let header = json!({ "__metadata__": { "format": "pt" } });
     let header_bytes = serde_json::to_vec(&header).unwrap();
@@ -10568,10 +11782,7 @@ fn write_min_lokr(path: &std::path::Path) {
 
 /// A valid safetensors header that declares tensor data the file doesn't actually
 /// contain — i.e. a truncated/interrupted download (sc-6072).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn write_truncated_lora(path: &std::path::Path) {
     let header = json!({
         "__metadata__": { "format": "pt" },
@@ -10587,10 +11798,7 @@ fn write_truncated_lora(path: &std::path::Path) {
 /// sc-6072: a truncated LoRA is rejected at adapter-classification time (the
 /// generation path's last gate before the engine) instead of reaching the MLX
 /// loader and surfacing the opaque "invalid data offsets" error.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn classify_adapter_rejects_truncated_safetensors() {
     let dir = tempfile::tempdir().unwrap();
@@ -10609,14 +11817,11 @@ fn classify_adapter_rejects_truncated_safetensors() {
 /// into a non-empty adapter set — the worker now feeds these into `InstantIdPaths.adapters` (they
 /// were previously dropped: `instantid.rs` never called `resolve_adapters`). Guards the worker half
 /// of the fix; the engine merge is covered by mlx-gen #477 / candle-gen #86 + the real-weight smoke.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn instantid_resolves_user_loras_into_adapters() {
     let dir = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
 
     // A real (tiny, valid) safetensors LoRA under the app-managed data dir — both the path
@@ -10649,14 +11854,11 @@ fn instantid_resolves_user_loras_into_adapters() {
     );
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn prepared_adapter_resolver_reads_under_the_exact_deduplicated_token() {
     let dir = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
     let lora_file = dir.path().join("style.safetensors");
     write_min_lora(&lora_file);
@@ -10689,13 +11891,7 @@ fn prepared_adapter_resolver_reads_under_the_exact_deduplicated_token() {
         .expect("the same token used for header classification remains valid");
 }
 
-#[cfg(all(
-    unix,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(unix, native_lane))]
 #[test]
 fn prepared_adapter_directory_reconfines_the_selected_child() {
     use std::os::unix::fs::symlink;
@@ -10707,7 +11903,7 @@ fn prepared_adapter_directory_reconfines_the_selected_child() {
     let outside = dir.path().join("outside.safetensors");
     write_min_lora(&outside);
     symlink(&outside, install.join("escape.safetensors")).expect("escaping child link");
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = data;
     let req = request(json!({
         "projectId": "p", "model": "kreamania_variant5", "prompt": "portrait",
@@ -10727,10 +11923,7 @@ fn prepared_adapter_directory_reconfines_the_selected_child() {
 /// or the Library / Recent-Batches fold and the Original↔Upscaled toggle can't pair it with its
 /// original. The old bare `upscaledFrom` field was read by nothing (web `assetVariants.js`,
 /// `project_store`) and dropped at sidecar-build time, so inline upscales never folded.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn inline_upscaled_asset_links_back_to_base_for_library_fold() {
     let dir = tempfile::tempdir().unwrap();
@@ -10801,10 +11994,7 @@ fn inline_upscaled_asset_links_back_to_base_for_library_fold() {
 /// E6: an inline Iris post-process whose input was budget-downscaled is NOT `scale×` of the render,
 /// so its filename must never claim `_iris4x` — it names the budgeted output geometry. A within-budget
 /// restore keeps the `iris{scale}x` tag.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn inline_iris_restore_of_a_budget_downscaled_render_is_not_named_4x() {
     use sceneworks_core::image_restoration::{IrisRestoreParams, RestoreInputSizing};
@@ -10869,10 +12059,7 @@ fn inline_iris_restore_of_a_budget_downscaled_render_is_not_named_4x() {
 
 /// F-003 / sc-11159: the upscaled variant builds its own `_up{factor}x.png` filename from the
 /// same payload model id, so it must be confined identically to the base PNG.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn write_upscaled_asset_confines_malicious_model_id() {
     for evil in ["../../../../etc/passwd", "..\\..\\evil", "/abs/pwn"] {
@@ -10931,7 +12118,7 @@ fn write_upscaled_asset_confines_malicious_model_id() {
 #[test]
 fn image_route_count_follows_dispatch_order() {
     let dir = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
     let model_path = dir.path().to_string_lossy().to_string();
 
@@ -11064,7 +12251,7 @@ fn candle_conditioned_angle_work_uses_eleven_prompts_one_seed_and_route_total() 
     assert!(work.iter().all(|(seed, _)| *seed == work[0].0));
     assert_eq!(work[0].0, 123);
     assert_eq!(
-        CandleImageRoute::SenseNovaEdit.image_count(&req, &Settings::from_env()),
+        CandleImageRoute::SenseNovaEdit.image_count(&req, &crate::test_env::offline_settings()),
         11
     );
     assert_eq!(
@@ -11086,7 +12273,7 @@ fn image_route_rejects_wired_pose_when_control_base_absent() {
     // Isolate the HF hub cache to the empty tempdir so the control base is genuinely absent regardless of
     // the machine's real cache (the weight resolvers read the global HF cache in preference to `data_dir`).
     let _hf = isolate_hf_hub_cache_to(dir.path());
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     // Empty data_dir + isolated HF cache + no `modelPath` → every `…_control_available` weight-gate (and
     // `mlx_available`) resolves nothing, so each wired-family pose job falls through to the reject arm.
     settings.data_dir = dir.path().to_path_buf();
@@ -11139,7 +12326,7 @@ fn image_route_rejects_wired_pose_when_control_base_absent() {
 #[test]
 fn image_route_wired_pose_with_base_present_routes_to_control_lane() {
     let dir = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
     let model_path = dir.path().to_string_lossy().to_string();
 
@@ -11177,7 +12364,7 @@ fn image_route_wired_pose_with_base_present_routes_to_control_lane() {
 #[test]
 fn image_route_refuses_flux1_ipadapter_plus_pose_without_dropping_conditioning() {
     let dir = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
     let model_path = dir.path().to_string_lossy().to_string();
 
@@ -11214,7 +12401,7 @@ fn image_route_refuses_flux1_ipadapter_plus_pose_without_dropping_conditioning()
 #[test]
 fn image_route_sends_exact_sdxl_pose_family_to_control_before_other_conditioning() {
     let dir = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
     let model_path = dir.path().to_string_lossy().to_string();
 
@@ -11271,7 +12458,7 @@ fn image_route_sends_exact_sdxl_pose_family_to_control_before_other_conditioning
 #[test]
 fn krea_turbo_on_raw_routes_only_with_accelerator_lora() {
     let dir = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
     let model_path = dir.path().to_string_lossy().to_string();
 
@@ -11339,7 +12526,7 @@ fn krea_turbo_on_raw_routes_only_with_accelerator_lora() {
 #[test]
 fn krea_multiphase_routes_only_with_phases_and_takes_precedence_over_turbo() {
     let dir = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
     let model_path = dir.path().to_string_lossy().to_string();
 
@@ -11680,9 +12867,9 @@ fn lora_declares_accelerator_role_matches_only_the_accelerator_marker() {
 
 // sc-13883 (epic 13879 S3) — the DISCRIMINATING param-selection test. The turbo-on-Raw lane resolves
 // its sampling regime against the `krea_2_turbo` descriptor (while loading Raw weights), so the whole
-// regime falls out for free: fixed-mu engine, ~8 steps, guidance off, no negative forwarded. Pinning
+// default regime falls out for free: fixed-mu engine, ~8 steps and guidance off. Pinning
 // the NON-default turbo values here makes the test FAIL if the lane ever reverts to the Raw defaults
-// (52 steps / guidance 1.0 / dynamic-mu / negative forwarded). mu itself is engine-internal
+// (52 steps / guidance 1.0 / dynamic-mu). mu itself is engine-internal
 // (`TURBO_MU = 1.15` in the pinned Krea engine's `turbo_sigmas`), reached by selecting the
 // `krea_2_turbo` engine id — so asserting that engine id IS the worker-observable proof of fixed mu.
 #[cfg(target_os = "macos")]
@@ -11691,7 +12878,7 @@ fn krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
     let raw = mlx_model("krea_2_raw").expect("krea_2_raw engine registered");
     let turbo = mlx_model("krea_2_turbo").expect("krea_2_turbo engine registered");
 
-    // The lane routes to the `krea_2_turbo` engine — the FIXED mu 1.15 / CFG-free `render_turbo`
+    // The lane routes to the `krea_2_turbo` engine — the FIXED mu 1.15 / default CFG-off `render_turbo`
     // regime — NOT the `krea_2_raw` engine (resolution-DYNAMIC mu, true-CFG `render_base`). This engine
     // swap IS the mu-1.15 mechanism (the pinned engine keys the schedule on the descriptor id).
     assert_eq!(turbo.engine_id(), "krea_2_turbo");
@@ -11722,11 +12909,11 @@ fn krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
         "control: the Raw default is 52"
     );
 
-    // Guidance: CFG off (the turbo descriptor advertises no guidance → None), NOT the Raw 1.0.
+    // Guidance: Turbo retains its CFG-off default zero, while Raw defaults to one.
     assert_eq!(
         resolve_guidance(&req, &turbo),
-        None,
-        "turbo-on-Raw forwards no guidance (CFG off)",
+        Some(0.0),
+        "turbo-on-Raw retains its CFG-off guidance default",
     );
     assert_eq!(
         resolve_guidance(&req, &raw),
@@ -11734,12 +12921,11 @@ fn krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
         "control: the Raw default guidance is 1.0",
     );
 
-    // Negative prompt: NOT forwarded under turbo (the descriptor advertises no negative), even though
-    // the request carries one; the Raw path DOES forward it.
+    // Both providers retain negative conditioning for explicit experimental CFG. Admission gates CFG-off requests.
     assert_eq!(
         resolve_negative_prompt(&req, &turbo),
-        None,
-        "turbo-on-Raw must not forward the negative prompt (CFG off)",
+        Some("blurry, low quality".to_owned()),
+        "turbo-on-Raw can forward negative conditioning for experimental CFG",
     );
     assert_eq!(
         resolve_negative_prompt(&req, &raw),
@@ -11791,7 +12977,7 @@ fn krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn candle_image_route_gates_on_flag_then_sdxl_control_then_txt2img() {
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
 
     // Candle disabled (default) → None (the job stubs), regardless of model.
     settings.backend_candle_enabled = false;
@@ -11873,7 +13059,7 @@ fn every_scheduler_routed_candle_image_has_a_native_worker_route() {
         &[("bernini_image", CandleImageRoute::Bernini)];
     const BESPOKE_BUILTIN_MODELS: &[&str] = &["bernini_image"];
 
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.backend_candle_enabled = true;
 
     let scheduler_models = sceneworks_core::jobs_store::candle_routed_image_models();
@@ -11946,7 +13132,7 @@ fn scheduler_only_unregistered_model_fails_native_generator_parity() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn qwen_image_2_1_candle_txt2img_route_carries_the_2_1_adapter_stamp() {
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.backend_candle_enabled = true;
 
     for payload in [
@@ -11989,7 +13175,7 @@ fn qwen_image_2_1_candle_txt2img_route_carries_the_2_1_adapter_stamp() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn candle_image_route_sends_krea_img2img_to_txt2img() {
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.backend_candle_enabled = true;
 
     // krea_2_turbo + a reference, no poses, non-edit mode → the generic candle txt2img lane (the img2img
@@ -12056,7 +13242,7 @@ fn candle_image_route_sends_krea_img2img_to_txt2img() {
 #[test]
 fn candle_krea_multiphase_and_turbo_route_with_over_routing_guards() {
     let dir = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
     settings.backend_candle_enabled = true;
     // `resolve_weights_dir` honors an explicit `modelPath` first, so the tempdir resolves the Raw
@@ -12162,7 +13348,7 @@ fn candle_krea_multiphase_and_turbo_route_with_over_routing_guards() {
 #[test]
 fn candle_krea_multiphase_claims_conflicting_shapes_to_reject_them() {
     let dir = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
     settings.backend_candle_enabled = true;
     let model_path = dir.path().to_string_lossy().to_string();
@@ -12242,11 +13428,11 @@ fn candle_krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
         "control: the Raw default is 52"
     );
 
-    // Guidance: CFG off under the turbo (distilled) descriptor → None, NOT the Raw 1.0.
+    // Guidance: Turbo retains its CFG-off default zero, while Raw defaults to one.
     assert_eq!(
         resolve_guidance(&req, &turbo),
-        None,
-        "candle turbo-on-Raw forwards no guidance (CFG off)",
+        Some(0.0),
+        "candle turbo-on-Raw retains its CFG-off guidance default",
     );
     assert_eq!(
         resolve_guidance(&req, &raw),
@@ -12254,11 +13440,11 @@ fn candle_krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
         "control: the Raw default guidance is 1.0",
     );
 
-    // Negative prompt: NOT forwarded under turbo (distilled, no negative branch); the Raw path forwards it.
+    // Both providers retain negative conditioning for explicit experimental CFG. Admission gates CFG-off requests.
     assert_eq!(
         resolve_negative_prompt(&req, &turbo),
-        None,
-        "candle turbo-on-Raw must not forward the negative prompt (CFG off)",
+        Some("blurry, low quality".to_owned()),
+        "candle turbo-on-Raw can forward negative conditioning for experimental CFG",
     );
     assert_eq!(
         resolve_negative_prompt(&req, &raw),
@@ -12295,10 +13481,7 @@ fn candle_krea_turbo_on_raw_selects_the_turbo_regime_not_the_raw_regime() {
 /// `video_jobs::tests::ltx_eros_auto_injects_distill_lora_per_pass` (6/6) after that test's own
 /// module-local lock was supposed to have fixed it, and the two tests using it also clobbered each
 /// other's `HF_HUB_CACHE` (sc-12380).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn isolate_hf_hub_cache_to(hub: &std::path::Path) -> EnvVars {
     EnvVars::set(&[
         ("HF_HUB_CACHE", hub.to_str().expect("utf-8 hub dir")),
@@ -12310,17 +13493,14 @@ fn isolate_hf_hub_cache_to(hub: &std::path::Path) -> EnvVars {
 /// sc-21689: the plan route's cache-only mirror is a restart path too. A corrupt
 /// pre-existing SDXL component must be compared with the exact pinned HF-cache
 /// source and atomically replaced, never accepted merely because it is a file.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn cache_only_sdxl_mirror_replaces_a_corrupt_existing_destination() {
     let root = tempfile::tempdir().expect("temp data dir");
     let hub = root.path().join("hub");
     std::fs::create_dir_all(&hub).expect("hub dir");
     let _hf = isolate_hf_hub_cache_to(&hub);
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
 
     let source =
@@ -12373,10 +13553,7 @@ fn cache_only_sdxl_mirror_replaces_a_corrupt_existing_destination() {
 /// first publisher in the middle of its copy and prove the second job cannot
 /// even enter its copy closure until publication completes. Once it acquires
 /// the target lock, it must validate the first result and reuse it instead.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn cache_only_sdxl_mirror_serializes_concurrent_same_process_publishers() {
     use std::io::Write as _;
@@ -12387,7 +13564,7 @@ fn cache_only_sdxl_mirror_serializes_concurrent_same_process_publishers() {
     let hub = root.path().join("hub");
     std::fs::create_dir_all(&hub).expect("hub dir");
     let _hf = isolate_hf_hub_cache_to(&hub);
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
 
     let source =
@@ -12492,17 +13669,14 @@ fn cache_only_sdxl_mirror_serializes_concurrent_same_process_publishers() {
 
 /// Mutation guard: even under the target lock, a copier that returns success
 /// after writing the wrong bytes must not replace the caller-visible entry.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn cache_only_sdxl_mirror_rejects_unverified_staging_before_publication() {
     let root = tempfile::tempdir().expect("temp data dir");
     let hub = root.path().join("hub");
     std::fs::create_dir_all(&hub).expect("hub dir");
     let _hf = isolate_hf_hub_cache_to(&hub);
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
 
     let source =
@@ -12626,7 +13800,7 @@ fn krea_convrot_pose_route_is_claimed_by_the_immutable_dit_identity() {
     .unwrap();
     let _hf = isolate_hf_hub_cache_to(&hub);
 
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
     settings.backend_candle_enabled = true;
     let req = request(json!({
@@ -12688,7 +13862,7 @@ fn sensenova_q8_floor_keeps_the_capability_downtier_off_q4() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, b"weights").unwrap();
     }
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
 
     let req = |advanced: serde_json::Value| {
@@ -12765,7 +13939,7 @@ fn sensenova_weights_resolution_takes_the_standard_tier_descent() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, b"weights").unwrap();
     }
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
 
     let req = |bits: Option<i64>| {
@@ -12820,7 +13994,7 @@ fn flux2_edit_candle_base_resolves_the_packed_turnkey_tier() {
     let hub = root.path().join("hub");
     std::fs::create_dir_all(&hub).unwrap();
     let _hf = isolate_hf_hub_cache_to(&hub);
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
     settings.backend_candle_enabled = true;
 
@@ -12884,7 +14058,7 @@ fn flux2_edit_candle_base_resolves_the_packed_turnkey_tier() {
 fn flux2_edit_candle_base_is_absent_without_the_turnkey() {
     let dir = tempfile::tempdir().unwrap();
     let _hf = isolate_hf_hub_cache_to(dir.path());
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
     settings.backend_candle_enabled = true;
 
@@ -12973,7 +14147,7 @@ fn flux2_klein_reference_routes_resolve_real_references_and_missing_refs_fail_cl
 #[test]
 fn flux2_character_pose_routes_control_before_edit_and_qwen_pose_routes_ordered_edit() {
     let root = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
     settings.backend_candle_enabled = true;
     let model_path = root.path().to_string_lossy().to_string();
@@ -13136,7 +14310,7 @@ fn candle_image_route_rejects_wired_pose_when_control_base_absent() {
     // Isolate the HF hub cache to the empty tempdir so the control base is genuinely absent regardless of
     // the machine's real cache (the resolver reads the global HF cache in preference to `data_dir`).
     let _hf = isolate_hf_hub_cache_to(dir.path());
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     // A tempdir data_dir + isolated HF cache holds no HF snapshot, so `resolve_zimage_control_base` yields
     // `None` → the Z-Image control lane's weight-gate (`zimage_control_available`) fails and it falls through.
     settings.data_dir = dir.path().to_path_buf();
@@ -13188,7 +14362,7 @@ fn prepared_candle_file_routes_reject_selection_to_dispatch_retarget() {
     let external = root.path().join("external");
     std::fs::create_dir_all(&external).expect("external root");
 
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().join("data");
     settings.external_model_roots = vec![external.clone()];
     settings.backend_candle_enabled = true;
@@ -13393,7 +14567,7 @@ fn prepared_candle_file_routes_reject_selection_to_dispatch_retarget() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn candle_strict_pose_route_image_count_is_pose_set_length() {
-    let settings = Settings::from_env();
+    let settings = crate::test_env::offline_settings();
     // 4 images requested, but 3 poses → the strict-pose lane renders 3 (one per pose).
     let zimage_pose = request(json!({
         "projectId": "p", "model": "z_image_turbo", "count": 4,
@@ -13593,7 +14767,7 @@ fn every_generating_candle_route_has_a_real_generation_set_adapter() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn candle_image_route_selects_bernini_lane_for_bernini_image() {
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
 
     // Candle disabled (default) → None (the job stubs), regardless of model.
     settings.backend_candle_enabled = false;
@@ -13627,7 +14801,7 @@ fn generic_lane_conditioning_defaults_when_no_reference() {
     // fall-through. No disk access; just proves the dispatch order picks the right arm and each yields
     // the empty conditioning when its reference precondition is absent.
     let dir = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
     let project_path = dir.path();
 
@@ -13723,7 +14897,7 @@ fn fit_edit_references_squares_a_landscape_character_reference() {
 fn character_image_likeness_source_gates_to_plain_with_character() {
     let dir = tempfile::tempdir().unwrap();
     let project_path = dir.path();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
 
     // A non-character mode (text_to_image / edit_image) is NEVER a With-Character generation: excluded
@@ -13783,7 +14957,7 @@ fn character_image_likeness_source_gates_to_plain_with_character() {
 
 // Asserts against `gen_core::imageops::contain_box` directly (not a macOS-only symbol), so it runs
 // on the candle lane too where the same letterbox geometry is shared (sc-9420).
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 #[test]
 fn contain_box_centers_the_contained_rect() {
     // `fit_rgb`'s pad arm now rides the engine's `contain_box` (sc-8824), the same geometry the
@@ -13835,7 +15009,7 @@ fn fit_rgb_crop_pad_stretch_produce_exact_dims_and_geometry() {
 /// candle lanes (both compile `fit_rgb` + the shared geometry) — it's the divergence guard: were
 /// `fit_rgb` to round differently from the mask (the old local f32 `.round()` copy could, at an exact
 /// `.5`), the black-content rect below would drift off the mask's keep rect and this would fail.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 #[test]
 fn fit_pad_content_rect_matches_outpaint_mask_keep_rect() {
     // Odd dims + aspect ratios that stress rounding. The FIRST case is the divergence guard: it
@@ -13984,7 +15158,7 @@ fn qwen_edit_engine_id_maps_variants() {
 #[test]
 fn an_alpha_carrying_reference_truncates_by_default_and_composites_only_on_request() {
     let data_dir = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = data_dir.path().to_path_buf();
     let store = ProjectStore::new(settings.data_dir.clone(), "worker");
     let project = store.create_project("sc24113-alpha-reference").unwrap();
@@ -14129,7 +15303,7 @@ fn qwen_edit_reference_ids_preserves_plural_and_supports_singular_or_source() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn resolve_qwen_edit_guidance_reads_true_cfg_scale_not_guidance_scale() {
+fn resolve_qwen_edit_guidance_honors_advanced_values_and_legacy_aliases() {
     let model = mlx_model("qwen_image_edit_2511").unwrap();
     // Default is the family true-CFG default (4.0).
     assert_eq!(
@@ -14139,19 +15313,18 @@ fn resolve_qwen_edit_guidance_reads_true_cfg_scale_not_guidance_scale() {
         ),
         4.0
     );
-    // guidanceScale (the inert embedded-guidance knob the Python edit path pins at 1.0)
-    // is IGNORED — only trueCfgScale drives the engine's true CFG.
+    // The Advanced guidance control names true CFG on Qwen edit.
     assert_eq!(
         resolve_qwen_edit_guidance(
             &request(json!({
                 "projectId": "p", "mode": "edit_image",
-                "advanced": { "guidanceScale": 1.0 }
+                "advanced": { "guidanceScale": 1.5, "trueCfgScale": 4.0 }
             })),
             &model
         ),
-        4.0
+        1.5
     );
-    // trueCfgScale overrides.
+    // trueCfgScale remains an alias.
     assert_eq!(
         resolve_qwen_edit_guidance(
             &request(json!({
@@ -14173,7 +15346,7 @@ fn resolve_qwen_edit_guidance_reads_true_cfg_scale_not_guidance_scale() {
         2.5,
         "legacy imageGuidanceScale remains a deliberate fallback"
     );
-    // The character reference path clamps to [1, 10].
+    // Recommendation ranges do not cap explicit CFG.
     assert_eq!(
         resolve_qwen_edit_guidance(
             &request(json!({
@@ -14182,7 +15355,7 @@ fn resolve_qwen_edit_guidance_reads_true_cfg_scale_not_guidance_scale() {
             })),
             &model
         ),
-        10.0
+        50.0
     );
     assert_eq!(
         resolve_qwen_edit_guidance(
@@ -14192,9 +15365,9 @@ fn resolve_qwen_edit_guidance_reads_true_cfg_scale_not_guidance_scale() {
             })),
             &model
         ),
-        1.0
+        0.5
     );
-    // edit_image floors at 1.0 (the engine needs CFG > 1 to engage).
+    // Inverse guidance remains explicit on edit requests too.
     assert_eq!(
         resolve_qwen_edit_guidance(
             &request(json!({
@@ -14203,7 +15376,7 @@ fn resolve_qwen_edit_guidance_reads_true_cfg_scale_not_guidance_scale() {
             })),
             &model
         ),
-        1.0
+        0.5
     );
 }
 
@@ -14235,6 +15408,7 @@ fn qwen_edit_real_weights_generates_one_image() {
     let mut steps_seen = 0u32;
     let (w, h, pixels) = qwen_edit_generate_one(
         generator.as_ref(),
+        &gen_core::GenerationRequest::default(),
         "make it a watercolor painting",
         Some("blurry, low quality".to_owned()),
         512,
@@ -14301,6 +15475,7 @@ fn qwen_edit_lightning_real_weights_generates_one_image() {
     let mut steps_seen = 0u32;
     let (w, h, pixels) = qwen_edit_generate_one(
         generator.as_ref(),
+        &gen_core::GenerationRequest::default(),
         "make it a watercolor painting",
         // Lightning runs CFG-off: no negative prompt, guidance 1.0 (engine ignores it).
         None,
@@ -14394,6 +15569,7 @@ fn flux2_pose_tier_real_weights_generates_one_image() {
     let mut steps_seen = 0u32;
     let (w, h, pixels) = flux2_edit_generate_one(
         generator.as_ref(),
+        &gen_core::GenerationRequest::default(),
         false,
         false,
         None,
@@ -14532,6 +15708,7 @@ fn flux2_pose_tier_ab_wholebody_vs_body_real_weights() {
             eprintln!("[sc-6702] generating {pose}/{arm} (seed {seed}) ...");
             let (w, h, pixels) = flux2_edit_generate_one(
                 generator.as_ref(),
+                &gen_core::GenerationRequest::default(),
                 false,
                 false,
                 None,
@@ -14617,10 +15794,7 @@ fn sdxl_sub_mode_classifies_advanced_shapes() {
     assert!(sdxl_sub_mode(&request(json!({ "model": "sdxl", "mode": "edit_image" }))).is_none());
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn engine_dim_rounds_up_to_mult8_and_clamps() {
     assert_eq!(engine_dim(1024), 1024); // already valid
@@ -14630,10 +15804,7 @@ fn engine_dim_rounds_up_to_mult8_and_clamps() {
     assert_eq!(engine_dim(3000), 2048); // clamps to the engine maximum
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn detail_feather_ramps_over_overlap() {
     // No overlap → a flat field of ones (every pixel contributes fully).
@@ -14652,10 +15823,7 @@ fn detail_feather_ramps_over_overlap() {
     assert!((at(8, 0) - at(8, 15)).abs() < 1e-6);
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn compose_feathered_no_boundary_vignette() {
     // sc-8229: a single edge tile covers the whole frame; its raised-cosine feather ramps
@@ -14693,10 +15861,7 @@ fn compose_feathered_no_boundary_vignette() {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn shared_detail_tiler_is_backend_neutral_and_preserves_tile_progress() {
     use std::sync::Mutex;
@@ -15036,10 +16201,7 @@ fn ideogram_subdir_prefers_q8_and_clamps_to_installed() {
 /// `ideogram_model_subdir` and the fetch share this fn so the load target and the fetch target agree.
 /// Gated to the lanes where `base.rs` (and thus `ideogram_tier_subdir`) is compiled — the same cfg as
 /// its `include!`; the default/Linux no-candle `parity` build excludes base.rs, so this must too.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn ideogram_tier_subdir_maps_q8_optin() {
     assert_eq!(ideogram_tier_subdir(None), None);
@@ -15052,7 +16214,7 @@ fn ideogram_tier_subdir_maps_q8_optin() {
 
 /// Boogu (epic 6387) resolves each of its three ids to its own engine + the reference defaults, and
 /// quant resolution returns Q8 — the catalog declares `mlx.quantize: 8` (the pre-packed Q8 turnkey
-/// default). Turbo is CFG-free so `resolve_guidance` returns None. Runs in CI on Mac (no weights).
+/// default). Turbo retains its CFG-off default zero and accepts explicit guidance. Runs on Mac without weights.
 #[cfg(target_os = "macos")]
 #[test]
 fn boogu_engine_defaults_and_quant_resolution() {
@@ -15072,14 +16234,21 @@ fn boogu_engine_defaults_and_quant_resolution() {
             "modelManifestEntry": { "mlx": { "quantize": 8 } },
         }))
     };
-    // Base: true-CFG guidance 4.0 from the model row. Turbo: CFG-free → resolve_guidance None.
+    // Base retains guidance 4.0; Turbo retains its CFG-off default zero.
     assert_eq!(
         resolve_guidance(&req("boogu_image", json!({})), &base),
         Some(4.0)
     );
     assert_eq!(
         resolve_guidance(&req("boogu_image_turbo", json!({})), &turbo),
-        None
+        Some(0.0)
+    );
+    assert_eq!(
+        resolve_guidance(
+            &req("boogu_image_turbo", json!({ "guidanceScale": 1.5 })),
+            &turbo
+        ),
+        Some(1.5)
     );
     // Default → Q8 (the shipped pre-packed turnkey); advanced.mlxQuantize overrides to Q4 / bf16-dense.
     assert!(matches!(
@@ -16005,10 +17174,7 @@ fn validate_control_kind_accepts_and_rejects_per_table() {
 /// The generic SDXL provider is deliberately narrower than the Fun-Union engines: it exposes only
 /// the pinned OpenPose checkpoint and must reject canny/depth even though the shared preprocessor can
 /// produce those kinds for other providers.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn sdxl_control_catalog_is_pose_only() {
     let row = strict_control_engine(SDXL_CONTROL_ENGINE_ID).expect("sdxl control row");
@@ -16310,7 +17476,7 @@ fn krea_control_declares_the_reference_count_gen_core_derives_from_its_request()
 #[cfg(target_os = "macos")]
 #[test]
 fn resolve_control_identity_source_is_none_without_reference() {
-    let settings = Settings::from_env();
+    let settings = crate::test_env::offline_settings();
     let project_path = std::path::Path::new("/tmp/sc4410-nonexistent");
     // A bare pose set (skeleton-only, no identity reference) → None → no scorer → field omitted.
     let pose_only = request(json!({
@@ -16345,7 +17511,7 @@ fn resolve_control_identity_source_is_none_without_reference() {
 #[test]
 fn resolve_control_identity_source_decodes_present_reference_for_base_zimage() {
     let data_dir = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = data_dir.path().to_path_buf();
     let store = ProjectStore::new(settings.data_dir.clone(), "worker");
     let project = store.create_project("sc8822-base").unwrap();
@@ -16716,6 +17882,7 @@ fn matrix_flux1_render(
     let cancel = gen_core::CancelFlag::new();
     let (_, _, pixels) = flux1_control_generate_one(
         generator,
+        &gen_core::GenerationRequest::default(),
         "a person standing in a meadow, photorealistic",
         side,
         side,
@@ -16864,6 +18031,7 @@ fn matrix_flux2_render(
     let cancel = gen_core::CancelFlag::new();
     let (_, _, pixels) = flux2_control_generate_one_scoped(
         generator,
+        &gen_core::GenerationRequest::default(),
         // A directly-loaded generator has no live request evaluation to admit against; production
         // always supplies one (see `generate_flux2_dev_control_stream`).
         None,
@@ -16992,7 +18160,7 @@ fn matrix_zimage_turbo_paths() -> (std::path::PathBuf, std::path::PathBuf) {
     .flatten()
     .map(|entry| entry.path())
     .find(|path| path.is_dir())
-    .map(|dir| dir.join(super::ZIMAGE_CONTROL_FILE))
+    .map(|dir| dir.join(super::zimage::ZIMAGE_CONTROL_FILE))
     .filter(|path| path.exists())
     .expect("control weights file");
     (base, control)
@@ -17008,6 +18176,7 @@ fn matrix_zimage_turbo_render(
     let cancel = gen_core::CancelFlag::new();
     let (_, _, pixels) = zimage_control_generate_one(
         generator,
+        &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
         side,
         side,
@@ -17132,7 +18301,7 @@ fn matrix_zimage_base_paths() -> (std::path::PathBuf, std::path::PathBuf) {
     .flatten()
     .map(|entry| entry.path())
     .find(|path| path.is_dir())
-    .map(|dir| dir.join(super::ZIMAGE_BASE_CONTROL_FILE))
+    .map(|dir| dir.join(super::zimage::ZIMAGE_BASE_CONTROL_FILE))
     .filter(|path| path.exists())
     .expect("base control weights file");
     (base, control)
@@ -17147,6 +18316,7 @@ fn matrix_zimage_base_render(
     let cancel = gen_core::CancelFlag::new();
     let (_, _, pixels) = zimage_base_control_generate_one(
         generator,
+        &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
         None,
         side,
@@ -17271,7 +18441,7 @@ fn matrix_qwen_paths() -> (std::path::PathBuf, std::path::PathBuf) {
     // control overlay subdir.
     let control = hf_snapshot("models--SceneWorks--qwen-image-2512-fun-controlnet-union")
         .join("q8")
-        .join(super::QWEN_CONTROL_FILE);
+        .join(super::qwen::QWEN_CONTROL_FILE);
     assert!(
         control.exists(),
         "Qwen control weights missing: {control:?}"
@@ -17288,6 +18458,7 @@ fn matrix_qwen_render(
     let cancel = gen_core::CancelFlag::new();
     let (_, _, pixels) = qwen_control_generate_one(
         generator,
+        &gen_core::GenerationRequest::default(),
         "a person standing in a meadow",
         Some("blurry, low quality".to_owned()),
         side,
@@ -17560,7 +18731,7 @@ fn candle_control_providers_resolve_models_and_repos() {
     // is unchanged (2512 base). (The clamp-to-only-q4 behavior is proved directly in
     // `qwen_control_tier_tests`.)
     let empty_data = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = empty_data.path().to_path_buf();
     let qwen = request(json!({ "projectId": "p", "model": "qwen_image" }));
     let (q_repo, q_file) = qwen_control_repo_file(&qwen, &settings).expect("defaults resolve");
@@ -17639,7 +18810,7 @@ fn candle_control_weight_filenames_reject_traversal() {
     // override rejects at `safe_weight_filename` BEFORE any snapshot probe, so an empty data_dir is
     // never read here.
     let empty_data = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = empty_data.path().to_path_buf();
     for filename in ["../../etc/hosts", "/etc/hosts", "sub/x.safetensors", ".."] {
         let req = request(json!({
@@ -17689,7 +18860,7 @@ fn candle_control_weight_filenames_reject_traversal() {
 #[test]
 fn candle_control_weight_repositories_are_exactly_trusted() {
     let empty_data = tempfile::tempdir().unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = empty_data.path().to_path_buf();
     let arbitrary = request(json!({
         "projectId": "p",
@@ -18283,10 +19454,7 @@ fn depth_anything_revision_is_pinned_commit_not_main() {
 }
 
 /// The InstantID download pins (`instantid.rs`) — compiled on macOS AND the candle lane.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn instantid_revisions_are_pinned_commits_not_main() {
     assert_pinned_revision("INSTANTID_MLX_REVISION", INSTANTID_MLX_REVISION);
@@ -18325,10 +19493,7 @@ fn instantid_revisions_are_pinned_commits_not_main() {
 
 /// The Boogu/Ideogram on-demand tier fetches pin first-party turnkeys while preserving the established
 /// control-lane convention for explicitly configured override repos.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn turnkey_tier_fetch_revisions_pin_defaults_and_allow_explicit_overrides() {
     assert_pinned_revision("BOOGU_MLX_TURNKEY_REVISION", BOOGU_MLX_TURNKEY_REVISION);
@@ -18377,17 +19542,14 @@ fn turnkey_tier_fetch_revisions_pin_defaults_and_allow_explicit_overrides() {
     );
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn turnkey_resolution_prefers_pinned_tier_over_stale_main_but_override_uses_main() {
     let root = tempfile::tempdir().unwrap();
     let hub = root.path().join("hub");
     std::fs::create_dir_all(&hub).unwrap();
     let _hf = isolate_hf_hub_cache_to(&hub);
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = root.path().to_path_buf();
 
     for (repo, revision, relative) in [
@@ -18620,16 +19782,33 @@ fn candle_kolors_bespoke_routes_bind_immutable_receipts_before_load() {
 fn candle_sana_routes_pin_dense_artifacts_and_admit_both_hires_contexts() {
     // Architecture tripwire retained: the Candle-only SANA path has no CPU-safe provider execution;
     // the scan protects immutable revision literals and cross-pass admission wiring.
-    let source = include_str!("base.rs");
-    let selector = include_str!("../candle_memory_strategy.rs");
-    let registry = include_str!("../memory_route_registry.rs");
+    let source = include_str!("candle.rs");
+    let artifacts = include_str!("artifact_resolution.rs");
+    let memory = include_str!("memory.rs");
+    // This tripwire historically reads production wiring and the SANA refusal fixture.
+    let selector = format!(
+        "{}\n{}",
+        crate::source_tests::facade_source("candle_memory_strategy.rs"),
+        include_str!("../candle_memory_strategy/tests.rs"),
+    );
+    let registry = concat!(
+        include_str!("../memory_route_registry.rs"),
+        include_str!("../memory_route_registry/tests.rs"),
+    );
     for required in [
         "SANA_CANDLE_DIFFUSERS_REVISION",
         "ac0da2ff55fbe434795be0dce883042e4d49e2fc",
         "SANA_SPRINT_CANDLE_DIFFUSERS_REVISION",
         "19683c58b7ea290e55cedd8950ae1d86ada7ef96",
         "huggingface_pinned_snapshot_dir(",
-        "\"sana_1600m\" | \"sana_sprint_1600m\"",
+    ] {
+        assert!(
+            artifacts.contains(required),
+            "SANA artifact owner omitted {required}"
+        );
+    }
+    assert!(memory.contains("\"sana_1600m\" | \"sana_sprint_1600m\""));
+    for required in [
         "hires_first_pass_generation_memory",
         "hires_first_pass_memory_context",
         "requires an exact receipt-priced pre-load memory selection for every render pass",
@@ -18642,7 +19821,7 @@ fn candle_sana_routes_pin_dense_artifacts_and_admit_both_hires_contexts() {
             "SANA production route omitted {required}"
         );
     }
-    let force_dense = source
+    let force_dense = memory
         .split_once("fn candle_quant_for_resolved_tier(")
         .expect("Candle tier resolver")
         .1
@@ -18659,18 +19838,23 @@ fn candle_sana_routes_pin_dense_artifacts_and_admit_both_hires_contexts() {
         .0;
     assert!(final_mode.contains("sana_1600m") && final_mode.contains("image_to_image"));
     let final_selector = source
-        .split_once(
-            "let shared_memory = crate::candle_memory_strategy::evaluate_shared_image_priced(",
-        )
+        .split_once("let shared_memory = if let Some(references) = flux3_references.as_ref() {")
         .expect("final-pass selector")
         .1
         .split_once("let first_pass_shared_memory")
         .expect("end final-pass selector")
         .0;
+    let final_selector = final_selector
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     assert!(
-        final_selector.contains("hires_fix.is_some(),\n        hires_fix.is_some(),"),
+        final_selector.contains("hires_fix.is_some(), hires_fix.is_some(),"),
         "SANA Hires final pass must carry worker multipass and typed hasPhases authority"
     );
+    assert!(final_selector.contains("evaluate_shared_image_priced("));
+    assert!(final_selector.contains("evaluate_shared_image_priced_with_resources("));
+    assert!(final_selector.contains("Some(&references.resources)"));
     let first_mode = source
         .split_once("let first_pass_shared_memory = if hires_fix.is_some()")
         .expect("first-pass admission")
@@ -18819,7 +20003,10 @@ fn krea_control_lora_end_to_end_mlx_smoke() {
     // Load a repo pose skeleton (already an OpenPose render) as the pose Control map.
     let pose_png = PathBuf::from(env_or(
         "KREA_CTRL_POSE",
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../../poses/dance_01.png"),
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../apps/web/public/poses/dance_01.png"
+        ),
     ));
     let skel = image::open(&pose_png)
         .unwrap_or_else(|e| panic!("open pose {}: {e}", pose_png.display()))
@@ -18846,6 +20033,7 @@ fn krea_control_lora_end_to_end_mlx_smoke() {
             size,
             seed,
             steps,
+            &gen_core::GenerationRequest::default(),
             conditioning,
             None,
             gen_core::PreviewSink::default(),
@@ -18961,7 +20149,7 @@ fn resolve_krea_control_base_descends_turnkey_root_into_tier_with_tokenizer() {
     std::fs::create_dir_all(&refs).unwrap();
     std::fs::write(refs.join("main"), revision).unwrap();
 
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
 
     // A krea_2_turbo pose job whose manifest carries the tiered repo (the catalog default) — the exact
@@ -19030,10 +20218,7 @@ fn krea_control_calibration_provenance_accepts_only_exact_base_and_verified_defa
 /// The single-file-vs-snapshot-dir decision at the heart of S0c: a `.safetensors` FILE is a single-file
 /// checkpoint (→ the native entrypoint); a directory (a snapshot tier) is not (→ the registry snapshot
 /// path). A non-safetensors file (e.g. a `.ckpt`) is likewise not one — the S0b/S0a lane is safetensors.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn is_single_file_checkpoint_distinguishes_file_from_snapshot_dir() {
     let dir = tempfile::tempdir().unwrap();
@@ -19064,10 +20249,7 @@ fn is_single_file_checkpoint_distinguishes_file_from_snapshot_dir() {
 
 /// Seed an app-managed imported model file under `<data_dir>/models/…` and return a Settings pinned to
 /// that data dir. The confinement (`normalize_app_managed_model_path`) admits `<data_dir>` roots.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn imported_krea_settings_with_file(dir: &std::path::Path) -> (Settings, PathBuf) {
     let file = dir
         .join("models")
@@ -19075,7 +20257,7 @@ fn imported_krea_settings_with_file(dir: &std::path::Path) -> (Settings, PathBuf
         .join("kreamania_variant4.safetensors");
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(&file, b"dit").unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.to_path_buf();
     (settings, file)
 }
@@ -19304,7 +20486,7 @@ fn resolve_krea_imported_base_tier_requires_installed_base() {
     let hub = dir.path().join("hub");
     std::fs::create_dir_all(&hub).unwrap();
     let _hf = isolate_hf_hub_cache_to(&hub);
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
 
     let assert_install_base_error = |label: &str| {
@@ -19481,7 +20663,7 @@ fn resolve_image_route_sends_registered_imported_sdxl_operations_to_fused_lane()
         .join("community-xl.safetensors");
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(&file, b"sdxl").unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.path().to_path_buf();
     let payload = |extra: Value| {
         let mut value = json!({
@@ -19663,10 +20845,7 @@ fn resolve_candle_image_route_sends_imported_single_file_krea_to_the_bespoke_lan
 /// no imported Pose operation on `krea_imported_available` and routes it through
 /// `krea_imported_control_available` instead. Base-tier-only shapes (mask, character, a non-edit
 /// reference set, a bare non-edit source) stay rejected on every backend.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn krea_imported_available_backend_gates_loras_and_edit() {
     let dir = tempfile::tempdir().unwrap();
@@ -19949,10 +21128,7 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
 /// `krea2_identity_edit` LoRA (the source conditioning is inert without it), mirroring the builtin
 /// `generate_krea_edit_stream`. A plain t2i job (no loras) resolves to an empty adapter stack + no edit
 /// conditioning.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn imported_edit_requires_the_identity_edit_lora() {
     let dir = tempfile::tempdir().unwrap();
@@ -19990,10 +21166,7 @@ fn imported_edit_requires_the_identity_edit_lora() {
 /// without relying on optional UI presentation metadata. Pure — no reference-asset I/O or generator
 /// load. Runs on the cross-platform path so the
 /// candle imported lane's img2img threading is covered too.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn krea_imported_conditioning_threads_the_img2img_reference() {
     // A resolved reference → one `Conditioning::Reference` carrying the strength.
@@ -20840,10 +22013,7 @@ fn krea_imported_control_mlx_gpu_smoke() {
 /// Settings + a complete fine-tuned Mage transformer component dir under the app data root
 /// (sc-15036): the `config.json` + `diffusion_pytorch_model.safetensors` pair the trainer's
 /// `save_full_checkpoint` writes into `<data>/models/finetunes/<id>`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn mage_finetuned_settings_with_checkpoint(dir: &Path) -> (Settings, std::path::PathBuf) {
     let checkpoint = dir
         .join("models")
@@ -20860,7 +22030,7 @@ fn mage_finetuned_settings_with_checkpoint(dir: &Path) -> (Settings, std::path::
         b"dit",
     )
     .unwrap();
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = dir.to_path_buf();
     (settings, checkpoint)
 }
@@ -20871,10 +22041,7 @@ fn mage_finetuned_settings_with_checkpoint(dir: &Path) -> (Settings, std::path::
 /// Discriminating on each of the four conditions independently: a builtin Mage id must keep its
 /// tiered-snapshot path, a wrong family is not this lane's job, and a TORN checkpoint (either
 /// component file missing) is refused here rather than failing deep inside the load.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn resolve_mage_finetuned_transformer_claims_only_a_complete_non_builtin_checkpoint() {
     let dir = tempfile::tempdir().unwrap();
@@ -21091,10 +22258,7 @@ fn prepared_mage_finetuned_route_rejects_selection_to_dispatch_retarget() {
 /// The generated Mage base inherits the undistilled Base descriptor's true-CFG negative-prompt
 /// surface. Pin the actual per-image request builder so accepted LAN/API input cannot be recorded in
 /// asset provenance while disappearing before provider dispatch.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn mage_finetuned_generation_request_threads_negative_prompt() {
     let cancel = CancelFlag::new();
@@ -21408,6 +22572,7 @@ fn sc_8253_8278_identity_angle_ab() {
                 let cancel = gen_core::CancelFlag::new();
                 let (w, h, pixels) = flux2_edit_generate_one(
                     generator.as_ref(),
+                    &gen_core::GenerationRequest::default(),
                     false,
                     false,
                     None,
@@ -21692,6 +22857,8 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         // network overlaid, and the route reaches the generic `generate_candle_stream` base-model
         // admission gate. Structurally the SenseNova case, not the ControlNet case.
         "QwenImage21Edit",
+        // FLUX.3 references use the base autoencoder, not an additional conditioning network.
+        "Flux3Reference",
         "KreaEdit",
         // SenseNova references are consumed by the unified MoT base's built-in vision/VAE path; no
         // separately loaded conditioning network is overlaid. The route then uses the generic
@@ -21701,6 +22868,10 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         // unlike the dedicated IP-Adapter/ControlNet routes, it loads no second conditioning network
         // and reaches the generic `generate_candle_stream` base-model admission gate.
         "KolorsEdit",
+        // MOSS retains edit rank A/B tensors on its existing base projections, with no second
+        // independently loaded conditioning network. Its native edit peak includes those tensors
+        // and the reference workspace; the exact cold estimate and loader gate are checked below.
+        "MossImageEdit",
         // Krea sampling-regime lanes: the same base, a different schedule / phase list.
         "KreaTurboOnRaw",
         "KreaMultiPhase",
@@ -21731,6 +22902,18 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
     // them. Their companion snapshot's transformer is replaced by the primary File and must not be
     // double-priced; routing through the cache does not replace Candle's live-VRAM admission.
     const BASE_ADMITTED: &[(&str, &str, &str, &str)] = &[
+        (
+            "Flux3Reference",
+            "candle.rs",
+            include_str!("candle.rs"),
+            "evaluate_shared_image_priced_with_resources(",
+        ),
+        (
+            "MossImageEdit",
+            "moss.rs",
+            include_str!("moss.rs"),
+            "runtime.cold_peak(",
+        ),
         (
             "SdxlEdit",
             "sdxl_edit_candle.rs",
@@ -21859,6 +23042,8 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "start_cached_gen_stream(",
             "start_cached_gen_stream_with_request_state(",
             "start_cached_gen_stream_after_cold_admission(",
+            "start_cached_gen_stream_with_request_state_using(",
+            "start_cached_gen_stream_with_request_state_using_owned(",
         ]
         .iter()
         .filter_map(|needle| {
@@ -21887,6 +23072,68 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             );
         }
     }
+
+    // MOSS computes its exact edit peak before the cache handoff and admits inside the actual
+    // cache-miss loader. Check the Candle arm specifically, so the parallel MLX arm cannot carry
+    // this assertion, then bind the production loader callback to the admitted factory boundary.
+    let moss = include_str!("moss.rs");
+    let native_runtime = moss
+        .split_once("impl MossStreamRuntime for NativeMossStreamRuntime")
+        .expect("native MOSS defaults must exist")
+        .1;
+    let peak_lines: Vec<_> = native_runtime.lines().collect();
+    let candle_start = peak_lines
+        .windows(2)
+        .position(|lines| {
+            lines[0].trim()
+                == "#[cfg(all(not(target_os = \"macos\"), feature = \"backend-candle\"))]"
+                && lines[1].trim() == "let peak = if edit {"
+        })
+        .expect("native defaults must retain the Candle cold-peak arm");
+    assert!(
+        peak_lines[candle_start + 2..]
+            .iter()
+            .take_while(|line| !line.contains("} else {"))
+            .any(|line| line.contains("moss_edit_cold_peak(variant,")
+                && !line.trim_start().starts_with("//")),
+        "MOSS Candle edit must use the exact native edit peak before the cache handoff"
+    );
+    let loader = moss
+        .split_once("load: move |id: &str, spec: &LoadSpec| {")
+        .expect("MOSS must retain its actual cache-miss loader")
+        .1
+        .split_once("\n        },")
+        .expect("MOSS loader callback must end")
+        .0;
+    let live_loader = loader
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        live_loader.contains("moss_load_admitted(")
+            && live_loader.contains("|| load_generator(id, spec)"),
+        "MOSS actual provider construction must remain inside the admitted loader closure"
+    );
+    let factory = moss
+        .split_once("fn moss_load_admitted<T>(")
+        .expect("MOSS admitted factory must exist")
+        .1
+        .split_once("\n}\n")
+        .expect("MOSS admitted factory must end")
+        .0;
+    let live_factory = factory
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let admission = live_factory
+        .find("moss_admit(peak, 0, budget)")
+        .expect("MOSS cold admission must grant no residency credit");
+    let load = live_factory
+        .find("\n    load()")
+        .expect("MOSS admitted factory must invoke the supplied loader");
+    assert!(admission < load, "MOSS must admit before provider loading");
 
     // Imported single-file lanes use the same provider registry and generator cache as snapshot-backed
     // lanes. Their primary source must remain `File`, their companion snapshot must be explicit, and the
@@ -21948,8 +23195,8 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
 
     // Every route the resolver can actually produce, read out of its source. `Some(CandleImageRoute::`
     // is the production form, so prose mentioning a variant cannot inflate this set.
-    let base = include_str!("base.rs");
-    let resolver = base
+    let routing = include_str!("routing.rs");
+    let resolver = routing
         .split_once("fn resolve_candle_image_route_with_prepared_availability(")
         .expect("resolve_candle_image_route_with_prepared_availability must exist")
         .1
@@ -22139,10 +23386,7 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
 
 /// Live denoise preview plumbing (epic 16624, sc-16904). Gated like `stream.rs`/`base.rs`, which
 /// define the seam under test.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod preview_stream_tests {
     use super::*;
 
@@ -22239,7 +23483,7 @@ mod preview_stream_tests {
                     ..
                 } => {
                     assert_eq!(index, expected_index);
-                    assert_eq!(actual_seed, seed);
+                    assert_eq!(actual_seed, Some(seed));
                     assert_eq!(face_likeness.unwrap()["score"], likeness);
                 }
                 other => panic!("expected a scored image, got {}", gen_event_name(&other)),
@@ -22323,7 +23567,7 @@ mod preview_stream_tests {
             other => panic!("expected a step event, got {}", gen_event_name(&other)),
         }
         match rx.try_recv().expect("image 0 completes") {
-            GenEvent::Image { index, seed, .. } => assert_eq!((index, seed), (0, 70)),
+            GenEvent::Image { index, seed, .. } => assert_eq!((index, seed), (0, Some(70))),
             other => panic!("expected an image event, got {}", gen_event_name(&other)),
         }
         assert!(
@@ -22338,10 +23582,13 @@ mod preview_stream_tests {
             GenEvent::Step { .. } => "Step",
             GenEvent::Decoding { .. } => "Decoding",
             GenEvent::Loading { .. } => "Loading",
+            GenEvent::Upsampling { .. } => "Upsampling",
             GenEvent::Preview { .. } => "Preview",
             GenEvent::PromptEnhancement { .. } => "PromptEnhancement",
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             GenEvent::CheckpointWeightFacts { .. } => "CheckpointWeightFacts",
             GenEvent::ImageFacts { .. } => "ImageFacts",
+            GenEvent::AssetWritten { .. } => "AssetWritten",
             GenEvent::Image { .. } => "Image",
         }
     }
@@ -22360,11 +23607,13 @@ mod preview_stream_tests {
         assert_eq!((decoded.width(), decoded.height()), (2, 2));
     }
 
-    /// The frame rides `result.previewFrame` as a single slot on the EXISTING streaming result —
+    /// The frame rides `result.previewFrame` as a single slot on the SLIM STEP result —
     /// `result` is replaced wholesale per accepted POST, so a result built without the slot (the
-    /// final/terminal posts) is what clears it. Both halves are pinned here.
+    /// full Image/Decoding posts and every terminal post) is what clears it. Both halves are
+    /// pinned here, plus the sc-8953 follow-through contract: the step result carries NO
+    /// accumulated fact sets.
     #[test]
-    fn streaming_result_carries_the_preview_slot_and_omits_it_when_cleared() {
+    fn slim_step_result_carries_the_preview_slot_and_omits_it_when_cleared() {
         let plan = ImagePlan::new(&request(
             json!({ "projectId": "p", "prompt": "x", "count": 1 }),
         ));
@@ -22374,7 +23623,7 @@ mod preview_stream_tests {
             total: 20,
             data_url: "data:image/jpeg;base64,QQ==".to_owned(),
         };
-        let with = streaming_result_with_preview(&plan, &[], Some(&slot));
+        let with = slim_step_result_with_preview(&plan, Some(&slot));
         let frame = with
             .get("previewFrame")
             .and_then(Value::as_object)
@@ -22387,13 +23636,13 @@ mod preview_stream_tests {
             Some("data:image/jpeg;base64,QQ==")
         );
 
-        let without = streaming_result_with_preview(&plan, &[], None);
+        let without = slim_step_result_with_preview(&plan, None);
         assert!(
             !without.contains_key("previewFrame"),
             "a result built with no live slot must omit the key entirely"
         );
-        // Every other key matches the plain streaming result — the preview is strictly additive.
-        assert_eq!(without, streaming_result(&plan, &[]));
+        // Every other key matches the plain slim step result — the preview is strictly additive.
+        assert_eq!(without, slim_step_result(&plan));
     }
 }
 
@@ -22418,18 +23667,18 @@ mod preview_stream_tests {
 fn the_preview_arm_never_posts_so_frame_one_rides_the_next_step_update() {
     // Architecture tripwire retained: this is an event-loop/UI cadence invariant spanning the worker
     // and web placeholder contract; no helper exposes the arm's deliberate absence of a post.
-    let base = include_str!("base.rs");
+    let base = include_str!("events.rs");
     let arm_start = base
         .find("GenEvent::Preview { index, frame } => {")
         .expect("the Preview arm of consume_gen_events");
     let arm_end = arm_start
         + base[arm_start..]
-            .find("\n            GenEvent::Image {")
-            .expect("the Preview arm is followed by the Image arm");
+            .find("\n            GenEvent::")
+            .expect("the Preview arm is followed by another event arm");
     let arm = &base[arm_start..arm_end];
     assert!(
         !arm.contains("update_job("),
-        "GenEvent::Preview must NOT post — the frame rides the next Step/Decoding update, which is \
+        "GenEvent::Preview must NOT post — the frame rides the next Step update, which is \
          why the first `generating` POST carries no previewFrame and why previewSupport.js holds \
          its placeholder across denoise step 1. Arm:\n{arm}"
     );
@@ -22437,14 +23686,24 @@ fn the_preview_arm_never_posts_so_frame_one_rides_the_next_step_update() {
         arm.contains("latest_preview = Some(slot)"),
         "the Preview arm must park the frame in the single latest-wins slot for the next POST"
     );
-    // The counterpart: the Step arm is what actually posts, and it attaches whatever is parked.
+    // The counterpart: the Step arm is what actually posts, and it attaches whatever is parked
+    // on the SLIM step result (sc-8953 follow-through — no accumulated fact sets per step).
     let step_start = base
         .find("GenEvent::Step {")
         .expect("the Step arm of consume_gen_events");
-    let step_arm = &base[step_start..(step_start + 2000).min(base.len())];
+    let step_arm = &base[step_start..(step_start + 2600).min(base.len())];
     assert!(
-        step_arm.contains("update_job(") && step_arm.contains("streaming_result_with_preview("),
-        "the Step arm is the POST that carries the parked frame"
+        step_arm.contains("update_job(") && step_arm.contains("slim_step_result_with_preview("),
+        "the Step arm is the POST that carries the parked frame on the slim step result"
+    );
+    // And the full fact set streams on the arms where it can actually change.
+    let image_start = base
+        .find("GenEvent::Image {")
+        .expect("the Image arm of consume_gen_events");
+    let image_arm = &base[image_start..(image_start + 6000).min(base.len())];
+    assert!(
+        image_arm.contains("streaming_result(plan, asset_writes)"),
+        "the Image arm must post the FULL result (the fact set just grew by this image)"
     );
 }
 
@@ -22459,10 +23718,7 @@ fn the_preview_arm_never_posts_so_frame_one_rides_the_next_step_update() {
 // The fixture and its helpers serve the macOS route probes below (`resolve_image_route` is the
 // MLX test-facing probe); the candle twin of the route is typechecked by `rust:check:candle` and
 // exercised on the Windows candle lane through the shared `checkpoint_plan.rs` handler.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 struct CheckpointPlanFixture {
     _data: tempfile::TempDir,
     _library: tempfile::TempDir,
@@ -22474,10 +23730,7 @@ struct CheckpointPlanFixture {
     root_id: String,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn write_tiny_safetensors(path: &Path, entries: &[(&str, &str)], fill: u8) {
     let mut header = serde_json::Map::new();
     let mut offset = 0_u64;
@@ -22501,10 +23754,7 @@ fn write_tiny_safetensors(path: &Path, entries: &[(&str, &str)], fill: u8) {
     std::fs::write(path, bytes).unwrap();
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn krea_native_entries() -> Vec<(&'static str, &'static str)> {
     vec![
         ("model.diffusion_model.txtfusion.projector.weight", "BF16"),
@@ -22517,10 +23767,7 @@ fn krea_native_entries() -> Vec<(&'static str, &'static str)> {
 /// block grammar, BOTH CLIP conditioners (the second is what separates SDXL from SD1.5), and the
 /// `first_stage_model` VAE. Mirrors `sceneworks-core`'s own inspector fixture, because the family
 /// verdict this drives is that crate's.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn sdxl_fused_entries() -> Vec<(&'static str, &'static str)> {
     vec![
         (
@@ -22544,10 +23791,7 @@ fn sdxl_fused_entries() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl CheckpointPlanFixture {
     fn new(label: &str, with_base_tier: bool) -> Self {
         let data = tempfile::Builder::new()
@@ -22579,7 +23823,7 @@ impl CheckpointPlanFixture {
             std::fs::create_dir_all(repo_dir.join("refs")).unwrap();
             std::fs::write(repo_dir.join("refs/main"), revision).unwrap();
         }
-        let mut settings = Settings::from_env();
+        let mut settings = crate::test_env::offline_settings();
         settings.data_dir = data.path().to_path_buf();
         settings.external_model_roots = Vec::new();
         let library_dir = std::fs::canonicalize(library.path()).unwrap();
@@ -23979,7 +25223,7 @@ fn a_plan_backed_mage_flow_finetune_loads_from_the_plans_component_directory() {
 /// MLX's single `ldm_tokenizer` (CLIP-L `vocab.json` + `merges.txt`) and candle's
 /// `tokenizer_clip_l` + `tokenizer_clip_bigg` (one `tokenizer.json` per repo). Installing only the
 /// MLX pair left every candle-side caller measuring the missing bigG install (sc-20651).
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn install_sdxl_clip_tokenizer_assets(settings: &Settings) {
     let snapshot = settings
         .data_dir
@@ -24506,10 +25750,7 @@ fn checkpoint_plan_route_refuses_when_the_family_base_tier_is_not_installed() {
 /// The plan's primary layer selection is role-driven and fail-closed (sc-20634): a plan without a
 /// transformer/fused-checkpoint layer is a typed missing-component refusal, two primaries are
 /// ambiguous, and exactly one maps to the registry source shape it implies.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn checkpoint_plan_primary_layer_is_role_driven_and_fail_closed() {
     use sceneworks_core::checkpoint_import::{
@@ -24662,10 +25903,7 @@ fn checkpoint_plan_primary_layer_is_role_driven_and_fail_closed() {
 /// Gated to the lanes where `base.rs` is actually included (see `image_jobs.rs`) — macOS or
 /// candle. The Linux/candle-off `parity` lane compiles this file but NOT `base.rs`, so an ungated
 /// `#[test]` here cannot see `imported_base_snapshot_companions` and breaks that lane's build.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn the_plan_route_and_the_legacy_krea_lane_price_the_identical_candle_floor() {
     let temp = tempfile::Builder::new()
@@ -24745,14 +25983,14 @@ fn the_plan_route_and_the_legacy_krea_lane_price_the_identical_candle_floor() {
 ///
 /// Only the two variants those tests inspect are carried through; everything else collapses to its
 /// route label, which is all a failure message needs.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 enum RoutedImageLane {
     CheckpointPlan(Box<PreparedCheckpointPlanSources>),
     KreaImported(Box<PreparedKreaImportedSources>),
     Other(String),
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 impl RoutedImageLane {
     fn label(&self) -> String {
         match self {
@@ -24764,7 +26002,7 @@ impl RoutedImageLane {
 }
 
 /// Drive whichever production router this lane compiles, and normalize its result.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn prepare_image_route_on_this_lane(
     request: &ImageRequest,
     settings: &Settings,
@@ -24799,7 +26037,7 @@ fn prepare_image_route_on_this_lane(
     }
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn write_gguf_checkpoint(path: &Path, architecture: &str) {
     fn push_u32(bytes: &mut Vec<u8>, value: u32) {
         bytes.extend(value.to_le_bytes());
@@ -24872,7 +26110,7 @@ fn write_gguf_checkpoint(path: &Path, architecture: &str) {
 /// Failing mutation (run): widen `CHECKPOINT_PLAN_WEIGHTS_CONTAINERS` to include
 /// `CheckpointContainerV1::Gguf` — the GGUF is served again, `prepare_checkpoint_plan_sources`
 /// returns an available selection, and this test reds on the refusal assertion.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 #[test]
 fn a_gguf_backed_plan_is_refused_by_container_and_never_reaches_the_safetensors_loader() {
     let fx = CheckpointPlanFixture::new("gguf-container", true);
@@ -24994,7 +26232,7 @@ fn a_gguf_backed_plan_is_refused_by_container_and_never_reaches_the_safetensors_
 /// `if let Some(message) = self.declined` arm with a fall-through to the `no-adapter-binding`
 /// default. The route still refuses, so a weaker "the router errors" assertion stays green, but the
 /// container tag is gone and this test reds on the tag assertion.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 #[test]
 fn a_managed_gguf_plan_keeps_the_container_refusal_across_the_unclaimed_refusal_hop() {
     use sceneworks_core::checkpoint_import::ManagedProvenanceV1;
@@ -25146,10 +26384,7 @@ fn a_managed_gguf_plan_keeps_the_container_refusal_across_the_unclaimed_refusal_
 /// Failing mutation (run): point `CHECKPOINT_PLAN_RESIDENT_BASE_TIERS`' `krea_2` row at a resolver
 /// returning a different directory — the companion sets and the floors diverge and this reds while
 /// the arithmetic test above stays green.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn the_plan_route_and_the_legacy_krea_lane_price_the_same_resident_base_tier() {
     let fx = CheckpointPlanFixture::new("floor-parity", true);
@@ -25253,10 +26488,7 @@ fn the_plan_route_and_the_legacy_krea_lane_price_the_same_resident_base_tier() {
 /// hard-coded — a registry that widened `supported_quants` must not silently turn this green.
 ///
 /// Failing mutation (run): invert the gate to `.is_ok()` in `checkpoint_plan.rs`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn a_quantized_plan_is_gated_on_the_providers_advertised_tiers_not_on_its_layer_dtype() {
     let fx = CheckpointPlanFixture::new("quant-gate", true);
@@ -25350,10 +26582,7 @@ fn a_quantized_plan_is_gated_on_the_providers_advertised_tiers_not_on_its_layer_
 /// A single-file Krea NVFP4 transformer: the `_quantization_metadata` layer map plus one complete
 /// packed triplet (`U8` weight / `F8_E4M3` blocked scale / scalar `F32` second scale) per
 /// projection, over the `krea_2` family marker.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn write_krea_nvfp4_safetensors(path: &Path) {
     let layers = 6;
     let mut declared = serde_json::Map::new();
@@ -25418,10 +26647,7 @@ fn write_krea_nvfp4_safetensors(path: &Path) {
 ///
 /// Failing mutation (run): pass `None` for `classification` — i.e. drop the stamping — and the
 /// `q4`/`mlxQuantize` rows stop being refused as native NVFP4.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn a_linked_packed_nvfp4_checkpoint_cannot_be_dispatched_at_a_q4_tier() {
     let fx = CheckpointPlanFixture::new("linked-nvfp4-dispatch", true);
@@ -25562,10 +26788,7 @@ fn a_linked_packed_nvfp4_checkpoint_cannot_be_dispatched_at_a_q4_tier() {
 /// by a route that resolved one copy twice.
 ///
 /// Failing mutation (run): return the linked checkpoint's primary for both copies.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn a_linked_and_a_managed_sdxl_checkpoint_take_one_route_and_get_one_load_spec_shape() {
     let fx = CheckpointPlanFixture::new("sdxl-parity", true);
@@ -26356,10 +27579,7 @@ fn the_roles_helper_declines_another_familys_entry_and_still_refuses_a_mislabell
 ///
 /// Backend-neutral, so it runs on the MLX lane too even though no MLX catalog registers a
 /// ComfyUI-tree adapter: the helper under test is family-agnostic by construction.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn checkpoint_plan_sources_declared_components_from_the_plans_own_layers() {
     use sceneworks_core::checkpoint_import::{
@@ -26513,10 +27733,7 @@ fn checkpoint_plan_family_truth_is_read_from_the_registered_adapter() {
 /// proving that exact shape is registered. This test is portable across the MLX and Candle builds
 /// that include the checkpoint-plan implementation, so the contract is covered before the
 /// Candle-only behavioural test reaches Windows.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn a_bespoke_lane_accepts_its_registered_shape_on_a_multi_dialect_family() {
     use gen_core::ImportedModelSource::{ComfyUiTree, FusedCheckpoint, TransformerFile};
@@ -26576,10 +27793,7 @@ fn a_bespoke_lane_accepts_its_registered_shape_on_a_multi_dialect_family() {
 /// and this route sources only the primary layer, taking the rest from the resident base tier.
 /// Loading the plan's transformer while silently substituting the base tier's VAE for the plan's
 /// own is a silent substitution, so a plan with any unconsumed layer refuses instead.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn a_plan_with_a_layer_this_route_cannot_source_refuses_instead_of_substituting() {
     use sceneworks_core::checkpoint_import::{
@@ -27245,6 +28459,7 @@ fn the_linked_import_stamp_carries_the_plan_identity_and_no_install_path() {
             plan_id: plan_id.to_owned(),
             family: "krea_2".to_owned(),
             layers: Vec::new(),
+            context: Default::default(),
         },
         // sc-20636 reports same-digest siblings on a compile; the stamp does not read them.
         duplicate_checkpoint_ids: Vec::new(),
@@ -27545,7 +28760,7 @@ fn a_managed_entry_keeps_its_bespoke_lane_for_shapes_the_plan_route_does_not_ser
 ///   * stamp a `checkpointId` for a different managed install (`format!("{id}-other")`) — the plan
 ///     route finds no record, the entry falls back to its legacy lane, and the route-kind assertion
 ///     fails.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 #[test]
 fn a_migrated_pre_epic_entry_keeps_its_model_id_and_loads_the_same_weights() {
     let fx = CheckpointPlanFixture::new("e4-migrated", true);
@@ -27681,7 +28896,8 @@ fn sdxl_bespoke_routes_preserve_ordered_adapters_and_hires_context_identity() {
     let edit = include_str!("sdxl_edit_candle.rs");
     let ip = include_str!("sdxl_ipadapter.rs");
     let detail = include_str!("detail.rs");
-    let base = include_str!("base.rs");
+    let base = include_str!("candle.rs");
+    let render = include_str!("render.rs");
     for (label, source) in [("edit", edit), ("ip", ip)] {
         assert!(
             source.contains("let adapters = resolve_adapters(request, settings)?;"),
@@ -27720,14 +28936,50 @@ fn sdxl_bespoke_routes_preserve_ordered_adapters_and_hires_context_identity() {
     assert!(detail.contains("raw_adapter_settings[\"memoryStrategy\"]"));
     assert!(detail.contains("raw_adapter_settings[\"memoryEvidenceRevision\"]"));
     assert!(!detail.contains("packed/request-quantized detail is not supported"));
-    assert!(base.contains("context.mode = if reference_count == 0"));
-    assert!(base.contains(
-        "let shared_request_mode = candle_base_memory_request_mode(engine_id, &request.mode)"
-    ));
+    assert!(render.contains("context.mode = if reference_count == 0"));
+    let mode_call = base
+        .split_once("let shared_request_mode = candle_base_memory_request_mode(")
+        .expect("shared mode must use the family-specific mode mapper")
+        .1
+        .split_once(");")
+        .expect("shared mode mapper call must terminate")
+        .0;
+    // rustfmt may wrap this call without changing its executed family/reference identity.
+    // Keep the complete argument/branch contract, not independent tokens from unrelated code.
+    let reference_mode_contract = |call: &str| {
+        call.split_whitespace().collect::<Vec<_>>().join(" ")
+            == "engine_id, if flux3_references.is_some() { \"edit_image\" } else { &request.mode },"
+    };
+    assert!(
+        reference_mode_contract(mode_call),
+        "actual FLUX3 references select edit_image; every other family preserves authored mode"
+    );
+    for (required, mutation) in [
+        ("engine_id,", "\"sdxl\","),
+        ("flux3_references.is_some()", "false"),
+        ("\"edit_image\"", "\"text_to_image\""),
+        ("&request.mode", "\"edit_image\""),
+    ] {
+        let mutated = mode_call.replacen(required, mutation, 1);
+        assert_ne!(mutated, mode_call, "mutation must change the actual call");
+        assert!(
+            !reference_mode_contract(&mutated),
+            "the actual normalized guard must reject changing {required}"
+        );
+    }
+    assert!(reference_mode_contract(mode_call));
     assert!(base.contains("let shared_admission_mode = if hires_fix.is_some()"));
     assert!(base.contains("let first_pass_shared_memory = if hires_fix.is_some()"));
     assert!(base.contains("| \"sdxl\""));
-    assert!(base.contains("provider_contract_for_spec(&spec)"));
+    let memory = include_str!("memory.rs");
+    let bespoke_admission = memory
+        .split_once("async fn admit_sdxl_bespoke_memory(")
+        .expect("shared SDXL bespoke admission owner")
+        .1
+        .split_once("\n}\n")
+        .expect("shared SDXL bespoke admission function end")
+        .0;
+    assert!(bespoke_admission.contains("provider_contract_for_spec(&spec)"));
 }
 
 /// SC-20799 receipt-authority seam guard. `generate_candle_stream` is the only place that decides
@@ -27740,10 +28992,10 @@ fn sdxl_bespoke_routes_preserve_ordered_adapters_and_hires_context_identity() {
 fn candle_receipt_authority_is_family_agnostic_and_compared_after_cache_rebinding() {
     // Architecture tripwire retained: the Candle body is cfg-gated off on macOS, and the invariant
     // is the ordering of receipt authority versus cache rebinding rather than a provider result.
-    let base = include_str!("base.rs");
+    let base = include_str!("candle.rs");
     let body = base
-        .split_once("async fn generate_candle_stream_using(")
-        .expect("missing production function marker generate_candle_stream_using")
+        .split_once("async fn generate_candle_registry_stream_using(")
+        .expect("missing production generic Candle function marker")
         .1
         .split_once("\n}\n")
         .expect("generate_candle_stream has no top-level end marker")
@@ -27789,10 +29041,7 @@ fn candle_receipt_authority_is_family_agnostic_and_compared_after_cache_rebindin
 /// `PLAN_BACKED_RESIDENT_BASE_MODELS` (set inequality); change its `base_model_id` to
 /// `"krea_2_raw"` (repo mismatch vs `KREA_IMPORTED_BASE_REPO`); change its `tier` to `"q4"`
 /// (tier mismatch vs `KREA_IMPORTED_BASE_TIER`).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables() {
     use crate::external_library_runtime::{ResidentBaseShape, PLAN_BACKED_RESIDENT_BASE_MODELS};
@@ -27955,7 +29204,7 @@ fn the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables() {
 /// the count; deleting either `fit.selection_telemetry(..)` emission reds its block.
 #[test]
 fn candle_stream_emits_the_krea_ladder_selection() {
-    let source = include_str!("base.rs");
+    let source = include_str!("candle.rs");
     let stream = source
         .split_once("async fn generate_candle_stream(")
         .expect("generate_candle_stream")
@@ -28026,7 +29275,7 @@ fn candle_stream_emits_the_krea_ladder_selection() {
 /// the deference arm reds the third.
 #[test]
 fn candle_stream_emits_the_ladder_selection_and_charges_the_reserve_from_the_raw_probe() {
-    let source = include_str!("base.rs");
+    let source = include_str!("candle.rs");
     let stream = source
         .split_once("async fn generate_candle_stream(")
         .expect("generate_candle_stream")
@@ -28087,8 +29336,10 @@ fn candle_stream_emits_the_ladder_selection_and_charges_the_reserve_from_the_raw
         !stream.contains("ladder_reserve_gb(budget"),
         "the ladder reserve must never be derived from the reclaimable-credited budget"
     );
-    // The final pass is the priced twin (epic 25899: it carries the prefix-KV-cache surcharge);
-    // the hires first pass is the plain selection.
+    // Exactly one final-pass branch runs: the legacy priced twin for no references, or the
+    // reference-aware twin. The optional hires first pass remains the plain selection.
+    assert!(stream
+        .contains("let shared_memory = if let Some(references) = flux3_references.as_ref() {"));
     // Per-tier preflight also uses the shared selector before generation-memory construction.
     // This guard concerns the final render pass and its independent Hires first pass.
     let render_selectors = stream
@@ -28100,32 +29351,61 @@ fn candle_stream_emits_the_ladder_selection_and_charges_the_reserve_from_the_raw
         .count()
         + render_selectors
             .match_indices("crate::candle_memory_strategy::evaluate_shared_image_priced(")
+            .count()
+        + render_selectors
+            .match_indices(
+                "crate::candle_memory_strategy::evaluate_shared_image_priced_with_resources(",
+            )
             .count();
     assert_eq!(
-        shared_calls, 2,
-        "the final-pass and hires first-pass shared selections"
+        shared_calls, 3,
+        "the mutually exclusive final-pass branches and the hires first-pass selection"
     );
+    let normalized_stream = stream.split_whitespace().collect::<Vec<_>>().join(" ");
     assert_eq!(
-        stream
-            .match_indices("budget,\n        shared_reserve_gb,\n        shared_predicted_peak_gb,")
-            .count()
-            + stream
-                .match_indices(
-                    "budget,\n            shared_reserve_gb,\n            shared_predicted_peak_gb,"
-                )
-                .count(),
-        2,
-        "both shared selections must pass the raw-probe reserve explicitly after the budget"
+        normalized_stream
+            .match_indices("budget, shared_reserve_gb, shared_predicted_peak_gb,")
+            .count(),
+        3,
+        "every shared call must pass the raw-probe reserve explicitly after the budget"
     );
 
     // Deference arm: gated on sequential capability AND a staging-engaging selection.
-    let deference = stream
-        .split_once("} else if sequential_capable\n                && memory_strategy_selection")
+    let deference = normalized_stream
+        .split_once("} else if sequential_capable")
         .expect("the legacy gate's deference arm is gated on sequential_capable")
         .1
         .split_once("match (needed, budget) {")
         .expect("deference arm body")
         .0;
+    // Rustfmt may split a long method chain before the dot (`memory_strategy_selection\n
+    // .is_some_and(...)`), which is semantically identical and must not red this guard. Normalize
+    // whitespace before a dot once, then both the contract check and the mutation replacen below see
+    // the same spelling.
+    let deference = format!("sequential_capable{deference}").replace(" .", ".");
+    let deference_contract = |arm: &str| {
+        arm.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .replace(" .", ".")
+            .starts_with(
+            "sequential_capable && memory_strategy_selection.is_some_and(|selection| selection.strategy.is_optimized()) && generation_memory.is_some_and(|memory| memory.stage_residency) {",
+        )
+    };
+    assert!(deference_contract(&deference));
+    for required in [
+        "sequential_capable",
+        "memory_strategy_selection.is_some_and(|selection| selection.strategy.is_optimized())",
+        "generation_memory.is_some_and(|memory| memory.stage_residency)",
+    ] {
+        let mutated = deference.replacen(required, "true", 1);
+        assert_ne!(mutated, deference, "mutation must change the actual arm");
+        assert!(
+            !deference_contract(&mutated),
+            "the actual normalized guard must reject removing {required}"
+        );
+    }
+    assert!(deference_contract(&deference));
     assert!(
         deference.contains(".is_some_and(|selection| selection.strategy.is_optimized())"),
         "the deference arm requires an optimized selection"
@@ -28136,10 +29416,7 @@ fn candle_stream_emits_the_ladder_selection_and_charges_the_reserve_from_the_raw
     );
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn checkpoint_negative_prompt_uses_provider_capabilities() {
     let mut descriptor = crate::inference_runtime::imported_model_descriptor(
@@ -28152,13 +29429,14 @@ fn checkpoint_negative_prompt_uses_provider_capabilities() {
         json!({"projectId":"p", "model":"kreamanai_v2", "prompt":"p",
         "negativePrompt":"  blur  "}),
     );
-    assert!(!descriptor.capabilities.supports_negative_prompt);
-    assert_eq!(checkpoint_plan_negative_prompt(&req, &descriptor), None);
-    descriptor.capabilities.supports_negative_prompt = true;
+    assert!(descriptor.capabilities.supports_negative_prompt);
     assert_eq!(
         checkpoint_plan_negative_prompt(&req, &descriptor).as_deref(),
         Some("blur")
     );
+    descriptor.capabilities.supports_negative_prompt = false;
+    assert_eq!(checkpoint_plan_negative_prompt(&req, &descriptor), None);
+    descriptor.capabilities.supports_negative_prompt = true;
     let mut blank = req;
     blank.negative_prompt = " \n ".into();
     assert_eq!(checkpoint_plan_negative_prompt(&blank, &descriptor), None);
@@ -28408,10 +29686,7 @@ fn reattach_alpha_is_verbatim_at_the_same_geometry_and_keeps_the_bands_when_scal
     assert!(matches!(reattach_alpha(rgb, None), GeneratedPixels::Rgb(_)));
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn write_upscaled_asset_reattaches_the_alpha_the_engine_could_not_see() {
     // The inline Image Studio upscale's write, driven with the plane `apply_inline_upscale` splits
@@ -28489,10 +29764,7 @@ fn write_upscaled_asset_reattaches_the_alpha_the_engine_could_not_see() {
     );
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn write_upscaled_asset_without_a_plane_still_writes_rgb() {
     let dir = tempfile::tempdir().unwrap();
@@ -28543,10 +29815,7 @@ fn write_upscaled_asset_without_a_plane_still_writes_rgb() {
 /// q4 are subdirs of the SceneWorks re-host. So the tier selects the REPO first, then the subdir —
 /// and that is what these tests pin, because a resolver that quietly assumed one repo would hand
 /// the loader `Qwen/Qwen-Image-2.1/q4`, which does not exist.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 mod qwen_image_2_1_tiers {
     use super::*;
     use std::path::{Path, PathBuf};
@@ -28558,14 +29827,6 @@ mod qwen_image_2_1_tiers {
     /// sc-25909). The shipped catalog pins it, and
     /// `the_shipped_catalog_pins_the_published_rehost` asserts so.
     const REHOST_REVISION: &str = "ef03535eac756dd21feb7ac47c4f2df3e9b5b3c0";
-
-    fn isolate_hf_cache() -> crate::test_env::EnvVars {
-        crate::test_env::EnvVars::set(&[
-            ("HF_HUB_CACHE", ""),
-            ("HUGGINGFACE_HUB_CACHE", ""),
-            ("HF_HOME", ""),
-        ])
-    }
 
     fn tier_root(data_dir: &Path, repo: &str, revision: &str, subdir: Option<&str>) -> PathBuf {
         let snapshot = sceneworks_core::hf_home::huggingface_repo_cache_path(data_dir, repo)
@@ -28607,13 +29868,13 @@ mod qwen_image_2_1_tiers {
     /// The shipped entry, which since sc-24114 IS the published catalog: the packed rows carry the
     /// real re-host revision and no `pendingArtifact` flag.
     fn entry_after_upload() -> serde_json::Map<String, Value> {
-        shipped_qwen_2_1_entry()
+        crate::test_env::shipped_catalog_entry("qwen_image_2_1")
     }
 
     /// The same entry with the packed rows put back into the sc-24112 PENDING shape (null-SHA
     /// placeholder + `pendingArtifact`), for the guard that must keep an unpublished tier inert.
     fn pending_entry() -> serde_json::Map<String, Value> {
-        let mut entry = shipped_qwen_2_1_entry();
+        let mut entry = crate::test_env::shipped_catalog_entry("qwen_image_2_1");
         for download in entry
             .get_mut("downloads")
             .and_then(Value::as_array_mut)
@@ -28638,7 +29899,7 @@ mod qwen_image_2_1_tiers {
     /// *Mutation that reds this:* restoring the null SHA (or `pendingArtifact`) on either row.
     #[test]
     fn the_shipped_catalog_pins_the_published_rehost() {
-        let entry = shipped_qwen_2_1_entry();
+        let entry = crate::test_env::shipped_catalog_entry("qwen_image_2_1");
         let rows: Vec<&Value> = entry["downloads"]
             .as_array()
             .expect("downloads array")
@@ -28661,7 +29922,7 @@ mod qwen_image_2_1_tiers {
     /// dense-only probe (the `packed` arm dropped).
     #[test]
     fn the_published_packed_layout_is_seen_as_installed() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().expect("temp data dir");
         let entry = entry_after_upload();
         stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
@@ -28691,7 +29952,7 @@ mod qwen_image_2_1_tiers {
             Some((q8, "q8"))
         );
         // q4 is not on disk: an explicit pick is refused, never substituted.
-        let error = super::super::qwen_image_2_1_tier_dir(
+        let error = crate::image_jobs::artifact_resolution::qwen_image_2_1_tier_dir(
             &settings(data.path()),
             &request(&entry, Some(4)),
         )
@@ -28710,11 +29971,13 @@ mod qwen_image_2_1_tiers {
         std::fs::create_dir_all(&q4).expect("create q4 transformer");
         std::fs::write(q4.join("model.safetensors"), b"x").expect("write q4 weights");
         std::fs::write(q4.join("config.json"), b"{}").expect("write unmarked config");
-        assert!(super::super::qwen_image_2_1_tier_dir(
-            &settings(data.path()),
-            &request(&entry, Some(4)),
-        )
-        .is_err());
+        assert!(
+            crate::image_jobs::artifact_resolution::qwen_image_2_1_tier_dir(
+                &settings(data.path()),
+                &request(&entry, Some(4)),
+            )
+            .is_err()
+        );
     }
 
     /// sc-25909 — a v0.9.0 install (q4 at the superseded `1691de01…`, never at the republished pin)
@@ -28727,7 +29990,7 @@ mod qwen_image_2_1_tiers {
     #[cfg(unix)]
     #[test]
     fn a_tier_installed_at_the_superseded_revision_resolves_after_the_pin_bump() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().expect("temp data dir");
         let entry = entry_after_upload();
         let supersession =
@@ -28766,26 +30029,6 @@ mod qwen_image_2_1_tiers {
         );
     }
 
-    fn shipped_qwen_2_1_entry() -> serde_json::Map<String, Value> {
-        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
-            sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-                .iter()
-                .find(|(name, _)| *name == "builtin.models.jsonc")
-                .expect("builtin.models.jsonc embedded")
-                .1,
-        ))
-        .expect("builtin.models.jsonc parses");
-        manifest["models"]
-            .as_array()
-            .expect("models array")
-            .iter()
-            .find(|model| model["id"] == "qwen_image_2_1")
-            .expect("qwen_image_2_1 is in the shipped catalog")
-            .as_object()
-            .expect("entry object")
-            .clone()
-    }
-
     fn request(entry: &serde_json::Map<String, Value>, bits: Option<i64>) -> ImageRequest {
         let mut payload = serde_json::Map::new();
         payload.insert("projectId".to_owned(), Value::String("p".to_owned()));
@@ -28820,8 +30063,11 @@ mod qwen_image_2_1_tiers {
         entry: &serde_json::Map<String, Value>,
         bits: Option<i64>,
     ) -> Option<(PathBuf, &'static str)> {
-        super::super::qwen_image_2_1_tier_dir(&settings(data_dir), &request(entry, bits))
-            .expect("the resolver answers rather than refusing")
+        crate::image_jobs::artifact_resolution::qwen_image_2_1_tier_dir(
+            &settings(data_dir),
+            &request(entry, bits),
+        )
+        .expect("the resolver answers rather than refusing")
     }
 
     /// Each tier resolves into ITS OWN repo — the whole reason this family needs a bespoke
@@ -28831,7 +30077,7 @@ mod qwen_image_2_1_tiers {
     /// `Qwen/Qwen-Image-2.1/q4`.
     #[test]
     fn each_tier_resolves_into_its_own_repository() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().expect("temp data dir");
         let entry = entry_after_upload();
         stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
@@ -28874,7 +30120,7 @@ mod qwen_image_2_1_tiers {
     /// reason, as every other tier resolver.
     #[test]
     fn an_unselected_default_falls_back_densest_first() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().expect("temp data dir");
         let entry = entry_after_upload();
         // Only bf16 and q4 on disk; the q8 default must land on bf16, not on q4.
@@ -28898,12 +30144,12 @@ mod qwen_image_2_1_tiers {
     /// fallback (`installed(tier).or_else(...)`).
     #[test]
     fn an_explicit_uninstalled_tier_is_refused_never_substituted() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().expect("temp data dir");
         let entry = entry_after_upload();
         stage_tier(data.path(), REHOST_REPO, REHOST_REVISION, Some("q4"));
         for (bits, tier) in [(8, "q8"), (0, "bf16")] {
-            let answer = super::super::qwen_image_2_1_tier_dir(
+            let answer = crate::image_jobs::artifact_resolution::qwen_image_2_1_tier_dir(
                 &settings(data.path()),
                 &request(&entry, Some(bits)),
             );
@@ -28931,11 +30177,11 @@ mod qwen_image_2_1_tiers {
     /// nothing-installed branch.
     #[test]
     fn nothing_installed_is_none_unselected_and_an_install_error_when_explicit() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().expect("temp data dir");
         assert_eq!(resolved(data.path(), &entry_after_upload(), None), None);
         for bits in [0, 4, 8, 16] {
-            let error = super::super::qwen_image_2_1_tier_dir(
+            let error = crate::image_jobs::artifact_resolution::qwen_image_2_1_tier_dir(
                 &settings(data.path()),
                 &request(&entry_after_upload(), Some(bits)),
             )
@@ -28955,7 +30201,7 @@ mod qwen_image_2_1_tiers {
     /// *Mutation that reds this:* the pre-fix `_ => "q8"` catch-all for every bit count above 4.
     #[test]
     fn a_dense_bit_width_selects_bf16_not_q8() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().expect("temp data dir");
         let entry = entry_after_upload();
         stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
@@ -28987,7 +30233,7 @@ mod qwen_image_2_1_tiers {
     /// is a syntactically valid pinned revision, so the staged directory below would resolve.
     #[test]
     fn pending_tiers_resolve_to_nothing_rather_than_a_missing_directory() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().expect("temp data dir");
         let entry = pending_entry();
         stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
@@ -29007,7 +30253,7 @@ mod qwen_image_2_1_tiers {
             default.display()
         );
         assert!(
-            super::super::qwen_image_2_1_tier_dir(
+            crate::image_jobs::artifact_resolution::qwen_image_2_1_tier_dir(
                 &settings(data.path()),
                 &request(&entry, Some(4))
             )
@@ -29025,14 +30271,14 @@ mod qwen_image_2_1_tiers {
     /// *Mutation that reds this:* `split_repo_root_tier_key` returning `None` (the pre-fix mapping).
     #[test]
     fn the_shipped_bf16_root_is_gated_and_loaded_as_bf16() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().expect("temp data dir");
-        let entry = shipped_qwen_2_1_entry();
+        let entry = crate::test_env::shipped_catalog_entry("qwen_image_2_1");
         stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
         let (dir, tier) = resolved_with_tier(data.path(), &entry, None).expect("bf16 is installed");
         assert_eq!(tier, "bf16");
         assert_eq!(
-            super::super::tier_key_from_resolved_dir(&dir),
+            crate::image_jobs::quantization::tier_key_from_resolved_dir(&dir),
             None,
             "precondition: the root's basename is a SHA, not a tier token"
         );
@@ -29043,14 +30289,14 @@ mod qwen_image_2_1_tiers {
         #[cfg(target_os = "macos")]
         {
             assert_eq!(
-                super::super::tier_quant_from_resolved_dir(&entry, &dir),
+                crate::image_jobs::quantization::tier_quant_from_resolved_dir(&entry, &dir),
                 Some((None, None)),
                 "MLX candidate quant: a dense root is never load-time quantized"
             );
             // The request carries no selection, so it derives the manifest's q8; reconcile must
             // correct that to the dense tier that is actually on disk.
             assert_eq!(
-                super::super::reconcile_resolved_tier_quant(
+                crate::image_jobs::quantization::reconcile_resolved_tier_quant(
                     (Some(Quant::Q8), Some(8)),
                     &dir,
                     &entry,
@@ -29065,10 +30311,18 @@ mod qwen_image_2_1_tiers {
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         {
             let request = request(&entry, None);
-            let gate = super::super::gate_tier_key(false, &dir, &request.advanced, &entry, false);
+            let gate = super::super::quantization::gate_tier_key(
+                false,
+                &dir,
+                &request.advanced,
+                &entry,
+                false,
+            );
             assert_eq!(gate, "bf16", "the VRAM gate prices the tier that loads");
             assert_eq!(
-                super::super::candle_quant_for_resolved_tier(&request, gate, &dir, true, false),
+                super::super::memory::candle_quant_for_resolved_tier(
+                    &request, gate, &dir, true, false
+                ),
                 (None, None),
                 "Candle never sends LoadSpec.quantize against the dense root"
             );
@@ -29079,7 +30333,7 @@ mod qwen_image_2_1_tiers {
     /// directory are the same answer for every installed tier — the two cannot drift.
     #[test]
     fn resolved_tier_identity_round_trips_through_the_directory() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().expect("temp data dir");
         let entry = entry_after_upload();
         stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
@@ -29141,10 +30395,7 @@ fn the_admission_reference_count_prices_every_condition_carrier() {
 ///
 /// *Mutation that reds this:* dropping the `qwen_image_2_1` arm of `reference_image_count`, which
 /// falls back to the carrier `max` and prices this request as 9 (admitted).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn qwen_image_2_1_admission_counts_source_mask_and_every_reference() {
     let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
@@ -29260,10 +30511,7 @@ fn an_over_envelope_qwen_image_2_1_request_is_refused_with_its_number() {
 /// `advanced.controlImage` naming a `type: "depth"` asset yields the engine's near-bright control
 /// image from a decoded copy, without Iris weights or the depth job, and the raw `.npy` stays
 /// byte-identical. A depth map is refused as the control map of any other control kind.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn depth_control_reads_a_saved_depth_asset_without_touching_the_raw_map() {
     let data = tempfile::tempdir().unwrap();
@@ -29319,10 +30567,7 @@ fn depth_control_reads_a_saved_depth_asset_without_touching_the_raw_map() {
 /// code (`apply_inline_iris_restore` → `restore_with_progress`) with a stub transform: every base
 /// image gets a NEW restored variant at the planned size, linked back to its base, carrying the
 /// applied Iris record (never a `factor`), with per-tile progress posted — and the base is untouched.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn inline_iris_restore_appends_a_lineage_linked_restored_variant_per_base_image() {
     use crate::iris_restore::tests as iris;
@@ -29420,10 +30665,7 @@ async fn inline_iris_restore_appends_a_lineage_linked_restored_variant_per_base_
 /// sc-25688: the inline pass with a TRAINED restoration model (`upscale.irisModel`) restores with it
 /// and records it on the restored variant — the record's `model` and `irisModel`, and the embedded
 /// workflow's reopenable `upscale` controls.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn inline_iris_restore_with_a_trained_model_records_the_trained_model() {
     use crate::iris_restore::tests as iris;
@@ -29486,10 +30728,7 @@ async fn inline_iris_restore_with_a_trained_model_records_the_trained_model() {
 /// sc-25683: a cancel requested after the inline pass's last per-tile progress reply (no flag sees
 /// it) is caught by the re-check before the restored variant is written: the pass ends canceled with
 /// no restored variant appended and no new PNG on disk.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn inline_iris_restore_canceled_after_the_last_tile_writes_no_variant() {
     use crate::iris_restore::tests as iris;
@@ -29562,10 +30801,7 @@ async fn inline_iris_restore_canceled_after_the_last_tile_writes_no_variant() {
 ///
 /// *Mutation that reds this:* dropping the `PREFIX_KV_CACHE_KEY` removal from the per-image settings
 /// in `consume_gen_events_with_disclosure`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_forged_advanced_prefix_kv_cache_never_reaches_an_asset_or_the_job_result() {
     let dir = tempfile::tempdir().unwrap();
@@ -29591,14 +30827,14 @@ async fn a_forged_advanced_prefix_kv_cache_never_reaches_an_asset_or_the_job_res
 
     let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(8);
     let report = real.clone();
-    let blocking = tokio::task::spawn_blocking(move || {
+    let blocking = crate::load_progress::spawn_blocking(move || {
         let mut facts = JsonObject::new();
         facts.insert(lane_controls::PREFIX_KV_CACHE_KEY.to_owned(), report);
         let _ = tx.blocking_send(GenEvent::ImageFacts { index: 0, facts });
         for (index, seed) in [(0_usize, 5_i64), (1, 6)] {
             let _ = tx.blocking_send(GenEvent::Image {
                 index,
-                seed,
+                seed: Some(seed),
                 width: 64,
                 height: 64,
                 pixels: stub_rgb8(64, 64, seed),
@@ -29649,10 +30885,7 @@ async fn a_forged_advanced_prefix_kv_cache_never_reaches_an_asset_or_the_job_res
 /// The MLX/Candle generic lanes' shared raw-settings builder drops a forged record too (epic 25899).
 ///
 /// *Mutation that reds this:* dropping the `PREFIX_KV_CACHE_KEY` removal from `mlx_raw_settings`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[test]
 fn mlx_raw_settings_drops_a_forged_prefix_kv_cache() {
     let req = request(json!({
@@ -29680,4 +30913,75 @@ fn stub_raw_settings_drops_a_forged_prefix_kv_cache() {
     let raw = stub_raw_settings(&req);
     assert!(raw.get(PREFIX_KV_CACHE_RESULT_KEY).is_none(), "{raw:?}");
     assert_eq!(raw["sampler"], "euler");
+}
+
+#[cfg(native_lane)]
+#[test]
+fn explicit_sampling_prototype_preserves_experimental_values_without_defaults() {
+    let empty = super::sampling::explicit_sampling_request(&request(json!({"projectId":"p"})));
+    assert_eq!((empty.guidance, empty.scheduler_shift), (None, None));
+    let explicit = super::sampling::explicit_sampling_request(&request(json!({
+        "projectId":"p", "negativePrompt":"blurry",
+        "advanced":{"guidanceScale":1.5,"schedulerShift":18.375,"sampler":"heun","scheduler":"karras"}
+    })));
+    assert_eq!(
+        (explicit.guidance, explicit.scheduler_shift),
+        (Some(1.5), Some(18.375))
+    );
+    assert_eq!(explicit.sampler.as_deref(), Some("heun"));
+    assert_eq!(explicit.scheduler.as_deref(), Some("karras"));
+    assert_eq!(explicit.negative_prompt.as_deref(), Some("blurry"));
+}
+
+#[cfg(native_lane)]
+#[test]
+fn checkpoint_plan_native_request_keeps_sampling_overrides_and_defaults() {
+    let empty = super::checkpoint_plan::checkpoint_plan_generation_request(&request(
+        json!({"projectId":"p"}),
+    ));
+    assert_eq!((empty.guidance, empty.scheduler_shift), (None, None));
+    assert!(empty.sampler.is_none() && empty.scheduler.is_none());
+    let explicit = super::checkpoint_plan::checkpoint_plan_generation_request(&request(json!({
+        "projectId":"p", "model":"kreamania_v4_int8", "width":768,"height":1024,
+        "advanced":{"guidanceScale":1.5,"schedulerShift":33.375,"sampler":"heun","scheduler":"karras"}
+    })));
+    assert_eq!((explicit.width, explicit.height), (768, 1024));
+    assert_eq!(
+        (explicit.guidance, explicit.scheduler_shift),
+        (Some(1.5), Some(33.375))
+    );
+    assert_eq!(explicit.sampler.as_deref(), Some("heun"));
+    assert_eq!(explicit.scheduler.as_deref(), Some("karras"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn zimage_control_forwards_experimental_sampling_to_the_native_request() {
+    let generator = HiresProbeGenerator::new();
+    let sampling = super::sampling::explicit_sampling_request(&request(json!({
+        "projectId":"p", "negativePrompt":"blurry", "advanced":{
+            "guidanceScale":1.5,"sampler":"heun","scheduler":"karras","schedulerShift":33.375
+        }
+    })));
+    zimage_control_generate_one(
+        &generator,
+        &sampling,
+        "p",
+        4,
+        4,
+        7,
+        2,
+        vec![],
+        gen_core::PreviewSink::default(),
+        &CancelFlag::new(),
+        &mut |_| {},
+    )
+    .unwrap();
+    let captured = generator.requests.lock().unwrap();
+    let native = &captured[0];
+    assert_eq!(native.guidance, Some(1.5));
+    assert_eq!(native.negative_prompt.as_deref(), Some("blurry"));
+    assert_eq!(native.scheduler_shift, Some(33.375));
+    assert_eq!(native.sampler.as_deref(), Some("heun"));
+    assert_eq!(native.scheduler.as_deref(), Some("karras"));
 }

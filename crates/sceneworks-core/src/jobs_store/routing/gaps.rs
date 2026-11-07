@@ -5,6 +5,7 @@
 use serde_json::{Map, Value};
 
 use crate::contracts::{JobSnapshot, JobType};
+use crate::image_request::image_quant_tier_refusal;
 use crate::jobs_store::routing::candle::{
     candle_family_serves_quant, candle_image_refusals, candle_requested_quant_bits,
     image_job_is_candle_eligible, model_has_candle_pose_lane, training_job_is_candle_eligible,
@@ -993,13 +994,41 @@ pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> Unsuppo
             ),
             Some("epic 5480"),
         ),
+        CandleImageRefusal::Flux3Surface => UnsupportedReason::new(
+            Some(model),
+            "FLUX 3 request outside supported text-to-image",
+            &format!(
+                "FLUX 3 Image Klein base and distilled checkpoints serve text_to_image on both \
+                 native backends, including exact-identity compatible LoRA. References, boxes, \
+                 controls and hires fix are not supported by this route. Select one installed \
+                 package: bf16, q4 or q8 on both backends, or publisher fp8r / nvfp4 on Candle. \
+                 Use an explicit adapter id for each LoRA and select the model's pinned checkpoint. \
+                 Adapter base_model/base_revision must match that checkpoint.{also}"
+            ),
+            Some("sc-26239"),
+        ),
+        CandleImageRefusal::Fp8rTier => UnsupportedReason::new(
+            Some(model),
+            "fp8r quant tier request this model cannot load",
+            &format!(
+                "{reason}. Candle refuses rather than silently rendering at a precision the \
+                 request did not name.{also}",
+                reason = payload
+                    .get("advanced")
+                    .and_then(Value::as_object)
+                    .and_then(|advanced| image_quant_tier_refusal(model, advanced))
+                    .unwrap_or_else(|| "advanced.quantTier \"fp8r\" is not loadable here".to_owned()),
+            ),
+            Some("sc-26241"),
+        ),
         CandleImageRefusal::IrisSurface => UnsupportedReason::new(
             Some(model),
             "Iris-3B request outside plain text-to-image",
             &format!(
                 "Iris-3B serves text-to-image only — no source/reference/mask, controls, poses, \
-                 quant tier (advanced.mlxQuantize / advanced.quantTier) or hires fix, on either \
-                 backend (generation-task LoRA / LoKr adapters do apply). This request (mode {mode:?}) carries one of those, so it is \
+                 advanced.quantTier, an advanced.mlxQuantize other than its bf16 / q8 / q4 tiers \
+                 (0 / 8 / 4 on both native backends) or hires fix \
+                 (generation-task LoRA / LoKr adapters do apply). This request (mode {mode:?}) carries one of those, so it is \
                  refused rather than rendered with the carrier silently dropped.{remediation}{also}",
                 remediation = if also.is_empty() {
                     " Re-submit as plain text_to_image without it and the same prompt routes."
@@ -1312,7 +1341,7 @@ pub const NATIVE_CONVERTERS: &[&str] = &[
     "sd3_5_medium_quant",
     "anima_quant",
     // sc-24213: Supra2-IMG `.pt` checkpoint -> native bundle through inference's backend-neutral
-    // `gen_core::supra2::convert_pinned_checkpoint`.
+    // `gen_core_checkpoint::supra2::convert_pinned_checkpoint`.
     "supra2_img",
 ];
 
@@ -1325,7 +1354,7 @@ pub const NATIVE_CONVERTERS: &[&str] = &[
 ///   sc-7459) performs the same single-file → diffusers key remap as the macOS converter so
 ///   `flux2_klein_9b_true_v2` installs + converts off-Mac;
 /// - `supra2_img` (sc-24214), which needs no twin at all: its converter is inference's
-///   backend-neutral `gen_core::supra2::convert_pinned_checkpoint` (no MLX or Candle code), compiled
+///   backend-neutral `gen_core_checkpoint::supra2::convert_pinned_checkpoint` (no MLX or Candle code), compiled
 ///   on every platform, and `candle-gen-supra2` loads the very bundle it writes. Off-Mac Supra2 has
 ///   no raw-source fallback (the upstream `.pt` pickle is not loadable), so the converted bundle is
 ///   required here exactly as on macOS.

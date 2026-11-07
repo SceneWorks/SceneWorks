@@ -3,7 +3,7 @@
 //! native-training path every family shares.
 //!
 //! * the pre-launch **data walk** endpoint — the trainer's own unused-tail condition
-//!   (`gen_core::iris::train::DataWalk`, via the worker crate), so the Studio can warn before Start;
+//!   (`gen_core_iris::train::DataWalk`, via the worker crate), so the Studio can warn before Start;
 //! * **resume / new phase / load-from** — a client names a previous Iris training JOB, never a
 //!   path; the run's checkpoint root or export is recomputed from that job's trusted ids exactly as
 //!   the registrars recompute an output dir, and stamped into the engine options bag;
@@ -32,7 +32,7 @@ pub(crate) const CHECKPOINT_MODEL_ID_KEY: &str = "checkpointModelId";
 const BACKBONE_CONFIG_FILE: &str = "config.yaml";
 const BACKBONE_WEIGHTS_FILE: &str = "model.safetensors";
 const CHECKPOINT_STATE_FILE: &str = "state.json";
-/// The third file of a depth / restoration task export (`gen_core::iris::downstream`).
+/// The third file of a depth / restoration task export (`gen_core_iris::downstream`).
 const EMPTY_PROMPT_FILE: &str = "empty_prompt.safetensors";
 
 /// The objective of a plan (`None` for a non-Iris plan).
@@ -314,6 +314,7 @@ pub(crate) async fn guard_iris_training_rerun(
         &output_dir,
         &plan.output.file_name,
     ))
+    .await?
     .is_some()
     {
         return Err(output_in_use(format!(
@@ -323,7 +324,13 @@ pub(crate) async fn guard_iris_training_rerun(
             job.id
         )));
     }
-    if output_dir.join(&stem).exists() || output_dir.join(&plan.output.file_name).exists() {
+    if tokio::fs::try_exists(output_dir.join(&stem))
+        .await
+        .unwrap_or(false)
+        || tokio::fs::try_exists(output_dir.join(&plan.output.file_name))
+            .await
+            .unwrap_or(false)
+    {
         return Err(output_in_use(format!(
             "Training run {} already exported its result; a retry would overwrite it and its \
              registration. Duplicate the run (a duplicate trains under its own output) or submit a \
@@ -335,7 +342,14 @@ pub(crate) async fn guard_iris_training_rerun(
 }
 
 /// A complete checkpoint (`step_XXXXXXXX/state.json`) under a run's checkpoint root, newest first.
-fn newest_complete_checkpoint(root: &FsPath) -> Option<PathBuf> {
+async fn newest_complete_checkpoint(root: &FsPath) -> Result<Option<PathBuf>, ApiError> {
+    let root = root.to_path_buf();
+    tokio::task::spawn_blocking(move || newest_complete_checkpoint_on_disk(&root))
+        .await
+        .map_err(|error| ApiError::internal(format!("Checkpoint scan failed: {error}")))
+}
+
+fn newest_complete_checkpoint_on_disk(root: &FsPath) -> Option<PathBuf> {
     let mut steps: Vec<(u64, PathBuf)> = std::fs::read_dir(root)
         .ok()?
         .filter_map(Result::ok)
@@ -501,7 +515,7 @@ pub(crate) async fn resolve_iris_run_sources(
             ))
         })?;
         let root = sceneworks_worker::iris_checkpoint_root(&output_dir, &previous.output.file_name);
-        if newest_complete_checkpoint(&root).is_none() {
+        if newest_complete_checkpoint(&root).await?.is_none() {
             return Err(ApiError::bad_request(format!(
                 "advanced.{RESUME_FROM_JOB_KEY}: {job_id} saved no complete checkpoint to resume \
                  from (it stopped before its first checkpoint)."
@@ -531,13 +545,17 @@ pub(crate) async fn resolve_iris_run_sources(
             ))
         })?;
         let export = output_dir.join(&stem);
-        let source = if export.join(BACKBONE_WEIGHTS_FILE).is_file() {
+        let source = if tokio::fs::metadata(export.join(BACKBONE_WEIGHTS_FILE))
+            .await
+            .is_ok_and(|metadata| metadata.is_file())
+        {
             export
         } else {
             newest_complete_checkpoint(&sceneworks_worker::iris_checkpoint_root(
                 &output_dir,
                 &previous.output.file_name,
             ))
+            .await?
             .ok_or_else(|| {
                 ApiError::bad_request(format!(
                     "advanced.{LOAD_FROM_JOB_KEY}: {job_id} left neither an export nor a \
@@ -901,7 +919,12 @@ pub(crate) async fn alias_trained_checkpoint(
     let Some(engine_model) = trained_checkpoint_engine_model(object) else {
         return Ok(None);
     };
-    let checkpoint_dir = confined_checkpoint_dir(object, &state.settings.data_dir)?;
+    let checkpoint_entry = object.clone();
+    let data_dir = state.settings.data_dir.clone();
+    let checkpoint_dir =
+        tokio::task::spawn_blocking(move || confined_checkpoint_dir(&checkpoint_entry, &data_dir))
+            .await
+            .map_err(|error| ApiError::internal(error.to_string()))??;
     let mut engine_entry = crate::jobs::project_image_manifest_for_worker(
         crate::models::resolve_model_manifest_entry(state, engine_model).await?,
     );

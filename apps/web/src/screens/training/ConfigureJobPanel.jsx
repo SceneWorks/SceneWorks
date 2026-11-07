@@ -22,6 +22,7 @@ import {
   optionLabel,
   qualityPresetLabel,
   rangeOptions,
+  randomTrainingSeed,
   resolutionBucketRepeatsMax,
   resolutionBucketsMax,
   resolutionBucketStride,
@@ -260,6 +261,7 @@ export function ConfigureJobPanel({
   // per-image control condition from the selected dataset (the data source) and trains a control
   // branch instead of a LoRA. Surface that so the run reads as ControlNet, not a mislabeled LoRA.
   const isControlTarget = selectedTarget?.outputKind === "control_branch";
+  const isMossTrainingTarget = selectedTarget?.kernel === "moss_image_lora";
   const controlType =
     selectedTarget?.defaults?.advanced?.controlType ?? selectedTarget?.limits?.controlTypes?.[0] ?? "pose";
   const fullFinetuneConfig = isFullFinetune
@@ -284,6 +286,7 @@ export function ConfigureJobPanel({
     gradientNoiseSupported && String(configDraft.gradientNoiseEta ?? "").trim() !== "";
   // Multi-resolution buckets are on whenever the draft carries a row list (null = off).
   const resolutionBuckets = Array.isArray(configDraft.resolutionBuckets) ? configDraft.resolutionBuckets : null;
+  const rectangularBuckets = Boolean(resolutionBuckets?.some((row) => Object.hasOwn(row ?? {}, "width")));
   // Offered only where the target's trainer on this platform declares buckets
   // (`limits.supportsResolutionBuckets`, withheld for LTX-2.5) — elsewhere the run would be refused.
   // A list carried onto an unsupported target keeps its toggle so it can be turned off.
@@ -332,7 +335,7 @@ export function ConfigureJobPanel({
   // same coverage readout and "Generate subject masks" action (once — under subject-masked loss
   // when that is on too).
   const restrictedNormalsOn =
-    selectedTarget?.baseModel !== "ltx_2_5" &&
+    selectedTarget?.ui?.subjectRestrictedNormalLoss !== false &&
     Boolean(configDraft.normalRestrictToSubject) &&
     bodyLosses.some((loss) => loss.prefix === "normal" && bodyLossEnabled(configDraft, loss));
   const subjectMaskCoverageAffordance = (
@@ -447,7 +450,7 @@ export function ConfigureJobPanel({
         ),
         normal: (
           <>
-            {selectedTarget?.baseModel !== "ltx_2_5" ? (
+            {selectedTarget?.ui?.subjectRestrictedNormalLoss !== false ? (
               <TechniqueToggle
                 checked={Boolean(configDraft.normalRestrictToSubject)}
                 invalid={invalidProps(configValidity, "normalRestrictToSubject")}
@@ -582,11 +585,12 @@ export function ConfigureJobPanel({
     objective === "restoration" && isFullFinetune && (networkTypeOptions ?? []).includes("lora")
       ? irisMemoryFloors(selectedTarget, "lora", floorSize, irisContext.trainingLane ?? null)
       : [];
-  const ltxWorkflows = selectedTarget?.baseModel === "ltx_2_5"
+  const ltxWorkflows = selectedTarget?.ui?.ltxWorkflowPlans
     ? (selectedTarget?.limits?.ltxWorkflows ?? [])
     : [];
   const updateLtxWorkflow = (workflow) => {
-    const plan = ltx25WorkflowPlan(workflow);
+    const plan = ltx25WorkflowPlan(selectedTarget, workflow);
+    if (!plan) return;
     updateConfigDraft("ltxWorkflow", workflow);
     updateConfigDraft("ltxVideo", plan.video);
     updateConfigDraft("ltxAudio", plan.audio);
@@ -725,8 +729,7 @@ export function ConfigureJobPanel({
               <label>
                 Output scope
                 <p className="training-field-hint">
-                  A full base fine-tune is registered as a model in your global model library, so it is available in
-                  every project. Only adapters are scoped to a single project.
+                  Full base fine-tunes enter the global model library, available in every project. Only adapters support project scope.
                 </p>
               </label>
             ) : (
@@ -975,9 +978,26 @@ export function ConfigureJobPanel({
               {(irisTask && isFullFinetune ? [] : [["rank", "Rank"], ["alpha", "Alpha"]]).map(([field, label]) => (
                 <label key={field}>
                   {label}
-                  {numericInput(field, {}, true)}
+                  {numericInput(field, field === "alpha" && isMossTrainingTarget ? { min: "0", step: "any" } : {}, true)}
                 </label>
               ))}
+              {isMossTrainingTarget ? (
+                <div className="form-row training-seed-control">
+                  <label title="A literal nonnegative whole seed, including zero. Randomize chooses and saves a concrete value before submission.">
+                    Seed
+                    {numericInput("seed", { min: "0", step: "1", "aria-label": "MOSS training seed" }, true)}
+                  </label>
+                  <button
+                    aria-label="Randomize seed"
+                    className="secondary-action"
+                    onClick={() => updateConfigDraft("seed", randomTrainingSeed())}
+                    title="Randomize seed"
+                    type="button"
+                  >
+                    <Icon.Refresh size={14} />
+                  </button>
+                </div>
+              ) : null}
               {/* Real hyperparameters the config validates (sc-10689). They live here
                   beside the other numeric knobs so every `> 0` error the rule set can
                   raise names an input the user can reach. The draft always seeds a
@@ -1013,6 +1033,21 @@ export function ConfigureJobPanel({
                 <label title="LoKr block-decomposition factor. -1 lets LyCORIS pick the largest factor automatically; larger values trade adapter size for capacity.">
                   LoKr factor
                   {numericInput("decomposeFactor", { min: "-1", step: "1" })}
+                </label>
+              ) : null}
+              {isMossTrainingTarget ? (
+                <label className="training-sample-prompts" title="One native target path per line. Paths are case-sensitive and sent exactly as written; leave blank to train all supported MOSS projections.">
+                  MOSS target modules
+                  <textarea
+                    aria-label="MOSS target modules"
+                    onChange={(event) => updateConfigDraft("loraTargetModules", event.target.value)}
+                    placeholder="q\nproj.q\nlayers.0.proj.q"
+                    rows={4}
+                    value={configDraft.loraTargetModules ?? ""}
+                  />
+                  <span className="training-field-hint">
+                    Exact case-sensitive native paths only (for example q, k, v, o, ffn_up_gate, ffn_down, or an exact dot path). Leave blank for all supported projections.
+                  </span>
                 </label>
               ) : null}
               <label>
@@ -1193,19 +1228,39 @@ export function ConfigureJobPanel({
               <textarea
                 disabled={upstreamPrompts}
                 onChange={(event) => updateConfigDraft("samplePrompts", event.target.value)}
-                placeholder="One prompt per line. Leave blank to use the trigger-phrase defaults."
+                placeholder="Blank uses trigger-phrase defaults."
                 rows={4}
                 value={configDraft.samplePrompts ?? ""}
               />
               <span className="training-field-hint">
                 {upstreamPrompts
-                  ? "Iris' seven built-in validation prompts replace these for this run (Iris training options → Previews)."
-                  : "One prompt per line. Renders one preview per prompt, up to the sample count."}
+                  ? "Iris' seven built-in validation prompts replace these."
+                  : "One per line; previews capped by Sample count."}
               </span>
             </label>
             )}
 
             <div className="training-advanced-toggles">
+              {isMossTrainingTarget ? (
+                <>
+                  <label className="training-checkbox-field" title="Reuse frozen VAE latents, or turn off to encode each training image again every epoch. Caching keeps the encoded latents resident for the run (more memory); recomputing trades that residency for encode time.">
+                    <input
+                      checked={configDraft.cacheLatents !== false}
+                      onChange={(event) => updateConfigDraft("cacheLatents", event.target.checked)}
+                      type="checkbox"
+                    />
+                    Cache VAE latents
+                  </label>
+                  <label className="training-checkbox-field" title="Reuse frozen text embeddings, or turn off to encode each caption again every epoch. Caching keeps the frozen text encoder's embeddings resident (more memory); recomputing trades that residency for encode time.">
+                    <input
+                      checked={configDraft.cacheTextEmbeddings !== false}
+                      onChange={(event) => updateConfigDraft("cacheTextEmbeddings", event.target.checked)}
+                      type="checkbox"
+                    />
+                    Cache text embeddings
+                  </label>
+                </>
+              ) : null}
               {checkpointingUnsupported && checkpointingLanes ? (
                 <p className="training-field-hint" aria-label="Gradient checkpointing availability">
                   Gradient checkpointing for this target is implemented on{" "}
@@ -1250,7 +1305,7 @@ export function ConfigureJobPanel({
                     updateConfigDraft("gradientNoiseEta", event.target.checked ? String(gradientNoiseEtaSuggested) : "");
                     updateConfigDraft("gradientNoiseGamma", event.target.checked ? String(gradientNoiseGammaDefault) : "");
                   }}
-                  title="Add seeded Gaussian noise to the adapter gradients that fades out over the run (eta / (1 + step)^gamma) — helps escape poor early minima. Off by default."
+                  title="Seeded Gaussian adapter-gradient noise: eta / (1 + step)^gamma. Helps escape poor early minima. Off by default."
                 />
               ) : null}
               {resolutionBucketsSupported || resolutionBuckets ? (
@@ -1263,7 +1318,7 @@ export function ConfigureJobPanel({
                       event.target.checked ? seedResolutionBuckets(selectedTarget, configDraft.resolution) : null,
                     )
                   }
-                  title="Train every image at several resolutions, each with its own repeat count per epoch (e.g. 512/768/1024 at 16/4/1). Replaces the single Resolution above. Off by default."
+                  title="Train every image at several resolutions with square rows, or explicitly choose width × height rows to assign images by closest aspect. Each row has its own repeat count per epoch. Replaces the single Resolution above. Off by default."
                 />
               ) : null}
               {auxLosses.map((loss) => (
@@ -1284,11 +1339,23 @@ export function ConfigureJobPanel({
                   invalid={invalidProps(configValidity, "subjectMaskLoss")}
                   label="Subject-masked loss"
                   onChange={(event) => updateConfigDraft("subjectMaskLoss", event.target.checked)}
-                  title="Weight the training loss by each image's subject mask so the adapter learns the subject, not the background. Needs a subject mask on every image; missing ones are generated with SAM3 when training starts. On in the Z-Image character presets, off otherwise."
+                  title="Subject-focused loss uses a mask on every image; missing masks are generated with SAM3 at training start. On in Z-Image character presets, otherwise off."
                 />
               ) : null}
             </div>
 
+            {selectedTarget?.family === "flux3" ? (
+              <label>
+                Source options (JSON)
+                <textarea
+                  title={selectedTarget.ui.description}
+                  value={configDraft.flux3 ?? "{}"}
+                  onChange={(event) => updateConfigDraft("flux3", event.target.value)}
+                  rows={6}
+                  {...invalidProps(configValidity, "flux3")}
+                />
+              </label>
+            ) : null}
             {iris ? (
               <IrisTrainingOptions
                 captionFieldOptions={irisContext.captionFieldOptions}
@@ -1314,39 +1381,67 @@ export function ConfigureJobPanel({
               <fieldset className="training-resolution-buckets" {...invalidProps(configValidity, "resolutionBuckets")}>
                 <legend>Resolution buckets</legend>
                 <span className="training-field-hint">
-                  Each image trains at every resolution below, repeated that many times per epoch. These replace the
-                  single Resolution setting.
+                  Square rows train every image at each listed resolution. Width × height rows assign each image only to its closest-aspect bucket; equal-aspect ties use the first row, not every resolution. Repeats apply within the assigned bucket.
                 </span>
+                <button
+                  className="secondary-action"
+                  disabled={!isMossTrainingTarget && !rectangularBuckets}
+                  title={!isMossTrainingTarget && !rectangularBuckets ? "Width × height buckets require a MOSS training target." : undefined}
+                  onClick={() => updateConfigDraft("resolutionBuckets", resolutionBuckets.map((row) => {
+                    const edge = row.resolution ?? row.width ?? row.height ?? configDraft.resolution ?? "";
+                    return rectangularBuckets
+                      ? { resolution: edge, repeats: row.repeats }
+                      : { width: edge, height: edge, repeats: row.repeats };
+                  }))}
+                  type="button"
+                >
+                  {rectangularBuckets ? "Use square buckets" : "Use width × height buckets"}
+                </button>
                 {resolutionBuckets.map((row, index) => (
                   <div className="training-resolution-bucket-row" key={index}>
-                    <label>
-                      Resolution
-                      {bucketResolutionOptions.length ? (
-                        <select
-                          aria-label={`Bucket ${index + 1} resolution`}
-                          onChange={(event) => updateResolutionBucket(index, "resolution", event.target.value)}
-                          value={row.resolution ?? ""}
-                        >
-                          {bucketResolutionOptions.map(String).includes(String(row.resolution)) ? null : (
-                            <option value={row.resolution ?? ""}>{row.resolution ?? ""}</option>
-                          )}
-                          {bucketResolutionOptions.map((resolution) => (
-                            <option key={resolution} value={resolution}>
-                              {resolution}
-                            </option>
-                          ))}
-                        </select>
-                      ) : (
-                        <input
-                          aria-label={`Bucket ${index + 1} resolution`}
-                          min={resolutionBucketStride}
-                          onChange={(event) => updateResolutionBucket(index, "resolution", event.target.value)}
-                          step={resolutionBucketStride}
-                          type="number"
-                          value={row.resolution ?? ""}
-                        />
-                      )}
-                    </label>
+                    {rectangularBuckets ? (
+                      <div>
+                        {["width", "height"].map((dimension) => (
+                          <label key={dimension}>
+                            {dimension === "width" ? "Width" : "Height"}
+                            <input
+                              aria-label={`Bucket ${index + 1} ${dimension}`}
+                              inputMode="numeric"
+                              onChange={(event) => updateResolutionBucket(index, dimension, event.target.value)}
+                              type="text"
+                              value={row[dimension] ?? ""}
+                            />
+                          </label>
+                        ))}
+                      </div>
+                    ) : (
+                      <label>
+                        Resolution
+                        {bucketResolutionOptions.length ? (
+                          <select
+                            aria-label={`Bucket ${index + 1} resolution`}
+                            onChange={(event) => updateResolutionBucket(index, "resolution", event.target.value)}
+                            value={row.resolution ?? ""}
+                          >
+                            {bucketResolutionOptions.map(String).includes(String(row.resolution)) ? null : (
+                              <option value={row.resolution ?? ""}>{row.resolution ?? ""}</option>
+                            )}
+                            {bucketResolutionOptions.map((resolution) => (
+                              <option key={resolution} value={resolution}>{resolution}</option>
+                            ))}
+                          </select>
+                        ) : (
+                          <input
+                            aria-label={`Bucket ${index + 1} resolution`}
+                            min={resolutionBucketStride}
+                            onChange={(event) => updateResolutionBucket(index, "resolution", event.target.value)}
+                            step={resolutionBucketStride}
+                            type="number"
+                            value={row.resolution ?? ""}
+                          />
+                        )}
+                      </label>
+                    )}
                     <label>
                       Repeats
                       <input
@@ -1380,7 +1475,13 @@ export function ConfigureJobPanel({
                   onClick={() =>
                     updateConfigDraft("resolutionBuckets", [
                       ...resolutionBuckets,
-                      { resolution: String(configDraft.resolution ?? ""), repeats: "1" },
+                      rectangularBuckets
+                        ? {
+                            width: String(configDraft.resolution ?? ""),
+                            height: String(configDraft.resolution ?? ""),
+                            repeats: "1",
+                          }
+                        : { resolution: String(configDraft.resolution ?? ""), repeats: "1" },
                     ])
                   }
                   type="button"

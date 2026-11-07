@@ -1,6 +1,84 @@
 use super::*;
 use crate::dto::{VectorSampling, MAX_VECTOR_WALL_TIME_MS};
 
+pub(super) async fn create_generation_job_with_binding(
+    state: AppState,
+    job_type: JobType,
+    project_id: Option<String>,
+    project_name: Option<String>,
+    mut payload: JsonObject,
+    requested_gpu: String,
+    admission: (Option<JobStatus>, Option<Value>),
+) -> Result<JobSnapshot, ApiError> {
+    let (initial_status, mut download_binding) = admission;
+    model_sources::ensure_runtime_model_sources(&state, &job_type, &mut payload).await?;
+    // sc-26687 / sc-26690: freeze the server-trusted provenance of the checkpoint this job
+    // admitted, in the SAME transaction that enqueues it, so a later re-import or rescan cannot
+    // change the identity the generated asset will report.
+    //
+    // Typed handlers mint the primary with their own canonical resolver. The source seam fills
+    // runtime companions and canonicalizes the utility roles; mere presence of a primary in an
+    // arbitrary incoming payload is not authority. Unbound/builtin entries honestly get None.
+    let model_provenance = match payload.get("modelManifestEntry").and_then(Value::as_object) {
+        Some(entry) => {
+            // Imported component terms are independent of the author's terms. Covered here are
+            // typed generation jobs with a server-resolved primary; queue_model_import_job owns
+            // the component-download gate. Raw POST /jobs admission is gated separately in
+            // jobs.rs::create_job on its actual canonical selection, before atomic enqueue.
+            crate::models::ensure_inherited_component_licenses_acknowledged(
+                &state,
+                entry,
+                payload
+                    .get(crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            )
+            .await?;
+            sceneworks_core::model_artifacts::provenance::resolved_model_provenance(
+                &state.settings.data_dir,
+                entry,
+            )
+            .map_err(|error| ApiError::internal(format!("resolve model provenance: {error}")))?
+        }
+        None => None,
+    };
+    let empty = JsonObject::new();
+    let entry = payload
+        .get("modelManifestEntry")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    validate_expected_imported_model_reference(&payload, entry, model_provenance.as_ref())?;
+    // Freeze the admitted selection for retry/duplicate too, including requests that were not
+    // themselves replays. A later same-id catalog rebind must not change their weights.
+    if let Some(reference) = imported_reference_from_provenance(entry, model_provenance.as_ref()) {
+        payload.insert("expectedImportedModelRef".to_owned(), reference);
+    }
+    if let Some(binding) = download_binding.as_mut().and_then(Value::as_object_mut) {
+        binding.insert("payload".to_owned(), json!(payload));
+    }
+    let job = store_call(state.clone(), move |store, _timeout| {
+        store.create_job_with_download_binding(
+            CreateJob {
+                job_type,
+                project_id,
+                project_name,
+                payload,
+                requested_gpu,
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+                initial_status,
+            },
+            model_provenance.as_ref(),
+            download_binding.as_ref(),
+        )
+    })
+    .await?;
+    publish(&state, "job.updated", &job);
+    publish_queue(&state).await?;
+    Ok(job)
+}
+
 /// The single backend this API instance can actually enqueue for — the one authority every
 /// enqueue-time capability gate must key off.
 ///
@@ -132,6 +210,21 @@ pub(crate) async fn create_image_job(
     let project_id = Some(payload.project_id.clone());
     let project_name = payload.project_name.clone();
     let mut job_payload = to_json_object(&payload)?;
+    if let Some(advanced) = job_payload.remove("mossImageAdvanced") {
+        let map = job_payload
+            .entry("advanced".to_owned())
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| ApiError::bad_request("advanced must be an object"))?;
+        if map
+            .insert(sceneworks_core::moss_image_advanced::KEY.into(), advanced)
+            .is_some()
+        {
+            return Err(ApiError::bad_request(
+                "supply mossImageAdvanced once, not at both request boundaries",
+            ));
+        }
+    }
     job_payload.remove("requestedGpu");
     if payload.recipe_preset_id.is_none() {
         job_payload.remove("recipePresetId");
@@ -199,13 +292,25 @@ pub(crate) async fn create_image_job(
     // chroma1_flash's declared 768. Silent: geometry coerces, so nothing ever errored (sc-12400).
     //
     // Written back per side only when the caller named none, so a caller's own size is untouched.
+    let reference_derived_size = if sceneworks_core::image_request::flux3::is_model(&model_id) {
+        !sceneworks_core::image_request::flux3::parse(&job_payload)
+            .map_err(ApiError::bad_request)?
+            .asset_ids
+            .is_empty()
+    } else {
+        false
+    };
     if let Some(entry) = model_manifest_entry.as_object() {
+        sceneworks_core::image_request::validate_image_request_payload(&job_payload, entry)
+            .map_err(ApiError::bad_request)?;
         let (default_width, default_height) =
             image_default_resolution(entry).unwrap_or((1024, 1024));
-        if !job_payload.contains_key("width") {
+        // Preserve omitted sides through storage/retry. The worker derives their actual canvas
+        // from the owned decoded references before admission; numeric defaults are not intent.
+        if !reference_derived_size && !job_payload.contains_key("width") {
             job_payload.insert("width".to_owned(), Value::from(default_width));
         }
-        if !job_payload.contains_key("height") {
+        if !reference_derived_size && !job_payload.contains_key("height") {
             job_payload.insert("height".to_owned(), Value::from(default_height));
         }
         // `defaults.count`, the resolution key's other half — 29 of the 45 image models declare
@@ -263,9 +368,9 @@ pub(crate) async fn create_image_job(
         // The declared sampler / scheduler MENU (sc-24114): a name no lane advertises is one the
         // worker silently falls back from, so it is refused here, naming the menu.
         if let Some(advanced) = job_payload.get("advanced").and_then(Value::as_object) {
-            if let Some(message) = sceneworks_core::video_request::image_sampling_knob_error(
-                &model_id, advanced, entry,
-            ) {
+            if let Some(message) =
+                sceneworks_core::image_limits::image_sampling_knob_error(&model_id, advanced, entry)
+            {
                 return Err(ApiError::bad_request(message));
             }
         }
@@ -347,10 +452,13 @@ pub(crate) async fn create_image_job(
         // Read off `job_payload` rather than the DTO so the count reflects what is actually
         // enqueued after preset/style patching. ABSENT ⇒ no cap, so every other image model is
         // byte-for-byte unchanged.
-        if let Some(message) = sceneworks_core::video_request::image_reference_limit_error(
+        if let Some(message) = sceneworks_core::image_limits::image_reference_limit_error(
             &model_id,
-            sceneworks_core::image_request::ordered_image_reference_ids(&job_payload)
-                .map_or(0, |ids| ids.len()),
+            sceneworks_core::image_request::ordered_image_reference_ids_for_model(
+                &model_id,
+                &job_payload,
+            )
+            .map_or(0, |ids| ids.len()),
             entry,
         ) {
             return Err(ApiError::bad_request(message));
@@ -372,16 +480,6 @@ pub(crate) async fn create_image_job(
             job_payload.get("height").and_then(Value::as_u64),
         ) {
             if let (Ok(width), Ok(height)) = (u32::try_from(width), u32::try_from(height)) {
-                if let Some(message) = sceneworks_core::video_request::image_dimension_error(
-                    &model_id,
-                    width,
-                    height,
-                    entry,
-                    crate::HISTORICAL_MIN_IMAGE_DIMENSION,
-                    crate::MAX_IMAGE_DIMENSION,
-                ) {
-                    return Err(ApiError::bad_request(message));
-                }
                 // The declared request-geometry ENVELOPE (sc-24112, `admissionGeometry`): the
                 // largest-preset area, the reference count and the batch, jointly. Per-side bounds
                 // cannot express it — 2752x2752 passes every side check and is still 7.57 Mpx
@@ -390,8 +488,11 @@ pub(crate) async fn create_image_job(
                 // the worker calls, over the same ordered reference list the worker renders.
                 // ABSENT block ⇒ inert.
                 let reference_count =
-                    sceneworks_core::image_request::ordered_image_reference_ids(&job_payload)
-                        .map_or(0, |ids| ids.len());
+                    sceneworks_core::image_request::ordered_image_reference_ids_for_model(
+                        &model_id,
+                        &job_payload,
+                    )
+                    .map_or(0, |ids| ids.len());
                 let batch = job_payload
                     .get("count")
                     .and_then(Value::as_u64)
@@ -422,9 +523,12 @@ pub(crate) async fn create_image_job(
         // The PER-ENTRY half: each ordered reference must actually BE a raster image this project
         // owns. Needs the asset store, so it cannot live in the pure core helper. Only runs for a
         // model that declares the cap — no other image model pays an asset read it never paid.
-        if sceneworks_core::video_request::image_max_reference_assets(entry).is_some() {
-            let ordered = sceneworks_core::image_request::ordered_image_reference_ids(&job_payload)
-                .unwrap_or_default();
+        if sceneworks_core::image_limits::image_max_reference_assets(entry).is_some() {
+            let ordered = sceneworks_core::image_request::ordered_image_reference_ids_for_model(
+                &model_id,
+                &job_payload,
+            )
+            .unwrap_or_default();
             if !ordered.is_empty() {
                 validate_ordered_image_references(
                     state.clone(),
@@ -731,10 +835,10 @@ async fn validate_vector_source_asset(
     project_id: String,
     source_asset_id: String,
 ) -> Result<(), ApiError> {
-    let (asset, media_path) = project_call(state, move |store| {
+    let (asset, media_exists) = project_call(state, move |store| {
         let asset = store.get_asset(&project_id, &source_asset_id)?;
         let media_path = store.resolve_asset_media_path(&project_id, &source_asset_id)?;
-        Ok((asset, media_path))
+        Ok((asset, media_path.is_file()))
     })
     .await?;
     let media_type = asset
@@ -745,12 +849,12 @@ async fn validate_vector_source_asset(
         .pointer("/file/mimeType")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if media_type != "image" || !mime.starts_with("image/") || mime == "image/svg+xml" {
+    if !sceneworks_core::contracts::is_raster_image_asset(media_type, mime) {
         return Err(ApiError::bad_request(
             "sourceAssetId must name a raster image owned by projectId",
         ));
     }
-    if !media_path.is_file() {
+    if !media_exists {
         return Err(ApiError::bad_request(
             "sourceAssetId media is missing from its project",
         ));
@@ -775,7 +879,37 @@ async fn validate_vector_source_asset(
 /// Deliberately serial rather than a join: the sets are at most ten entries, the store call is a
 /// blocking task, and the first bad entry is the one the caller has to fix — reporting it in
 /// request order is more useful than reporting whichever read finished first.
-async fn validate_ordered_image_references(
+/// Retry/duplicate revalidate the exact authored reference slots against the owning job project,
+/// not a project id the payload patch can replace. No native or model code runs in the API.
+pub(crate) async fn validate_flux3_reference_payload(
+    state: AppState,
+    project_id: Option<&str>,
+    payload: &JsonObject,
+) -> Result<(), ApiError> {
+    let model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !sceneworks_core::image_request::flux3::is_model(model) {
+        return Ok(());
+    }
+    let references =
+        sceneworks_core::image_request::flux3::parse(payload).map_err(ApiError::bad_request)?;
+    if references.asset_ids.is_empty() {
+        return Ok(());
+    }
+    let project_id = project_id
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| ApiError::bad_request("FLUX.3 references require an owning projectId"))?;
+    if payload.get("projectId").and_then(Value::as_str) != Some(project_id) {
+        return Err(ApiError::bad_request(
+            "FLUX.3 reference payload projectId must match the owning job project",
+        ));
+    }
+    validate_ordered_image_references(state, project_id.to_owned(), references.asset_ids).await
+}
+
+pub(crate) async fn validate_ordered_image_references(
     state: AppState,
     project_id: String,
     asset_ids: Vec<String>,
@@ -784,10 +918,10 @@ async fn validate_ordered_image_references(
         let ordinal = index + 1;
         let project = project_id.clone();
         let id = asset_id.clone();
-        let (asset, media_path) = project_call(state.clone(), move |store| {
+        let (asset, media_exists) = project_call(state.clone(), move |store| {
             let asset = store.get_asset(&project, &id)?;
             let media_path = store.resolve_asset_media_path(&project, &id)?;
-            Ok((asset, media_path))
+            Ok((asset, media_path.is_file()))
         })
         .await
         .map_err(|_| {
@@ -803,12 +937,12 @@ async fn validate_ordered_image_references(
             .pointer("/file/mimeType")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if media_type != "image" || !mime.starts_with("image/") || mime == "image/svg+xml" {
+        if !sceneworks_core::contracts::is_raster_image_asset(media_type, mime) {
             return Err(ApiError::bad_request(format!(
                 "reference {ordinal} ({asset_id}) must name a raster image owned by projectId"
             )));
         }
-        if !media_path.is_file() {
+        if !media_exists {
             return Err(ApiError::bad_request(format!(
                 "reference {ordinal} ({asset_id}) media is missing from its project"
             )));
@@ -848,10 +982,8 @@ pub(crate) async fn create_vector_job(
         validate_vector_source_asset(state.clone(), payload.project_id.clone(), source_asset_id)
             .await?;
     }
-    let model_manifest_entry = crate::models::model_catalog(&state)
+    let model_manifest_entry = crate::models::find_model_by_id(&state, payload.model.as_str())
         .await?
-        .into_iter()
-        .find(|model| model.get("id").and_then(Value::as_str) == Some(payload.model.as_str()))
         .unwrap_or_else(|| json!({}));
     validate_vector_model_manifest(&payload.model, payload.mode, &model_manifest_entry)?;
     validate_vector_provider_request(&payload, &model_manifest_entry)?;
@@ -1046,20 +1178,11 @@ async fn create_vector_prompt_workflow_internal(
     .map_err(|error| ApiError::bad_request(format!("Invalid raster stage: {error}")))?;
     validate_image_job(&raster_request)?;
 
-    let catalog = crate::models::model_catalog(&state).await?;
-    let raster_model = catalog
-        .iter()
-        .find(|model| {
-            model.get("id").and_then(Value::as_str) == Some(payload.raster_model.as_str())
-        })
-        .cloned()
+    let raster_model = crate::models::find_model_by_id(&state, &payload.raster_model)
+        .await?
         .unwrap_or_else(|| json!({}));
-    let vector_model = catalog
-        .iter()
-        .find(|model| {
-            model.get("id").and_then(Value::as_str) == Some(payload.vector_model.as_str())
-        })
-        .cloned()
+    let vector_model = crate::models::find_model_by_id(&state, &payload.vector_model)
+        .await?
         .unwrap_or_else(|| json!({}));
     let raster_revision =
         validate_raster_workflow_model(&state, &payload.raster_model, &raster_model)?;
@@ -1405,10 +1528,8 @@ async fn prepare_vector_parent_from_intermediate(
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::internal("vector workflow revision is missing"))?
         .to_owned();
-    let model = crate::models::model_catalog(state)
+    let model = crate::models::find_model_by_id(state, vector_model_id.as_str())
         .await?
-        .into_iter()
-        .find(|model| model.get("id").and_then(Value::as_str) == Some(vector_model_id.as_str()))
         .unwrap_or_else(|| json!({}));
     let actual_revision = authoritative_workflow_revision(&model)?;
     validate_workflow_revision("vector", &actual_revision, Some(&expected_revision))?;
@@ -2424,6 +2545,18 @@ pub(crate) async fn create_video_job(
     // job-create instead of 2–3× (sc-8819, F-017).
     let catalogs = JobCatalogSnapshot::default();
     apply_recipe_preset_to_video_payload(&state, &payload, &mut job_payload, &catalogs).await?;
+    if let Some(selection) = payload.appearance.as_ref() {
+        crate::styles::apply_appearance_to_payload(
+            &state,
+            &payload.model,
+            selection,
+            None,
+            payload.preset_prompt_resolved_client_side.unwrap_or(false),
+            &mut job_payload,
+        )
+        .await?;
+    }
+
     // Resolve the model manifest entry here so the GPU worker never re-parses
     // builtin/user.models.jsonc itself — Rust owns manifest parsing/merging
     // (story 1653). An unknown model resolves to {}, matching the worker's
@@ -2442,6 +2575,7 @@ pub(crate) async fn create_video_job(
         .unwrap_or(payload.model.as_str())
         .to_owned();
     let model_manifest_entry = resolve_model_manifest_entry(&state, &model_id).await?;
+    ensure_expected_imported_model_reference(&state, &job_payload, &model_manifest_entry)?;
     let auto_duration_active =
         normalize_ltx25_generation_controls(&model_id, &mut job_payload, &model_manifest_entry)?;
     // Do not advertise or enqueue the paired source layout until the pinned inference descriptor
@@ -2613,6 +2747,16 @@ pub(crate) async fn create_video_job(
         }
     }
     job_payload.insert("modelManifestEntry".to_owned(), model_manifest_entry);
+    // sc-26691. A fresh request takes the engine's own `match` when it names no resize mode, and
+    // the persisted job SAYS so: the only job payload that may then lack the key is one written
+    // before it existed, which is how a replay recognises a `diffusers`-rendered record. Stamped
+    // after the manifest entry lands so an imported H3 checkpoint (no `minimax_h3` id prefix) is
+    // recognised by its resolved family.
+    sceneworks_core::video_request::stamp_reference_image_resize_mode(
+        &mut job_payload,
+        sceneworks_core::video_request::REFERENCE_IMAGE_RESIZE_MODE_DEFAULT,
+    )
+    .map_err(ApiError::bad_request)?;
     validate_job_lora_compatibility_with(
         &state,
         Some(&payload.project_id),
@@ -2688,7 +2832,7 @@ pub(crate) async fn create_video_job(
 
 pub(crate) fn video_job_platform(_state: &AppState) -> &'static str {
     #[cfg(test)]
-    if let Some(platform) = *_state.video_platform_override.lock() {
+    if let Some(platform) = *_state.test_hooks.video_platform_override.lock() {
         return platform;
     }
     std::env::consts::OS
@@ -3055,6 +3199,29 @@ mod plan_backed_video_enqueue_tests {
     /// An app whose catalog holds ONE imported `wan-video` model. `import_plan` is spliced in
     /// verbatim so the control case can drop it and change nothing else.
     fn app_with_imported_wan(temp_dir: &tempfile::TempDir, import_plan: &str) -> axum::Router {
+        if !import_plan.is_empty() {
+            use sceneworks_core::checkpoint_import::{
+                CheckpointContainerV1, ImportLayerV1, ImportPlanV1, SourceLocatorV1,
+            };
+            let plan = ImportPlanV1::new(
+                format!("checkpoint-plan-{}", "3".repeat(64)),
+                "wan-video",
+                vec![ImportLayerV1 {
+                    layer_id: "dit".into(),
+                    role: "transformer".into(),
+                    target_path: "model.safetensors".into(),
+                    container: CheckpointContainerV1::Safetensors,
+                    source: SourceLocatorV1::linked(
+                        "root-wan-fixture",
+                        "model.safetensors",
+                        "a".repeat(64),
+                    )
+                    .unwrap(),
+                }],
+            )
+            .unwrap();
+            persist_checkpoint_plan_fixture(&test_settings(temp_dir), "ckpt_wan_abc123", &plan);
+        }
         write_manifests(
             &temp_dir.path().join("config/manifests"),
             &format!(
@@ -3075,13 +3242,8 @@ mod plan_backed_video_enqueue_tests {
     const IMPORT_PLAN: &str = r#","importPlan": { "checkpointId": "ckpt_wan_abc123" }"#;
 
     async fn create_project(app: &axum::Router) {
-        let (status, project) = request(
-            app.clone(),
-            "POST",
-            "/api/v1/projects",
-            json!({ "name": "Imported Wan" }),
-        )
-        .await;
+        let (status, project) =
+            crate::tests::support::create_project(app.clone(), &"Imported Wan").await;
         assert_eq!(status, StatusCode::CREATED, "project create: {project}");
     }
 
@@ -3178,5 +3340,209 @@ mod plan_backed_video_enqueue_tests {
         let (status, queue) = request(app, "GET", "/api/v1/queue", Value::Null).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(queue["counts"]["queued"], 0);
+    }
+}
+
+/// sc-26680 (epic 26679): an imported dense MiniMax-H3 DiT entry — exactly the shape the worker's
+/// model-import job stamps — is selectable in the catalog and enqueues through the PUBLIC video
+/// route under its OWN id, with the validated binding riding the payload to the worker. Each
+/// positive has a control that differs only in the binding, so the tests are about the plan.
+#[cfg(test)]
+mod imported_minimax_h3_video_tests {
+    use crate::tests::support::*;
+    use sceneworks_worker::minimax_h3_import_fixture::{
+        stage_managed_minimax_h3_import, ManagedMiniMaxH3Import,
+    };
+
+    const IMPORTED_ID: &str = "minimax_h3_custom";
+
+    /// E6/E8/E9: a fresh import captures real component contents BEFORE committing its plan.
+    /// Retain the fixture's scoped source-library guard for the entire API request lifetime.
+    fn imported_entry(temp_dir: &tempfile::TempDir, with_assembly: bool) -> ManagedMiniMaxH3Import {
+        let mut imported =
+            stage_managed_minimax_h3_import(&test_settings(temp_dir).data_dir, IMPORTED_ID);
+        assert_h3_component_authority_required(&test_settings(temp_dir).data_dir, &imported.entry);
+        if !with_assembly {
+            imported.entry["importPlan"]
+                .as_object_mut()
+                .expect("importPlan object")
+                .remove("assembly");
+        }
+        imported
+    }
+
+    fn app_with(temp_dir: &tempfile::TempDir, entry: Value) -> axum::Router {
+        let config_dir = temp_dir.path().join("config/manifests");
+        std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+        let user_models = json!({ "schemaVersion": 1, "models": [entry] }).to_string();
+        for (name, body) in [
+            (
+                "builtin.models.jsonc",
+                r#"{ "schemaVersion": 1, "models": [] }"#,
+            ),
+            ("user.models.jsonc", user_models.as_str()),
+            (
+                "builtin.loras.jsonc",
+                r#"{ "schemaVersion": 1, "loras": [] }"#,
+            ),
+            ("user.loras.jsonc", r#"{ "schemaVersion": 1, "loras": [] }"#),
+            (
+                "builtin.recipe-presets.jsonc",
+                r#"{ "schemaVersion": 1, "presets": [] }"#,
+            ),
+            (
+                "user.recipe-presets.jsonc",
+                r#"{ "schemaVersion": 1, "presets": [] }"#,
+            ),
+        ] {
+            std::fs::write(config_dir.join(name), body).expect("manifest writes");
+        }
+        // This success fixture represents consent already recorded by the import workflow.
+        let settings = test_settings(temp_dir);
+        let ack_path =
+            sceneworks_core::license_acknowledgments::acknowledgments_file(&settings.config_dir);
+        for component in sceneworks_core::minimax_h3_import::inherited_component_entries(
+            entry.as_object().unwrap(),
+        ) {
+            sceneworks_core::license_acknowledgments::record_acknowledgment(
+                &ack_path,
+                &component,
+                "test",
+                "2026-10-24T00:00:00Z",
+            )
+            .unwrap();
+        }
+        create_app(test_settings(temp_dir)).expect("app creates")
+    }
+
+    async fn create_project(app: &axum::Router) {
+        let (status, project) =
+            crate::tests::support::create_project(app.clone(), &"Imported H3").await;
+        assert_eq!(status, StatusCode::CREATED, "project create: {project}");
+    }
+
+    async fn catalog_row(app: &axum::Router) -> Value {
+        let (status, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{models}");
+        models
+            .as_array()
+            .expect("model list")
+            .iter()
+            .find(|model| model["id"] == IMPORTED_ID)
+            .cloned()
+            .expect("the imported entry is listed")
+    }
+
+    async fn enqueue_t2v(app: &axum::Router) -> (StatusCode, Value) {
+        request(
+            app.clone(),
+            "POST",
+            "/api/v1/video/jobs",
+            json!({
+                "projectId": "project-1",
+                "model": IMPORTED_ID,
+                "mode": "text_to_video",
+                "prompt": "a courier crosses a rain-lit square"
+            }),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn the_imported_h3_entry_is_a_selectable_video_model_on_both_lanes() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let imported = imported_entry(&temp_dir, true);
+        let app = app_with(&temp_dir, Value::Object(imported.entry.clone()));
+        let row = catalog_row(&app).await;
+
+        assert_eq!(row["type"], "video");
+        assert_eq!(row["catalogScope"], "user");
+        assert_eq!(
+            row["capabilities"],
+            json!(["text_to_video", "image_to_video", "first_last_frame"])
+        );
+        assert_eq!(
+            row["importPlan"]["assembly"]["components"]["transformer"]["source"],
+            "plan"
+        );
+        for block in ["macSupport", "candleSupport"] {
+            assert_eq!(row[block]["supported"], true, "{block}: {row}");
+            for mode in ["text_to_video", "image_to_video", "first_last_frame"] {
+                assert_eq!(
+                    row[block]["features"]["videoModes"][mode], true,
+                    "{block} {mode}"
+                );
+            }
+            assert_eq!(
+                row[block]["features"]["videoModes"]["reference_to_video"], false,
+                "{block}: the bound partition is the base one"
+            );
+        }
+        // E5/S9: compatible imported H3 checkpoints retain their adapter surface.
+        assert_eq!(row["loraCompatibility"]["supported"], true, "{row}");
+        assert_eq!(
+            row["loraCompatibility"]["families"],
+            json!(["minimax-h3"]),
+            "{row}"
+        );
+        assert!(!row["importPlan"]["assembly"]["componentClosure"]
+            .as_array()
+            .expect("fresh import component closure")
+            .is_empty());
+
+        // Control: the identical row without its validated binding is an incomplete assembly, and
+        // must not read as a usable model on either lane.
+        let unbound_dir = tempfile::tempdir().expect("temp dir creates");
+        let unbound_import = imported_entry(&unbound_dir, false);
+        let unbound = catalog_row(&app_with(
+            &unbound_dir,
+            Value::Object(unbound_import.entry.clone()),
+        ))
+        .await;
+        assert_eq!(unbound["macSupport"]["supported"], false, "{unbound}");
+        assert_eq!(unbound["candleSupport"]["supported"], false, "{unbound}");
+    }
+
+    #[tokio::test]
+    async fn a_public_request_for_the_imported_h3_entry_enqueues_with_its_binding() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let imported = imported_entry(&temp_dir, true);
+        let app = app_with(&temp_dir, Value::Object(imported.entry.clone()));
+        create_project(&app).await;
+
+        let (status, job) = enqueue_t2v(&app).await;
+        assert_eq!(status, StatusCode::CREATED, "enqueue answered: {job}");
+        assert_eq!(job["type"], "video_generate");
+        assert_eq!(job["status"], "queued", "{job}");
+        // The request names the IMPORTED id — no builtin id anywhere — and the worker receives the
+        // plan identity and binding it resolves through.
+        assert_eq!(job["payload"]["model"], IMPORTED_ID);
+        let entry = &job["payload"]["modelManifestEntry"];
+        assert_eq!(
+            entry["importPlan"]["checkpointId"],
+            format!("managed/{IMPORTED_ID}")
+        );
+        assert_eq!(
+            entry["importPlan"]["assembly"]["partition"], "fl2va",
+            "{entry}"
+        );
+        // The base partition's surface resolved the request: its 24 fps and its default canvas.
+        assert_eq!(job["payload"]["fps"], 24);
+        assert_eq!(job["payload"]["width"], 1344);
+    }
+
+    #[tokio::test]
+    async fn the_imported_h3_entry_without_its_binding_is_refused_by_the_no_lane_gate() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let imported = imported_entry(&temp_dir, false);
+        let app = app_with(&temp_dir, Value::Object(imported.entry.clone()));
+        create_project(&app).await;
+
+        let (status, error) = enqueue_t2v(&app).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "answered: {error}");
+        assert!(
+            error.to_string().contains("no backend implements it"),
+            "the no-lane gate must be what refused it: {error}"
+        );
     }
 }

@@ -1,3 +1,7 @@
+import { getMediaTicket } from "./api.js";
+import { useMediaTicket } from "./hooks/useMediaTicket.js";
+import { mediaResponse } from "./api/media.js";
+import { getAudioContextCtor } from "./audioContext.js";
 import { useEffect, useState } from "react";
 import { assetCanRenderAsAudio, assetUrl } from "./components/assetMedia.jsx";
 
@@ -118,19 +122,15 @@ export function idlePeaks(bars = PEAK_RESOLUTION) {
 const peakCache = new Map();
 const inflightDecodes = new Map();
 const failedAssetIds = new Set();
+const unauthorizedTickets = new Map();
 
 // Test seam: drop the module-level caches so a suite can exercise a fresh decode.
-export function resetAudioPeakCache() {
-  peakCache.clear();
-  inflightDecodes.clear();
-  failedAssetIds.clear();
-}
 
 function audioContextCtor() {
   if (typeof window === "undefined") {
     return null;
   }
-  return window.AudioContext ?? window.webkitAudioContext ?? null;
+  return getAudioContextCtor();
 }
 
 async function decodeAssetPeaks(asset) {
@@ -139,7 +139,14 @@ async function decodeAssetPeaks(asset) {
   if (!Ctx || !url || typeof fetch !== "function") {
     return null;
   }
-  const response = await fetch(url);
+  const ticket = getMediaTicket();
+  let response = await mediaResponse(url);
+  let requestTicket = ticket;
+  if (response.status === 401 && getMediaTicket() !== ticket) {
+    requestTicket = getMediaTicket();
+    response = await mediaResponse(assetUrl(asset));
+  }
+  if (response.status === 401) return { unauthorizedTicket: requestTicket };
   if (!response.ok) {
     return null;
   }
@@ -157,9 +164,11 @@ async function decodeAssetPeaks(asset) {
 // Peaks for an audio asset, or `null` until they land / forever when they can't. Safe to
 // call for any asset — a non-audio one never decodes.
 export function useAudioPeaks(asset) {
+  const ticket = useMediaTicket();
   const assetId = asset?.id ?? null;
   const playable = Boolean(asset) && assetCanRenderAsAudio(asset);
   const [peaks, setPeaks] = useState(() => (assetId ? (peakCache.get(assetId) ?? null) : null));
+  const [retry, setRetry] = useState(0);
 
   useEffect(() => {
     if (!playable || !assetId) {
@@ -172,9 +181,10 @@ export function useAudioPeaks(asset) {
       return undefined;
     }
     setPeaks(null);
-    if (failedAssetIds.has(assetId)) {
+    if (failedAssetIds.has(assetId) || unauthorizedTickets.get(assetId) === ticket) {
       return undefined;
     }
+    unauthorizedTickets.delete(assetId);
     let live = true;
     let pending = inflightDecodes.get(assetId);
     if (!pending) {
@@ -185,6 +195,10 @@ export function useAudioPeaks(asset) {
       pending = decodeAssetPeaks(asset).then(
         (result) => {
           inflightDecodes.delete(assetId);
+          if (result?.unauthorizedTicket !== undefined) {
+            unauthorizedTickets.set(assetId, result.unauthorizedTicket);
+            return result;
+          }
           if (result) {
             peakCache.set(assetId, result);
           } else {
@@ -201,14 +215,17 @@ export function useAudioPeaks(asset) {
       inflightDecodes.set(assetId, pending);
     }
     pending.then((result) => {
-      if (live && result) {
+      if (!live) return;
+      if (result?.unauthorizedTicket !== undefined) {
+        if (result.unauthorizedTicket !== getMediaTicket()) setRetry((value) => value + 1);
+      } else if (result) {
         setPeaks(result);
       }
     });
     return () => {
       live = false;
     };
-  }, [assetId, playable, asset]);
+  }, [assetId, playable, asset, ticket, retry]);
 
   return peaks;
 }

@@ -97,29 +97,59 @@ pub(crate) async fn create_job(
             payload.job_type.as_str()
         )));
     }
-    validate_raw_job_payload(&state, &payload.job_type, &mut payload.payload).await?;
-    canonicalize_image_model_payload(&state, &payload.job_type, &mut payload.payload).await?;
+    if matches!(payload.job_type, JobType::ImageDetail) {
+        // Raw callers never mint the private carrier, including resolved text-encoder paths.
+        for key in [
+            "modelManifestEntry",
+            "baseModelManifestEntry",
+            "modelManifestEntries",
+            "modelProvenance",
+        ] {
+            payload.payload.remove(key);
+        }
+    }
+    validate_raw_job_payload(
+        &state,
+        &payload.job_type,
+        &mut payload.payload,
+        FetchingLicenseValidation::FreshSubmission,
+    )
+    .await?;
+    let canonical_entry =
+        canonicalize_image_model_payload(&state, &payload.job_type, &mut payload.payload).await?;
     crate::model_sources::ensure_runtime_model_sources(
         &state,
         &payload.job_type,
         &mut payload.payload,
     )
     .await?;
+    let selected_entry = canonical_entry.as_ref().or_else(|| {
+        if crate::model_sources::canonical_utility_model_carrier(&payload.job_type) {
+            payload.payload.get("modelManifestEntry")
+        } else {
+            None
+        }
+    });
+    let model_provenance =
+        canonical_model_provenance(&state, selected_entry, &payload.payload).await?;
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.create_job(CreateJob {
-            job_type: payload.job_type,
-            project_id: payload.project_id,
-            project_name: payload.project_name,
-            payload: payload.payload,
-            requested_gpu: payload.requested_gpu,
-            source_job_id: None,
-            duplicate_of_job_id: None,
-            attempts: 1,
-            initial_status: None,
-        })
+        store.create_job_with_model_provenance(
+            CreateJob {
+                job_type: payload.job_type,
+                project_id: payload.project_id,
+                project_name: payload.project_name,
+                payload: payload.payload,
+                requested_gpu: payload.requested_gpu,
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+                initial_status: None,
+            },
+            model_provenance.as_ref(),
+        )
     })
     .await?;
-    publish(&state, "job.updated", &job);
+    publish(&state, "job.updated", &public_job_snapshot(job.clone()));
     publish_queue(&state).await?;
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
@@ -395,7 +425,7 @@ pub(crate) async fn cancel_job(
     })
     .await?;
     crate::generation::cascade_cancel_vector_prompt_workflow(&state, &job).await?;
-    publish(&state, "job.updated", &job);
+    publish(&state, "job.updated", &public_job_snapshot(job.clone()));
     publish_queue(&state).await?;
     Ok(Json(public_job_snapshot(job)))
 }
@@ -425,23 +455,27 @@ pub(crate) async fn retry_job(
     {
         return Ok((StatusCode::CREATED, Json(public_job_snapshot(job))));
     }
-    payload.payload_changes = validate_and_canonicalize_merged_generation_payload(
-        &state,
-        &job_id,
-        &payload.payload_changes,
-        true,
-    )
-    .await?;
+    let (canonical_payload, model_provenance, download_binding) =
+        validate_and_canonicalize_merged_generation_payload(
+            &state,
+            &job_id,
+            &payload.payload_changes,
+            true,
+        )
+        .await?;
+    payload.payload_changes = canonical_payload;
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.retry_job(
+        store.retry_job_with_download_binding(
             &job_id,
             RetryJob {
                 payload_changes: payload.payload_changes,
             },
+            model_provenance.as_ref(),
+            download_binding.as_ref(),
         )
     })
     .await?;
-    publish(&state, "job.updated", &job);
+    publish(&state, "job.updated", &public_job_snapshot(job.clone()));
     publish_queue(&state).await?;
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
@@ -527,6 +561,40 @@ async fn apply_training_retry_resume(
             "Only a failed, canceled or interrupted training job can be resumed.",
         ));
     }
+    let source_is_flux3 = job
+        .payload
+        .get("plan")
+        .and_then(|plan| plan.pointer("/target/kernel"))
+        .and_then(Value::as_str)
+        .is_some_and(|kernel| sceneworks_core::training::flux3::KERNELS.contains(&kernel));
+    let effective_resume = resume.unwrap_or_else(|| {
+        plan.get("config")
+            .and_then(|config| config.pointer("/advanced/resume"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    });
+    if source_is_flux3 && effective_resume {
+        let original = job
+            .payload
+            .get("plan")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                ApiError::bad_request("FLUX.3 resume requires the original stored training plan.")
+            })?;
+        let normalize = |plan: &JsonObject| {
+            let mut value = Value::Object(plan.clone());
+            if let Some(advanced) = value
+                .pointer_mut("/config/advanced")
+                .and_then(Value::as_object_mut)
+            {
+                advanced.remove("resume");
+            }
+            value
+        };
+        if normalize(original) != normalize(&plan) {
+            return Err(ApiError::bad_request("FLUX.3 checkpoint identity mismatch: resume must keep the original model, options, dataset and output. Start a new training run to change them."));
+        }
+    }
     let output_dir = plan
         .get("output")
         .and_then(|output| output.get("outputDir"))
@@ -574,7 +642,7 @@ async fn apply_training_retry_resume(
             training_plan_resume_checkpoint_step(&state_for_scan, &plan_value)
         })
         .await
-        .map_err(|error| ApiError::internal(format!("resume checkpoint scan failed: {error}")))?;
+        .map_err(|error| ApiError::internal(format!("resume checkpoint scan failed: {error}")))??;
         if step.is_none() {
             return Err(ApiError::bad_request(
                 "This training job has no saved checkpoint to resume from; restart it from step 0 instead.",
@@ -600,27 +668,40 @@ async fn apply_training_retry_resume(
 /// confining that directory exactly as the worker does and matching the engine's checkpoint stem
 /// (`output.fileName`). `None` when the plan names no valid output dir or the dir holds no resume
 /// bundle of that run. Blocking filesystem work (sc-25785).
-fn training_plan_resume_checkpoint_step(state: &AppState, plan: &Value) -> Option<u32> {
-    let output_dir = plan.pointer("/output/outputDir").and_then(Value::as_str)?;
-    let file_name = plan.pointer("/output/fileName").and_then(Value::as_str)?;
+fn training_plan_resume_checkpoint_step(
+    state: &AppState,
+    plan: &Value,
+) -> Result<Option<u32>, ApiError> {
+    let Some(output_dir) = plan.pointer("/output/outputDir").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let Some(file_name) = plan.pointer("/output/fileName").and_then(Value::as_str) else {
+        return Ok(None);
+    };
     let output_dir = sceneworks_worker::resolve_training_output_dir_under(
         &state.settings.data_dir,
         output_dir,
         "Training outputDir",
     )
-    .ok()?;
-    sceneworks_worker::latest_training_resume_step(
+    .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if plan.pointer("/target/kernel").and_then(Value::as_str) == Some("moss_image_lora") {
+        return sceneworks_worker::latest_moss_training_resume_step(&output_dir, file_name)
+            .map_err(|error| ApiError::bad_request(error.to_string()));
+    }
+    Ok(sceneworks_worker::latest_training_resume_step(
         &output_dir,
         sceneworks_worker::training_resume_stem(file_name),
-    )
+    ))
 }
 
 async fn retry_job_request_from_body(request: AxumRequest) -> Result<RetryJobRequest, ApiError> {
+    let headers = request.headers().clone();
     let bytes = to_bytes(request.into_body(), 1024 * 1024)
         .await
         .map_err(|error| {
             ApiError::bad_request(format!("Unable to read retry request body: {error}"))
         })?;
+    auth::require_json_content_type(&headers, !bytes.is_empty())?;
     if bytes.iter().all(|byte| byte.is_ascii_whitespace()) {
         return Ok(RetryJobRequest::default());
     }
@@ -645,28 +726,46 @@ pub(crate) async fn duplicate_job(
     {
         return Ok((StatusCode::CREATED, Json(public_job_snapshot(job))));
     }
-    payload.payload_changes = validate_and_canonicalize_merged_generation_payload(
-        &state,
-        &job_id,
-        &payload.payload_changes,
-        false,
-    )
-    .await?;
+    let (canonical_payload, model_provenance, download_binding) =
+        validate_and_canonicalize_merged_generation_payload(
+            &state,
+            &job_id,
+            &payload.payload_changes,
+            false,
+        )
+        .await?;
+    payload.payload_changes = canonical_payload;
     // An Iris training duplicate trains under its own output id (merged last: never overridable).
     if let Some(fresh_output) = fresh_output {
         payload.payload_changes.extend(fresh_output);
     }
+    let fresh_job_id = if let Some((id, owned_output)) =
+        crate::training::fresh_flux3_training_duplicate(&state, &job_id, &payload.payload_changes)
+            .await?
+    {
+        // Merge server-owned bindings last: even a complete caller-supplied plan cannot restore the
+        // old output directory, manifest id or resume flag after freshening this duplicate.
+        payload.payload_changes.extend(owned_output);
+        Some(id)
+    } else {
+        None
+    };
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.duplicate_job(
+        // Both halves: main's preallocated id for a freshened FLUX.3 training duplicate, and the
+        // feature's canonical-admission source provenance (never read from payload metadata).
+        store.duplicate_job_with_download_binding(
+            fresh_job_id,
             &job_id,
             DuplicateJob {
                 payload_changes: payload.payload_changes,
                 requested_gpu: payload.requested_gpu,
             },
+            model_provenance.as_ref(),
+            download_binding.as_ref(),
         )
     })
     .await?;
-    publish(&state, "job.updated", &job);
+    publish(&state, "job.updated", &public_job_snapshot(job.clone()));
     publish_queue(&state).await?;
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
@@ -837,11 +936,16 @@ async fn validate_and_canonicalize_merged_generation_payload(
     job_id: &str,
     payload_changes: &JsonObject,
     retry: bool,
-) -> Result<JsonObject, ApiError> {
+) -> Result<(JsonObject, Option<Value>, Option<Value>), ApiError> {
     let job_id = job_id.to_owned();
-    let job = store_call(state.clone(), move |store, _timeout| store.get_job(&job_id)).await?;
+    let (job, download_binding) = store_call(state.clone(), move |store, _timeout| {
+        Ok((store.get_job(&job_id)?, store.download_binding(&job_id)?))
+    })
+    .await?;
     let job_type = job.job_type.clone();
     let project_id = job.project_id.clone();
+    // sc-26691: only a job that actually rendered can be a legacy (pre-resize-mode) render.
+    let persisted_rendered = matches!(job.status, JobStatus::Completed);
     let mut merged = job.payload;
     // Resolved from the PERSISTED payload, BEFORE the merge below, because inline-LoRA permission is
     // a property of how the job was originally created and `payload_changes` must not be able to
@@ -850,6 +954,31 @@ async fn validate_and_canonicalize_merged_generation_payload(
     let permitted_inline_loras = persisted_character_inline_loras(&merged);
     let persisted = merged.clone();
     merged.extend(payload_changes.clone());
+    if merged.get("model") == persisted.get("model") {
+        // A retry of the same selection retains the admitted identity even when a patch replaces
+        // other settings. Same-id catalog rebinding cannot opt out of the original checkpoint.
+        if let Some(expected) = persisted
+            .get("expectedImportedModelRef")
+            .filter(|value| !value.is_null())
+        {
+            merged.insert("expectedImportedModelRef".to_owned(), expected.clone());
+        }
+    } else if !payload_changes.contains_key("expectedImportedModelRef") {
+        // Deliberately choosing another model is a new selection. Null clears the old key through
+        // the store's shallow merge, rather than leaving an invisible stale replay constraint.
+        merged.insert("expectedImportedModelRef".to_owned(), Value::Null);
+    }
+    let canonical_raw_image = matches!(job_type, JobType::ImageDetail)
+        || crate::model_sources::canonical_utility_model_carrier(&job_type);
+    if canonical_raw_image {
+        for key in [
+            "baseModelManifestEntry",
+            "modelManifestEntries",
+            "modelProvenance",
+        ] {
+            merged.remove(key);
+        }
+    }
     if generation_job_model_is_path_backed(&job_type) {
         validate_payload_model(&merged)?;
         // A YuE2 retry/duplicate is held to the contract the worker enforces (sc-22999): the block
@@ -865,11 +994,32 @@ async fn validate_and_canonicalize_merged_generation_payload(
             .await?;
         }
     } else {
-        validate_raw_job_payload(state, &job_type, &mut merged).await?;
+        if let Some(binding) = download_binding.as_ref() {
+            if !matches!(job_type, JobType::ModelDownload) {
+                return Err(ApiError::bad_request("Invalid saved download binding"));
+            }
+            crate::models::validate_catalog_download_replay(state, binding, &merged).await?;
+        }
+        let license_validation = if download_binding.is_some() {
+            FetchingLicenseValidation::VerifiedCatalogReplay
+        } else {
+            FetchingLicenseValidation::Replay
+        };
+        validate_raw_job_payload(state, &job_type, &mut merged, license_validation).await?;
     }
     // A replay model switch resets inherited MOSS controls. Explicit new advanced controls still
     // reach validation, so headless clients cannot silently drop a conflicting authored setting.
     if merged.get("model") != persisted.get("model")
+        && !(sceneworks_core::moss_image::is_edit(&persisted)
+            && sceneworks_core::moss_image::is_edit(&merged)
+            && persisted
+                .get("model")
+                .and_then(Value::as_str)
+                .is_some_and(sceneworks_core::moss_image::is_moss)
+            && merged
+                .get("model")
+                .and_then(Value::as_str)
+                .is_some_and(sceneworks_core::moss_image::is_moss))
         && (persisted
             .get("model")
             .and_then(Value::as_str)
@@ -895,8 +1045,30 @@ async fn validate_and_canonicalize_merged_generation_payload(
             }
         }
     }
+    // Edit options are server-defaulted and compatible across Base/SFT, but must not leak into
+    // another model or ordinary generation. An explicit advanced replacement remains authored
+    // input and reaches strict validation unchanged.
+    let is_moss_edit = |payload: &JsonObject| {
+        payload
+            .get("model")
+            .and_then(Value::as_str)
+            .is_some_and(sceneworks_core::moss_image::is_moss)
+            && sceneworks_core::moss_image::is_edit(payload)
+    };
+    if !payload_changes.contains_key("advanced")
+        && is_moss_edit(&persisted)
+        && !is_moss_edit(&merged)
+    {
+        if let Some(advanced) = merged.get_mut("advanced").and_then(Value::as_object_mut) {
+            advanced.remove(sceneworks_core::moss_image::EDIT_OPTIONS_KEY);
+            advanced.remove(sceneworks_core::moss_image_advanced::KEY);
+            advanced.remove("promptBatch");
+        }
+    }
     let canonical_model_entry =
         canonicalize_image_model_payload(state, &job_type, &mut merged).await?;
+    // Local control-flow evidence, never a serialized/caller-supplied trust marker.
+    let mut canonical_selection = canonical_model_entry.is_some();
     // The store SHALLOW-merges this object over the persisted payload, so a recorded checkpoint
     // alias the canonicalizer dropped (the replay picked another model) must be cleared explicitly
     // or the persisted value would survive the merge.
@@ -919,6 +1091,7 @@ async fn validate_and_canonicalize_merged_generation_payload(
         // trusting the original job's modelManifestEntry. This is the replay counterpart to the
         // typed `/video/jobs` pre-enqueue platform gate.
         let model_manifest_entry = resolve_model_manifest_entry(state, model_id).await?;
+        ensure_expected_imported_model_reference(state, &merged, &model_manifest_entry)?;
         // Retry/duplicate are video creation boundaries too. Validate the exact shallow-merged
         // reference array against the CURRENT server-owned entry before stamping it: malformed
         // arrays must not be cleaned by VideoRequest's tolerant parser, and a legacy multi-ref row
@@ -932,7 +1105,33 @@ async fn validate_and_canonicalize_merged_generation_payload(
             &model_manifest_entry,
             crate::generation::video_job_platform(state),
         )?;
+        if let Some(entry) = model_manifest_entry.as_object() {
+            // Re-freeze the identity that will actually be enqueued: the entry above was resolved
+            // from the CURRENT catalog, so it is authority for what runs, not for what the original
+            // replay named (checked above, before this point).
+            let provenance = sceneworks_core::model_artifacts::provenance::resolved_model_provenance(
+                &state.settings.data_dir, entry,
+            ).map_err(|error| ApiError::bad_request(format!("Cannot verify imported replay identity: {error}. Reimport the original checkpoint.")))?;
+            if let Some(reference) = imported_reference_from_provenance(entry, provenance.as_ref())
+            {
+                merged.insert("expectedImportedModelRef".to_owned(), reference);
+            }
+        }
+        canonical_selection = true;
         merged.insert("modelManifestEntry".to_owned(), model_manifest_entry);
+        // sc-26691. A replay keeps the resize mode its record names (the shallow merge carried it).
+        // Every creation boundary and every claim since stamps the key, so a MiniMax-H3 record that
+        // names NONE and COMPLETED rendered before the upgrade, under the forced short edge, and
+        // replays as `diffusers`; an unstamped record that never rendered takes today's `match`.
+        // Applied after the CURRENT entry lands, so an imported H3 checkpoint is recognised by its
+        // resolved family. See `stamp_replayed_reference_image_resize_mode`.
+        sceneworks_core::video_request::stamp_replayed_reference_image_resize_mode(
+            &mut merged,
+            &persisted,
+            persisted_rendered,
+            payload_changes,
+        )
+        .map_err(ApiError::bad_request)?;
     }
     if matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
         if let Some(advanced) = merged.get("advanced").and_then(Value::as_object) {
@@ -949,6 +1148,12 @@ async fn validate_and_canonicalize_merged_generation_payload(
             state,
             project_id.as_deref(),
             &mut merged,
+        )
+        .await?;
+        crate::generation::validate_flux3_reference_payload(
+            state.clone(),
+            project_id.as_deref(),
+            &merged,
         )
         .await?;
         validate_prompt_enhancement_payload(&merged)?;
@@ -1055,7 +1260,55 @@ async fn validate_and_canonicalize_merged_generation_payload(
         )
         .await?;
     }
-    Ok(merged)
+    if canonical_raw_image {
+        crate::model_sources::ensure_runtime_model_sources(state, &job_type, &mut merged).await?;
+        if crate::model_sources::canonical_utility_model_carrier(&job_type) {
+            canonical_selection = true;
+        }
+        // The store shallow-merges replay payloads: explicitly clear discarded historical claims.
+        for key in [
+            "baseModelManifestEntry",
+            "modelManifestEntries",
+            "modelProvenance",
+        ] {
+            if persisted.contains_key(key) && !merged.contains_key(key) {
+                merged.insert(key.to_owned(), Value::Null);
+            }
+        }
+    }
+    let selected_entry = if canonical_selection {
+        merged.get("modelManifestEntry")
+    } else {
+        None
+    };
+    let provenance = canonical_model_provenance(state, selected_entry, &merged).await?;
+    Ok((merged, provenance, download_binding))
+}
+
+/// Accept only the entry returned by an actual server canonicalizer. Presence in an incoming or
+/// persisted payload is not evidence of its origin and is never a fallback for this argument.
+async fn canonical_model_provenance(
+    state: &AppState,
+    entry: Option<&Value>,
+    payload: &JsonObject,
+) -> Result<Option<Value>, ApiError> {
+    let Some(entry) = entry.and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    crate::models::ensure_inherited_component_licenses_acknowledged(
+        state,
+        entry,
+        payload
+            .get(crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    )
+    .await?;
+    sceneworks_core::model_artifacts::provenance::resolved_model_provenance(
+        &state.settings.data_dir,
+        entry,
+    )
+    .map_err(ApiError::bad_request)
 }
 
 /// Resolve and stamp the authoritative catalog entry at every image-job creation boundary.
@@ -1181,15 +1434,103 @@ pub(crate) async fn canonicalize_image_model_payload(
         )));
     }
 
+    // Tier capability does not certify an installable artifact. This check is shared by create,
+    // retry and duplicate after resolving the authoritative catalog (never caller metadata).
+    let empty = JsonObject::new();
+    let advanced = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    if let Some(reason) = sceneworks_core::image_request::flux3_catalog_tier_refusal(
+        &model_id,
+        advanced,
+        &model_manifest_entry,
+    ) {
+        return Err(ApiError::bad_request(reason));
+    }
+
     // Every image entry point reaches this post-expansion/post-merge seam.
     sceneworks_core::moss_image::scrub_reports(payload);
     if let Some(entry) = model_manifest_entry.as_object() {
+        // Artifact hashing/validation can stream hundreds of MiB. Keep that bounded host I/O
+        // off the async request executor, and persist only the fully validated result.
+        let data_dir = state.settings.data_dir.clone();
+        let tensor_entry = entry.clone();
+        let mut tensor_payload = payload.clone();
+        *payload = tokio::task::spawn_blocking(move || {
+            let tensor_store = ProjectStore::new(data_dir, "api");
+            sceneworks_core::moss_image_advanced::canonicalize(
+                &tensor_store,
+                &mut tensor_payload,
+                &tensor_entry,
+            )?;
+            Ok::<_, String>(tensor_payload)
+        })
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .map_err(ApiError::bad_request)?;
         // sc-24215: Supra2-IMG's published interface (text-to-image, 256x256, prompt / seed /
         // guidance / steps / count) — anything else is a 400 here, before a job exists.
         sceneworks_core::supra2::validate_request(payload, entry).map_err(ApiError::bad_request)?;
         if let Some(request) = sceneworks_core::moss_image::native_request(payload, entry)
             .map_err(ApiError::bad_request)?
         {
+            if sceneworks_core::moss_image::is_edit(payload) {
+                let project_id = payload
+                    .get("projectId")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| ApiError::bad_request("MOSS edit requires projectId"))?
+                    .to_owned();
+                let ids = sceneworks_core::moss_image::edit_reference_ids(payload)
+                    .map_err(ApiError::bad_request)?;
+                crate::generation::validate_ordered_image_references(
+                    state.clone(),
+                    project_id,
+                    ids,
+                )
+                .await?;
+                payload
+                    .entry("width".to_owned())
+                    .or_insert(json!(request.width));
+                payload
+                    .entry("height".to_owned())
+                    .or_insert(json!(request.height));
+                payload
+                    .entry("negativePrompt".to_owned())
+                    .or_insert_with(|| json!(request.negative_prompt.as_deref().unwrap_or("")));
+                // Null records an authored random seed; egress replaces it with the actual
+                // per-image seed in the persisted recipe, as it does for every generation.
+                payload.entry("seed".to_owned()).or_insert(Value::Null);
+                let controls =
+                    sceneworks_core::moss_image::edit_effective_controls(&model_id, &request)
+                        .map_err(ApiError::bad_request)?;
+                let advanced = payload
+                    .entry("advanced".to_owned())
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+                    .ok_or_else(|| ApiError::bad_request("advanced must be an object"))?;
+                for (key, value) in controls {
+                    advanced.entry(key).or_insert(value);
+                }
+                let edit = sceneworks_core::moss_image::edit_options(
+                    payload
+                        .get("advanced")
+                        .and_then(Value::as_object)
+                        .unwrap_or(&JsonObject::new()),
+                )
+                .map_err(ApiError::bad_request)?;
+                payload
+                    .entry("advanced".to_owned())
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+                    .ok_or_else(|| ApiError::bad_request("advanced must be an object"))?
+                    .insert(
+                        sceneworks_core::moss_image::EDIT_OPTIONS_KEY.into(),
+                        serde_json::to_value(edit)
+                            .map_err(|e| ApiError::internal(e.to_string()))?,
+                    );
+            }
             let options = request
                 .moss_image
                 .as_ref()
@@ -1209,7 +1550,7 @@ pub(crate) async fn canonicalize_image_model_payload(
                     serde_json::to_value(options).map_err(|e| ApiError::internal(e.to_string()))?,
                 );
 
-            if let Some(purpose) = sceneworks_core::moss_image::purpose(options) {
+            if let Some(purpose) = sceneworks_core::moss_image::request_purpose(payload, options) {
                 let rows = sceneworks_core::model_usage_policy::conditional_component_downloads(
                     &model_manifest_entry,
                     purpose,
@@ -1223,8 +1564,11 @@ pub(crate) async fn canonicalize_image_model_payload(
                 }
             }
             model_manifest_entry = Value::Object(
-                sceneworks_core::moss_image::selected_components(entry, options)
-                    .map_err(ApiError::bad_request)?,
+                sceneworks_core::moss_image::selected_components_for_purpose(
+                    entry,
+                    sceneworks_core::moss_image::request_purpose(payload, options),
+                )
+                .map_err(ApiError::bad_request)?,
             );
         }
     }
@@ -1347,6 +1691,23 @@ fn dense_image_detail_error() -> ApiError {
     )
 }
 
+enum FetchingLicenseValidation {
+    FreshSubmission,
+    Replay,
+    VerifiedCatalogReplay,
+}
+
+fn is_license_gated_fetching_job(job_type: &JobType) -> bool {
+    matches!(
+        job_type,
+        JobType::ModelDownload
+            | JobType::ModelImport
+            | JobType::ModelConvert
+            | JobType::LoraDownload
+            | JobType::LoraImport
+    )
+}
+
 /// Jobs created through the raw queue route do not pass a typed request validator. Keep this
 /// inventory aligned with worker payload fields that reach filesystem model resolution:
 /// `image_upscale`, `image_detail`, and `prompt_refine` consume `model`; the model-management jobs
@@ -1360,6 +1721,7 @@ async fn validate_raw_job_payload(
     state: &AppState,
     job_type: &JobType,
     payload: &mut JsonObject,
+    license_validation: FetchingLicenseValidation,
 ) -> Result<(), ApiError> {
     if matches!(
         job_type,
@@ -1443,9 +1805,9 @@ async fn validate_raw_job_payload(
     // not carry at all. So a `model_download` posted here fetched `MiniMaxAI/MiniMax-H3` and was
     // answered 201 while the typed `POST /api/v1/models/:id/download` answered 403 for the same
     // bytes. Rejecting the whole job type instead would break retry/duplicate, which re-validate a
-    // stored `model_download` payload through this same function; the repo-keyed check lets an
-    // already-authorized download retry (the typed route stamps `licenseAcknowledged` onto the job)
-    // while still refusing a fresh unacknowledged one.
+    // stored `model_download` payload through this same function. Replays with a private typed
+    // binding revalidate the selected catalog entry and current receipt before reaching this gate;
+    // unbound replays use this canonical repo check without trusting an old assertion.
     //
     // The LoRA download/import types are in the list because they take the same `repo` + `files`
     // shape through `run_lora_download_job` and would otherwise be the identical bypass wearing a
@@ -1467,15 +1829,24 @@ async fn validate_raw_job_payload(
     // `"**"` downloads the entire named repo. Adding the job type alone would have been inert;
     // `ensure_job_payload_license_acknowledged` reads `baseRepo`/`sourceRepo` as well as `repo`
     // (`LICENSE_GATED_REPO_PAYLOAD_KEYS`), which is what makes this line bite.
-    if matches!(
-        job_type,
-        JobType::ModelDownload
-            | JobType::ModelImport
-            | JobType::ModelConvert
-            | JobType::LoraDownload
-            | JobType::LoraImport
-    ) {
-        crate::models::ensure_job_payload_license_acknowledged(state, payload).await?;
+    if is_license_gated_fetching_job(job_type) {
+        match license_validation {
+            FetchingLicenseValidation::VerifiedCatalogReplay => {}
+            FetchingLicenseValidation::FreshSubmission => {
+                crate::models::ensure_job_payload_license_acknowledged(state, payload).await?;
+            }
+            FetchingLicenseValidation::Replay => {
+                // Ignore the old assertion only for authorization. Saved import payloads are
+                // also committed-request identities and must remain unchanged on retry.
+                let mut receipt_view = payload.clone();
+                receipt_view.insert(
+                    crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY.to_owned(),
+                    Value::Bool(false),
+                );
+                crate::models::ensure_job_payload_license_acknowledged(state, &receipt_view)
+                    .await?;
+            }
+        }
     }
     // sc-24159: the training twin — a hand-built `lora_train`/`control_training` plan naming a
     // licence-bound target (Qwen Image 2.1) must not reach the queue around the typed route's gate.
@@ -1719,7 +2090,7 @@ pub(crate) async fn update_job_progress(
     // deterministic. Take the hook before awaiting so the competing request is
     // not blocked by the same mutex.
     #[cfg(test)]
-    let progress_barrier = state.progress_before_accept_once.lock().take();
+    let progress_barrier = state.test_hooks.progress_before_accept_once.lock().take();
     #[cfg(test)]
     if let Some(barrier) = progress_barrier {
         barrier.wait().await;
@@ -1796,7 +2167,7 @@ pub(crate) async fn update_job_progress(
                 // transition occurs. A later retry/recovery has no status change,
                 // so it publishes only the augmented job snapshot below.
                 if status_changed {
-                    publish(&state, "job.updated", &job);
+                    publish(&state, "job.updated", &public_job_snapshot(job.clone()));
                     if let Err(queue_error) = publish_queue(&state).await {
                         tracing::error!(
                             event = "terminal_progress_queue_publish_failed",
@@ -1815,7 +2186,7 @@ pub(crate) async fn update_job_progress(
         job = apply_progress_side_effects(&state, job, false).await?;
     }
     if publish_job_update {
-        publish(&state, "job.updated", &job);
+        publish(&state, "job.updated", &public_job_snapshot(job.clone()));
     }
     // sc-4203 (F-API-5): workers POST progress per inference step. The queue summary
     // is a full SQLite aggregation plus a stale-worker sweep, serialized and
@@ -1908,7 +2279,7 @@ async fn apply_progress_side_effects(
     // resumed registration must upsert rather than duplicate.
     #[cfg(test)]
     if clear_terminal_side_effects
-        && std::mem::take(&mut *state.progress_side_effects_fail_once.lock())
+        && std::mem::take(&mut *state.test_hooks.progress_side_effects_fail_once.lock())
     {
         return Err(ApiError::internal(
             "injected post-acceptance progress side-effect failure",
@@ -1917,11 +2288,13 @@ async fn apply_progress_side_effects(
     #[cfg(test)]
     if clear_terminal_side_effects
         && state
+            .test_hooks
             .progress_side_effects_fail_job_ids
             .lock()
             .contains(&job_id)
     {
         *state
+            .test_hooks
             .progress_side_effects_attempts
             .lock()
             .entry(job_id.clone())
@@ -2018,7 +2391,7 @@ pub(crate) async fn recover_pending_terminal_progress_side_effects_as_of(
     for job_id in ids {
         match process_pending_terminal_progress_side_effects(state, &job_id).await {
             Ok(Some(job)) => {
-                publish(state, "job.updated", &job);
+                publish(state, "job.updated", &public_job_snapshot(job.clone()));
                 recovered += 1;
             }
             Ok(None) => {}
@@ -2100,21 +2473,33 @@ pub(crate) async fn persist_reported_assets(
         .unwrap_or_default()
         .to_owned();
     let generation_set = result.get("generationSet").cloned();
-    // The job row is authoritative for the project id (never the worker payload).
-    let job = store_call(state.clone(), {
+    // Only a server-canonical admission can freeze source authority. Historical payload carriers
+    // may be client-authored, malformed, or belong to another real import; NULL remains unknown.
+    // In particular, finishing an old job must not reconstruct provenance or retry forever.
+    let (job, model_provenance) = store_call(state.clone(), {
         let job_id = job_id.to_owned();
-        move |store, _timeout| store.get_job(&job_id)
+        move |store, _timeout| Ok((store.get_job(&job_id)?, store.model_provenance(&job_id)?))
     })
     .await?;
+    sceneworks_core::model_artifacts::provenance::stamp_asset_provenance(
+        &mut asset_writes,
+        model_provenance.as_ref(),
+    );
     stamp_vector_workflow_asset_writes(&job.job_type, &job.payload, &job.id, &mut asset_writes);
     crate::yue2_jobs::stamp_export_usage_policies(&job.job_type, &job.payload, &mut asset_writes);
     let Some(project_id) = job.project_id.clone() else {
         return Ok(());
     };
     let job_id_owned = job_id.to_owned();
+    let provenance_data_dir = state.settings.data_dir.clone();
     let built = project_call(state.clone(), move |store| {
         // An asset derived from a policy-bearing input inherits its usage policy (sc-22999).
         crate::yue2_jobs::inherit_usage_policies(&store, &project_id, &mut asset_writes)?;
+        sceneworks_core::model_artifacts::provenance::verify_asset_derivative_provenance(
+            &provenance_data_dir,
+            &mut asset_writes,
+        )
+        .map_err(ProjectStoreError::BadRequest)?;
         if let Some(generation_set) = generation_set.as_ref() {
             store.write_generation_set(
                 &project_id,

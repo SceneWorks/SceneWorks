@@ -1,7 +1,13 @@
+import { useConsentRequestOwner } from "../hooks/useConsentRequestOwner.js";
+import { downloadSizeText } from "../formatting.js";
 import React, { useMemo, useState } from "react";
 import { CheckpointImportPanel } from "../components/CheckpointImportPanel.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { ModelLicenseSummary } from "../components/ModelLicenseSummary.jsx";
+import {
+  hasImportedCheckpointSurface,
+  importedSourceSummary,
+} from "../components/ImportedCheckpointSurface.jsx";
 import { licenseComponentForModel } from "../data/bundledLicenses.js";
 import { useAppContext } from "../context/AppContext.js";
 import { terminalStatuses } from "../constants.js";
@@ -19,7 +25,7 @@ import {
   lightestInstallableTier,
   sdxlCudaMemoryEstimate,
 } from "../tierSuggestion.js";
-import { workerAdvertises } from "./simpleJobs.js";
+import { nativeTierEligibility } from "../quantTier.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
 
 // Simple Model Manager (design handoff): a tabbed catalog (Image / Video / Utility /
@@ -40,6 +46,7 @@ import { useSimpleUi } from "./SimpleUiContext.js";
 // be a second place to get destructive actions wrong. Download enqueues the model's default
 // tier through the same createModelDownloadJob the advanced screen uses.
 
+const EMPTY_CATALOG = [];
 const TABS = [
   { id: "image", label: "Image" },
   { id: "video", label: "Video" },
@@ -49,8 +56,8 @@ const TABS = [
 
 export function SimpleModelManager() {
   const {
-    models = [],
-    loras = [],
+    models = EMPTY_CATALOG,
+    loras = EMPTY_CATALOG,
     jobs = [],
     token = "",
     createModelDownloadJob,
@@ -64,31 +71,19 @@ export function SimpleModelManager() {
   const { toast, openInAdvanced } = useSimpleUi();
   const hostMemory = useHostMemory();
   const [tab, setTab] = useState("image");
+  const captureConsentOwner = useConsentRequestOwner(token, models, loras, tab);
   // Which lane's memory evidence the rows quote. Same derivation as ImageStudio / SimpleImageStudio —
   // the memory numbers are per-backend and must not be crossed (see `needsLabel`).
   const backend = macCapabilities?.macGatingActive ? "mlx" : "candle";
   const hostMemoryGb = hostMemoryGbForBackend(hostMemory, backend);
-  // The candle-only tiers' host-eligibility gates, derived exactly as SimpleImageStudio derives them for
-  // tier RESOLUTION (sc-9300 / sc-11042). The memory floor has to agree with the picker: a host where no
-  // live worker advertises `int8_convrot` will never be offered that tier, so its measured row must not
-  // set this row's number. Defaulting them to true — as `installedTiers` does for callers that pass
-  // nothing — would size an ineligible host against a tier it cannot run.
-  const tierOptions = useMemo(
-    () => ({
-      backend,
-      hostMemoryGb,
-      convRotEligible: workerAdvertises(visibleWorkers, "int8_convrot"),
-      nvfp4Eligible: workerAdvertises(visibleWorkers, "nvfp4"),
-    }),
-    [backend, hostMemoryGb, visibleWorkers],
-  );
+  const tierOptions = useMemo(() => ({ backend, hostMemoryGb }), [backend, hostMemoryGb]);
 
   const rows = useMemo(() => {
     if (tab === "loras") {
       return loras.map((lora) => ({
         id: lora.id,
         name: lora.name ?? lora.id,
-        meta: [sizeLabel(lora), lora.baseModel ?? lora.family].filter(Boolean).join(" · "),
+        meta: [downloadSizeText(lora), lora.baseModel ?? lora.family].filter(Boolean).join(" · "),
         manageOnly: lora.installState === "installed",
         entry: lora,
         kind: "lora",
@@ -100,17 +95,24 @@ export function SimpleModelManager() {
     const wanted = tab === "utility" ? (type) => type !== "image" && type !== "video" : (type) => type === tab;
     return models
       .filter((model) => wanted(model.type))
-      .map((model) => ({
-        id: model.id,
-        name: model.name ?? model.id,
-        meta: [sizeLabel(model), needsLabel(model, tierOptions)].filter(Boolean).join(" · "),
-        memoryTitle: needsLabel(model, tierOptions)?.startsWith("Q4 optimized ")
-          ? sdxlCudaMemoryEstimate(model, "q4", tierOptions.backend)?.description : undefined,
-        manageOnly: model.installState === "installed" || model.platformCleanupOnly === true,
-        entry: model,
-        kind: "model",
-      }));
-  }, [tab, models, loras, tierOptions]);
+      .map((model) => {
+        // Match the generation picker's per-model native format contract. In particular,
+        // generic nvfp4 workers cannot supply FLUX.3 packed-provider measurements.
+        const options = { ...tierOptions, ...nativeTierEligibility(model, visibleWorkers) };
+        return {
+          id: model.id,
+          name: model.name ?? model.id,
+          meta: [downloadSizeText(model), needsLabel(model, options), importedCheckpointLabel(model)]
+            .filter(Boolean)
+            .join(" · "),
+          memoryTitle: needsLabel(model, options)?.startsWith("Q4 optimized ")
+            ? sdxlCudaMemoryEstimate(model, "q4", options.backend)?.description : undefined,
+          manageOnly: model.installState === "installed" || model.platformCleanupOnly === true,
+          entry: model,
+          kind: "model",
+        };
+      });
+  }, [tab, models, loras, tierOptions, visibleWorkers]);
 
   const activeDownloads = useMemo(
     () =>
@@ -128,6 +130,8 @@ export function SimpleModelManager() {
   );
 
   async function download(row) {
+    const ownsRequest = captureConsentOwner(token);
+    if (!ownsRequest()) return;
     const enqueue = row.kind === "lora" ? createLoraDownloadJob : createModelDownloadJob;
     if (typeof enqueue !== "function") {
       return;
@@ -143,16 +147,23 @@ export function SimpleModelManager() {
     // Without this branch the refusal is a dead end HERE specifically: `createLoraDownloadJob`'s
     // own gate returns null and writes the real reason to `loraError`, which Simple renders
     // nowhere, so the user saw only "Could not start the … download" with no way to act on it.
-    const blocked =
-      row.kind === "lora"
-        ? borrowedLicenseAcknowledgmentBlocked(row.entry)
-        : licenseAcknowledgmentBlocked(row.entry);
-    if (blocked) {
-      toast(`${row.name} needs its license accepted first — opening Models.`);
-      openInAdvanced("Models");
+    try {
+      const blocked = row.kind === "lora"
+        ? await borrowedLicenseAcknowledgmentBlocked(row.entry, token)
+        : await licenseAcknowledgmentBlocked(row.entry, token);
+      if (!ownsRequest()) return;
+      if (blocked) {
+        toast(`${row.name} needs its license accepted first — opening Models.`);
+        openInAdvanced("Models");
+        return;
+      }
+    } catch (error) {
+      if (!ownsRequest()) return;
+      toast(`Could not check license acknowledgment: ${error.message}`);
       return;
     }
     const job = await enqueue(row.entry);
+    if (!ownsRequest()) return;
     toast(job ? `Downloading ${row.name}…` : `Could not start the ${row.name} download`);
   }
 
@@ -268,14 +279,25 @@ export function SimpleModelManager() {
   );
 }
 
-// The catalog's own human-readable download size; `~` marks an estimate, exactly as the
-// advanced Models screen labels it.
-function sizeLabel(entry) {
-  if (!entry?.downloadSizeLabel) {
+// The imported-checkpoint line in a row's meta (sc-26687): which source variant was imported and
+// how much of its component assembly is present here. Simple deliberately keeps to one-line rows
+// and hands repair to the advanced Models screen through "Manage", so this states the state and the
+// full card offers the fix — the same split the memory-number comment above describes.
+function importedCheckpointLabel(model) {
+  if (!hasImportedCheckpointSurface(model)) {
     return null;
   }
-  return entry.downloadSizeEstimated ? `~${entry.downloadSizeLabel}` : entry.downloadSizeLabel;
+  const summary = importedSourceSummary(model);
+  const components = model?.componentReadiness?.components;
+  if (!Array.isArray(components) || components.length === 0) {
+    return summary || null;
+  }
+  const ready = components.filter((component) => component.present === true).length;
+  return `${summary ? `${summary} · ` : ""}${ready}/${components.length} components ready`;
 }
+
+// The catalog's own human-readable download size; `~` marks an estimate, exactly as the
+// advanced Models screen labels it.
 
 // The model's memory requirement, PREFERRING the per-tier measured peak over the blanket per-lane
 // `minMemoryGb` (sc-15400). Showing the blanket unconditionally over-warns every variant-matrix model

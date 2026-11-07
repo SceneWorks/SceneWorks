@@ -10,7 +10,7 @@ export const ZOOM_MIN = 0.6;
 export const ZOOM_MAX = 2.6;
 export const ZOOM_STEP = 0.2;
 
-// Track ids the backend ships on a default timeline (project_store.rs
+// Track ids the backend ships on a default timeline (project_store/timelines.rs
 // default_timeline_tracks): main video, overlay, and one audio track.
 export const MAIN_TRACK_ID = "track_main";
 export const OVERLAY_TRACK_ID = "track_overlay";

@@ -369,9 +369,10 @@ test("an edit to a shared crate the loader does not reach leaves the key unchang
   const { digest, files } = keyAt(PIN);
   for (const shared of [
     // A file inside a shared crate the loader DOES link and DOES partly reach — but this file is
-    // not on any path from the loader's entry points.
-    "crates/contracts/gen-core/src/sdxl_ldm.rs",
-    "crates/contracts/gen-core/src/wan_i2v_memory.rs",
+    // not on any path from the loader's entry points. (sdxl_ldm.rs and wan_i2v_memory.rs played
+    // this role until inference sc-27316 moved them into sibling contracts crates.)
+    "crates/contracts/gen-core/src/face.rs",
+    "crates/contracts/gen-core/src/json_constraint.rs",
     // A shared crate on the other lane entirely.
     "crates/llm/candle-llm/src/lib.rs",
   ]) {
@@ -485,13 +486,17 @@ test("a leading `super` RUN is consumed whole, not just its first hop", { skip }
   // spells exactly this at `unified.rs:255` (inside `#[cfg(test)]`, so it is stripped before the
   // hash — the shape is live, its current site is not shipped).
   const unified = "crates/contracts/gen-core/src/sampling/unified.rs";
-  const target = "crates/contracts/gen-core/src/sdxl_ldm.rs";
+  // `face` sits at gen-core's crate root and outside the LTX loader's closure (`sdxl_ldm`
+  // played this role until inference sc-27316 moved it to gen-core-family).
+  const target = "crates/contracts/gen-core/src/face.rs";
   const current = keyAt(PIN);
   assert.ok(current.files.includes(unified), `${unified} must be in the closure`);
   assert.ok(!current.files.includes(target), `${target} must start OUTSIDE the closure`);
 
   const closure = filesFor(
-    { [unified]: edited(base, unified, "pub type Probe = super::super::sdxl_ldm::SdxlLdm;") },
+    {
+      [unified]: edited(base, unified, "pub type Probe = super::super::face::DetectedFace;"),
+    },
     config.models[MODEL].entryPoints,
   );
   assert.ok(

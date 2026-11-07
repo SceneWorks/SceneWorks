@@ -116,19 +116,8 @@ async fn revalidate_receipt(
         }
         let expected =
             crate::downloads::huggingface_file_content_sha256(&client, settings, file).await?;
-        let actual = tokio::task::spawn_blocking(move || -> std::io::Result<String> {
-            use std::io::Read;
-            let mut file = std::fs::File::open(path)?;
-            let mut digest = Sha256::new();
-            let mut buffer = [0_u8; 64 * 1024];
-            loop {
-                let count = file.read(&mut buffer)?;
-                if count == 0 {
-                    break;
-                }
-                digest.update(&buffer[..count]);
-            }
-            Ok(format!("{:x}", digest.finalize()))
+        let actual = crate::load_progress::spawn_blocking(move || -> std::io::Result<String> {
+            sceneworks_core::hashing::sha256_file(&path)
         })
         .await
         .map_err(|error| invalid(&error.to_string()))??;
@@ -277,7 +266,7 @@ mod tests {
             );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         settings.huggingface_base_url = format!("http://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move {
+        let server = crate::load_progress::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
         // A fitting q8 must never consult the stale q4 receipt (or require its network recovery).

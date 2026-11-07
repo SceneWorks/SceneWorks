@@ -1,0 +1,73 @@
+
+running 2 tests
+test adapter_topology::a_genuine_lokr_installs_on_the_pruned_curve_with_the_same_delta ... H3_ADAPTER_STACK_CAUSAL backend=cuda topology=full property=lora_vs_base max_abs=2.139128298e-1 floor=1.166702873e-6 seam=adaptable_projection
+H3_ADAPTER_STACK_CAUSAL backend=cuda topology=full property=lokr_vs_base max_abs=4.180272818e-1 floor=1.184159601e-6 seam=adaptable_projection
+H3_ADAPTER_STACK_CAUSAL backend=cuda topology=full property=stack_vs_base max_abs=6.073046327e-1 floor=1.369324423e-6 seam=adaptable_projection
+H3_ADAPTER_STACK_CAUSAL backend=cuda topology=full property=stack_drop_lora max_abs=2.139128447e-1 floor=1.369324423e-6 seam=adaptable_projection
+H3_ADAPTER_STACK_CAUSAL backend=cuda topology=full property=stack_drop_lokr max_abs=4.180272818e-1 floor=1.369324423e-6 seam=adaptable_projection
+H3_ADAPTER_STACK_CAUSAL backend=cuda topology=full property=component_differentials additive_max_abs=5.960464478e-8 order_max_abs=0.000000000e0 bound=1.095459538e-5
+H3_ADAPTER_STACK_CAUSAL backend=cuda topology=pruned property=lora_vs_base max_abs=2.139128298e-1 floor=1.166702873e-6 seam=adaptable_projection
+H3_ADAPTER_STACK_CAUSAL backend=cuda topology=pruned property=lokr_vs_base max_abs=4.180272818e-1 floor=1.184159601e-6 seam=adaptable_projection
+H3_ADAPTER_STACK_CAUSAL backend=cuda topology=pruned property=stack_vs_base max_abs=6.073046327e-1 floor=1.369324423e-6 seam=adaptable_projection
+H3_ADAPTER_STACK_CAUSAL backend=cuda topology=pruned property=stack_drop_lora max_abs=2.139128447e-1 floor=1.369324423e-6 seam=adaptable_projection
+H3_ADAPTER_STACK_CAUSAL backend=cuda topology=pruned property=stack_drop_lokr max_abs=4.180272818e-1 floor=1.369324423e-6 seam=adaptable_projection
+H3_ADAPTER_STACK_CAUSAL backend=cuda topology=pruned property=component_differentials additive_max_abs=5.960464478e-8 order_max_abs=0.000000000e0 bound=1.095459538e-5
+ok
+test pruned_adaln::manual_unit_patch_and_mixed_reference_full_forward_matches_resident_control ... H3 unit-patch/mixed-reference full forward device=Cuda(CudaDevice(DeviceId(2))); cuda=true
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=2.000000000e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=2.000000000e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=2.000000000e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=2.000000000e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=2.000000000e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=2.000000000e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=2.000000000e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=2.000000000e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=2.000000000e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=2.000000000e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=2.000000000e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=2.000000000e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=2.000000000e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=2.000000000e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=2.000000000e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=2.000000000e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=2.000000000e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=2.000000000e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=2.000000000e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=2.000000000e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=2.000000000e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=2.000000000e-5
+H3_GEOMETRY_AUDIO_FULL_FORWARD backend=cuda cases=11
+H3_CONDITIONING_CAUSAL backend=cuda property=context_values max_abs=1.082327515e-1 floor=4.753681537e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=cuda property=context_vs_zero_same_shape max_abs=7.199922204e-2 floor=4.753681537e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=cuda property=first_only_values max_abs=2.030286193e-2 floor=4.826550253e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=cuda property=first_only_vs_zero_same_shape max_abs=2.813625336e-2 floor=4.800454008e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=cuda property=last_only_values max_abs=2.147674561e-2 floor=4.828405054e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=cuda property=first_vs_last_placement max_abs=1.064400375e-2 floor=4.800454008e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=cuda property=first_only_vs_drop max_abs=2.418544888e-2 floor=4.800454008e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=cuda property=last_only_vs_drop max_abs=3.747405112e-2 floor=4.828405054e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=cuda property=first_last_swap_values max_abs=2.749204636e-3 floor=4.856294140e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=cuda property=first_last_drop_first max_abs=1.968015730e-2 floor=4.856294140e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=cuda property=first_last_drop_last max_abs=3.159788251e-2 floor=4.856294140e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=cuda property=reference_image_values max_abs=1.859691739e-2 floor=4.819029868e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=cuda property=fl2va_vs_ref2va_positioning max_abs=1.851161569e-2 floor=4.812072234e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=cuda property=ordered_reference_values max_abs=4.331290722e-3 floor=4.895438224e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=cuda property=reference_video_only_values max_abs=4.506407678e-2 floor=4.894945391e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=cuda property=reference_audio_only_CONDITIONING_ROWS max_abs=1.169819683e-1 floor=4.859606406e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=cuda property=reference_audio_values_visual_fixed max_abs=1.000334024e-1 floor=4.931245030e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=cuda property=reference_image_drop_same_layout max_abs=1.567523181e-2 floor=4.812072234e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=cuda property=reference_video_drop_same_layout max_abs=3.001855314e-2 floor=4.832627951e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=cuda property=reference_audio_only_drop_same_layout_CONDITIONING_ROWS max_abs=1.152969003e-1 floor=4.776502465e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=cuda property=ordered_video_references_AB_vs_BA max_abs=1.755636930e-2 floor=4.975821639e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=cuda property=ordered_audio_references_AB_vs_BA_visual_fixed max_abs=3.192636371e-2 floor=4.766286281e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=cuda property=mixed_image_video_soundtrack_audio_reference_order max_abs=8.551433682e-2 floor=4.606105222e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=cuda property=mixed_image_drop_same_layout max_abs=1.370539516e-2 floor=4.510407621e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=cuda property=mixed_video_carrier_drop_same_layout max_abs=1.391166300e-1 floor=4.701581133e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=cuda property=mixed_standalone_audio_drop_same_layout max_abs=5.566066504e-2 floor=4.611576401e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=cuda property=mixed_video_soundtrack_drop_same_layout max_abs=1.020500213e-1 floor=4.724441851e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=cuda property=hybrid_checkpoint_FL_portion_vs_wrong_REF_portion max_abs=4.400000572e0 floor=4.157798230e-6 generated_only=true
+H3_CONDITIONING_CAUSAL backend=cuda property=hybrid_checkpoint_REF_portion_vs_wrong_FL_portion max_abs=4.400000572e0 floor=4.157798230e-6 generated_only=true
+H3_CONDITIONING_CAUSAL_BOUNDARY backend=cuda hybrid_checkpoint=two_distinct_portions selected_by=native_task_partition audio_only_generator=refused prompt_seam=context_embedding
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 291 filtered out; finished in 0.62s
+

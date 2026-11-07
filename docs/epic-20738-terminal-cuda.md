@@ -73,7 +73,7 @@ a time across the Windows CUDA pool.
 The terminal dispatch arm gives this one strictly serial job a 720-minute hard timeout. That is a
 job-level budget below GitHub's five-day self-hosted execution limit, not a step timeout; no step is
 assigned a timeout above 360 minutes. The unrelated LTX Eros, provisioning, five-rung, and ordinary
-job budgets remain 360, 240, 120, and 45 minutes respectively.
+job budgets are 360, 240, 120, and 90 minutes respectively.
 
 The job checks out exact source revisions and requires both checkouts to be clean. It installs the
 lockfile-pinned in-process Node Draft 2020-12 validator and creates a fresh `RUNNER_TEMP` Python

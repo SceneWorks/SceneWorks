@@ -1,16 +1,11 @@
+import { settle } from "../testUtils/dom.js";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Markdown } from "./Markdown.jsx";
 import { PromptGuideModal } from "./PromptGuideModal.jsx";
 
-async function settle() {
-  await act(async () => {
-    for (let index = 0; index < 6; index += 1) {
-      await Promise.resolve();
-    }
-  });
-}
+
 
 describe("Markdown renderer", () => {
   let container;
@@ -102,11 +97,33 @@ describe("PromptGuideModal", () => {
     });
     await settle();
 
-    expect(global.fetch).toHaveBeenCalledWith("/prompt-guides/z-image-turbo.md");
+    expect(global.fetch).toHaveBeenCalledWith("/prompt-guides/z-image-turbo.md", { signal: expect.any(AbortSignal) });
     expect(document.body.querySelector("#prompt-guide-title").textContent).toBe("Z-Image-Turbo Prompt Guide");
     expect(document.body.textContent).toContain("Z-Image-Turbo · Prompt guide");
     expect(document.body.querySelector(".markdown-body h1").textContent).toBe("Z-Image Guide");
     expect(document.body.textContent).toContain("Use short prompts.");
+  });
+
+  it("aborts the previous guide on path change and the current guide on unmount", async () => {
+    const pending = [];
+    global.fetch = vi.fn((path, { signal }) => new Promise((resolve) => pending.push({ path, signal, resolve })));
+    root = createRoot(container);
+    const guide = (path) => <PromptGuideModal guide={{ title: "Guide", path }} onClose={() => {}} />;
+    await act(async () => root.render(guide("/prompt-guides/first.md")));
+    expect(pending[0].signal.aborted).toBe(false);
+    await act(async () => root.render(guide("/prompt-guides/second.md")));
+    expect(pending[0].signal.aborted).toBe(true);
+    expect(pending[1].signal.aborted).toBe(false);
+    await act(async () => {
+      pending[1].resolve({ ok: true, text: async () => "# Current guide" });
+      pending[0].resolve({ ok: true, text: async () => "# Stale guide" });
+    });
+    await settle();
+    expect(document.body.textContent).toContain("Current guide");
+    expect(document.body.textContent).not.toContain("Stale guide");
+    act(() => root.unmount());
+    root = null;
+    expect(pending[1].signal.aborted).toBe(true);
   });
 
   it("renders metadata source links when provided", async () => {

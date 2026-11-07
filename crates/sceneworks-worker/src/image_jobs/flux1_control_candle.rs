@@ -1,19 +1,41 @@
-use super::{
-    advanced, apply_candle_image_load_shape, candle_artifact_path_matches,
-    candle_certified_artifact_path, candle_pinned_hf_artifact_path, ensure_hf_cached_file,
-    huggingface_snapshot_dir,
-};
-use super::{
-    control_kind_label, pose_entries, requested_control_kind, resolve_adapters,
-    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32, run_candle_strict_control,
-    trusted_control_weight_revision, ApiClient, CancelFlag, CandleStrictControl, Flux1ControlPaths,
-    Flux1ControlRequest, Flux1DevControl, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject,
-    Path, PathBuf, Progress, Settings, Value, WorkerError, WorkerResult,
-};
-use super::{
-    resolve_app_managed_model_dir, safe_weight_filename, standard_tier_subdir, DownloadContext,
-};
+use super::adapters::resolve_adapters;
+use super::conditioning::pose_entries;
+use super::load_policy::apply_candle_image_load_shape;
+use super::load_spec::candle_artifact_path_matches;
+use super::load_spec::candle_certified_artifact_path;
+use super::load_spec::candle_pinned_hf_artifact_path;
+use super::run_candle_strict_control;
+use super::sampling::resolve_advanced_or_manifest_f32;
+use super::sampling::resolve_advanced_or_manifest_u32;
+use super::standard_tier_subdir;
+use super::strict_control::control_kind_label;
+use super::strict_control::requested_control_kind;
+use super::strict_control::trusted_control_weight_revision;
+use super::CancelFlag;
+use super::CandleStrictControl;
+use super::Flux1ControlPaths;
+use super::Flux1ControlRequest;
+use super::Flux1DevControl;
+use super::Image;
+use super::ImagePlan;
+use super::ImageRequest;
+use super::Progress;
+use crate::advanced;
 use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
+use crate::ensure_hf_cached_file;
+use crate::huggingface_snapshot_dir;
+use crate::resolve_app_managed_model_dir;
+use crate::safe_weight_filename;
+use crate::ApiClient;
+use crate::DownloadContext;
+use crate::JobSnapshot;
+use crate::JsonObject;
+use crate::Path;
+use crate::PathBuf;
+use crate::Settings;
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
 use serde_json::json;
 
 pub(super) fn flux1_control_adapter_source_bytes(
@@ -95,20 +117,13 @@ fn resolve_flux1_control_base(
         .advanced
         .get("modelPath")
         .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "FLUX.1 control modelPath")
             .map(Some);
     }
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or_else(|| {
             crate::engines::default_repo_for(&request.model)
                 .unwrap_or(FLUX1_CONTROL_CANDLE_BASE_REPO)
@@ -156,9 +171,7 @@ pub(super) fn flux1_control_candle_repo_file(
         .and_then(Value::as_object);
     let pick = |key: &str, default: &str| {
         cw.and_then(|m| m.get(key))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
+            .and_then(crate::payload::trimmed_value_str)
             .unwrap_or(default)
             .to_owned()
     };
@@ -270,6 +283,7 @@ pub(super) struct Flux1StrictControl {
     width: u32,
     height: u32,
     steps: u32,
+    sampling: gen_core::GenerationRequest,
     guidance: f32,
     control_scale: f32,
     /// The resolved control kind for this set (`pose` | `canny` | `depth`) — input-agnostic; the engine
@@ -289,6 +303,7 @@ pub(super) fn flux1_strict_control_test_fixture(path: PathBuf) -> Flux1StrictCon
         width: 512,
         height: 512,
         steps: 25,
+        sampling: gen_core::GenerationRequest::default(),
         guidance: 3.5,
         control_scale: 0.7,
         adapters: Vec::new(),
@@ -363,6 +378,9 @@ impl CandleStrictControl for Flux1StrictControl {
             width: self.width,
             height: self.height,
             steps: self.steps as usize,
+            sampler: self.sampling.sampler.clone(),
+            scheduler: self.sampling.scheduler.clone(),
+            scheduler_shift: self.sampling.scheduler_shift,
             guidance: self.guidance,
             // The worker resolves `controlScale` itself (user value or `FLUX1_CONTROL_CANDLE_DEFAULT_SCALE`)
             // before building the provider, so always pass the resolved value explicitly. `None` (engine
@@ -417,12 +435,7 @@ pub(super) async fn generate_candle_flux1_control_stream(
     // label into the request struct (input-agnostic — the engine validates the accepted set but does not
     // branch the forward). Defaults to `pose` when `controlMode` is unset (byte-preserved skeleton path).
     let control_kind = control_kind_label(&requested_control_kind(request)?);
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or_else(|| {
             crate::engines::default_repo_for(&request.model)
                 .unwrap_or(FLUX1_CONTROL_CANDLE_BASE_REPO)
@@ -455,10 +468,7 @@ pub(super) async fn generate_candle_flux1_control_stream(
             .with_adapters(adapters.clone())
             .with_offload_policy(gen_core::OffloadPolicy::Sequential),
     );
-    let raw_budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let raw_budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     let predicted_peak = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
         &request.model_manifest_entry,
         tier,
@@ -529,6 +539,7 @@ pub(super) async fn generate_candle_flux1_control_stream(
         width: request.width,
         height: request.height,
         steps,
+        sampling: super::sampling::explicit_sampling_request(request),
         guidance,
         control_scale,
         control_kind,

@@ -1,4 +1,33 @@
-enum GenEvent {
+#[cfg(target_os = "macos")]
+use super::artifact_resolution::model_repo;
+#[cfg(target_os = "macos")]
+use super::artifact_resolution::resolve_weights_dir;
+#[cfg(target_os = "macos")]
+use super::mlx_model;
+#[cfg(target_os = "macos")]
+use super::resolved_tier_is_complete;
+use super::sampling::emit_load_event;
+use super::CancelFlag;
+use super::Generator;
+#[cfg(target_os = "macos")]
+use super::ImageRequest;
+use super::LoadPhase;
+use super::LoadSpec;
+use super::Progress;
+use crate::heartbeat_while_blocking;
+use crate::ApiClient;
+use crate::JsonObject;
+use crate::Settings;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use crate::Value;
+use crate::WorkerError;
+use crate::WorkerResult;
+pub(super) enum GenEvent {
+    /// An output already encoded by its producing lane, persisted through shared assetWrites.
+    AssetWritten {
+        index: usize,
+        fact: JsonObject,
+    },
     Step {
         index: usize,
         current: u32,
@@ -6,6 +35,11 @@ enum GenEvent {
     },
     Decoding {
         index: usize,
+    },
+    Upsampling {
+        index: usize,
+        tokens: u32,
+        max_tokens: u32,
     },
     Loading {
         index: usize,
@@ -36,11 +70,8 @@ enum GenEvent {
     //
     // The producers today are the candle imported-Krea and checkpoint-plan lanes (the routes whose
     // runtime handles answer `checkpoint_weight_facts()` at this pin), so builds without those
-    // lanes construct nothing here while the consumer arm still compiles everywhere.
-    #[cfg_attr(
-        not(all(not(target_os = "macos"), feature = "backend-candle")),
-        allow(dead_code)
-    )]
+    // lanes compile neither the variant nor its consumer arm. Candle tests retain both.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     CheckpointWeightFacts {
         facts: Value,
     },
@@ -48,20 +79,13 @@ enum GenEvent {
     /// the applied adapter stack (`lane_controls::image_facts`). Sent before that image's
     /// [`GenEvent::Image`] on the same channel; the consumer merges the block into that image's
     /// `rawAdapterSettings`. Lanes with nothing to report never produce it.
-    #[cfg_attr(
-        not(any(
-            target_os = "macos",
-            all(not(target_os = "macos"), feature = "backend-candle")
-        )),
-        allow(dead_code)
-    )]
     ImageFacts {
         index: usize,
         facts: JsonObject,
     },
     Image {
         index: usize,
-        seed: i64,
+        seed: Option<i64>,
         width: u32,
         height: u32,
         pixels: Vec<u8>,
@@ -74,7 +98,7 @@ enum GenEvent {
     },
 }
 
-type GeneratedImage = (i64, u32, u32, Vec<u8>);
+pub(super) type GeneratedImage = (i64, u32, u32, Vec<u8>);
 
 /// A generated image plus its optional pre-built `faceLikeness` sidecar block (sc-4409). Returned by
 /// the per-item closure of [`drive_gen_items_scored`] so the identity-likeness post-pass (used by all
@@ -89,7 +113,7 @@ type ScoredGeneratedImage = (i64, u32, u32, Vec<u8>, Option<JsonObject>);
 /// latest frame per job (single-slot, latest-wins), so a dropped intermediate frame is invisible.
 /// Contrast with [`send_gen_progress`]'s `blocking_send`, which is correct for `Progress` events
 /// (they are load-bearing for cancel polling) but would stall the GPU here.
-fn preview_sink_for(
+pub(super) fn preview_sink_for(
     tx: &tokio::sync::mpsc::Sender<GenEvent>,
     index: usize,
 ) -> gen_core::PreviewSink {
@@ -100,13 +124,13 @@ fn preview_sink_for(
 }
 
 #[derive(Clone)]
-struct PromptEnhancementEventSink {
+pub(super) struct PromptEnhancementEventSink {
     tx: tokio::sync::mpsc::Sender<GenEvent>,
     index: usize,
 }
 
 impl PromptEnhancementEventSink {
-    fn for_prompt(&self, prompt: &str) -> gen_core::PromptEnhancementSink {
+    pub(super) fn for_prompt(&self, prompt: &str) -> gen_core::PromptEnhancementSink {
         let tx = self.tx.clone();
         let index = self.index;
         let expected_prompt = prompt.to_owned();
@@ -128,7 +152,7 @@ impl PromptEnhancementEventSink {
     /// prompt-enhancement report rides. Load-bearing like that report, so it blocks rather than
     /// dropping under channel pressure; it is sent before the image itself, so the consumer holds
     /// it when the image is written.
-    fn send_image_facts(&self, facts: JsonObject) {
+    pub(super) fn send_image_facts(&self, facts: JsonObject) {
         let _ = self.tx.blocking_send(GenEvent::ImageFacts {
             index: self.index,
             facts,
@@ -146,18 +170,37 @@ fn prompt_enhancement_event_sink_for(
     }
 }
 
-fn send_gen_progress(tx: &tokio::sync::mpsc::Sender<GenEvent>, index: usize, progress: Progress) {
+/// Source checks can hash multi-GB files. The job-wide observer follows the blocking task;
+/// the shared poster reports the latest I/O state while this helper keeps heartbeats alive.
+pub(super) async fn prepare_image_route_with_progress<T: Send + 'static>(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    prepare: impl FnOnce() -> WorkerResult<T> + Send + 'static,
+) -> WorkerResult<T> {
+    let task = crate::load_progress::spawn_blocking(prepare);
+    heartbeat_while_blocking(api, settings, job_id, "image source preparation", task).await
+}
+
+pub(super) fn send_gen_progress(
+    tx: &tokio::sync::mpsc::Sender<GenEvent>,
+    index: usize,
+    progress: Progress,
+) {
+    crate::load_progress::generator_progress(&progress);
     // Internal resource boundary: never extend the worker wire protocol or synthesize Step 0.
-    if matches!(progress, Progress::ConditioningComplete) {
-        return;
-    }
-    // Prompt-upsampling events (inference 46c22c01e) fire only for a request that asked for
-    // enhancement on a provider that implements it; this lane has no upsampling consumer, so they
-    // stay internal exactly like the conditioning boundary.
     if matches!(
         progress,
-        Progress::PromptUpsamplingComplete | Progress::Upsampling { .. }
+        Progress::ConditioningComplete
+            | Progress::PromptEncodingComplete
+            | Progress::PostProcessing
     ) {
+        return;
+    }
+    // The prompt-upsampling COMPLETION boundary has no consumer on this lane and stays internal
+    // exactly like the conditioning boundary. Incremental token counts DO reach the job wire: the
+    // FLUX 3 prompt-enhancement surface renders them (sc-26233).
+    if matches!(progress, Progress::PromptUpsamplingComplete) {
         return;
     }
     let event = match progress {
@@ -166,17 +209,24 @@ fn send_gen_progress(tx: &tokio::sync::mpsc::Sender<GenEvent>, index: usize, pro
             current,
             total,
         },
-        Progress::ConditioningComplete => unreachable!("internal boundary filtered above"),
-        Progress::PromptUpsamplingComplete | Progress::Upsampling { .. } => {
-            unreachable!("prompt-upsampling events filtered above")
+        Progress::ConditioningComplete
+        | Progress::PostProcessing
+        | Progress::PromptEncodingComplete
+        | Progress::PromptUpsamplingComplete => {
+            unreachable!("internal boundary filtered above")
         }
         Progress::Decoding => GenEvent::Decoding { index },
         Progress::Loading(phase) => GenEvent::Loading { index, phase },
+        Progress::Upsampling { tokens, max_tokens } => GenEvent::Upsampling {
+            index,
+            tokens,
+            max_tokens,
+        },
     };
     let _ = tx.blocking_send(event);
 }
 
-fn send_generated_image(
+pub(super) fn send_generated_image(
     tx: &tokio::sync::mpsc::Sender<GenEvent>,
     index: usize,
     image: GeneratedImage,
@@ -184,7 +234,7 @@ fn send_generated_image(
     let (seed, width, height, pixels) = image;
     tx.blocking_send(GenEvent::Image {
         index,
-        seed,
+        seed: Some(seed),
         width,
         height,
         pixels,
@@ -202,7 +252,7 @@ fn send_scored_generated_image(
     let (seed, width, height, pixels, face_likeness) = image;
     tx.blocking_send(GenEvent::Image {
         index,
-        seed,
+        seed: Some(seed),
         width,
         height,
         pixels,
@@ -211,7 +261,7 @@ fn send_scored_generated_image(
     .is_ok()
 }
 
-fn drive_gen_items<I, Item, F>(
+pub(super) fn drive_gen_items<I, Item, F>(
     tx: tokio::sync::mpsc::Sender<GenEvent>,
     items: I,
     mut generate: F,
@@ -248,11 +298,8 @@ where
 /// Prompt-reporting sibling of [`drive_gen_items`]. Kept separate so the additive inference
 /// contract changes only the FLUX.2-dev-capable generic lanes; every other producer remains source-
 /// and behavior-identical.
-#[cfg_attr(
-    not(all(not(target_os = "macos"), feature = "backend-candle")),
-    allow(dead_code)
-)]
-fn drive_gen_items_reported<I, Item, F>(
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn drive_gen_items_reported<I, Item, F>(
     tx: tokio::sync::mpsc::Sender<GenEvent>,
     items: I,
     mut generate: F,
@@ -295,16 +342,9 @@ where
 /// keeps using [`drive_gen_items`].
 //
 // The scored producers are all face-backend paths; off-Mac they compile only with the candle backend
-// (the angle-set scorer's backend legs are cfg-gated the same way), so allow this dead when neither
-// face backend is present.
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code)
-)]
-fn drive_gen_items_scored<I, Item, F>(
+// (the angle-set scorer's backend legs are cfg-gated the same way). The native include owns
+// that boundary; no inverse dead-code suppression is needed here.
+pub(super) fn drive_gen_items_scored<I, Item, F>(
     tx: tokio::sync::mpsc::Sender<GenEvent>,
     items: I,
     mut generate: F,
@@ -332,11 +372,10 @@ where
     Ok(())
 }
 
-/// [`drive_gen_items_scored`] plus the request-local prompt-report sink used by the shared MLX lane.
-/// Face likeness and prompt provenance remain independent per-image facts. The Candle FLUX.2-dev
-/// edit route does not admit the character-image mode, so it has no scored/reporting combination.
-#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
-fn drive_gen_items_scored_reported<I, Item, F>(
+/// [`drive_gen_items_scored`] plus the request-local prompt-report sink used by shared native lanes.
+/// Face likeness and prompt provenance remain independent per-image facts. Both the MLX and
+/// Candle registry callers use this helper; the native stream include owns its availability.
+pub(super) fn drive_gen_items_scored_reported<I, Item, F>(
     tx: tokio::sync::mpsc::Sender<GenEvent>,
     items: I,
     mut generate: F,
@@ -376,14 +415,7 @@ where
 /// image `k` on seed `seed + k`, the seed the engine drew its noise from, after its provenance
 /// `facts`. A cancel or an engine failure inside the call returns before any image is sent, so a
 /// partial batch is never published; a count that is not `expected` is a typed engine failure.
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code)
-)]
-fn drive_native_prompt_batch<F>(
+pub(super) fn drive_native_prompt_batch<F>(
     tx: tokio::sync::mpsc::Sender<GenEvent>,
     seed: i64,
     expected: usize,
@@ -416,40 +448,6 @@ where
     Ok(())
 }
 
-#[cfg(test)]
-#[test]
-fn conditioning_complete_stays_internal_and_preserves_first_positive_step() {
-    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-    send_gen_progress(&tx, 2, Progress::ConditioningComplete);
-    assert!(matches!(
-        rx.try_recv(),
-        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-    ));
-    send_gen_progress(&tx, 2, Progress::Step { current: 1, total: 4 });
-    assert!(matches!(
-        rx.try_recv(),
-        Ok(GenEvent::Step { index: 2, current: 1, total: 4 })
-    ));
-    assert!(matches!(
-        rx.try_recv(),
-        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-    ));
-}
-
-/// The prompt-upsampling events (inference 46c22c01e) have no consumer on this lane, so they never
-/// reach the job wire: no event, no synthesized step.
-#[cfg(test)]
-#[test]
-fn prompt_upsampling_events_stay_internal() {
-    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-    send_gen_progress(&tx, 0, Progress::Upsampling { tokens: 3, max_tokens: 8 });
-    send_gen_progress(&tx, 0, Progress::PromptUpsamplingComplete);
-    assert!(matches!(
-        rx.try_recv(),
-        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-    ));
-}
-
 /// Release MLX's freed-buffer cache between batch images so peak memory doesn't carry
 /// forward across a `drive_gen_items` loop (sc-5567). `clear_cache()` returns only the
 /// retained-for-reuse buffers to the OS — live arrays (the cached model weights) are not
@@ -457,7 +455,7 @@ fn prompt_upsampling_events_stay_internal() {
 /// tens-of-seconds generation, and far cheaper than an OOM kill. No-op off macOS: the
 /// Windows/CUDA candle lane shares this loop but has no `mlx_rs` dependency.
 #[cfg(target_os = "macos")]
-fn release_gen_cache_between_items() {
+pub(super) fn release_gen_cache_between_items() {
     #[cfg(test)]
     if SUPPRESS_TEST_MLX_CACHE_RELEASE.with(std::cell::Cell::get) {
         return;
@@ -475,7 +473,7 @@ std::thread_local! {
 }
 
 #[cfg(all(test, target_os = "macos"))]
-fn without_mlx_cache_release_for_headless_test<T>(run: impl FnOnce() -> T) -> T {
+pub(super) fn without_mlx_cache_release_for_headless_test<T>(run: impl FnOnce() -> T) -> T {
     struct Restore(bool);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -489,7 +487,7 @@ fn without_mlx_cache_release_for_headless_test<T>(run: impl FnOnce() -> T) -> T 
 }
 
 #[cfg(not(target_os = "macos"))]
-fn release_gen_cache_between_items() {}
+pub(super) fn release_gen_cache_between_items() {}
 
 /// Always release allocator-cache buffers at the end of an item, including cancellation and error
 /// exits. Provider scopes synchronize/release active graphs and windows first; this guard then
@@ -506,11 +504,8 @@ impl Drop for RequestCacheRelease {
 // `!Send` engine on the blocking thread and stream per-item events back. `G` is the loaded model
 // (MLX `Box<dyn Generator>` or candle `InstantId`) — created and consumed inside the one
 // `spawn_blocking`, so it never needs to be `Send`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-fn start_gen_stream<G, L, D>(
+#[cfg(native_lane)]
+pub(super) fn start_gen_stream<G, L, D>(
     job_id: String,
     engine_id: &'static str,
     adapter_count: usize,
@@ -530,7 +525,7 @@ where
     let cancel = CancelFlag::new();
     let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
     let blocking_cancel = cancel.clone();
-    let blocking = tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+    let blocking = crate::load_progress::spawn_blocking(move || -> WorkerResult<()> {
         emit_load_event(
             "image_pipeline_load_start",
             &job_id,
@@ -549,7 +544,7 @@ where
     (cancel, rx, blocking)
 }
 
-fn start_cached_gen_stream<D>(
+pub(super) fn start_cached_gen_stream<D>(
     job_id: String,
     engine_id: &'static str,
     adapter_count: usize,
@@ -590,14 +585,14 @@ where
 
 /// The reclaimable-byte estimate and the gate that consumes resident-entry credit for one cold load.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-struct ColdLoadAdmission<A> {
+pub(super) struct ColdLoadAdmission<A> {
     incoming_reclaimable_weight_bytes: u64,
     admit: A,
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 impl<A> ColdLoadAdmission<A> {
-    fn new(incoming_reclaimable_weight_bytes: u64, admit: A) -> Self {
+    pub(super) fn new(incoming_reclaimable_weight_bytes: u64, admit: A) -> Self {
         Self {
             incoming_reclaimable_weight_bytes,
             admit,
@@ -609,7 +604,7 @@ impl<A> ColdLoadAdmission<A> {
 /// The admission closure is invoked by the cache loader only for a cold/different-key load; an exact
 /// warm hit goes straight to `drive` without re-gating or evicting itself.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn start_cached_gen_stream_after_cold_admission<A, D>(
+pub(super) fn start_cached_gen_stream_after_cold_admission<A, D>(
     job_id: String,
     engine_id: &'static str,
     adapter_count: usize,
@@ -635,7 +630,7 @@ where
     let cancel = CancelFlag::new();
     let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
     let blocking_cancel = cancel.clone();
-    let blocking = tokio::spawn(async move {
+    let blocking = crate::load_progress::spawn(async move {
         emit_load_event(
             "image_pipeline_load_start",
             &job_id,
@@ -680,7 +675,7 @@ where
 /// own policy intent after vetting, and the callback owes it exactly one settlement — thread it into
 /// `mlx_fit_gate::evaluate_request` (which floors the memory ladder with it and reports what the
 /// selection did) or `decline` it. It is `#[must_use]`, so forgetting is a compiler warning.
-fn start_cached_gen_stream_with_request_state<D>(
+pub(super) fn start_cached_gen_stream_with_request_state<D>(
     job_id: String,
     engine_id: &'static str,
     adapter_count: usize,
@@ -721,7 +716,7 @@ where
 /// lifted to the image stream, so a test can drive a whole image job arm (`generate_stream_using`)
 /// against a stub `Generator` with no tensor backend or weights. Production passes
 /// `crate::inference_runtime::load` through the plain name.
-fn start_cached_gen_stream_with_request_state_using<D>(
+pub(super) fn start_cached_gen_stream_with_request_state_using<D>(
     job_id: String,
     engine_id: &'static str,
     adapter_count: usize,
@@ -755,22 +750,29 @@ where
         adapter_count,
         spec,
         load_error_context,
-        load_generator,
+        CachedGeneratorFactory {
+            cache: crate::generator_cache::GeneratorCacheHandle::global(),
+            load: load_generator,
+        },
         move |generator, state, policy, warm, external, _owned, tx, cancel| {
             drive(generator, state, policy, warm, external, tx, cancel)
         },
     )
 }
 
-fn start_cached_gen_stream_with_request_state_using_owned<D>(
+/// The cache owner and loader form one private dependency for the existing stream transaction.
+pub(super) struct CachedGeneratorFactory<L> {
+    pub(super) cache: crate::generator_cache::GeneratorCacheHandle,
+    pub(super) load: L,
+}
+
+pub(super) fn start_cached_gen_stream_with_request_state_using_owned<D, L>(
     job_id: String,
     engine_id: &'static str,
     adapter_count: usize,
     spec: LoadSpec,
     load_error_context: String,
-    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
-        + Send
-        + 'static,
+    factory: CachedGeneratorFactory<L>,
     drive: D,
 ) -> (
     CancelFlag,
@@ -778,6 +780,7 @@ fn start_cached_gen_stream_with_request_state_using_owned<D>(
     tokio::task::JoinHandle<WorkerResult<()>>,
 )
 where
+    L: FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>> + Send + 'static,
     D: FnOnce(
             &dyn Generator,
             gen_core::MemoryCacheState,
@@ -794,18 +797,19 @@ where
     let cancel = CancelFlag::new();
     let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
     let blocking_cancel = cancel.clone();
-    let blocking = tokio::spawn(async move {
+    let blocking = crate::load_progress::spawn(async move {
         emit_load_event(
             "image_pipeline_load_start",
             &job_id,
             engine_id,
             adapter_count,
         );
-        crate::generator_cache::with_cached_generator_for_request_using(
+        crate::generator_cache::with_cached_generator_for_request_using_cache(
+            factory.cache,
             engine_id,
             spec,
             load_error_context,
-            load_generator,
+            factory.load,
             move |generator,
                   cache_state,
                   loaded_policy,
@@ -879,3 +883,7 @@ pub(crate) fn mlx_weights_gap(request: &ImageRequest, settings: &Settings) -> Op
         model_repo(request, &model),
     ))
 }
+
+#[cfg(test)]
+#[path = "tests/stream_tests.rs"]
+mod tests;

@@ -56,7 +56,7 @@ where
     let tmp_path = absolute_path.with_extension("tmp.png");
     let encode_tmp = tmp_path.clone();
     let workflow = spec.workflow.take();
-    tokio::task::spawn_blocking(move || match workflow {
+    crate::load_progress::spawn_blocking(move || match workflow {
         // The embed lane (sc-15948). The conversion follows the buffer the caller produced rather
         // than forcing one: the upscale lane hands in `DynamicImage::ImageRgb8`, so `into_rgb8()`
         // is still a move and its files are byte-identical, while an alpha-carrying render

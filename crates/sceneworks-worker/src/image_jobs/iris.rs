@@ -18,7 +18,7 @@
 /// The Iris text-encoder directory a resolved spec carries, for diagnostics/tests.
 #[cfg(test)]
 pub(crate) fn staged_text_encoder_dir(spec: &gen_core::LoadSpec) -> Option<&std::path::Path> {
-    match spec.components.get(gen_core::iris::TEXT_ENCODER_COMPONENT) {
+    match spec.components.get(gen_core_iris::TEXT_ENCODER_COMPONENT) {
         Some(gen_core::WeightsSource::Dir(dir)) => Some(dir.as_path()),
         _ => None,
     }
@@ -29,9 +29,8 @@ mod tests {
     use super::*;
     use crate::error::WorkerResult;
     use crate::settings::Settings;
-    use gen_core::iris::{IrisTask, TEXT_ENCODER_COMPONENT};
     use gen_core::{LoadSpec, WeightsSource};
-    use sceneworks_core::contracts::JsonObject;
+    use gen_core_iris::{IrisTask, TEXT_ENCODER_COMPONENT};
     use serde_json::json;
     use serde_json::Value;
     use std::path::Path;
@@ -43,38 +42,6 @@ mod tests {
         let mut settings = crate::tests::test_settings("http://127.0.0.1:0".to_owned(), None);
         settings.data_dir = data_dir.to_path_buf();
         settings
-    }
-
-    /// Neutralize the ambient HF cache env so the cache resolves under the temp data dir.
-    fn isolate_hf_cache() -> crate::test_env::EnvVars {
-        crate::test_env::EnvVars::set(&[
-            ("HF_HUB_CACHE", ""),
-            ("HUGGINGFACE_HUB_CACHE", ""),
-            ("HF_HOME", ""),
-        ])
-    }
-
-    /// The shipped catalog entry, so the test exercises the real `coRequisite` declaration.
-    fn shipped_iris_entry() -> JsonObject {
-        let text = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-            .iter()
-            .find(|(name, _)| *name == "builtin.models.jsonc")
-            .expect("builtin.models.jsonc embedded")
-            .1;
-        let manifest: Value =
-            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(text))
-                .expect("parse builtin.models.jsonc");
-        manifest
-            .get("models")
-            .and_then(Value::as_array)
-            .and_then(|models| {
-                models
-                    .iter()
-                    .find(|model| model.get("id").and_then(Value::as_str) == Some("iris_3b"))
-            })
-            .and_then(Value::as_object)
-            .cloned()
-            .expect("iris_3b is in the builtin catalog")
     }
 
     fn stage(root: &Path, repo: &str, revision: &str, file: &str) {
@@ -172,15 +139,15 @@ mod tests {
 
     #[test]
     fn generation_stages_the_installed_text_encoder_snapshot() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().unwrap();
         stage_text_encoder(data.path());
         let settings = settings_at(data.path());
         let backbone = data.path().join("backbone");
-        let spec = super::super::attach_required_components(
+        let spec = crate::image_jobs::load_spec::attach_required_components(
             LoadSpec::new(WeightsSource::Dir(backbone.clone())),
             "iris_3b",
-            &shipped_iris_entry(),
+            &crate::test_env::shipped_catalog_entry("iris_3b"),
             &settings,
         )
         .expect("an installed encoder stages");
@@ -199,13 +166,13 @@ mod tests {
 
     #[test]
     fn a_missing_text_encoder_is_a_typed_failure_before_load() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().unwrap();
         let settings = settings_at(data.path());
-        let error = super::super::attach_required_components(
+        let error = crate::image_jobs::load_spec::attach_required_components(
             LoadSpec::new(WeightsSource::Dir(data.path().join("backbone"))),
             "iris_3b",
-            &shipped_iris_entry(),
+            &crate::test_env::shipped_catalog_entry("iris_3b"),
             &settings,
         )
         .expect_err("no encoder installed");
@@ -218,16 +185,16 @@ mod tests {
 
     #[test]
     fn a_torn_text_encoder_is_a_typed_failure_before_load() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().unwrap();
         // Everything but the shards.
         for file in ["config.json", "tokenizer.json", "tokenizer_config.json"] {
             stage(data.path(), TE_REPO, TE_REVISION, file);
         }
-        let error = super::super::attach_required_components(
+        let error = crate::image_jobs::load_spec::attach_required_components(
             LoadSpec::new(WeightsSource::Dir(data.path().join("backbone"))),
             "iris_3b",
-            &shipped_iris_entry(),
+            &crate::test_env::shipped_catalog_entry("iris_3b"),
             &settings_at(data.path()),
         )
         .expect_err("torn encoder");
@@ -268,20 +235,20 @@ mod tests {
     /// sampler menu is the descriptor's solver menu, there is no scheduler menu but a declared shift
     /// axis, the CFG interval / caption-overflow declarations mirror the descriptor's capability
     /// flags, adapters are offered iff the engine applies them (generation-task stamps only), and
-    /// there is no quant tier because the engine refuses quantization.
+    /// the bf16 / q8 / q4 tier rows are exactly the engine's load-time tiers (sc-26266): one
+    /// shared download, q8 / q4 macOS-only, bf16 the default and the no-pick tier.
     ///
     /// *Mutation that reds this:* drop `euler` from `limits.samplers`, or `supportsCfgInterval`.
     #[test]
     fn the_catalog_row_offers_exactly_the_linked_engines_controls() {
         let model = crate::engines::mlx_model("iris_3b").expect("iris_3b is linked");
         assert_eq!(model.engine_id(), "iris_3b");
-        assert!(!model.supports_quant());
         assert!(model.supports_guidance() && model.supports_negative_prompt());
         let caps = &model.descriptor.capabilities;
-        assert_eq!(model.default_steps(), gen_core::iris::DEFAULT_STEPS);
-        assert_eq!(model.default_guidance(), gen_core::iris::DEFAULT_CFG_SCALE);
+        assert_eq!(model.default_steps(), gen_core_iris::DEFAULT_STEPS);
+        assert_eq!(model.default_guidance(), gen_core_iris::DEFAULT_CFG_SCALE);
 
-        let entry = shipped_iris_entry();
+        let entry = crate::test_env::shipped_catalog_entry("iris_3b");
         let limits = entry.get("limits").and_then(Value::as_object).unwrap();
         let samplers: Vec<&str> = limits["samplers"]
             .as_array()
@@ -290,10 +257,10 @@ mod tests {
             .filter_map(Value::as_str)
             .collect();
         assert_eq!(samplers, caps.samplers, "the menu IS the engine's");
-        assert_eq!(samplers, gen_core::iris::SAMPLERS);
+        assert_eq!(samplers, gen_core_iris::SAMPLERS);
         assert_eq!(
             entry["defaults"]["sampler"].as_str(),
-            Some(gen_core::iris::SOLVER_ORDER_2_SAMPLER)
+            Some(gen_core_iris::SOLVER_ORDER_2_SAMPLER)
         );
         assert!(caps.schedulers.is_empty());
         for absent in ["schedulers", "guidanceMethods"] {
@@ -322,13 +289,48 @@ mod tests {
             entry["loraCompatibility"]["irisTask"].as_str(),
             Some(IrisTask::Generation.name())
         );
-        assert!(entry
-            .get("mlx")
-            .and_then(|mlx| mlx.get("quantize"))
-            .is_none());
+        // sc-26266: both engines advertise q8/q4, loaded from the same dense upstream files.
+        assert_eq!(
+            caps.supported_quants,
+            [gen_core::Quant::Q8, gen_core::Quant::Q4]
+        );
+        assert_eq!(
+            entry["mlx"]["quantize"].as_i64(),
+            Some(0),
+            "no pick loads bf16"
+        );
+        let tiers: Vec<(&str, Option<&Value>, bool, &Value)> = entry["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|download| download.get("componentId").is_none())
+            .map(|download| {
+                (
+                    download["variant"]
+                        .as_str()
+                        .expect("every backbone row names a tier"),
+                    download.get("platforms"),
+                    download.get("default").and_then(Value::as_bool) == Some(true),
+                    &download["files"],
+                )
+            })
+            .collect();
+        assert_eq!(
+            tiers.iter().map(|tier| tier.0).collect::<Vec<_>>(),
+            ["bf16", "q8", "q4"]
+        );
+        for (tier, platforms, default, files) in &tiers {
+            assert_eq!(
+                *files,
+                &json!(["config.yaml", "model.safetensors"]),
+                "{tier}"
+            );
+            assert_eq!(*default, *tier == "bf16", "{tier}");
+            assert!(platforms.is_none(), "all native platforms serve {tier}");
+        }
         assert_eq!(
             limits["requiresDimensionsMultipleOf"].as_u64(),
-            Some(u64::from(gen_core::iris::SIZE_MULTIPLE))
+            Some(u64::from(gen_core_iris::SIZE_MULTIPLE))
         );
         assert_eq!(
             limits["maxDimension"].as_u64(),
@@ -340,16 +342,16 @@ mod tests {
         );
         assert_eq!(
             entry["defaults"]["steps"].as_u64(),
-            Some(u64::from(gen_core::iris::DEFAULT_STEPS))
+            Some(u64::from(gen_core_iris::DEFAULT_STEPS))
         );
         assert_eq!(
             entry["defaults"]["resolution"].as_str(),
-            Some(format!("{0}x{0}", gen_core::iris::DEFAULT_SIZE).as_str()),
+            Some(format!("{0}x{0}", gen_core_iris::DEFAULT_SIZE).as_str()),
             "the default stays 1024-class"
         );
         assert_eq!(
             entry["image"]["patchGridVisibleBelow"].as_u64(),
-            Some(u64::from(gen_core::iris::DEFAULT_SIZE))
+            Some(u64::from(gen_core_iris::DEFAULT_SIZE))
         );
     }
 
@@ -358,10 +360,10 @@ mod tests {
     #[test]
     fn the_steps_ceiling_admits_the_models_own_default() {
         assert_eq!(
-            super::super::max_requested_steps(gen_core::iris::DEFAULT_STEPS),
-            gen_core::iris::DEFAULT_STEPS
+            crate::image_jobs::sampling::max_requested_steps(gen_core_iris::DEFAULT_STEPS),
+            gen_core_iris::DEFAULT_STEPS
         );
-        assert_eq!(super::super::max_requested_steps(40), 80);
+        assert_eq!(crate::image_jobs::sampling::max_requested_steps(40), 80);
     }
 
     // ---------------------------------------------------------------------------------------
@@ -378,8 +380,8 @@ mod tests {
     use crate::api_client::ApiClient;
     use axum::extract::{Path as AxumPath, State};
     use axum::response::{IntoResponse, Response};
-    use axum::routing::{get, post};
-    use axum::{Json, Router};
+
+    use axum::Json;
     use gen_core::{GenerationOutput, GenerationRequest, Generator, Progress};
     use sceneworks_core::contracts::JobSnapshot;
     use std::sync::{Arc, Mutex};
@@ -676,17 +678,15 @@ mod tests {
             .into_response()
         }
         let posts: Posts = Arc::default();
-        let app = Router::new()
-            .route("/api/v1/jobs/:job_id", get(job_route))
-            .route("/api/v1/jobs/:job_id/progress", post(progress_route))
-            .route(
-                "/api/v1/workers/:worker_id/heartbeat",
-                post(heartbeat_route),
-            )
-            .with_state((posts.clone(), cancel_requested));
+        let app = crate::test_api_stub::job_progress_heartbeat_routes(
+            job_route,
+            progress_route,
+            heartbeat_route,
+        )
+        .with_state((posts.clone(), cancel_requested));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
+        crate::load_progress::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
         (format!("http://{address}"), posts)
@@ -710,6 +710,9 @@ mod tests {
         loaded_offload: Option<gen_core::OffloadPolicy>,
         /// The materialization shape the loader was handed (`LoadSpec::load_shape`).
         loaded_shape: Option<gen_core::LoadShape>,
+        /// The tier the loader was handed (`LoadSpec::quantize`; `None` = bf16).
+        #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+        loaded_quant: Option<Option<gen_core::Quant>>,
         stopped_on_cancel: bool,
         /// Every memory-strategy context the arm opened an engine request scope under.
         #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -888,6 +891,7 @@ mod tests {
         let loaded_adapters = Arc::new(Mutex::new(Vec::new()));
         let loaded_offload = Arc::new(Mutex::new(None));
         let loaded_shape = Arc::new(Mutex::new(None));
+        let loaded_quant = Arc::new(Mutex::new(None));
         let stopped_on_cancel = Arc::new(Mutex::new(false));
         let memory_contexts = Arc::new(Mutex::new(Vec::new()));
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -922,7 +926,7 @@ mod tests {
                     "height": 64,
                     "count": 1,
                     "loras": loras,
-                    "modelManifestEntry": Value::Object(shipped_iris_entry()),
+                    "modelManifestEntry": Value::Object(crate::test_env::shipped_catalog_entry("iris_3b")),
                 });
                 for (key, value) in extra.as_object().cloned().unwrap_or_default() {
                     payload[key] = value;
@@ -945,6 +949,7 @@ mod tests {
                 let loader_adapters = Arc::clone(&loaded_adapters);
                 let loader_offload = Arc::clone(&loaded_offload);
                 let loader_shape = Arc::clone(&loaded_shape);
+                let loader_quant = Arc::clone(&loaded_quant);
                 let loader = move |_engine: &str, spec: &LoadSpec| {
                     #[cfg(target_os = "macos")]
                     let contract = crate::inference_runtime::media()
@@ -952,6 +957,7 @@ mod tests {
                     *loader_loads.lock().unwrap() += 1;
                     *loader_offload.lock().unwrap() = Some(spec.offload_policy);
                     *loader_shape.lock().unwrap() = Some(spec.load_shape);
+                    *loader_quant.lock().unwrap() = Some(spec.quantize);
                     *loader_adapters.lock().unwrap() = spec.adapters.clone();
                     Ok(Box::new(IrisArmProbe {
                         descriptor,
@@ -970,7 +976,7 @@ mod tests {
                 // Candle `generate_candle_stream_using` off-Mac (sc-25680) — so progress, cancel,
                 // failure and knob shaping are pinned per backend by one set of assertions.
                 #[cfg(target_os = "macos")]
-                let arm = super::super::generate_stream_using(
+                let arm = crate::image_jobs::mlx::generate_stream_using(
                     &api,
                     &settings,
                     &job,
@@ -981,7 +987,7 @@ mod tests {
                     loader,
                 );
                 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-                let arm = super::super::generate_candle_stream_using(
+                let arm = super::super::candle::generate_candle_stream_using(
                     &api,
                     &settings,
                     &job,
@@ -990,6 +996,7 @@ mod tests {
                     "cuda",
                     &mut asset_writes,
                     loader,
+                    Arc::new(super::super::moss::NativeMossStreamRuntime),
                 );
                 let outcome = tokio::time::timeout(Duration::from_secs(60), arm)
                     .await
@@ -1024,6 +1031,7 @@ mod tests {
         let loaded_adapters = loaded_adapters.lock().unwrap().clone();
         let loaded_offload = *loaded_offload.lock().unwrap();
         let loaded_shape = *loaded_shape.lock().unwrap();
+        let loaded_quant = *loaded_quant.lock().unwrap();
         let memory_contexts = memory_contexts.lock().unwrap().clone();
         let stopped_on_cancel = *stopped_on_cancel.lock().unwrap();
         let load_calls = *loads.lock().unwrap();
@@ -1037,10 +1045,40 @@ mod tests {
             loaded_adapters,
             loaded_offload,
             loaded_shape,
+            loaded_quant,
             stopped_on_cancel,
             memory_contexts,
             project_files: files_under(project.path()),
             switch,
+        }
+    }
+
+    /// sc-26266: both native arms route a tier pick to the quantized load — `advanced.mlxQuantize` 4 /
+    /// 8 reach the engine as `LoadSpec::quantize` Q4 / Q8, and no pick (or an explicit 0) loads
+    /// bf16 through the catalog's `mlx.quantize: 0` — and the job completes at that tier.
+    ///
+    /// *Mutations that red this:* dropping `mlx.quantize: 0` (a no-pick request loads the
+    /// resolver's q8 default); an engine that advertises no quant (every pick loads bf16).
+    #[test]
+    fn a_tier_pick_reaches_the_quantized_load() {
+        for (advanced, want) in [
+            (json!({}), None),
+            (json!({ "mlxQuantize": 0 }), None),
+            (json!({ "mlxQuantize": 8 }), Some(gen_core::Quant::Q8)),
+            (json!({ "mlxQuantize": 4 }), Some(gen_core::Quant::Q4)),
+            (json!({ "mlxQuantize": "0" }), None),
+            (json!({ "mlxQuantize": "8" }), Some(gen_core::Quant::Q8)),
+            (json!({ "mlxQuantize": "4" }), Some(gen_core::Quant::Q4)),
+        ] {
+            let run = run_iris_arm(
+                ArmBehavior::Completes,
+                false,
+                json!({ "advanced": advanced.clone() }),
+            );
+            assert!(run.outcome.is_ok(), "{advanced}: {:?}", run.outcome);
+            assert_eq!(run.load_calls, 1, "{advanced}");
+            assert_eq!(run.loaded_quant, Some(want), "{advanced}");
+            assert_eq!(run.generate_calls, 1, "{advanced}");
         }
     }
 
@@ -1130,8 +1168,8 @@ mod tests {
             width: 64,
             height: 64,
             seed,
-            steps: Some(gen_core::iris::DEFAULT_STEPS),
-            guidance: Some(gen_core::iris::DEFAULT_CFG_SCALE),
+            steps: Some(gen_core_iris::DEFAULT_STEPS),
+            guidance: Some(gen_core_iris::DEFAULT_CFG_SCALE),
             sampler: None,
             scheduler: None,
             scheduler_shift: None,
@@ -1666,7 +1704,7 @@ mod tests {
         );
         assert_eq!(
             switch.generator_after_generation,
-            Some(vec![gen_core::iris::TEXT_ENCODER_COMPONENT.to_owned()]),
+            Some(vec![gen_core_iris::TEXT_ENCODER_COMPONENT.to_owned()]),
             "the generator is resident with its text encoder: {switch:?}"
         );
         assert_eq!(
@@ -1684,7 +1722,7 @@ mod tests {
     /// *Mutation that reds this:* move/drop the `evict_resident_transform()` before the probe.
     #[test]
     fn the_candle_arm_evicts_a_resident_transform_before_probing_vram() {
-        let base = include_str!("base.rs");
+        let base = include_str!("candle.rs");
         let body = &base[base
             .find("async fn generate_candle_stream_using(")
             .expect("candle arm")..];
@@ -1692,7 +1730,7 @@ mod tests {
             .find("crate::transform_cache::evict_resident_transform().await?")
             .expect("the candle arm evicts a resident transform");
         let probe = body
-            .find("crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await")
+            .find("crate::vram_gate::live_capped_budget(&settings.gpu_id).await")
             .expect("the candle arm probes VRAM");
         assert!(evict < probe, "evict before the probe");
     }
@@ -1708,7 +1746,7 @@ mod tests {
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     #[test]
     fn the_candle_gate_has_a_resident_and_a_staged_prediction_for_every_iris_tier_key() {
-        let iris = shipped_iris_entry();
+        let iris = crate::test_env::shipped_catalog_entry("iris_3b");
         for advanced in [
             json!({}),
             json!({ "mlxQuantize": 0 }),
@@ -1825,7 +1863,7 @@ mod tests {
         let eager = gen_core::LoadShape::EagerMaterialization;
         let ids = [
             "iris_3b",
-            gen_core::iris::DEPTH_MODEL_ID,
+            gen_core_iris::DEPTH_MODEL_ID,
             crate::iris_restore::IRIS_RESTORE_MODEL_ID,
         ];
         for witness in deferred_route_witnesses() {
@@ -1887,27 +1925,22 @@ mod tests {
         }
     }
 
-    /// The Iris engines' `validate` refuses a request memory block that tiles a decode or streams
-    /// transformer blocks (neither exists on any Iris route), and bounded attention with no chunk
-    /// size (MLX refuses bounded attention outright). The worker builds that block in exactly one
-    /// place — `MemoryProviderContract::generation_memory` over the selected rung — so for every
-    /// rung of every Iris route, on the contract THIS lane's engine publishes, the block the worker
-    /// would send is one the engine honours. Also pins what the ladder is expected to reach:
-    /// staged residency on both lanes, bounded attention (with its one published chunk size) on
-    /// Candle alone.
+    /// Both Iris generation engines implement resident, staged and bounded-attention rungs. The
+    /// shared contract must emit the selected, declared chunk budget only for bounded attention;
+    /// neither a missing budget nor an undeclared one is a valid selection. Encoder-free tasks
+    /// retain resident attention. Decode tiling and transformer streaming remain unavailable.
     ///
-    /// *Mutation that reds this:* none in the worker — it holds the engine's declaration. It reds
-    /// if a pin bump makes an Iris contract engage a rung the engine's `validate` refuses.
+    /// *Mutations that red this:* dropping or changing the emitted chunk budget, or withdrawing
+    /// the generation descriptor's bounded-attention rung. No GPU or weights are needed.
     #[test]
     fn no_selectable_iris_rung_emits_a_request_memory_block_the_engine_refuses() {
         use gen_core::MemoryStrategy;
         let registry = crate::inference_runtime::media();
         let spec = LoadSpec::new(WeightsSource::Dir("iris-weights-free".into()));
-        let candle = cfg!(not(target_os = "macos"));
         let mut generation_rungs = Vec::new();
         for id in [
             "iris_3b",
-            gen_core::iris::DEPTH_MODEL_ID,
+            gen_core_iris::DEPTH_MODEL_ID,
             crate::iris_restore::IRIS_RESTORE_MODEL_ID,
         ] {
             let fixture = registry
@@ -1953,22 +1986,49 @@ mod tests {
                 );
                 assert_eq!(memory.decode_tile_edge, None, "{id} {strategy:?}");
                 assert_eq!(memory.transformer_window_size, None, "{id} {strategy:?}");
-                if candle {
+                assert_eq!(
+                    memory.chunk_attention,
+                    strategy == MemoryStrategy::BoundedAttention,
+                    "{id} {strategy:?}: only the bounded-attention rung chunks attention"
+                );
+                if strategy == MemoryStrategy::BoundedAttention {
+                    assert_eq!(id, "iris_3b", "encoder-free tasks keep resident attention");
+                    let budget = memory
+                        .attention_chunk_size
+                        .expect("a bounded-attention request must name its budget");
+                    assert!(budget > 0, "{id}: the attention budget is nonzero");
+                    assert_eq!(Some(budget), selection.parameters.attention_chunk_size);
                     assert_eq!(
-                        memory.chunk_attention,
-                        memory.attention_chunk_size.is_some(),
-                        "{id} {strategy:?}: a chunked request names its budget"
+                        contract
+                            .capability(MemoryStrategy::BoundedAttention)
+                            .unwrap()
+                            .parameters
+                            .attention_chunk_sizes,
+                        [budget],
+                        "{id}: the request carries the engine's one declared budget"
                     );
+                    for invalid_budget in [None, Some(budget / 2)] {
+                        let mut invalid = selection;
+                        invalid.parameters.attention_chunk_size = invalid_budget;
+                        assert!(
+                            contract.validate_selection(&invalid).is_err(),
+                            "{id}: a missing or undeclared budget {invalid_budget:?} must be refused"
+                        );
+                    }
                 } else {
-                    assert!(!memory.chunk_attention, "{id} {strategy:?}: {memory:?}");
+                    assert_eq!(memory.attention_chunk_size, None, "{id} {strategy:?}");
                 }
             }
         }
-        let mut expected = vec![MemoryStrategy::Resident, MemoryStrategy::StagedResidency];
-        if candle {
-            expected.push(MemoryStrategy::BoundedAttention);
-        }
-        assert_eq!(generation_rungs, expected, "the generation ladder's rungs");
+        assert_eq!(
+            generation_rungs,
+            [
+                MemoryStrategy::Resident,
+                MemoryStrategy::StagedResidency,
+                MemoryStrategy::BoundedAttention,
+            ],
+            "both native generation ladders retain all three implemented rungs"
+        );
     }
 
     /// A budget on which a 2 × 2 native batch runs under an OPTIMIZED rung on the Candle lane: the

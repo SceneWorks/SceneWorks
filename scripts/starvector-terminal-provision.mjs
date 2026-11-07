@@ -1,8 +1,9 @@
 #!/usr/bin/env node
+import { sha256 as sha } from "./lib/file-sha256.mjs";
 // Source-owned, idempotent host provisioning for the terminal campaign. It
 // acquires immutable inputs and assembles manifests; it never starts a product
 // service, invokes a model, writes an install receipt, or claims a campaign.
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
 import { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
@@ -19,7 +20,7 @@ import { sortTerminalTreeEntries, terminalTreeEntry, terminalTreeSha256 } from "
 const execFile = promisify(execFileCallback);
 const SHA256 = /^[a-f0-9]{64}$/;
 const REVISION = /^[a-f0-9]{40}$/;
-const sha = (value) => createHash("sha256").update(value).digest("hex");
+
 const die = (message) => { throw new Error(`starvector terminal provision: ${message}`); };
 const json = async (file) => JSON.parse(await readFile(file, "utf8"));
 
@@ -171,6 +172,16 @@ export async function prepareCorpusInputs({ inferenceRoot, assetsRoot, permanent
   return "materialize";
 }
 
+// Long FILE paths require an invocation-only Git for Windows opt-in. DIRECTORY/chdir paths
+// have a separate platform limit, admitted below before any filesystem mutation or Git command.
+const checkoutGitOptions = process.platform === "win32" ? ["-c", "core.longpaths=true"] : [];
+function checkoutStagingPath(destination) {
+  const staging = `${destination}.staging-${process.pid}-${randomUUID()}`;
+  if (process.platform === "win32" && (destination.length >= 260 || staging.length >= 260)) {
+    die(`Windows Git checkout directories must be shorter than 260 UTF-16 characters (published=${destination.length}, staging=${staging.length}); choose a shorter checkout root. Long-file support does not remove Git's directory/chdir limit.`);
+  }
+  return staging;
+}
 async function validatePublishedCheckout(destination, revision) {
   const existing = await lstat(destination).catch((error) => error?.code === "ENOENT" ? null : Promise.reject(error));
   if (!existing) return null;
@@ -178,8 +189,8 @@ async function validatePublishedCheckout(destination, revision) {
   let head;
   let dirty;
   try {
-    head = (await execFile("git", ["-C", destination, "rev-parse", "HEAD"])).stdout.trim();
-    dirty = (await execFile("git", ["-C", destination, "status", "--porcelain"])).stdout.trim();
+    head = (await execFile("git", [...checkoutGitOptions, "-C", destination, "rev-parse", "HEAD"])).stdout.trim();
+    dirty = (await execFile("git", [...checkoutGitOptions, "-C", destination, "status", "--porcelain"])).stdout.trim();
   } catch {
     die("published inference checkout is not exact and clean");
   }
@@ -195,13 +206,16 @@ async function validatePublishedCheckout(destination, revision) {
 
 export async function installCheckout(source, destination, revision) {
   if (!REVISION.test(revision) || !path.isAbsolute(source) || !path.isAbsolute(destination)) die("checkout requires absolute roots and an exact SHA");
+  const staging = checkoutStagingPath(destination);
+  return installCheckoutAt(source, destination, revision, staging);
+}
+async function installCheckoutAt(source, destination, revision, staging) {
   const existing = await lstat(destination).catch(() => null);
   if (existing) return validatePublishedCheckout(destination, revision);
   await mkdir(path.dirname(destination), { recursive: true });
-  const staging = `${destination}.staging-${process.pid}-${randomUUID()}`;
   try {
-    await execFile("git", ["clone", "--no-hardlinks", "--no-checkout", source, staging]);
-    await execFile("git", ["-C", staging, "checkout", "--detach", revision]);
+    await execFile("git", [...checkoutGitOptions, "clone", "--no-hardlinks", "--no-checkout", source, staging]);
+    await execFile("git", [...checkoutGitOptions, "-C", staging, "checkout", "--detach", revision]);
     await validatePublishedCheckout(staging, revision);
     try {
       await rename(staging, destination);
@@ -277,7 +291,9 @@ async function withPinnedCheckoutLock(hostRoot, revision, callback, { timeoutMs 
 }
 
 export async function installPinnedCheckout(source, hostRoot, revision) {
+  if (!REVISION.test(revision) || !path.isAbsolute(source) || !path.isAbsolute(hostRoot)) die("checkout requires absolute roots and an exact SHA");
   const roots = await assertTerminalPinPhysicalContainment(hostRoot, revision);
+  const staging = checkoutStagingPath(roots.inferenceRoot);
   await ensureTerminalPhysicalDirectory(roots.hostRoot, roots.pinRoot);
   return withPinnedCheckoutLock(roots.hostRoot, revision, async () => {
     await assertTerminalPhysicalContainment(roots.hostRoot, roots.inferenceRoot);
@@ -291,7 +307,7 @@ export async function installPinnedCheckout(source, hostRoot, revision) {
         await rm(roots.inferenceRoot, { recursive: true, force: true });
       }
     }
-    const published = await installCheckout(source, roots.inferenceRoot, revision);
+    const published = await installCheckoutAt(source, roots.inferenceRoot, revision, staging);
     await assertTerminalPhysicalContainment(roots.hostRoot, roots.inferenceRoot);
     return published;
   });
@@ -540,10 +556,10 @@ export function upstreamPipProgress(line) {
   return null;
 }
 
-export async function runUpstreamPip(python, args, bounds, { emit = console.log, heartbeatMs = 30_000, noProgressMs = 300_000 } = {}) {
-  const start = Date.now();
+export async function runUpstreamPip(python, args, bounds, { emit = console.log, heartbeatMs = 30_000, noProgressMs = 300_000, now = Date.now } = {}) {
+  const start = now();
   let latest = null, transfer = null, lastProgressAt = start, installing = false, stopReason = null;
-  const report = event => emit(JSON.stringify({ kind: "upstream-package-install", elapsed_seconds: Math.floor((Date.now() - start) / 1000), ...event }));
+  const report = event => emit(JSON.stringify({ kind: "upstream-package-install", elapsed_seconds: Math.floor((now() - start) / 1000), ...event }));
   report({ event: "started", timeout_seconds: bounds.timeout / 1000, no_progress_timeout_seconds: noProgressMs / 1000 });
   return new Promise((resolve, reject) => {
     const partial = { stdout: "", stderr: "" };
@@ -556,7 +572,7 @@ export async function runUpstreamPip(python, args, bounds, { emit = console.log,
         outcome.killed = error?.killed === true;
         outcome.signal = ["SIGTERM", "SIGKILL"].includes(error?.signal) ? error.signal : null;
         outcome.exit_code = Number.isInteger(error?.code) ? error.code : null;
-        outcome.failure = stopReason ?? (error.killed && Date.now() - start >= bounds.timeout ? "process_deadline" : error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" ? "output_limit" : "process_exit");
+        outcome.failure = stopReason ?? (error.killed && now() - start >= bounds.timeout ? "process_deadline" : error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" ? "output_limit" : "process_exit");
       }
       report(outcome);
       if (failed) reject(new Error(`upstream package acquisition failed: ${JSON.stringify(outcome)}`));
@@ -571,11 +587,11 @@ export async function runUpstreamPip(python, args, bounds, { emit = console.log,
         // Repeated counts do not prove progress. A completed transfer followed by
         // a new file starts a new bounded observation window.
         if (!transfer || event.bytes > transfer.bytes || (transfer.total_bytes && transfer.bytes === transfer.total_bytes && event.bytes < transfer.bytes)) {
-          lastProgressAt = Date.now();
+          lastProgressAt = now();
           transfer = event;
         }
       } else if (event.event === "download_started" || event.event === "cached_download") {
-        lastProgressAt = Date.now();
+        lastProgressAt = now();
         transfer = null;
       }
       if (event.event !== "download") report(event);
@@ -590,7 +606,7 @@ export async function runUpstreamPip(python, args, bounds, { emit = console.log,
     child.stdout.on("data", consume("stdout"));
     child.stderr.on("data", consume("stderr"));
     const heartbeat = setInterval(() => {
-      const silence = Date.now() - lastProgressAt;
+      const silence = now() - lastProgressAt;
       report({ event: "waiting", phase: installing ? "installing" : "acquiring", seconds_since_progress: Math.floor(silence / 1000), ...(latest ? { last_progress: latest } : {}) });
       if (!installing && silence >= noProgressMs && !stopReason) {
         stopReason = transfer ? "download_stalled" : "no_observable_download_progress";

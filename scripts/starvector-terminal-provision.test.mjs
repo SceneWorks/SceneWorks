@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
+import { existsSync, writeFileSync } from "node:fs";
 import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -901,6 +902,188 @@ test("inference checkout publication binds an exact clean detached revision", as
   await writeFile(path.join(destination, "drift"), "drift"); await assert.rejects(() => installCheckout(source, destination, revision), /not exact and clean/);
 });
 
+test("Windows overlong checkout directories refuse before any write or Git command", { timeout: 30_000 }, async t => {
+  const root = await mkdtemp(path.join(tmpdir(), "starvector-long-checkout-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const source = path.join(root, "source");
+  const hostRoot = path.join(root, `bounded-long-root-${"x".repeat(120)}`, "owned-host");
+  const closure = ["release/starvector-terminal-receipt-v1.schema.json", "release/starvector-terminal-corpus-v1.json", "scripts/release/starvector_terminal_evidence.mjs"];
+  await mkdir(hostRoot, { recursive: true });
+  for (const relative of closure) {
+    await mkdir(path.dirname(path.join(source, relative)), { recursive: true });
+    await writeFile(path.join(source, relative), `DECLARED SYNTHETIC fixture: ${relative}`);
+  }
+  await execFile("git", ["init", source], { timeout: 10_000 });
+  await execFile("git", ["-C", source, "add", "."], { timeout: 10_000 });
+  await execFile("git", ["-C", source, "-c", "user.name=fixture", "-c", "user.email=fixture@example.com", "commit", "-m", "tiny fixture"], { timeout: 10_000 });
+  const revision = (await execFile("git", ["-C", source, "rev-parse", "HEAD"])).stdout.trim();
+  const expected = terminalPinPaths(hostRoot, revision).inferenceRoot;
+  const objectPath = path.join(expected, ".git", "objects", "ab", "c".repeat(38));
+  assert.ok(objectPath.split(path.sep).every(component => component.length < 255));
+  if (process.platform === "win32") {
+    assert.ok(objectPath.length > 300);
+    await mkdir(expected, { recursive: true });
+    await writeFile(path.join(expected, "existing-target"), "preserve target bytes");
+    const foreign = `${expected}.staging-foreign-owner`;
+    await mkdir(foreign);
+    await writeFile(path.join(foreign, "owner"), "preserve foreign bytes");
+    const ordinaryStageHost = path.join(root, "stage-only-host");
+    const stagePadding = 235 - terminalPinPaths(ordinaryStageHost, revision).inferenceRoot.length - 1;
+    assert.ok(stagePadding > 0 && stagePadding < 255);
+    const stageOnlyHost = path.join(root, "s".repeat(stagePadding), "stage-only-host");
+    const stageOnlyDestination = terminalPinPaths(stageOnlyHost, revision).inferenceRoot;
+    assert.equal(stageOnlyDestination.length, 235);
+    await mkdir(stageOnlyDestination, { recursive: true });
+    await writeFile(path.join(stageOnlyDestination, "existing-target"), "preserve stage-only target bytes");
+    const before = await tree(root);
+    const beforeDirectories = await readdir(path.dirname(expected));
+    const child = `
+      import assert from "node:assert/strict";
+      import cp from "node:child_process";
+      import fs from "node:fs/promises";
+      import { syncBuiltinESMExports } from "node:module";
+      const [moduleUrl, source, hostRoot, destination, revision, stageOnlyHost, stageOnlyDestination] = process.argv.slice(1);
+      const operations = [];
+      cp.execFile = () => { operations.push("git"); throw new Error("Git must not run before directory admission"); };
+      for (const name of ["mkdir", "writeFile", "rename", "rm", "rmdir", "copyFile"]) {
+        fs[name] = async () => { operations.push(name); throw new Error("No filesystem mutation before directory admission"); };
+      }
+      syncBuiltinESMExports();
+      const { installCheckout, installPinnedCheckout } = await import(moduleUrl);
+      const refusal = /Windows Git checkout directories.*260 UTF-16.*choose a shorter checkout root/;
+      await assert.rejects(() => installPinnedCheckout(source, hostRoot, revision), refusal);
+      await assert.rejects(() => installCheckout(source, destination, revision), refusal);
+      for (const call of [
+        () => installPinnedCheckout(source, stageOnlyHost, revision),
+        () => installCheckout(source, stageOnlyDestination, revision),
+      ]) {
+        await assert.rejects(call, error => {
+          assert.match(error.message, refusal);
+          const lengths = error.message.split("published=")[1].split(", staging=");
+          assert.ok(Number(lengths[0]) < 260 && Number(lengths[1].split(")")[0]) >= 260);
+          return true;
+        });
+      }
+      assert.deepEqual(operations, []);
+    `;
+    await execFile(process.execPath, ["--input-type=module", "-e", child,
+      new URL("./starvector-terminal-provision.mjs", import.meta.url).href,
+      source, hostRoot, expected, revision, stageOnlyHost, stageOnlyDestination], { timeout: 10_000 });
+    assert.deepEqual(await tree(root), before);
+    assert.deepEqual(await readdir(path.dirname(expected)), beforeDirectories);
+    await assert.rejects(lstat(path.join(hostRoot, ".locks")), { code: "ENOENT" });
+    t.diagnostic(`Unchanged ${objectPath.length}-character fixture refused early with no Git/mkdir/lock/staging/publication or changed bytes`);
+  } else {
+    // Short /tmp prefixes need not reproduce a Windows path length. The real positive
+    // publication still runs, without a Windows limit, flag, namespace or skipped contract.
+    assert.equal(await installPinnedCheckout(source, hostRoot, revision), revision);
+    assert.equal(await installPinnedCheckout(source, hostRoot, revision), revision);
+    assert.equal((await execFile("git", ["-C", expected, "rev-parse", "HEAD"])).stdout.trim(), revision);
+    assert.equal((await execFile("git", ["-C", expected, "status", "--porcelain"])).stdout, "");
+    for (const relative of closure) assert.equal(await readFile(path.join(expected, relative), "utf8"), `DECLARED SYNTHETIC fixture: ${relative}`);
+  }
+});
+
+test("owned deep FILE paths exceed 300 characters under admitted short Git directories", { timeout: 30_000 }, async t => {
+  const root = await mkdtemp(path.join(tmpdir(), "starvector-files-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const source = path.join(root, "source");
+  const ordinaryHost = path.join(root, "host");
+  const padding = 180 - terminalPinPaths(ordinaryHost, "a".repeat(40)).inferenceRoot.length - 1;
+  assert.ok(padding > 0 && padding < 255);
+  const hostRoot = path.join(root, "p".repeat(padding), "host");
+  const closure = ["release/starvector-terminal-receipt-v1.schema.json", "release/starvector-terminal-corpus-v1.json", "scripts/release/starvector_terminal_evidence.mjs"];
+  const deepFile = `payload/${"x".repeat(180)}.txt`;
+  const prefix = process.platform === "win32" ? ["-c", "core.longpaths=true"] : [];
+  for (const relative of [...closure, deepFile]) {
+    await mkdir(path.dirname(path.join(source, relative)), { recursive: true });
+    await writeFile(path.join(source, relative), `DECLARED SYNTHETIC fixture: ${relative}`);
+  }
+  await mkdir(hostRoot, { recursive: true });
+  await execFile("git", ["init", source], { timeout: 10_000 });
+  await execFile("git", [...prefix, "-C", source, "add", "."], { timeout: 10_000 });
+  await execFile("git", [...prefix, "-C", source, "-c", "user.name=fixture", "-c", "user.email=fixture@example.com", "commit", "-m", "tiny long-file fixture"], { timeout: 10_000 });
+  const revision = (await execFile("git", [...prefix, "-C", source, "rev-parse", "HEAD"])).stdout.trim();
+  const expected = terminalPinPaths(hostRoot, revision).inferenceRoot;
+  const child = `
+    import assert from "node:assert/strict";
+    import cp from "node:child_process";
+    import { promisify } from "node:util";
+    import { syncBuiltinESMExports } from "node:module";
+    const [moduleUrl, source, hostRoot, destination, revision] = process.argv.slice(1);
+    const original = cp.execFile, execute = promisify(original), calls = [];
+    const wrapped = (...args) => original(...args);
+    wrapped[promisify.custom] = (...args) => {
+      assert.equal(args[0], "git"); calls.push([...args[1]]);
+      return execute(...args);
+    };
+    cp.execFile = wrapped; syncBuiltinESMExports();
+    const { installCheckout, installPinnedCheckout } = await import(moduleUrl);
+    assert.equal(await installPinnedCheckout(source, hostRoot, revision), revision);
+    assert.equal(await installPinnedCheckout(source, hostRoot, revision), revision);
+    await assert.rejects(() => installCheckout(source, destination, "0".repeat(40)), /not exact and clean/);
+    const clones = calls.filter(args => args.includes("clone"));
+    assert.equal(clones.length, 1);
+    console.log(JSON.stringify({ calls, staging: clones[0].at(-1) }));
+  `;
+  const observed = JSON.parse((await execFile(process.execPath, ["--input-type=module", "-e", child,
+    new URL("./starvector-terminal-provision.mjs", import.meta.url).href,
+    source, hostRoot, expected, revision], { timeout: 15_000 })).stdout);
+  const staging = observed.staging;
+  assert.equal(path.dirname(staging), path.dirname(expected));
+  assert.ok(staging.startsWith(`${expected}.staging-`));
+  assert.ok(expected.length < 260 && staging.length < 260);
+  const objectPath = path.join(staging, ".git", "objects", "ab", "c".repeat(38));
+  assert.ok(objectPath.length > 260);
+  assert.ok(path.join(expected, deepFile).length > 300);
+  assert.ok([...objectPath.split(path.sep), ...path.join(expected, deepFile).split(path.sep)].every(component => component.length < 255));
+  await t.test("actual four-role Git argv contracts reject every removed or inverted Windows flag", () => {
+    const contract = calls => {
+      const roles = new Set();
+      for (const args of calls) {
+        if (JSON.stringify(args.slice(0, prefix.length)) !== JSON.stringify(prefix)) return false;
+        const command = args.slice(prefix.length);
+        if (JSON.stringify(command) === JSON.stringify(["clone", "--no-hardlinks", "--no-checkout", source, staging])) roles.add("clone");
+        else if (JSON.stringify(command) === JSON.stringify(["-C", staging, "checkout", "--detach", revision])) roles.add("checkout");
+        else if ([staging, expected].some(directory => JSON.stringify(command) === JSON.stringify(["-C", directory, "rev-parse", "HEAD"]))) roles.add("rev-parse");
+        else if ([staging, expected].some(directory => JSON.stringify(command) === JSON.stringify(["-C", directory, "status", "--porcelain"]))) roles.add("status");
+        else return false;
+      }
+      return roles.size === 4;
+    };
+    assert.ok(contract(observed.calls));
+    for (const role of ["clone", "checkout", "rev-parse", "status"]) {
+      const index = observed.calls.findIndex(args => args.includes(role));
+      assert.ok(index >= 0);
+      const removed = structuredClone(observed.calls);
+      removed[index] = process.platform === "win32" ? removed[index].slice(2) : ["-c", "core.longpaths=true", ...removed[index]];
+      assert.equal(contract(removed), false, `${role} must retain its platform-exact argv`);
+      if (process.platform === "win32") {
+        const inverted = structuredClone(observed.calls); inverted[index][1] = "core.longpaths=false";
+        assert.equal(contract(inverted), false, `${role} must retain the Windows file-path flag`);
+      }
+    }
+    assert.ok(contract(observed.calls));
+  });
+  if (process.platform === "win32") {
+    // Reuse the ACTUAL now-removed owned staging path, not a guessed directory geometry.
+    try {
+      await execFile("git", ["-c", "core.longpaths=false", "clone", "--no-hardlinks", "--no-checkout", source, staging], { timeout: 10_000 });
+      t.diagnostic("This Git/OS supports the long-file clone without opt-in; capability observation, not a killed mutation");
+    } catch (error) {
+      assert.match(error.stderr, /Filename too long/i);
+      t.diagnostic("Windows longpaths=false genuinely refused clone object FILES with both Git DIRECTORY paths below 260");
+    }
+    await rm(staging, { recursive: true, force: true });
+  }
+  assert.equal((await execFile("git", [...prefix, "-C", expected, "rev-parse", "HEAD"])).stdout.trim(), revision);
+  assert.equal((await execFile("git", [...prefix, "-C", expected, "status", "--porcelain"])).stdout, "");
+  for (const relative of [...closure, deepFile]) assert.equal(await readFile(path.join(expected, relative), "utf8"), `DECLARED SYNTHETIC fixture: ${relative}`);
+  await assert.rejects(execFile("git", [...prefix, "-C", expected, "config", "--local", "--get", "core.longpaths"]), error => error.code === 1);
+  assert.deepEqual((await readdir(path.dirname(expected))).filter(name => name.includes(".staging-") && name !== path.basename(expected)), []);
+  t.diagnostic(`Actual published/staging DIRECTORY lengths ${expected.length}/${staging.length}, clone object FILE ${objectPath.length}, tracked FILE ${path.join(expected, deepFile).length}`);
+});
+
 test("pinned inference checkout publication is same-pin idempotent and derives the immutable destination", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "starvector-provision-pinned-checkout-")), source = path.join(root, "source"), hostRoot = path.join(root, "host");
   await mkdir(hostRoot);
@@ -1191,6 +1374,29 @@ test("upstream pip watchdog closes its owned child on repeated or decreasing tra
       assert.throws(() => process.kill(pid, 0), /ESRCH/);
       assert.doesNotMatch(JSON.stringify(events), /FIXTURE_PRIVATE/);
     }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("upstream pip spawn watchdog remains active before any recognized download", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "starvector-pip-startup-stall-"));
+  const pidPath = path.join(root, "child.pid"), events = [];
+  let clock = 0;
+  const script = `require('node:fs').writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+    console.log('Unrecognized startup FIXTURE_PRIVATE'); setInterval(() => {}, 20);`;
+  try {
+    await assert.rejects(() => runUpstreamPip(process.execPath, ["-e", script], { timeout: 5000, maxBuffer: 4096 }, {
+      now: () => clock,
+      emit: line => {
+        const event = JSON.parse(line); events.push(event);
+        // The filesystem handshake is not pip progress: advancing this invocation's clock past
+        // its spawn deadline must still stop the child WITHOUT a recognized download event.
+        if (event.event === "waiting" && existsSync(pidPath)) clock = 101;
+      },
+      heartbeatMs: 10, noProgressMs: 100,
+    }), /no_observable_download_progress/);
+    const pid = Number(await readFile(pidPath, "utf8"));
+    assert.throws(() => process.kill(pid, 0), /ESRCH/);
+    assert.doesNotMatch(JSON.stringify(events), /FIXTURE_PRIVATE/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

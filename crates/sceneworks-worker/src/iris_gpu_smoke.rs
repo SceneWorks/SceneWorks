@@ -24,9 +24,6 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use axum::extract::{Path as AxumPath, State};
-use axum::routing::{get, post};
-use axum::{Json, Router};
 use serde_json::{json, Value};
 
 use super::*;
@@ -97,98 +94,28 @@ fn write_stamped_smoke_lora(path: &std::path::Path) {
 type ProgressPosts = Arc<Mutex<Vec<(String, Value)>>>;
 
 fn stub_job_snapshot(job_id: &str) -> Value {
-    json!({
-        "id": job_id,
-        "type": "image_generate",
-        "status": "running",
-        "projectId": null,
-        "projectName": null,
-        "payload": {},
-        "result": {},
-        "requestedGpu": "auto",
-        "assignedGpu": "0",
-        "workerId": "iris-smoke-worker",
-        "progress": 0.1,
-        "stage": "running",
-        "message": "running",
-        "error": null,
-        "etaSeconds": null,
-        "elapsedSeconds": null,
-        "attempts": 1,
-        "sourceJobId": null,
-        "duplicateOfJobId": null,
-        "cancelRequested": false,
-        "createdAt": "2026-10-10T00:00:00Z",
-        "updatedAt": "2026-10-10T00:00:00Z",
-        "startedAt": "2026-10-10T00:00:00Z",
-        "completedAt": null,
-        "canceledAt": null,
-        "lastHeartbeatAt": "2026-10-10T00:00:00Z"
-    })
-}
-
-async fn stub_job(AxumPath(job_id): AxumPath<String>) -> Json<Value> {
-    Json(stub_job_snapshot(&job_id))
-}
-
-async fn stub_progress(
-    State(posts): State<ProgressPosts>,
-    AxumPath(job_id): AxumPath<String>,
-    Json(payload): Json<Value>,
-) -> Json<Value> {
-    posts
-        .lock()
-        .expect("progress posts lock")
-        .push((job_id.clone(), payload));
-    Json(stub_job_snapshot(&job_id))
-}
-
-async fn stub_heartbeat(AxumPath(worker_id): AxumPath<String>) -> Json<Value> {
-    Json(json!({
-        "id": worker_id, "gpuId": "0", "gpuName": null, "status": "busy",
-        "currentJobId": JOB_ID, "capabilities": [], "loadedModels": [],
-        "registeredAt": "2026-10-10T00:00:00Z", "lastSeenAt": "2026-10-10T00:00:00Z"
-    }))
-}
-
-async fn stub_metrics(Json(payload): Json<Value>) -> Json<Value> {
-    Json(payload)
+    crate::test_api_stub::smoke_job(
+        job_id,
+        "image_generate",
+        None,
+        None,
+        "iris-smoke-worker",
+        "2026-10-10T00:00:00Z",
+    )
 }
 
 async fn spawn_worker_api_stub() -> (String, ProgressPosts) {
-    let posts: ProgressPosts = Arc::default();
-    let app = Router::new()
-        .route("/api/v1/jobs/:job_id", get(stub_job))
-        .route("/api/v1/jobs/:job_id/progress", post(stub_progress))
-        .route("/api/v1/jobs/:job_id/metrics", post(stub_metrics))
-        .route("/api/v1/workers/:worker_id/heartbeat", post(stub_heartbeat))
-        .with_state(posts.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("worker API stub listener binds");
-    let address = listener.local_addr().expect("worker API stub has address");
-    tokio::spawn(async move {
-        axum::serve(listener, app)
-            .await
-            .expect("worker API stub serves");
-    });
-    (format!("http://{address}"), posts)
+    crate::test_api_stub::smoke_api(
+        stub_job_snapshot(""),
+        crate::test_api_stub::smoke_worker("", JOB_ID, "2026-10-10T00:00:00Z"),
+        None,
+    )
+    .await
 }
 
 /// The shipped `iris_3b` catalog entry (the real `coRequisite` declaration, not a test copy).
 fn shipped_iris_entry() -> Value {
-    let text = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-        .iter()
-        .find(|(name, _)| *name == "builtin.models.jsonc")
-        .expect("builtin.models.jsonc embedded")
-        .1;
-    let manifest: Value =
-        serde_json::from_str(&strip_jsonc_comments(text)).expect("parse builtin.models.jsonc");
-    manifest["models"]
-        .as_array()
-        .and_then(|models| models.iter().find(|model| model["id"] == "iris_3b"))
-        .cloned()
-        .expect("iris_3b is in the builtin catalog")
+    Value::Object(crate::test_env::shipped_catalog_entry("iris_3b"))
 }
 
 #[cfg(not(target_os = "macos"))]

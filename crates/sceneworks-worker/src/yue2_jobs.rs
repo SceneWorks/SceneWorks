@@ -351,7 +351,7 @@ async fn execute<B: crate::yue2_transcription::TranscriptionBackend>(
             JobStatus::Running,
             ProgressStage::Generating,
             0.05,
-            "Loading YuE2.",
+            crate::load_progress::PREPARING_MODEL,
             None,
             &backend,
         ),
@@ -544,11 +544,7 @@ fn primary_rows(entry: &Value) -> Vec<&Value> {
 }
 
 fn text<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
+    crate::payload::trimmed_string(value.get(key))
 }
 
 fn tier_of(name: &str) -> Option<Tier> {
@@ -739,7 +735,7 @@ pub(crate) struct Inputs {
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    sceneworks_core::hashing::sha256_bytes(bytes)
 }
 
 /// Verify a source run against the identity its producing job recorded, before anything reads it.
@@ -1045,6 +1041,9 @@ impl Yue2Progress {
     /// The job fraction and message after `progress`.
     pub(crate) fn observe(&mut self, progress: Progress) -> (f64, String) {
         let message = match progress {
+            Progress::PromptEncodingComplete => {
+                return (self.fraction, "Preparing generation.".to_owned())
+            }
             Progress::PromptUpsamplingComplete => {
                 return (self.fraction, "Generating audio.".to_owned())
             }
@@ -1052,10 +1051,11 @@ impl Yue2Progress {
             Progress::ConditioningComplete | Progress::Upsampling { .. } => {
                 return (self.fraction, "Generating audio.".to_owned())
             }
-            Progress::Loading(_) => {
+            Progress::Loading(phase) => {
                 self.fraction = self.fraction.max(0.08);
-                "Loading YuE2 weights.".to_owned()
+                crate::load_progress::generator_phase(phase).to_owned()
             }
+            Progress::PostProcessing => return (self.fraction, "Finishing output.".to_owned()),
             Progress::Decoding => {
                 self.fraction = self.fraction.max(0.86);
                 "Decoding audio.".to_owned()
@@ -1139,7 +1139,7 @@ async fn generate(
     let mut tracker = Yue2Progress::new(spec);
     let handle = {
         let cancel = cancel.clone();
-        tokio::task::spawn_blocking(move || -> WorkerResult<GenerationReport> {
+        crate::load_progress::spawn_blocking(move || -> WorkerResult<GenerationReport> {
             let _residency = crate::yue2_transcription::residency_lock()
                 .read()
                 .unwrap_or_else(|poison| poison.into_inner());
@@ -1160,6 +1160,7 @@ async fn generate(
                 return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
             }
             let mut on_progress = |progress: Progress| {
+                crate::load_progress::generator_progress(&progress);
                 lease.observe(&progress);
                 let update = tracker.observe(progress);
                 // The pump may be gone; generation never depends on its progress sink.
@@ -1176,7 +1177,7 @@ async fn generate(
         let job_id = job.id.clone();
         let backend = backend_label(&settings.gpu_id).to_owned();
         let cancel = cancel.clone();
-        tokio::spawn(async move {
+        crate::load_progress::spawn(async move {
             let mut posts = 0usize;
             let mut last_post: Option<Instant> = None;
             while rx.changed().await.is_ok() {
@@ -1279,12 +1280,7 @@ impl RunClaim {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&path)?;
+        let file = sceneworks_core::file_lock::open_regular_lock_file(&path)?;
         let lock = sceneworks_core::file_lock::FileLock::try_exclusive(file).map_err(|error| {
             WorkerError::InvalidPayload(format!(
                 "yue2: the run {} is claimed by another active job ({error}); it cannot run or \
@@ -1520,9 +1516,7 @@ pub(crate) fn wav_licence_info(usage_policy: &Value) -> Vec<([u8; 4], String)> {
     // a guess parsed out of the notice prose.
     let license = usage_policy
         .pointer("/license/license")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
         .unwrap_or("see the model licence");
     let mut copyright = format!("Generated with YuE2 (weights: {license})");
     if flag("nonCommercial") {
@@ -1583,7 +1577,7 @@ async fn publish_audio(
     {
         let media_path = media_path.clone();
         let info = wav_licence_info(usage_policy);
-        tokio::task::spawn_blocking(move || {
+        crate::load_progress::spawn_blocking(move || {
             let tags: Vec<([u8; 4], &str)> =
                 info.iter().map(|(id, text)| (*id, text.as_str())).collect();
             write_wav_pcm16_with_info(&wav, &media_path, &tags)

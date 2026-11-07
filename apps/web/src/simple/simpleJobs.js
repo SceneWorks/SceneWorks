@@ -1,4 +1,5 @@
 import { buildImageJobRequest } from "../imageJobRequest.js";
+import { isMossEdit } from "../mossImage.js";
 import { composeStyledPrompt } from "../styleComposer.js";
 import { serializeLora } from "../presetUtils.js";
 import { styleTextForId } from "../data/styleCatalog.js";
@@ -23,21 +24,6 @@ import { readDefaultGenerationQuality } from "../generationQuality.js";
 // studios post — kept deliberately small and free of the mode-specific branches Simple
 // never reaches.
 
-// Mirrors the advanced studios' candle-only tier gates: a tier is only offered when a
-// live worker advertises the capability, so an MLX/pre-Ada host never resolves one.
-//
-// Lives here rather than in a studio because BOTH the tier resolver below and the Model
-// Manager's memory floor (sc-15400) need it — the floor must not size a host against a
-// tier that host will never be offered.
-export function workerAdvertises(workers, capability) {
-  return (workers ?? []).some(
-    (worker) =>
-      worker?.status !== "offline" &&
-      Array.isArray(worker?.capabilities) &&
-      worker.capabilities.includes(capability),
-  );
-}
-
 // Quant tier is the ONE "advanced" knob Simple still has to resolve, because omitting it
 // would silently ignore the app-wide "Default quality" setting the Simple Settings screen
 // writes. This mirrors the advanced studios' seed effect exactly: the per-(screen,model)
@@ -47,10 +33,11 @@ export function resolveSimpleTier(model, screen, options = {}) {
   const {
     convRotEligible = false,
     nvfp4Eligible = false,
+    fp8rEligible = false,
     unifiedMemoryGb = null,
     backend = "mlx",
   } = options;
-  const tierOptions = { convRotEligible, nvfp4Eligible };
+  const tierOptions = { convRotEligible, nvfp4Eligible, fp8rEligible };
   const available = installedTiers(model, tierOptions);
   if (available.length === 0) {
     return { quantTier: "", tierExplicit: false };
@@ -225,6 +212,12 @@ export function buildSimpleImageRequest({
   guidance = "",
   width: widthOverride = null,
   height: heightOverride = null,
+  mossImageEdit = undefined,
+  schedulerShift = null,
+  maxSequenceLength = 4096,
+  trainingShift = 1,
+  mossImageAdvanced,
+  mossPromptBatch,
 }) {
   const size = parseResolutionPair(resolution);
   if (!size) {
@@ -237,6 +230,7 @@ export function buildSimpleImageRequest({
   const height =
     Number.isFinite(heightOverride) && heightOverride > 0 ? heightOverride : size.height;
   const editing = mode === "edit_image";
+  const mossEdit = isMossEdit(model, mode);
   // Only claim img2img on the text path AND on a model that advertises it — the flag is
   // what makes buildImageJobAdvanced emit `advanced.strength`, so claiming it for a model
   // without the capability would send a knob the engine has no use for.
@@ -259,7 +253,7 @@ export function buildSimpleImageRequest({
   return buildImageJobRequest({
     ...IMAGE_DEFAULTS,
     loras,
-    sourceAssetId: editing ? referenceAssetId || null : null,
+    sourceAssetId: editing && !mossEdit ? referenceAssetId || null : null,
     supportsImg2img: img2imgActive,
     img2imgReferenceAssetId: img2imgActive ? referenceAssetId : null,
     img2imgStrength,
@@ -271,6 +265,11 @@ export function buildSimpleImageRequest({
     // sc-24113: the advanced fold's knobs, through the SAME builder the full studio uses
     // (`stepsOverride` / `guidanceOverride` are its names for "" = use the model default).
     referenceAssetIds,
+    mossImageEdit,
+    mossImage: mossEdit ? { max_sequence_length: maxSequenceLength, training_shift: trainingShift } : undefined,
+    mossImageAdvanced: mossEdit ? mossImageAdvanced : undefined,
+    mossPromptBatch: mossEdit ? mossPromptBatch : undefined,
+    schedulerShift,
     stepsOverride: steps,
     guidanceOverride: guidance,
     negativePrompt,
@@ -303,6 +302,7 @@ export function buildSimpleVideoRequest({
   styleId,
   sourceAssetId,
   lastFrameAssetId,
+  selectedModel,
   // Already-serialized picker selections (epic 15404) — `serializeLora(lora, { weight })`,
   // the same entries VideoStudio posts.
   loras = [],
@@ -335,7 +335,7 @@ export function buildSimpleVideoRequest({
     characterId: null,
     characterLookId: null,
     sourceAssetId: mode === "image_to_video" ? sourceAssetId || null : null,
-    lastFrameAssetId: model === "minimax_h3" && mode === "image_to_video" ? lastFrameAssetId || null : null,
+    lastFrameAssetId: selectedModel?.id === model && selectedModel?.supportsLastOnlyImageToVideo === true && mode === "image_to_video" ? lastFrameAssetId || null : null,
     sourceClipAssetId: null,
     sourceClipAssetIds: [],
     bridgeRightClipAssetId: null,

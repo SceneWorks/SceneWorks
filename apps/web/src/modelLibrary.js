@@ -1,4 +1,5 @@
-import { apiFetch } from "./api.js";
+import { modelLibraryApi } from "./api/modelLibraryResources.js";
+
 
 // The unavailable-external-library recovery flow (sc-19709).
 //
@@ -54,13 +55,13 @@ export function modelLibraryContextForModel(model) {
 
 // One write-free identity probe of the configured library. This is what a retry gates on.
 export function fetchModelLibraryStatus(token, options) {
-  return apiFetch("/api/v1/model-library", token, options);
+  return modelLibraryApi.modelLibrary(token, options);
 }
 
 // Check a candidate library root without writing anything, anywhere. Every ordinary refusal — the
 // wrong folder, a library missing installed models — lands here, BEFORE either durable write.
 export function validateModelLibrary(token, path) {
-  return apiFetch("/api/v1/model-library/relocate", token, {
+  return modelLibraryApi.modelLibraryRelocate(token, {
     method: "POST",
     body: JSON.stringify({ path, dryRun: true }),
   });
@@ -69,7 +70,7 @@ export function validateModelLibrary(token, path) {
 // Adopt a different library root: the API re-binds the durable identity. It never downloads and
 // never rewrites install receipts.
 export function relocateModelLibrary(token, path) {
-  return apiFetch("/api/v1/model-library/relocate", token, {
+  return modelLibraryApi.modelLibraryRelocate(token, {
     method: "POST",
     body: JSON.stringify({ path }),
   });
@@ -203,6 +204,7 @@ export function createModelLibraryGate({ probe, validate, adopt, persist } = {})
   // The single pending action. It is REMOVED from this slot before it runs, so no second caller —
   // a double click, a poll, a reconnect event — can ever find it again to run it twice.
   let pending = null;
+  let retryAction = null;
   // Bumped by every attempt and by cancel. An attempt whose epoch is stale when its probe finally
   // answers has been superseded (the user cancelled, or a newer attempt owns the gate) and must
   // neither run the action nor write state — otherwise "Cancel" could still submit the job.
@@ -232,7 +234,10 @@ export function createModelLibraryGate({ probe, validate, adopt, persist } = {})
     // one pending action, and no hidden backlog to fire later.
     block(context, action) {
       if (!context) return false;
-      if (state.status !== "idle") return true;
+      if (state.status !== "idle") {
+        action?.onAbandon?.();
+        return true;
+      }
       pending = typeof action === "function" ? action : null;
       emit({ status: "blocked", context, hint: "", error: "", relocated: null });
       return true;
@@ -244,6 +249,7 @@ export function createModelLibraryGate({ probe, validate, adopt, persist } = {})
     async retry({ auto = false } = {}) {
       if (state.status !== "blocked") return null;
       const action = takePending();
+      retryAction = action;
       const attempt = ++epoch;
       emit({ status: "retrying", hint: "", error: "" });
       let available = false;
@@ -251,6 +257,7 @@ export function createModelLibraryGate({ probe, validate, adopt, persist } = {})
         available = (await probe?.())?.available === true;
       } catch (error) {
         if (attempt !== epoch) return null;
+        retryAction = null;
         pending = action;
         emit({
           status: "blocked",
@@ -260,6 +267,7 @@ export function createModelLibraryGate({ probe, validate, adopt, persist } = {})
       }
       if (attempt !== epoch) return null;
       if (!available) {
+        retryAction = null;
         pending = action;
         emit({
           status: "blocked",
@@ -270,6 +278,7 @@ export function createModelLibraryGate({ probe, validate, adopt, persist } = {})
         });
         return null;
       }
+      retryAction = null;
       emit({ ...IDLE });
       return action ? action() : null;
     },
@@ -280,6 +289,7 @@ export function createModelLibraryGate({ probe, validate, adopt, persist } = {})
     async relocate(path) {
       if (state.status !== "blocked") return null;
       const action = takePending();
+      retryAction = action;
       const attempt = ++epoch;
       emit({ status: "relocating", hint: "", error: "" });
       let target = null;
@@ -289,11 +299,14 @@ export function createModelLibraryGate({ probe, validate, adopt, persist } = {})
         // A refusal (validate) or a failed write (persist/adopt, already undone where possible)
         // leaves the blocked action intact and reports what happened; the user simply picks again.
         if (attempt !== epoch) return null;
+        retryAction = null;
         pending = action;
         emit({ status: "blocked", hint: "", error: error.message });
         return null;
       }
       if (attempt !== epoch) return null;
+      retryAction = null;
+      action?.onAbandon?.();
       emit({ ...IDLE, relocated: target });
       return target;
     },
@@ -301,7 +314,9 @@ export function createModelLibraryGate({ probe, validate, adopt, persist } = {})
     // Abandon the blocked action outright. Nothing is queued, nothing partial is left behind, and
     // an attempt already in flight is superseded so it cannot resume behind the user's back.
     cancel() {
-      takePending();
+      takePending()?.onAbandon?.();
+      retryAction?.onAbandon?.();
+      retryAction = null;
       epoch += 1;
       emit({ ...IDLE });
     },

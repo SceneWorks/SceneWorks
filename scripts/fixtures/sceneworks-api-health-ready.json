@@ -1,0 +1,25 @@
+{
+  "status": "ok",
+  "service": "sceneworks-api",
+  "runtime": "rust",
+  "version": "<version>",
+  "authRequired": false,
+  "directories": {
+    "data": "<data>",
+    "config": "<config>",
+    "projects": "<projects>",
+    "jobsDb": "<jobsDb>"
+  },
+  "interruptedJobsOnStartup": 0,
+  "readiness": {
+    "status": "ready",
+    "criticality": "readiness-critical"
+  },
+  "startupMaintenance": {
+    "phase": "upload_sweeps",
+    "criticality": "background-safe",
+    "status": "<status>",
+    "removedUploads": 0,
+    "failureCount": 0
+  }
+}

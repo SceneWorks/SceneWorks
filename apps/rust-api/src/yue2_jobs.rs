@@ -151,7 +151,7 @@ pub(crate) async fn record_license_acknowledgment(
     .await
 }
 
-async fn current_license_acknowledgment(
+pub(crate) async fn current_license_acknowledgment(
     state: &AppState,
     entry: &Value,
 ) -> Result<Option<LicenseAcknowledgment>, ApiError> {
@@ -163,31 +163,19 @@ async fn current_license_acknowledgment(
 }
 
 async fn catalog_entry(state: &AppState, model_id: &str) -> Result<Value, ApiError> {
-    model_catalog_snapshot(state)
+    crate::models::find_model_by_id(state, model_id)
         .await?
-        .iter()
-        .find(|entry| entry.get("id").and_then(Value::as_str) == Some(model_id))
-        .cloned()
-        .ok_or_else(|| ApiError {
-            status: StatusCode::NOT_FOUND,
-            detail: format!("Model '{model_id}' is not in this catalog."),
-            context: None,
-            code: None,
+        .ok_or_else(|| {
+            crate::models::model_not_found(format!("Model '{model_id}' is not in this catalog."))
         })
-}
-
-fn requires_license_acknowledgment(entry: &Value) -> bool {
-    entry
-        .get("requiresLicenseAcknowledgment")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
 }
 
 fn acknowledgment_view(entry: &Value, ack: Option<&LicenseAcknowledgment>) -> Value {
     json!({
         "modelId": entry.get("id").cloned().unwrap_or(Value::Null),
-        "required": requires_license_acknowledgment(entry),
+        "required": crate::models::model_requires_license_acknowledgment(entry),
         "termsSha256": acks::terms_sha256(entry),
+        "terms": { "license": entry.get("license"), "licenseUrl": entry.get("licenseUrl"), "licenseNotice": entry.get("licenseNotice") },
         "acknowledged": ack.is_some(),
         "acknowledgment": ack,
     })
@@ -199,7 +187,22 @@ pub(crate) async fn get_license_acknowledgment(
     Path(model_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let entry = catalog_entry(&state, &model_id).await?;
-    let ack = current_license_acknowledgment(&state, &entry).await?;
+    let mut ack = current_license_acknowledgment(&state, &entry).await?;
+    if ack.is_some() {
+        if let Some(object) = entry.as_object() {
+            if let Err(error) = crate::models::ensure_inherited_component_licenses_acknowledged(
+                &state, object, false,
+            )
+            .await
+            {
+                if error.code == Some(LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE) {
+                    ack = None;
+                } else {
+                    return Err(error);
+                }
+            }
+        }
+    }
     Ok(Json(acknowledgment_view(&entry, ack.as_ref())))
 }
 
@@ -207,8 +210,24 @@ pub(crate) async fn get_license_acknowledgment(
 pub(crate) async fn put_license_acknowledgment(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let entry = catalog_entry(&state, &model_id).await?;
+    if let Some(expected) = headers.get(axum::http::header::IF_MATCH) {
+        let current = format!("\"{}\"", acks::terms_sha256(&entry));
+        if expected.to_str().ok() != Some(current.as_str()) {
+            return Err(ApiError::typed(StatusCode::PRECONDITION_FAILED,
+                "License terms changed. Refresh the model catalog and review them before accepting.",
+                "license_terms_changed", json!({ "modelId": model_id })));
+        }
+    }
+    // Imported cards show the trusted inherited component terms as part of their
+    // notice. Persist those through the same guard used by import/repair, rather
+    // than relying on a later download to assert a new acceptance implicitly.
+    if let Some(object) = entry.as_object() {
+        crate::models::ensure_inherited_component_licenses_acknowledged(&state, object, true)
+            .await?;
+    }
     let ack = record_license_acknowledgment(&state, &entry, "api").await?;
     Ok(Json(acknowledgment_view(&entry, Some(&ack))))
 }
@@ -309,7 +328,7 @@ pub(crate) async fn yue2_eligibility(
             ));
         }
     }
-    let ack = if requires_license_acknowledgment(&entry) {
+    let ack = if crate::models::model_requires_license_acknowledgment(&entry) {
         if assert_ack {
             record_license_acknowledgment(state, &entry, "yue2_job").await?;
         }
@@ -446,11 +465,8 @@ async fn recording_source(
         )));
     }
     let sha256 = tokio::task::spawn_blocking(move || -> std::io::Result<String> {
-        use sha2::Digest;
-        let mut file = std::fs::File::open(&path)?;
-        let mut hasher = sha2::Sha256::new();
-        std::io::copy(&mut file, &mut hasher)?;
-        Ok(format!("{:x}", hasher.finalize()))
+        sceneworks_core::hashing::sha256_reader_retry(std::fs::File::open(&path)?)
+            .map(|(hash, _)| hash)
     })
     .await
     .map_err(|error| ApiError::internal(error.to_string()))?

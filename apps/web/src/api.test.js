@@ -14,6 +14,20 @@ describe("apiFetch response handling", () => {
     vi.restoreAllMocks();
   });
 
+  it("returns blob bytes and routes blob failures through the 401 gate", async () => {
+    const handler = vi.fn(() => true);
+    setUnauthorizedHandler(handler);
+    global.fetch = vi.fn().mockResolvedValueOnce(new Response("export", { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ detail: "expired", code: "auth" }), { status: 401 }));
+    const blob = await apiFetch("/file", "token", { responseType: "blob" });
+    expect(blob.size).toBe(6);
+    expect(global.fetch.mock.calls[0][1]).not.toHaveProperty("responseType");
+    const error = await apiFetch("/file", "token", { responseType: "blob" }).catch((e) => e);
+    expect(error).toMatchObject({ status: 401, code: "auth", reauthenticating: true });
+    expect(handler).toHaveBeenCalledOnce();
+    setUnauthorizedHandler(null);
+  });
+
   it("stringifies structured API details instead of coercing them to [object Object]", async () => {
     global.fetch = vi.fn(async () =>
       new Response(JSON.stringify({ detail: { field: "prompt", reason: "required" } }), {
@@ -204,4 +218,24 @@ describe("ApiError (sc-15105)", () => {
     // A throwing handler cannot be treated as having claimed the session.
     expect(err.reauthenticating).toBe(false);
   });
+});
+
+it("keeps the long-lived access token in headers and short-lived tickets in URLs (F-269)", async () => {
+  const { eventUrl, setMediaTicket, withMediaTicket } = await import("./api.js");
+  const fetch = vi.spyOn(global, "fetch").mockResolvedValue(new Response("{}", { status: 200 }));
+  try {
+    fetch.mockClear();
+    const password = "long-lived-host-password";
+    await apiFetch("/api/v1/files/ticket", password, { method: "POST", body: "{}" });
+    const [url, options] = fetch.mock.calls[0];
+    expect(url).not.toContain(password);
+    expect(url).not.toContain("token=");
+    expect(options.headers.get("X-SceneWorks-Token")).toBe(password);
+    expect(options.headers.get("Content-Type")).toBe("application/json");
+    expect(options.body).toBe("{}");
+    setMediaTicket("short-lived-media-ticket");
+    expect(withMediaTicket("/api/v1/projects/p/files/movie.mp4")).toBe("/api/v1/projects/p/files/movie.mp4?ticket=short-lived-media-ticket");
+    expect(eventUrl("/api/v1/events", "short-lived-sse-ticket")).not.toContain(password);
+    expect(eventUrl("/api/v1/events", "short-lived-sse-ticket")).toContain("ticket=short-lived-sse-ticket");
+  } finally { setMediaTicket(""); fetch.mockRestore(); }
 });

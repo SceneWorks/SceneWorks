@@ -1,3 +1,5 @@
+import { useMoveToolPanel } from "./useImageEditorPanels.js";
+import { useEditorPanelActions } from "./useEditorPanelActions.js";
 import React, { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -6,7 +8,6 @@ import {
   ImageEditorEditPanel,
   ImageEditorToolPanel,
   setImageEditorToolPanelRenderObserverForTests,
-  useStableImageEditorToolPanelScope,
 } from "./ImageEditorToolPanel.jsx";
 import { EDIT_PROMPT_TEMPLATES } from "../../data/editPromptTemplates.js";
 import { readFileSync } from "node:fs";
@@ -25,6 +26,60 @@ afterEach(async () => {
 });
 
 describe("ImageEditorToolPanel memo boundary", () => {
+  it("creates a stable trampoline for a callback introduced after mount", async () => {
+    const calls = [];
+    let scope;
+    function Harness({ step }) {
+      scope = useEditorPanelActions(step ? { later: () => calls.push(step) } : {});
+      return null;
+    }
+    await act(async () => root.render(<Harness step={0} />));
+    await act(async () => root.render(<Harness step={1} />));
+    const callback = scope.later;
+    callback();
+    await act(async () => root.render(<Harness step={2} />));
+    expect(scope.later).toBe(callback);
+    callback();
+    expect(calls).toEqual([1, 2]);
+  });
+
+  it("keeps visible events on the committed owner while a transition suspends", async () => {
+    const calls = [];
+    let changeOwner;
+    let release;
+    let ready = false;
+    const pending = new Promise((resolve) => { release = () => { ready = true; resolve(); }; });
+    function Owner({ value }) {
+      const actions = useEditorPanelActions({ fitToView: () => calls.push(value) });
+      if (value === "B" && !ready) throw pending;
+      return <ImageEditorToolPanel panelKey="move" working={{ width: 1, height: 1 }} layerCount={1} {...actions} />;
+    }
+    function Harness() {
+      const [value, setValue] = React.useState("A");
+      changeOwner = setValue;
+      return <React.Suspense fallback="loading"><Owner value={value} /></React.Suspense>;
+    }
+    const fit = () => Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent === "Fit to view").click();
+    await act(async () => root.render(<Harness />));
+    await act(async () => React.startTransition(() => changeOwner("B")));
+    await act(async () => fit());
+    expect(calls).toEqual(["A"]);
+    await act(async () => release());
+    await act(async () => fit());
+    expect(calls).toEqual(["A", "B"]);
+  });
+
+  it("renders current document data rather than freezing render-derived helpers", async () => {
+    const props = { setActiveTransform: vi.fn(), endTransformGesture: vi.fn(), onTransformSlider: vi.fn(),
+      flipActiveLayer: vi.fn(), resetActiveLayerTransform: vi.fn(), setTool: vi.fn() };
+    const image = (x) => ({ activeLayerId: "a", layers: [{ id: "a", transform: { x, y: 0, scaleX: 1, scaleY: 1, rotation: 0 } }] });
+    await act(async () => root.render(<ImageEditorToolPanel panelKey="transform" working={image(10)} {...props} />));
+    expect(container.querySelector("input").value).toBe("10");
+    await act(async () => root.render(<ImageEditorToolPanel panelKey="transform" working={image(20)} {...props} />));
+    expect(container.querySelector("input").value).toBe("20");
+  });
+
   it("skips parent-only rerenders while a rendered handler sees its latest closure", async () => {
     const observer = vi.fn();
     const fitCalls = [];
@@ -38,13 +93,13 @@ describe("ImageEditorToolPanel memo boundary", () => {
         fitToView: () => fitCalls.push(stageWidth),
         actualSize: () => {},
       };
-      const stableScope = useStableImageEditorToolPanelScope(scope);
+      const panel = useMoveToolPanel(scope);
       return (
         <>
           <button data-action="parent-update" onClick={() => setStageWidth(200)} type="button">
             resize parent
           </button>
-          <ImageEditorToolPanel panelKey="move" scope={stableScope} />
+          <ImageEditorToolPanel panelKey="move" {...panel} />
         </>
       );
     }
@@ -72,7 +127,7 @@ describe("ImageEditorToolPanel color-key cutout", () => {
     await act(async () => root.render(
       <ImageEditorToolPanel
         panelKey="cutout"
-        scope={{
+        {...{
           colorKeyGlobal: false,
           colorKeySeed: { x: 7, y: 9 },
           colorKeySoftness: 8,
@@ -125,7 +180,7 @@ describe("ImageEditorToolPanel color-key cutout", () => {
     await act(async () => root.render(
       <ImageEditorToolPanel
         panelKey="cutout"
-        scope={{
+        {...{
           colorKeyGlobal: false,
           colorKeySeed: { x: 7, y: 9 },
           colorKeySoftness: 8,
@@ -153,7 +208,7 @@ describe("ImageEditorToolPanel color-key cutout", () => {
     await act(async () => root.render(
       <ImageEditorToolPanel
         panelKey="cutout"
-        scope={{
+        {...{
           applyMaskCutout: vi.fn(),
           clearMask: vi.fn(),
           colorKeyGlobal: false,
@@ -190,7 +245,7 @@ describe("ImageEditorToolPanel color-key cutout", () => {
     await act(async () => root.render(
       <ImageEditorToolPanel
         panelKey="cutout"
-        scope={{
+        {...{
           aiOp: null,
           applyMaskCutout,
           clearMask: vi.fn(),
@@ -247,7 +302,7 @@ describe("ImageEditorEditPanel quick edit instructions", () => {
       EDIT_OUTPUT_ASPECTS: [{ key: "match", label: "Match" }],
       EditorLoraPanel: () => null,
       FitModeControl: () => null,
-      MAX_EDIT_REFERENCES: 3,
+      maxEditReferences: 4,
       StudioUpdateBadge: () => null,
       StudioUpdateNotice: () => null,
       aiOp: null,
@@ -311,7 +366,7 @@ describe("ImageEditorEditPanel quick edit instructions", () => {
 
   it("offers every built-in recipe and writes its full instruction into the box", async () => {
     const setEditPrompt = vi.fn();
-    await act(async () => root.render(<ImageEditorEditPanel scope={editScope({ setEditPrompt })} />));
+    await act(async () => root.render(<ImageEditorEditPanel {...editScope({ setEditPrompt })} />));
 
     const pills = [...container.querySelectorAll(".ie-chip-row .ie-chip")];
     expect(pills.map((pill) => pill.textContent)).toEqual(EDIT_PROMPT_TEMPLATES.map((template) => template.label));
@@ -321,6 +376,24 @@ describe("ImageEditorEditPanel quick edit instructions", () => {
         .dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(setEditPrompt).toHaveBeenCalledWith("correct the colors of this photo");
+  });
+  it("renders all MOSS edit controls and repeated ordinal slots while gating a missing adapter",async()=>{
+    const model={id:"moss_image_sft",name:"MOSS SFT",conditionalPurposes:{moss_image_edit:{installState:"missing"}}};
+    const setMossImageEdit=vi.fn(),setMossEditSettings=vi.fn(),setRefAssetIds=vi.fn();
+    const scope=editScope({editModel:model.id,editModels:[model],selectedEditModel:model,mossEdit:true,mossEditReady:false,mossEditError:"",mossImageEdit:{reference_max_edge:768,use_kv_cache:false},mossEditSettings:{width:512,height:768,steps:41,guidanceScale:4.5,schedulerShift:6,max_sequence_length:2048,negativePrompt:"blur"},setMossImageEdit,setMossEditSettings,setRefAssetIds,refAssetIds:["a","a","b"],imageAssets:[{id:"a",displayName:"Wide"},{id:"b",displayName:"Tall"}],editPrompt:"blue cup",multiRefCapable:true});
+    await act(async()=>root.render(<ImageEditorEditPanel {...scope}/>));
+    expect(container.textContent).toContain("working image is Image 1");
+    const guidance = container.querySelectorAll('input[aria-label="Guidance"]');
+    expect(guidance).toHaveLength(1);
+    expect(guidance[0].disabled).toBe(false);
+    expect(guidance[0].value).toBe("4.5");
+
+    expect(container.textContent).toContain("Ordered MOSS references (2–4)");
+    expect([...container.querySelectorAll("label")].find((label)=>label.textContent==="Reference maximum edge").querySelector("input").value).toBe("768");
+    expect([...container.querySelectorAll("button")].find((button)=>button.textContent==="Generate edit").disabled).toBe(true);
+    await act(async()=>container.querySelector('button[aria-label="Move Image 4 earlier"]').click());expect(setRefAssetIds).toHaveBeenCalledWith(["a","b","a"]);
+    await act(async()=>root.render(<ImageEditorEditPanel {...{...scope,mossEditReady:true,selectedEditModel:{...model,conditionalPurposes:{moss_image_edit:{installState:"installed"}}}}}/>));
+    expect([...container.querySelectorAll("button")].find((button)=>button.textContent==="Generate edit").disabled).toBe(false);
   });
 
   // sc-24114: the editor exposes the Studio's transparency toggle for an alpha-capable model, and
@@ -332,7 +405,7 @@ describe("ImageEditorEditPanel quick edit instructions", () => {
     await act(async () =>
       root.render(
         <ImageEditorEditPanel
-          scope={editScope({
+          {...editScope({
             editModel: alphaModel.id,
             editModels: [alphaModel],
             selectedEditModel: alphaModel,
@@ -356,7 +429,7 @@ describe("ImageEditorEditPanel quick edit instructions", () => {
     await act(async () =>
       root.render(
         <ImageEditorEditPanel
-          scope={editScope({ editModel: opaqueModel.id, editModels: [opaqueModel], selectedEditModel: opaqueModel })}
+          {...editScope({ editModel: opaqueModel.id, editModels: [opaqueModel], selectedEditModel: opaqueModel })}
         />,
       ),
     );
@@ -386,7 +459,7 @@ describe("ImageEditorEditPanel quick edit instructions", () => {
     const addButton = () => container.querySelector(".ie-ref-add");
 
     const eight = Array.from({ length: 8 }, (_, index) => `ref_${index}`);
-    await act(async () => root.render(<ImageEditorEditPanel scope={scopeFor(eight)} />));
+    await act(async () => root.render(<ImageEditorEditPanel {...scopeFor(eight)} />));
     expect(addButton(), "the reference rail is rendered for this model").not.toBeNull();
     expect(addButton().disabled, "eight references + the working image is nine of ten").toBe(false);
     // sc-24114: the working image leads the ordered list the edit sends, so it is "Image 1" and
@@ -397,7 +470,7 @@ describe("ImageEditorEditPanel quick edit instructions", () => {
     expect(container.querySelector(".ie-ref-working .ie-ref-ordinal")?.textContent).toBe("Image 1");
 
     const nine = Array.from({ length: 9 }, (_, index) => `ref_${index}`);
-    await act(async () => root.render(<ImageEditorEditPanel scope={scopeFor(nine)} />));
+    await act(async () => root.render(<ImageEditorEditPanel {...scopeFor(nine)} />));
     expect(addButton().disabled, "nine references + the working image is the cap of ten").toBe(true);
   });
 
@@ -424,11 +497,11 @@ describe("ImageEditorEditPanel quick edit instructions", () => {
         editTransparent: true,
       });
     const nine = Array.from({ length: 9 }, (_, index) => `ref_${index}`);
-    await act(async () => root.render(<ImageEditorEditPanel scope={scopeFor(nine.slice(0, 8))} />));
+    await act(async () => root.render(<ImageEditorEditPanel {...scopeFor(nine.slice(0, 8))} />));
     expect(container.querySelector(".ie-ref-add")?.disabled).toBe(false);
     expect(container.querySelector(".transparency-toggle input")?.checked).toBe(true);
     expect(container.querySelector(".transparency-prompt-hint button")).not.toBeNull();
-    await act(async () => root.render(<ImageEditorEditPanel scope={scopeFor(nine)} />));
+    await act(async () => root.render(<ImageEditorEditPanel {...scopeFor(nine)} />));
     expect(container.querySelector(".ie-ref-add").disabled, "nine + the working image is ten").toBe(true);
   });
 });
@@ -450,7 +523,7 @@ describe("ImageEditorToolPanel upscale tool with Iris restoration (sc-25683)", (
       return (
         <ImageEditorToolPanel
           panelKey="upscale"
-          scope={{
+          {...{
             IrisRestoreControls,
             UPSCALE_ENGINE_DESC: {},
             aiOp: null,

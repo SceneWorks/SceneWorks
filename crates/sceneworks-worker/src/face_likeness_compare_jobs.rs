@@ -27,10 +27,7 @@
 // Linux parity build (no `backend-candle`) only the unsupported stub at the bottom compiles, and it uses
 // fully-qualified paths with no top-level imports; an ungated `PathBuf` would be an unused-import error
 // there under `-D warnings` (the cfg trap that broke the parity lane).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use std::path::PathBuf;
 
 // `Image` resolves to `runtime_macos::media::Image` on macOS and `gen_core::Image` under the candle backend — the
@@ -42,55 +39,30 @@ use gen_core::Image;
 #[cfg(target_os = "macos")]
 use runtime_macos::media::Image;
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use crate::face_likeness::FaceLikenessScorer;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use crate::image_jobs::load_reference_image;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use crate::{
     heartbeat, progress_payload, run_blocking_with_heartbeat, update_job, ApiClient, Settings,
     WorkerError, WorkerResult,
 };
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use sceneworks_core::contracts::{JobSnapshot, JobStatus, JsonObject, ProgressStage, WorkerStatus};
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use sceneworks_core::project_store::ProjectStore;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 use serde_json::Value;
 
 /// Resolve `sourceAssetId` + `candidateAssetId` (both in the same project) to decoded RGB images.
 /// Mirrors the `kps_extract` / reference-asset resolution: read each asset record, confine its
 /// `file.path` to the project directory ([`load_reference_image`] routes through `safe_project_path`),
 /// and decode. A missing/garbled asset id is a clean `InvalidPayload`, never a panic.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn load_compare_images(settings: &Settings, job: &JobSnapshot) -> WorkerResult<(Image, Image)> {
     let payload = &job.payload;
-    let project_id = payload
-        .get("projectId")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
+    let project_id = crate::payload::trimmed_string(payload.get("projectId"))
         .or(job.project_id.as_deref())
         .ok_or_else(|| {
             WorkerError::InvalidPayload(
@@ -126,19 +98,13 @@ fn load_compare_images(settings: &Settings, job: &JobSnapshot) -> WorkerResult<(
 }
 
 /// Read a required, non-empty asset id from the payload, or a precise `InvalidPayload`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn required_asset_id<'a>(payload: &'a JsonObject, field: &str) -> WorkerResult<&'a str> {
-    payload
-        .get(field)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(format!("face likeness compare needs a {field}"))
-        })
+    crate::payload::required_trimmed_str(
+        payload,
+        field,
+        &format!("face likeness compare needs a {field}"),
+    )
 }
 
 /// Build the scorer from the SOURCE face, score the CANDIDATE, and return the standard result object
@@ -146,10 +112,7 @@ fn required_asset_id<'a>(payload: &'a JsonObject, field: &str) -> WorkerResult<&
 /// `source_ref` is stamped on the result so the UI can attribute the score to the chosen reference.
 /// Runs the `!Send` MLX/candle work; call inside `spawn_blocking`. Non-fatal: a backend forward
 /// failure becomes a logged N/A result (`score_or_null`), never an `Err` that fails the job.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn compare(
     weights_dir: &std::path::Path,
     source: &Image,
@@ -164,10 +127,7 @@ fn compare(
 /// JSON-producing half of [`compare`], factored out so the wiring tests exercise the exact same path
 /// over the weight-free stub scorer (no antelopev2 weights in CI). Non-fatal: a backend forward
 /// failure becomes a logged N/A via `score_or_null`, never an `Err`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn compare_with_scorer(
     scorer: &FaceLikenessScorer,
     candidate: &Image,
@@ -179,10 +139,7 @@ fn compare_with_scorer(
 /// Run a `face_likeness_compare` job: load the SOURCE reference + CANDIDATE assets, score the
 /// candidate's face against the source identity through the shared scorer, and return the result.
 /// MLX on Mac, candle off-Mac — the result shape is backend-identical.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn run_face_likeness_compare_job(
     api: &ApiClient,
     settings: &Settings,
@@ -244,7 +201,7 @@ pub(crate) async fn run_face_likeness_compare_job(
         "",
         "face likeness compare task",
         crate::no_cancel_ack(),
-        tokio::task::spawn_blocking(move || {
+        crate::load_progress::spawn_blocking(move || {
             let (source, candidate) = load_compare_images(&settings_for_task, &job_for_task)?;
             compare(&weights_dir, &source, &candidate, &source_ref)
         }),
@@ -277,13 +234,7 @@ pub(crate) async fn run_face_likeness_compare_job(
     Ok(())
 }
 
-#[cfg(all(
-    test,
-    any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )
-))]
+#[cfg(all(test, native_lane))]
 mod tests {
     use super::*;
     use crate::face_likeness::FaceLikenessScorer;
@@ -368,7 +319,7 @@ mod tests {
         assert!(required_asset_id(&payload, "sourceAssetId").is_err());
         payload.insert("sourceAssetId".to_owned(), json!("   "));
         assert!(required_asset_id(&payload, "sourceAssetId").is_err());
-        payload.insert("sourceAssetId".to_owned(), json!("asset_42"));
+        payload.insert("sourceAssetId".to_owned(), json!("  asset_42  "));
         assert_eq!(
             required_asset_id(&payload, "sourceAssetId").unwrap(),
             "asset_42"
@@ -434,7 +385,7 @@ mod tests {
 /// Plain-Linux parity build (no MLX, no candle): the native SCRFD + ArcFace face stack is unavailable,
 /// so the compare cannot run. Return a precise unsupported error rather than failing to compile or
 /// silently mis-handling the job — mirrors `run_dataset_face_analysis_job`.
-#[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(not(native_lane))]
 pub(crate) async fn run_face_likeness_compare_job(
     _api: &crate::ApiClient,
     _settings: &crate::Settings,

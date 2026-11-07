@@ -710,7 +710,14 @@ def test_control_weight_authority_audit_detects_absence_and_fallback_mutations()
 
 
 AUDITED_TOP_LEVEL_MANIFEST_REPO_LANES = {
-    "image_jobs/base.rs": "model.default_repo()",
+    # Shared resolver receives MODEL_TABLE's default (or the frozen canonical FLUX3 identity).
+    "image_jobs/artifact_resolution.rs": "unwrap_or(default_repo)",
+    # These production readers were formerly hidden by an early cfg(test) import.
+    "image_jobs/flux2_control_candle.rs": "FLUX2_CONTROL_CANDLE_BASE_REPO",
+    "image_jobs/kolors_control.rs": "KOLORS_CONTROL_DEFAULT_REPO",
+    "image_jobs/krea_control.rs": "KREA_CONTROL_MLX_REPO",
+    "image_jobs/qwen_control.rs": "QWEN_CONTROL_DEFAULT_REPO",
+    "image_jobs/zimage_control.rs": "zimage_control_base_default_repo(&request.model)",
     "image_jobs/flux1_control_candle.rs": "crate::engines::default_repo_for(&request.model)",
     "image_jobs/flux_ipadapter.rs": "flux_ipadapter_default_repo(&request.model)",
     "image_jobs/instantid.rs": "INSTANTID_SDXL_REPO",
@@ -728,6 +735,11 @@ AUDITED_TOP_LEVEL_MANIFEST_REPO_LANES = {
 }
 
 
+def _before_test_module(source: str) -> str:
+    # A cfg(test) import is not the end of production. Stop at the actual inline/external test module.
+    return re.split(r"\n#\[cfg\(test\)\]\s*(?:#\[[^\n]+\]\s*)*mod\s+\w+\s*(?:\{|;)", source, maxsplit=1)[0]
+
+
 def _worker_sources() -> dict[str, str]:
     return {
         path.relative_to(WORKER_SOURCE_PATH).as_posix(): path.read_text(encoding="utf-8")
@@ -743,7 +755,7 @@ def _assert_top_level_manifest_repo_readers_have_audited_installed_fallbacks(
         for relative_path, source in sources.items()
         if re.search(
             r"\.model_manifest_entry\s*\.get\(\"repo\"\)",
-            source.split("\n#[cfg(test)]", maxsplit=1)[0],
+            _before_test_module(source),
         )
     }
     assert actual_lanes == set(audited_lanes), (
@@ -752,7 +764,7 @@ def _assert_top_level_manifest_repo_readers_have_audited_installed_fallbacks(
         f"removed={sorted(set(audited_lanes) - actual_lanes)}"
     )
     for relative_path, fallback_marker in audited_lanes.items():
-        source = sources[relative_path].split("\n#[cfg(test)]", maxsplit=1)[0]
+        source = _before_test_module(sources[relative_path])
         reads = list(re.finditer(r"\.model_manifest_entry\s*\.get\(\"repo\"\)", source))
         assert reads, f"{relative_path}: inventoried lane no longer contains a top-level repo read"
         for read in reads:
@@ -786,7 +798,7 @@ def test_every_top_level_manifest_repo_reader_has_an_audited_installed_fallback(
 
 
 def _assert_minimax_h3_candle_uses_exact_installed_roots(source: str) -> None:
-    production = source.split("\n#[cfg(test)]", maxsplit=1)[0]
+    production = _before_test_module(source)
     assert '.model_manifest_entry.get("repo")' not in production, (
         "MiniMax-H3 Candle must not accept a top-level manifest repo override; its q4/q8 and "
         "bf16/shared components come from two separately pinned installed snapshots"
@@ -850,7 +862,12 @@ def test_manifest_model_path_is_only_an_optional_override():
         # selected an imported Krea/SDXL route, and declines attribution when every path source is
         # absent. It does not affect generation's normal repo resolution.
         "image_jobs.rs",
-        "image_jobs/base.rs",
+        "image_jobs/artifact_resolution.rs",
+        "image_jobs/flux2_control_candle.rs",
+        "image_jobs/kolors_control.rs",
+        "image_jobs/krea_control.rs",
+        "image_jobs/qwen_control.rs",
+        "image_jobs/zimage_control.rs",
         "image_jobs/flux1_control_candle.rs",
         "image_jobs/flux_ipadapter.rs",
         "image_jobs/instantid.rs",
@@ -872,7 +889,7 @@ def test_manifest_model_path_is_only_an_optional_override():
     }
     actual_readers: list[str] = []
     for path in WORKER_SOURCE_PATH.rglob("*.rs"):
-        source = path.read_text(encoding="utf-8").split("\n#[cfg(test)]", maxsplit=1)[0]
+        source = _before_test_module(path.read_text(encoding="utf-8"))
         for match in re.finditer(
             r'request\.model_manifest_entry\.get\("modelPath"\)',
             source,
@@ -1799,8 +1816,20 @@ def test_locally_derived_tiers_fetch_exactly_their_source_variant():
             ]
             assert len(source) == 1, (model["id"], row["variant"])
             assert "localDerivation" not in source[0]
-            for key in ("provider", "repo", "revision", "files", "platforms"):
+            for key in ("provider", "repo", "revision", "files"):
                 assert row.get(key) == source[0].get(key), (model["id"], row["variant"], key)
+            # A conversion belongs to the backend that loads it (sc-26241: FLUX 3's Candle GGML
+            # q4/q8 off-Mac, its MLX affine q4/q8 on macOS), so a derived row may narrow its
+            # source's platforms — never widen them to a host the original does not install on.
+            source_platforms = source[0].get("platforms")
+            if source_platforms is None:
+                assert row.get("platforms") is None or row["platforms"], (model["id"], row["variant"])
+            else:
+                assert set(row.get("platforms") or source_platforms) <= set(source_platforms), (
+                    model["id"],
+                    row["variant"],
+                    "platforms",
+                )
             assert row["footprint"]["diskSizeBytes"] > source[0]["footprint"]["diskSizeBytes"]
     # Shape, not population: the catalog declares at least one derived tier (so the loop above
     # judged something), and every one of them resolved its `fromVariant` row above.
@@ -3006,16 +3035,22 @@ def test_sdxl_manifest_has_mlx_block():
 
 
 def test_hide_reference_strength_models_declare_a_variation_knob():
-    """Symmetry guard for the sc-2017 picker UX. A model that opts out of the
-    IP-Adapter reference-strength slider via `ui.hideReferenceStrength` MUST
-    also declare `ui.variationStrength` — otherwise the picker shows no tuning
-    control at all, and the worker silently runs at default true_cfg_scale.
+    """Identity/edit models need their effective tuning control, while native
+    AE-only reference conditioning must not advertise an ineffective strength axis.
+    The worker's live-route honesty guard independently verifies native dispatch.
     """
     manifest = _load_builtin_models_manifest()
     unbalanced: list[str] = []
     for model in manifest.get("models", []):
         ui = model.get("ui") or {}
         if not ui.get("hideReferenceStrength"):
+            continue
+        if model.get("family") == "flux3":
+            # No img2img noise initialization or identity scale exists on this native route.
+            # Keep its real reference shape AND absence of a fake variation knob load-bearing.
+            assert "variationStrength" not in ui, model["id"]
+            assert model["limits"]["maxReferenceAssets"] == 10, model["id"]
+            assert {"edit_image", "image_to_image", "character_image"} <= set(model["capabilities"]), model["id"]
             continue
         if not ui.get("variationStrength"):
             unbalanced.append(model["id"])
@@ -3528,16 +3563,9 @@ def test_recipe_preset_schema_rejects_a_bad_id_pattern():
 # `resolve_negative_prompt` ALL return None. Every one is a guidance-distilled student.
 IMAGE_MODELS_WITHOUT_EITHER_AXIS = frozenset(
     {
-        "z_image_turbo",
-        "z_image_edit",  # runs on the z_image_turbo ENGINE
         "flux_schnell",
         "ideogram_4_turbo",
-        "boogu_image_turbo",
-        "krea_2_turbo",
-        "sd3_5_large_turbo",
-        "anima_turbo",
-        "mage_flow_turbo",
-        "mage_flow_edit_turbo",
+        "flux3_klein",  # flow map: no CFG at all (sc-26234)
     }
 )
 
@@ -3547,8 +3575,6 @@ IMAGE_MODELS_WITHOUT_NEGATIVE_ONLY = frozenset(
     {
         "flux_dev",
         "ideogram_4",
-        "boogu_image",
-        "boogu_image_edit",
         "flux2_dev",
         "sensenova_u1_8b",
         "sensenova_u1_8b_infographic_v2",
@@ -3563,6 +3589,20 @@ IMAGE_MODELS_WITHOUT_NEGATIVE_ONLY = frozenset(
         "supra2_img",
     }
 )
+
+
+IMAGE_MODELS_WITH_EXPERIMENTAL_CFG = frozenset({
+    "z_image_turbo",
+    "z_image_edit",
+    "boogu_image_turbo",
+    "krea_2_turbo",
+    "sd3_5_large_turbo",
+    "anima_turbo",
+    "mage_flow_turbo",
+    "mage_flow_edit_turbo",
+    "boogu_image",
+    "boogu_image_edit",
+})
 
 
 def _image_models_by_id() -> dict:
@@ -3608,12 +3648,9 @@ def test_negative_only_image_models_keep_their_guidance_axis():
         )
 
 
-def test_guidance_taking_image_models_declare_nothing():
-    """sc-15299 polarity guard: absent means TRUE, so every image entry that genuinely takes both
-    axes must stay silent. Includes the true-CFG Chroma family, whose descriptor reads
-    supports_guidance=false but whose Guidance control IS live — the worker forwards
-    `advanced.guidanceScale` as `true_cfg` (base.rs `uses_true_cfg`/`resolve_true_cfg`). Declaring
-    an `image` block for Chroma would break a working knob."""
+def test_guidance_taking_image_models_keep_both_axes():
+    """Absent axis flags mean supported. Positive capability declarations and independent
+    Shift metadata must not hide either axis, including experimental Turbo CFG."""
     models = _image_models_by_id()
     # Only the two AXIS keys hide a control; `negativePromptRequiresGuidance` (sc-25679) keeps both
     # axes live and is policed by its own guard below.
@@ -3623,15 +3660,44 @@ def test_guidance_taking_image_models_declare_nothing():
         for model_id, model in models.items()
         if axis_keys & set(model.get("image") or {})
     }
-    expected = IMAGE_MODELS_WITHOUT_EITHER_AXIS | IMAGE_MODELS_WITHOUT_NEGATIVE_ONLY
+    expected = IMAGE_MODELS_WITHOUT_EITHER_AXIS | IMAGE_MODELS_WITHOUT_NEGATIVE_ONLY | IMAGE_MODELS_WITH_EXPERIMENTAL_CFG
     assert declared == expected, (
         "unexpected `image` declarations — every other image entry must stay silent so it keeps "
         f"both controls: unexpected={sorted(declared - expected)}, missing={sorted(expected - declared)}"
     )
     for model_id in ("chroma1_hd", "chroma1_base", "chroma1_flash", "sana_1600m", "krea_2_raw", "sdxl"):
-        assert models[model_id].get("image") is None, (
-            f"{model_id} takes both axes (Chroma via true_cfg) and must declare no `image` block"
-        )
+        block = models[model_id].get("image") or {}
+        assert block.get("supportsGuidance") is not False, model_id
+        assert block.get("supportsNegativePrompt") is not False, model_id
+    for model_id in IMAGE_MODELS_WITH_EXPERIMENTAL_CFG:
+        block = models[model_id]["image"]
+        assert block.get("supportsGuidance") is not False, model_id
+        assert block.get("supportsNegativePrompt") is True, model_id
+        assert block.get("negativePromptRequiresGuidance") is True, model_id
+
+
+def test_iris_all_native_tiers_share_the_dense_snapshot_and_encoder():
+    """Iris loads bf16/q8/q4 from one upstream install on every native platform."""
+    model = _image_models_by_id()["iris_3b"]
+    assert model.get("macOnly") is False
+    assert model["mlx"]["quantize"] == 0
+    primaries = [row for row in model["downloads"] if not row.get("coRequisite")]
+    assert sorted(row["variant"] for row in primaries) == ["bf16", "q4", "q8"]
+    assert [row["variant"] for row in primaries if row.get("default")] == ["bf16"]
+    for row in primaries:
+        assert not row.get("platforms"), row
+        assert row["repo"] == "speridlabs/iris-3b"
+        assert row["revision"] == "7445443349bc9abe3c96f01ff793e2098ca012b3"
+        assert row["files"] == ["config.yaml", "model.safetensors"]
+        assert row["estimatedSizeBytes"] == primaries[0]["estimatedSizeBytes"]
+    components = [row for row in model["downloads"] if row.get("coRequisite")]
+    assert len(components) == 1
+    encoder = components[0]
+    assert encoder["componentId"] == "text_encoder"
+    assert encoder["repo"] == "Qwen/Qwen3-VL-4B-Instruct"
+    assert encoder["revision"] == "ebb281ec70b05090aa6165b016eac8ec08e71b17"
+    assert not encoder.get("platforms")
+    assert "model-*.safetensors" in encoder["files"]
 
 
 def test_negative_prompt_requires_guidance_keeps_both_axes_live():
@@ -4575,6 +4641,26 @@ def _qwen_image_2_1_entry() -> dict:
     )
 
 
+def test_flux3_prompt_upsampler_is_a_pinned_optional_whole_repository_component():
+    models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
+    image = models["flux3_klein"]
+    utility = models["flux3_image_klein_pup"]
+    assert image["ui"]["promptEnhance"] is True
+    assert utility["type"] == "utility" and utility["componentOnly"] is True
+    assert utility["capabilities"] == [] and utility["ui"]["recommendedFor"] == []
+    assert utility["gated"] is False and utility["license"] == "Apache-2.0"
+    optional = [row for row in image["downloads"] if row.get("componentId") == "prompt_upsampler"]
+    assert len(optional) == 1
+    row = optional[0]
+    assert row["coRequisite"] is True and row["required"] == "soft"
+    assert not row.get("default", False)
+    for download in [row, utility["downloads"][0]]:
+        assert download["repo"] == "black-forest-labs/flux-3-image-klein-pup"
+        assert download["revision"] == "8b069751eb5dcab23829d9c5eccb470eb8b8a4ed"
+        assert download["files"] == []
+        assert download["estimatedSizeBytes"] == 18_839_746_673
+    assert any(download.get("default") and not download.get("coRequisite") for download in image["downloads"])
+
 # ── Qwen-Image 2.1 Turbo (sc-25907, epic 25899) ────────────────────────────────────────────────
 
 
@@ -4867,7 +4953,7 @@ def test_minimax_h3_managed_veda_predictor_exact_identity_and_soft_policy():
 
 
 def test_managed_file_schema_rejects_partial_or_unpinned_identity():
-    schema = json.loads(SCHEMA_PATH.read_text())
+    schema = _load_schema(SCHEMA_PATH)
     manifest = _load_builtin_models_manifest()
     model = next(model for model in manifest["models"] if model["id"] == "minimax_h3")
     index = next(index for index, row in enumerate(model["downloads"]) if row.get("componentId") == "veda_predictor")
@@ -4879,3 +4965,113 @@ def test_managed_file_schema_rejects_partial_or_unpinned_identity():
         invalid = copy.deepcopy(manifest)
         del next(model for model in invalid["models"] if model["id"] == "minimax_h3")["downloads"][index][key]
         assert list(jsonschema.Draft202012Validator(schema).iter_errors(invalid)), key
+
+
+def test_managed_file_schema_reader_is_utf8_under_a_windows_default(tmp_path, monkeypatch):
+    schema = _load_schema(SCHEMA_PATH)
+    schema["title"] = "许可"
+    fixture = tmp_path / "non-ascii-schema.json"
+    fixture.write_text(json.dumps(schema, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setitem(globals(), "SCHEMA_PATH", fixture)
+    native_read_text = Path.read_text
+
+    def windows_default(path, *args, **kwargs):
+        if path == fixture and not args and kwargs.get("encoding") is None:
+            kwargs["encoding"] = "cp1252"
+        return native_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", windows_default)
+    # Execute the real identity audit, not only the already-correct generic loader.
+    test_managed_file_schema_rejects_partial_or_unpinned_identity()
+
+
+def test_flux3_base_and_distilled_have_separate_defaults_and_adapter_identity():
+    models = {row["id"]: row for row in _load_builtin_models_manifest()["models"]}
+    base = models["flux3_klein_base"]
+    distilled = models["flux3_klein"]
+    assert base["family"] == distilled["family"] == "flux3"
+    assert base["defaults"]["steps"] == 50
+    assert base["defaults"]["guidanceScale"] == 3.5
+    assert distilled["defaults"]["steps"] == 16
+    assert distilled["defaults"]["guidanceScale"] == 0
+    # The product's established polarity: absence means both controls are supported.
+    assert base["image"].get("supportsGuidance", True) is True
+    assert base["image"].get("supportsNegativePrompt", True) is True
+    assert distilled["image"]["supportsGuidance"] is False
+    assert distilled["image"]["supportsNegativePrompt"] is False
+    for model, repo, revision in [
+        (base, "black-forest-labs/flux-3-image-klein-base", "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4"),
+        (distilled, "black-forest-labs/flux-3-image-klein", "8454017f9ebaada30c998fccd9f67a80c7580f68"),
+    ]:
+        primary = next(row for row in model["downloads"] if row.get("default"))
+        assert primary["repo"] == repo
+        assert primary["revision"] == revision
+        assert model["paths"]["model"] == "${HF_CACHE}/" + repo
+        assert model["loraCompatibility"]["families"] == ["flux3"]
+        assert model["loraCompatibility"]["baseModel"] == repo
+        assert model["loraCompatibility"]["baseRevision"] == revision
+        assert model["loraCompatibility"]["adapterKinds"] == ["lora"]
+        assert model["gated"] is True
+        assert model["credentialHost"] == "huggingface.co"
+    assert base["downloads"][0]["files"] == []
+    proof = json.loads((ROOT / "tests/fixtures/flux3-base-hub-metadata.json").read_text(encoding="utf-8"))
+    assert proof["repository"] == base["downloads"][0]["repo"]
+    assert proof["revision"] == base["downloads"][0]["revision"]
+    assert len(proof["files"]) == proof["repository_file_count"] == 39
+    assert any(row["rfilename"].startswith("variants/") for row in proof["files"])
+    size = sum(row["size"] for row in proof["files"])
+    assert size == proof["repository_size_bytes"] == 43229093855
+    assert base["downloads"][0]["estimatedSizeBytes"] == size
+    assert base["downloads"][0]["footprint"]["diskSizeBytes"] == size
+    rows = [row for row in base["downloads"] if not row.get("coRequisite")]
+    primary = [row for row in rows if "localDerivation" not in row]
+    assert [row["variant"] for row in primary] == ["bf16", "fp8r", "nvfp4"]
+    # Public metadata proves paths and claimed sizes, NOT downloaded weight bytes. The converted
+    # q4/q8 rows exist only because genuine local base conversions (sc-26243) supplied their own
+    # size/hash pins, recorded in the artifact-prerequisite inventory's `activated` evidence.
+    derived = [row for row in rows if "localDerivation" in row]
+    assert sorted((row["variant"], tuple(row["platforms"]), row["localDerivation"]["conversion"]) for row in derived) == sorted([
+        ("q8", ("windows", "linux"), "flux3-candle-ggml-q8_0-v1"),
+        ("q4", ("windows", "linux"), "flux3-candle-ggml-q4_1-v1"),
+        ("q8", ("macos",), "flux3-mlx-affine-q8-g64-v1"),
+        ("q4", ("macos",), "flux3-mlx-affine-q4-g64-v1"),
+    ])
+    activated = {
+        record["conversion"]: record
+        for record in json.loads(
+            (ROOT / "docs/testing/sc-26243-terminal-artifact-prerequisites.json").read_text(encoding="utf-8")
+        )["activated"]
+    }
+    for row in derived:
+        conversion = row["localDerivation"]
+        record = activated[conversion["conversion"]]
+        assert conversion["fromVariant"] == "bf16" and conversion["weightsFile"] == "model.safetensors"
+        assert conversion["weightsBytes"] == record["weightsBytes"]
+        assert conversion["weightsSha256"] == record["weightsSha256"]
+        assert row["repo"] == proof["repository"] and row["revision"] == proof["revision"]
+        assert row["files"] == [] and row["estimatedSizeBytes"] == size
+        assert row["footprint"]["diskSizeBytes"] > size + conversion["weightsBytes"]
+    metadata_paths = {row["rfilename"] for row in proof["files"]}
+    for row in primary:
+        assert row["repo"] == proof["repository"] and row["revision"] == proof["revision"]
+        assert row["files"] == [] and row["estimatedSizeBytes"] == size
+        assert row["footprint"]["residentMemoryBytes"] is None
+        assert row["footprint"]["peakMemoryBytes"] is None
+        if row["variant"] != "bf16":
+            assert row["platforms"] == ["windows", "linux"]
+            for name in ["config.json", "hf_quant_config.json", "manifest.json", "model.safetensors"]:
+                assert f"variants/{row['variant']}/{name}" in metadata_paths
+    assert all("localDerivation" not in row for row in primary)
+
+
+def test_flux3_both_checkpoints_declare_the_owned_reference_editing_surface():
+    models = {row["id"]: row for row in _load_builtin_models_manifest()["models"]}
+    for model_id in ["flux3_klein", "flux3_klein_base"]:
+        model = models[model_id]
+        assert set(model["capabilities"]) >= {"text_to_image", "edit_image", "image_to_image", "character_image"}
+        assert model["limits"]["maxReferenceAssets"] == 10
+        assert model["limits"]["minDimension"] == 64  # plain T2I; references use the family parser's 16px floor
+        assert model["limits"]["maxDimension"] == 4096
+        assert model["limits"]["requiresDimensionsMultipleOf"] == 16
+        assert model["ui"]["hideReferenceStrength"] is True
+        assert model["ui"]["promptEnhance"] is True

@@ -95,6 +95,9 @@ export function SimpleShell({
   settingsSharingFocusRequest,
   lockedToSimple,
   preferencesHydrated = true,
+  sidebarCollapsed = false,
+  onSidebarCollapsedChange,
+  workspaceSwitcher,
 }) {
   const {
     jobs = [],
@@ -110,12 +113,16 @@ export function SimpleShell({
   const [rootRef, width] = useContainerWidth();
   const breakpoint = breakpointFor(width);
   const phone = breakpoint === "phone";
+  const compactSidebar = sidebarCollapsed && !phone && !lockedToSimple;
 
-  const [screen, setScreen] = useState("image");
+  const [screen, setScreen] = useState(() => SCREEN_BY_ID.has(requestedScreen) ? requestedScreen : "image");
   const [drawer, setDrawer] = useState(false);
   const [sheet, setSheet] = useState(null);
   const [guideOpen, setGuideOpen] = useState(false);
   const [preview, setPreview] = useState(null);
+  // Ids of the collection the preview was opened from (the grid the user tapped), so the viewer
+  // can step through it. Ids, not assets: neighbours re-resolve from the live catalog.
+  const [previewScopeIds, setPreviewScopeIds] = useState(null);
   // Which audio asset the Assets viewer holds (epic 14361 / sc-14366). It lives HERE, beside
   // `preview`, so the grid and the viewer agree on which clip is loaded — the grid rings the
   // loaded tile while the viewer IS that clip's play deck. Only the ID is shell state: the
@@ -208,10 +215,14 @@ export function SimpleShell({
 
   // Opening an asset. An audio asset also becomes the loaded take, so the grid rings it and
   // the viewer opens on its deck; `play` (the tile's play button) starts it immediately.
+  // `scope` is the list the caller rendered; omit it (prev/next navigation) to keep the current one.
   const openPreview = useCallback((asset, options = {}) => {
     if (!asset) {
       setPreview(null);
       return;
+    }
+    if (options.scope) {
+      setPreviewScopeIds(options.scope.map((item) => item.id));
     }
     if (assetCanRenderAsAudio(asset)) {
       setLoadedTakeId(asset.id);
@@ -297,17 +308,49 @@ export function SimpleShell({
     () => (preview ? (assets.find((asset) => asset.id === preview.id) ?? preview) : null),
     [preview, assets],
   );
+  // Neighbours within the opened-from collection, skipping ids that have left the catalog
+  // (deleted/trashed since). Null at either end, so the viewer disables that direction.
+  const previewNavigation = useMemo(() => {
+    if (!previewAsset || !previewScopeIds) {
+      return { previous: null, next: null, position: null };
+    }
+    const byId = new Map(assets.map((asset) => [asset.id, asset]));
+    const members = previewScopeIds
+      .map((id) => byId.get(id))
+      .filter((asset) => asset && !asset.status?.trashed);
+    const index = members.findIndex((asset) => asset.id === previewAsset.id);
+    if (index < 0 || members.length < 2) {
+      return { previous: null, next: null, position: null };
+    }
+    return {
+      previous: members[index - 1] ?? null,
+      next: members[index + 1] ?? null,
+      position: { index: index + 1, total: members.length },
+    };
+  }, [previewAsset, previewScopeIds, assets]);
 
   return (
     <SimpleUiContext.Provider value={ui}>
       <div
-        className="su-root"
+        className={compactSidebar ? "su-root su-sidebar-collapsed" : "su-root"}
         data-bp={breakpoint}
         ref={rootRef}
         style={{ "--su-content-max": contentMaxWidth(breakpoint) }}
       >
         {!phone || drawer ? (
           <nav aria-label="Primary" className="su-nav">
+            {!phone && !lockedToSimple && onSidebarCollapsedChange ? (
+              <button
+                aria-expanded={!sidebarCollapsed}
+                aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+                className="icon-btn sidebar-toggle"
+                onClick={() => onSidebarCollapsedChange(!sidebarCollapsed)}
+                title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+                type="button"
+              >
+                <Icon.Sidebar collapsed={sidebarCollapsed} />
+              </button>
+            ) : null}
             <div className="su-nav-scroll su-scroll">
               <div className="su-brand">
                 <Logo size={30} />
@@ -316,6 +359,7 @@ export function SimpleShell({
                   <div className="su-brand-sub">Simple</div>
                 </div>
               </div>
+              {workspaceSwitcher}
               {SIMPLE_SCREENS.map((group) => (
                 <React.Fragment key={group.group}>
                   <div className="su-nav-group-title">{group.group}</div>
@@ -328,6 +372,8 @@ export function SimpleShell({
                       const IconComponent = item.icon;
                       return (
                         <button
+                          aria-label={compactSidebar ? item.label : undefined}
+                          title={compactSidebar ? item.label : undefined}
                           aria-current={screen === item.id ? "page" : undefined}
                           className={screen === item.id ? "su-nav-item active" : "su-nav-item"}
                           key={item.id}
@@ -347,8 +393,22 @@ export function SimpleShell({
               ))}
             </div>
             <div className="su-nav-footer">
-              {appVersion}
-              <SimpleModeSwitch locked={lockedToSimple} mode="simple" onChange={onModeChange} />
+              {compactSidebar ? (
+                <button
+                  aria-label="Switch to Advanced UI"
+                  className="icon-btn"
+                  onClick={() => onModeChange(ADVANCED_MODE)}
+                  title="Switch to Advanced UI"
+                  type="button"
+                >
+                  <Icon.Sliders />
+                </button>
+              ) : (
+                <>
+                  {appVersion}
+                  <SimpleModeSwitch locked={lockedToSimple} mode="simple" onChange={onModeChange} />
+                </>
+              )}
             </div>
           </nav>
         ) : null}
@@ -430,7 +490,11 @@ export function SimpleShell({
             asset={previewAsset}
             audioAutoPlay={audioAutoPlay}
             breakpoint={breakpoint}
+            nextAsset={previewNavigation.next}
             onClose={() => setPreview(null)}
+            onNavigate={(asset) => openPreview(asset)}
+            position={previewNavigation.position}
+            previousAsset={previewNavigation.previous}
             onSendToVideo={
               sendAssetToVideo
                 ? (asset) => {

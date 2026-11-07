@@ -276,6 +276,20 @@ export function loraMatchesModel(lora, model) {
   // A trained full Iris checkpoint is listed under its own id but RUNS on its engine (the API aliases
   // it onto `iris_3b` before the adapter gate), so an adapter's recorded base is compared with that
   // engine id — a `baseModel: iris_3b` adapter is offered for the trained checkpoint too.
+  // Exact training checkpoint identity is separate from family and adapter download identity.
+  // Explicitly declaring this contract fails closed for unstamped or mismatched adapters.
+  const compatibility = model?.loraCompatibility;
+  if (compatibility && Object.hasOwn(compatibility, "baseModel")) {
+    if (typeof compatibility.baseModel !== "string" || !compatibility.baseModel || lora?.baseModel !== compatibility.baseModel) return false;
+  }
+  if (compatibility && Object.hasOwn(compatibility, "baseRevision")) {
+    if (typeof compatibility.baseRevision !== "string" || !compatibility.baseRevision || lora?.baseRevision !== compatibility.baseRevision) return false;
+  }
+  if (compatibility && Object.hasOwn(compatibility, "adapterKinds")) {
+    const kinds = compatibility.adapterKinds;
+    const kind = typeof lora?.networkType === "string" ? lora.networkType.toLowerCase() : "";
+    if (!Array.isArray(kinds) || !kinds.length || !kind || !kinds.includes(kind)) return false;
+  }
   const irisTask = model?.loraCompatibility?.irisTask;
   if (irisTask) {
     if (lora?.irisTask !== irisTask) return false;
@@ -287,11 +301,16 @@ export function loraMatchesModel(lora, model) {
   if (declaredModelIds.length && model?.id && !declaredModelIds.includes(model.id)) {
     return false;
   }
+  // MOSS Base and SFT share the `moss-image` family AND accept each other's adapters
+  // (epic 27933, 2026-10-29): the two checkpoints are one transformer architecture, so a
+  // recorded base is provenance, never a picker gate. Any moss-image adapter — either parent,
+  // or a family-assigned row with no base at all — is offered on both models, mirroring the API
+  // gate, which no longer base-gates `moss-image`. The family test above is the whole rule.
+  const trainedBase = lora?.baseModel ?? lora?.base_model;
   // LTX-2.3 and LTX-2.5 deliberately keep one architecture family for routing, but their adapter
   // contracts are not interchangeable. Training/import outputs record `baseModel`; mirror the API
   // gate so a 2.3 output is never offered in the 2.5 picker (or vice versa), and fail closed for an
   // unstamped family-only adapter on 2.5. Eros is the same 2.3 backbone.
-  const trainedBase = lora?.baseModel ?? lora?.base_model;
   if (
     families.includes("ltx-video") &&
     model?.id === "ltx_2_5" &&
@@ -738,11 +757,9 @@ export function presetSaveValidation({ editable, name, model, kind }, { validati
 // digits, dash, underscore). Mirrors the backend's slugify_preset_id so the id
 // the client previews matches what the server stores.
 export function slugifyPresetId(value) {
-  return String(value ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, "_")
-    .replace(/^[_-]+|[_-]+$/g, "");
+  const id = String(value ?? "").trim()
+    .replace(/[^a-zA-Z0-9]+/g, "_").toLowerCase().replace(/^_+|_+$/g, "");
+  return !id || id === "lora" ? "preset" : id;
 }
 
 // Map an active studio mode to the recipe workflow it persists under. Inverts

@@ -174,7 +174,8 @@ impl SavedVoiceStore {
             ));
         }
 
-        let connection = connect_project_db_migrated(&self.project_path)?;
+        let mut db = connect_project_db_migrated(&self.project_path)?;
+        let connection = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let duplicate =
             nearest_existing_voice(&connection, project_id, &input.embedding, dedup_threshold)?;
 
@@ -197,6 +198,7 @@ impl SavedVoiceStore {
             ],
         )?;
 
+        connection.commit()?;
         let voice = json!({
             "id": id,
             "name": name,
@@ -215,7 +217,8 @@ impl SavedVoiceStore {
         if !is_safe_id(voice_id) {
             return Err(ProjectStoreError::BadRequest("Invalid voice id".to_owned()));
         }
-        let connection = connect_project_db_migrated(&self.project_path)?;
+        let mut db = connect_project_db_migrated(&self.project_path)?;
+        let connection = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let affected = connection.execute(
             "delete from saved_voices where id = ?1 and project_id = ?2",
             params![voice_id, project_id],
@@ -225,6 +228,7 @@ impl SavedVoiceStore {
                 "Saved voice not found".to_owned(),
             ));
         }
+        connection.commit()?;
         Ok(SavedVoiceMutationResult {
             id: voice_id.to_owned(),
             status: "deleted".to_owned(),

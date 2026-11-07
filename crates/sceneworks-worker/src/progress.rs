@@ -42,10 +42,7 @@ pub(crate) const CANCEL_JOIN_ABANDON: std::time::Duration = std::time::Duration:
 /// worker threads through its blocking tasks — `gen_core::CancelFlag` (image/video/training/analysis)
 /// and `gen_core::core_llm::CancelFlag` (prompt-refine LLM), which are distinct types with the same
 /// `cancel()` surface — so one guard covers every streaming consumer regardless of which flag it holds.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) trait CancelHandle {
     fn cancel(&self);
 }
@@ -60,31 +57,22 @@ impl CancelHandle for gen_core::CancelFlag {
 // own flag, re-exported through core_llm); it exposes the same `cancel()`. Implemented separately so
 // the prompt-refine consumer can use the same guard. On the plain-Linux parity build core_llm may
 // not link, but the guard is unused there anyway; guard the impl behind the same gate as the callers.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl CancelHandle for gen_core::core_llm::CancelFlag {
     fn cancel(&self) {
         gen_core::core_llm::CancelFlag::cancel(self)
     }
 }
 
-/// Gated to the job handlers that use it (`any(target_os = "macos", feature = "backend-candle")`);
+/// Gated to the job handlers that use it (`native_lane`);
 /// on the plain-Linux parity build it is unused, so allow dead_code only there.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) struct CancelJoinGuard<C: CancelHandle, R> {
     cancel: Option<C>,
     handle: Option<tokio::task::JoinHandle<R>>,
 }
 
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 impl<C: CancelHandle, R> CancelJoinGuard<C, R> {
     /// Bind a spawned blocking task to its engine cancel flag. On an error path the consumer calls
     /// [`Self::cancel_and_join`] to trip the flag and awaited-bounded-join the task before the job
@@ -296,10 +284,7 @@ pub(crate) async fn mark_job_canceled(
 /// the task is still running trips its flag; if the task then returns `Ok` anyway (it had passed
 /// its last cancel checkpoint) the finished work is discarded and the job posts `Canceled`. A task
 /// whose `Ok` is a committed side effect uses [`run_blocking_with_heartbeat_keeping_ok`] instead.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_blocking_with_heartbeat<R, F, Fut>(
     api: &ApiClient,
@@ -460,10 +445,7 @@ where
 /// A well-typed `None` for [`run_blocking_with_heartbeat`]'s `on_cancel_acknowledged` param, for the
 /// callers with no intermediate "Canceling…" update to post. Naming a concrete future type lets the
 /// compiler infer `F`/`Fut` at the `None` call sites without a turbofish (sc-8928).
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) fn no_cancel_ack() -> Option<fn() -> std::future::Ready<WorkerResult<()>>> {
     None
 }
@@ -548,7 +530,7 @@ impl HeartbeatPump {
         let settings = settings.clone();
         let job_id = job_id.to_owned();
         let period = progress_report_interval(&settings);
-        let handle = tokio::spawn(async move {
+        let handle = crate::load_progress::spawn(async move {
             let mut interval = tokio::time::interval(period);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             // The caller has just posted a Busy heartbeat of its own alongside the status update
@@ -576,6 +558,21 @@ impl Drop for HeartbeatPump {
     fn drop(&mut self) {
         self.handle.abort();
     }
+}
+
+/// Await one region of job work under a [`HeartbeatPump`]. A managed model import copies the whole
+/// checkpoint into staging before it hashes anything; that copy emits no progress, and a multi-GB
+/// copy outlasts the 90s stale-worker sweep (`jobs_store::mark_stale_workers_interrupted`). The
+/// H3 terminal campaign's import copy took about two minutes and the healthy job was swept to
+/// `interrupted` with "No heartbeat from the worker for 90s" (run 40560917627).
+pub(crate) async fn with_job_heartbeat<T>(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    work: impl std::future::Future<Output = WorkerResult<T>>,
+) -> WorkerResult<T> {
+    let _heartbeat = HeartbeatPump::start(api, settings, job_id);
+    work.await
 }
 
 /// Check-only cancel poll (sc-5515): returns `true` when the user requested
@@ -627,10 +624,7 @@ tokio::task_local! {
 /// Run `future` with the process-shutdown [`SHUTDOWN_FLAG`] task-local bound to `shutdown`, so every
 /// consumer loop awaited within it can consult [`shutdown_requested`] at its cancel checkpoints
 /// (sc-9618). Scoped once around `run_utility_job`'s dispatch.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) async fn with_shutdown_flag<F>(shutdown: gen_core::CancelFlag, future: F) -> F::Output
 where
     F: std::future::Future,
@@ -651,6 +645,31 @@ pub(crate) fn shutdown_requested() -> bool {
 }
 
 pub(crate) async fn update_job(
+    api: &ApiClient,
+    job_id: &str,
+    payload: ProgressRequest,
+) -> WorkerResult<JobSnapshot> {
+    if let Some(session) = crate::load_progress::current(job_id) {
+        return session.post(api, payload).await;
+    }
+    post_job_progress(api, job_id, payload).await
+}
+
+/// Post a nonterminal cancellation acknowledgement with precedence over later phase reports.
+/// The explicit control channel avoids inferring cancellation from a UI message or shared stage.
+#[cfg(any(test, native_lane))]
+pub(crate) async fn update_job_cancelling(
+    api: &ApiClient,
+    job_id: &str,
+    payload: ProgressRequest,
+) -> WorkerResult<JobSnapshot> {
+    if let Some(session) = crate::load_progress::current(job_id) {
+        return session.post_cancelling(api, payload).await;
+    }
+    post_job_progress(api, job_id, payload).await
+}
+
+pub(crate) async fn post_job_progress(
     api: &ApiClient,
     job_id: &str,
     mut payload: ProgressRequest,
@@ -694,6 +713,20 @@ pub(crate) fn progress_payload(
     }
 }
 
+/// Shared GPU/analysis constructor; the utility constructor keeps its CPU defaults.
+pub(crate) fn progress_payload_for_backend(
+    status: JobStatus,
+    stage: ProgressStage,
+    progress: f64,
+    message: &str,
+    result: Option<JsonObject>,
+    backend: &str,
+) -> ProgressRequest {
+    let mut payload = progress_payload(status, stage, progress, message, None, result, None);
+    payload.backend = Some(backend.to_owned());
+    payload
+}
+
 pub(crate) fn number_from_f64(value: f64) -> ContractNumber {
     Number::from_f64(value).unwrap_or_else(|| Number::from(0))
 }
@@ -701,6 +734,33 @@ pub(crate) fn number_from_f64(value: f64) -> ContractNumber {
 #[cfg(test)]
 mod shutdown_flag_tests {
     use super::*;
+
+    #[test]
+    fn backend_progress_constructor_preserves_shared_defaults() {
+        let result = Some(JsonObject::from_iter([("count".to_owned(), json!(3))]));
+        let mut expected = progress_payload(
+            JobStatus::Running,
+            ProgressStage::Running,
+            0.25,
+            "working",
+            None,
+            result.clone(),
+            None,
+        );
+        expected.backend = Some("candle".to_owned());
+        let actual = progress_payload_for_backend(
+            JobStatus::Running,
+            ProgressStage::Running,
+            0.25,
+            "working",
+            result,
+            "candle",
+        );
+        assert_eq!(
+            serde_json::to_value(actual).expect("actual"),
+            serde_json::to_value(expected).expect("expected")
+        );
+    }
 
     /// sc-9618: outside a scoped job the task-local is unset, so a consumer loop's checkpoint reads
     /// "no shutdown" and keeps running (never spuriously cancels a job in a unit test).

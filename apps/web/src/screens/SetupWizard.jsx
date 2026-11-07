@@ -1,14 +1,15 @@
+import { useConsentRequestOwner } from "../hooks/useConsentRequestOwner.js";
+import { downloadSizeText } from "../formatting.js";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { LicenseGateNotice, gatedRepoUrl } from "../components/LicenseGateNotice.jsx";
+import { useLicenseAcknowledgments } from "../hooks/useLicenseAcknowledgments.js";
 import { Logo } from "../components/Logo.jsx";
 import { terminalStatuses } from "../constants.js";
 import {
   licenseAcknowledgmentBlocked,
   offerableWithoutLicenseUi,
-  readLicenseAck,
   requiresLicenseAcknowledgment,
-  writeLicenseAck,
 } from "../licenseAcknowledgment.js";
 import { audioModelUsable } from "../modelEligibility.js";
 import { isDesktop, tauriInvoke } from "../runtime.js";
@@ -60,12 +61,6 @@ function isOfferable(model, caps) {
   );
 }
 
-function downloadSizeText(model) {
-  if (!model.downloadSizeLabel) {
-    return "Size unavailable";
-  }
-  return model.downloadSizeEstimated ? `~${model.downloadSizeLabel}` : model.downloadSizeLabel;
-}
 
 function defaultSelection(models, caps) {
   return new Set(
@@ -100,6 +95,7 @@ function typeRank(type) {
 
 export function SetupWizard({
   models,
+  token = "",
   jobs,
   macCapabilities,
   onDownloadModel,
@@ -108,18 +104,13 @@ export function SetupWizard({
   onOpenQueue,
 }) {
   const [step, setStep] = useState("models");
+  const captureConsentOwner = useConsentRequestOwner(token, models, undefined, step);
   const [selected, setSelected] = useState(() => defaultSelection(models, macCapabilities));
   const [started, setStarted] = useState(() => new Set());
-  // Per-model licence acknowledgments (sc-7872 / sc-17227), mirroring the Models screen: the
-  // STORE (localStorage) is what `createModelDownloadJob` reads, so every toggle persists there
-  // and this state only mirrors it for rendering. Seeded from the store in the catalog effect
-  // below so an acknowledgment taken earlier on the Models screen is not re-asked here.
-  const [licenseAcks, setLicenseAcks] = useState(() => new Set());
-  // Per-click download refusals, BY NAME. `onDownloadModel` (the shared choke point) returns null
-  // when it refuses — including for an unacknowledged licence — and the app-level error banner is
-  // hidden behind this overlay, so the wizard must say itself which rows did NOT start.
+  const { licenseAcks, setLicenseAck, licenseAckError } = useLicenseAcknowledgments(models, token);
   const [refusals, setRefusals] = useState([]);
   const [queueing, setQueueing] = useState(false);
+  useEffect(() => { setQueueing(false); }, [token, models, step]);
   const [projectName, setProjectName] = useState("");
   const [submitting, setSubmitting] = useState(false);
   // When the first project can't be created — almost always because the chosen
@@ -135,13 +126,6 @@ export function SetupWizard({
   useEffect(() => {
     if (!initializedRef.current && models.length) {
       setSelected(defaultSelection(models, macCapabilities));
-      setLicenseAcks(
-        new Set(
-          models
-            .filter((model) => requiresLicenseAcknowledgment(model) && readLicenseAck(model.id))
-            .map((model) => model.id),
-        ),
-      );
       initializedRef.current = true;
     }
   }, [models, macCapabilities]);
@@ -189,20 +173,6 @@ export function SetupWizard({
     });
   }
 
-  function toggleLicenseAck(model, acknowledged) {
-    // Persist FIRST: the choke point (`createModelDownloadJob`) reads the store, not this state.
-    writeLicenseAck(model.id, acknowledged);
-    setLicenseAcks((current) => {
-      const next = new Set(current);
-      if (acknowledged) {
-        next.add(model.id);
-      } else {
-        next.delete(model.id);
-      }
-      return next;
-    });
-  }
-
   // Queue each pending selection through the shared choke point and mark `started` ONLY for the
   // rows that actually produced a job. `onDownloadModel` returns null on refusal — an
   // unacknowledged licence, or any API error — and the old fire-and-forget version marked every
@@ -213,6 +183,8 @@ export function SetupWizard({
     if (queueing) {
       return;
     }
+    const ownsRequest = captureConsentOwner(token);
+    if (!ownsRequest()) return;
     setQueueing(true);
     setRefusals([]);
     const startedNow = [];
@@ -220,27 +192,14 @@ export function SetupWizard({
     try {
       for (const model of pendingSelection) {
         const name = model.name ?? model.id;
-        // Ask the STORE, not this component's mirror. The choke point
-        // (`createModelDownloadJob`) reads the persisted ack, so the mirror is the wrong
-        // authority: when `writeLicenseAck` cannot persist (private mode, quota) it swallows the
-        // failure by design, leaving the checkbox ticked over a store that never took it. Gating on
-        // the mirror let that row sail past this branch and get refused downstream with the generic
-        // "download did not start", which names neither the licence nor the cause. Reading the store
-        // keeps the gate fail-CLOSED (an unreadable store answers "not acknowledged") and puts the
-        // licence-specific message on the path that actually happens.
-        if (licenseAcknowledgmentBlocked(model)) {
-          // Refuse locally with the wizard's own remedy: the checkbox is on this row, so pointing
-          // at the Models screen (the choke point's message) would be a detour. When the mirror and
-          // the store DISAGREE the user already did accept, so "accept it first" would be a lie —
-          // name the storage failure instead, since re-ticking the box cannot fix it.
-          refusedNow.push(
-            licenseAcks.has(model.id)
-              ? `${name} was not downloaded — this browser could not save the license acknowledgment (private browsing, or site storage is full). Allow site storage for SceneWorks, then accept the license above again.`
-              : `${name} was not downloaded — accept its license above first.`,
-          );
+        const blocked = await licenseAcknowledgmentBlocked(model, token);
+        if (!ownsRequest()) return;
+        if (blocked) {
+          refusedNow.push(`${name} was not downloaded — accept its license above first.`);
           continue;
         }
         const job = await onDownloadModel(model);
+        if (!ownsRequest()) return;
         if (job) {
           startedNow.push(model.id);
         } else {
@@ -251,8 +210,11 @@ export function SetupWizard({
         setStarted((current) => new Set([...current, ...startedNow]));
       }
       setRefusals(refusedNow);
+    } catch (err) {
+      if (!ownsRequest()) return;
+      setRefusals([...refusedNow, `Could not check license acknowledgment: ${err.message}`]);
     } finally {
-      setQueueing(false);
+      if (ownsRequest()) setQueueing(false);
     }
   }
 
@@ -299,6 +261,7 @@ export function SetupWizard({
 
   return (
     <section className="setup-wizard">
+      {licenseAckError ? <p role="alert" className="inline-warning">{licenseAckError}</p> : null}
       <div className="setup-wizard-card">
         <span className="setup-wizard-mark" aria-hidden="true">
           <Logo size={48} />
@@ -348,18 +311,18 @@ export function SetupWizard({
                                 {recommended && !installed ? <span className="setup-wizard-tag">Recommended</span> : null}
                               </span>
                               <span className="setup-wizard-model-meta">
-                                {installed ? "Already installed" : downloading ? "Download started" : downloadSizeText(model)}
+                                {installed ? "Already installed" : downloading ? "Download started" : downloadSizeText(model, "Size unavailable")}
                               </span>
                             </span>
                           </label>
                           {licenseGate ? (
                             <LicenseGateNotice
-                              acknowledged={licenseAcks.has(model.id)}
+                              acknowledged={licenseAcks[model.id] === true}
                               credentialRequired={model.gated === true}
                               host={model.credentialHost}
                               licenseNotice={model.licenseNotice}
                               licenseUrl={model.licenseUrl}
-                              onAcknowledgeChange={(checked) => toggleLicenseAck(model, checked)}
+                              onAcknowledgeChange={(checked) => setLicenseAck(model.id, checked)}
                               repoUrl={gatedRepoUrl(model)}
                               variant="onboarding"
                             />

@@ -9,11 +9,7 @@ use gen_core::{
     OffloadPolicy, PinnedWeightsFile, Precision, Quant, WeightsSource,
 };
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
-))]
+#[cfg(any(native_lane, test))]
 use crate::cache_thread::CacheThread;
 use crate::cache_thread::{self, CacheAccess, CacheJob, Fingerprint, SeamMessages};
 use crate::WorkerResult;
@@ -44,16 +40,12 @@ struct CachedGenerator {
     provider_resident_bytes: u64,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
-))]
+#[cfg(any(native_lane, test))]
 type GeneratorCache = CacheThread<LoadIdentity, CachedGenerator>;
 type GeneratorJob = CacheJob<LoadIdentity, CachedGenerator>;
 
-const GENERATOR_CACHE_IDLE_SECONDS_ENV: &str = "SCENEWORKS_GENERATOR_CACHE_IDLE_SECONDS";
-const DEFAULT_GENERATOR_CACHE_IDLE_SECONDS: u64 = 300;
+#[cfg(test)]
+const DEFAULT_GENERATOR_CACHE_IDLE_SECONDS: u64 = cache_thread::DEFAULT_CACHE_IDLE_SECONDS;
 
 /// The generator cache does NOT free the backend cache before a cold load (unlike the refine cache,
 /// which sets this `true` to bound peak memory to one ~16 GB model). A cold miss here clears the
@@ -87,7 +79,7 @@ fn capture_backend_committed_bytes() -> WorkerResult<u64> {
     Ok(0)
 }
 
-#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle"), not(test)))]
+#[cfg(not(any(test, native_lane)))]
 fn capture_backend_committed_bytes() -> WorkerResult<u64> {
     Ok(0)
 }
@@ -148,6 +140,35 @@ const fn provider_resident_delta(
     post_load_committed_bytes.saturating_sub(pre_load_committed_bytes)
 }
 
+/// Constructed only after imported plan authority and the actual prepared source seals agree.
+#[derive(Clone, Debug)]
+pub(crate) struct PreparedH3CacheContext {
+    pub(crate) identity: String,
+    pub(crate) receipt: sceneworks_core::minimax_h3_load::PreparedH3Load,
+}
+
+/// Load sources for the original request-aware cache callback. Ordinary callers retain their
+/// LoadSpec API; imported H3 additionally carries its content-bound prepared closure.
+pub(crate) struct GeneratorRequestLoad {
+    spec: LoadSpec,
+    prepared_h3: Option<PreparedH3CacheContext>,
+}
+
+impl From<LoadSpec> for GeneratorRequestLoad {
+    fn from(spec: LoadSpec) -> Self {
+        Self {
+            spec,
+            prepared_h3: None,
+        }
+    }
+}
+
+impl From<(LoadSpec, Option<PreparedH3CacheContext>)> for GeneratorRequestLoad {
+    fn from((spec, prepared_h3): (LoadSpec, Option<PreparedH3CacheContext>)) -> Self {
+        Self { spec, prepared_h3 }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LoadIdentity {
     engine_id: String,
@@ -177,6 +198,8 @@ pub(crate) struct LoadIdentity {
     /// companion (for example a File encoder's sibling config or selected tokenizer) is not nested
     /// beneath any `WeightsSource` slot.
     prepared_files: Vec<PinnedWeightsFile>,
+    /// Plan-bound imported H3 closure, including native sibling files outside configured Dir slots.
+    imported_h3: Option<(String, Vec<PinnedWeightsFile>)>,
     /// sc-24806: an MLX load released from its declared Sequential policy to eager Resident
     /// (`Eligible` + `Resident`) has no staging seam, so it must never warm-serve a request that
     /// still needs the declared Sequential load (or the reverse); the two reload instead.
@@ -272,6 +295,64 @@ struct CacheIdentityWeights {
 }
 
 impl LoadIdentity {
+    /// Names of the identity fields that differ from `other`, in declaration order. Explains a cache
+    /// miss (sc-27985): a reload that silently discards a resident model is otherwise
+    /// indistinguishable from a cache defect.
+    pub(crate) fn changed_fields(&self, other: &Self) -> Vec<&'static str> {
+        // Exhaustive destructure: a new identity field fails to compile until it is reported here.
+        let Self {
+            engine_id,
+            resolved_route,
+            decode_geometry_policies,
+            decode_geometry_policy_authoritative,
+            decode_quality_runtime_identity,
+            weights,
+            quantize,
+            precision,
+            control,
+            extra_controls,
+            ip_adapter,
+            adapters,
+            pid,
+            identity,
+            text_encoder,
+            components,
+            prepared_files,
+            imported_h3,
+            released_resident,
+            sdxl_cuda_offload_policy,
+        } = self;
+        let mut changed = Vec::new();
+        macro_rules! field {
+            ($name:ident) => {
+                if *$name != other.$name {
+                    changed.push(stringify!($name));
+                }
+            };
+        }
+        field!(engine_id);
+        field!(resolved_route);
+        field!(decode_geometry_policies);
+        field!(decode_geometry_policy_authoritative);
+        field!(decode_quality_runtime_identity);
+        field!(weights);
+        field!(quantize);
+        field!(precision);
+        field!(control);
+        field!(extra_controls);
+        field!(ip_adapter);
+        field!(adapters);
+        field!(pid);
+        field!(identity);
+        field!(text_encoder);
+        field!(components);
+        field!(prepared_files);
+        field!(imported_h3);
+        field!(released_resident);
+        field!(sdxl_cuda_offload_policy);
+        changed
+    }
+
     /// The named components (`LoadSpec::components` ids, e.g. Iris's `text_encoder`) this identity
     /// was loaded with. Test/introspection helper.
     #[cfg(test)]
@@ -283,6 +364,24 @@ impl LoadIdentity {
     pub(crate) fn from_load_spec(engine_id: &str, spec: &LoadSpec) -> Self {
         Self::try_from_load_spec(engine_id, spec)
             .expect("unprepared LoadSpec cache identity remains infallible")
+    }
+
+    fn try_from_load_spec_with_h3(
+        engine_id: &str,
+        spec: &LoadSpec,
+        context: Option<&PreparedH3CacheContext>,
+    ) -> WorkerResult<Self> {
+        let mut key = Self::try_from_load_spec(engine_id, spec).map_err(|error| {
+            crate::classify_engine_error("Generator cache source validation failed", error)
+        })?;
+        if let Some(context) = context {
+            context
+                .receipt
+                .validate(spec)
+                .map_err(crate::WorkerError::InvalidPayload)?;
+            key.imported_h3 = Some((context.identity.clone(), context.receipt.files().to_vec()));
+        }
+        Ok(key)
     }
 
     pub(crate) fn try_from_load_spec(engine_id: &str, spec: &LoadSpec) -> gen_core::Result<Self> {
@@ -377,6 +476,7 @@ impl LoadIdentity {
                 .iter()
                 .map(|(_, pin)| pin.clone())
                 .collect(),
+            imported_h3: None,
             released_resident: cfg!(target_os = "macos")
                 && spec.load_shape_declaration_result == LoadShapeDeclarationResult::Eligible
                 && spec.offload_policy == OffloadPolicy::Resident,
@@ -486,10 +586,37 @@ impl CacheAdapterSpec {
     }
 }
 
+/// Selects the existing serialized cache worker; isolated tests use the same worker loop.
+#[derive(Clone)]
+pub(crate) struct GeneratorCacheHandle {
+    worker: mpsc::Sender<GeneratorJob>,
+    evict_transform: bool,
+}
+impl GeneratorCacheHandle {
+    pub(crate) fn global() -> Self {
+        Self {
+            worker: generator_worker().clone(),
+            evict_transform: true,
+        }
+    }
+    #[cfg(all(test, native_lane))]
+    pub(crate) fn isolated() -> (Self, thread::JoinHandle<()>) {
+        let (worker, rx) = mpsc::channel();
+        let join = thread::spawn(move || run_generator_cache_worker(rx, None));
+        (
+            Self {
+                worker,
+                evict_transform: false,
+            },
+            join,
+        )
+    }
+}
+
 fn generator_worker() -> &'static mpsc::Sender<GeneratorJob> {
     GENERATOR_WORKER.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<GeneratorJob>();
-        let idle_timeout = generator_cache_idle_timeout_from_env();
+        let idle_timeout = cache_thread::idle_timeout_from_env();
         thread::Builder::new()
             .name("sceneworks-mlx-generator-cache".to_owned())
             .spawn(move || {
@@ -519,14 +646,26 @@ fn run_generator_cache_worker(rx: mpsc::Receiver<GeneratorJob>, idle_timeout: Op
     );
 }
 
-fn generator_cache_idle_timeout_from_env() -> Option<Duration> {
-    generator_cache_idle_timeout(
-        std::env::var(GENERATOR_CACHE_IDLE_SECONDS_ENV)
-            .ok()
-            .as_deref(),
-    )
+/// Documented event (docs/observability.md): why a request cold-loads instead of reusing the
+/// resident generator — an empty cache, or the identity fields that differ from the resident key.
+fn log_generator_cache_miss(resident: Option<&LoadIdentity>, incoming: &LoadIdentity) {
+    match resident {
+        None => tracing::info!(
+            event = "generator_cache_miss",
+            engine = %incoming.engine_id,
+            reason = "empty",
+        ),
+        Some(resident) => tracing::info!(
+            event = "generator_cache_miss",
+            engine = %incoming.engine_id,
+            reason = "identity_changed",
+            residentEngine = %resident.engine_id,
+            changed = %resident.changed_fields(incoming).join(","),
+        ),
+    }
 }
 
+#[cfg(test)]
 fn generator_cache_idle_timeout(raw: Option<&str>) -> Option<Duration> {
     cache_thread::idle_timeout_from_secs(raw, DEFAULT_GENERATOR_CACHE_IDLE_SECONDS)
 }
@@ -625,10 +764,7 @@ pub(crate) fn resolve_gpu_memory_limit(requested: u64, total_unified_bytes: Opti
     let Some(total) = total_unified_bytes else {
         return 0;
     };
-    let total_gb = total as f64 / crate::fit_gate::BYTES_PER_GIB;
-    let reserve = (crate::fit_gate::legacy_unified_reserve(total_gb).gb
-        * crate::fit_gate::BYTES_PER_GIB) as u64;
-    total.saturating_sub(reserve)
+    crate::fit_gate::unified_available_bytes(total)
 }
 
 /// The device's wired-residency ceiling in bytes (`recommendedMaxWorkingSetSize`), derived once.
@@ -794,7 +930,7 @@ pub(crate) fn write_gpu_telemetry(config_dir: &Path) {
 /// worker's lifetime (aborted when the process exits).
 #[cfg(all(target_os = "macos", not(test)))]
 pub(crate) fn spawn_gpu_telemetry(config_dir: PathBuf) {
-    tokio::spawn(async move {
+    crate::load_progress::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(2));
         loop {
             ticker.tick().await;
@@ -1271,7 +1407,7 @@ where
 
 pub(crate) async fn with_cached_generator_for_request_using<R>(
     engine_id: &'static str,
-    spec: LoadSpec,
+    load: impl Into<GeneratorRequestLoad> + Send,
     load_error_context: impl Into<String>,
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
@@ -1290,11 +1426,52 @@ pub(crate) async fn with_cached_generator_for_request_using<R>(
 where
     R: Send + 'static,
 {
-    with_cached_generator_for_request_after_cold_admission_using_on(
-        generator_worker(),
-        crate::transform_cache::evict_resident_transform(),
+    with_cached_generator_for_request_using_cache(
+        GeneratorCacheHandle::global(),
+        engine_id,
+        load,
+        load_error_context,
+        load_generator,
+        run,
+    )
+    .await
+}
+
+pub(crate) async fn with_cached_generator_for_request_using_cache<R>(
+    cache: GeneratorCacheHandle,
+    engine_id: &'static str,
+    load: impl Into<GeneratorRequestLoad> + Send,
+    load_error_context: impl Into<String>,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+    run: impl FnOnce(
+            &dyn Generator,
+            MemoryCacheState,
+            ExecutionPolicy,
+            crate::execution_planner::WarmPolicyProposal,
+            u64,
+            u64,
+        ) -> WorkerResult<R>
+        + Send
+        + 'static,
+) -> WorkerResult<R>
+where
+    R: Send + 'static,
+{
+    let GeneratorRequestLoad { spec, prepared_h3 } = load.into();
+    with_cached_generator_for_request_after_cold_admission_using_on_with_h3(
+        &cache.worker,
+        async {
+            if cache.evict_transform {
+                crate::transform_cache::evict_resident_transform().await
+            } else {
+                Ok(false)
+            }
+        },
         engine_id,
         spec,
+        prepared_h3,
         load_error_context,
         0,
         |_| Ok(()),
@@ -1309,7 +1486,7 @@ async fn with_cached_generator_for_request_using_on<R>(
     worker: &mpsc::Sender<GeneratorJob>,
     evict_transform: impl std::future::Future<Output = WorkerResult<bool>> + Send,
     engine_id: &'static str,
-    spec: LoadSpec,
+    load: impl Into<GeneratorRequestLoad> + Send,
     load_error_context: impl Into<String>,
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
@@ -1328,11 +1505,13 @@ async fn with_cached_generator_for_request_using_on<R>(
 where
     R: Send + 'static,
 {
-    with_cached_generator_for_request_after_cold_admission_using_on(
+    let GeneratorRequestLoad { spec, prepared_h3 } = load.into();
+    with_cached_generator_for_request_after_cold_admission_using_on_with_h3(
         worker,
         evict_transform,
         engine_id,
         spec,
+        prepared_h3,
         load_error_context,
         0,
         |_| Ok(()),
@@ -1342,6 +1521,7 @@ where
     .await
 }
 
+#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
 #[allow(clippy::too_many_arguments)]
 async fn with_cached_generator_for_request_after_cold_admission_using_on<R>(
     worker: &mpsc::Sender<GeneratorJob>,
@@ -1368,15 +1548,55 @@ async fn with_cached_generator_for_request_after_cold_admission_using_on<R>(
 where
     R: Send + 'static,
 {
+    with_cached_generator_for_request_after_cold_admission_using_on_with_h3(
+        worker,
+        evict_transform,
+        engine_id,
+        spec,
+        None,
+        load_error_context,
+        incoming_reclaimable_weight_bytes,
+        cold_admission,
+        load_generator,
+        run,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn with_cached_generator_for_request_after_cold_admission_using_on_with_h3<R>(
+    worker: &mpsc::Sender<GeneratorJob>,
+    evict_transform: impl std::future::Future<Output = WorkerResult<bool>> + Send,
+    engine_id: &'static str,
+    spec: LoadSpec,
+    prepared_h3: Option<PreparedH3CacheContext>,
+    load_error_context: impl Into<String>,
+    incoming_reclaimable_weight_bytes: u64,
+    cold_admission: impl FnOnce(u64) -> WorkerResult<()> + Send + 'static,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+    run: impl FnOnce(
+            &dyn Generator,
+            MemoryCacheState,
+            ExecutionPolicy,
+            crate::execution_planner::WarmPolicyProposal,
+            u64,
+            u64,
+        ) -> WorkerResult<R>
+        + Send
+        + 'static,
+) -> WorkerResult<R>
+where
+    R: Send + 'static,
+{
     // One resident engine across the generator and transform caches (sc-25683): a resident
     // restoration transform is dropped before a generator can load on top of it. A no-op when no
     // transform was ever loaded. Injected (production passes the process-global
     // `transform_cache::evict_resident_transform`) so a test on a local cache worker never evicts the
     // global transform another test is asserting on.
     evict_transform.await?;
-    let key = LoadIdentity::try_from_load_spec(engine_id, &spec).map_err(|error| {
-        crate::classify_engine_error("Generator cache source validation failed", error)
-    })?;
+    let key = LoadIdentity::try_from_load_spec_with_h3(engine_id, &spec, prepared_h3.as_ref())?;
     let requested_policy = ExecutionPolicy::from_load_spec(&spec);
     let load_error_context = load_error_context.into();
     let admission_spec = spec.clone();
@@ -1441,10 +1661,13 @@ where
             cached.provider_resident_bytes,
         )
     };
+    let incoming_key = key.clone();
     cache_thread::run_cached_with_access_after_cold_admission(
         worker,
         key,
         move |resident| {
+            log_generator_cache_miss(resident.map(|(key, _)| key), &incoming_key);
+            let resident = resident.map(|(_, cached)| cached);
             admission_spec
                 .validate_prepared_file_pins()
                 .map_err(|error| {
@@ -1487,7 +1710,9 @@ where
     // One resident engine across the generator and transform caches (sc-25683).
     crate::transform_cache::evict_resident_transform().await?;
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<WorkerResult<R>>();
+    let progress_context = crate::load_progress::Context::capture();
     let job: GeneratorJob = Box::new(move |cache: &mut GeneratorCache| {
+        let _progress = progress_context.install();
         let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // Free the resident cached generator (if any) before loading the fresh one, so the process
             // has room for the large in-place weights. On CUDA `release_backend_cache_after_evict` is a
@@ -1564,10 +1789,7 @@ where
 /// On macOS it is YuE2's admission lever too (sc-23001): YuE2 runs on candle-Metal beside the MLX
 /// generator the cache keeps warm for 300 s after an image job, in the same unified working set, so a
 /// render that fits only without that generator evicts it first (the release clears the MLX cache).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn evict_cached_generator() -> WorkerResult<bool> {
     evict_cached_generator_on(generator_worker()).await
 }
@@ -1576,13 +1798,12 @@ pub(crate) async fn evict_cached_generator() -> WorkerResult<bool> {
 /// enqueues the same eviction job and waits for the generator thread's reply synchronously. Never
 /// call it from the generator cache thread itself (it would wait on its own queue) or from inside a
 /// Tokio runtime worker (it blocks).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn evict_cached_generator_blocking() -> WorkerResult<bool> {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<bool>();
+    let progress_context = crate::load_progress::Context::capture();
     let job: GeneratorJob = Box::new(move |cache: &mut GeneratorCache| {
+        let _progress = progress_context.install();
         let evicted = cache.evict().is_some();
         if evicted {
             cache_thread::release_backend_cache_after_evict();
@@ -1609,7 +1830,9 @@ async fn cached_generator_resident_bytes_on(
     worker: &mpsc::Sender<GeneratorJob>,
 ) -> WorkerResult<Option<u64>> {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<Option<u64>>();
+    let progress_context = crate::load_progress::Context::capture();
     let job: GeneratorJob = Box::new(move |cache: &mut GeneratorCache| {
+        let _progress = progress_context.install();
         let _ = reply_tx.send(
             cache
                 .resident_model()
@@ -1627,13 +1850,12 @@ async fn cached_generator_resident_bytes_on(
 /// [`evict_cached_generator`] against a caller-supplied cache-worker sender — the seam a unit test drives
 /// its own seeded [`GeneratorCache`] worker through (the production entry point uses the process-global
 /// [`generator_worker`]).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn evict_cached_generator_on(worker: &mpsc::Sender<GeneratorJob>) -> WorkerResult<bool> {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<bool>();
+    let progress_context = crate::load_progress::Context::capture();
     let job: GeneratorJob = Box::new(move |cache: &mut GeneratorCache| {
+        let _progress = progress_context.install();
         let evicted = cache.evict().is_some();
         if evicted {
             // On CUDA a no-op (cudarc has no empty_cache); the evicted generator's drop already
@@ -1702,7 +1924,9 @@ pub(crate) async fn load_stub_into_global_cache(weights: &Path) -> WorkerResult<
 #[cfg(test)]
 pub(crate) async fn global_generator_resident() -> Option<Vec<String>> {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<Option<Vec<String>>>();
+    let progress_context = crate::load_progress::Context::capture();
     let job: GeneratorJob = Box::new(move |cache: &mut GeneratorCache| {
+        let _progress = progress_context.install();
         let _ = reply_tx.send(cache.resident_key().map(LoadIdentity::component_ids));
     });
     generator_worker()
@@ -1860,6 +2084,98 @@ mod tests {
     }
 
     #[test]
+    fn imported_h3_cache_key_includes_sealed_component_contents_and_membership() {
+        let root = tempfile::tempdir().unwrap();
+        for component in [
+            "transformer",
+            "transformer_ref",
+            "text_encoder",
+            "vae",
+            "audio_vae",
+            "tokenizer",
+        ] {
+            std::fs::create_dir_all(root.path().join(component)).unwrap();
+            std::fs::write(
+                root.path().join(component).join("model.safetensors"),
+                component,
+            )
+            .unwrap();
+        }
+        let fresh = || LoadSpec::new(WeightsSource::Dir(root.path().to_owned()));
+        let mut spec = fresh();
+        let receipt = sceneworks_core::minimax_h3_load::PreparedH3Load::prepare(&mut spec).unwrap();
+        let key = LoadIdentity::try_from_load_spec("minimax_h3", &spec).unwrap();
+        let mut same = fresh();
+        sceneworks_core::minimax_h3_load::PreparedH3Load::prepare(&mut same).unwrap();
+        assert_eq!(
+            key,
+            LoadIdentity::try_from_load_spec("minimax_h3", &same).unwrap()
+        );
+        std::fs::write(
+            root.path().join("audio_vae/model.safetensors"),
+            b"different decoder",
+        )
+        .unwrap();
+        assert!(receipt.validate(&spec).is_err());
+        let mut changed = fresh();
+        sceneworks_core::minimax_h3_load::PreparedH3Load::prepare(&mut changed).unwrap();
+        assert_ne!(
+            key,
+            LoadIdentity::try_from_load_spec("minimax_h3", &changed).unwrap()
+        );
+        let key = LoadIdentity::try_from_load_spec("minimax_h3", &changed).unwrap();
+        std::fs::write(
+            root.path().join("transformer/adaln-table.safetensors"),
+            b"new table",
+        )
+        .unwrap();
+        let mut table = fresh();
+        sceneworks_core::minimax_h3_load::PreparedH3Load::prepare(&mut table).unwrap();
+        assert_ne!(
+            key,
+            LoadIdentity::try_from_load_spec("minimax_h3", &table).unwrap()
+        );
+    }
+
+    #[test]
+    fn imported_h3_supplemental_key_covers_semantic_plan_and_external_reference() {
+        let root = tempfile::tempdir().unwrap();
+        let backbone = tempfile::tempdir().unwrap();
+        for name in ["transformer", "transformer_ref"] {
+            std::fs::create_dir_all(backbone.path().join(name)).unwrap();
+            std::fs::write(backbone.path().join(name).join("model.safetensors"), name).unwrap();
+        }
+        let prepare = |identity: &str| {
+            let mut spec = LoadSpec::new(WeightsSource::Dir(root.path().to_owned()));
+            spec.components.insert(
+                "transformer".into(),
+                WeightsSource::Dir(backbone.path().join("transformer")),
+            );
+            let receipt =
+                sceneworks_core::minimax_h3_load::PreparedH3Load::prepare(&mut spec).unwrap();
+            let context = PreparedH3CacheContext {
+                identity: identity.to_owned(),
+                receipt,
+            };
+            LoadIdentity::try_from_load_spec_with_h3("minimax_h3", &spec, Some(&context)).unwrap()
+        };
+        let before = prepare("source-bound-plan:schedule-a");
+        assert_eq!(before, prepare("source-bound-plan:schedule-a"));
+        assert_ne!(before, prepare("source-bound-plan:schedule-b"));
+        // sc-27985 cache-miss reasons must name the imported closure, not report an empty diff.
+        assert_eq!(
+            before.changed_fields(&prepare("source-bound-plan:schedule-b")),
+            ["imported_h3"]
+        );
+        std::fs::write(
+            backbone.path().join("transformer_ref/model.safetensors"),
+            b"different reference table",
+        )
+        .unwrap();
+        assert_ne!(before, prepare("source-bound-plan:schedule-a"));
+    }
+
+    #[test]
     fn cache_key_includes_adapter_fingerprint() {
         let dir = tempfile::tempdir().expect("tempdir");
         let adapter = dir.path().join("style.safetensors");
@@ -1877,6 +2193,31 @@ mod tests {
         assert_ne!(
             LoadIdentity::from_load_spec("z_image_turbo", &with_adapter),
             LoadIdentity::from_load_spec("z_image_turbo", &different_scale)
+        );
+    }
+
+    #[test]
+    fn cache_miss_reason_names_only_the_changed_identity_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let adapter = dir.path().join("style.safetensors");
+        std::fs::write(&adapter, b"adapter").expect("write adapter");
+        let base = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/models/base")))
+            .with_resolved_route("moss_image_sft:Off:edit=false");
+        let mut with_adapter = base.clone();
+        with_adapter.adapters = vec![AdapterSpec::new(adapter, 1.0, AdapterKind::Lora)];
+        let accelerated = base
+            .clone()
+            .with_resolved_route("moss_image_sft:Dmd:edit=false");
+        let identity = |spec: &LoadSpec| LoadIdentity::from_load_spec("moss_image_sft", spec);
+
+        assert!(identity(&base).changed_fields(&identity(&base)).is_empty());
+        assert_eq!(
+            identity(&with_adapter).changed_fields(&identity(&base)),
+            ["adapters"]
+        );
+        assert_eq!(
+            identity(&base).changed_fields(&identity(&accelerated)),
+            ["resolved_route"]
         );
     }
 
@@ -3856,6 +4197,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prepared_h3_uses_original_request_callback_for_cold_warm_and_changed_identity() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let (tx, rx) = mpsc::channel::<GeneratorJob>();
+        let worker = thread::spawn(move || run_generator_cache_worker(rx, None));
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("transformer")).unwrap();
+        std::fs::write(
+            root.path().join("transformer/model.safetensors"),
+            b"sealed fixture",
+        )
+        .unwrap();
+        let mut spec = LoadSpec::new(WeightsSource::Dir(root.path().to_owned()))
+            .with_offload_policy(OffloadPolicy::Sequential);
+        let receipt = sceneworks_core::minimax_h3_load::PreparedH3Load::prepare(&mut spec).unwrap();
+        let loads = Arc::new(AtomicUsize::new(0));
+        for (identity, expected) in [
+            ("source-bound-schedule-17", MemoryCacheState::Cold),
+            ("source-bound-schedule-17", MemoryCacheState::Warm),
+            ("source-bound-schedule-23", MemoryCacheState::Cold),
+        ] {
+            let expected_pins = spec.prepared_file_pins().clone();
+            let loads = loads.clone();
+            let context = PreparedH3CacheContext {
+                identity: identity.to_owned(),
+                receipt: receipt.clone(),
+            };
+            let state = with_cached_generator_for_request_using_on(
+                &tx,
+                no_transform_eviction(),
+                "sc3724_stub",
+                (spec.clone(), Some(context)),
+                "stub load",
+                move |_, received| {
+                    assert_eq!(received.prepared_file_pins(), &expected_pins);
+                    loads.fetch_add(1, Ordering::SeqCst);
+                    stub_load(received)
+                },
+                |_, state, policy, warm_policy, external, provider| {
+                    assert_eq!(policy.offload_policy, OffloadPolicy::Sequential);
+                    // Unit-cache backend probes are deliberately zero and create no device.
+                    assert_eq!((external, provider), (0, 0));
+                    warm_policy.decline(
+                        crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory,
+                    );
+                    Ok(state)
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                state, expected,
+                "the original callback must retain the sealed semantic identity"
+            );
+        }
+        assert_eq!(loads.load(Ordering::SeqCst), 2);
+        drop(tx);
+        worker.join().unwrap();
+    }
+
+    #[tokio::test]
     async fn prepared_spec_reaches_loader_exactly_and_drives_cold_warm_stale_new_identity() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
@@ -4375,7 +4777,7 @@ mod tests {
         let (warm_started_tx, warm_started_rx) = mpsc::channel();
         let (warm_release_tx, warm_release_rx) = mpsc::channel();
         let warm_tx = tx.clone();
-        let warm = tokio::spawn(async move {
+        let warm = crate::load_progress::spawn(async move {
             with_cached_generator_using_cold_admission_on(
                 warm_tx,
                 no_transform_eviction(),
@@ -4401,7 +4803,7 @@ mod tests {
         let gate_called = Arc::new(AtomicBool::new(false));
         let cold_gate_called = gate_called.clone();
         let cold_tx = tx.clone();
-        let cold = tokio::spawn(async move {
+        let cold = crate::load_progress::spawn(async move {
             with_cached_generator_using_cold_admission_on(
                 cold_tx,
                 no_transform_eviction(),
@@ -4577,10 +4979,7 @@ mod tests {
         worker.join().expect("cache worker exits");
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[tokio::test]
     async fn evict_cached_generator_frees_the_resident_slot_and_no_ops_when_empty() {
         let (tx, rx) = mpsc::channel::<GeneratorJob>();

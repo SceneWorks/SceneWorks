@@ -27,12 +27,83 @@
 //! and update both wrappers — do not silently flip the flag here.
 
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::{mpsc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
 use tokio::sync::oneshot;
 
 use crate::{WorkerError, WorkerResult};
+
+/// Lock a process-wide cache, discarding suspect model state after an unwinding job.
+/// The reset policy retains each cache's cardinality/container contract (a single
+/// `Option` or a factor/path map). Deliberately retain the existing sticky poison:
+/// every later acquisition resets again; this helper does not certify the backend
+/// healthy or clear its poison. The returned guard keeps the model operation locked.
+pub(crate) fn lock_resetting<T>(cache: &Mutex<T>, reset: impl FnOnce(&mut T)) -> MutexGuard<'_, T> {
+    cache.lock().unwrap_or_else(|poisoned| {
+        let mut guard = poisoned.into_inner();
+        reset(&mut guard);
+        guard
+    })
+}
+
+/// Reuse one resident entry according to the caller's existing key policy, or load
+/// its replacement. Evaluate the fallible loader before dropping the previous
+/// entry, so a failed replacement retains it and the next request can retry.
+/// No thread-safety bounds are imposed on the resident model.
+pub(crate) fn get_or_load<T>(
+    slot: &mut Option<T>,
+    matches: impl FnOnce(&T) -> bool,
+    load: impl FnOnce() -> WorkerResult<T>,
+) -> WorkerResult<&mut T> {
+    if !slot.as_ref().is_some_and(matches) {
+        *slot = Some(load()?);
+    }
+    Ok(slot.as_mut().expect("cache entry loaded"))
+}
+
+/// Multi-resident sibling: retain every other factor/path entry on a miss or
+/// failed load, matching the upscaler's existing `HashMap::entry` contract.
+pub(crate) fn get_or_load_by_key<K: Eq + std::hash::Hash, T>(
+    entries: &mut std::collections::HashMap<K, T>,
+    key: K,
+    load: impl FnOnce() -> WorkerResult<T>,
+) -> WorkerResult<&mut T> {
+    use std::collections::hash_map::Entry;
+    Ok(match entries.entry(key) {
+        Entry::Occupied(entry) => entry.into_mut(),
+        Entry::Vacant(entry) => entry.insert(load()?),
+    })
+}
+
+/// Thread-local sibling for `!Send` models. Release the lookup borrow before
+/// building, then hold a shared borrow through use, exactly like the prior callers.
+#[cfg(any(native_lane, test))]
+pub(crate) fn get_or_load_local<T>(
+    cell: &std::cell::RefCell<Option<T>>,
+    matches: impl FnOnce(&T) -> bool,
+    load: impl FnOnce() -> WorkerResult<T>,
+) -> WorkerResult<std::cell::Ref<'_, T>> {
+    let cache_matches = cell.borrow().as_ref().is_some_and(matches);
+    if !cache_matches {
+        let value = load()?;
+        *cell.borrow_mut() = Some(value);
+    }
+    Ok(std::cell::Ref::map(cell.borrow(), |slot| {
+        slot.as_ref().expect("cache entry loaded")
+    }))
+}
+
+/// All resident model caches share one user setting and the same five-minute default.
+pub(crate) const CACHE_IDLE_SECONDS_ENV: &str = "SCENEWORKS_GENERATOR_CACHE_IDLE_SECONDS";
+pub(crate) const DEFAULT_CACHE_IDLE_SECONDS: u64 = 300;
+
+pub(crate) fn idle_timeout_from_env() -> Option<Duration> {
+    idle_timeout_from_secs(
+        std::env::var(CACHE_IDLE_SECONDS_ENV).ok().as_deref(),
+        DEFAULT_CACHE_IDLE_SECONDS,
+    )
+}
 
 /// A unit of work handed to a cache worker thread: a boxed closure that runs against the resident
 /// [`CacheThread`] on that thread and signals completion through its own captured reply channel. The
@@ -169,13 +240,14 @@ where
     /// [`Self::with_model_access`] with a hook that runs only for a genuine miss, while the previous
     /// resident entry is still alive. A live-memory gate can therefore observe the raw budget before
     /// replacement, account for the entry the cache is about to drop, and avoid touching an exact-key
-    /// warm hit. The hook receives the different resident model itself (or `None` on an empty cold
+    /// warm hit. The hook receives the different resident key and model (or `None` on an empty cold
     /// start), so callers can credit only metadata bound to that exact entry rather than a stale
-    /// process-global high-water. The entry is cleared only after admission succeeds.
+    /// process-global high-water, and can report why the key missed. The entry is cleared only after
+    /// admission succeeds.
     pub(crate) fn with_model_access_after_cold_admission<R>(
         &mut self,
         key: K,
-        cold_admission: impl FnOnce(Option<&M>) -> WorkerResult<()>,
+        cold_admission: impl FnOnce(Option<(&K, &M)>) -> WorkerResult<()>,
         load: impl FnOnce() -> WorkerResult<M>,
         run: impl FnOnce(&M, CacheAccess) -> WorkerResult<R>,
         entry_missing_msg: &str,
@@ -183,7 +255,7 @@ where
         let access = if self.entry.as_ref().is_some_and(|entry| entry.key == key) {
             CacheAccess::Warm
         } else {
-            cold_admission(self.entry.as_ref().map(|entry| &entry.model))?;
+            cold_admission(self.entry.as_ref().map(|entry| (&entry.key, &entry.model)))?;
             self.entry = None;
             if self.evict_before_load {
                 release_backend_cache_after_evict();
@@ -408,7 +480,7 @@ where
 pub(crate) async fn run_cached_with_access_after_cold_admission<K, M, R>(
     worker: &mpsc::Sender<CacheJob<K, M>>,
     key: K,
-    cold_admission: impl FnOnce(Option<&M>) -> WorkerResult<()> + Send + 'static,
+    cold_admission: impl FnOnce(Option<(&K, &M)>) -> WorkerResult<()> + Send + 'static,
     load: impl FnOnce() -> WorkerResult<M> + Send + 'static,
     run: impl FnOnce(&M, CacheAccess) -> WorkerResult<R> + Send + 'static,
     msgs: SeamMessages,
@@ -419,7 +491,9 @@ where
     R: Send + 'static,
 {
     let (reply_tx, reply_rx) = oneshot::channel::<WorkerResult<R>>();
+    let progress_context = crate::load_progress::Context::capture();
     let job: CacheJob<K, M> = Box::new(move |cache: &mut CacheThread<K, M>| {
+        let _progress = progress_context.install();
         // Contain a panic from inside the load/run so it fails THIS job with a clean error instead of
         // unwinding out of the shared cache thread and stopping every subsequent request (sc-6067).
         // The cached model is evicted on panic — post-abort backend state is suspect, so the next
@@ -475,7 +549,9 @@ where
     R: Send + 'static,
 {
     let (reply_tx, reply_rx) = oneshot::channel::<WorkerResult<R>>();
+    let progress_context = crate::load_progress::Context::capture();
     let job: CacheJob<K, M> = Box::new(move |cache: &mut CacheThread<K, M>| {
+        let _progress = progress_context.install();
         let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let request_active = || {
                 // A Tokio task can be aborted/dropped without first tripping its engine cancel
@@ -1089,5 +1165,28 @@ mod tests {
         assert_eq!(panic_message(s.as_ref()), "boom-str");
         let s = std::panic::catch_unwind(|| panic!("{}", "boom-string".to_owned())).unwrap_err();
         assert_eq!(panic_message(s.as_ref()), "boom-string");
+    }
+}
+
+#[cfg(test)]
+#[path = "cache_thread/process_cache_tests.rs"]
+mod process_cache_tests;
+
+#[cfg(test)]
+mod shared_idle_configuration_tests {
+    use super::*;
+    #[test]
+    fn shared_idle_env_preserves_default_parse_and_disabled_behavior() {
+        for (raw, seconds) in [
+            ("", Some(300)),
+            ("bad", Some(300)),
+            (" 42 ", Some(42)),
+            ("0", None),
+        ] {
+            crate::test_env::temp_env_var(CACHE_IDLE_SECONDS_ENV, raw, || {
+                assert_eq!(idle_timeout_from_env(), seconds.map(Duration::from_secs));
+            });
+        }
+        assert_eq!(DEFAULT_CACHE_IDLE_SECONDS, 300);
     }
 }

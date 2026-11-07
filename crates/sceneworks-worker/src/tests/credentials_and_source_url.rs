@@ -27,6 +27,28 @@ fn parse_credentials_env_tolerates_invalid_json() {
 }
 
 #[test]
+fn parse_credentials_env_warns_without_logging_the_body() {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+    #[derive(Clone)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> { self.0.lock().unwrap().extend_from_slice(bytes); Ok(bytes.len()) }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let writer = output.clone();
+    let subscriber = tracing_subscriber::fmt().with_ansi(false).without_time().with_writer(move || Capture(writer.clone())).finish();
+    tracing::subscriber::with_default(subscriber, || {
+        assert!(parse_credentials_env("{never-log-this-secret:").is_empty());
+    });
+    let logged = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+    assert!(logged.contains("WARN"));
+    assert!(logged.contains("SCENEWORKS_CREDENTIALS"));
+    assert!(!logged.contains("never-log-this-secret"));
+}
+
+#[test]
 fn secret_bearing_debug_output_is_redacted() {
     let mut settings =
         test_settings("https://huggingface.co".to_owned(), Some("hf-secret-token"));
@@ -580,4 +602,287 @@ fn has_bearer(headers: &HeaderMap, token: &str) -> bool {
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         == Some(expected.as_str())
+}
+
+#[tokio::test]
+async fn source_url_unknown_416_restarts_and_never_publishes_a_partial() {
+    for verified_total in [false, true] {
+        let temp = tempdir().unwrap();
+        let target = temp.path().join("style.safetensors");
+        let partial = temp.path().join("style.safetensors.partial");
+        let bytes = b"source-complete".to_vec();
+        tokio::fs::write(
+            &partial,
+            if verified_total {
+                &bytes[..]
+            } else {
+                b"bad-prefix"
+            },
+        )
+        .await
+        .unwrap();
+        let visible = target.clone();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let count = requests.clone();
+        let payload = bytes.clone();
+        let app = Router::new().route(
+            "/style.safetensors",
+            get(move |headers: HeaderMap| {
+                let visible = visible.clone();
+                let count = count.clone();
+                let payload = payload.clone();
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    assert!(
+                        !visible.exists(),
+                        "unverified partial must never be visible as a complete file"
+                    );
+                    if headers.contains_key(axum::http::header::RANGE) {
+                        let mut response = Response::new(Body::empty());
+                        *response.status_mut() = axum::http::StatusCode::RANGE_NOT_SATISFIABLE;
+                        if verified_total {
+                            response.headers_mut().insert(
+                                axum::http::header::CONTENT_RANGE,
+                                format!("bytes */{}", payload.len()).parse().unwrap(),
+                            );
+                        }
+                        response
+                    } else {
+                        payload.into_response()
+                    }
+                }
+            })
+            .head(|| async { axum::http::StatusCode::METHOD_NOT_ALLOWED }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let mut settings = test_settings("http://127.0.0.1:1".into(), None);
+        settings.allow_private_lora_urls = true;
+        let api = ApiClient::new(&settings);
+        let client = reqwest::Client::new();
+        download_source_url(
+            &DownloadContext {
+                api: &api,
+                client: &client,
+                settings: &settings,
+                job_id: "fixture",
+                cancel_message: "canceled",
+                fresh_download: false,
+            },
+            &format!("http://{address}/style.safetensors"),
+            temp.path(),
+            "fixture",
+            100,
+        )
+        .await
+        .unwrap();
+        assert_eq!(tokio::fs::read(&target).await.unwrap(), bytes);
+        assert!(!partial.exists());
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            if verified_total { 1 } else { 2 }
+        );
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn source_url_failures_preserve_old_targets_and_never_publish_partial_bytes() {
+    for (fails, old_target) in [(false, false), (false, true), (true, false), (true, true)] {
+        let app = Router::new().route(
+            "/style.safetensors",
+            get(move || async move {
+                if fails {
+                    return axum::http::StatusCode::BAD_GATEWAY.into_response();
+                }
+                let stream = futures_util::stream::iter([Ok::<_, std::io::Error>(
+                    axum::body::Bytes::from_static(b"too-many-bytes"),
+                )]);
+                Response::new(Body::from_stream(stream))
+            })
+            .head(|| async { axum::http::StatusCode::METHOD_NOT_ALLOWED }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let temp = tempdir().unwrap();
+        if old_target {
+            tokio::fs::write(temp.path().join("style.safetensors"), b"old")
+                .await
+                .unwrap();
+        }
+        let mut settings = test_settings("http://127.0.0.1:1".into(), None);
+        settings.allow_private_lora_urls = true;
+        let api = ApiClient::new(&settings);
+        let client = reqwest::Client::new();
+        let result = download_source_url(
+            &DownloadContext {
+                api: &api,
+                client: &client,
+                settings: &settings,
+                job_id: "fixture",
+                cancel_message: "canceled",
+                fresh_download: false,
+            },
+            &format!("http://{address}/style.safetensors"),
+            temp.path(),
+            "fixture",
+            4,
+        )
+        .await;
+        assert!(result.is_err());
+        if old_target {
+            assert_eq!(
+                tokio::fs::read(temp.path().join("style.safetensors"))
+                    .await
+                    .unwrap(),
+                b"old"
+            );
+        } else {
+            assert!(!temp.path().join("style.safetensors").exists());
+        }
+        if let Ok(metadata) =
+            tokio::fs::metadata(temp.path().join("style.safetensors.partial")).await
+        {
+            assert!(metadata.len() <= 4);
+        }
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn source_url_drops_bearer_on_same_host_port_redirect() {
+    let destination = Router::new().route(
+        "/style.safetensors",
+        get(|headers: HeaderMap| async move {
+            assert!(!headers.contains_key(axum::http::header::AUTHORIZATION));
+            b"weights".to_vec()
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, destination).await.unwrap();
+    });
+    let source = Router::new().route(
+        "/style.safetensors",
+        get(move |headers: HeaderMap| async move {
+            assert_eq!(
+                headers.get(axum::http::header::AUTHORIZATION).unwrap(),
+                "Bearer fixture-secret"
+            );
+            axum::response::Redirect::temporary(&format!("http://{address}/style.safetensors"))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let source_address = listener.local_addr().unwrap();
+    let source_task = tokio::spawn(async move {
+        axum::serve(listener, source).await.unwrap();
+    });
+    let mut settings = test_settings("http://127.0.0.1:1".into(), None);
+    settings.allow_private_lora_urls = true;
+    settings.credentials = vec![WorkerCredential {
+        host: "127.0.0.1".into(),
+        token: "fixture-secret".into(),
+        scheme: CredentialScheme::Bearer,
+    }];
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+    let temp = tempdir().unwrap();
+    download_source_url(
+        &DownloadContext {
+            api: &api,
+            client: &client,
+            settings: &settings,
+            job_id: "fixture",
+            cancel_message: "canceled",
+            fresh_download: false,
+        },
+        &format!("http://{source_address}/style.safetensors"),
+        temp.path(),
+        "fixture",
+        100,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        tokio::fs::read(temp.path().join("style.safetensors"))
+            .await
+            .unwrap(),
+        b"weights"
+    );
+    task.abort();
+    source_task.abort();
+}
+
+#[tokio::test]
+async fn source_url_verifies_staged_bytes_against_stream_digest_before_publication() {
+    let temp = tempdir().unwrap();
+    let partial = temp.path().join("style.safetensors.partial");
+    let app = Router::new().route(
+        "/style.safetensors",
+        get(move || {
+            let partial = partial.clone();
+            async move {
+                let first = futures_util::stream::once(async {
+                    Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"good-stream"))
+                });
+                let tamper = futures_util::stream::once(async move {
+                    tokio::time::timeout(Duration::from_secs(3), async {
+                        loop {
+                            if tokio::fs::metadata(&partial)
+                                .await
+                                .is_ok_and(|metadata| metadata.len() == 11)
+                            {
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(1)).await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    tokio::fs::write(&partial, b"bad-on-disk").await.unwrap();
+                    Ok::<_, std::io::Error>(axum::body::Bytes::new())
+                });
+                Response::new(Body::from_stream(futures_util::StreamExt::chain(
+                    first, tamper,
+                )))
+            }
+        })
+        .head(|| async { axum::http::StatusCode::METHOD_NOT_ALLOWED }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let mut settings = test_settings("http://127.0.0.1:1".into(), None);
+    settings.allow_private_lora_urls = true;
+    let api = ApiClient::new(&settings);
+    let client = reqwest::Client::new();
+    let error = download_source_url(
+        &DownloadContext {
+            api: &api,
+            client: &client,
+            settings: &settings,
+            job_id: "fixture",
+            cancel_message: "canceled",
+            fresh_download: false,
+        },
+        &format!("http://{address}/style.safetensors"),
+        temp.path(),
+        "fixture",
+        100,
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("integrity check"), "{error}");
+    assert!(!temp.path().join("style.safetensors").exists());
+    assert!(!temp.path().join("style.safetensors.partial").exists());
+    task.abort();
 }

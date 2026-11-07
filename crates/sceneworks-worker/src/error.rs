@@ -86,8 +86,9 @@ pub(crate) fn task_join_error(label: &str, error: tokio::task::JoinError) -> Wor
 /// engine/backend cannot do" signal — e.g. `reject_loha_on_packed` on quantized Wan, which carries
 /// an actionable steer-to-bf16 message (sc-10051, epic 10043). We surface it as
 /// [`WorkerError::InvalidPayload`] (the worker's user-facing / validation class) with the engine's
-/// message text INTACT, rather than burying it in an opaque [`WorkerError::Engine`]. Everything else
-/// stays [`WorkerError::Engine`]. `context` prefixes the message so the origin (load vs generate)
+/// message text INTACT, rather than burying it in an opaque [`WorkerError::Engine`]. Typed
+/// cancellation stays [`WorkerError::Canceled`]; everything else stays [`WorkerError::Engine`].
+/// `context` prefixes the message so the origin (load vs generate)
 /// stays legible, matching the existing `format!("{context}: {error}")` seams.
 ///
 /// ## Driver-class CUDA failures (sc-16247, GH #1966)
@@ -116,6 +117,7 @@ pub(crate) fn task_join_error(label: &str, error: tokio::task::JoinError) -> Wor
 /// unread distinction; the defect was the message, and the message is what changed.
 pub(crate) fn classify_engine_error(context: &str, error: gen_core::Error) -> WorkerError {
     match error {
+        gen_core::Error::Canceled => WorkerError::Canceled(format!("{context}: {error}")),
         gen_core::Error::Unsupported(_) => {
             WorkerError::InvalidPayload(format!("{context}: {error}"))
         }
@@ -159,6 +161,27 @@ pub type WorkerResult<T> = Result<T, WorkerError>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Literal typed errors only: no runtime, source lookup, model or device work.
+    #[test]
+    fn typed_engine_cancellation_remains_cancellation_at_checked_preload_boundaries() {
+        for context in [
+            "MOSS preload canceled",
+            "MOSS adapter preload canceled",
+            "MOSS preload facts failed",
+        ] {
+            let classified = classify_engine_error(context, gen_core::Error::Canceled);
+            assert!(
+                matches!(&classified, WorkerError::Canceled(_)),
+                "{classified:?}"
+            );
+            assert_eq!(classified.to_string(), format!("{context}: cancelled"));
+        }
+        // The typed contract must not turn arbitrary failures containing this word into success/cancel.
+        let untyped =
+            classify_engine_error("MOSS preload", gen_core::Error::Msg("cancelled".into()));
+        assert!(matches!(untyped, WorkerError::Engine(_)));
+    }
 
     // sc-10051 / epic 10043: at the new mlx-gen rev, the Wan load path rejects a LoHa adapter on a
     // packed (quantized) base with a typed `gen_core::Error::Unsupported` carrying an actionable

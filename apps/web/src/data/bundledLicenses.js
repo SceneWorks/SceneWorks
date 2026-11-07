@@ -12,6 +12,9 @@ import ffmpegGpl from "../../../desktop/licenses/ffmpeg/COPYING.GPLv3?url&no-inl
 import onnxruntimeNotice from "../../../desktop/licenses/onnxruntime/NOTICE.txt?url&no-inline";
 import onnxruntimeLicense from "../../../desktop/licenses/onnxruntime/LICENSE?url&no-inline";
 import cudaNotice from "../../../desktop/licenses/cuda/NOTICE.txt?url&no-inline";
+import flashAttentionLicense from "../../../desktop/licenses/flash-attention/LICENSE.txt?url&no-inline";
+import cutlassLicense from "../../../desktop/licenses/cutlass/LICENSE.txt?url&no-inline";
+import flashAttentionAuthors from "../../../desktop/licenses/flash-attention/AUTHORS.txt?url&no-inline";
 // Re-hosted AI model weights (sc-5604). Upstream license text reproduced so the
 // redistribution attribution travels with the app. The three Wan2.2 models are
 // each redistributed under Apache-2.0; the LTX-2.3 bundle carries two restricted
@@ -140,6 +143,7 @@ import insightfaceModelNotice from "../../../desktop/licenses/insightface/Insigh
 // Production third-party source/data compiled into the inference runtimes (sc-14403).
 import cephesBsd3Clause from "../../../desktop/licenses/cephes/BSD-3-Clause.txt?url&no-inline";
 import mageMit from "../../../desktop/licenses/mage/MIT.txt?url&no-inline";
+import flux3ImageKleinFLUXKommunityLicense from "../../../desktop/licenses/flux3-image-klein/FLUX-Kommunity-License-v1.0.md?url&no-inline";
 import iris3bApache20 from "../../../desktop/licenses/iris-3b/Apache-2.0.txt?url&no-inline";
 import supra2ImgApache20 from "../../../desktop/licenses/supra2-img/Apache-2.0.txt?url&no-inline";
 import supra2ImgSdVaeMit from "../../../desktop/licenses/supra2-img/SD-VAE-FT-MSE-MIT-DECLARATION.txt?url&no-inline";
@@ -200,6 +204,9 @@ const DOCUMENT_URL = {
   "onnxruntime-notice": onnxruntimeNotice,
   "onnxruntime-license": onnxruntimeLicense,
   "cuda-notice": cudaNotice,
+  "flash-attention-license": flashAttentionLicense,
+  "cutlass-license": cutlassLicense,
+  "flash-attention-authors": flashAttentionAuthors,
   "wan2.2-ti2v-5b-apache": wanTi2v5bApache,
   "wan2.2-i2v-a14b-apache": wanI2vA14bApache,
   "wan2.2-t2v-a14b-apache": wanT2vA14bApache,
@@ -276,6 +283,7 @@ const DOCUMENT_URL = {
   "insightface-model-notice": insightfaceModelNotice,
   "cephes-bsd-3-clause": cephesBsd3Clause,
   "mage-mit": mageMit,
+  "flux3-image-klein-flux-kommunity-license": flux3ImageKleinFLUXKommunityLicense,
   "iris-3b-apache": iris3bApache20,
   "supra2-img-apache": supra2ImgApache20,
   "supra2-img-sd-vae-mit": supra2ImgSdVaeMit,

@@ -1,0 +1,2016 @@
+{
+  "schema_version": 1,
+  "purpose": "Explicit ZIP9 security ports of exact pinned leaf packages; engine revision remains pinned, effective source includes these overrides.",
+  "engine_revision": "91ffb4a819aa2990c652db2d881ba0b9b10126ce",
+  "zip_version": "9.0.5",
+  "packages": [
+    {
+      "name": "candle-audio-kokoro",
+      "version": "0.0.0",
+      "path": "vendor/zip9-candle-audio-kokoro",
+      "upstream_repository": "https://github.com/SceneWorks/inference",
+      "upstream_revision": "91ffb4a819aa2990c652db2d881ba0b9b10126ce",
+      "upstream_package_path": "crates/audio/candle-audio-kokoro",
+      "files": [
+        {
+          "path": "vendor/zip9-candle-audio-kokoro/LICENSE",
+          "upstream_path": "LICENSE",
+          "upstream_git_blob": "261eeb9e9f8b2b4b0d119366dda99c6fd7d35c64",
+          "upstream_sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "bytes": 11357
+        },
+        {
+          "path": "vendor/zip9-candle-audio-kokoro/Cargo.toml",
+          "upstream_path": "crates/audio/candle-audio-kokoro/Cargo.toml",
+          "upstream_git_blob": "fd7aa394d78e106d288d6c83066116c0a5f649fe",
+          "upstream_sha256": "783a65d4dd0eb69e0f4f1497b9ba4652ae3b62bab1693c5118e6a37d4b8f5408",
+          "sha256": "66debc026b488f7534034922295cbb2937883269f062eacdbd7d272a7fc2962f",
+          "bytes": 5026
+        },
+        {
+          "path": "vendor/zip9-candle-audio-kokoro/resources/LICENSE-CMUDICT",
+          "upstream_path": "crates/audio/candle-audio-kokoro/resources/LICENSE-CMUDICT",
+          "upstream_git_blob": "d7337d8551a2d217addce30cbceece3db66bf4e7",
+          "upstream_sha256": "c2e0c90783cf941bf75315d470ed77be13d3b706cdc00ab446f727cc5cc4f9ff",
+          "sha256": "c2e0c90783cf941bf75315d470ed77be13d3b706cdc00ab446f727cc5cc4f9ff",
+          "bytes": 1755
+        },
+        {
+          "path": "vendor/zip9-candle-audio-kokoro/resources/cmudict.dict",
+          "upstream_path": "crates/audio/candle-audio-kokoro/resources/cmudict.dict",
+          "upstream_git_blob": "8b1cc8176a163b8933b0eb398709861e124386e8",
+          "upstream_sha256": "e975bd6570354ac852c636e5837c9e3ec27a1b6ccfe992930610e8bc4f0797ae",
+          "sha256": "e975bd6570354ac852c636e5837c9e3ec27a1b6ccfe992930610e8bc4f0797ae",
+          "bytes": 3613898
+        },
+        {
+          "path": "vendor/zip9-candle-audio-kokoro/src/albert.rs",
+          "upstream_path": "crates/audio/candle-audio-kokoro/src/albert.rs",
+          "upstream_git_blob": "4ce2fc86bdb8e52f83843ad16565d7863cc03e00",
+          "upstream_sha256": "74ee7fd0cf185dbb70c54575e64f731534675d7e7c443fb49316d04fd41913c2",
+          "sha256": "74ee7fd0cf185dbb70c54575e64f731534675d7e7c443fb49316d04fd41913c2",
+          "bytes": 6853
+        },
+        {
+          "path": "vendor/zip9-candle-audio-kokoro/src/config.rs",
+          "upstream_path": "crates/audio/candle-audio-kokoro/src/config.rs",
+          "upstream_git_blob": "370f5734695e8671dd89218c5fdcab2103990759",
+          "upstream_sha256": "cda0632c44771955cc2f4b93fe0d9c0fdc4d91076423a3ac277e4986627239e9",
+          "sha256": "cda0632c44771955cc2f4b93fe0d9c0fdc4d91076423a3ac277e4986627239e9",
+          "bytes": 8521
+        },
+        {
+          "path": "vendor/zip9-candle-audio-kokoro/src/decoder.rs",
+          "upstream_path": "crates/audio/candle-audio-kokoro/src/decoder.rs",
+          "upstream_git_blob": "82546e4f2ddd0e5c988b7a16d204fb08bdd6d025",
+          "upstream_sha256": "d809868e583c079a1224192e2a32c662043bc47d1de80fc6e7bc278a6a495d94",
+          "sha256": "d809868e583c079a1224192e2a32c662043bc47d1de80fc6e7bc278a6a495d94",
+          "bytes": 23401
+        },
+        {
+          "path": "vendor/zip9-candle-audio-kokoro/src/g2p.rs",
+          "upstream_path": "crates/audio/candle-audio-kokoro/src/g2p.rs",
+          "upstream_git_blob": "2478eb433661395060badbb0dbaf6c739c3cd4f7",
+          "upstream_sha256": "34c1f582e8b67e258fdf31006df9c61f1b60026bfd010249eb2ff1c6d8bcaa64",
+          "sha256": "34c1f582e8b67e258fdf31006df9c61f1b60026bfd010249eb2ff1c6d8bcaa64",
+          "bytes": 27597
+        },
+        {
+          "path": "vendor/zip9-candle-audio-kokoro/src/lib.rs",
+          "upstream_path": "crates/audio/candle-audio-kokoro/src/lib.rs",
+          "upstream_git_blob": "50475cccd6b807028760e3574ab1dbf2db9becde",
+          "upstream_sha256": "9f69bf4bdb3ce1c59a7a0a7e8d39f034d11139ef83c4fb8ebea24bbacd5525ce",
+          "sha256": "9f69bf4bdb3ce1c59a7a0a7e8d39f034d11139ef83c4fb8ebea24bbacd5525ce",
+          "bytes": 4354
+        },
+        {
+          "path": "vendor/zip9-candle-audio-kokoro/src/model.rs",
+          "upstream_path": "crates/audio/candle-audio-kokoro/src/model.rs",
+          "upstream_git_blob": "e07b0450d6372a6b0e71cbe31f50979a521d198e",
+          "upstream_sha256": "4f7443dadb7155892a1892d75a44e911d8cb58fa7a970af9a5e9f7f20c733c3b",
+          "sha256": "4f7443dadb7155892a1892d75a44e911d8cb58fa7a970af9a5e9f7f20c733c3b",
+          "bytes": 19561
+        },
+        {
+          "path": "vendor/zip9-candle-audio-kokoro/src/nn.rs",
+          "upstream_path": "crates/audio/candle-audio-kokoro/src/nn.rs",
+          "upstream_git_blob": "af18767d0dd428a3ecd1d2f41a72adcf69330159",
+          "upstream_sha256": "47ab0795fd1ae7a49eeabfb32c1753d635f12c09c6fb02f67f104a17e5498c4c",
+          "sha256": "47ab0795fd1ae7a49eeabfb32c1753d635f12c09c6fb02f67f104a17e5498c4c",
+          "bytes": 15802
+        },
+        {
+          "path": "vendor/zip9-candle-audio-kokoro/src/pipeline.rs",
+          "upstream_path": "crates/audio/candle-audio-kokoro/src/pipeline.rs",
+          "upstream_git_blob": "2fd509792ba31a27ec968cc93bb5a6cef3ced5c7",
+          "upstream_sha256": "a1ab613d9ba2e9d5897ae401a9742869d44245e0517e55c0ad4bce556d4396fc",
+          "sha256": "a1ab613d9ba2e9d5897ae401a9742869d44245e0517e55c0ad4bce556d4396fc",
+          "bytes": 10209
+        },
+        {
+          "path": "vendor/zip9-candle-audio-kokoro/src/predictor.rs",
+          "upstream_path": "crates/audio/candle-audio-kokoro/src/predictor.rs",
+          "upstream_git_blob": "f691041baba894bf2b3fb9dbf79f08e69731e57a",
+          "upstream_sha256": "c8a86c7cd88387cb62f296631182803fecc142fa4b3707979b4431b84c4abacd",
+          "sha256": "c8a86c7cd88387cb62f296631182803fecc142fa4b3707979b4431b84c4abacd",
+          "bytes": 6316
+        },
+        {
+          "path": "vendor/zip9-candle-audio-kokoro/src/prepare.rs",
+          "upstream_path": "crates/audio/candle-audio-kokoro/src/prepare.rs",
+          "upstream_git_blob": "3b63ff29631208a1b401a2300bda7a3171184b30",
+          "upstream_sha256": "df5b6aadf89f8043d1330745e6c77b621e6d30c9a6a0852f2bba7096d87e9506",
+          "sha256": "df5b6aadf89f8043d1330745e6c77b621e6d30c9a6a0852f2bba7096d87e9506",
+          "bytes": 5408
+        },
+        {
+          "path": "vendor/zip9-candle-audio-kokoro/src/text_encoder.rs",
+          "upstream_path": "crates/audio/candle-audio-kokoro/src/text_encoder.rs",
+          "upstream_git_blob": "edc00a9f166a0b0ccbe79f6d31767ef7ad3e6f5b",
+          "upstream_sha256": "c6462b7a48bab9ccbdc2fc3dfe02941f601b52163abcfb695793b0f96ed4e896",
+          "sha256": "c6462b7a48bab9ccbdc2fc3dfe02941f601b52163abcfb695793b0f96ed4e896",
+          "bytes": 2344
+        },
+        {
+          "path": "vendor/zip9-candle-audio-kokoro/src/weights.rs",
+          "upstream_path": "crates/audio/candle-audio-kokoro/src/weights.rs",
+          "upstream_git_blob": "9a21fcf4446110467d092901464d37b4e5cb1cf9",
+          "upstream_sha256": "59c42e774ff0907c713b4a66b4aa8481610aefca1b250102b5e4429f6e2663fa",
+          "sha256": "cc801e11e42bea836e1dd581830c17cdb8c145e34ccf5cf283bc6b8829a47a5c",
+          "bytes": 9874
+        },
+        {
+          "path": "vendor/zip9-candle-audio-kokoro/tests/conformance.rs",
+          "upstream_path": "crates/audio/candle-audio-kokoro/tests/conformance.rs",
+          "upstream_git_blob": "84502c14390574c65e10b59f6a31b0027b74b6b8",
+          "upstream_sha256": "5720b98c575919ef5660683c38c9a7cada56db8ddd051129c63da8a4880e3957",
+          "sha256": "5720b98c575919ef5660683c38c9a7cada56db8ddd051129c63da8a4880e3957",
+          "bytes": 9904
+        },
+        {
+          "path": "vendor/zip9-candle-audio-kokoro/tests/fixtures/kokoro_82m_regression.json",
+          "upstream_path": "crates/audio/candle-audio-kokoro/tests/fixtures/kokoro_82m_regression.json",
+          "upstream_git_blob": "a68d491f41dee38fe1d641098a5b23480da8eea8",
+          "upstream_sha256": "fccbf789d227f44ba4aa3ec16564cee87e5cc1a66adf1697092758a5b54c4820",
+          "sha256": "fccbf789d227f44ba4aa3ec16564cee87e5cc1a66adf1697092758a5b54c4820",
+          "bytes": 4259
+        },
+        {
+          "path": "vendor/zip9-candle-audio-kokoro/tests/regression.rs",
+          "upstream_path": "crates/audio/candle-audio-kokoro/tests/regression.rs",
+          "upstream_git_blob": "e17af2db022b1a7e53fe32527fbdae9779fce6ef",
+          "upstream_sha256": "e10d068e7e495bd756c08a1cc1c17901548f3e1b1b876f753464d752fe566ea1",
+          "sha256": "e10d068e7e495bd756c08a1cc1c17901548f3e1b1b876f753464d752fe566ea1",
+          "bytes": 13930
+        }
+      ]
+    },
+    {
+      "name": "candle-core",
+      "version": "0.10.2",
+      "path": "vendor/zip9-candle-core",
+      "upstream_repository": "https://github.com/SceneWorks/inference",
+      "upstream_revision": "91ffb4a819aa2990c652db2d881ba0b9b10126ce",
+      "upstream_package_path": "crates/media/candle-gen/vendor/candle-core",
+      "files": [
+        {
+          "path": "vendor/zip9-candle-core/Cargo.toml",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/Cargo.toml",
+          "upstream_git_blob": "8d2e0234087667830d9d089cbb807d341387b00a",
+          "upstream_sha256": "23cf4a78621d1b9b6ee40f38b05f60cf6d23548607570162cf0cdffa4c8c35f6",
+          "sha256": "50f381763e333a2b51427d96b1df117744a0d7be35f83423a6e147ba0ea71961",
+          "bytes": 3706
+        },
+        {
+          "path": "vendor/zip9-candle-core/LICENSE",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/LICENSE",
+          "upstream_git_blob": "261eeb9e9f8b2b4b0d119366dda99c6fd7d35c64",
+          "upstream_sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "bytes": 11357
+        },
+        {
+          "path": "vendor/zip9-candle-core/README.md",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/README.md",
+          "upstream_git_blob": "246f5bae61e012bfa13b4c5c2ee4169e266a9352",
+          "upstream_sha256": "9b00007b1d568125e67d6f2ff5c40acd8227dec4c62681cbc87775768a125200",
+          "sha256": "9b00007b1d568125e67d6f2ff5c40acd8227dec4c62681cbc87775768a125200",
+          "bytes": 42
+        },
+        {
+          "path": "vendor/zip9-candle-core/VENDORED.md",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/VENDORED.md",
+          "upstream_git_blob": "1b1e8951e82b86036e2429c646a7475a55861457",
+          "upstream_sha256": "60beee0d29810e3ce3611f8331c364ae7f166a0b80adc687946d11154b27cea5",
+          "sha256": "60beee0d29810e3ce3611f8331c364ae7f166a0b80adc687946d11154b27cea5",
+          "bytes": 15522
+        },
+        {
+          "path": "vendor/zip9-candle-core/benches/bench_main.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/benches/bench_main.rs",
+          "upstream_git_blob": "ec02e4bddb102a938ca583b923ffce7e5d840c79",
+          "upstream_sha256": "0228bb14b13ee0cd2d7e907d8e66017fa291d81d39316c183f4bf5aed0657518",
+          "sha256": "0228bb14b13ee0cd2d7e907d8e66017fa291d81d39316c183f4bf5aed0657518",
+          "bytes": 447
+        },
+        {
+          "path": "vendor/zip9-candle-core/benches/benchmarks/affine.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/benches/benchmarks/affine.rs",
+          "upstream_git_blob": "1d6edd4c6903207e2e1bdce687dd9abd54811ef8",
+          "upstream_sha256": "260d6aeb9faf50808ac278dd93664dd24769bcd5c53333490d742cdff298844c",
+          "sha256": "260d6aeb9faf50808ac278dd93664dd24769bcd5c53333490d742cdff298844c",
+          "bytes": 1465
+        },
+        {
+          "path": "vendor/zip9-candle-core/benches/benchmarks/binary.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/benches/benchmarks/binary.rs",
+          "upstream_git_blob": "a4953c6332fadfe30a9e971a3616ddd00c9a4c02",
+          "upstream_sha256": "86335f2ca24005c215d590797cfde35c6a3bba21978b0cf184ac906c6f255e40",
+          "sha256": "86335f2ca24005c215d590797cfde35c6a3bba21978b0cf184ac906c6f255e40",
+          "bytes": 1647
+        },
+        {
+          "path": "vendor/zip9-candle-core/benches/benchmarks/broadcast.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/benches/benchmarks/broadcast.rs",
+          "upstream_git_blob": "020ed5b259592ec8667f175219bb2c1bb7d1e10e",
+          "upstream_sha256": "9da8fde24dcbed559dfd44e7ec6607762ed2a7f80857a057f619838a4c723618",
+          "sha256": "9da8fde24dcbed559dfd44e7ec6607762ed2a7f80857a057f619838a4c723618",
+          "bytes": 1575
+        },
+        {
+          "path": "vendor/zip9-candle-core/benches/benchmarks/conv_transpose2d.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/benches/benchmarks/conv_transpose2d.rs",
+          "upstream_git_blob": "7bd5c5bf069d9b94705e48f72f5135d3c39228bc",
+          "upstream_sha256": "f57723066b6fc173d2957181e2e54a06505213303f82577b10d482983048981a",
+          "sha256": "f57723066b6fc173d2957181e2e54a06505213303f82577b10d482983048981a",
+          "bytes": 1783
+        },
+        {
+          "path": "vendor/zip9-candle-core/benches/benchmarks/copy.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/benches/benchmarks/copy.rs",
+          "upstream_git_blob": "00eff3dca63981e7246af4eace8a490ea0a5d2c1",
+          "upstream_sha256": "406c04fa73a664a785dd7d9c6a4ad4d09b4c0c0b52072b8e429566485fd61938",
+          "sha256": "406c04fa73a664a785dd7d9c6a4ad4d09b4c0c0b52072b8e429566485fd61938",
+          "bytes": 1415
+        },
+        {
+          "path": "vendor/zip9-candle-core/benches/benchmarks/matmul.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/benches/benchmarks/matmul.rs",
+          "upstream_git_blob": "08732d2b3215f8f4ed38f8ac4952496c556abadb",
+          "upstream_sha256": "8ceb3d0e312a82770f85414459009d0385043eb1fa384f8dd34476b84cf42bbb",
+          "sha256": "8ceb3d0e312a82770f85414459009d0385043eb1fa384f8dd34476b84cf42bbb",
+          "bytes": 2447
+        },
+        {
+          "path": "vendor/zip9-candle-core/benches/benchmarks/mod.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/benches/benchmarks/mod.rs",
+          "upstream_git_blob": "9cc6767a4d6ef794131fff28588bd00c3c861c64",
+          "upstream_sha256": "28ed8ad6b0e938364c62d64456dd98bd84faca4b038b7f3661ebe013555833ac",
+          "sha256": "28ed8ad6b0e938364c62d64456dd98bd84faca4b038b7f3661ebe013555833ac",
+          "bytes": 2232
+        },
+        {
+          "path": "vendor/zip9-candle-core/benches/benchmarks/qmatmul.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/benches/benchmarks/qmatmul.rs",
+          "upstream_git_blob": "be1d2ad021c7023f6269f3f3a7bd19729cd5a877",
+          "upstream_sha256": "cd71f24bc0dbdd716f36fec4658a444cde64fdeacca1cdf63bbf1501ede12e40",
+          "sha256": "cd71f24bc0dbdd716f36fec4658a444cde64fdeacca1cdf63bbf1501ede12e40",
+          "bytes": 2105
+        },
+        {
+          "path": "vendor/zip9-candle-core/benches/benchmarks/random.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/benches/benchmarks/random.rs",
+          "upstream_git_blob": "365e051c0e3ae7beb6f6d5176023f562ce690b77",
+          "upstream_sha256": "0f68d50a3da9f1096ab00c6a1141b58454b335604d6c2ff3d39af830a47b9138",
+          "sha256": "0f68d50a3da9f1096ab00c6a1141b58454b335604d6c2ff3d39af830a47b9138",
+          "bytes": 1852
+        },
+        {
+          "path": "vendor/zip9-candle-core/benches/benchmarks/reduce.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/benches/benchmarks/reduce.rs",
+          "upstream_git_blob": "6020633c00aa4fc6e8d5fd82caccba9c1087d5aa",
+          "upstream_sha256": "8a0ce9e9f10ca9d210db3c424325dd082ccc08fd288080f0b579ab1c7faa8fc6",
+          "sha256": "8a0ce9e9f10ca9d210db3c424325dd082ccc08fd288080f0b579ab1c7faa8fc6",
+          "bytes": 4355
+        },
+        {
+          "path": "vendor/zip9-candle-core/benches/benchmarks/unary.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/benches/benchmarks/unary.rs",
+          "upstream_git_blob": "65723bb3fd104732284dbd3c69adae35045399c4",
+          "upstream_sha256": "40153b0fe906af2235e0a356719a208d82b5910853df93957f8e18bcb61bcef1",
+          "sha256": "40153b0fe906af2235e0a356719a208d82b5910853df93957f8e18bcb61bcef1",
+          "bytes": 2740
+        },
+        {
+          "path": "vendor/zip9-candle-core/benches/benchmarks/where_cond.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/benches/benchmarks/where_cond.rs",
+          "upstream_git_blob": "348c1d8cbab33aeb6a8d5cd0238fde4d8aa6f4d7",
+          "upstream_sha256": "41be1e61510cfdfbdc74cbb523ec8756fad12eb53a3b6add8f032999e98370aa",
+          "sha256": "41be1e61510cfdfbdc74cbb523ec8756fad12eb53a3b6add8f032999e98370aa",
+          "bytes": 2026
+        },
+        {
+          "path": "vendor/zip9-candle-core/examples/basics.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/examples/basics.rs",
+          "upstream_git_blob": "e99140344108de300a7025fd14d06d2287552b7f",
+          "upstream_sha256": "6c85b5c338290f8d2eeeb548209fc4f4d4052fa4bfd2ea07846731cd9c36d88d",
+          "sha256": "6c85b5c338290f8d2eeeb548209fc4f4d4052fa4bfd2ea07846731cd9c36d88d",
+          "bytes": 569
+        },
+        {
+          "path": "vendor/zip9-candle-core/examples/cuda_basics.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/examples/cuda_basics.rs",
+          "upstream_git_blob": "4eadcdeb82caa78ae51cd21feaf78ea407eea4da",
+          "upstream_sha256": "ec4aa80f89acf913ca74828fdf19ceb24808406794e98caa3f524dd23ce66cd4",
+          "sha256": "ec4aa80f89acf913ca74828fdf19ceb24808406794e98caa3f524dd23ce66cd4",
+          "bytes": 769
+        },
+        {
+          "path": "vendor/zip9-candle-core/examples/cuda_sum_benchmark.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/examples/cuda_sum_benchmark.rs",
+          "upstream_git_blob": "5bd4b4eefec350aceda4be1ec5b6201265ea5bb6",
+          "upstream_sha256": "f53810234d3b90cbef0cc23c7ac1ad8141a9a93d1e86f7c358f5d32fcc5c76cc",
+          "sha256": "f53810234d3b90cbef0cc23c7ac1ad8141a9a93d1e86f7c358f5d32fcc5c76cc",
+          "bytes": 1692
+        },
+        {
+          "path": "vendor/zip9-candle-core/examples/metal_basics.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/examples/metal_basics.rs",
+          "upstream_git_blob": "3f433d9c26f74eb44a980ec4c54db7ddfa89e759",
+          "upstream_sha256": "4f2cb274449cf1b6326b1ed2211f1076d55e621fcc81cdd501eca72e7203351e",
+          "sha256": "4f2cb274449cf1b6326b1ed2211f1076d55e621fcc81cdd501eca72e7203351e",
+          "bytes": 898
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/accelerate.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/accelerate.rs",
+          "upstream_git_blob": "d371d3b33bea65bb402d331b29ad5b6e37439331",
+          "upstream_sha256": "9be99929bb6553d9baf6b6a5a56fa66bfdbee122f76c4792a00e09ac8a0d638a",
+          "sha256": "9be99929bb6553d9baf6b6a5a56fa66bfdbee122f76c4792a00e09ac8a0d638a",
+          "bytes": 12889
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/backend.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/backend.rs",
+          "upstream_git_blob": "d8ab2b56299b929f6572fcabc2f5478c271303c5",
+          "upstream_sha256": "822a96a62ef7d300141b7d439807482bd40bded3f592e9e72c1e108f43ff63cc",
+          "sha256": "822a96a62ef7d300141b7d439807482bd40bded3f592e9e72c1e108f43ff63cc",
+          "bytes": 5124
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/backprop.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/backprop.rs",
+          "upstream_git_blob": "023c288fc53922da54b16e34425e29d913cf458c",
+          "upstream_sha256": "b50387ec1a7f9b5884d3f021bb9a80468cb026c12406259aefa21a89953aa3b7",
+          "sha256": "b50387ec1a7f9b5884d3f021bb9a80468cb026c12406259aefa21a89953aa3b7",
+          "bytes": 44597
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/conv.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/conv.rs",
+          "upstream_git_blob": "0d0a816b44c12aa31b86dfa38858a6e0c5919b26",
+          "upstream_sha256": "903a634824c56498a3cdb2a98ad262397c196b1c3fff2fe50ebfd4448473e0c9",
+          "sha256": "903a634824c56498a3cdb2a98ad262397c196b1c3fff2fe50ebfd4448473e0c9",
+          "bytes": 15148
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/convert.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/convert.rs",
+          "upstream_git_blob": "38e7a7c9a6a4a6aed8bedd7bffcd98627924f153",
+          "upstream_sha256": "664562f7fc98008b1cbf4815aacf79311141a40d9a003f86ecdb8cebcf6abbae",
+          "sha256": "664562f7fc98008b1cbf4815aacf79311141a40d9a003f86ecdb8cebcf6abbae",
+          "bytes": 4765
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/cpu/avx.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/cpu/avx.rs",
+          "upstream_git_blob": "113fc14ced8897515e737d597b916ace45ff7a93",
+          "upstream_sha256": "d06f480b9ec3553568c0ef4b32e30d9f0dc7371f6db94473b42724f2b2519d45",
+          "sha256": "d06f480b9ec3553568c0ef4b32e30d9f0dc7371f6db94473b42724f2b2519d45",
+          "bytes": 6121
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/cpu/erf.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/cpu/erf.rs",
+          "upstream_git_blob": "bc99c89bcbb104b311cd62af76ed8a34c9f22ed1",
+          "upstream_sha256": "e034235ab4045d75ff82f2c5ff4ca446a6a4b6f4f983e4ae5055e93a38eb3ed3",
+          "sha256": "e034235ab4045d75ff82f2c5ff4ca446a6a4b6f4f983e4ae5055e93a38eb3ed3",
+          "bytes": 9665
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/cpu/kernels.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/cpu/kernels.rs",
+          "upstream_git_blob": "bca76adcc8d071abec6787c6717e92bf779e7421",
+          "upstream_sha256": "ad187fd28c7b491ae982e5e9c714331b89c91056c370f6a7417cc79dfda7aab1",
+          "sha256": "ad187fd28c7b491ae982e5e9c714331b89c91056c370f6a7417cc79dfda7aab1",
+          "bytes": 5713
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/cpu/mod.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/cpu/mod.rs",
+          "upstream_git_blob": "c4864b7a8141aefe2b8875a1e3d427f9ae7e5ef5",
+          "upstream_sha256": "667e12b8807e5b73cb3b84f4078029e1060fc2b4147122584c24dc0c083c3738",
+          "sha256": "667e12b8807e5b73cb3b84f4078029e1060fc2b4147122584c24dc0c083c3738",
+          "bytes": 7001
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/cpu/neon.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/cpu/neon.rs",
+          "upstream_git_blob": "66b8b45e1507044bbf2132e949c984cde53ea2f0",
+          "upstream_sha256": "c180dffb8a342c2f026d8fdcc235c7d9e8f0aac8a5f6f03de4c2f4de8dda609c",
+          "sha256": "c180dffb8a342c2f026d8fdcc235c7d9e8f0aac8a5f6f03de4c2f4de8dda609c",
+          "bytes": 1688
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/cpu/simd128.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/cpu/simd128.rs",
+          "upstream_git_blob": "64b94588bdda00b4859537620dfc461d6fcec540",
+          "upstream_sha256": "8ed8cff924086325c4d4af5a12746a7ce4a5a05f18cdeaa28bc0ff9c64060906",
+          "sha256": "8ed8cff924086325c4d4af5a12746a7ce4a5a05f18cdeaa28bc0ff9c64060906",
+          "bytes": 1541
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/cpu_backend/conv2d.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/cpu_backend/conv2d.rs",
+          "upstream_git_blob": "82460abf027da0ff802341770857cb5f418698ca",
+          "upstream_sha256": "7cce5919db374cc01593ec4b7d50da06c19e180ccfd3651053cb5dc20323e406",
+          "sha256": "7cce5919db374cc01593ec4b7d50da06c19e180ccfd3651053cb5dc20323e406",
+          "bytes": 16731
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/cpu_backend/mod.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/cpu_backend/mod.rs",
+          "upstream_git_blob": "b96195811a42ba010c262fabd0dc0b2d79496d81",
+          "upstream_sha256": "441c9631f163d882ce6398fe8cd225b3c0cf1e52e3eb09cb3186c932696013da",
+          "sha256": "441c9631f163d882ce6398fe8cd225b3c0cf1e52e3eb09cb3186c932696013da",
+          "bytes": 129150
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/cpu_backend/utils.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/cpu_backend/utils.rs",
+          "upstream_git_blob": "1f800a928b753924c9a7553b5c6479cb78c99f9a",
+          "upstream_sha256": "85b05a7f3d6934a115f72f1caf977d7bbdd680715939fb3bdfbbf24af5ac15b1",
+          "sha256": "85b05a7f3d6934a115f72f1caf977d7bbdd680715939fb3bdfbbf24af5ac15b1",
+          "bytes": 16969
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/cuda_backend/cudnn.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/cudnn.rs",
+          "upstream_git_blob": "d7d8770587ced65d3bd3bc8942ab98fe730b50d6",
+          "upstream_sha256": "3e3237559a6148567a369effe6e9616bbc12a6b67c13c09b2d52e6f6382f04b8",
+          "sha256": "3e3237559a6148567a369effe6e9616bbc12a6b67c13c09b2d52e6f6382f04b8",
+          "bytes": 8121
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/cuda_backend/device.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/device.rs",
+          "upstream_git_blob": "6eb4f3ea4c8ea223ffedf6cc0938acc38ba57c44",
+          "upstream_sha256": "4a8b60b18e7bde413954a914554cc189aeb3d903b96fa74dba04658b31107f57",
+          "sha256": "4a8b60b18e7bde413954a914554cc189aeb3d903b96fa74dba04658b31107f57",
+          "bytes": 28348
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/cuda_backend/error.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/error.rs",
+          "upstream_git_blob": "bd6f8ac6da4319994f0480cdf2b0619c47dcaaf8",
+          "upstream_sha256": "b60bce29f50ce640fb1932009bd447f0ff7fc0e293900befb05a9d8df0e43413",
+          "sha256": "b60bce29f50ce640fb1932009bd447f0ff7fc0e293900befb05a9d8df0e43413",
+          "bytes": 1682
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/cuda_backend/mod.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/mod.rs",
+          "upstream_git_blob": "6986c6e22fac82f163b525f929f26751b02ecbcc",
+          "upstream_sha256": "117080fe4e00891701848073bcd45d94211a181f580d8719a1045ecc4212472e",
+          "sha256": "117080fe4e00891701848073bcd45d94211a181f580d8719a1045ecc4212472e",
+          "bytes": 104856
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/cuda_backend/utils.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/cuda_backend/utils.rs",
+          "upstream_git_blob": "10f8876ab574edc33cae22727ee849679a19e65a",
+          "upstream_sha256": "24ceb7c9e50389a911e9aaf4d4f01e92ca3f2a06743adfa72981ba870a0574d9",
+          "sha256": "24ceb7c9e50389a911e9aaf4d4f01e92ca3f2a06743adfa72981ba870a0574d9",
+          "bytes": 7449
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/custom_op.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/custom_op.rs",
+          "upstream_git_blob": "e76f96806e50a2597e93c15e9a3c077030426cd6",
+          "upstream_sha256": "c0a4953dad882f3a392070fa6bbabeaa582d2576d50bf349e12a97d680161ff1",
+          "sha256": "c0a4953dad882f3a392070fa6bbabeaa582d2576d50bf349e12a97d680161ff1",
+          "bytes": 16561
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/device.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/device.rs",
+          "upstream_git_blob": "d0167c61e93090261c89c3f43c0e5b0b7a4731a6",
+          "upstream_sha256": "0929b7e72e83dea86a40f43f55a61eb2ca0dcb2d1c3c2d6e698bd18cf801754b",
+          "sha256": "0929b7e72e83dea86a40f43f55a61eb2ca0dcb2d1c3c2d6e698bd18cf801754b",
+          "bytes": 15213
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/display.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/display.rs",
+          "upstream_git_blob": "a9b53947f399717e69d7de3a5fdfa734217943d6",
+          "upstream_sha256": "17d38758a849310137f69069a0806224b9fdb682c0b44196b6d5885327515211",
+          "sha256": "17d38758a849310137f69069a0806224b9fdb682c0b44196b6d5885327515211",
+          "bytes": 17747
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/dtype.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/dtype.rs",
+          "upstream_git_blob": "f6ac3c8c7e678e34beb692f09c1f5bff51b4f019",
+          "upstream_sha256": "75b91eb41b522e935e3a14d3ab27dca2232b7cfab54eb2e702e60a0c8830677c",
+          "sha256": "75b91eb41b522e935e3a14d3ab27dca2232b7cfab54eb2e702e60a0c8830677c",
+          "bytes": 8188
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/dummy_cuda_backend.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/dummy_cuda_backend.rs",
+          "upstream_git_blob": "2aa45859660097c3fff38b06ca895938e2c45c3b",
+          "upstream_sha256": "842836efb0c1ca8097d1a5c11140207f185b7f877603e98091afdf7d494fee47",
+          "sha256": "842836efb0c1ca8097d1a5c11140207f185b7f877603e98091afdf7d494fee47",
+          "bytes": 8475
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/dummy_dtype.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/dummy_dtype.rs",
+          "upstream_git_blob": "5fdb0961a8310695f87f628666540fe79095af6c",
+          "upstream_sha256": "50bcae6eeba464291a8d85020e967056b42cc7199658999de7159d0c4e8190e0",
+          "sha256": "50bcae6eeba464291a8d85020e967056b42cc7199658999de7159d0c4e8190e0",
+          "bytes": 8036
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/dummy_metal_backend.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/dummy_metal_backend.rs",
+          "upstream_git_blob": "8c23b580fc9b726c7abd452c5f229b1b0a37efb6",
+          "upstream_sha256": "e59c40e1aea0210adac21316af7b7e9b838d8357da9492045f530a139d35acd7",
+          "sha256": "e59c40e1aea0210adac21316af7b7e9b838d8357da9492045f530a139d35acd7",
+          "bytes": 7147
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/error.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/error.rs",
+          "upstream_git_blob": "9f10ca29cfa786374a18cbd5d365f6436dae380b",
+          "upstream_sha256": "e6605678f4093e0867e73a5579aa8d046d13d65bd609d5851edf42d44051927d",
+          "sha256": "e6605678f4093e0867e73a5579aa8d046d13d65bd609d5851edf42d44051927d",
+          "bytes": 10898
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/indexer.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/indexer.rs",
+          "upstream_git_blob": "d6cd6debf83759feb4741d778e3117c02838b217",
+          "upstream_sha256": "2df921d3e8284540a34c197b692b384ed5d6a25047d3685535f01c227718a3e0",
+          "sha256": "2df921d3e8284540a34c197b692b384ed5d6a25047d3685535f01c227718a3e0",
+          "bytes": 7912
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/layout.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/layout.rs",
+          "upstream_git_blob": "91e50481ecbd548982c6f74eb2bacf73f11293a1",
+          "upstream_sha256": "1bf7fca1aa8759cfe4663a63ed9cce5dcc7ae8da84fc5a2e043697a279980db7",
+          "sha256": "1bf7fca1aa8759cfe4663a63ed9cce5dcc7ae8da84fc5a2e043697a279980db7",
+          "bytes": 8632
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/lib.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/lib.rs",
+          "upstream_git_blob": "791933d25a0aaf10fe264dd2a564298b79cc5514",
+          "upstream_sha256": "a7d035c1a1153b3acdee0c9378f5d2fbd14eb2e16e9e3f2fb27db687030640ab",
+          "sha256": "a7d035c1a1153b3acdee0c9378f5d2fbd14eb2e16e9e3f2fb27db687030640ab",
+          "bytes": 5216
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/metal_backend/device.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/metal_backend/device.rs",
+          "upstream_git_blob": "03627b455925b995094b74c31eaacf10a157459f",
+          "upstream_sha256": "a33ad76fe0b92f49709ee5e587fce4a157dbcfbd6097883ea3f5207e492f75a6",
+          "sha256": "a33ad76fe0b92f49709ee5e587fce4a157dbcfbd6097883ea3f5207e492f75a6",
+          "bytes": 12206
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/metal_backend/mod.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/metal_backend/mod.rs",
+          "upstream_git_blob": "95bf37c3cf600ce35dd25f0fd855e3de1ff83bba",
+          "upstream_sha256": "e5652cc1620fece91cf41ba5f7a72175940b0bc1ff4a9d37e3654b8adac59a66",
+          "sha256": "e5652cc1620fece91cf41ba5f7a72175940b0bc1ff4a9d37e3654b8adac59a66",
+          "bytes": 84621
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/mkl.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/mkl.rs",
+          "upstream_git_blob": "359add741c81a096202915d4900493cb30f99980",
+          "upstream_sha256": "c80564bd6139736e0e28336ba3130f386da963d62238eb45f2f1a15c506c2254",
+          "sha256": "c80564bd6139736e0e28336ba3130f386da963d62238eb45f2f1a15c506c2254",
+          "bytes": 11567
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/npy.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/npy.rs",
+          "upstream_git_blob": "28721e858eb3c3309c8daa0554c0a37be2d04b19",
+          "upstream_sha256": "46df77176b957a8d3abc6f453a8fc6a081e124a3ab47b5df7b1520de7ee58f80",
+          "sha256": "ae2aa5351fd909b4cf8d2da20d0ee44535c9d112340ee5536f2d8446c21ae31d",
+          "bytes": 18278
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/op.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/op.rs",
+          "upstream_git_blob": "dbfa462b7502ad089a9dd2cc41a2d2f664accdc7",
+          "upstream_sha256": "8787d8e941217e500b7f653aa4252c41a0e15459c31f7373d0dc896fce4c4521",
+          "sha256": "8787d8e941217e500b7f653aa4252c41a0e15459c31f7373d0dc896fce4c4521",
+          "bytes": 27977
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/pickle.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/pickle.rs",
+          "upstream_git_blob": "dd65b9dee9df37c5145dc7176e66f1fb2661be06",
+          "upstream_sha256": "7fcb931fb616c35c7817e5461cc6173d7c6635339223c360a6c22fb077c07d63",
+          "sha256": "3b98dee96ce63c91da0644b2d63040e924b92bb17a49a3f15ade096ce2d49a91",
+          "bytes": 27409
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/quantized/avx.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/quantized/avx.rs",
+          "upstream_git_blob": "527941eb6d412b83cfef6d62772e5fa00ab59cd8",
+          "upstream_sha256": "69cb5408571eb64812cb6386f0e24a7ff39fdc16482d44ee9f31fb40e536665c",
+          "sha256": "69cb5408571eb64812cb6386f0e24a7ff39fdc16482d44ee9f31fb40e536665c",
+          "bytes": 28323
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/quantized/cuda.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/quantized/cuda.rs",
+          "upstream_git_blob": "679b9ebc8247453737816f4c218d5b95ff50789b",
+          "upstream_sha256": "582267e98d01a188341b41ca92471f329cd41549c3c6d748a47af3b341e835ca",
+          "sha256": "582267e98d01a188341b41ca92471f329cd41549c3c6d748a47af3b341e835ca",
+          "bytes": 36971
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/quantized/dummy_cuda.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/quantized/dummy_cuda.rs",
+          "upstream_git_blob": "04f19f9fcb64153045311c2a8ac9bb33fe7a8581",
+          "upstream_sha256": "534ff012566fea238b247715c278352fa1860202ea9c8db32636469769f6dd97",
+          "sha256": "534ff012566fea238b247715c278352fa1860202ea9c8db32636469769f6dd97",
+          "bytes": 2374
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/quantized/dummy_metal.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/quantized/dummy_metal.rs",
+          "upstream_git_blob": "6f470e9099de5b974118b6d83362d22c4e2027fc",
+          "upstream_sha256": "a9c727095f509046d1a50d131eee1529f9aa97ab306ceb1a44a1e827ea10109d",
+          "sha256": "a9c727095f509046d1a50d131eee1529f9aa97ab306ceb1a44a1e827ea10109d",
+          "bytes": 2161
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/quantized/fast_mmq.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/quantized/fast_mmq.rs",
+          "upstream_git_blob": "b2c1e04b97b5a5d3042fb70606fad2c886e03240",
+          "upstream_sha256": "be3f83f1098cc480af28716a671e1f4560ae87ede82c7593564d3db3f5c38a41",
+          "sha256": "be3f83f1098cc480af28716a671e1f4560ae87ede82c7593564d3db3f5c38a41",
+          "bytes": 12275
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/quantized/fast_mmvq.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/quantized/fast_mmvq.rs",
+          "upstream_git_blob": "0b53552b3a8af43dd8a15912989fc36b25cd40f3",
+          "upstream_sha256": "d1a833eaad8897848d365c2773cc067359b8b8afc3adc6644e1c467959283eb7",
+          "sha256": "d1a833eaad8897848d365c2773cc067359b8b8afc3adc6644e1c467959283eb7",
+          "bytes": 11444
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/quantized/ggml_file.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/quantized/ggml_file.rs",
+          "upstream_git_blob": "ea5ec025787639eec71de581ad727ba1f013dd40",
+          "upstream_sha256": "dfc48f822e4393bc836efcf782f4a6bb36168ac9d641324a054f13ee862aadac",
+          "sha256": "dfc48f822e4393bc836efcf782f4a6bb36168ac9d641324a054f13ee862aadac",
+          "bytes": 9229
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/quantized/gguf_file.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/quantized/gguf_file.rs",
+          "upstream_git_blob": "197e43cfe3077783e3766d275f46c5c9a68e7bcc",
+          "upstream_sha256": "a263c9076e3e233457cc3d7780e3240c6448c7b5b8c517e480353691be5ff186",
+          "sha256": "a263c9076e3e233457cc3d7780e3240c6448c7b5b8c517e480353691be5ff186",
+          "bytes": 18416
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/quantized/imatrix_file.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/quantized/imatrix_file.rs",
+          "upstream_git_blob": "ed228b74ce0ac6633b29893e56a0b0f5adc66006",
+          "upstream_sha256": "4ad710e64a0c9d3e5c2be1f6ca0a760035babb66c5fb91774acd1d7a30288d66",
+          "sha256": "4ad710e64a0c9d3e5c2be1f6ca0a760035babb66c5fb91774acd1d7a30288d66",
+          "bytes": 2580
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/quantized/k_quants.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/quantized/k_quants.rs",
+          "upstream_git_blob": "9069b23667e2de005b6dabccd1bbe13e2175424c",
+          "upstream_sha256": "736a4b74c26c8c3be2917ec4c4ca88cf87e892c6b3278f5a466726bdf84f21b1",
+          "sha256": "736a4b74c26c8c3be2917ec4c4ca88cf87e892c6b3278f5a466726bdf84f21b1",
+          "bytes": 87195
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/quantized/metal.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/quantized/metal.rs",
+          "upstream_git_blob": "c42045113b85935d7db7e5a60bedc6a546455418",
+          "upstream_sha256": "80109200330128c4cd9549796006556fac8f23bf8a1008da13a9248e366dd3b9",
+          "sha256": "80109200330128c4cd9549796006556fac8f23bf8a1008da13a9248e366dd3b9",
+          "bytes": 14775
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/quantized/mod.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/quantized/mod.rs",
+          "upstream_git_blob": "eb97aed17e0da98a4f77390e21cc6f3af6e7650a",
+          "upstream_sha256": "8895c74c5277b5681e7065692487c43582898102e6f91f4fb1098f9a5bae4f49",
+          "sha256": "8895c74c5277b5681e7065692487c43582898102e6f91f4fb1098f9a5bae4f49",
+          "bytes": 32471
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/quantized/neon.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/quantized/neon.rs",
+          "upstream_git_blob": "63196769f5fb0f11911d60e58ec6fa5e3c6d3e48",
+          "upstream_sha256": "2a46cd5cf8f296c3673f61380bac49fd98232472ae5db60dc7babc788fdd0be7",
+          "sha256": "2a46cd5cf8f296c3673f61380bac49fd98232472ae5db60dc7babc788fdd0be7",
+          "bytes": 22872
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/quantized/simd128.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/quantized/simd128.rs",
+          "upstream_git_blob": "4c02f9919eb4ee5754206ddf217c798a29dc91c5",
+          "upstream_sha256": "5c8000c6dea9803de8befde33b15970c1b1dcbf83b914c6261a3e9c2b658c1da",
+          "sha256": "5c8000c6dea9803de8befde33b15970c1b1dcbf83b914c6261a3e9c2b658c1da",
+          "bytes": 17120
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/quantized/tokenizer.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/quantized/tokenizer.rs",
+          "upstream_git_blob": "b96128effa83adfbadb104b3ed8b154fdf77c998",
+          "upstream_sha256": "bffd78cafb82f4c33a4d39af79a78512c3781cd2d6ea25d30db3faf05c934b1a",
+          "sha256": "bffd78cafb82f4c33a4d39af79a78512c3781cd2d6ea25d30db3faf05c934b1a",
+          "bytes": 11226
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/quantized/utils.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/quantized/utils.rs",
+          "upstream_git_blob": "9dd9c0918aa071ab187717aea29b36a08c00d374",
+          "upstream_sha256": "33a4ff45fafb4baecbd6b95f68fd373d447283be19e38e63f1f4da3434f3a47b",
+          "sha256": "33a4ff45fafb4baecbd6b95f68fd373d447283be19e38e63f1f4da3434f3a47b",
+          "bytes": 16370
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/safetensors.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/safetensors.rs",
+          "upstream_git_blob": "bec233b614a6b80ee958a2fda262a0760130d874",
+          "upstream_sha256": "1259250e0899d842d34e0a2495c414fb63efdee0d78e74092a47648c5380bfb3",
+          "sha256": "1259250e0899d842d34e0a2495c414fb63efdee0d78e74092a47648c5380bfb3",
+          "bytes": 25322
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/scalar.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/scalar.rs",
+          "upstream_git_blob": "5c512c03b9e897bc05eca046c702098d581cefa5",
+          "upstream_sha256": "d98ca484e6fd0580f2b8bb2c3c43283671496042aa9d58115829052532d6200c",
+          "sha256": "d98ca484e6fd0580f2b8bb2c3c43283671496042aa9d58115829052532d6200c",
+          "bytes": 3356
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/shape.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/shape.rs",
+          "upstream_git_blob": "b9e731266f5cd19291240802efbcc6bdfe63d919",
+          "upstream_sha256": "0fb3b21b63f348efcc18222cecbc3b5ea510d14c50f728c9471a30e24901ba74",
+          "sha256": "0fb3b21b63f348efcc18222cecbc3b5ea510d14c50f728c9471a30e24901ba74",
+          "bytes": 19165
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/sort.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/sort.rs",
+          "upstream_git_blob": "19d783874b703f302cfb08335d5a6990d7f57080",
+          "upstream_sha256": "4c1263ab7b6f80a1acd05813a4afd4ef2aa98d44378458829dfc403bccfdbb92",
+          "sha256": "4c1263ab7b6f80a1acd05813a4afd4ef2aa98d44378458829dfc403bccfdbb92",
+          "bytes": 11046
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/storage.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/storage.rs",
+          "upstream_git_blob": "4646dc88ea93fd508d5ba57366ae33ec3ba57831",
+          "upstream_sha256": "6241271357ee152f0244e47053f40de811832fca89e8aece6420bbc1b5c485c4",
+          "sha256": "6241271357ee152f0244e47053f40de811832fca89e8aece6420bbc1b5c485c4",
+          "bytes": 29392
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/streaming.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/streaming.rs",
+          "upstream_git_blob": "f4c0a9ff0b2888770b8c7ef9e9626ddf53d20eb6",
+          "upstream_sha256": "abd0de65d894b617e6e3fb0c0787f220582bcb1f8eb9341c33bb74aaa23bf165",
+          "sha256": "abd0de65d894b617e6e3fb0c0787f220582bcb1f8eb9341c33bb74aaa23bf165",
+          "bytes": 6138
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/strided_index.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/strided_index.rs",
+          "upstream_git_blob": "a31d406a432760bfb1552bd3443e8c2b63220579",
+          "upstream_sha256": "b4884a6ad8d6fcb043b69b47b8203a035f40616057677802df32c4ee3799445b",
+          "sha256": "b4884a6ad8d6fcb043b69b47b8203a035f40616057677802df32c4ee3799445b",
+          "bytes": 2453
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/tensor.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/tensor.rs",
+          "upstream_git_blob": "52b7f79b77f4850115280f348367265a3f1e1b8d",
+          "upstream_sha256": "25b95a8deecffa87d55325d9ae258b9552778a7eb24a653b7c1438340aa21487",
+          "sha256": "25b95a8deecffa87d55325d9ae258b9552778a7eb24a653b7c1438340aa21487",
+          "bytes": 116067
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/tensor_cat.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/tensor_cat.rs",
+          "upstream_git_blob": "520b246f5e87e2957b017eebad6b777e9a3e3de2",
+          "upstream_sha256": "8c97ffbac8ca2fef78d5d1440e05df7915e6b1c2ae34ef891a36e6a6e989f497",
+          "sha256": "8c97ffbac8ca2fef78d5d1440e05df7915e6b1c2ae34ef891a36e6a6e989f497",
+          "bytes": 11055
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/test_utils.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/test_utils.rs",
+          "upstream_git_blob": "e331399f4d1309f93c77253f2d1c71d0372b9993",
+          "upstream_sha256": "b3eec41e2864344b9e0a0eec4f0be70f8273617b99684d41315809530327debb",
+          "sha256": "b3eec41e2864344b9e0a0eec4f0be70f8273617b99684d41315809530327debb",
+          "bytes": 2113
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/utils.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/utils.rs",
+          "upstream_git_blob": "4a58db81135babc2dae22ee27711a014d7caae9d",
+          "upstream_sha256": "bdfc884fb12a14eb2b5a0dfafebd7951596ac9361f97c1cd93c4284507eec9e6",
+          "sha256": "bdfc884fb12a14eb2b5a0dfafebd7951596ac9361f97c1cd93c4284507eec9e6",
+          "bytes": 888
+        },
+        {
+          "path": "vendor/zip9-candle-core/src/variable.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/src/variable.rs",
+          "upstream_git_blob": "1e4880e59aaa51a611b8347f735edddac12a39f3",
+          "upstream_sha256": "b9b10b5d2d4a81d1ab920f9337e556a634bae7e484a0b04ea855f9a903fc87ec",
+          "sha256": "b9b10b5d2d4a81d1ab920f9337e556a634bae7e484a0b04ea855f9a903fc87ec",
+          "bytes": 4731
+        },
+        {
+          "path": "vendor/zip9-candle-core/tests/bilinear_tests.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/tests/bilinear_tests.rs",
+          "upstream_git_blob": "3716df6ba4f2781e485844ef16b9302b33b0a997",
+          "upstream_sha256": "6844aa75cbe436d753391e3839619adca77a1f83d6ae78957261181fabbefe9a",
+          "sha256": "6844aa75cbe436d753391e3839619adca77a1f83d6ae78957261181fabbefe9a",
+          "bytes": 17560
+        },
+        {
+          "path": "vendor/zip9-candle-core/tests/conv_tests.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/tests/conv_tests.rs",
+          "upstream_git_blob": "df9d492ec8bbb7edc7dada9f37da45c69b543df0",
+          "upstream_sha256": "c017970bc3a2288634718a7c743f3dfe458e254e5d34c9704fa5531570eeafa0",
+          "sha256": "c017970bc3a2288634718a7c743f3dfe458e254e5d34c9704fa5531570eeafa0",
+          "bytes": 41816
+        },
+        {
+          "path": "vendor/zip9-candle-core/tests/custom_op_tests.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/tests/custom_op_tests.rs",
+          "upstream_git_blob": "cea9b90cac3195c1d992a8bcd249735b4a449805",
+          "upstream_sha256": "fa13ae08edf71d1c15a0a7509652367ee53a5960b722d7ee503494455fa4173d",
+          "sha256": "fa13ae08edf71d1c15a0a7509652367ee53a5960b722d7ee503494455fa4173d",
+          "bytes": 5395
+        },
+        {
+          "path": "vendor/zip9-candle-core/tests/display_tests.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/tests/display_tests.rs",
+          "upstream_git_blob": "8ab8bb6ab70ab15153e5908b9562c5749ecf0dd8",
+          "upstream_sha256": "cf59d2ee9954a639db5c43ade847d4629503b706282419fae8c6481790c41e9b",
+          "sha256": "cf59d2ee9954a639db5c43ade847d4629503b706282419fae8c6481790c41e9b",
+          "bytes": 2794
+        },
+        {
+          "path": "vendor/zip9-candle-core/tests/fortran_tensor_3d.pth",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/tests/fortran_tensor_3d.pth",
+          "upstream_git_blob": "bd50b03d9cd74135fa6f53e2bf39da2f7ac0879d",
+          "upstream_sha256": "f5178bcd53eb6cb54c9a5e825492c717bf4e7bbadb9f0f3833b6c5c6764f7a38",
+          "sha256": "f5178bcd53eb6cb54c9a5e825492c717bf4e7bbadb9f0f3833b6c5c6764f7a38",
+          "bytes": 1486
+        },
+        {
+          "path": "vendor/zip9-candle-core/tests/grad_tests.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/tests/grad_tests.rs",
+          "upstream_git_blob": "0018f5e0a7fe31e2a4d1b16752ffad7296109084",
+          "upstream_sha256": "1982df5053fb43b71388ed9bf1cf3f1d44d550c9ffddcdaaee79d41b0c7f2340",
+          "sha256": "1982df5053fb43b71388ed9bf1cf3f1d44d550c9ffddcdaaee79d41b0c7f2340",
+          "bytes": 19442
+        },
+        {
+          "path": "vendor/zip9-candle-core/tests/indexing_tests.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/tests/indexing_tests.rs",
+          "upstream_git_blob": "047205a31faa336be99b34a1c8e0b9f84c648a6f",
+          "upstream_sha256": "3d9e855b36a3e0b8683777b3d13c6d34859773f47e5ff309d612cbfcafdd6be4",
+          "sha256": "3d9e855b36a3e0b8683777b3d13c6d34859773f47e5ff309d612cbfcafdd6be4",
+          "bytes": 3728
+        },
+        {
+          "path": "vendor/zip9-candle-core/tests/layout_tests.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/tests/layout_tests.rs",
+          "upstream_git_blob": "bc67f7defc146f59e1a920f6ab1c332febca18ff",
+          "upstream_sha256": "25e6347e2c647838331254ad21d437f6ab59bc26dd98110c696d365f05daa18e",
+          "sha256": "25e6347e2c647838331254ad21d437f6ab59bc26dd98110c696d365f05daa18e",
+          "bytes": 5185
+        },
+        {
+          "path": "vendor/zip9-candle-core/tests/matmul_tests.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/tests/matmul_tests.rs",
+          "upstream_git_blob": "aa2189f7a039bbc46c5bf9c34392f06554c808c1",
+          "upstream_sha256": "7499f96b1d2343ab919076f57f6907f85391af5c2e55d057673fb24ea59a061e",
+          "sha256": "7499f96b1d2343ab919076f57f6907f85391af5c2e55d057673fb24ea59a061e",
+          "bytes": 5382
+        },
+        {
+          "path": "vendor/zip9-candle-core/tests/npy.py",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/tests/npy.py",
+          "upstream_git_blob": "0fd2778a159815df75eb2d4fb3c7bef8b4b00c4e",
+          "upstream_sha256": "e2547b01e13fc3807991286645dba5eea7c5b3d76e821be2cfa7822be7a2f818",
+          "sha256": "e2547b01e13fc3807991286645dba5eea7c5b3d76e821be2cfa7822be7a2f818",
+          "bytes": 193
+        },
+        {
+          "path": "vendor/zip9-candle-core/tests/pool_tests.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/tests/pool_tests.rs",
+          "upstream_git_blob": "1edb7d353be8f8279cd639d536957e58faca878a",
+          "upstream_sha256": "b574c67ce8486578d55b3f27070f83bf1c1137173b9d3762d5cd2e7d25c9f8b3",
+          "sha256": "b574c67ce8486578d55b3f27070f83bf1c1137173b9d3762d5cd2e7d25c9f8b3",
+          "bytes": 3639
+        },
+        {
+          "path": "vendor/zip9-candle-core/tests/pth.py",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/tests/pth.py",
+          "upstream_git_blob": "5c787c2036bce476caecad603b92b94314cf7ce3",
+          "upstream_sha256": "7ef7b4686691b33173f376f22daa121e92c91bec172994afe3deebd53e77f0b7",
+          "sha256": "7ef7b4686691b33173f376f22daa121e92c91bec172994afe3deebd53e77f0b7",
+          "bytes": 1432
+        },
+        {
+          "path": "vendor/zip9-candle-core/tests/pth_tests.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/tests/pth_tests.rs",
+          "upstream_git_blob": "7ea3d1420ef51b747b39f3bc310398b639a5d55f",
+          "upstream_sha256": "32440ce8dcb64ddf469e7cf122f4d19aa0ae484650c20d127d147fb99052fa35",
+          "sha256": "32440ce8dcb64ddf469e7cf122f4d19aa0ae484650c20d127d147fb99052fa35",
+          "bytes": 919
+        },
+        {
+          "path": "vendor/zip9-candle-core/tests/quantized_tests.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/tests/quantized_tests.rs",
+          "upstream_git_blob": "de649f3a3e1c65228e67dc6f89105f15aeb2340e",
+          "upstream_sha256": "0fa86469209dfcac457f4eb54892c27f404d8042c7595a3d5e5d6df4142a7d3a",
+          "sha256": "0fa86469209dfcac457f4eb54892c27f404d8042c7595a3d5e5d6df4142a7d3a",
+          "bytes": 49872
+        },
+        {
+          "path": "vendor/zip9-candle-core/tests/serialization_tests.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/tests/serialization_tests.rs",
+          "upstream_git_blob": "f81350e6e17657cd2a578616d542aa38451b488f",
+          "upstream_sha256": "98db2da64586ec61234767421a792e712f2c072fe2382b1ff589c771b03b7d57",
+          "sha256": "98db2da64586ec61234767421a792e712f2c072fe2382b1ff589c771b03b7d57",
+          "bytes": 1905
+        },
+        {
+          "path": "vendor/zip9-candle-core/tests/tensor_tests.rs",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/tests/tensor_tests.rs",
+          "upstream_git_blob": "5422353b0e970b42d696992f7f25d33e2b943119",
+          "upstream_sha256": "8ce0f9b1406a9c30a1d2600dc88887875fec89b3c87e4eea21c971535b4bc261",
+          "sha256": "8ce0f9b1406a9c30a1d2600dc88887875fec89b3c87e4eea21c971535b4bc261",
+          "bytes": 66041
+        },
+        {
+          "path": "vendor/zip9-candle-core/tests/test.npy",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/tests/test.npy",
+          "upstream_git_blob": "a3ff5af9540510ac6518b5a2478bc1a40f992371",
+          "upstream_sha256": "f314ddddf18999d4890f4fec8bb6539fc62b6f41861fa85e1c04c98a03097dda",
+          "sha256": "f314ddddf18999d4890f4fec8bb6539fc62b6f41861fa85e1c04c98a03097dda",
+          "bytes": 208
+        },
+        {
+          "path": "vendor/zip9-candle-core/tests/test.npz",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/tests/test.npz",
+          "upstream_git_blob": "b6683caab0e0e9e66cb5ca649aab4980a1e650df",
+          "upstream_sha256": "999497e0c309302915e4db2b16118ce097c68aac66c08058fac8db3d58c7809a",
+          "sha256": "999497e0c309302915e4db2b16118ce097c68aac66c08058fac8db3d58c7809a",
+          "bytes": 668
+        },
+        {
+          "path": "vendor/zip9-candle-core/tests/test.pt",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/tests/test.pt",
+          "upstream_git_blob": "f2fa7da3e47d765585833e67c9f02e4612cd26f2",
+          "upstream_sha256": "2bc164fa96f78ef8fcb8eab5fdae9b991efe946b9b63071fdf1769dba5d3fe25",
+          "sha256": "2bc164fa96f78ef8fcb8eab5fdae9b991efe946b9b63071fdf1769dba5d3fe25",
+          "bytes": 1165
+        },
+        {
+          "path": "vendor/zip9-candle-core/tests/test_with_key.pt",
+          "upstream_path": "crates/media/candle-gen/vendor/candle-core/tests/test_with_key.pt",
+          "upstream_git_blob": "a598e02c42ea4daf5450f7888dada9b2874471e0",
+          "upstream_sha256": "2775d95f17d2630e2534e3ae09462624955031407a67f0f3b52115c49601b747",
+          "sha256": "2775d95f17d2630e2534e3ae09462624955031407a67f0f3b52115c49601b747",
+          "bytes": 1338
+        },
+        {
+          "path": "vendor/zip9-candle-core/tests/zip9_security_tests.rs",
+          "upstream_path": null,
+          "upstream_sha256": null,
+          "added_security_regression_test": true,
+          "sha256": "288038a4aaa234f605e31d67dc685ac8ea09ceddb6bff5bfb7cde0ce9e273445",
+          "bytes": 4936
+        }
+      ]
+    },
+    {
+      "name": "mlx-gen",
+      "version": "0.0.0",
+      "path": "vendor/zip9-mlx-gen",
+      "upstream_repository": "https://github.com/SceneWorks/inference",
+      "upstream_revision": "91ffb4a819aa2990c652db2d881ba0b9b10126ce",
+      "upstream_package_path": "crates/media/mlx-gen",
+      "files": [
+        {
+          "path": "vendor/zip9-mlx-gen/Cargo.toml",
+          "upstream_path": "crates/media/mlx-gen/Cargo.toml",
+          "upstream_git_blob": "56efd60cfe842684a512d9ae44dd4b8bae5797b7",
+          "upstream_sha256": "7ec1ef133d8f5efb7d20604fd68ba2ca38ca781843ecef025e288a8932ed9931",
+          "sha256": "a11a1675356fb2255c55d54ab6ff802872f39eb5b2d5179ebd9537085ef94875",
+          "bytes": 15050
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/LICENSE",
+          "upstream_path": "crates/media/mlx-gen/LICENSE",
+          "upstream_git_blob": "1dd8469609acdffdd4159fbdfad46ef3f6bff604",
+          "upstream_sha256": "18d87fbcec0b894bd5fe838cafc5bc447d58c28675c81f02ecabce04953fce8c",
+          "sha256": "18d87fbcec0b894bd5fe838cafc5bc447d58c28675c81f02ecabce04953fce8c",
+          "bytes": 11373
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/LICENSE-CEPHES",
+          "upstream_path": "crates/media/mlx-gen/LICENSE-CEPHES",
+          "upstream_git_blob": "d7335e4ecd52141c87a29f076895a178fad82a4f",
+          "upstream_sha256": "72c1fdefab5faaaeb817979962a80b60b759f3d25134e1250ceb732a8b9b5daa",
+          "sha256": "72c1fdefab5faaaeb817979962a80b60b759f3d25134e1250ceb732a8b9b5daa",
+          "bytes": 2668
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/NOTICE",
+          "upstream_path": "crates/media/mlx-gen/NOTICE",
+          "upstream_git_blob": "5bd2f8bc5a8df3ee119b10bf583203a45f6e1b49",
+          "upstream_sha256": "27dc0ff4ab8565f0d9f8571be1b719869846b9bb6b4d6dc733cff2b8674ad76e",
+          "sha256": "27dc0ff4ab8565f0d9f8571be1b719869846b9bb6b4d6dc733cff2b8674ad76e",
+          "bytes": 5848
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/README.md",
+          "upstream_path": "crates/media/mlx-gen/README.md",
+          "upstream_git_blob": "cce80b9334a01ee388964996c3c455859a466507",
+          "upstream_sha256": "e4f28fc91068888ecce0dabdeaeba6584c9657518453d09ffe6a323d937463f0",
+          "sha256": "e4f28fc91068888ecce0dabdeaeba6584c9657518453d09ffe6a323d937463f0",
+          "bytes": 6173
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/mlx-gen-bernini/src/memory_strategy.rs",
+          "upstream_path": "crates/media/mlx-gen/mlx-gen-bernini/src/memory_strategy.rs",
+          "upstream_git_blob": "b8de50a45a7b7903e6691c86ebd9107df3f6b141",
+          "upstream_sha256": "5d60b1d313f8035efbcf98cd38d1ce4947df29cb877291722f112a61ec62aca8",
+          "sha256": "5d60b1d313f8035efbcf98cd38d1ce4947df29cb877291722f112a61ec62aca8",
+          "bytes": 170594
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs",
+          "upstream_path": "crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs",
+          "upstream_git_blob": "84a3b8ebf6c62beeadb396700492580a61e8625f",
+          "upstream_sha256": "ace70b5a6f3dc58beb0d06883583bea08f75e6dd5c4087959d3c0a6cff681cc2",
+          "sha256": "ace70b5a6f3dc58beb0d06883583bea08f75e6dd5c4087959d3c0a6cff681cc2",
+          "bytes": 121541
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/mlx-gen-krea/src/memory_strategy.rs",
+          "upstream_path": "crates/media/mlx-gen/mlx-gen-krea/src/memory_strategy.rs",
+          "upstream_git_blob": "4a30091988cccda09df83c95cf008cca682823f8",
+          "upstream_sha256": "b774231f58032b1d7fb5db8b39938f76979d9733636dde4f888b1f7333b06efb",
+          "sha256": "b774231f58032b1d7fb5db8b39938f76979d9733636dde4f888b1f7333b06efb",
+          "bytes": 75892
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/mlx-gen-lens/src/memory_strategy.rs",
+          "upstream_path": "crates/media/mlx-gen/mlx-gen-lens/src/memory_strategy.rs",
+          "upstream_git_blob": "ca56c6c3da010d78b55dd8bc5703aa55f8367f73",
+          "upstream_sha256": "f786dc658cb03bb2d29de6891212e209b19c37c3db7a97b043b9e47dee272637",
+          "sha256": "f786dc658cb03bb2d29de6891212e209b19c37c3db7a97b043b9e47dee272637",
+          "bytes": 78406
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/mlx-gen-ltx/src/memory_strategy.rs",
+          "upstream_path": "crates/media/mlx-gen/mlx-gen-ltx/src/memory_strategy.rs",
+          "upstream_git_blob": "d5d604a0ae93b753bfd633859bcee8bcc4b56168",
+          "upstream_sha256": "475dd0ec5c75e383bb0e70331e327dd010787938e9fa728385a0cd87208e379e",
+          "sha256": "475dd0ec5c75e383bb0e70331e327dd010787938e9fa728385a0cd87208e379e",
+          "bytes": 116167
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/mlx-gen-mage/src/model.rs",
+          "upstream_path": "crates/media/mlx-gen/mlx-gen-mage/src/model.rs",
+          "upstream_git_blob": "c577716cc1f88504b31e80233dd5ce28807f0204",
+          "upstream_sha256": "8693ccce610e0b33a625d308b60df9f81258e304990c40f3a156f9a5d5ac269a",
+          "sha256": "8693ccce610e0b33a625d308b60df9f81258e304990c40f3a156f9a5d5ac269a",
+          "bytes": 183498
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs",
+          "upstream_path": "crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs",
+          "upstream_git_blob": "6e6b996ff87dfa5a6f887330731a74a2a444c7f9",
+          "upstream_sha256": "c14f18ae0aa3190ae9d9dff63eb44c1316db97d16174939005020c5a44f28ed7",
+          "sha256": "c14f18ae0aa3190ae9d9dff63eb44c1316db97d16174939005020c5a44f28ed7",
+          "bytes": 50111
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/mlx-gen-sana/src/memory_strategy.rs",
+          "upstream_path": "crates/media/mlx-gen/mlx-gen-sana/src/memory_strategy.rs",
+          "upstream_git_blob": "1c3472f674a9191a5a506b65a71ba27a894e526c",
+          "upstream_sha256": "9867d34071c9e3a42e32f9125924a0527207df53a13243d8a60c3b39dc338e71",
+          "sha256": "9867d34071c9e3a42e32f9125924a0527207df53a13243d8a60c3b39dc338e71",
+          "bytes": 93317
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/mlx-gen-z-image/src/memory_strategy.rs",
+          "upstream_path": "crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs",
+          "upstream_git_blob": "6a80f547aefe3efa8a79999d4a80822c717aa97e",
+          "upstream_sha256": "21539e279f34ed2842e1bd2224e86cc4710dac4bb84351c52c4c025abdd2c142",
+          "sha256": "21539e279f34ed2842e1bd2224e86cc4710dac4bb84351c52c4c025abdd2c142",
+          "bytes": 154482
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/adapters.rs",
+          "upstream_path": "crates/media/mlx-gen/src/adapters.rs",
+          "upstream_git_blob": "a33e50bbfba2246399d88b71e57933db8c1d7d51",
+          "upstream_sha256": "eb09850387741d6fe606f5786419bc552cb32ee551d4f8e02486108972d2909e",
+          "sha256": "eb09850387741d6fe606f5786419bc552cb32ee551d4f8e02486108972d2909e",
+          "bytes": 116743
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/adapters/loader.rs",
+          "upstream_path": "crates/media/mlx-gen/src/adapters/loader.rs",
+          "upstream_git_blob": "cf21ab949d537a17bc3bf462aa3e5601768d2ee9",
+          "upstream_sha256": "18dbbcb61053f09e0bbe615b3be81b30e7cf70e14816e2111cf9763933e59f88",
+          "sha256": "18dbbcb61053f09e0bbe615b3be81b30e7cf70e14816e2111cf9763933e59f88",
+          "bytes": 268057
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/architecture_facts.rs",
+          "upstream_path": "crates/media/mlx-gen/src/architecture_facts.rs",
+          "upstream_git_blob": "11496a4d01facdaf576c5799e20506a397687ebf",
+          "upstream_sha256": "3050e27fd2682162cc0f7580299855f45fdff08e94bf64f1c2735afdd1bf0ff7",
+          "sha256": "3050e27fd2682162cc0f7580299855f45fdff08e94bf64f1c2735afdd1bf0ff7",
+          "bytes": 6194
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/array.rs",
+          "upstream_path": "crates/media/mlx-gen/src/array.rs",
+          "upstream_git_blob": "d3d30c7cc4066971b13ed35a814b0b2f99e1b57c",
+          "upstream_sha256": "269ce72afad672497fce54c99631619759e71a63eae610ac0689d6e7f2845fd8",
+          "sha256": "269ce72afad672497fce54c99631619759e71a63eae610ac0689d6e7f2845fd8",
+          "bytes": 10435
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/asset_facts.rs",
+          "upstream_path": "crates/media/mlx-gen/src/asset_facts.rs",
+          "upstream_git_blob": "b49b0d2de38590f93ddccd3cc76a13916f8ee922",
+          "upstream_sha256": "db6e80d756f195b8ca7fcbf97a55a34ecb05308c644f9c4b8ecbda48f15406a2",
+          "sha256": "db6e80d756f195b8ca7fcbf97a55a34ecb05308c644f9c4b8ecbda48f15406a2",
+          "bytes": 17711
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/attention.rs",
+          "upstream_path": "crates/media/mlx-gen/src/attention.rs",
+          "upstream_git_blob": "98279acbad9e1e95eb7459b627963e2d1e37e284",
+          "upstream_sha256": "bd06cbed2698935cca1b50c943057d5b69cb40de1f72bb54de21b6a7d02d5852",
+          "sha256": "bd06cbed2698935cca1b50c943057d5b69cb40de1f72bb54de21b6a7d02d5852",
+          "bytes": 55802
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/block_residency.rs",
+          "upstream_path": "crates/media/mlx-gen/src/block_residency.rs",
+          "upstream_git_blob": "8390ff635a4dbc01e09df160dc52c8d44abfdcea",
+          "upstream_sha256": "7e9232b6cbd1b4e194bd1638701eec6d1b2322acd7b735833dd088a905de9c90",
+          "sha256": "7e9232b6cbd1b4e194bd1638701eec6d1b2322acd7b735833dd088a905de9c90",
+          "bytes": 9574
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/capability.rs",
+          "upstream_path": "crates/media/mlx-gen/src/capability.rs",
+          "upstream_git_blob": "c02979367d90f59c3003ab43be81e2012135c538",
+          "upstream_sha256": "f80ec30db17e8a2484d3cbf1d26ebad8f3dd4c3ccb7c19b7bf0cd27c78c86961",
+          "sha256": "f80ec30db17e8a2484d3cbf1d26ebad8f3dd4c3ccb7c19b7bf0cd27c78c86961",
+          "bytes": 14772
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/caption.rs",
+          "upstream_path": "crates/media/mlx-gen/src/caption.rs",
+          "upstream_git_blob": "e5b7bc969d849521a8633023fd08d2af17fce4e6",
+          "upstream_sha256": "811927a2d88c7edf961f937d271c07b206bae1066842d867823bf1c9d347f343",
+          "sha256": "811927a2d88c7edf961f937d271c07b206bae1066842d867823bf1c9d347f343",
+          "bytes": 307
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/caption/joycaption.rs",
+          "upstream_path": "crates/media/mlx-gen/src/caption/joycaption.rs",
+          "upstream_git_blob": "3862a8c596446c3a7139bfd929905e3a723c3fa5",
+          "upstream_sha256": "b0f873b5d7862f15d50f89569db815019529c3caf13b02988a1ec6ba9c13ef7b",
+          "sha256": "b0f873b5d7862f15d50f89569db815019529c3caf13b02988a1ec6ba9c13ef7b",
+          "bytes": 14995
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/coherence.rs",
+          "upstream_path": "crates/media/mlx-gen/src/coherence.rs",
+          "upstream_git_blob": "7fc91ea18f5891168b08683ccfddcb4284593069",
+          "upstream_sha256": "1515299660e4e9487d3bcb5d897d166106d2a24de936759f5aeb43662ee8cf34",
+          "sha256": "1515299660e4e9487d3bcb5d897d166106d2a24de936759f5aeb43662ee8cf34",
+          "bytes": 16599
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/decoder.rs",
+          "upstream_path": "crates/media/mlx-gen/src/decoder.rs",
+          "upstream_git_blob": "dd1adfc286ad5aa6005d2a6a9392fe580a1b5e6a",
+          "upstream_sha256": "77ea117fe36b9218f77ee62d95e4bd66a4efc50fb74ad22853a6cab84e6b49bd",
+          "sha256": "77ea117fe36b9218f77ee62d95e4bd66a4efc50fb74ad22853a6cab84e6b49bd",
+          "bytes": 9231
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/diagnostics.rs",
+          "upstream_path": "crates/media/mlx-gen/src/diagnostics.rs",
+          "upstream_git_blob": "861c034046e7b31ba525154cc6c1d4db0b944a2d",
+          "upstream_sha256": "080123c6e57ce4154f43683a76a57bf27f5989f6423571b07684457f21fe6ed2",
+          "sha256": "080123c6e57ce4154f43683a76a57bf27f5989f6423571b07684457f21fe6ed2",
+          "bytes": 36653
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/error.rs",
+          "upstream_path": "crates/media/mlx-gen/src/error.rs",
+          "upstream_git_blob": "526dccc921305aeb5e2031775dc465a9f8d97a72",
+          "upstream_sha256": "67b344001d740230fc64cfe94fc72dd7f262d5d5d0951886cd7e84255ae1dfac",
+          "sha256": "67b344001d740230fc64cfe94fc72dd7f262d5d5d0951886cd7e84255ae1dfac",
+          "bytes": 9584
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/image.rs",
+          "upstream_path": "crates/media/mlx-gen/src/image.rs",
+          "upstream_git_blob": "212a9d9d171b2bdfa79b74e9043b7bc370224b3e",
+          "upstream_sha256": "2f2d47a8da2bccbadc7b19eb1c2893b7cbb67043a200ea5f7353659b56d54767",
+          "sha256": "2f2d47a8da2bccbadc7b19eb1c2893b7cbb67043a200ea5f7353659b56d54767",
+          "bytes": 11952
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/img2img.rs",
+          "upstream_path": "crates/media/mlx-gen/src/img2img.rs",
+          "upstream_git_blob": "f8aea9f5182f6d0ef30e4ec512266ee969cd4893",
+          "upstream_sha256": "886d846a00ba2d1c86041fb35bd7fe12718fe73a0db5580885417ddbc97516a9",
+          "sha256": "886d846a00ba2d1c86041fb35bd7fe12718fe73a0db5580885417ddbc97516a9",
+          "bytes": 6764
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/lib.rs",
+          "upstream_path": "crates/media/mlx-gen/src/lib.rs",
+          "upstream_git_blob": "cba73f16465b30af28936ea7b76653b136278b9c",
+          "upstream_sha256": "092de5260e41a07a4818b423a4a8e32ef1879503ad210034103bc66835392c2f",
+          "sha256": "092de5260e41a07a4818b423a4a8e32ef1879503ad210034103bc66835392c2f",
+          "bytes": 6840
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/logical_weights.rs",
+          "upstream_path": "crates/media/mlx-gen/src/logical_weights.rs",
+          "upstream_git_blob": "fd5272b5ce8a259c1a8c9777cb10701891db22c7",
+          "upstream_sha256": "5e81db53553fc34556edfef35d851aa00f1a79cca31a6a2abf10b86bd2926076",
+          "sha256": "5e81db53553fc34556edfef35d851aa00f1a79cca31a6a2abf10b86bd2926076",
+          "bytes": 106191
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/memory.rs",
+          "upstream_path": "crates/media/mlx-gen/src/memory.rs",
+          "upstream_git_blob": "4839e57a05c96402efadb030b8f1f6a2cb9125c2",
+          "upstream_sha256": "35034376aa0140fa16d5cf709a6ea464593055eafbfb8002830ddfda7558db97",
+          "sha256": "35034376aa0140fa16d5cf709a6ea464593055eafbfb8002830ddfda7558db97",
+          "bytes": 9469
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/memory_probe.rs",
+          "upstream_path": "crates/media/mlx-gen/src/memory_probe.rs",
+          "upstream_git_blob": "4103c6779ecb3d77f39d59a78f59034ee03671ad",
+          "upstream_sha256": "fed91b77b6d71e89f51c3b6a396717ebd7ece39406fdb241e587613de3725b5a",
+          "sha256": "fed91b77b6d71e89f51c3b6a396717ebd7ece39406fdb241e587613de3725b5a",
+          "bytes": 42212
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/mllm.rs",
+          "upstream_path": "crates/media/mlx-gen/src/mllm.rs",
+          "upstream_git_blob": "2d17a20dc4500c8358989ef8b88382f9fe735fdb",
+          "upstream_sha256": "f8953ced56713823faaa006c8b4675bca8cc3e44d15962cb6b166dd193a44143",
+          "sha256": "f8953ced56713823faaa006c8b4675bca8cc3e44d15962cb6b166dd193a44143",
+          "bytes": 4447
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/nn.rs",
+          "upstream_path": "crates/media/mlx-gen/src/nn.rs",
+          "upstream_git_blob": "978c1dcd1e6be9f8f8d8fa25a54228155d8516a5",
+          "upstream_sha256": "20fd7e55dae057815d38207900bfeed552e5c65c67eb3bd213d53a81fabc0021",
+          "sha256": "20fd7e55dae057815d38207900bfeed552e5c65c67eb3bd213d53a81fabc0021",
+          "bytes": 119613
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/preview.rs",
+          "upstream_path": "crates/media/mlx-gen/src/preview.rs",
+          "upstream_git_blob": "f640cbcc41e8cd0f3d03ff8eaa1a31c79a22efba",
+          "upstream_sha256": "060a19a1c1ff399a527d3228b49e172fb03906cee98cfbb721003427e843f3b1",
+          "sha256": "060a19a1c1ff399a527d3228b49e172fb03906cee98cfbb721003427e843f3b1",
+          "bytes": 10932
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/pth.rs",
+          "upstream_path": "crates/media/mlx-gen/src/pth.rs",
+          "upstream_git_blob": "d03224894b267f0858e0d18caee2d81cb0d71a64",
+          "upstream_sha256": "466449ccf8e8ea3fefd159152bc30c32b1ff330138a3f7815ebb546b52307062",
+          "sha256": "585741a3af9cb922f2c0bf64584b7e0d495bbe25570f93863dc1535110c144c1",
+          "bytes": 41507
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/qkv.rs",
+          "upstream_path": "crates/media/mlx-gen/src/qkv.rs",
+          "upstream_git_blob": "db963fb482f55ae2bebbce233bfa36936a919e15",
+          "upstream_sha256": "0db308c998ad5923491c37198949d135b4a723bd44c661dff4102305673e09c1",
+          "sha256": "0db308c998ad5923491c37198949d135b4a723bd44c661dff4102305673e09c1",
+          "bytes": 79377
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/qkv/tests.rs",
+          "upstream_path": "crates/media/mlx-gen/src/qkv/tests.rs",
+          "upstream_git_blob": "316ed4a50a0f60340b728b15be2d76f8cdcd9140",
+          "upstream_sha256": "dee2e8230a30d15bb8c0ff82a326ca5976c8635968792e38cec54ea4cb8aced7",
+          "sha256": "dee2e8230a30d15bb8c0ff82a326ca5976c8635968792e38cec54ea4cb8aced7",
+          "bytes": 77462
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/quant.rs",
+          "upstream_path": "crates/media/mlx-gen/src/quant.rs",
+          "upstream_git_blob": "1a26157ed74e9ee8e73d22672f8b6d7cf4ee81e8",
+          "upstream_sha256": "7eef2da10aedd763686c8d42dbc91313f7847cb9f482d8c69247271e29fd879d",
+          "sha256": "7eef2da10aedd763686c8d42dbc91313f7847cb9f482d8c69247271e29fd879d",
+          "bytes": 33766
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/request_scope.rs",
+          "upstream_path": "crates/media/mlx-gen/src/request_scope.rs",
+          "upstream_git_blob": "648474d0c643cc10ad7ff92605d63914898d660d",
+          "upstream_sha256": "f24ac7d0ce46f617347bda08acaae4d274acafc69c270024778f3ec8dd512963",
+          "sha256": "f24ac7d0ce46f617347bda08acaae4d274acafc69c270024778f3ec8dd512963",
+          "bytes": 37851
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/residency.rs",
+          "upstream_path": "crates/media/mlx-gen/src/residency.rs",
+          "upstream_git_blob": "71fb5464e35883cb068e488973d759b944cbd3fb",
+          "upstream_sha256": "e44d56daea84b1d3a4512ec9397675fbb109ea71cb56e810069605f51d38a3af",
+          "sha256": "e44d56daea84b1d3a4512ec9397675fbb109ea71cb56e810069605f51d38a3af",
+          "bytes": 14945
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/sampler.rs",
+          "upstream_path": "crates/media/mlx-gen/src/sampler.rs",
+          "upstream_git_blob": "c0c212dfa5dc612dbb797c97779bf863fd750e4f",
+          "upstream_sha256": "e6a0ae394264a4ef2f4e87fce29cd208982ed8de98fecaf924b3f170f0f419d1",
+          "sha256": "e6a0ae394264a4ef2f4e87fce29cd208982ed8de98fecaf924b3f170f0f419d1",
+          "bytes": 73325
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/sc20686.rs",
+          "upstream_path": "crates/media/mlx-gen/src/sc20686.rs",
+          "upstream_git_blob": "73aa72aab48fb7bb555df13d05d9f6e6c8db6e40",
+          "upstream_sha256": "5ab1eb2d0ce1fb43c52081f654d377ca3e1760883f19e98f9601a373343a0945",
+          "sha256": "5ab1eb2d0ce1fb43c52081f654d377ca3e1760883f19e98f9601a373343a0945",
+          "bytes": 54220
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/sc20686/tests.rs",
+          "upstream_path": "crates/media/mlx-gen/src/sc20686/tests.rs",
+          "upstream_git_blob": "7cc9940c4d9b0297bc720c794960357f14ed5ad8",
+          "upstream_sha256": "b4398812938ccde889b44bba22a9268241c736e52576eadbf34c5a0f2f1d64ab",
+          "sha256": "b4398812938ccde889b44bba22a9268241c736e52576eadbf34c5a0f2f1d64ab",
+          "bytes": 29070
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/scheduler.rs",
+          "upstream_path": "crates/media/mlx-gen/src/scheduler.rs",
+          "upstream_git_blob": "86bf9609ae64d31ce7a355f7417b9f7d6164872c",
+          "upstream_sha256": "b3483503ed83a864a667972f963c87668f6d642d21bd669a6a9b909c9e741796",
+          "sha256": "b3483503ed83a864a667972f963c87668f6d642d21bd669a6a9b909c9e741796",
+          "bytes": 8851
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/text_sample.rs",
+          "upstream_path": "crates/media/mlx-gen/src/text_sample.rs",
+          "upstream_git_blob": "ee02b9d9f9bcac6d4d88b5f587b1caa9addb1e64",
+          "upstream_sha256": "38d43561593807335962ee064705f7814837c6d8eeb22d6f15076fc04f35e5d7",
+          "sha256": "38d43561593807335962ee064705f7814837c6d8eeb22d6f15076fc04f35e5d7",
+          "bytes": 10325
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/tokenizer.rs",
+          "upstream_path": "crates/media/mlx-gen/src/tokenizer.rs",
+          "upstream_git_blob": "9efc73016821044ffd4dc11213d7f6d6e5e54757",
+          "upstream_sha256": "ccaa807e984ee80a4c40d9805524a3ebed5bc7558f7e570f9cdfe0c5eca0bff0",
+          "sha256": "ccaa807e984ee80a4c40d9805524a3ebed5bc7558f7e570f9cdfe0c5eca0bff0",
+          "bytes": 888
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/train.rs",
+          "upstream_path": "crates/media/mlx-gen/src/train.rs",
+          "upstream_git_blob": "fe55b36dcd25a1511717e593fa2a6e53e7d6f347",
+          "upstream_sha256": "420c12862f9dc0ca3f3797c12d7818cadd035aaecd2523399fa5d7d962f56ac9",
+          "sha256": "420c12862f9dc0ca3f3797c12d7818cadd035aaecd2523399fa5d7d962f56ac9",
+          "bytes": 1183
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/train/checkpoint.rs",
+          "upstream_path": "crates/media/mlx-gen/src/train/checkpoint.rs",
+          "upstream_git_blob": "8832f23b93a40623a011446d4d045fd542627dd9",
+          "upstream_sha256": "2075b03e5a53275eed665da16204308b95a89cde91f7929a3897737b1697a5fd",
+          "sha256": "2075b03e5a53275eed665da16204308b95a89cde91f7929a3897737b1697a5fd",
+          "bytes": 18133
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/train/dataset.rs",
+          "upstream_path": "crates/media/mlx-gen/src/train/dataset.rs",
+          "upstream_git_blob": "3b7369e07538ba225a89452f66c7bc4424873717",
+          "upstream_sha256": "eaee1269c3ef526edc7271594c291bccbdbba58a35726473f899764cb8d19bfa",
+          "sha256": "eaee1269c3ef526edc7271594c291bccbdbba58a35726473f899764cb8d19bfa",
+          "bytes": 4728
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/train/formula.rs",
+          "upstream_path": "crates/media/mlx-gen/src/train/formula.rs",
+          "upstream_git_blob": "5ce23844a90423dbae597d91fa8c03333d92d906",
+          "upstream_sha256": "80ff8a515db0eaf8a2786cb87e58a967a55657a053d47137a69488ecc39021b3",
+          "sha256": "80ff8a515db0eaf8a2786cb87e58a967a55657a053d47137a69488ecc39021b3",
+          "bytes": 3082
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/train/latent_lpips.rs",
+          "upstream_path": "crates/media/mlx-gen/src/train/latent_lpips.rs",
+          "upstream_git_blob": "f09db86ec074737a77804f7805b7e408d1b780ea",
+          "upstream_sha256": "3ef2ae8f455893ee3a034166d9fcb89de5cf20b7d0b47b7f168ec3b9e6ddba16",
+          "sha256": "3ef2ae8f455893ee3a034166d9fcb89de5cf20b7d0b47b7f168ec3b9e6ddba16",
+          "bytes": 27712
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/train/lazy.rs",
+          "upstream_path": "crates/media/mlx-gen/src/train/lazy.rs",
+          "upstream_git_blob": "f886250e9e8482e7813bb6ebb141d82b4b809e65",
+          "upstream_sha256": "6016aaf74f7501283f4b829bd5d492bc90e62d2cd995793fc5cac718ccc1f611",
+          "sha256": "6016aaf74f7501283f4b829bd5d492bc90e62d2cd995793fc5cac718ccc1f611",
+          "bytes": 6685
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/train/lora.rs",
+          "upstream_path": "crates/media/mlx-gen/src/train/lora.rs",
+          "upstream_git_blob": "80f22f559c3b5de0ae2186131a7162dd5f275ce3",
+          "upstream_sha256": "e665a6116aedbaadae091343459b810ace9c9fd8ee783283017689aa45cb270e",
+          "sha256": "e665a6116aedbaadae091343459b810ace9c9fd8ee783283017689aa45cb270e",
+          "bytes": 58136
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/train/loss.rs",
+          "upstream_path": "crates/media/mlx-gen/src/train/loss.rs",
+          "upstream_git_blob": "c67b3b942f176f7cb7684989b4a56ab588f75423",
+          "upstream_sha256": "c88fce92eacc752c2549a7552f987913ddeb5bc36438c8e2141c307385811acf",
+          "sha256": "c88fce92eacc752c2549a7552f987913ddeb5bc36438c8e2141c307385811acf",
+          "bytes": 9967
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/train/optim.rs",
+          "upstream_path": "crates/media/mlx-gen/src/train/optim.rs",
+          "upstream_git_blob": "7b69103ddd99b374d09d5def01a53d9257e00870",
+          "upstream_sha256": "3742b91dabbdb69ba5ffac139e7d1819e52c05f4b4ac79380cbf075370b688cb",
+          "sha256": "3742b91dabbdb69ba5ffac139e7d1819e52c05f4b4ac79380cbf075370b688cb",
+          "bytes": 33725
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/train/perceptual.rs",
+          "upstream_path": "crates/media/mlx-gen/src/train/perceptual.rs",
+          "upstream_git_blob": "afc1517b757e3c58f1e8a911de571b7bcb8d585b",
+          "upstream_sha256": "a2e958fd5aed9cb8d7db93bc7b13f172aea902d04aa9a870eef41ab17a26eb1b",
+          "sha256": "a2e958fd5aed9cb8d7db93bc7b13f172aea902d04aa9a870eef41ab17a26eb1b",
+          "bytes": 52818
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/train/tae.rs",
+          "upstream_path": "crates/media/mlx-gen/src/train/tae.rs",
+          "upstream_git_blob": "33030245da633f192b276671a19185a2fe3d1f54",
+          "upstream_sha256": "227f4ab6f089d3462ce816c7156a6054b8383c464a1930d0f6b94b7a9ee07429",
+          "sha256": "227f4ab6f089d3462ce816c7156a6054b8383c464a1930d0f6b94b7a9ee07429",
+          "bytes": 45284
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/train/taehv.rs",
+          "upstream_path": "crates/media/mlx-gen/src/train/taehv.rs",
+          "upstream_git_blob": "aa6778ba7b22db75ed6d607dc60383802a58526f",
+          "upstream_sha256": "8b008139db2feb993fd2d3554a462fc012d30460ee6ca78b55d4f8844f09e128",
+          "sha256": "8b008139db2feb993fd2d3554a462fc012d30460ee6ca78b55d4f8844f09e128",
+          "bytes": 47646
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/train/vae_anchor.rs",
+          "upstream_path": "crates/media/mlx-gen/src/train/vae_anchor.rs",
+          "upstream_git_blob": "1c9f0236ee550687e6f8cb8efd77ca16d0a56cc6",
+          "upstream_sha256": "6bd6ca06ed154e19d783c4d380039bebfee04387dbe21c420969a41f5b9c5884",
+          "sha256": "6bd6ca06ed154e19d783c4d380039bebfee04387dbe21c420969a41f5b9c5884",
+          "bytes": 38248
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/vae_tiling.rs",
+          "upstream_path": "crates/media/mlx-gen/src/vae_tiling.rs",
+          "upstream_git_blob": "58c7f4cb000573897c8b26d9d12ffc9fe0e0943d",
+          "upstream_sha256": "0f93d8590229d431340743249a8b0ebc8cdf8a73a9bcc988b6f1d1649820cb61",
+          "sha256": "0f93d8590229d431340743249a8b0ebc8cdf8a73a9bcc988b6f1d1649820cb61",
+          "bytes": 80961
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/src/weights.rs",
+          "upstream_path": "crates/media/mlx-gen/src/weights.rs",
+          "upstream_git_blob": "86bdd08ea46f4bc6709c01e8df351b7b2cbf2ad7",
+          "upstream_sha256": "1da0952e0d9037fee0b2429bd7698a2dcd510ccb8034077f11fd20843a78d292",
+          "sha256": "1da0952e0d9037fee0b2429bd7698a2dcd510ccb8034077f11fd20843a78d292",
+          "bytes": 29442
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/accel_sampler_parity.rs",
+          "upstream_path": "crates/media/mlx-gen/tests/accel_sampler_parity.rs",
+          "upstream_git_blob": "d60bb953644750e1b46b992743529baf729d9175",
+          "upstream_sha256": "14fb87dbe852e86f34391feb201af9cbae203b5460228adb9ea9f2c9550f4fe6",
+          "sha256": "14fb87dbe852e86f34391feb201af9cbae203b5460228adb9ea9f2c9550f4fe6",
+          "bytes": 6527
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/atomic_cache.rs",
+          "upstream_path": "crates/media/mlx-gen/tests/atomic_cache.rs",
+          "upstream_git_blob": "d828dc69798d614b454ce291374f3775d4f69ba3",
+          "upstream_sha256": "9c9a77bb39a67fff3b48b4bfe21de73e29c50cc9b77f12919aa17aed6761a5a3",
+          "sha256": "9c9a77bb39a67fff3b48b4bfe21de73e29c50cc9b77f12919aa17aed6761a5a3",
+          "bytes": 3019
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/block_residency_real_weights.rs",
+          "upstream_path": "crates/media/mlx-gen/tests/block_residency_real_weights.rs",
+          "upstream_git_blob": "3d45c4fb941408384975f3b8a77d6ff5fdf9e128",
+          "upstream_sha256": "8767ffb882105e44073a5db806ca104e9611ffe1eb128945bcba3c0a36ff4b91",
+          "sha256": "8767ffb882105e44073a5db806ca104e9611ffe1eb128945bcba3c0a36ff4b91",
+          "bytes": 6094
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/causal_mask_equiv.rs",
+          "upstream_path": "crates/media/mlx-gen/tests/causal_mask_equiv.rs",
+          "upstream_git_blob": "cde81804d84a89a4f89a47871600fb5124d9a6fe",
+          "upstream_sha256": "f4320494dc85fb0136766a7df0f27c2907dba5a2e6da9ab81bf4d632eb9108a7",
+          "sha256": "f4320494dc85fb0136766a7df0f27c2907dba5a2e6da9ab81bf4d632eb9108a7",
+          "bytes": 2864
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/fixtures/quant_q4q8.safetensors",
+          "upstream_path": "crates/media/mlx-gen/tests/fixtures/quant_q4q8.safetensors",
+          "upstream_git_blob": "28e5c3a14a89762c802f7c9cc397b18504859fd6",
+          "upstream_sha256": "4872d517f606cf80d07d7c28b3937f0a5dc06ddffaf526b779cdf0608b008fd7",
+          "sha256": "4872d517f606cf80d07d7c28b3937f0a5dc06ddffaf526b779cdf0608b008fd7",
+          "bytes": 459648
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/fixtures/sc3642_lokr/conv_tucker.expected.safetensors",
+          "upstream_path": "crates/media/mlx-gen/tests/fixtures/sc3642_lokr/conv_tucker.expected.safetensors",
+          "upstream_git_blob": "88ad7fb28e30265ff5faa19dd2bcc3cacbdd89c0",
+          "upstream_sha256": "57a9bf67a43e1cb9dccf5c6c4751dd3bde549560c7b7572635f3cf30d2b166a6",
+          "sha256": "57a9bf67a43e1cb9dccf5c6c4751dd3bde549560c7b7572635f3cf30d2b166a6",
+          "bytes": 221456
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/fixtures/sc3642_lokr/conv_tucker.safetensors",
+          "upstream_path": "crates/media/mlx-gen/tests/fixtures/sc3642_lokr/conv_tucker.safetensors",
+          "upstream_git_blob": "49c6b1d1be9b942f517a2973fbe4c0917bcc3612",
+          "upstream_sha256": "d9be28acd0afd494e2d35c8ac4e61070c2fa867eadca780cb8c86d89c83fccec",
+          "sha256": "d9be28acd0afd494e2d35c8ac4e61070c2fa867eadca780cb8c86d89c83fccec",
+          "bytes": 1556
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/fixtures/sc3642_lokr/linear_bothfull.expected.safetensors",
+          "upstream_path": "crates/media/mlx-gen/tests/fixtures/sc3642_lokr/linear_bothfull.expected.safetensors",
+          "upstream_git_blob": "83746f937d6af2270dee811ba011194e699faef3",
+          "upstream_sha256": "8a63f621a827709830a31e68109e5182a328a160c04fbec5a5ec76ad7fe205b3",
+          "sha256": "8a63f621a827709830a31e68109e5182a328a160c04fbec5a5ec76ad7fe205b3",
+          "bytes": 1800
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/fixtures/sc3642_lokr/linear_bothfull.safetensors",
+          "upstream_path": "crates/media/mlx-gen/tests/fixtures/sc3642_lokr/linear_bothfull.safetensors",
+          "upstream_git_blob": "57c0deec072cbd9aa2bd53308d59552dd7206df6",
+          "upstream_sha256": "85611050199902fbe76b514f3fd89b5e928301e85b7200f48d662c97e9382ee2",
+          "sha256": "85611050199902fbe76b514f3fd89b5e928301e85b7200f48d662c97e9382ee2",
+          "bytes": 396
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/fixtures/sc3642_lokr/linear_bothlr.expected.safetensors",
+          "upstream_path": "crates/media/mlx-gen/tests/fixtures/sc3642_lokr/linear_bothlr.expected.safetensors",
+          "upstream_git_blob": "2ccfe7d856a25ba04ba910e3089e4bd7b7400c21",
+          "upstream_sha256": "553ff134a50447f1144a63768f0e2ef0992d4c0bf9836dfa3d11910499c0ba61",
+          "sha256": "553ff134a50447f1144a63768f0e2ef0992d4c0bf9836dfa3d11910499c0ba61",
+          "bytes": 83216
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/fixtures/sc3642_lokr/linear_bothlr.safetensors",
+          "upstream_path": "crates/media/mlx-gen/tests/fixtures/sc3642_lokr/linear_bothlr.safetensors",
+          "upstream_git_blob": "bc5c8e317227e584006e56df54e870f5022dc0bd",
+          "upstream_sha256": "41674d7c4d5af424d545eaa3f99be27add42dae614882df444bc4de1b381a60a",
+          "sha256": "41674d7c4d5af424d545eaa3f99be27add42dae614882df444bc4de1b381a60a",
+          "bytes": 1172
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/fixtures/sc3642_lokr/linear_w1full_w2lr.expected.safetensors",
+          "upstream_path": "crates/media/mlx-gen/tests/fixtures/sc3642_lokr/linear_w1full_w2lr.expected.safetensors",
+          "upstream_git_blob": "8a1cfe3fdb9d998b9f8ffb43f6679d197c774470",
+          "upstream_sha256": "815e7ac3b84644d1eadacf3f4da9a8ae73863ab8df0bb9aa6bdcf111db640ab4",
+          "sha256": "815e7ac3b84644d1eadacf3f4da9a8ae73863ab8df0bb9aa6bdcf111db640ab4",
+          "bytes": 65808
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/fixtures/sc3642_lokr/linear_w1full_w2lr.safetensors",
+          "upstream_path": "crates/media/mlx-gen/tests/fixtures/sc3642_lokr/linear_w1full_w2lr.safetensors",
+          "upstream_git_blob": "ddf1746f3e50a7102a783ff621683710789ce4d2",
+          "upstream_sha256": "3cedb89d368f8f2e6896ca6edffc3106964a4533313bed847822e3edd6a287b0",
+          "sha256": "3cedb89d368f8f2e6896ca6edffc3106964a4533313bed847822e3edd6a287b0",
+          "bytes": 1092
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/fixtures/sc3643_loha/conv_notucker.expected.safetensors",
+          "upstream_path": "crates/media/mlx-gen/tests/fixtures/sc3643_loha/conv_notucker.expected.safetensors",
+          "upstream_git_blob": "5a64dc141f91f8220b9c447c9b7adc508af72f97",
+          "upstream_sha256": "b6f35a81b44cf75283758600e8d1194821b939b56b7c6f8e3afa39c86000bbd9",
+          "sha256": "b6f35a81b44cf75283758600e8d1194821b939b56b7c6f8e3afa39c86000bbd9",
+          "bytes": 110808
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/fixtures/sc3643_loha/conv_notucker.safetensors",
+          "upstream_path": "crates/media/mlx-gen/tests/fixtures/sc3643_loha/conv_notucker.safetensors",
+          "upstream_git_blob": "6ba0cc8caf3e8521f6772b717d4c51cd2e5792cb",
+          "upstream_sha256": "140e96367b58d2eaa2a86648966a2c209fb21bb5485a27179fdf4c153a9c747b",
+          "sha256": "140e96367b58d2eaa2a86648966a2c209fb21bb5485a27179fdf4c153a9c747b",
+          "bytes": 16292
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/fixtures/sc3643_loha/conv_tucker.expected.safetensors",
+          "upstream_path": "crates/media/mlx-gen/tests/fixtures/sc3643_loha/conv_tucker.expected.safetensors",
+          "upstream_git_blob": "322db6429a0bd736a9f64ef2709be3ee534c1167",
+          "upstream_sha256": "3d5f53baf7e8f84499126bd9a8afcfae3e429c851ce92d5bb62b0abb10b3aaf3",
+          "sha256": "3d5f53baf7e8f84499126bd9a8afcfae3e429c851ce92d5bb62b0abb10b3aaf3",
+          "bytes": 110808
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/fixtures/sc3643_loha/conv_tucker.safetensors",
+          "upstream_path": "crates/media/mlx-gen/tests/fixtures/sc3643_loha/conv_tucker.safetensors",
+          "upstream_git_blob": "80bd0b171e801a1889b65bcac1407c1a3e8070dc",
+          "upstream_sha256": "98bebc8ea9e1b0d04f0a77d3dc4483fb273647ce1186a0d5c24cf567857c624f",
+          "sha256": "98bebc8ea9e1b0d04f0a77d3dc4483fb273647ce1186a0d5c24cf567857c624f",
+          "bytes": 5316
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/fixtures/sc3643_loha/linear.expected.safetensors",
+          "upstream_path": "crates/media/mlx-gen/tests/fixtures/sc3643_loha/linear.expected.safetensors",
+          "upstream_git_blob": "f62ac8eb512b626dc2830ae6badb156f04b4282c",
+          "upstream_sha256": "1a07686495bec574a3de9e19e6fe973ec64ac0cf6ddfbce978b8ce27ca4b18a9",
+          "sha256": "1a07686495bec574a3de9e19e6fe973ec64ac0cf6ddfbce978b8ce27ca4b18a9",
+          "bytes": 49360
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/fixtures/sc3643_loha/linear.safetensors",
+          "upstream_path": "crates/media/mlx-gen/tests/fixtures/sc3643_loha/linear.safetensors",
+          "upstream_git_blob": "284396c2744a59884d8309d146851c8132a12536",
+          "upstream_sha256": "d933408329edb63f9dff858b591e10a871b427a44c42a9e24bdd87dcb3dfe858",
+          "sha256": "d933408329edb63f9dff858b591e10a871b427a44c42a9e24bdd87dcb3dfe858",
+          "bytes": 7588
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/fixtures/scheduler.safetensors",
+          "upstream_path": "crates/media/mlx-gen/tests/fixtures/scheduler.safetensors",
+          "upstream_git_blob": "3327480eee74a9d8a5c1f48bd0b666039956017f",
+          "upstream_sha256": "320ebfec444b2d4eb79190362fb46dafc0436bc363fb39e1aa7387286a0020fa",
+          "sha256": "320ebfec444b2d4eb79190362fb46dafc0436bc363fb39e1aa7387286a0020fa",
+          "bytes": 1084
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/fixtures/tokenizer_zimage.safetensors",
+          "upstream_path": "crates/media/mlx-gen/tests/fixtures/tokenizer_zimage.safetensors",
+          "upstream_git_blob": "754ff93c9b2c8d77d11bc39e61fcd351d7be234a",
+          "upstream_sha256": "3bbacd84a6e395ac5810e0dd8fe66d310e63e5fdc840381aabf3b68295c1104a",
+          "sha256": "3bbacd84a6e395ac5810e0dd8fe66d310e63e5fdc840381aabf3b68295c1104a",
+          "bytes": 12776
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/lora_train_probe.rs",
+          "upstream_path": "crates/media/mlx-gen/tests/lora_train_probe.rs",
+          "upstream_git_blob": "be6fadfe0e8c7f0e8c7970732a0add47726674f7",
+          "upstream_sha256": "a1ace63b7c4d294531f9ceaf800c8a39f7ee859a30ad0287cc4ee62a662ba74b",
+          "sha256": "a1ace63b7c4d294531f9ceaf800c8a39f7ee859a30ad0287cc4ee62a662ba74b",
+          "bytes": 4961
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/main.rs",
+          "upstream_path": "crates/media/mlx-gen/tests/main.rs",
+          "upstream_git_blob": "03bb41748c2272b55946ce00e7f437ade5d32a94",
+          "upstream_sha256": "2d302d0b0f1641840feecf8347b47519611e339915a03fc1015e88a625b10c56",
+          "sha256": "2d302d0b0f1641840feecf8347b47519611e339915a03fc1015e88a625b10c56",
+          "bytes": 1314
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/mlx_write_bound_probe.rs",
+          "upstream_path": "crates/media/mlx-gen/tests/mlx_write_bound_probe.rs",
+          "upstream_git_blob": "dd88d7cb06b6a946379907fd7b9dc8cc077492f9",
+          "upstream_sha256": "eef4fa9a2210cd6ff8c69b56ffb0eeddca21f7cd80e2e2ba34c78b1351503848",
+          "sha256": "eef4fa9a2210cd6ff8c69b56ffb0eeddca21f7cd80e2e2ba34c78b1351503848",
+          "bytes": 25013
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/preview_readback.rs",
+          "upstream_path": "crates/media/mlx-gen/tests/preview_readback.rs",
+          "upstream_git_blob": "a5754a72657939bc2eadc8ab93bf26b9fe991f6f",
+          "upstream_sha256": "3408283a231d9fb2815e80d1fa088bfa004767bab2806b58657ff636a5e42a87",
+          "sha256": "3408283a231d9fb2815e80d1fa088bfa004767bab2806b58657ff636a5e42a87",
+          "bytes": 1438
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/qkv_family_fixtures.rs",
+          "upstream_path": "crates/media/mlx-gen/tests/qkv_family_fixtures.rs",
+          "upstream_git_blob": "82489de36e4355623e40e0b4f8c99d8d12c5397d",
+          "upstream_sha256": "72bb263d0a4962a73b41b9aea622c153e0a8de1d73953135f18b195cee2287f5",
+          "sha256": "72bb263d0a4962a73b41b9aea622c153e0a8de1d73953135f18b195cee2287f5",
+          "bytes": 77289
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/quant_parity.rs",
+          "upstream_path": "crates/media/mlx-gen/tests/quant_parity.rs",
+          "upstream_git_blob": "c389ff00278283d2d564d3fa4f83b261f2d2843f",
+          "upstream_sha256": "03635c593309f469b7a9a9a7572755ec6b45605e0bcad352e4abdde849b2b82d",
+          "sha256": "03635c593309f469b7a9a9a7572755ec6b45605e0bcad352e4abdde849b2b82d",
+          "bytes": 5231
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/rung4_block_residency_spike.rs",
+          "upstream_path": "crates/media/mlx-gen/tests/rung4_block_residency_spike.rs",
+          "upstream_git_blob": "eda02321959695eecbe49a68befb80ed7bc43507",
+          "upstream_sha256": "6f6c71e70a5c6059abe74f91d11b4d8d4f571e5dd3ce8db70efc471413067351",
+          "sha256": "6f6c71e70a5c6059abe74f91d11b4d8d4f571e5dd3ce8db70efc471413067351",
+          "bytes": 11105
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/scheduler.rs",
+          "upstream_path": "crates/media/mlx-gen/tests/scheduler.rs",
+          "upstream_git_blob": "67bfc06a40a0ab256a0139ecf00c2b182306f0ed",
+          "upstream_sha256": "9a4a16a522ed4ddd05e4c0cd115fa8cbc76bcbee2ccc89e3d75ec9704810a315",
+          "sha256": "9a4a16a522ed4ddd05e4c0cd115fa8cbc76bcbee2ccc89e3d75ec9704810a315",
+          "bytes": 2574
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/support/atomic_cache.rs",
+          "upstream_path": "crates/media/mlx-gen/tests/support/atomic_cache.rs",
+          "upstream_git_blob": "2ac90865e688e9a28ac0b87a60b20a278b1de238",
+          "upstream_sha256": "a83654d100370b8ddea77058c5abef20f0d070482abc29f15fe9d2de01b25132",
+          "sha256": "a83654d100370b8ddea77058c5abef20f0d070482abc29f15fe9d2de01b25132",
+          "bytes": 2544
+        },
+        {
+          "path": "vendor/zip9-mlx-gen/tests/tokenizer_parity.rs",
+          "upstream_path": "crates/media/mlx-gen/tests/tokenizer_parity.rs",
+          "upstream_git_blob": "16cb8cf8e8b1929072eaddf9532cbfa0dda5cf24",
+          "upstream_sha256": "98796c132fede2457e20ac108da84f1760d958c19eea4d38d6a49a64a73a0401",
+          "sha256": "98796c132fede2457e20ac108da84f1760d958c19eea4d38d6a49a64a73a0401",
+          "bytes": 2703
+        }
+      ],
+      "omitted_nonbuild_root_files": [
+        "ARCHITECTURE.md",
+        "CODEGRAPH.md",
+        "CODE_REVIEW_2026-07-01.md",
+        "CODE_REVIEW_2026-07-11.md",
+        "CLAUDE.md",
+        ".gitignore"
+      ]
+    },
+    {
+      "name": "tauri-plugin-updater",
+      "version": "2.11.0",
+      "path": "vendor/zip9-tauri-plugin-updater",
+      "upstream_registry": "crates.io",
+      "upstream_crate_checksum": "b28d8cabdeb0564f03ae261963de4bc3d98321cd3d213e76a81b7d344e5df606",
+      "files": [
+        {
+          "path": "vendor/zip9-tauri-plugin-updater/.cargo_vcs_info.json",
+          "upstream_path": ".cargo_vcs_info.json",
+          "upstream_sha256": "9f6d7ba9d81aec2a1d17cc18307e6eaadd5c1a80791af03267ddd1600e7384e7",
+          "sha256": "9f6d7ba9d81aec2a1d17cc18307e6eaadd5c1a80791af03267ddd1600e7384e7",
+          "bytes": 109
+        },
+        {
+          "path": "vendor/zip9-tauri-plugin-updater/CHANGELOG.md",
+          "upstream_path": "CHANGELOG.md",
+          "upstream_sha256": "0135850678c56c804afb1271f21504bec293e7d3246df11e9c6927de20125652",
+          "sha256": "0135850678c56c804afb1271f21504bec293e7d3246df11e9c6927de20125652",
+          "bytes": 22584
+        },
+        {
+          "path": "vendor/zip9-tauri-plugin-updater/Cargo.lock",
+          "upstream_path": "Cargo.lock",
+          "upstream_sha256": "73114e56a43955f8dcc7311d00f2775962f3e613bdecbaaa22ecb88da0dfbcb6",
+          "sha256": "73114e56a43955f8dcc7311d00f2775962f3e613bdecbaaa22ecb88da0dfbcb6",
+          "bytes": 109108
+        },
+        {
+          "path": "vendor/zip9-tauri-plugin-updater/Cargo.toml",
+          "upstream_path": "Cargo.toml",
+          "upstream_sha256": "5e004bb6c3036cc6ffcc9317a2b0f6479920bcbb49dac76459849bbfe57a0fc9",
+          "sha256": "67316647e87818bdfa1daee10188b2182d0215af4f5fba4ae8b87a5e68ad8b7e",
+          "bytes": 3690
+        },
+        {
+          "path": "vendor/zip9-tauri-plugin-updater/Cargo.toml.orig",
+          "upstream_path": "Cargo.toml.orig",
+          "upstream_sha256": "4818cd0aef020406c8b83d6ec2b7c5f3be9b780f591e3dbbfbfbe2fa5f6dc55c",
+          "sha256": "db1e6c4558480ec15ca63fc49a4fc3bc3f7ccec11a26452c33de499dcef1864d",
+          "bytes": 2284
+        },
+        {
+          "path": "vendor/zip9-tauri-plugin-updater/LICENSE.spdx",
+          "upstream_path": "LICENSE.spdx",
+          "upstream_sha256": "eb8a6c84630461b352badcab1dbe5d0168c56d377358b2b8c86b51003272d5ef",
+          "sha256": "eb8a6c84630461b352badcab1dbe5d0168c56d377358b2b8c86b51003272d5ef",
+          "bytes": 888
+        },
+        {
+          "path": "vendor/zip9-tauri-plugin-updater/LICENSE_APACHE-2.0",
+          "upstream_path": "LICENSE_APACHE-2.0",
+          "upstream_sha256": "0cec06e0e55fbc3dc5cee4fca9b607f66cb8f4e4dbcf3b3c013594dd156732e9",
+          "sha256": "0cec06e0e55fbc3dc5cee4fca9b607f66cb8f4e4dbcf3b3c013594dd156732e9",
+          "bytes": 10173
+        },
+        {
+          "path": "vendor/zip9-tauri-plugin-updater/LICENSE_MIT",
+          "upstream_path": "LICENSE_MIT",
+          "upstream_sha256": "89ff9689dcf9dd53968785d05a26f7898bb169dbfcada8d032b3e68cf0d55607",
+          "sha256": "89ff9689dcf9dd53968785d05a26f7898bb169dbfcada8d032b3e68cf0d55607",
+          "bytes": 1089
+        },
+        {
+          "path": "vendor/zip9-tauri-plugin-updater/README.md",
+          "upstream_path": "README.md",
+          "upstream_sha256": "2bbc041800d50f4d99e1c5b2ea74cf668247725de5c00e8bb7cfd1abfeef68a9",
+          "sha256": "2bbc041800d50f4d99e1c5b2ea74cf668247725de5c00e8bb7cfd1abfeef68a9",
+          "bytes": 3185
+        },
+        {
+          "path": "vendor/zip9-tauri-plugin-updater/SECURITY.md",
+          "upstream_path": "SECURITY.md",
+          "upstream_sha256": "400507bc36e47e71f99199e78b4f9eb11aedc32f2bd8a0269247d693359a7078",
+          "sha256": "400507bc36e47e71f99199e78b4f9eb11aedc32f2bd8a0269247d693359a7078",
+          "bytes": 1253
+        },
+        {
+          "path": "vendor/zip9-tauri-plugin-updater/api-iife.js",
+          "upstream_path": "api-iife.js",
+          "upstream_sha256": "ee4315489b17e03f42e409067a77413703e0870a8b00de77e3de1daafb069d96",
+          "sha256": "ee4315489b17e03f42e409067a77413703e0870a8b00de77e3de1daafb069d96",
+          "bytes": 2769
+        },
+        {
+          "path": "vendor/zip9-tauri-plugin-updater/build.rs",
+          "upstream_path": "build.rs",
+          "upstream_sha256": "9cfd08999145a5d82ac206a6e244278fc39aeca45d874ec42474b49d504fe192",
+          "sha256": "9cfd08999145a5d82ac206a6e244278fc39aeca45d874ec42474b49d504fe192",
+          "bytes": 800
+        },
+        {
+          "path": "vendor/zip9-tauri-plugin-updater/permissions/autogenerated/commands/check.toml",
+          "upstream_path": "permissions/autogenerated/commands/check.toml",
+          "upstream_sha256": "ffabbdc8db47852174267390319de7f6c4712cd31fe0e33720d3787e063c9a8d",
+          "sha256": "ffabbdc8db47852174267390319de7f6c4712cd31fe0e33720d3787e063c9a8d",
+          "bytes": 371
+        },
+        {
+          "path": "vendor/zip9-tauri-plugin-updater/permissions/autogenerated/commands/download.toml",
+          "upstream_path": "permissions/autogenerated/commands/download.toml",
+          "upstream_sha256": "76e53e55a009c517c6f12b5fd1e3a2d7ef5d8717f0d543e32a3ffc5028075108",
+          "sha256": "76e53e55a009c517c6f12b5fd1e3a2d7ef5d8717f0d543e32a3ffc5028075108",
+          "bytes": 389
+        },
+        {
+          "path": "vendor/zip9-tauri-plugin-updater/permissions/autogenerated/commands/download_and_install.toml",
+          "upstream_path": "permissions/autogenerated/commands/download_and_install.toml",
+          "upstream_sha256": "9cbbb2de399c055d5c2aacd0a54a0fb510c836a9fa8667187d6e946e7bb4d0da",
+          "sha256": "9cbbb2de399c055d5c2aacd0a54a0fb510c836a9fa8667187d6e946e7bb4d0da",
+          "bytes": 461
+        },
+        {
+          "path": "vendor/zip9-tauri-plugin-updater/permissions/autogenerated/commands/install.toml",
+          "upstream_path": "permissions/autogenerated/commands/install.toml",
+          "upstream_sha256": "f14f424be64e9330964aa483ecafa4c100852debe581d17875183182fdcc8a18",
+          "sha256": "f14f424be64e9330964aa483ecafa4c100852debe581d17875183182fdcc8a18",
+          "bytes": 383
+        },
+        {
+          "path": "vendor/zip9-tauri-plugin-updater/permissions/autogenerated/reference.md",
+          "upstream_path": "permissions/autogenerated/reference.md",
+          "upstream_sha256": "bae3ccbf58c3168613c3bcf3bb301f9618c4cfdd89f6fa26be96082eb915d642",
+          "sha256": "bae3ccbf58c3168613c3bcf3bb301f9618c4cfdd89f6fa26be96082eb915d642",
+          "bytes": 1484
+        },
+        {
+          "path": "vendor/zip9-tauri-plugin-updater/permissions/default.toml",
+          "upstream_path": "permissions/default.toml",
+          "upstream_sha256": "e309991acc3516882b37ba0941d5a40d1587e29a89077fb6567ff23090d23117",
+          "sha256": "e309991acc3516882b37ba0941d5a40d1587e29a89077fb6567ff23090d23117",
+          "bytes": 367
+        },
+        {
+          "path": "vendor/zip9-tauri-plugin-updater/permissions/schemas/schema.json",
+          "upstream_path": "permissions/schemas/schema.json",
+          "upstream_sha256": "c60f60c191d706ce29deb42ded0d8d1774147e032f9ae18752ca600ba2392640",
+          "sha256": "c60f60c191d706ce29deb42ded0d8d1774147e032f9ae18752ca600ba2392640",
+          "bytes": 11447
+        },
+        {
+          "path": "vendor/zip9-tauri-plugin-updater/src/commands.rs",
+          "upstream_path": "src/commands.rs",
+          "upstream_sha256": "a8fef41ba3c06a816a0a97553d29f2884b878584bd4488164f1fad794858314a",
+          "sha256": "a8fef41ba3c06a816a0a97553d29f2884b878584bd4488164f1fad794858314a",
+          "bytes": 6143
+        },
+        {
+          "path": "vendor/zip9-tauri-plugin-updater/src/config.rs",
+          "upstream_path": "src/config.rs",
+          "upstream_sha256": "476be19ed6b7eec7f502a9b5bca005b361366a390901a3ce33fd6a7d70898588",
+          "sha256": "476be19ed6b7eec7f502a9b5bca005b361366a390901a3ce33fd6a7d70898588",
+          "bytes": 5972
+        },
+        {
+          "path": "vendor/zip9-tauri-plugin-updater/src/error.rs",
+          "upstream_path": "src/error.rs",
+          "upstream_sha256": "bd2504aca0b86c0e157d846fd72f110216617f2af29551f245f38b42a1a9884c",
+          "sha256": "bd2504aca0b86c0e157d846fd72f110216617f2af29551f245f38b42a1a9884c",
+          "bytes": 4093
+        },
+        {
+          "path": "vendor/zip9-tauri-plugin-updater/src/lib.rs",
+          "upstream_path": "src/lib.rs",
+          "upstream_sha256": "9758867fee130852049a36fd972561193e9f3238e5e12d981765dff2e8dbd782",
+          "sha256": "9758867fee130852049a36fd972561193e9f3238e5e12d981765dff2e8dbd782",
+          "bytes": 7510
+        },
+        {
+          "path": "vendor/zip9-tauri-plugin-updater/src/updater.rs",
+          "upstream_path": "src/updater.rs",
+          "upstream_sha256": "e95d7d44c3e9bfbaaf269702c0abf406b59cfbf6d5524cdc40c72d8224037243",
+          "sha256": "e95d7d44c3e9bfbaaf269702c0abf406b59cfbf6d5524cdc40c72d8224037243",
+          "bytes": 60917
+        }
+      ]
+    }
+  ],
+  "audited_unchanged_cuda_anchors": [
+    {
+      "package": "candle-gen-krea",
+      "relative_path": "src/loader.rs",
+      "upstream_path": "crates/media/candle-gen/candle-gen-krea/src/loader.rs",
+      "sha256": "6da29aebc4e92e53d8ee6172308c13c8bd26ece61ba8251cda43c112b454aeb8"
+    },
+    {
+      "package": "candle-gen",
+      "relative_path": "src/logical_weights.rs",
+      "upstream_path": "crates/media/candle-gen/candle-gen/src/logical_weights.rs",
+      "sha256": "cef50e328f8a29f2715cd4d3a17e1e9b819b3437de44a36a0bee16f0f3943b6c"
+    },
+    {
+      "package": "sceneworks-gen-core",
+      "relative_path": "src/checkpoint_facts.rs",
+      "upstream_path": "crates/contracts/gen-core/src/checkpoint_facts.rs",
+      "sha256": "fa0b1a8926e985a1cc0bf18b19960d1586a021fea8c5e362cf5def5d92e214ed"
+    },
+    {
+      "package": "candle-gen-krea",
+      "relative_path": "src/pipeline.rs",
+      "upstream_path": "crates/media/candle-gen/candle-gen-krea/src/pipeline.rs",
+      "sha256": "93723bcefa94bd4501cd04b111a1c813689cbdecd308ae8c9ef5fa629d6e5af1"
+    },
+    {
+      "package": "candle-gen-krea",
+      "relative_path": "src/lib.rs",
+      "upstream_path": "crates/media/candle-gen/candle-gen-krea/src/lib.rs",
+      "sha256": "77d4d2012a8aac0de4776562c725eabab80e3d723f8390d000c1bb59efe65fd2"
+    }
+  ],
+  "security_diff_sha256": "3e3ecb250ef7a52483c5231c48963281f6b037213955b05842e69ba59fa17410"
+}

@@ -24,6 +24,8 @@
 
 // `status` values of `POST /api/v1/workflows/inspect`. Both keys are always present in the body,
 // so a reader branches on `status` rather than on the absence of `workflow`.
+import { isFlux3ReferenceRequest } from "./resolutionOverride.js";
+import { reacquireMossTensors } from "./mossImageAdvanced.js";
 export const WORKFLOW_STATUS_WORKFLOW = "workflow";
 export const WORKFLOW_STATUS_NO_WORKFLOW = "no_workflow";
 
@@ -97,12 +99,13 @@ export async function looksLikeWorkflowCandidate(file) {
   if (!Number.isFinite(size) || size > MAX_WORKFLOW_INSPECT_BYTES) {
     return false;
   }
+  if (file?.name?.endsWith(".sceneworks-workflow.json")) return size > 0 && size <= 160 * 1024;
   return blobIsPng(file);
 }
 
 // ---- The envelope an already-imported asset is carrying -------------------------------------
 
-// `IMPORTED_WORKFLOW_KEY` in `crates/sceneworks-core/src/project_store.rs`, mirrored.
+// `IMPORTED_WORKFLOW_KEY` in `crates/sceneworks-core/src/project_store/uploads.rs`, mirrored.
 //
 // Import clears this key unconditionally before writing its own, so what is under it is either the
 // envelope THIS install's reader parsed and sanitized, or nothing — a caller-supplied
@@ -174,6 +177,11 @@ function styleIdResolved(report) {
   return live ? requirementResolved(live) : false;
 }
 
+const APPEARANCE_REPLAY_KEYS = new Set(["appearance", "appearancePrompt", "appearanceNegativePrompt", "appearancePromptBatch"]);
+function appearanceNeedsComposedStyle(share, report) {
+  return Boolean(share?.advanced?.appearance && (share.styleId || share.advanced.styleId)) && !styleIdResolved(report);
+}
+
 // Every requirement that BLOCKS replay, as the sentences the report already wrote. The panel
 // renders these; nothing here rewords them.
 //
@@ -191,6 +199,9 @@ export function workflowUnresolved(report) {
   const rows = [];
   if (report.model && report.model.state !== "resolved") {
     rows.push({ kind: "model", state: report.model.state, detail: report.model.detail });
+  }
+  for (const component of report.components ?? []) {
+    if (component.state !== "resolved") rows.push({ kind: "component", state: component.state, detail: component.detail });
   }
   for (const lora of report.loras ?? []) {
     if (lora.state !== "resolved") {
@@ -242,6 +253,12 @@ export const PREFILL_NONE = "none"; // it travels, and this studio has nowhere t
 // quietly disappears".
 export const ADVANCED_PREFILL = {
   mossImage: { label: "MOSS controls", prefill: PREFILL_CONTROL },
+  mossImageEdit: { label: "MOSS edit controls", prefill: PREFILL_CONTROL },
+  mossImageAdvanced: { label: "Native edit tensors and output", prefill: PREFILL_CONTROL },
+  promptBatch: { label: "Native edit prompt batch", prefill: PREFILL_CONTROL },
+  mossImageSampleIndex: { label: "Original batch output ordinal", prefill: PREFILL_NONE, detail: "The original output ordinal is provenance. Replay runs the full authored native batch with its exact inputs." },
+  mossImageEditExecutionReport: { label: "MOSS edit execution receipt", prefill: PREFILL_NONE,
+    detail: "Recorded provenance belongs to the exported image. A new edit computes its own receipt." },
   mossImageExecutionReport: { label: "MOSS execution receipt", prefill: PREFILL_NONE,
     detail: "Recorded provenance belongs to the exported image. A new generation computes its own receipt." },
   resolution: { label: "Resolution", prefill: PREFILL_CONTROL },
@@ -274,6 +291,8 @@ export const ADVANCED_PREFILL = {
   guidanceScale: { label: "Guidance", prefill: PREFILL_CONTROL },
   guidanceMethod: { label: "Guidance method", prefill: PREFILL_CONTROL },
   enhancePrompt: { label: "Prompt upsampling", prefill: PREFILL_CONTROL },
+  flux3_layout: { label: "Layout guidance", prefill: PREFILL_CONTROL },
+  flux3_reference_ids: { label: "Layout reference attachments", prefill: PREFILL_CONTROL },
   // sc-24113. Restores the toggle, which is the whole of what SceneWorks controls: it keeps the
   // model's alpha channel instead of compositing over white. The prompt that ASKED for a
   // transparent background travels as the prompt, because upstream has no transparency mode — so
@@ -293,6 +312,10 @@ export const ADVANCED_PREFILL = {
   controlScale: { label: "Control strength", prefill: PREFILL_CONTROL },
   styleId: { label: "Style", prefill: PREFILL_CONTROL },
   stylePrompt: { label: "Pre-style prompt", prefill: PREFILL_PROMPT },
+  appearance: { label: "Appearance", prefill: PREFILL_CONTROL },
+  appearancePrompt: { label: "Pre-appearance prompt", prefill: PREFILL_PROMPT },
+  appearanceNegativePrompt: { label: "Authored negative prompt", prefill: PREFILL_CONTROL },
+  appearancePromptBatch: { label: "Pre-appearance prompt batch", prefill: PREFILL_CONTROL },
   phases: { label: "Multi-phase denoise", prefill: PREFILL_CONTROL },
   // Shared by Image Studio substitutions and the older LTX video selector. Image workflow replay
   // restores the opaque authored id even when this install no longer lists it; Image Studio keeps
@@ -425,6 +448,8 @@ export const ADVANCED_PREFILL = {
 };
 
 function prefillDisposition(key, share) {
+  if ((key === "flux3_layout" || key === "flux3_reference_ids") &&
+      (share.sceneworksWorkflow !== "image" || !/^flux3(?:_|$)/.test(share.model ?? ""))) return PREFILL_NONE;
   return key === "veda" && share.sceneworksWorkflow !== "video"
     ? PREFILL_NONE
     : (ADVANCED_PREFILL[key]?.prefill ?? PREFILL_NONE);
@@ -469,7 +494,7 @@ export function workflowReplaySeed(share) {
 
 // A `WorkflowShare` (plus this install's resolution report) as a studio recipe.
 //
-// The shape is the one `crates/sceneworks-core/src/project_store.rs` writes for a generated
+// The shape is the one `crates/sceneworks-core/src/project_store/asset_sidecars.rs` writes for a generated
 // asset, because that is what the ImageStudio injection effect reads — this returns the same
 // object the "Use this recipe" path hands it, so there is exactly one prefill path.
 //
@@ -485,7 +510,7 @@ export function workflowReplaySeed(share) {
 export function recipeFromWorkflowShare(
   share,
   report = null,
-  { substituteModelId = null, referenceAssetIds = [] } = {},
+  { substituteModelId = null, referenceAssetIds = [], sourceAssetId = null, tensorPicks = {}, assets = [] } = {},
 ) {
   if (!share) {
     return null;
@@ -514,6 +539,13 @@ export function recipeFromWorkflowShare(
     delete rawSettings.styleId;
     delete rawSettings.stylePrompt;
   }
+  const appearanceAsText = appearanceNeedsComposedStyle(share, report);
+  if (appearanceAsText) {
+    // The raw appearance carriers predate the missing style too. Keep the effective
+    // positive/negative prompts and native batch, without reapplying either picker.
+    for (const key of APPEARANCE_REPLAY_KEYS) delete rawSettings[key];
+  }
+  if (rawSettings.mossImageAdvanced) rawSettings.mossImageAdvanced = reacquireMossTensors(rawSettings.mossImageAdvanced, report?.tensors ?? [], tensorPicks, assets);
   // The multi-phase schedule, reindexed onto the LoRA stack this install will actually hold.
   const phases = workflowPhases(share, report);
   if (phases) {
@@ -551,7 +583,7 @@ export function recipeFromWorkflowShare(
   // N-image batch — N-1 images the user did not ask for, each burning a generation. The recipe
   // therefore always asks for one, and the panel states the file was one of a batch of N so the
   // fact is reported rather than lost.
-  normalizedSettings.count = 1;
+  normalizedSettings.count = share.advanced?.mossImageAdvanced ? Number(share.count ?? 1) : 1;
 
   const recipe = {
     mode: share.mode ?? "text_to_image",
@@ -561,6 +593,7 @@ export function recipeFromWorkflowShare(
     loras: workflowLoras(report),
     normalizedSettings,
     rawAdapterSettings: rawSettings,
+    ...(appearanceAsText ? { uiPreserveComposedPrompt: true } : {}),
   };
   // The model the RECIPE named, when this install resolved it — otherwise the one the user picked
   // in the panel, and otherwise nothing at all. The resolved id wins because it is what the file
@@ -569,6 +602,15 @@ export function recipeFromWorkflowShare(
   const modelId = workflowModelId(report) ?? (substituteModelId || null);
   if (modelId) {
     recipe.model = modelId;
+  }
+  // A shared reference workflow carries authored OPTIONAL axes, not output geometry. Keep this
+  // as UI launch intent: only the worker may write flux3ReferenceEditing provenance/facts.
+  if (share.sceneworksWorkflow === "image" && share.inputs?.some(({ kind }) =>
+    isFlux3ReferenceRequest(modelId, kind === "reference" ? references : kind === "source" ? [sourceAssetId] : []))) {
+    recipe.uiDimensionIntent = {
+      width: Number.isInteger(width) && width > 0 ? width : null,
+      height: Number.isInteger(height) && height > 0 ? height : null,
+    };
   }
   // `stylePreset` is NOT set here even when it resolved. Nothing in `apps/web/src` reads
   // `recipe.stylePreset` — the studio's preset seam is `launchRequest.presetId`, a different
@@ -689,6 +731,7 @@ export function workflowSettingRows(share, report = null) {
     return [];
   }
   const styleResolvedHere = styleIdResolved(report);
+  const appearanceAsText = appearanceNeedsComposedStyle(share, report);
   return Object.keys(settings)
     .filter((key) => prefillDisposition(key, share) !== PREFILL_PROMPT)
     .map((key) => ({ key, value: settings[key] }))
@@ -701,16 +744,19 @@ export function workflowSettingRows(share, report = null) {
     )
     .map((row) => {
       const styleUnavailable = row.key === "styleId" && !styleResolvedHere;
+      const appearanceUnavailable = appearanceAsText && APPEARANCE_REPLAY_KEYS.has(row.key);
       return {
         key: row.key,
         label: ADVANCED_PREFILL[row.key]?.label ?? row.key,
         value: settingValueLabel(row.key, row.value),
-        restored: prefillDisposition(row.key, share) === PREFILL_CONTROL && !styleUnavailable,
-        detail: styleUnavailable
-          ? "This install does not have that style, so the prompt is used exactly as it was already composed."
-          : row.key === "veda" && share.sceneworksWorkflow !== "video"
-            ? "Video Studio only."
-            : (ADVANCED_PREFILL[row.key]?.detail ?? "This build has no control for this setting."),
+        restored: prefillDisposition(row.key, share) === PREFILL_CONTROL && !styleUnavailable && !appearanceUnavailable,
+        detail: appearanceUnavailable
+          ? "The style is unavailable here. Style and appearance text are kept in the composed prompts; appearance picker values are not restored."
+          : styleUnavailable
+            ? "This install does not have that style, so the prompt is used exactly as it was already composed."
+            : row.key === "veda" && share.sceneworksWorkflow !== "video"
+              ? "Video Studio only."
+              : (ADVANCED_PREFILL[row.key]?.detail ?? "This build has no control for this setting."),
       };
     });
 }
@@ -764,6 +810,9 @@ export function workflowNotRestored(share, report = null) {
 // docs call out — and a `resolved` row needs none.
 export function workflowInstallable(report) {
   const rows = [];
+  for (const component of report?.components ?? []) {
+    if (component.state === "installable") rows.push({ kind: "component", id: `${component.modelId}:${component.purpose}`, modelId: component.modelId, purpose: component.purpose, name: "MOSS Image Edit adapter", detail: component.detail });
+  }
   if (report?.model?.state === "installable" && report.model.catalogId) {
     rows.push({
       kind: "model",
@@ -879,7 +928,7 @@ export function workflowHasMissingInputs(report) {
   return (
     workflowInstallable(report).length > 0 ||
     workflowModelUnknown(report) ||
-    workflowInputSlots(report).length > 0
+    workflowInputSlots(report).length > 0 || (report?.tensors?.length ?? 0) > 0
   );
 }
 

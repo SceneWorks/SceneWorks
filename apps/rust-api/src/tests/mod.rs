@@ -2,12 +2,14 @@
 //! (sc-11217, F-030). Shared fixtures/helpers live in `support`.
 
 mod auth;
+mod browser_fixture;
 mod catalog;
 mod checkpoint_library;
 mod compression;
 mod dataset_catalogs;
 #[cfg(feature = "embed-web")]
 mod embedded_web;
+mod import_repair;
 // `pub(crate)` so the sc-22714 review suite can drive the same in-process API + fake worker
 // instead of standing up a second one.
 pub(crate) mod film_harness;
@@ -18,14 +20,37 @@ mod film_harness_review;
 mod films;
 mod image_restoration;
 mod jobs;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod load_progress_acceptance;
 mod mcp;
 mod media;
 mod model_cache;
 mod model_library;
 mod moss_image;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod moss_training_acceptance;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod moss_training_acceptance_contracts;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod moss_training_native;
 mod projects;
 mod prompt_batches;
+mod provenance;
 mod recipe_presets;
+mod routes;
+mod security;
 mod server;
 mod startup;
 mod subject_masks;
@@ -44,3 +69,6 @@ mod yue2_catalog;
 mod yue2_jobs;
 mod yue2_scores;
 mod yue2_transcriptions;
+
+#[cfg(all(not(target_os = "macos"), feature = "model-inference-proof"))]
+mod moss_training_acceleration;

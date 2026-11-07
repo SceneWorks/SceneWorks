@@ -307,9 +307,12 @@ test("current source derives one exact inference pin without a workflow input", 
   const sealed = campaign.inference_contract.validator_source.revision;
   assert.match(sealed, /^[a-f0-9]{40}$/);
   const checkWorkflow = await readFile(path.join(root, ".github/workflows/check.yml"), "utf8");
-  const fetch = checkWorkflow.slice(checkWorkflow.indexOf("      - name: Fetch the exact public inference terminal contract"));
-  assert.match(fetch, new RegExp(`git -C \\"\\$inference_root\\" fetch --depth=2 origin ${sealed}`));
-  assert.match(fetch, new RegExp(`rev-parse HEAD\\)\\" = ${sealed}`));
+  const { historyRequirements } = await import("./prepare-inference-history.mjs");
+  const required = historyRequirements(root);
+  assert.equal(required.terminal, sealed);
+  assert.ok(required.revisions.includes(campaign.inference_contract.validator_source.base_revision));
+  assert.match(checkWorkflow, /name: Fetch and verify all immutable inference history\n        run: node scripts\/prepare-inference-history\.mjs/);
+
 });
 
 test("diagnostic stops only at three accepted or three rejected across the five remaining cases", () => {
@@ -322,7 +325,11 @@ test("diagnostic stops only at three accepted or three rejected across the five 
 test("workflow exposes one fixed Windows diagnostic with offline cleanup and diagnostic-only artifacts", async () => {
   const workflow = await readFile(new URL("../.github/workflows/server-candle-linux.yml", import.meta.url), "utf8");
   const job = workflow.slice(workflow.indexOf("  starvector-diagnostic-candle-1b:"));
-  assert.match(workflow, /options: \[standard, source, provision, readiness, campaign, diagnostic-candle-1b\]/);
+  const choices = workflow.match(/starvector_terminal_operation:[\s\S]*?options: \[([^\]]+)\]/)?.[1].split(",").map((choice) => choice.trim());
+  assert.ok(choices, "the registered manual operation menu exists");
+  const legacy = ["standard", "source", "provision", "readiness", "campaign", "diagnostic-candle-1b"];
+  assert.deepEqual(choices.filter((choice) => legacy.includes(choice)), legacy, "legacy choices retain presence and order without freezing other epics' modes");
+  assert.equal(new Set(choices).size, choices.length, "manual choices are unique");
   assert.match(job, /runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]/);
   assert.match(job, /STARVECTOR_TERMINAL_NO_JOB_DOWNLOADS: "1"/);
   assert.match(job, /shell: cmd/);

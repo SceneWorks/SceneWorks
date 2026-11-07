@@ -22,7 +22,7 @@
 
 use super::*;
 use candle_gen::gen_core::tiling::VaeTiling;
-use runtime_cuda::gen_core::wan_i2v_memory::WanI2vRoute;
+use gen_core_memory_wan::WanI2vRoute;
 use runtime_cuda::gen_core::{MemoryCalibrationIdentity, ReplacementMode};
 
 const SEED: u64 = 22_736;
@@ -240,26 +240,12 @@ fn production_fingerprint(arm: Arm, tier: &str) -> Result<String, String> {
     })
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Geometry {
-    width: u32,
-    height: u32,
-    frames: u32,
-}
+use protocol::Geometry;
 
 fn arm(request: &Value) -> Result<Arm, String> {
-    let target = protocol::planned(request)?
-        .get("target")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "planned.target must be an object".to_owned())?;
-    let provider = target
-        .get("provider")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
-    let model_id = target
-        .get("modelId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    let target = protocol::planned_object(request, "/target")?;
+    let provider = protocol::target_str(target, "provider")?;
+    let model_id = protocol::target_str(target, "modelId")?;
     ARMS.into_iter()
         .find(|arm| arm.provider == provider && arm.model_id == model_id)
         .ok_or_else(|| {
@@ -269,11 +255,13 @@ fn arm(request: &Value) -> Result<Arm, String> {
 
 /// Whether this arm is one of the four this module implements — asked before `run` commits to it,
 /// so `candle.rs`'s dispatch can route by provider id alone.
+#[cfg(test)]
 pub(super) fn implements(provider: &str) -> bool {
     ARMS.iter().any(|arm| arm.provider == provider)
 }
 
 /// The four provider ids, in arm order, for `candle.rs`'s pre-gate agreement test.
+#[cfg(test)]
 pub(super) fn providers() -> [&'static str; 4] {
     ARMS.map(|arm| arm.provider)
 }
@@ -351,43 +339,13 @@ fn engine_vae(arm: Arm) -> Result<VaeTiling, String> {
 }
 
 fn target_geometry(request: &Value, arm: Arm) -> Result<Geometry, String> {
-    let geometry = protocol::planned(request)?
-        .pointer("/target/geometry")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
-    let axis = |name: &str| {
-        geometry
-            .get(name)
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| format!("planned.target.geometry.{name} must fit u32"))
-    };
-    if axis("batch")? != 1 {
-        return Err(format!(
-            "{LABEL} requires geometry.batch == 1 (these engines render one clip per request)"
-        ));
-    }
-    let resolved = Geometry {
-        width: axis("width")?,
-        height: axis("height")?,
-        frames: axis("frames")?,
-    };
+    let resolved = protocol::wan_target_geometry(request, LABEL)?;
     validate_geometry(arm, resolved)?;
     Ok(resolved)
 }
 
 fn validate_mode(request: &Value, arm: Arm) -> Result<(), String> {
-    let mode = protocol::planned(request)?
-        .pointer("/target/mode")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
-    if mode != arm.mode {
-        return Err(format!(
-            "{} is captured under {:?}; the plan declares {mode:?}",
-            arm.provider, arm.mode
-        ));
-    }
-    Ok(())
+    protocol::validate_captured_mode(request, arm.provider, arm.mode)
 }
 
 fn validate_fixture(
@@ -396,10 +354,7 @@ fn validate_fixture(
     tier: &str,
     geometry: Geometry,
 ) -> Result<(), String> {
-    let fixture = protocol::planned(request)?
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let fixture = protocol::planned_fixture(request)?;
     let expected = format!(
         "{}-candle-{tier}-{}x{}-f{}-fps{}-seed{SEED}",
         arm.slug, geometry.width, geometry.height, geometry.frames, arm.fps
@@ -465,7 +420,7 @@ fn load_spec(arm: Arm, tier: &str, load_shape: LoadShape) -> Result<Artifact, St
 }
 
 /// Whether this cell's production identity is minted by the SEALED-RECEIPT authority
-/// (`gen_core::wan_i2v_memory`), so the capture must seal a receipt before the load to read it —
+/// (`gen_core_memory_wan`), so the capture must seal a receipt before the load to read it —
 /// or by the provider's own `memory_strategy` module, which the loader publishes only for an
 /// unprepared spec, so sealing one would HIDE it (sc-22738). The MLX arm's helper on this lane's
 /// backend token; `production_calibration_fingerprint` returns `None` for `wan2_2_ti2v_5b` by
@@ -478,9 +433,9 @@ fn receipt_publishes_the_identity(
     let Some(route) = arm.route else {
         return Ok(false);
     };
-    match runtime_cuda::gen_core::wan_i2v_memory::production_calibration_fingerprint(
+    match gen_core_memory_wan::production_calibration_fingerprint(
         route,
-        runtime_cuda::gen_core::wan_i2v_memory::WanI2vBackend::Candle,
+        gen_core_memory_wan::WanI2vBackend::Candle,
         numeric_tier(tier)?,
     ) {
         None => Ok(false),
@@ -493,27 +448,7 @@ fn receipt_publishes_the_identity(
     }
 }
 
-/// A deterministic, non-degenerate RGB8 plane — the same generator the MLX arm uses, so the two
-/// lanes present byte-identical carriers for the same cell.
-fn plane(width: u32, height: u32, salt: u32) -> Image {
-    let mut pixels = Vec::with_capacity((width as usize) * (height as usize) * 3);
-    for y in 0..height {
-        for x in 0..width {
-            let base = x
-                .wrapping_mul(7)
-                .wrapping_add(y.wrapping_mul(13))
-                .wrapping_add(salt);
-            pixels.push((base % 251) as u8);
-            pixels.push((base.wrapping_mul(3) % 241) as u8);
-            pixels.push((base.wrapping_mul(5) % 239) as u8);
-        }
-    }
-    Image {
-        width,
-        height,
-        pixels,
-    }
-}
+use protocol::wan_reference_plane as plane;
 
 fn generation_request(arm: Arm, geometry: Geometry) -> GenerationRequest {
     let Geometry {
@@ -709,11 +644,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     }
     let selection = planned_selection(request)?;
     let expected_fingerprint = production_fingerprint(arm, tier)?;
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?
-        .to_owned();
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?.to_owned();
     if planned_fingerprint != expected_fingerprint {
         return Err(format!(
             "plan/provider calibration mismatch: plan={planned_fingerprint}, the {} {tier} \
@@ -1040,22 +971,20 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
 mod tests {
     use super::*;
 
-    struct WanFixture(PathBuf);
-
-    impl Drop for WanFixture {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
+    struct WanFixture {
+        root: PathBuf,
+        _temporary: tempfile::TempDir,
     }
 
     fn a14b_fixture(arm: Arm, tier: &str) -> (WanFixture, LoadSpec) {
-        use runtime_cuda::gen_core::wan_i2v_memory::{fixture_snapshot_root, WanI2vBackend};
-        let temporary = WanFixture(std::env::temp_dir().join(format!(
-            "sc23026-wan-{}-{}-{}", std::process::id(), arm.provider,
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        )));
+        use gen_core_memory_wan::{fixture_snapshot_root, WanI2vBackend};
+        let owner = tempfile::tempdir().unwrap();
+        let temporary = WanFixture {
+            root: owner.path().to_path_buf(),
+            _temporary: owner,
+        };
         let root = if tier == "bf16" {
-            fixture_snapshot_root(&temporary.0, WanI2vBackend::Candle, arm.route.unwrap())
+            fixture_snapshot_root(&temporary.root, WanI2vBackend::Candle, arm.route.unwrap())
         } else {
             let revision = if arm.provider == WAN_T2V_A14B_ID {
                 "da1909b66b360e1ea8cdeb3e39e40dca172cfa32"
@@ -1063,7 +992,7 @@ mod tests {
                 "d01bf1ea995c01a5bc545cefb977a320c9cb9fd0"
             };
             temporary
-                .0
+                .root
                 .join(format!(
                     "models--{}",
                     arm.packed.repository.replace('/', "--")

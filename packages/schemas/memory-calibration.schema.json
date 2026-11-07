@@ -116,6 +116,154 @@
         "memoryBytes": { "type": "integer", "exclusiveMinimum": 0 }
       }
     },
+    "observedOperatingConditions": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Admission-instant observed foreign/headroom conditions only; not a phase minimum, reservation, residency assertion or fit authorization.",
+      "required": [
+        "schemaVersion",
+        "sharingMode",
+        "physicalGpuId",
+        "gpuUuid",
+        "pciBusId",
+        "observedAt",
+        "totalDeviceBytes",
+        "freeDeviceBytes",
+        "foreignDedicatedBytes",
+        "foreignProcessCount",
+        "foreignMaxProcessBytes",
+        "foreignProcessLimitBytes",
+        "foreignTotalLimitBytes",
+        "observationScope",
+        "fitAuthorization",
+        "exclusiveThroughputClaim",
+        "physicalResidencyClaim"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "sharingMode": {
+          "const": "bounded-shared"
+        },
+        "physicalGpuId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "gpuUuid": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pciBusId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "observedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "totalDeviceBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "freeDeviceBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "foreignDedicatedBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "foreignProcessCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "foreignMaxProcessBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "foreignProcessLimitBytes": {
+          "const": 1073741824
+        },
+        "foreignTotalLimitBytes": {
+          "const": 3221225472
+        },
+        "observationScope": {
+          "const": "producer-reservation-admission"
+        },
+        "fitAuthorization": {
+          "const": false
+        },
+        "exclusiveThroughputClaim": {
+          "const": false
+        },
+        "physicalResidencyClaim": {
+          "const": false
+        }
+      }
+    },
+    "observedExecutionRecipe": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "backend", "provider", "tier", "actualLoadSpecSha256", "actualGenerationRequestSha256", "invocationRequestSha256", "measuredStrategySha256"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "backend": { "const": "candle" },
+        "provider": { "type": "string", "minLength": 1 }, "tier": { "type": "string", "minLength": 1 },
+        "actualLoadSpecSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "actualGenerationRequestSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "invocationRequestSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "measuredStrategySha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "ownedProcessPhase": {
+      "description": "Independent sampled maxima; dedicated/shared peaks are not additive. Total committed accounting is not physical residency, allocator activity, or an upper bound on all CUDA demand. Semantic validators additionally verify time ordering, phase coverage and overall dominance.",
+      "type": "object", "additionalProperties": false,
+      "required": ["dedicatedPeakBytes", "sharedPeakBytes", "totalCommittedPeakBytes", "samples", "firstSampleMs", "lastSampleMs", "maxGapMs"],
+      "properties": {
+        "dedicatedPeakBytes": { "type": "integer", "minimum": 0 },
+        "sharedPeakBytes": { "type": "integer", "minimum": 0 },
+        "totalCommittedPeakBytes": { "type": "integer", "minimum": 0 },
+        "samples": { "type": "integer", "minimum": 2 },
+        "firstSampleMs": { "type": "integer", "minimum": 0 },
+        "lastSampleMs": { "type": "integer", "minimum": 1 },
+        "maxGapMs": { "type": "integer", "minimum": 1, "maximum": 1500 }
+      }
+    },
+    "ownedProcessMemory": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "kind", "source", "semantics", "attribution", "physicalResidencyClaim", "allocatorActivityClaim", "deviceTotalDeltaAttributionClaim", "exclusiveThroughputClaim", "sampling", "identity", "physicalNodes", "phases", "overall", "unavailableMetrics"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "kind": { "const": "flux3_owned_process_memory_accounting_v1" },
+        "source": { "const": "Windows GPU Process Memory performance counters" },
+        "semantics": { "const": "sampled per-process dedicated/shared/total-committed accounting; not physical residency or CUDA active/reserved allocator bytes" },
+        "attribution": { "const": "own PID/start-time/executable and CUDA adapter LUID; includes any cross-process-shared allocations charged to this process" },
+        "physicalResidencyClaim": { "const": false }, "allocatorActivityClaim": { "const": false },
+        "deviceTotalDeltaAttributionClaim": { "const": false }, "exclusiveThroughputClaim": { "const": false },
+        "unavailableMetrics": {
+          "type": "object", "additionalProperties": false, "required": ["physicalResidentBytes", "activeBytes", "allocatorBytes"],
+          "properties": { "physicalResidentBytes": { "type": "null" }, "activeBytes": { "type": "null" }, "allocatorBytes": { "type": "null" } }
+        },
+        "sampling": {
+          "type": "object", "additionalProperties": false,
+          "required": ["intervalMs", "maxAllowedGapMs", "maxAllowedReadSkewMs", "maxObservedReadSkewMs", "losslessPeakClaim"],
+          "properties": { "intervalMs": { "const": 200 }, "maxAllowedGapMs": { "const": 1500 }, "maxAllowedReadSkewMs": { "const": 250 }, "maxObservedReadSkewMs": { "type": "integer", "minimum": 0, "maximum": 250 }, "losslessPeakClaim": { "const": false } }
+        },
+        "identity": {
+          "type": "object", "additionalProperties": false,
+          "required": ["pid", "startedAt", "executable", "luid", "physicalGpuId", "gpuUuid", "pciBusId", "logicalCudaOrdinal"],
+          "properties": {
+            "pid": { "type": "integer", "minimum": 1 }, "startedAt": { "type": "string", "format": "date-time" },
+            "executable": { "type": "string", "minLength": 1 }, "luid": { "type": "string", "pattern": "^0x[0-9a-fA-F]{8}_0x[0-9a-fA-F]{8}$" },
+            "physicalGpuId": { "type": "string", "minLength": 1 }, "gpuUuid": { "type": "string", "minLength": 1 }, "pciBusId": { "type": "string", "minLength": 1 }, "logicalCudaOrdinal": { "const": 0 }
+          }
+        },
+        "physicalNodes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "integer", "minimum": 0 } },
+        "phases": {
+          "type": "object", "additionalProperties": false, "required": ["load", "conditioning", "denoise", "decode"],
+          "properties": { "load": { "$ref": "#/$defs/ownedProcessPhase" }, "conditioning": { "$ref": "#/$defs/ownedProcessPhase" }, "denoise": { "$ref": "#/$defs/ownedProcessPhase" }, "decode": { "$ref": "#/$defs/ownedProcessPhase" }, "promptUpsampling": { "$ref": "#/$defs/ownedProcessPhase" } }
+        },
+        "overall": { "$ref": "#/$defs/ownedProcessPhase" }
+      }
+    },
     "phase": {
       "type": "object", "additionalProperties": false,
       "description":
@@ -539,10 +687,22 @@
       "required": [
         "id", "logicalCaseId", "status", "evidenceScope", "backend", "loadShape", "repositories",
         "hardware", "artifact", "target", "fixture", "strategy", "sweep", "scenarios",
-        "predictedPeakBytes", "observedMemory", "quality", "negativeMutation",
+        "predictedPeakBytes", "quality", "negativeMutation",
         "loadability", "calibrationFingerprint", "capturedAt", "harnessVersion"
       ],
       "allOf": [
+        {
+          "if": { "properties": { "measurementKind": { "const": "windows-owned-process-accounting-v1" } }, "required": ["measurementKind"] },
+          "then": {
+            "required": ["ownedProcessMemory", "observedExecutionRecipe", "observedExecutionRecipeSha256", "observedOperatingConditions"],
+            "not": { "required": ["observedMemory"] },
+            "properties": {
+              "backend": { "const": "candle" },
+              "target": { "properties": { "modelId": { "pattern": "^flux3" } } }
+            }
+          },
+          "else": { "required": ["observedMemory"], "not": { "anyOf": [{ "required": ["ownedProcessMemory"] }, { "required": ["observedExecutionRecipe"] }, { "required": ["observedOperatingConditions"] }, { "required": ["observedExecutionRecipeSha256"] }] } }
+        },
         {
           "$comment": "Audio quality is admissible only as a source-derived physical A/V comparison. Bundle-level validators bind derivation.quality to the exact physical session.",
           "if": {
@@ -667,6 +827,11 @@
             { "type": "null" }
           ]
         },
+        "measurementKind": { "const": "windows-owned-process-accounting-v1" },
+        "ownedProcessMemory": { "$ref": "#/$defs/ownedProcessMemory" },
+        "observedExecutionRecipe": { "$ref": "#/$defs/observedExecutionRecipe" },
+        "observedExecutionRecipeSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "observedOperatingConditions": { "$ref": "#/$defs/observedOperatingConditions" },
         "observedMemory": {
           "oneOf": [
             { "$ref": "#/$defs/phaseMetrics" },

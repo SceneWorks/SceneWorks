@@ -28,6 +28,9 @@ pub(crate) struct UiPreferences {
     /// Last-used UI theme (`"light"` or `"dark"`); absent until first set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     theme: Option<String>,
+    /// Icon-only desktop/tablet sidebar; absent means expanded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sidebar_collapsed: Option<bool>,
     /// Last-used accent palette id (see `ACCENT_IDS`); absent until first set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     accent: Option<String>,
@@ -230,12 +233,7 @@ fn normalize_accent(input: Option<&str>) -> Option<String> {
 
 fn normalize_preference_id(input: Option<&str>, max_len: usize) -> Option<String> {
     let value = input.map(str::trim)?;
-    (!value.is_empty()
-        && value.len() <= max_len
-        && value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "_-".contains(character)))
-    .then(|| value.to_owned())
+    sceneworks_core::ids::is_safe_id_with_max(value, max_len).then(|| value.to_owned())
 }
 
 /// The valid stored generation quality for `input`, falling back to the q8 default when
@@ -323,6 +321,9 @@ pub(crate) async fn set_ui_preferences(
         }
         if let Some(accent) = normalize_accent(payload.accent.as_deref()) {
             prefs.accent = Some(accent);
+        }
+        if let Some(collapsed) = payload.sidebar_collapsed {
+            prefs.sidebar_collapsed = Some(collapsed);
         }
         // Only touch the Simple-UI default when the payload actually carries it, so a
         // theme/accent/quality-only PUT can't reset it (same partial-merge rule as the fields

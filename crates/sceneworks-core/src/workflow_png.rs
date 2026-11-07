@@ -1204,6 +1204,24 @@ mod tests {
         png_with(&[workflow_chunk(text.to_owned())])
     }
 
+    /// One adversarial compressed iTXt chunk expanding to 8 MiB of NUL. PNG's text writer
+    /// hardcodes fast compression, whose output size differs between miniz and zlib-rs after
+    /// workspace feature unification. Choose best compression for this attack fixture only:
+    /// both backends keep it below the unchanged on-disk precondition, so only the production
+    /// bounded inflater can refuse it. Ordinary writer/round-trip fixtures remain unchanged.
+    fn zip_bomb_chunk() -> Vec<u8> {
+        use std::io::Write as _;
+        let bomb = vec![0_u8; 8 * 1024 * 1024];
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+        encoder.write_all(&bomb).expect("fixture compresses");
+        let compressed = encoder.finish().expect("fixture compression finishes");
+        framed_chunk(
+            b"iTXt",
+            &itxt_data(WORKFLOW_CHUNK_KEYWORD, true, &compressed),
+            None,
+        )
+    }
+
     /// The smallest envelope `parse_workflow_share_json` accepts, as JSON text.
     fn minimal_envelope_json(prompt: &str) -> String {
         serde_json::json!({
@@ -1506,8 +1524,7 @@ mod tests {
         // The decompression cap is the other guard that must not be bypassed by placement. 8 MiB of
         // NUL in a small chunk: nothing before the inflate can refuse it, so if the second pass
         // reached a laxer decompress this would cost 8 MiB for a few kB of theirs.
-        let bomb = "\0".repeat(8 * 1024 * 1024);
-        let tail = framed(&workflow_chunk(bomb));
+        let tail = zip_bomb_chunk();
         let spliced = splice_before_iend(&png_with(&[]), &tail);
         assert!(
             spliced.len() < 64 * 1024,
@@ -2216,8 +2233,7 @@ mod tests {
         // 8 MiB of NUL, which deflate takes to a handful of kilobytes: a ~1000:1 ratio. The file
         // is small, so nothing before the inflate can refuse it — the decompression cap is the
         // only thing standing between this and 8 MiB of our memory for a few kB of theirs.
-        let bomb = "\0".repeat(8 * 1024 * 1024);
-        let png = png_with_workflow_text(&bomb);
+        let png = splice_after_ihdr(&png_with(&[]), &zip_bomb_chunk());
         assert!(
             png.len() < 64 * 1024,
             "the bomb must stay small on disk or it is not testing the ratio: {} bytes",

@@ -28,6 +28,7 @@
 //! status by its `code()` and carried in `context.reason` so a client branches on the code rather
 //! than on prose.
 
+use crate::ApiJson;
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -268,9 +269,9 @@ pub(crate) async fn list_library_roots(
 pub(crate) async fn approve_library_root(
     State(state): State<AppState>,
     connect_info: Option<ConnectInfo<SocketAddr>>,
-    Json(request): Json<ApproveLibraryRootRequest>,
+    ApiJson(request): ApiJson<ApproveLibraryRootRequest>,
 ) -> Result<(StatusCode, Json<LibraryRootView>), ApiError> {
-    require_local_peer(connect_info.map(|ConnectInfo(addr)| addr))?;
+    require_local_library_change(connect_info.map(|ConnectInfo(addr)| addr))?;
     let path = required_path(&request.path)?;
     let label = request.label.as_deref().map(str::trim).map(str::to_owned);
     let store = open_store(&state);
@@ -291,7 +292,7 @@ pub(crate) async fn update_library_root(
     State(state): State<AppState>,
     Path(root_id): Path<String>,
     connect_info: Option<ConnectInfo<SocketAddr>>,
-    Json(request): Json<UpdateLibraryRootRequest>,
+    ApiJson(request): ApiJson<UpdateLibraryRootRequest>,
 ) -> Result<Json<LibraryRootView>, ApiError> {
     let label = request.label.as_deref().map(str::trim).map(str::to_owned);
     let path = match request.path.as_deref().map(str::trim) {
@@ -306,7 +307,7 @@ pub(crate) async fn update_library_root(
     }
     if path.is_some() {
         // Only the relink half names a host path, so only it is local-only.
-        require_local_peer(connect_info.map(|ConnectInfo(addr)| addr))?;
+        require_local_library_change(connect_info.map(|ConnectInfo(addr)| addr))?;
     }
     let store = open_store(&state);
     let root = blocking(move || {
@@ -337,7 +338,7 @@ pub(crate) async fn remove_library_root(
     // carry. Approving and relinking are gated because they name a host path; forgetting a library
     // destroys the plans, records and derivatives that path produced, which is no less a host-state
     // change, and leaving it open let a remote caller tear down a library it could not have added.
-    require_local_peer(connect_info.map(|ConnectInfo(addr)| addr))?;
+    require_local_library_change(connect_info.map(|ConnectInfo(addr)| addr))?;
     let data_dir = state.settings.data_dir.clone();
     let (removal, derivatives) = tokio::task::spawn_blocking(move || {
         CheckpointDerivativeStore::open(&data_dir)?.remove_root(&root_id)
@@ -384,18 +385,150 @@ pub(crate) async fn scan_library_root(
 pub(crate) async fn rescan_library_checkpoint(
     State(state): State<AppState>,
     Path(root_id): Path<String>,
-    Json(request): Json<RescanCheckpointRequest>,
+    ApiJson(request): ApiJson<RescanCheckpointRequest>,
 ) -> Result<Json<LinkedCheckpointStatusV1>, ApiError> {
     let relative_path = request.relative_path.trim().to_owned();
     if relative_path.is_empty() {
         return Err(ApiError::bad_request("A checkpoint path is required."));
     }
     let store = open_store(&state);
-    let status = blocking(move || {
-        let compiled = store.compile_linked(&root_id, &relative_path)?;
-        store.checkpoint_status(&compiled.checkpoint_id)
+    let checkpoint_id =
+        sceneworks_core::checkpoint_plan_store::linked_checkpoint_id(&root_id, &relative_path);
+    let models = crate::models::model_catalog(&state).await?;
+    let h3_entries: Vec<_> = models
+        .iter()
+        .filter_map(serde_json::Value::as_object)
+        .filter(|entry| {
+            sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(entry)
+                == Some(checkpoint_id.as_str())
+                && sceneworks_core::minimax_h3_import::entry_requires_minimax_h3_family(entry)
+        })
+        .cloned()
+        .collect();
+    let mut context = std::collections::BTreeMap::new();
+    if let Some(entry) = h3_entries.first() {
+        // Rescan is the explicit authority to accept current component CONTENT, not to silently
+        // reinterpret trained task semantics from a mutated catalog or a fresh load seal.
+        let mut declaration =
+            sceneworks_core::model_artifacts::provenance::import_declaration_context(entry)
+                .map_err(ApiError::bad_request)?;
+        if let Ok(record) = store.record(&checkpoint_id) {
+            let old = store
+                .plan(&checkpoint_id, &record.plan.plan_id)
+                .map_err(plan_error_to_api_error)?;
+            record
+                .validate_loaded_plan(&old)
+                .map_err(|e| ApiError::bad_request(e.to_string()))?;
+            if let Some(config) = old.context.get("transformerConfig") {
+                declaration.insert("transformerConfig".into(), config.clone());
+            }
+            if let Some(previous) = old
+                .context
+                .get(sceneworks_core::model_artifacts::provenance::MODEL_DECLARATION_KEY)
+            {
+                for (path, key) in [
+                    ("/baseLineage/baseModel", "baseModel"),
+                    (
+                        "/declaredSemantics/minimaxH3Partition",
+                        "minimaxH3Partition",
+                    ),
+                ] {
+                    if previous
+                        .pointer(path)
+                        .is_some_and(|bound| entry.get(key) != Some(bound))
+                    {
+                        return Err(ApiError::bad_request("Rescan cannot change a checkpoint's declared task/base; explicitly reimport with the new declaration"));
+                    }
+                }
+            }
+        }
+        for alias in &h3_entries[1..] {
+            if sceneworks_core::model_artifacts::provenance::import_declaration_context(alias)
+                .map_err(ApiError::bad_request)?
+                .get(sceneworks_core::model_artifacts::provenance::MODEL_DECLARATION_KEY)
+                != declaration
+                    .get(sceneworks_core::model_artifacts::provenance::MODEL_DECLARATION_KEY)
+            {
+                return Err(ApiError::bad_request(
+                    "Linked checkpoint aliases disagree about their component/task declaration",
+                ));
+            }
+        }
+        let data_dir = state.settings.data_dir.clone();
+        let entry = entry.clone();
+        struct CancelCapture(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for CancelCapture {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+        let guard = CancelCapture(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            false,
+        )));
+        let canceled = guard.0.clone();
+        let closure = tokio::task::spawn_blocking(move || {
+            sceneworks_core::model_artifacts::provenance::capture_h3_component_closure_with_check(
+                &data_dir,
+                &entry,
+                &|| {
+                    if canceled.load(std::sync::atomic::Ordering::Acquire) {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "rescan component binding canceled",
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+        })
+        .await
+        .map_err(task_failed)?
+        .map_err(ApiError::bad_request)?;
+        declaration
+            .get_mut(sceneworks_core::model_artifacts::provenance::MODEL_DECLARATION_KEY)
+            .expect("declaration context")["componentClosure"] = closure;
+        context = declaration;
+    }
+    let compiled = blocking(move || {
+        if context.is_empty() {
+            store.compile_linked(&root_id, &relative_path)
+        } else {
+            store.compile_linked_with_context(&root_id, &relative_path, context)
+        }
     })
     .await?;
+    // A rescan explicitly accepts the new bytes, not a new task declaration. Rebind every model
+    // referencing this checkpoint using its existing compatible base/partition, or refuse it.
+    // Otherwise the store reports Ready while generation permanently rejects the old assembly.
+    let path = state
+        .settings
+        .config_dir
+        .join("manifests/user.models.jsonc");
+    crate::manifest::mutate_manifest_entries(&state, &path, "models", |mut entries| {
+        for entry in &mut entries {
+            let Some(object) = entry.as_object_mut() else { continue };
+            if sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(object)
+                != Some(compiled.checkpoint_id.as_str()) {
+                continue;
+            }
+            if sceneworks_core::minimax_h3_import::entry_requires_minimax_h3_family(object) {
+                sceneworks_core::model_artifacts::provenance::validate_entry_declaration(&compiled.plan, object)
+                    .map_err(ApiError::bad_request)?;
+                let assembly = sceneworks_core::minimax_h3_import::MiniMaxH3ImportAssembly::from_declared_plan(
+                    &compiled.plan, object,
+                ).map_err(ApiError::bad_request)?;
+                object.insert("importPlan".into(), json!({
+                    "checkpointId":compiled.checkpoint_id, "planId":compiled.plan.plan_id,
+                    "semanticDigest":compiled.record.plan.semantic_digest,
+                }));
+                sceneworks_core::minimax_h3_import::stamp_imported_minimax_h3_entry(object, &assembly);
+            }
+        }
+        Ok((entries, ()))
+    }).await?;
+    let store = open_store(&state);
+    let status = blocking(move || store.checkpoint_status(&compiled.checkpoint_id)).await?;
     Ok(Json(status))
 }
 
@@ -435,17 +568,16 @@ fn required_path(path: &str) -> Result<PathBuf, ApiError> {
 /// local operations only — the same rule the model-library relocation seam applies, and for the
 /// same two reasons: the typed refusals are a filesystem-existence oracle, and a token-holding LAN
 /// client could otherwise re-point a shared server's library. A missing peer fails closed.
-fn require_local_peer(peer: Option<SocketAddr>) -> Result<(), ApiError> {
-    if peer.is_some_and(|addr| addr.ip().is_loopback()) {
-        return Ok(());
-    }
-    Err(ApiError::typed(
+fn require_local_library_change(peer: Option<SocketAddr>) -> Result<(), ApiError> {
+    crate::auth::require_local_peer(peer, || {
+        ApiError::typed(
         StatusCode::FORBIDDEN,
         "A model library can only be added, relinked, or forgotten from SceneWorks running on this \
          machine.",
         CHECKPOINT_LIBRARY_NOT_PERMITTED_CODE,
         json!({ "reason": "not_a_local_client" }),
-    ))
+    )
+    })
 }
 
 fn derivative_error_to_api_error(error: CheckpointDerivativeError) -> ApiError {

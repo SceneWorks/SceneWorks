@@ -10,6 +10,158 @@ pub(crate) async fn list_training_presets(
     Json(effective_training_presets())
 }
 
+/// A duplicate is a new FLUX.3 run, not another writer/resume of the source run. Allocate all
+/// product identities before the store inserts the new job atomically; never copy or alter files
+/// in the source output directory. Like the existing Iris duplicate surface, this copies inputs;
+/// changing training inputs belongs to a new Training Studio submission.
+pub(crate) async fn fresh_flux3_training_duplicate(
+    state: &AppState,
+    job_id: &str,
+    requested_changes: &JsonObject,
+) -> Result<Option<(String, JsonObject)>, ApiError> {
+    let job = store_call(state.clone(), {
+        let job_id = job_id.to_owned();
+        move |store, _timeout| store.get_job(&job_id)
+    })
+    .await?;
+    if !matches!(job.job_type, JobType::LoraTrain | JobType::ControlTraining) {
+        return Ok(None);
+    }
+    let Some(kernel) = job
+        .payload
+        .get("plan")
+        .and_then(|plan| plan.pointer("/target/kernel"))
+        .and_then(Value::as_str)
+    else {
+        return Ok(None);
+    };
+    if !sceneworks_core::training::flux3::KERNELS.contains(&kernel) {
+        return Ok(None);
+    }
+    if job.job_type != JobType::LoraTrain {
+        return Err(ApiError::bad_request(
+            "FLUX.3 adaptation requires a LoRA training job.",
+        ));
+    }
+    let original = job.payload.get("plan").ok_or_else(|| {
+        ApiError::bad_request("FLUX.3 duplicate requires its original training plan.")
+    })?;
+    let without_resume = |value: &Value| {
+        let mut value = value.clone();
+        if let Some(advanced) = value
+            .pointer_mut("/config/advanced")
+            .and_then(Value::as_object_mut)
+        {
+            advanced.remove("resume");
+        }
+        value
+    };
+    if requested_changes
+        .get("plan")
+        .is_some_and(|plan| without_resume(plan) != without_resume(original))
+        || requested_changes
+            .get("manifestEntry")
+            .is_some_and(|entry| Some(entry) != job.payload.get("manifestEntry"))
+        || requested_changes
+            .get("baseModel")
+            .is_some_and(|base| Some(base) != job.payload.get("baseModel"))
+    {
+        return Err(ApiError::bad_request("FLUX.3 duplicate copies the original training inputs with a fresh server-owned output identity. Use Training Studio to change model, options or dataset."));
+    }
+    let mut plan: sceneworks_core::training::TrainingPlan =
+        serde_json::from_value(original.clone()).map_err(|error| {
+            ApiError::bad_request(format!("Invalid FLUX.3 source plan: {error}"))
+        })?;
+    let target = sceneworks_core::training::flux3::target(kernel == "flux3_klein_edit_lora");
+    if plan.target.target_id != target.id
+        || plan.target.base_model != target.base_model
+        || plan.target.family != target.family
+        || plan.target.base_model_repo != target.base_model_repo
+        || plan.target.output_kind != sceneworks_core::training::TrainingOutputKind::Lora
+        || job.payload.get("baseModel").and_then(Value::as_str) != Some(target.base_model.as_str())
+    {
+        return Err(ApiError::bad_request(
+            "FLUX.3 duplicate requires the original publisher-base LoRA identity.",
+        ));
+    }
+    sceneworks_core::training::validate_training_config_for_target(&target, &plan.config)
+        .map_err(training_plan_error_to_api_error)?;
+    if !is_plain_relative_file(&plan.output.file_name)
+        || !plan.output.file_name.ends_with(".safetensors")
+    {
+        return Err(ApiError::bad_request(
+            "FLUX.3 duplicate requires a safe adapter filename.",
+        ));
+    }
+    let mut entry = job
+        .payload
+        .get("manifestEntry")
+        .and_then(Value::as_object)
+        .cloned()
+        .ok_or_else(|| {
+            ApiError::bad_request("FLUX.3 duplicate requires its original output record.")
+        })?;
+    let scope = entry
+        .get("scope")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("FLUX.3 output scope is missing."))?;
+    if scope != training_output_scope(&plan.config.advanced)?.as_str()
+        || entry.get("id").and_then(Value::as_str) != Some(plan.output.lora_id.as_str())
+    {
+        return Err(ApiError::bad_request(
+            "FLUX.3 source output identity is inconsistent.",
+        ));
+    }
+    let fresh_job_id = format!("job_{}", Uuid::new_v4().simple());
+    let fresh_lora_id = format!("lora_{}", Uuid::new_v4().simple());
+    let (output_dir, _) =
+        resolve_training_output_location(state, scope, job.project_id.as_deref(), &fresh_lora_id)
+            .await?;
+    plan.job_id = fresh_job_id.clone();
+    plan.output.lora_id = fresh_lora_id.clone();
+    plan.output.output_dir = output_dir.display().to_string();
+    plan.config.advanced.insert("resume".into(), json!(false));
+    let config = serde_json::to_value(&plan.config)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    plan.provenance.output_lora_id = fresh_lora_id.clone();
+    plan.provenance.source_job_id = fresh_job_id.clone();
+    plan.provenance.created_at = now_rfc3339();
+    plan.provenance.config_snapshot = config
+        .as_object()
+        .cloned()
+        .ok_or_else(|| ApiError::internal("Training config must serialize as an object."))?;
+    entry.insert("id".into(), json!(fresh_lora_id));
+    entry.insert(
+        "source".into(),
+        json!({"provider":"training", "path":format!("loras/{fresh_lora_id}")}),
+    );
+    entry.insert("baseModel".into(), json!(target.base_model));
+    entry.insert("family".into(), json!(target.family));
+    entry.insert("networkType".into(), json!("lora"));
+    entry.insert("files".into(), json!([plan.output.file_name]));
+    entry.insert("createdAt".into(), json!(plan.provenance.created_at));
+    entry.insert("updatedAt".into(), json!(plan.provenance.created_at));
+    let provenance = entry
+        .entry("provenance")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| ApiError::bad_request("FLUX.3 output provenance must be an object."))?;
+    provenance.insert("trainingJobId".into(), json!(fresh_job_id));
+    provenance.insert("configSnapshot".into(), config);
+    provenance.insert("createdAt".into(), json!(plan.provenance.created_at));
+    let plan = serde_json::to_value(plan).map_err(|error| ApiError::internal(error.to_string()))?;
+    if job.payload.get("dryRun").and_then(Value::as_bool) != Some(true) {
+        write_training_config_snapshot(&output_dir, &plan).await;
+    }
+    Ok(Some((
+        fresh_job_id,
+        JsonObject::from_iter([
+            ("plan".to_owned(), plan),
+            ("manifestEntry".to_owned(), Value::Object(entry)),
+        ]),
+    )))
+}
+
 /// Return the training catalog as it executes on this platform. The core registry deliberately
 /// retains the established MLX defaults; on non-macOS hosts the API projects only the Candle
 /// limitations into the response the Studio seeds and later submits. That makes the visible form,
@@ -137,11 +289,11 @@ pub(crate) async fn upload_training_dataset_item(
         let item = project_call(state, move |store| {
             store.upload_training_dataset_item(&project_id, upload)
         })
-        .await
-        .inspect_err(|_| {
-            let _ = std::fs::remove_file(&temp_path);
-        })?;
-        return Ok((StatusCode::CREATED, Json(item)));
+        .await;
+        if item.is_err() {
+            crate::uploads::cleanup_staged_upload(&temp_path).await;
+        }
+        return Ok((StatusCode::CREATED, Json(item?)));
     }
     Err(ApiError::bad_request("Upload file field is required"))
 }
@@ -165,7 +317,7 @@ pub(crate) async fn upload_ltx_prepared_bundle(
             store.install_ltx_prepared_bundle(&project_id, &dataset_id, &item_id, &source_path)
         })
         .await;
-        let _ = std::fs::remove_file(&temp_path);
+        crate::uploads::cleanup_staged_upload(&temp_path).await;
         return Ok((StatusCode::CREATED, Json(dataset?)));
     }
     Err(ApiError::bad_request("Upload file field is required"))
@@ -722,12 +874,15 @@ fn validate_parquet_import_request(
     let source = std::fs::canonicalize(&source).map_err(|error| {
         ApiError::bad_request(format!("Parquet sourcePath is unavailable: {error}"))
     })?;
-    if !source.is_file() && !source.is_dir() {
+    let metadata = std::fs::metadata(&source).map_err(|_| {
+        ApiError::bad_request("Parquet sourcePath must point to a file or directory.")
+    })?;
+    if !metadata.is_file() && !metadata.is_dir() {
         return Err(ApiError::bad_request(
             "Parquet sourcePath must point to a file or directory.",
         ));
     }
-    if source.is_file()
+    if metadata.is_file()
         && !source
             .extension()
             .and_then(|value| value.to_str())
@@ -746,9 +901,16 @@ fn validate_parquet_import_request(
 pub(crate) async fn create_training_dataset_parquet_import_job(
     State(state): State<AppState>,
     Path((project_id, dataset_id)): Path<(String, String)>,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     ApiJson(payload): ApiJson<DatasetParquetImportJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
-    let source_path = validate_parquet_import_request(&payload)?;
+    auth::local_only(connect_info.map(|axum::extract::ConnectInfo(addr)| addr))?;
+    let (payload, source_path) = tokio::task::spawn_blocking(move || {
+        let source_path = validate_parquet_import_request(&payload)?;
+        Ok::<_, ApiError>((payload, source_path))
+    })
+    .await
+    .map_err(|error| ApiError::internal(error.to_string()))??;
     let (dataset, dataset_root, project_name) = project_call(state.clone(), {
         let project_id = project_id.clone();
         let dataset_id = dataset_id.clone();
@@ -868,41 +1030,48 @@ pub(crate) async fn finalize_training_dataset_parquet_import(
         return Err(ApiError::bad_request("Invalid Parquet import jobId."));
     }
     let staging_root = dataset_root.join("parquet-imports").join(&payload.job_id);
-    let canonical_staging = std::fs::canonicalize(&staging_root).map_err(|error| {
-        ApiError::bad_request(format!(
-            "Parquet import staging directory is unavailable: {error}"
-        ))
-    })?;
     let project_root = dataset_root
         .ancestors()
         .nth(3)
-        .ok_or_else(|| ApiError::internal("training dataset root has an invalid layout"))?;
-    for item in &payload.items {
-        let relative = item
-            .path
-            .as_deref()
-            .ok_or_else(|| ApiError::bad_request("Parquet import item path is required."))?;
-        let candidate = project_root.join(relative);
-        let canonical = std::fs::canonicalize(&candidate).map_err(|error| {
-            ApiError::bad_request(format!("Parquet import item is unavailable: {error}"))
+        .ok_or_else(|| ApiError::internal("training dataset root has an invalid layout"))?
+        .to_path_buf();
+    let expected_version = payload.dataset_version;
+    let items = payload.items;
+    #[cfg(test)]
+    let test_gate = state
+        .test_hooks
+        .parquet_finalize_before_validation_once
+        .lock()
+        .take();
+    let items = tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let _test_scope = test_gate.map(|gate| gate.pause());
+        let canonical_staging = std::fs::canonicalize(&staging_root).map_err(|error| {
+            ApiError::bad_request(format!(
+                "Parquet import staging directory is unavailable: {error}"
+            ))
         })?;
-        if !canonical.starts_with(&canonical_staging) || !canonical.is_file() {
-            return Err(ApiError::bad_request(
-                "Parquet import item path escapes its job staging directory.",
-            ));
+        for item in &items {
+            let relative = item
+                .path
+                .as_deref()
+                .ok_or_else(|| ApiError::bad_request("Parquet import item path is required."))?;
+            let candidate = project_root.join(relative);
+            let canonical = std::fs::canonicalize(&candidate).map_err(|error| {
+                ApiError::bad_request(format!("Parquet import item is unavailable: {error}"))
+            })?;
+            if !canonical.starts_with(&canonical_staging) || !canonical.is_file() {
+                return Err(ApiError::bad_request(
+                    "Parquet import item path escapes its job staging directory.",
+                ));
+            }
         }
-    }
+        Ok::<_, ApiError>(items)
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("Parquet validation task failed: {error}")))??;
     let dataset = project_call(state, move |store| {
-        store.update_training_dataset(
-            &project_id,
-            &dataset_id,
-            TrainingDatasetUpdateInput {
-                name: None,
-                status: None,
-                character_id: None,
-                items: Some(payload.items),
-            },
-        )
+        store.finalize_training_dataset_import(&project_id, &dataset_id, expected_version, items)
     })
     .await?;
     Ok(Json(dataset))
@@ -1385,7 +1554,7 @@ pub(crate) async fn upload_training_dataset_subject_mask(
             )
         })
         .await;
-        let _ = std::fs::remove_file(&temp_path);
+        crate::uploads::cleanup_staged_upload(&temp_path).await;
         return Ok(Json(report?));
     }
     Err(ApiError::typed(
@@ -1404,9 +1573,8 @@ pub(crate) async fn create_training_dataset_upscale_job(
     Path((project_id, dataset_id)): Path<(String, String)>,
     ApiJson(payload): ApiJson<DatasetUpscaleJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
-    if !matches!(payload.factor, 2 | 4) {
-        return Err(ApiError::bad_request("Upscale factor must be 2 or 4."));
-    }
+    sceneworks_core::contracts::image_upscale_factor(u64::from(payload.factor))
+        .map_err(|_| ApiError::bad_request("Upscale factor must be 2 or 4."))?;
     if payload.item_ids.is_empty() {
         return Err(ApiError::bad_request("No items to upscale."));
     }
@@ -1772,6 +1940,22 @@ pub(crate) async fn create_training_job(
     Path(project_id): Path<String>,
     ApiJson(payload): ApiJson<LoraTrainingRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    let validated = validate_training_submission(&payload)?;
+    let prepared =
+        prepare_training_submission(state.clone(), project_id, payload, validated).await?;
+    enqueue_training_submission(state, prepared).await
+}
+struct ValidatedTrainingSubmission {
+    target: TrainingTarget,
+    is_control: bool,
+    is_base_checkpoint: bool,
+    preset_metadata: Option<TrainingPresetProvenance>,
+    output_name: String,
+}
+
+fn validate_training_submission(
+    payload: &LoraTrainingRequest,
+) -> Result<ValidatedTrainingSubmission, ApiError> {
     // Both dry-run plan validation and real execution exist (story 1417). A
     // dry-run resolves and validates the plan without producing weights; a real
     // run hands the same plan to the worker's Z-Image LoRA kernel.
@@ -1791,9 +1975,20 @@ pub(crate) async fn create_training_job(
     // Enforce the Rust-owned target capability before touching a dataset, allocating
     // output ids, or normalizing an image in place. The target catalog is returned
     // directly to clients, so every advertised numeric bound is a submit-time
-    // contract rather than an advisory UI hint.
+    // contract rather than an advisory UI hint. This also runs the shared MOSS field-shape
+    // validator used by worker preflight, before malformed controls can enter the queue.
     sceneworks_core::training::validate_training_config_for_target(target, &payload.config)
         .map_err(training_plan_error_to_api_error)?;
+    if sceneworks_core::training::flux3::KERNELS.contains(&target.kernel.as_str())
+        && payload
+            .config
+            .advanced
+            .get("resume")
+            .and_then(Value::as_bool)
+            == Some(true)
+    {
+        return Err(ApiError::bad_request("Resume a stopped FLUX.3 run using its queue entry; a new submit cannot select a previous checkpoint identity."));
+    }
     // ControlNet training (epic 10159) reuses this submit path — same target registry, dataset
     // resolution, plan build, and output/guardrail plumbing — but produces a control branch, not a
     // LoRA. A `ControlBranch` target enqueues the orchestrated `control_training` job (render the
@@ -1872,6 +2067,38 @@ pub(crate) async fn create_training_job(
         return Err(ApiError::bad_request("Training output name is required."));
     }
 
+    Ok(ValidatedTrainingSubmission {
+        target: target.clone(),
+        is_control,
+        is_base_checkpoint,
+        preset_metadata,
+        output_name,
+    })
+}
+
+struct PreparedTrainingSubmission {
+    job_id: String,
+    project_id: String,
+    project_name: String,
+    job_payload: JsonObject,
+    requested_gpu: String,
+    training_job_type: JobType,
+}
+
+async fn prepare_training_submission(
+    state: AppState,
+    project_id: String,
+    payload: LoraTrainingRequest,
+    validated: ValidatedTrainingSubmission,
+) -> Result<PreparedTrainingSubmission, ApiError> {
+    let ValidatedTrainingSubmission {
+        target,
+        is_control,
+        is_base_checkpoint,
+        preset_metadata,
+        output_name,
+    } = validated;
+    let target = &target;
     // Load the dataset, its absolute root, and the project name for the queue.
     let dataset_id = payload.dataset_id.clone();
     let (mut dataset, dataset_root, project_name) = project_call(state.clone(), {
@@ -2179,6 +2406,7 @@ pub(crate) async fn create_training_job(
             "datasetId": plan.provenance.dataset_id.clone(),
             "datasetVersion": plan.provenance.dataset_version,
             "baseModel": plan.provenance.base_model.clone(),
+            "baseModelRepo": plan.provenance.base_model_repo.clone(),
             "presetId": plan.provenance.preset_id.clone(),
             "presetVersion": plan.provenance.preset_version,
             "presetName": plan.provenance.preset_name.clone(),
@@ -2358,6 +2586,28 @@ pub(crate) async fn create_training_job(
     )
     .await?;
 
+    Ok(PreparedTrainingSubmission {
+        job_id,
+        project_id,
+        project_name,
+        job_payload,
+        requested_gpu,
+        training_job_type,
+    })
+}
+
+async fn enqueue_training_submission(
+    state: AppState,
+    prepared: PreparedTrainingSubmission,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    let PreparedTrainingSubmission {
+        job_id,
+        project_id,
+        project_name,
+        job_payload,
+        requested_gpu,
+        training_job_type,
+    } = prepared;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job_with_id(
             job_id,
@@ -2609,6 +2859,9 @@ pub(crate) async fn write_training_config_snapshot(output_dir: &std::path::Path,
 /// directory. The path need not exist yet — model installation is a separate job; the
 /// dry-run plan only records where the kernel will read from.
 pub(crate) fn resolve_base_model_path(target: &TrainingTarget, data_dir: &FsPath) -> String {
+    if target.base_model == sceneworks_core::training::flux3::BASE_ID {
+        return flux3_training_snapshot(data_dir).display().to_string();
+    }
     // Locally-converted MLX model: `requiresConversion` models (Wan TI2V-5B / A14B) keep
     // their usable weights in the app-managed `<data>/models/mlx/<id>` tree, NOT the HF cache
     // — which holds only the native *source* checkpoint the converter consumes. Inference reads
@@ -2661,6 +2914,17 @@ pub(crate) fn resolve_base_model_path(target: &TrainingTarget, data_dir: &FsPath
         .join(safe_download_dir(&target.base_model))
         .display()
         .to_string()
+}
+
+/// Training always selects the known publisher base revision, never whichever refs/main snapshot
+/// sorts first, a converted generation directory, or an unproven q4/q8 tier.
+fn flux3_training_snapshot(data_dir: &FsPath) -> PathBuf {
+    use sceneworks_core::training::flux3::{BASE_ID, BASE_REPO, BASE_REVISION};
+    sceneworks_worker::flux3_receipted_snapshot(data_dir, BASE_REPO, BASE_REVISION, BASE_ID)
+        // The existing uninstalled app-managed location is only a weights-free plan placeholder.
+        // Neither training_base_model_status nor TrainerLoadInputs accepts it as installation
+        // authority: both independently require the exact receipt-backed publisher snapshot.
+        .unwrap_or_else(|| data_dir.join("models").join(BASE_ID))
 }
 
 /// Whether a diffusers component tree roots here, keyed on its denoiser dir. DiT models (Krea 2 Raw,
@@ -3250,6 +3514,23 @@ pub(crate) fn training_base_model_status(
     data_dir: &FsPath,
     target: &TrainingTarget,
 ) -> TrainingBaseStatus {
+    if target.base_model == sceneworks_core::training::flux3::BASE_ID {
+        use sceneworks_core::training::flux3::{BASE_ID, BASE_REPO, BASE_REVISION};
+        return match sceneworks_worker::flux3_receipted_snapshot(
+            data_dir,
+            BASE_REPO,
+            BASE_REVISION,
+            BASE_ID,
+        ) {
+            Some(snapshot)
+                if sceneworks_worker::flux3_runtime_bundle_check(&snapshot, BASE_ID).is_ok() =>
+            {
+                TrainingBaseStatus::Ready
+            }
+            Some(_) => TrainingBaseStatus::TrainingTierMissing,
+            None => TrainingBaseStatus::Missing,
+        };
+    }
     // macOS Wan: certify the installed MLX turnkey the native trainer loads, NOT the Windows/Linux
     // diffusers `base_model_repo` below (never installed on macOS) — sc-13878. Inert off-Mac / non-Wan.
     if let Some(status) = macos_wan_base_status(data_dir, target) {
@@ -3542,7 +3823,7 @@ const MIN_FREE_TRAINING_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub(crate) fn training_disk_space_error(output_dir: &FsPath) -> Option<String> {
     // `output_dir` itself rarely exists yet; probe the nearest existing parent.
     let probe = nearest_existing_ancestor(output_dir)?;
-    let available = fs2::available_space(&probe).ok()?;
+    let available = sceneworks_core::disk::disk_free_bytes(&probe).ok()?;
     insufficient_disk_space(available, MIN_FREE_TRAINING_BYTES).then(|| {
         format!(
             "Not enough free disk space to train: {} available on the volume holding {}, but at least {} is recommended. Free up space and try again.",
@@ -3610,10 +3891,6 @@ pub(crate) fn trusted_adapter_files(
 /// (no `..`, root, drive prefix, or `.`), so joining it to an output dir cannot
 /// escape that dir.
 pub(crate) fn is_plain_relative_file(name: &str) -> bool {
-    let path = FsPath::new(name);
-    !name.is_empty()
-        && path.file_name().is_some()
-        && path
-            .components()
-            .all(|component| matches!(component, std::path::Component::Normal(_)))
+    // Export filenames originate on the native trainer, so keep Windows native separators.
+    sceneworks_core::safe_path::path_normal_components(FsPath::new(name)).is_ok()
 }

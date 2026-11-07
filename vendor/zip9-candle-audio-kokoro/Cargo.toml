@@ -1,0 +1,68 @@
+[package]
+name = "candle-audio-kokoro"
+version = "0.0.0"
+edition = "2021"
+description = "Kokoro-82M TTS provider for the SceneWorks Candle audio lane (sc-12836) — the first real audio Generator: StyleTTS2-derived acoustic model + iSTFT-Net vocoder ported natively onto the pinned candle revision, with a pure-Rust misaki G2P front-end (no espeak, no Python)."
+license = "Apache-2.0"
+repository = "https://github.com/SceneWorks/inference"
+keywords = ["candle", "tts", "kokoro", "audio", "speech"]
+categories = ["science"]
+
+[dependencies]
+# The shared candle audio commons (device seam, pinned-SHA hub resolution, host DSP, WAV encode,
+# `AudioError → gen_core::Error` bridge). Re-exports `gen_core` and `candle_core`, so this crate
+# resolves the SAME candle build + gen-core rev as the catalog it registers into.
+candle-audio = { "git" = "https://github.com/SceneWorks/inference", "rev" = "91ffb4a819aa2990c652db2d881ba0b9b10126ce" }
+# candle-nn at the workspace's pinned candle revision (Conv1d/ConvTranspose1d/LSTM/VarBuilder).
+candle-nn = { "git" = "https://github.com/huggingface/candle", "rev" = "1e6aa85e867eb007cba1b8bae517a10d1aaf0c0d" }
+# Snapshot-preparer contract types for the audio lane's Kokoro-aware preparer probe
+# (`SnapshotPreparerRegistration` lives in core-llm; composed by candle-audio-catalog).
+core-llm = { "git" = "https://github.com/SceneWorks/inference", "rev" = "91ffb4a819aa2990c652db2d881ba0b9b10126ce" }
+# Pure-Rust misaki G2P (MIT): the embedded gold+silver misaki lexicons + POS tagger, the same
+# phonemization lineage Kokoro-82M was trained with. `default-features = false` is LOAD-BEARING:
+# the default `espeak` feature links espeak-ng (GPL) through espeak-rs — never enable it here.
+misaki-rs = { version = "0.3.0", default-features = false }
+# config.json parsing (vocab / istftnet / plbert blocks).
+serde_json = { "version" = "1" }
+# Seeded RNG for the vocoder's harmonic-source noise (the reproducibility law: same request+seed
+# ⇒ byte-identical samples). Same crate the media providers use for seeded noise draws.
+rand = { "version" = "0.9" }
+rand_distr = { "version" = "0.5" }
+# Voice style-vector `.pt` files are torch zip containers holding ONE bare tensor — a shape the
+# pinned candle pickle reader does not expose (it reads state-dict zips only), so the raw
+# little-endian f32 storage entry is read directly. Same zip version candle-core itself uses.
+zip = { version = "9.0.5", default-features = false }
+# CMU Pronouncing Dictionary parser (MIT/Apache-2.0) for the G2P out-of-vocabulary fallback tier
+# (sc-13038): misaki lexicon → cmudict → letter spell-out. This crate ships ONLY the ARPAbet
+# parser + typed `Symbol` enum — the dictionary DATA is vendored under `resources/cmudict.dict`
+# (BSD-2-Clause, CMU; see `resources/LICENSE-CMUDICT`) and embedded via `include_str!`. Default
+# features only (no `serde`/`serialization` — the dict is parsed once from the embedded text).
+cmudict-fast = { version = "0.8.0", default-features = false }
+
+[dev-dependencies]
+# RAII fixture roots for the test helpers (sc-17791). A `TempDir` guard removes the tree on
+# `Drop` — including out of a panicking test, which is the only path the old
+# `env::temp_dir().join(..)` + trailing `remove_dir_all` shape ever leaked on.
+tempfile = { "version" = "3" }
+# The backend-neutral generator conformance suite (validate-honesty, progress, typed
+# cancellation, seed determinism) the real-weight test runs against the loaded provider.
+sceneworks-gen-core-testkit = { "git" = "https://github.com/SceneWorks/inference", "rev" = "91ffb4a819aa2990c652db2d881ba0b9b10126ce" }
+
+[features]
+default = []
+# Apple Metal GPU backend — forwarded to the shared audio commons AND to candle-nn. The
+# `candle-nn/metal` forward is load-bearing: candle-nn's fused ops (rms-norm, layer-norm, softmax,
+# …) carry their Metal kernels behind candle-nn's own `metal` feature, so omitting it compiles
+# candle-nn WITHOUT them and the first such op bails at runtime with "no metal implementation for
+# …" (measured on this lane, sc-13039). Mirrors candle-audio-clap / candle-gen / candle-llm. Not
+# in `default` (the audio lane ships CPU-first everywhere; see
+# docs/architecture/audio-backend-strategy.md). NOTE: with this forward Kokoro's candle-nn ops
+# (incl. its biased AlBERT `candle_nn::LayerNorm`) DO run on Metal. The iSTFT-Net vocoder used to be
+# blocked by candle-CORE's unimplemented `upsample_nearest1d` (a hard bail in metal_backend); that
+# dependency is now removed — the ×2 time upsample routes through the backend-agnostic, bit-identical
+# `candle_audio::ops::nearest_upsample1d` (sc-13886 CUDA / sc-13691 Metal). End-to-end Metal
+# validation of Kokoro on this candle rev is tracked by sc-13691 (must be verified on the Mac).
+metal = ["candle-audio/metal", "candle-nn/metal"]
+# NVIDIA CUDA backend — forwarded to the shared audio commons AND candle-nn (its CUDA kernels,
+# same rationale as `metal`). Not in `default`.
+cuda = ["candle-audio/cuda", "candle-nn/cuda"]

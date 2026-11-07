@@ -1,0 +1,27 @@
+{
+  "model": "moss_image_sft",
+  "mode": "edit_image",
+  "prompt": "Change only the bottle from blue to bright red. Keep its handle, silver collar, water droplets, orange slices, stone ledge, background and composition unchanged.",
+  "width": 768,
+  "height": 512,
+  "count": 1,
+  "seed": 173,
+  "referenceAssetIds": [
+    "water-bottle"
+  ],
+  "advanced": {
+    "steps": 30,
+    "guidanceScale": 4,
+    "schedulerShift": 5,
+    "mossImage": {
+      "acceleration": "off",
+      "max_sequence_length": 4096,
+      "training_shift": 1,
+      "uncond_skip_layers": []
+    },
+    "mossImageEdit": {
+      "reference_max_edge": 512,
+      "use_kv_cache": true
+    }
+  }
+}
