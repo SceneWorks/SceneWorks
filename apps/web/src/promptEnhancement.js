@@ -12,12 +12,12 @@ const SUPPORTED_MODES_BY_BACKEND = new Map([
 // separately installed optional upsampler. Neither grants enhancement to strict-control routes.
 export function promptEnhancementAvailable({ model, backend, mode, strictControlActive = false }) {
   if (model?.ui?.promptEnhance !== true || strictControlActive) return false;
-  if (model?.id === "flux3_klein" || model?.id === "flux3_klein_base") {
+  if (model?.family === "flux3" && model?.type === "image") {
     // Boxes and references choose the native upsampler's four modes from request geometry;
     // they are not a second user-selected mode that could disagree with the attached inputs.
     return (backend === "mlx" || backend === "candle") &&
       ["text_to_image", "edit_image", "character_image", "image_to_image"].includes(mode);
   }
   const supportedModes = SUPPORTED_MODES_BY_BACKEND.get(backend);
-  return Boolean(model?.id === "flux2_dev" && supportedModes?.has(mode));
+  return Boolean(model?.family === "flux2-dev" && model?.type === "image" && supportedModes?.has(mode));
 }
