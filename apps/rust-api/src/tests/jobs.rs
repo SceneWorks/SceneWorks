@@ -2200,7 +2200,8 @@ async fn retry_and_duplicate_recanonicalize_batch_detail_manifest_and_dense_tier
 async fn retry_and_duplicate_recanonicalize_imported_generate_and_edit_manifests() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_imported_image_model_manifests(temp_dir.path());
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Imported image replay").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -2225,39 +2226,56 @@ async fn retry_and_duplicate_recanonicalize_imported_generate_and_edit_manifests
             original["payload"]["modelManifestEntry"]["id"],
             "imported_krea"
         );
+        assert!(
+            original["payload"]["modelManifestEntry"]["paths"]["model"].is_null(),
+            "public job must hide the registered private locator: {original}"
+        );
+        let connection = rusqlite::Connection::open(&settings.jobs_db_path).expect("jobs db opens");
+        let binding_json: String = connection
+            .query_row(
+                "SELECT portable_model_binding_json FROM jobs WHERE id = ?1",
+                [original["id"].as_str().expect("job id")],
+                |row| row.get(0),
+            )
+            .expect("private binding exists");
+        let binding: Value = serde_json::from_str(&binding_json).expect("binding JSON");
+        for route in binding["routes"].as_object().expect("routes").values() {
+            assert_eq!(route["models"][0]["members"][0]["source"]["kind"], "digest");
+        }
         let job_id = original["id"].as_str().expect("job id");
-
         for operation in ["retry", "duplicate"] {
             let (status, replay) = request(
                 app.clone(),
                 "POST",
                 &format!("/api/v1/jobs/{job_id}/{operation}"),
-                json!({
-                    "payloadChanges": {
-                        "modelManifestEntry": {
-                            "id": "client-spoof",
-                            "family": "sdxl",
-                            "paths": { "model": "C:/attacker/other-model" }
-                        }
-                    }
-                }),
+                json!({"payloadChanges":{"modelManifestEntry":{
+                    "id":"client-spoof", "family":"sdxl",
+                    "paths":{"model":"C:/attacker/other-model"}
+                }}}),
             )
             .await;
             assert_eq!(status, StatusCode::CREATED, "{mode} {operation}: {replay}");
-            let entry = &replay["payload"]["modelManifestEntry"];
-            assert_eq!(entry["id"], "imported_krea");
-            assert_eq!(entry["family"], "krea_2");
-            assert!(
-                entry["paths"]["model"]
-                    .as_str()
-                    .is_some_and(|path| path.contains("imported_krea")),
-                "the authoritative imported install path must survive: {entry}"
+            assert_eq!(
+                replay["payload"]["modelManifestEntry"]["id"],
+                "imported_krea"
             );
-            assert!(
-                !entry.to_string().contains("attacker"),
-                "{mode} {operation} must replace the spoofed path: {entry}"
-            );
+            assert_eq!(replay["payload"]["modelManifestEntry"]["family"], "krea_2");
+            assert!(replay["payload"]["modelManifestEntry"]["paths"]["model"].is_null());
+            assert!(!replay.to_string().contains("attacker"));
         }
+        let checkpoint = temp_dir
+            .path()
+            .join("data/models/imports/imported_krea/model.safetensors");
+        std::fs::write(&checkpoint, b"substituted").expect("change registered model bytes");
+        let (status, changed) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/retry"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{changed}");
+        std::fs::write(&checkpoint, b"fixture").expect("restore registered model bytes");
     }
 }
 
@@ -2278,6 +2296,8 @@ fn write_imported_image_model_manifests(root: &std::path::Path) {
     let install_dir = root.join("data/models/imports/imported_krea");
     std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
     std::fs::create_dir_all(&install_dir).expect("imported install dir creates");
+    std::fs::write(install_dir.join("model.safetensors"), b"fixture")
+        .expect("imported checkpoint writes");
     std::fs::write(
         manifest_dir.join("builtin.models.jsonc"),
         r#"{ "schemaVersion": 1, "models": [] }"#,
