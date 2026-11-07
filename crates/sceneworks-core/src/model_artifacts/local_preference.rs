@@ -176,6 +176,9 @@ struct HeldEntry {
     /// single-owner: two scopes may legitimately serve one shared component snapshot, and a
     /// single-owner model would silently un-serve the other one the moment the first scope drops.
     holders: usize,
+    /// Portable job scopes freeze the repository revision before dispatch. Their unpinned
+    /// loader lookups must use that revision even when the source library has another refs/main.
+    portable_holders: usize,
 }
 
 #[derive(Debug, Default)]
@@ -197,6 +200,7 @@ fn lock_active() -> MutexGuard<'static, ActiveOverlay> {
 #[derive(Debug)]
 pub struct ActiveLocalArtifacts {
     entries: Arc<Vec<LocalArtifactOverlayEntry>>,
+    portable: bool,
 }
 
 impl ActiveLocalArtifacts {
@@ -216,6 +220,9 @@ impl Drop for ActiveLocalArtifacts {
             let Some(index) = active.entries.iter().position(|held| &held.entry == entry) else {
                 continue;
             };
+            if self.portable {
+                active.entries[index].portable_holders -= 1;
+            }
             if active.entries[index].holders > 1 {
                 active.entries[index].holders -= 1;
             } else {
@@ -238,6 +245,22 @@ impl Drop for ActiveLocalArtifacts {
 /// one is exactly how a load gets handed a snapshot verified for a different selection.
 pub fn prefer_local_snapshots(
     entries: Vec<LocalArtifactOverlayEntry>,
+) -> Result<ActiveLocalArtifacts, ArtifactContractError> {
+    prefer_snapshots(entries, false)
+}
+
+/// Install an authoritative portable-job scope. The worker has already frozen and verified
+/// every repository revision in this closure, so an unpinned loader lookup must not consult a
+/// stale or newer `refs/main` while the job runs. Normal resolved-local scopes remain unchanged.
+pub fn prefer_portable_snapshots(
+    entries: Vec<LocalArtifactOverlayEntry>,
+) -> Result<ActiveLocalArtifacts, ArtifactContractError> {
+    prefer_snapshots(entries, true)
+}
+
+fn prefer_snapshots(
+    entries: Vec<LocalArtifactOverlayEntry>,
+    portable: bool,
 ) -> Result<ActiveLocalArtifacts, ArtifactContractError> {
     let mut requested: Vec<LocalArtifactOverlayEntry> = Vec::new();
     for entry in entries {
@@ -262,16 +285,23 @@ pub fn prefer_local_snapshots(
     }
     for entry in &requested {
         match active.entries.iter_mut().find(|held| &held.entry == entry) {
-            Some(held) => held.holders += 1,
+            Some(held) => {
+                held.holders += 1;
+                if portable {
+                    held.portable_holders += 1;
+                }
+            }
             None => active.entries.push(HeldEntry {
                 entry: entry.clone(),
                 holders: 1,
+                portable_holders: usize::from(portable),
             }),
         }
     }
     drop(active);
     Ok(ActiveLocalArtifacts {
         entries: Arc::new(requested),
+        portable,
     })
 }
 
@@ -325,6 +355,36 @@ pub fn unique_local_snapshot(repository: &str) -> Option<(String, PathBuf)> {
         first.entry.revision.clone(),
         first.entry.snapshot_root.clone(),
     ))
+}
+
+/// An active portable job's unique frozen revision for a repository. An ambiguous pair fails
+/// closed even if `refs/main` happens to name one of them.
+pub fn unique_portable_snapshot(
+    repository: &str,
+) -> Result<Option<(String, PathBuf)>, ArtifactContractError> {
+    let active = lock_active();
+    let mut matches = active
+        .entries
+        .iter()
+        .filter(|held| held.portable_holders > 0 && held.entry.repository == repository);
+    let Some(first) = matches.next() else {
+        return Ok(None);
+    };
+    if matches.next().is_some() {
+        return Err(ArtifactContractError(format!(
+            "portable source {repository} has multiple frozen active revisions"
+        )));
+    }
+    if !first.entry.snapshot_root.is_dir() {
+        return Err(ArtifactContractError(format!(
+            "portable source {repository}@{} frozen snapshot is missing",
+            first.entry.revision
+        )));
+    }
+    Ok(Some((
+        first.entry.revision.clone(),
+        first.entry.snapshot_root.clone(),
+    )))
 }
 
 /// Rewrite an already-confined path that points into the configured source library so it reads

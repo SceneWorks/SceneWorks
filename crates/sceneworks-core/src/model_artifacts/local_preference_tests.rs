@@ -254,6 +254,103 @@ fn a_superseded_revision_is_served_from_the_source_tier() {
     );
 }
 
+#[test]
+fn portable_scope_uses_frozen_revision_instead_of_source_main() {
+    let _serialized = overlay_guard();
+    let temp = tempfile::tempdir().unwrap();
+    let library_root = temp.path().join("external-hf");
+    seed_source(
+        &library_root,
+        "owner/model",
+        OTHER_REV,
+        "q4/model.safetensors",
+    );
+    write_refs_main(&library_root, "owner/model", OTHER_REV);
+    let artifact = bundle(&temp.path().join("bundle"));
+    let configured = ArtifactSourceLibrary::new_preferring_local(&library_root).unwrap();
+    let _scope =
+        prefer_portable_snapshots(overlay_entries_for_artifact(&artifact).unwrap()).unwrap();
+    let (identity, path) = configured.discover_snapshot("owner/model", None).unwrap();
+    assert_eq!(identity.revision, PRIMARY_REV);
+    assert_eq!(
+        path,
+        artifact
+            .location
+            .root()
+            .join(format!("models--owner--model/snapshots/{PRIMARY_REV}"))
+    );
+    assert_eq!(
+        ArtifactSourceLibrary::new(&library_root)
+            .unwrap()
+            .discover_snapshot("owner/model", None)
+            .unwrap()
+            .0
+            .revision,
+        OTHER_REV
+    );
+}
+
+#[test]
+fn portable_scope_refuses_ambiguous_active_revisions() {
+    let _serialized = overlay_guard();
+    let temp = tempfile::tempdir().unwrap();
+    let library_root = temp.path().join("external-hf");
+    seed_source(
+        &library_root,
+        "owner/model",
+        OTHER_REV,
+        "q4/model.safetensors",
+    );
+    write_refs_main(&library_root, "owner/model", OTHER_REV);
+    let artifact = bundle(&temp.path().join("bundle"));
+    let mut entries = overlay_entries_for_artifact(&artifact).unwrap();
+    let mut second = entries
+        .iter()
+        .find(|entry| entry.repository == "owner/model")
+        .unwrap()
+        .clone();
+    second.revision = OTHER_REV.to_owned();
+    second.snapshot_root = temp.path().join("second-snapshot");
+    std::fs::create_dir_all(&second.snapshot_root).unwrap();
+    entries.push(second);
+    let _scope = prefer_portable_snapshots(entries).unwrap();
+    let configured = ArtifactSourceLibrary::new_preferring_local(&library_root).unwrap();
+    assert!(configured
+        .discover_snapshot("owner/model", None)
+        .unwrap_err()
+        .to_string()
+        .contains("multiple frozen active revisions"));
+}
+
+#[test]
+fn portable_scope_refuses_missing_frozen_snapshot_without_source_fallback() {
+    let _serialized = overlay_guard();
+    let temp = tempfile::tempdir().unwrap();
+    let library_root = temp.path().join("external-hf");
+    seed_source(
+        &library_root,
+        "owner/model",
+        OTHER_REV,
+        "q4/model.safetensors",
+    );
+    write_refs_main(&library_root, "owner/model", OTHER_REV);
+    let artifact = bundle(&temp.path().join("bundle"));
+    let scope =
+        prefer_portable_snapshots(overlay_entries_for_artifact(&artifact).unwrap()).unwrap();
+    let frozen = scope
+        .entries()
+        .iter()
+        .find(|entry| entry.repository == "owner/model")
+        .unwrap();
+    std::fs::remove_dir_all(&frozen.snapshot_root).unwrap();
+    let configured = ArtifactSourceLibrary::new_preferring_local(&library_root).unwrap();
+    assert!(configured
+        .discover_snapshot("owner/model", None)
+        .unwrap_err()
+        .to_string()
+        .contains("frozen snapshot is missing"));
+}
+
 /// With the configured library disconnected, an unpinned resolve is served by the leased bundle —
 /// this is what keeps a complete local model usable while the drive is unplugged.
 #[test]

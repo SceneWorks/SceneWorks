@@ -1012,7 +1012,8 @@ impl ArtifactSourceLibrary {
     }
 
     /// Resolve an immutable source snapshot. `None` reads `refs/main` only to obtain its exact
-    /// commit; a caller-provided mutable revision is rejected.
+    /// commit, except during an authoritative portable-job scope, which supplies its uniquely
+    /// frozen revision. A caller-provided mutable revision is rejected.
     ///
     /// On the configured runtime library (see [`Self::new_preferring_local`]) a leased local-tier
     /// bundle serves the exact `(repository, revision)` pair when one is active — the single point
@@ -1026,6 +1027,17 @@ impl ArtifactSourceLibrary {
         revision: Option<&str>,
     ) -> Result<(ArtifactIdentity, PathBuf), ArtifactContractError> {
         let repo_root = self.repository_root(repository)?;
+        if revision.is_none() && self.prefer_local {
+            if let Some((revision, snapshot)) =
+                local_preference::unique_portable_snapshot(repository)?
+            {
+                validate_immutable_revision(&revision)?;
+                return Ok((
+                    ArtifactIdentity::pinned(repository, revision, "default")?,
+                    snapshot,
+                ));
+            }
+        }
         let revision = match revision {
             Some(revision) => {
                 validate_immutable_revision(revision)?;
