@@ -1,305 +1,7 @@
 {
   "flux_schnell": {
-    "product": {
-      "id": "flux_schnell",
-      "name": "FLUX.1 [schnell]",
-      "family": "flux",
-      "type": "image",
-      "adapter": "flux_diffusers",
-      "capabilities": [
-        "text_to_image"
-      ],
-      "downloads": [
-        {
-          "provider": "huggingface",
-          "repo": "SceneWorks/flux1-schnell-mlx",
-          "revision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
-          "variant": "q4",
-          "default": true,
-          "files": [
-            "q4/*"
-          ],
-          "estimatedSizeBytes": 9611551284,
-          "footprint": {
-            "diskSizeBytes": 9611551284,
-            "peakMemoryBytes": null,
-            "residentMemoryBytes": null
-          }
-        },
-        {
-          "provider": "huggingface",
-          "repo": "SceneWorks/flux1-schnell-mlx",
-          "revision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
-          "variant": "q8",
-          "files": [
-            "q8/*"
-          ],
-          "estimatedSizeBytes": 17999175703,
-          "footprint": {
-            "diskSizeBytes": 17999175703,
-            "peakMemoryBytes": null,
-            "residentMemoryBytes": null
-          }
-        },
-        {
-          "provider": "huggingface",
-          "repo": "SceneWorks/flux1-schnell-mlx",
-          "revision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
-          "variant": "bf16",
-          "files": [
-            "bf16/*"
-          ],
-          "estimatedSizeBytes": 33725923002,
-          "footprint": {
-            "diskSizeBytes": 33725923002,
-            "peakMemoryBytes": null,
-            "residentMemoryBytes": null
-          }
-        }
-      ],
-      "paths": {
-        "model": "${HF_CACHE}/SceneWorks/flux1-schnell-mlx"
-      },
-      "gated": false,
-      "defaults": {
-        "resolution": "1024x1024",
-        "steps": 4,
-        "guidanceScale": 0,
-        "count": 4
-      },
-      "limits": {
-        "resolutions": [
-          "768x768",
-          "1024x1024",
-          "1280x720",
-          "720x1280"
-        ],
-        "count": [
-          1,
-          2,
-          4
-        ],
-        "samplers": [
-          "default",
-          "euler",
-          "euler_ancestral",
-          "heun",
-          "dpmpp_2m",
-          "dpmpp_sde",
-          "uni_pc",
-          "lcm",
-          "ddim"
-        ],
-        "schedulers": [
-          "default",
-          "normal",
-          "simple",
-          "karras",
-          "exponential",
-          "sgm_uniform",
-          "beta",
-          "ddim_uniform"
-        ]
-      },
-      "loraCompatibility": {
-        "families": [
-          "flux"
-        ],
-        "types": [
-          "style",
-          "enhance",
-          "character"
-        ]
-      },
-      "ui": {
-        "description": "Black Forest Labs FLUX.1 [schnell] — fast ~4-step distilled text-to-image, Apache-2.0 (commercial-safe). 12B transformer + T5-XXL text encoder; ~34GB bf16 VRAM, needs a large-VRAM GPU.",
-        "label": "FLUX.1 [schnell]",
-        "pid": {
-          "checkpointId": "pid_flux"
-        },
-        "promptGuide": {
-          "path": "/prompt-guides/flux-schnell.md",
-          "sources": [
-            {
-              "label": "FLUX.1 [schnell] model card",
-              "url": "https://huggingface.co/black-forest-labs/FLUX.1-schnell"
-            },
-            {
-              "label": "Diffusers Flux pipeline docs",
-              "url": "https://huggingface.co/docs/diffusers/main/en/api/pipelines/flux"
-            }
-          ],
-          "title": "FLUX.1 [schnell] Prompt Guide"
-        },
-        "recommendedFor": [
-          "text_to_image"
-        ]
-      },
-      "image": {
-        "supportsGuidance": false,
-        "supportsNegativePrompt": false,
-        "supportsSchedulerShift": true
-      },
-      "mlx": {
-        "quantize": 4
-      }
-    },
-    "routes": {
-      "candle": {
-        "id": "flux1_schnell",
-        "family": "flux",
-        "backend": "candle",
-        "modality": "image",
-        "conditioning": [],
-        "supported_quants": [],
-        "supports_lora": true,
-        "supports_lokr": true,
-        "supports_preview": true,
-        "supports_prompt_enhancement": false,
-        "samplers": [
-          "euler",
-          "euler_ancestral",
-          "heun",
-          "dpmpp_2m",
-          "dpmpp_sde",
-          "uni_pc",
-          "lcm",
-          "ddim",
-          "er_sde",
-          "dpmpp_2m_sde"
-        ],
-        "schedulers": [
-          "normal",
-          "simple",
-          "karras",
-          "exponential",
-          "sgm_uniform",
-          "beta",
-          "ddim_uniform",
-          "beta57"
-        ],
-        "supported_guidance_methods": []
-      },
-      "mlx": {
-        "id": "flux1_schnell",
-        "family": "flux",
-        "backend": "mlx",
-        "modality": "image",
-        "conditioning": [
-          "reference"
-        ],
-        "supported_quants": [
-          "q4",
-          "q8"
-        ],
-        "supports_lora": true,
-        "supports_lokr": true,
-        "supports_preview": true,
-        "supports_prompt_enhancement": false,
-        "samplers": [
-          "euler",
-          "euler_ancestral",
-          "heun",
-          "dpmpp_2m",
-          "dpmpp_sde",
-          "uni_pc",
-          "lcm",
-          "ddim",
-          "er_sde",
-          "dpmpp_2m_sde",
-          "flow_match"
-        ],
-        "schedulers": [
-          "normal",
-          "simple",
-          "karras",
-          "exponential",
-          "sgm_uniform",
-          "beta",
-          "ddim_uniform",
-          "beta57",
-          "linear"
-        ],
-        "supported_guidance_methods": []
-      }
-    },
     "evidence": {
       "candle": {
-        "minMemoryGb": 24,
-        "memoryStrategyContract": {
-          "abi": 1,
-          "implementations": [
-            {
-              "loadProfiles": [
-                "plain"
-              ],
-              "modes": [
-                "text_to_image"
-              ],
-              "overlays": [
-                "none"
-              ],
-              "rung": "staged_residency",
-              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/flux1_schnell",
-              "tiers": [
-                "q8",
-                "q4"
-              ]
-            },
-            {
-              "loadProfiles": [
-                "plain"
-              ],
-              "modes": [
-                "text_to_image"
-              ],
-              "overlays": [
-                "none"
-              ],
-              "rung": "bounded_decode",
-              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/flux1_schnell",
-              "tiers": [
-                "q8",
-                "q4"
-              ]
-            },
-            {
-              "loadProfiles": [
-                "plain"
-              ],
-              "modes": [
-                "text_to_image"
-              ],
-              "overlays": [
-                "none"
-              ],
-              "rung": "bounded_attention",
-              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/flux1_schnell",
-              "tiers": [
-                "q8",
-                "q4"
-              ]
-            },
-            {
-              "loadProfiles": [
-                "plain"
-              ],
-              "modes": [
-                "text_to_image"
-              ],
-              "overlays": [
-                "none"
-              ],
-              "rung": "bounded_transformer_residency",
-              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/flux1_schnell",
-              "tiers": [
-                "q8",
-                "q4"
-              ]
-            }
-          ],
-          "provider": "flux1_schnell"
-        },
         "calibrations": [
           {
             "abi": 3,
@@ -440,6 +142,7 @@
             "tier": "q4"
           }
         ],
+        "measured": false,
         "memoryStrategyCapabilities": {
           "bounded_attention": {
             "overlays": [
@@ -468,20 +171,93 @@
             }
           }
         },
+        "memoryStrategyContract": {
+          "abi": 1,
+          "implementations": [
+            {
+              "loadProfiles": [
+                "plain"
+              ],
+              "modes": [
+                "text_to_image"
+              ],
+              "overlays": [
+                "none"
+              ],
+              "rung": "staged_residency",
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/flux1_schnell",
+              "tiers": [
+                "q8",
+                "q4"
+              ]
+            },
+            {
+              "loadProfiles": [
+                "plain"
+              ],
+              "modes": [
+                "text_to_image"
+              ],
+              "overlays": [
+                "none"
+              ],
+              "rung": "bounded_decode",
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/flux1_schnell",
+              "tiers": [
+                "q8",
+                "q4"
+              ]
+            },
+            {
+              "loadProfiles": [
+                "plain"
+              ],
+              "modes": [
+                "text_to_image"
+              ],
+              "overlays": [
+                "none"
+              ],
+              "rung": "bounded_attention",
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/flux1_schnell",
+              "tiers": [
+                "q8",
+                "q4"
+              ]
+            },
+            {
+              "loadProfiles": [
+                "plain"
+              ],
+              "modes": [
+                "text_to_image"
+              ],
+              "overlays": [
+                "none"
+              ],
+              "rung": "bounded_transformer_residency",
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/flux1_schnell",
+              "tiers": [
+                "q8",
+                "q4"
+              ]
+            }
+          ],
+          "provider": "flux1_schnell"
+        },
+        "minMemoryGb": 24,
+        "sequentialPeakGb": {
+          "q4": 18.4,
+          "q8": 26.4
+        },
         "supportsSequentialOffload": true,
         "vramGbByTier": {
           "q4": 21.3,
           "q8": 31.8
         },
-        "sequentialPeakGb": {
-          "q4": 18.4,
-          "q8": 26.4
-        },
-        "vramMeasuredPixels": 1048576,
-        "measured": false
+        "vramMeasuredPixels": 1048576
       },
       "mlx": {
-        "minMemoryGb": 42,
         "memoryStrategyContract": {
           "abi": 1,
           "exhaustive": true,
@@ -1007,7 +783,231 @@
             }
           ],
           "provider": "flux1_schnell"
+        },
+        "minMemoryGb": 42
+      }
+    },
+    "product": {
+      "adapter": "flux_diffusers",
+      "capabilities": [
+        "text_to_image"
+      ],
+      "defaults": {
+        "count": 4,
+        "guidanceScale": 0,
+        "resolution": "1024x1024",
+        "steps": 4
+      },
+      "downloads": [
+        {
+          "default": true,
+          "estimatedSizeBytes": 9611551284,
+          "files": [
+            "q4/*"
+          ],
+          "footprint": {
+            "diskSizeBytes": 9611551284,
+            "peakMemoryBytes": null,
+            "residentMemoryBytes": null
+          },
+          "provider": "huggingface",
+          "repo": "SceneWorks/flux1-schnell-mlx",
+          "revision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
+          "variant": "q4"
+        },
+        {
+          "estimatedSizeBytes": 17999175703,
+          "files": [
+            "q8/*"
+          ],
+          "footprint": {
+            "diskSizeBytes": 17999175703,
+            "peakMemoryBytes": null,
+            "residentMemoryBytes": null
+          },
+          "provider": "huggingface",
+          "repo": "SceneWorks/flux1-schnell-mlx",
+          "revision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
+          "variant": "q8"
+        },
+        {
+          "estimatedSizeBytes": 33725923002,
+          "files": [
+            "bf16/*"
+          ],
+          "footprint": {
+            "diskSizeBytes": 33725923002,
+            "peakMemoryBytes": null,
+            "residentMemoryBytes": null
+          },
+          "provider": "huggingface",
+          "repo": "SceneWorks/flux1-schnell-mlx",
+          "revision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
+          "variant": "bf16"
         }
+      ],
+      "family": "flux",
+      "gated": false,
+      "id": "flux_schnell",
+      "image": {
+        "supportsGuidance": false,
+        "supportsNegativePrompt": false,
+        "supportsSchedulerShift": true
+      },
+      "limits": {
+        "count": [
+          1,
+          2,
+          4
+        ],
+        "resolutions": [
+          "768x768",
+          "1024x1024",
+          "1280x720",
+          "720x1280"
+        ],
+        "samplers": [
+          "default",
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim"
+        ],
+        "schedulers": [
+          "default",
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform"
+        ]
+      },
+      "loraCompatibility": {
+        "families": [
+          "flux"
+        ],
+        "types": [
+          "style",
+          "enhance",
+          "character"
+        ]
+      },
+      "mlx": {
+        "quantize": 4
+      },
+      "name": "FLUX.1 [schnell]",
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/flux1-schnell-mlx"
+      },
+      "type": "image",
+      "ui": {
+        "description": "Black Forest Labs FLUX.1 [schnell] — fast ~4-step distilled text-to-image, Apache-2.0 (commercial-safe). 12B transformer + T5-XXL text encoder; ~34GB bf16 VRAM, needs a large-VRAM GPU.",
+        "label": "FLUX.1 [schnell]",
+        "pid": {
+          "checkpointId": "pid_flux"
+        },
+        "promptGuide": {
+          "path": "/prompt-guides/flux-schnell.md",
+          "sources": [
+            {
+              "label": "FLUX.1 [schnell] model card",
+              "url": "https://huggingface.co/black-forest-labs/FLUX.1-schnell"
+            },
+            {
+              "label": "Diffusers Flux pipeline docs",
+              "url": "https://huggingface.co/docs/diffusers/main/en/api/pipelines/flux"
+            }
+          ],
+          "title": "FLUX.1 [schnell] Prompt Guide"
+        },
+        "recommendedFor": [
+          "text_to_image"
+        ]
+      }
+    },
+    "routes": {
+      "candle": {
+        "backend": "candle",
+        "conditioning": [],
+        "family": "flux",
+        "id": "flux1_schnell",
+        "modality": "image",
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "supported_guidance_methods": [],
+        "supported_quants": [],
+        "supports_lokr": true,
+        "supports_lora": true,
+        "supports_preview": true,
+        "supports_prompt_enhancement": false
+      },
+      "mlx": {
+        "backend": "mlx",
+        "conditioning": [
+          "reference"
+        ],
+        "family": "flux",
+        "id": "flux1_schnell",
+        "modality": "image",
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde",
+          "flow_match"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57",
+          "linear"
+        ],
+        "supported_guidance_methods": [],
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_lokr": true,
+        "supports_lora": true,
+        "supports_preview": true,
+        "supports_prompt_enhancement": false
       }
     }
   }

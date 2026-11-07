@@ -125,7 +125,11 @@ pub fn model_mac_support(
 /// the API replaces this provisional verdict with exact provider-derived support during catalog
 /// projection; the family argument is intentionally insufficient here.
 pub(crate) fn image_model_mac_support(model: &str, _family: Option<&str>) -> ModelMacSupport {
-    if !MLX_ROUTED_MODELS.contains(&model) {
+    let registered = crate::registry::builtin_model_spec(model);
+    let native = registered.and_then(|spec| spec.routes.get("mlx"));
+    let supported =
+        registered.map_or_else(|| MLX_ROUTED_MODELS.contains(&model), |_| native.is_some());
+    if !supported {
         // A family token is not enough to choose an imported loader: source shape is mandatory.
         // Catalog projection applies exact provider facts once it has the full manifest entry.
         return ModelMacSupport {
@@ -188,7 +192,11 @@ pub(crate) fn image_model_mac_support(model: &str, _family: Option<&str>) -> Mod
         reason: None,
         features: ModelMacFeatures {
             pose,
-            reference,
+            // Product admission probes include supplemental adapters. A registered provider must
+            // also advertise native reference conditioning for that input to be offered.
+            reference: reference
+                && native
+                    .is_none_or(|route| route.conditioning.iter().any(|axis| axis == "reference")),
             edit,
             // Third-party LyCORIS applies on every MLX provider now (epic 3641).
             lycoris: true,
@@ -396,6 +404,21 @@ pub struct ModelCandleFeatures {
 /// this block closes is per-video-mode. A caller must therefore read `features.video_modes` for the
 /// per-mode answer and treat an empty map as "this block says nothing about that model".
 pub fn model_candle_support(model_id: &str, model_type: &str) -> ModelCandleSupport {
+    if let Some(spec) = crate::registry::builtin_model_spec(model_id) {
+        let supported = spec.routes.contains_key("candle");
+        return ModelCandleSupport {
+            supported,
+            reason: (!supported).then(|| {
+                UnsupportedReason::new(
+                    Some(model_id),
+                    "model",
+                    "No Candle route is registered for this model.",
+                    None,
+                )
+            }),
+            features: ModelCandleFeatures::default(),
+        };
+    }
     match model_type {
         "video" => video_model_candle_support(model_id),
         _ => ModelCandleSupport {

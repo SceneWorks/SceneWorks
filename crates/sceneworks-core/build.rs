@@ -30,9 +30,13 @@ fn build_registry() {
     )
     .expect("invalid static model registry");
     let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("model-registry.json");
+    // A host build dependency can enable serde_json's preserve_order feature. The shipped
+    // snapshot has the same bytes under either Cargo feature set.
+    let mut snapshot = serde_json::to_value(&specs).expect("serialize model registry");
+    snapshot.sort_all_objects();
     std::fs::write(
         out,
-        serde_json::to_vec_pretty(&specs).expect("serialize model registry"),
+        serde_json::to_vec_pretty(&snapshot).expect("serialize model registry"),
     )
     .expect("write model registry");
 }

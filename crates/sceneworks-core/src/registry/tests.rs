@@ -114,3 +114,20 @@ fn shipped_snapshot_matches_the_build_time_join() {
         "refresh with cargo run -q -p sceneworks-core --bin dump-model-registry"
     );
 }
+
+#[test]
+fn user_menus_only_narrow_native_product_choices_and_reconcile_defaults() {
+    let spec = builtin_model_spec("flux_schnell").unwrap();
+    let row = spec.project(Some(&json!({
+        "limits": {"resolutions": ["768x768"], "count": [1, 2], "samplers": ["unshipped"], "schedulers": ["karras"]},
+        "defaults": {"resolution": "1024x1024", "count": 2, "sampler": "unshipped"}
+    })));
+    assert_eq!(row["defaults"]["resolution"], "768x768");
+    assert_eq!(row["defaults"]["count"], 2);
+    assert_eq!(row["defaults"]["scheduler"], "karras");
+    assert_eq!(
+        row["limits"]["samplers"],
+        spec.project(None)["limits"]["samplers"]
+    );
+    assert!(row["defaults"].get("sampler").is_none());
+}

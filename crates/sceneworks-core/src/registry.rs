@@ -21,7 +21,7 @@ pub fn builtin_model_spec(id: &str) -> Option<&'static ModelSpec> {
 }
 
 impl ModelSpec {
-    /// Author choices may change display text, visibility and valid product defaults. Native
+    /// Author choices may change display text, visibility, product menus and valid defaults. Native
     /// routes, immutable download identities, restrictions, and evidence always come from the
     /// static spec. Credentials, install observations and physical bindings are added by their host.
     pub fn project(&self, user: Option<&Value>) -> Value {
@@ -59,33 +59,53 @@ impl ModelSpec {
                 }
             }
         }
-        let Some(defaults) = user.get("defaults").and_then(Value::as_object) else {
+        // Author menus can narrow shipped choices, never supply another native capability. Keep
+        // defaults inside the effective menu even when an existing user's override narrows it.
+        let limits = user.get("limits");
+        let defaults = user.get("defaults");
+        for (menu, default) in [
+            ("resolutions", "resolution"),
+            ("count", "count"),
+            ("samplers", "sampler"),
+            ("schedulers", "scheduler"),
+        ] {
+            let offered = model["limits"][menu]
+                .as_array()
+                .expect("typed product menu");
+            if let Some(requested) = limits
+                .and_then(|limits| limits.get(menu))
+                .and_then(Value::as_array)
+            {
+                if !requested.is_empty()
+                    && requested.iter().enumerate().all(|(i, value)| {
+                        offered.contains(value) && !requested[..i].contains(value)
+                    })
+                {
+                    let current = &model["defaults"][default];
+                    if (!current.is_null() && !requested.contains(current))
+                        || (current.is_null() && !requested.iter().any(|value| value == "default"))
+                    {
+                        model["defaults"][default] = requested[0].clone();
+                    }
+                    model["limits"][menu] = Value::Array(requested.clone());
+                }
+            }
+            if let Some(choice) = defaults.and_then(|defaults| defaults.get(default)) {
+                if model["limits"][menu]
+                    .as_array()
+                    .expect("typed product menu")
+                    .contains(choice)
+                {
+                    model["defaults"][default] = choice.clone();
+                }
+            }
+        }
+        let Some(defaults) = defaults.and_then(Value::as_object) else {
             return;
         };
-        let menus = &self.product.limits;
-        if let Some(resolution) = defaults.get("resolution").and_then(Value::as_str) {
-            if menus.resolutions.iter().any(|r| r == resolution) {
-                model["defaults"]["resolution"] = resolution.into();
-            }
-        }
-        if let Some(count) = defaults.get("count").and_then(Value::as_u64) {
-            if menus.count.iter().any(|&n| u64::from(n) == count) {
-                model["defaults"]["count"] = count.into();
-            }
-        }
         if let Some(steps) = defaults.get("steps").and_then(Value::as_u64) {
             if (1..=u64::from(u32::MAX)).contains(&steps) {
                 model["defaults"]["steps"] = steps.into();
-            }
-        }
-        for (key, menu) in [
-            ("sampler", &menus.samplers),
-            ("scheduler", &menus.schedulers),
-        ] {
-            if let Some(choice) = defaults.get(key).and_then(Value::as_str) {
-                if menu.iter().any(|item| item == choice) {
-                    model["defaults"][key] = choice.into();
-                }
             }
         }
         if self.product.image.supports_guidance {
