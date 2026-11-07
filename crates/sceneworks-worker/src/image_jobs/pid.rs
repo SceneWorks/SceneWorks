@@ -339,6 +339,38 @@ mod pid_tests {
     }
 
     #[test]
+    fn candle_pulid_pid_uses_frozen_decoder_and_gemma_or_refuses_missing_source() {
+        let root = tempfile::tempdir().unwrap();
+        let decoder = root.path().join("decoder");
+        let gemma = root.path().join("gemma");
+        std::fs::create_dir_all(&decoder).unwrap();
+        std::fs::create_dir_all(&gemma).unwrap();
+        let checkpoint = decoder.join("pid_flux_2kto4k_v1pt5.safetensors");
+        std::fs::write(&checkpoint, b"fixture").unwrap();
+        let input = request(
+            "pulid_flux_dev",
+            json!({
+                "usePid": true,
+                "__portableAuxPaths": {"pid_checkpoint": decoder, "pid_gemma": gemma}
+            }),
+        );
+        let resolved = resolve_pid_weights(&input, root.path(), "pulid_flux_dev")
+            .unwrap()
+            .expect("candle PuLID PiD must resolve");
+        assert!(matches!(resolved.checkpoint, WeightsSource::File(path) if path == checkpoint));
+        assert!(matches!(resolved.gemma, WeightsSource::Dir(path) if path == gemma));
+
+        let missing = request(
+            "pulid_flux_dev",
+            json!({
+                "usePid": true,
+                "__portableAuxPaths": {"pid_checkpoint": decoder}
+            }),
+        );
+        assert!(resolve_pid_weights(&missing, root.path(), "pulid_flux_dev").is_err());
+    }
+
+    #[test]
     fn backbone_map_covers_all_wired_latent_spaces() {
         // qwenimage (sc-7845)
         assert_eq!(pid_backbone_for("qwen_image"), Some("qwenimage"));
