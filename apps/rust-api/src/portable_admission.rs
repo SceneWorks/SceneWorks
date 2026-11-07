@@ -622,13 +622,33 @@ async fn capture_model_slot(
                 .await?
             }
             SelectedSourceLocation::DynamicHfRepo(repo) => {
-                let revision = resolve_dynamic_hf_revision(state, repo).await?;
+                let revision = resolve_dynamic_hf_revision(state, repo, "main").await?;
                 capture_dynamic_detail_file(
                     state,
                     repo,
                     &revision,
                     source.role.clone(),
                     source.component_id.clone(),
+                )
+                .await?
+            }
+            SelectedSourceLocation::DynamicHfRef {
+                repo,
+                reference,
+                files,
+            } => {
+                let revision = resolve_dynamic_hf_revision(state, repo, reference).await?;
+                let download = serde_json::json!({
+                    "provider":"huggingface",
+                    "repo":repo,
+                    "revision":revision,
+                    "files":files
+                });
+                capture_download_member(
+                    state,
+                    &download,
+                    source.role.clone(),
+                    Some(source.component_id.clone()),
                 )
                 .await?
             }
@@ -719,12 +739,22 @@ fn selected_detail_weight_file(files: &[PortableArtifactFile]) -> Option<&Portab
 
 /// Resolve a mutable, user-selected repository to a publisher commit once, at admission.
 /// The worker sees only the immutable revision and exact file ledger in its frozen route.
-async fn resolve_dynamic_hf_revision(state: &AppState, repo: &str) -> Result<String, ApiError> {
+async fn resolve_dynamic_hf_revision(
+    state: &AppState,
+    repo: &str,
+    reference: &str,
+) -> Result<String, ApiError> {
     let base_url = std::env::var("SCENEWORKS_HUGGINGFACE_BASE_URL")
         .unwrap_or_else(|_| "https://huggingface.co".to_owned());
     let token = huggingface_token(state)?;
-    resolve_dynamic_hf_revision_with_client(&state.http_client, &base_url, token.as_deref(), repo)
-        .await
+    resolve_dynamic_hf_revision_with_client(
+        &state.http_client,
+        &base_url,
+        token.as_deref(),
+        repo,
+        reference,
+    )
+    .await
 }
 
 async fn resolve_dynamic_hf_revision_with_client(
@@ -732,9 +762,23 @@ async fn resolve_dynamic_hf_revision_with_client(
     base_url: &str,
     token: Option<&str>,
     repo: &str,
+    reference: &str,
 ) -> Result<String, ApiError> {
     let repo = sceneworks_core::hf_repo_id::namespaced(repo)
         .map_err(|error| incomplete(format!("custom model repository is invalid: {error}")))?;
+    let reference_parts = reference.split('/').collect::<Vec<_>>();
+    if reference_parts.is_empty()
+        || reference_parts.iter().any(|part| {
+            part.is_empty()
+                || *part == "."
+                || *part == ".."
+                || !part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        })
+    {
+        return Err(incomplete("custom model reference is invalid"));
+    }
     let mut url = reqwest::Url::parse(&base_url)
         .map_err(|error| incomplete(format!("Hugging Face endpoint is invalid: {error}")))?;
     {
@@ -746,7 +790,7 @@ async fn resolve_dynamic_hf_revision_with_client(
         for segment in repo.split('/') {
             parts.push(segment);
         }
-        parts.push("revision").push("main");
+        parts.push("revision").push(reference);
     }
     let expected_origin = url.origin();
     let mut request = client.get(url);
@@ -1786,7 +1830,7 @@ mod tests {
         });
         let client = reqwest::Client::new();
         let first_revision =
-            resolve_dynamic_hf_revision_with_client(&client, &base, None, "owner/control")
+            resolve_dynamic_hf_revision_with_client(&client, &base, None, "owner/control", "main")
                 .await
                 .unwrap();
         let first_files = resolve_pinned_hf_files(
@@ -1800,7 +1844,7 @@ mod tests {
         .await
         .unwrap();
         let second_revision =
-            resolve_dynamic_hf_revision_with_client(&client, &base, None, "owner/control")
+            resolve_dynamic_hf_revision_with_client(&client, &base, None, "owner/control", "main")
                 .await
                 .unwrap();
         let second_files = resolve_pinned_hf_files(
@@ -1839,5 +1883,40 @@ mod tests {
             selected_detail_weight_file(&files).unwrap().relative_path,
             PathBuf::from("a/model.safetensors")
         );
+    }
+
+    #[tokio::test]
+    async fn server_owned_kolors_ref_resolves_to_immutable_commit() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let expected = "c".repeat(40);
+        let expected_for_server = expected.clone();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let count = stream.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..count]);
+            assert!(request
+                .contains("/api/models/Kwai-Kolors/Kolors-IP-Adapter-Plus/revision/refs%2Fpr%2F4"));
+            let body = serde_json::json!({"sha":expected_for_server}).to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let revision = resolve_dynamic_hf_revision_with_client(
+            &reqwest::Client::new(),
+            &base,
+            None,
+            "Kwai-Kolors/Kolors-IP-Adapter-Plus",
+            "refs/pr/4",
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+        assert_eq!(revision, expected);
     }
 }
