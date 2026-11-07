@@ -496,7 +496,7 @@ async fn capture_model_slot(
     let variant;
     let tier;
     if downloads.is_empty() {
-        let local = capture_local_model_entry(state, entry, slot)?;
+        let mut local = capture_local_model_entry(state, entry, slot)?;
         if let Some(training) = &training {
             let selected = capture_local_source_files(&training.path, &allowed_local_roots(state))?;
             if local
@@ -509,9 +509,17 @@ async fn capture_model_slot(
                 ));
             }
         }
+        if let Some(training) = &training {
+            if let Some(primary) = local
+                .iter_mut()
+                .find(|member| member.role == ArtifactMemberRole::Primary)
+            {
+                primary.tier = Some(training.tier.clone());
+            }
+        }
         members.extend(local);
         variant = requested_variant.unwrap_or_else(|| "local".to_owned());
-        tier = None;
+        tier = training.as_ref().map(|training| training.tier.clone());
     } else {
         let primary = downloads
             .iter()
