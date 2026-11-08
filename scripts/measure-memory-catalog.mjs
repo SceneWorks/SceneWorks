@@ -1580,7 +1580,7 @@ export const PROVIDER_FAMILIES = Object.freeze({
   // than per lane, which is why `familyArtifact` exists: each route ships a `SceneWorks/…-mlx`
   // rehost on macOS and a separate `SceneWorks/…-candle` rehost on Windows/Linux, and the candle
   // rehosts carry `q4` and `q8` ONLY — the candle dense leg is the upstream `Wan-AI/…-Diffusers`
-  // checkpoint, which the manifest ships with no pinned revision and with the weights at the
+  // checkpoint, which the manifest pins separately and keeps at the
   // snapshot ROOT rather than under a `bf16/` subtree (`layout: "flat"`).
   //
   // One env family per (route, lane, layout), never one shared `WAN22`: the three routes are three
@@ -2074,8 +2074,8 @@ export function tierVariantDownload(models, modelId, repo, tier) {
  *   `SceneWorks/…-candle` rehost on `["windows","linux"]`, so the two lanes load DIFFERENT
  *   repositories at different revisions, and
  * * the candle rehosts ship `q4` and `q8` only — the candle bf16 leg is the UPSTREAM
- *   `Wan-AI/Wan2.2-*-Diffusers` checkpoint, which the manifest ships with NO pinned revision and
- *   with the weights at the snapshot root rather than under a `bf16/` subtree.
+ *   `Wan-AI/Wan2.2-*-Diffusers` checkpoint, pinned separately, with weights at the snapshot root
+ *   rather than under a `bf16/` subtree.
  *
  * A row therefore declares `artifacts[backend][tier]`, or `artifacts[backend]["*"]` for a whole
  * lane; anything an override omits falls back to the row itself. `layout: "flat"` marks the second
@@ -3048,10 +3048,9 @@ export function tierDownloadRows(models, modelId, repo, tier, platform = manifes
  *
  * Two things are deliberately NOT fetchable, and are reported rather than guessed at:
  *
- *   - a repository the manifest ships with NO pinned revision (the upstream Wan 2.2 / SVD Diffusers
- *     checkpoints). `--revision` is ALWAYS the pinned revision here; falling back to `main` would
- *     fetch whatever the branch points at today, which is not the artifact the anchor prices — and
- *     pinning a manifest download REMOVES `refs/main` from the mirror in the first place;
+ *   - a repository the manifest ships with NO pinned revision. `--revision` is ALWAYS the pinned
+ *     revision here; falling back to `main` would fetch whatever the branch points at today,
+ *     which is not the artifact the anchor prices;
  *   - a `bundle` / `stagedEnv` root (PuLID's identity bundle, the InstantID stack), which is a
  *     pre-staged directory named by an operator env var and not a hub repository at all.
  */

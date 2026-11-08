@@ -431,12 +431,12 @@ test("the tier download is the non-corequisite entry for the tier, so its revisi
  * - dropping the `artifacts[backend][tier]` lookup (a candle bf16 plan would probe the packed
  *   rehost's non-existent `bf16/` subtree and report a stageable cell `weights_missing`);
  * - dropping `layout: "flat"` (the upstream Diffusers snapshot would be probed at `<root>/bf16`);
- * - resolving the unpinned upstream download through `tierDownload`'s any-revision fallback (which
+ * - resolving this fixture's unpinned upstream download through `tierDownload`'s any-revision fallback (which
  *   would name the PACKED rehost's revision for a dense checkpoint);
  * - reporting the unpinned-and-unstaged case with the ordinary "no repo@rev/tier" sentence, which
  *   sends an operator to fetch a revision the manifest never pinned.
  */
-test("an artifact is resolved per (lane, tier), including the flat upstream leg the manifest leaves unpinned", async () => {
+test("an artifact is resolved per (lane, tier), including an unpinned flat upstream fixture", async () => {
   const models = fakeModels();
   // A LOCAL family literal, not a `PROVIDER_FAMILIES` row: this test owns the mechanism, and the
   // mechanism must be provable before any family declares an arm that consumes it. The shape is
@@ -4452,7 +4452,7 @@ test("MAGE_COMPONENT_IDS are the adapter's own component-id constants", async ()
 // ARTIFACT is per (lane, TIER) rather than per lane. Each Wan route ships a `SceneWorks/…-mlx`
 // rehost on macOS and a separate `SceneWorks/…-candle` rehost on Windows/Linux, and the candle
 // rehosts carry `q4` and `q8` only: the candle dense leg is the upstream `Wan-AI/…-Diffusers`
-// checkpoint, at the snapshot ROOT and with no pinned revision. SCAIL-2 is the opposite shape —
+// checkpoint, at the snapshot ROOT and at its own pinned revision. SCAIL-2 is the opposite shape —
 // ONE repository, all three tiers, both lanes — which is why every one of its 24 sibling cells is
 // still claimed on both lanes. The KEY SET is spelled out for the sc-22731 reason: a count alone
 // would stay green if one route silently lost a lane while another gained one.
@@ -4467,14 +4467,14 @@ test("the wan 2.2 family and scail-2 are measurable on every shipped tier of eve
   assert.equal(gaps.length, 0, gapReport(gaps));
 });
 
-// Wan Candle BF16 uses flat upstream snapshots. T2V has an exact manifest revision so an
-// incomplete snapshot can be repaired; the other two still resolve their staged revision.
-test("the wan candle dense leg binds upstream snapshots flat, with T2V pinned for repair", async () => {
+// Wan Candle BF16 uses flat upstream snapshots. Every member has an exact manifest revision so an
+// incomplete snapshot can be repaired from its own pinned source.
+test("the wan candle dense leg binds pinned upstream snapshots flat", async () => {
   const models = await readManifestModels();
-  for (const [id, repo] of [
-    ["wan_2_2", "Wan-AI/Wan2.2-TI2V-5B-Diffusers"],
-    ["wan_2_2_t2v_14b", "Wan-AI/Wan2.2-T2V-A14B-Diffusers"],
-    ["wan_2_2_i2v_14b", "Wan-AI/Wan2.2-I2V-A14B-Diffusers"],
+  for (const [id, repo, revision] of [
+    ["wan_2_2", "Wan-AI/Wan2.2-TI2V-5B-Diffusers", "b8fff7315c768468a5333511427288870b2e9635"],
+    ["wan_2_2_t2v_14b", "Wan-AI/Wan2.2-T2V-A14B-Diffusers", "5be7df9619b54f4e2667b2755bc6a756675b5cd7"],
+    ["wan_2_2_i2v_14b", "Wan-AI/Wan2.2-I2V-A14B-Diffusers", "596658fd9ca6b7b71d5057529bbf319ecbc61d74"],
   ]) {
     const provider = id === "wan_2_2" ? "wan2_2_ti2v_5b" : id.replace("wan_2_2", "wan2_2");
     const artifact = familyArtifact(PROVIDER_FAMILIES[provider], "candle", "bf16");
@@ -4484,19 +4484,16 @@ test("the wan candle dense leg binds upstream snapshots flat, with T2V pinned fo
       (entry) => entry.repo === repo,
     );
     assert.ok(download, `${id} ships ${repo}`);
-    if (id === "wan_2_2_t2v_14b") {
-      assert.equal(download.revision, "5be7df9619b54f4e2667b2755bc6a756675b5cd7");
-      const { targets, unfetchable } = anchorDownloadTargets(
-        { key: `${id}:bf16:candle`, modelId: id, tier: "bf16", backend: "candle", provider }, models,
-      );
-      assert.deepEqual(unfetchable, []);
-      assert.equal(targets.length, 1);
-      assert.equal(targets[0].repo, repo);
-      assert.equal(targets[0].revision, download.revision);
-      assert.ok(hfDownloadArgvs(targets[0], "/hub").every(args => args.includes(download.revision)));
-    } else {
-      assert.equal(download.revision, undefined, `${id}: ${repo} is shipped without a revision`);
-    }
+    assert.equal(download.revision, revision, `${id}: the upstream snapshot is pinned`);
+    const { targets, unfetchable } = anchorDownloadTargets(
+      { key: `${id}:bf16:candle`, modelId: id, tier: "bf16", backend: "candle", provider },
+      models, { platform: "windows" },
+    );
+    assert.deepEqual(unfetchable, []);
+    assert.equal(targets.length, 1);
+    assert.equal(targets[0].repo, repo);
+    assert.equal(targets[0].revision, revision);
+    assert.ok(hfDownloadArgvs(targets[0], "/hub").every(args => args.includes(revision)));
     // The packed siblings are the opposite: a pinned, tier-suffixed SceneWorks rehost.
     for (const tier of ["q4", "q8"]) {
       const packed = familyArtifact(PROVIDER_FAMILIES[provider], "candle", tier);
@@ -7588,18 +7585,30 @@ test("--download-missing resolves the FULL inventory each failing CUDA cell need
 test("no anchor can be fetched off a branch: every target the shipped plan produces carries a 40-hex revision", async () => {
   const models = await readManifestModels();
   const plan = await readPlan();
-  let unpinned = 0;
   for (const [key, planned] of Object.entries(plan.anchors)) {
     const parts = anchorParts(key);
     const { targets, unfetchable } = anchorDownloadTargets({ key, ...parts, provider: planned.provider }, models);
     for (const target of targets) {
       assert.match(target.revision, /^[0-9a-f]{40}$/, `${key} would fetch ${target.repo}@${target.revision}`);
     }
-    if (unfetchable.some((note) => /shipped without a pinned revision/.test(note))) unpinned += 1;
+    assert.ok(
+      !unfetchable.some((note) => /shipped without a pinned revision/.test(note)),
+      `${key} unexpectedly lost its shipped pin: ${unfetchable.join("; ")}`,
+    );
   }
-  // The upstream Wan 2.2 / SVD Diffusers checkpoints are the shipped unpinned case; they are
-  // REPORTED rather than resolved off a branch, which is the whole reason the refusal exists.
-  assert.ok(unpinned > 0, "the unpinned-revision refusal is reachable on the shipped plan");
+
+  // Keep the fail-closed branch reachable without requiring a shipped model to stay unpinned.
+  const unpinnedModels = structuredClone(models);
+  const upstream = "Wan-AI/Wan2.2-TI2V-5B-Diffusers";
+  const download = unpinnedModels.find((model) => model.id === "wan_2_2")?.downloads.find((row) => row.repo === upstream);
+  assert.ok(download, "the fixture starts from the shipped Wan dense source");
+  delete download.revision;
+  const { targets, unfetchable } = anchorDownloadTargets(
+    { key: "wan_2_2:bf16:candle", modelId: "wan_2_2", tier: "bf16", backend: "candle", provider: "wan2_2_ti2v_5b" },
+    unpinnedModels, { platform: "windows" },
+  );
+  assert.ok(unfetchable.some((note) => note.includes(`${upstream} is shipped without a pinned revision`)));
+  assert.ok(!targets.some((target) => target.repo === upstream), "an unpinned source must never become a fetch target");
 });
 
 test("--download-missing fetches ONLY the weights_missing anchors, into the first hub root, and re-classifies them", { skip: skipWithoutShebang }, async () => {
