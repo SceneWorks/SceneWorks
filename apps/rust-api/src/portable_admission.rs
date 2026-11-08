@@ -477,10 +477,11 @@ pub(crate) async fn derive_vector_raster_child_binding(
         requested_gpu,
     )? {
         let key = format!("{backend}:{platform}");
-        let parent_route = parent_frozen
-            .routes
-            .get(&key)
-            .ok_or_else(|| incomplete(format!("vector parent did not freeze child route {key}")))?;
+        let Some(parent_route) =
+            frozen_vector_child_route(&parent_frozen.routes, &key, requested_gpu)?
+        else {
+            continue;
+        };
         let raster = parent_route
             .models
             .iter()
@@ -521,6 +522,11 @@ pub(crate) async fn derive_vector_raster_child_binding(
             .map_err(|error| incomplete(error.to_string()))?;
         routes.insert(key, route);
     }
+    if routes.is_empty() {
+        return Err(incomplete(
+            "vector parent has no compatible frozen child route",
+        ));
+    }
     let frozen_child =
         PortableJobBinding::new(authored, routes).map_err(|error| incomplete(error.to_string()))?;
     validate_frozen_replay_binding(
@@ -531,6 +537,22 @@ pub(crate) async fn derive_vector_raster_child_binding(
         &frozen_child,
     )
     .await
+}
+
+fn frozen_vector_child_route<'a>(
+    routes: &'a BTreeMap<String, PortableRouteBinding>,
+    key: &str,
+    requested_gpu: &str,
+) -> Result<Option<&'a PortableRouteBinding>, ApiError> {
+    match routes.get(key) {
+        Some(route) => Ok(Some(route)),
+        // A local raster source may have been provable on only a subset of workers. A child
+        // cannot add a route the parent did not freeze, but Auto can keep its valid routes.
+        None if requested_gpu == "auto" => Ok(None),
+        None => Err(incomplete(format!(
+            "vector parent did not freeze child route {key}"
+        ))),
+    }
 }
 
 async fn capture_portable_model_binding_inner(
@@ -2640,6 +2662,29 @@ fn capture_selected_request_overlays(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn vector_child_auto_keeps_only_parent_frozen_worker_routes() {
+        let routes = BTreeMap::from([(
+            "candle:linux".to_owned(),
+            PortableRouteBinding {
+                backend: "candle".to_owned(),
+                platform: "linux".to_owned(),
+                models: Vec::new(),
+            },
+        )]);
+        let eligible = ["candle:linux", "candle:windows", "mlx:macos"];
+        let selected = eligible
+            .into_iter()
+            .filter(|key| {
+                frozen_vector_child_route(&routes, key, "auto")
+                    .unwrap()
+                    .is_some()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(selected, ["candle:linux"]);
+        assert!(frozen_vector_child_route(&routes, "candle:windows", "candle").is_err());
+    }
 
     #[test]
     fn conversion_claims_prefer_authored_tier_across_workers() {
