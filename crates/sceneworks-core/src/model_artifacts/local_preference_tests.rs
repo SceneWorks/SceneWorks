@@ -550,7 +550,7 @@ fn different_revisions_of_one_repository_wait_for_unique_portable_lookup() {
     });
     wait_for_overlay_waiters(1);
     let configured =
-        ArtifactSourceLibrary::new_preferring_local(&temp.path().join("absent-source")).unwrap();
+        ArtifactSourceLibrary::new_preferring_local(temp.path().join("absent-source")).unwrap();
     assert_eq!(
         configured.discover_snapshot("owner/model", None).unwrap().1,
         first_root
