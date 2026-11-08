@@ -888,7 +888,7 @@ fn catalog_records(path: &Path, collection: &str) -> Vec<serde_json::Value> {
 }
 
 /// The built-in LoRA catalog names pinned Hugging Face files rather than local paths. Resolve
-/// only its own snapshot or a receipt naming the same repository; never use a job's API-host path.
+/// only its pinned snapshot and file; never use a job's API-host path.
 fn builtin_lora_source_paths(settings: &Settings, entry: &serde_json::Value) -> Vec<PathBuf> {
     let Some(id) = entry.get("id").and_then(serde_json::Value::as_str) else {
         return Vec::new();
@@ -958,17 +958,15 @@ fn builtin_lora_source_paths(settings: &Settings, entry: &serde_json::Value) -> 
                 .cloned()
                 .unwrap_or_else(|| vec![receipt]);
             for row in rows.iter().rev() {
-                if row.get("repo").and_then(serde_json::Value::as_str) != Some(repo) {
+                if row.get("repo").and_then(serde_json::Value::as_str) != Some(repo)
+                    || row
+                        .get("snapshotRevision")
+                        .and_then(serde_json::Value::as_str)
+                        != Some(revision)
+                {
                     continue;
                 }
-                let Some(snapshot_revision) = row
-                    .get("snapshotRevision")
-                    .and_then(serde_json::Value::as_str)
-                else {
-                    continue;
-                };
-                let Ok((_, snapshot)) =
-                    resolver.discover_source_snapshot(repo, Some(snapshot_revision))
+                let Ok((_, snapshot)) = resolver.discover_source_snapshot(repo, Some(revision))
                 else {
                     continue;
                 };
@@ -976,7 +974,10 @@ fn builtin_lora_source_paths(settings: &Settings, entry: &serde_json::Value) -> 
                     .get("resolvedFiles")
                     .and_then(serde_json::Value::as_array)
                 {
-                    for file in files.iter().filter_map(serde_json::Value::as_str) {
+                    if files
+                        .iter()
+                        .any(|candidate| candidate.as_str() == Some(file))
+                    {
                         push(&snapshot, file);
                     }
                 }
@@ -1450,6 +1451,60 @@ mod tests {
                 .iter()
                 .any(|claim| claim.source_id == id));
         }
+    }
+
+    #[test]
+    fn builtin_hf_lora_receipt_cannot_select_another_revision_or_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut settings = Settings::for_test(temp.path().join("worker-data"));
+        settings.config_dir = temp.path().join("worker-config");
+        let hub = temp.path().join("worker-hub");
+        let _hub = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+            settings.data_dir.clone(),
+            hub.clone(),
+        );
+        let repo = "example/pinned-lora";
+        let revision = "1111111111111111111111111111111111111111";
+        let stale_revision = "2222222222222222222222222222222222222222";
+        let manifest = settings.config_dir.join("manifests/builtin.loras.jsonc");
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(&manifest, json!({"loras":[{"id":"pinned","source":{
+            "provider":"huggingface","repo":repo,"revision":revision,"file":"selected.safetensors"
+        }}]}).to_string()).unwrap();
+        let snapshot_root = hub.join("models--example--pinned-lora/snapshots");
+        let selected = snapshot_root.join(revision).join("selected.safetensors");
+        let alternate = snapshot_root.join(revision).join("alternate.safetensors");
+        let stale = snapshot_root
+            .join(stale_revision)
+            .join("selected.safetensors");
+        for path in [&selected, &alternate, &stale] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"same bytes").unwrap();
+        }
+        let receipt = settings
+            .data_dir
+            .join("loras/pinned/.sceneworks-download-complete.json");
+        std::fs::create_dir_all(receipt.parent().unwrap()).unwrap();
+        let entry = catalog_records(&manifest, "loras").remove(0);
+        let write_receipt = |snapshot_revision: &str, file: &str| {
+            std::fs::write(
+                &receipt,
+                json!({"repo":repo,
+                    "snapshotRevision":snapshot_revision,"resolvedFiles":[file]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        };
+        // Remove the direct pinned file so the receipt selector is the only candidate.
+        std::fs::remove_file(&selected).unwrap();
+        write_receipt(stale_revision, "selected.safetensors");
+        assert!(builtin_lora_source_paths(&settings, &entry).is_empty());
+        write_receipt(revision, "alternate.safetensors");
+        assert!(builtin_lora_source_paths(&settings, &entry).is_empty());
+        std::fs::write(&selected, b"same bytes").unwrap();
+        write_receipt(revision, "selected.safetensors");
+        assert_eq!(builtin_lora_source_paths(&settings, &entry), vec![selected]);
     }
 
     #[test]
