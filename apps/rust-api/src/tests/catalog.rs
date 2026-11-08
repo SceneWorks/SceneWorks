@@ -6328,8 +6328,13 @@ fn builtin_manifest_registers_the_wan_vace_fun_model() {
     let macos = download_for("macos");
     assert_eq!(macos["provider"], "huggingface");
     assert_eq!(macos["repo"], "linoyts/Wan2.2-VACE-Fun-14B-diffusers");
+    assert_eq!(
+        macos["revision"],
+        "1abfb95801b7bd8f952083ebf80b93448ddb0ce4"
+    );
     let windows = download_for("windows");
     assert_eq!(windows["repo"], "linoyts/Wan2.2-VACE-Fun-14B-diffusers");
+    assert_eq!(windows["revision"], macos["revision"]);
     assert_eq!(
         download_for("linux")["repo"],
         "linoyts/Wan2.2-VACE-Fun-14B-diffusers",
@@ -6353,6 +6358,83 @@ fn builtin_manifest_registers_the_wan_vace_fun_model() {
         model.get("quantization").is_none(),
         "native-first: no Torch GGUF quantization block"
     );
+}
+
+#[test]
+fn shipped_hugging_face_downloads_have_immutable_selected_revisions() {
+    use sceneworks_core::model_artifacts::artifact_selection::{
+        is_supported_model_download, selected_model_artifact_closure,
+    };
+
+    let manifest = sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+        .expect("shipped model manifest");
+    let models = manifest["models"].as_array().expect("models array");
+    for model in models {
+        for download in model["downloads"].as_array().into_iter().flatten() {
+            if !is_supported_model_download(download) || download["provider"] != "huggingface" {
+                continue;
+            }
+            let revision = download["revision"].as_str().unwrap_or_default();
+            assert!(
+                revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                "{}/{} has no immutable publisher revision",
+                model["id"],
+                download["repo"]
+            );
+        }
+    }
+
+    for (id, platform, tier, repo, revision) in [
+        (
+            "svd",
+            "macos",
+            None,
+            "stabilityai/stable-video-diffusion-img2vid-xt",
+            "9e43909513c6714f1bc78bcb44d96e733cd242aa",
+        ),
+        (
+            "wan_2_2",
+            "windows",
+            Some("bf16"),
+            "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+            "b8fff7315c768468a5333511427288870b2e9635",
+        ),
+        (
+            "wan_2_2_i2v_14b",
+            "linux",
+            Some("bf16"),
+            "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+            "596658fd9ca6b7b71d5057529bbf319ecbc61d74",
+        ),
+        (
+            "wan_2_2_vace_fun_14b",
+            "macos",
+            None,
+            "linoyts/Wan2.2-VACE-Fun-14B-diffusers",
+            "1abfb95801b7bd8f952083ebf80b93448ddb0ce4",
+        ),
+        (
+            "wan_2_2_vace_fun_14b",
+            "windows",
+            None,
+            "linoyts/Wan2.2-VACE-Fun-14B-diffusers",
+            "1abfb95801b7bd8f952083ebf80b93448ddb0ce4",
+        ),
+    ] {
+        let model = models
+            .iter()
+            .find(|model| model["id"] == id)
+            .expect("shipped model");
+        let selected = selected_model_artifact_closure(model, platform, tier);
+        let primary = selected["downloads"]
+            .as_array()
+            .expect("selected downloads")
+            .iter()
+            .find(|row| row["coRequisite"] != true)
+            .expect("selected primary");
+        assert_eq!(primary["repo"], repo, "{id}/{platform}/{tier:?}");
+        assert_eq!(primary["revision"], revision, "{id}/{platform}/{tier:?}");
+    }
 }
 
 #[test]

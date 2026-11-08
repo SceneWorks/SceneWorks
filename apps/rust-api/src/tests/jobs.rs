@@ -2,6 +2,55 @@
 use super::support::*;
 use crate::{validate_prompt_enhancement_fields, validate_prompt_enhancement_payload};
 
+#[tokio::test]
+async fn wan_vace_fun_video_enqueue_keeps_a_pinned_source() {
+    use sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile;
+
+    fn pinned_metadata(selectors: &[String]) -> Vec<PortableArtifactFile> {
+        selectors
+            .iter()
+            .map(|selector| PortableArtifactFile {
+                relative_path: std::path::PathBuf::from(selector.replace('*', "model_index.json")),
+                size_bytes: 1,
+                sha256: format!("sha256:{}", "a".repeat(64)),
+            })
+            .collect()
+    }
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let settings = test_settings(&temp);
+    sceneworks_core::builtin_manifests::seed_builtin_manifests(
+        &settings.config_dir,
+        sceneworks_core::builtin_manifests::SeedMode::Overwrite,
+    )
+    .expect("builtin manifests seed");
+    let (app, state) = create_app_with_state(settings).expect("app and state");
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(true);
+    *state.test_hooks.video_platform_override.lock() = Some("macos");
+    *state.test_hooks.pinned_metadata_override.lock() = Some(pinned_metadata);
+    let (_, project) = create_project(app.clone(), &"VACE pin regression").await;
+    let (status, job) = request(
+        app,
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project["id"],
+            "model": "wan_2_2_vace_fun_14b",
+            "mode": "replace_person",
+            "prompt": "a person walks through a garden",
+            "sourceClipAssetId": "clip-1",
+            "personTrackId": "track-1",
+            "characterId": "character-1"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["payload"]["model"], "wan_2_2_vace_fun_14b");
+}
+
 #[test]
 fn vector_detail_default_allows_five_minutes_per_svg() {
     assert_eq!(
