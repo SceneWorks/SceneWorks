@@ -10,6 +10,10 @@
 #   docker build -f docker/rust.Dockerfile --target rust-api-embed --build-arg BIN=sceneworks-rust-api .
 #   docker build -f docker/rust.Dockerfile --target rust-worker --build-arg BIN=sceneworks-rust-worker .
 
+# Immutable CUDA worker base for the RunPod target. Its source inputs are
+# checked by scripts/check-runpod-prebuilt-inputs.mjs before publication.
+ARG RUNPOD_PREBUILT_CANDLE_IMAGE=ghcr.io/sceneworks/sceneworks-runpod@sha256:2ff487bd5aefdf294443ece9ea25e6b55c1cb8c349964af5db4d11990e492fe8
+
 # Production SPA bundle for the opt-in rust-api-embed target. The plain rust-api
 # target has no dependency on this stage, so it neither installs Node packages nor
 # embeds web assets. The license corpus is imported directly by the production UI.
@@ -449,11 +453,15 @@ CMD ["sceneworks-rust-worker"]
 # disjoint capabilities, so generation cannot leak onto the utility lane and
 # downloads/imports/exports cannot occupy the GPU lane.
 #
-# Keep this runtime based on rust-worker-candle-base: it is the validated CUDA 12.9.1
-# + cuDNN 9 + onnxruntime-gpu image and already contains ffmpeg. Model Manager
-# downloads run through the worker's native in-process downloader; intentionally
-# do not install the retired Hugging Face CLI (sc-12227 / sc-12232).
-FROM rust-worker-candle-base AS runpod
+# This digest is the previously validated 0.11.0 candidate, retained under the
+# candle-prebuilt-6435067 registry tag. It already contains the CUDA/Candle
+# worker and the validated CUDA 12.9.1 + cuDNN 9 + onnxruntime-gpu runtime. The
+# publication workflow rejects changes to its worker build inputs before this
+# stage is used; only the API/web and RunPod wrapper are rebuilt here. Refresh
+# the digest after a separately validated worker build when those inputs change.
+# Model Manager downloads use the native in-process path; do not install the retired Hugging Face CLI (sc-12227 / sc-12232).
+FROM ${RUNPOD_PREBUILT_CANDLE_IMAGE} AS runpod
+USER root
 
 COPY --from=embed-builder /out/sceneworks-rust-api /usr/local/bin/sceneworks-rust-api
 COPY docker/runpod-entrypoint.sh /usr/local/bin/sceneworks-runpod-entrypoint
