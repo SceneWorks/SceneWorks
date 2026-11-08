@@ -12,7 +12,7 @@
 
 # Immutable CUDA worker base for the RunPod target. Its source inputs are
 # checked by scripts/check-runpod-prebuilt-inputs.mjs before publication.
-ARG RUNPOD_PREBUILT_CANDLE_IMAGE=ghcr.io/sceneworks/sceneworks-runpod@sha256:2ff487bd5aefdf294443ece9ea25e6b55c1cb8c349964af5db4d11990e492fe8
+ARG RUNPOD_PREBUILT_CANDLE_IMAGE=ghcr.io/sceneworks/sceneworks-runpod@sha256:36e0a3fc5bf6a25eb4eaead33e3d07cfb3c10c1db969ecf5955be9737d664d44
 
 # Production SPA bundle for the opt-in rust-api-embed target. The plain rust-api
 # target has no dependency on this stage, so it neither installs Node packages nor
@@ -453,8 +453,8 @@ CMD ["sceneworks-rust-worker"]
 # disjoint capabilities, so generation cannot leak onto the utility lane and
 # downloads/imports/exports cannot occupy the GPU lane.
 #
-# This digest is the previously validated 0.11.0 candidate, retained under the
-# candle-prebuilt-6435067 registry tag. It already contains the CUDA/Candle
+# This digest is the 0.11.1 worker built from source 703d8d884056de9752a2d415d408cc5209483ce9
+# by build-runpod-candle-base.yml (Actions run 42498547124). It contains the CUDA/Candle
 # worker and the validated CUDA 12.9.1 + cuDNN 9 + onnxruntime-gpu runtime. The
 # publication workflow rejects changes to its worker build inputs before this
 # stage is used; only the API/web and RunPod wrapper are rebuilt here. Refresh
