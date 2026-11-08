@@ -138,6 +138,9 @@ fn catalog_hash(settings: &Settings) -> [u8; 32] {
     let projects =
         sceneworks_core::project_store::ProjectStore::new(settings.data_dir.clone(), "worker");
     if let Ok(projects) = projects.list_projects() {
+        for project in &projects {
+            paths.extend(character_sidecar_paths(Path::new(&project.path)));
+        }
         paths.extend(
             projects
                 .iter()
@@ -378,6 +381,38 @@ fn registered_digest_source_claims(
             }
         }
     }
+    let projects =
+        sceneworks_core::project_store::ProjectStore::new(settings.data_dir.clone(), "worker");
+    if let Ok(projects) = projects.list_projects() {
+        for project in projects {
+            let project_path = Path::new(&project.path);
+            let characters = sceneworks_core::character_store::CharacterStore::new(
+                &settings.data_dir,
+                project_path,
+            );
+            let Ok(characters) = characters.list_characters(&project.id, true) else {
+                continue;
+            };
+            for character in characters {
+                for link in character
+                    .get("loras")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    let Some(id) = link.get("id").and_then(serde_json::Value::as_str) else {
+                        continue;
+                    };
+                    if let Some(path) = character_lora_copy_path(settings, project_path, link) {
+                        append_registered_claim(&mut claims, "lora", id, None, &path);
+                    }
+                    for claim in claims.drain(..) {
+                        publish(claim);
+                    }
+                }
+            }
+        }
+    }
     for manifest in control_overlay_manifests(settings) {
         for overlay in catalog_records(&manifest, "controlOverlays") {
             let Some(id) = overlay.get("id").and_then(serde_json::Value::as_str) else {
@@ -392,6 +427,76 @@ fn registered_digest_source_claims(
             }
         }
     }
+}
+
+fn character_sidecar_paths(project_path: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(project_path.join("characters")) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.ends_with(sceneworks_core::character_store::CHARACTER_SIDECAR_PATTERN)
+                })
+        })
+        .collect()
+}
+
+fn character_lora_copy_path(
+    settings: &Settings,
+    project_path: &Path,
+    link: &serde_json::Value,
+) -> Option<PathBuf> {
+    let id = link.get("id")?.as_str()?;
+    if !id.starts_with("character_lora_") || link.get("category")?.as_str()? != "character" {
+        return None;
+    }
+    let relative = link.get("projectPath")?.as_str()?;
+    let within_loras = relative.strip_prefix("loras/")?;
+    let selected = sceneworks_core::safe_path::confine_under(
+        &project_path.join("loras"),
+        within_loras,
+        sceneworks_core::safe_path::Confinement::SymlinkSafe,
+    )
+    .ok()?;
+    crate::paths::normalize_app_managed_lora_path(settings, &selected).ok()
+}
+
+pub(crate) fn registered_character_lora_path(
+    settings: &Settings,
+    project_path: &Path,
+    project_id: &str,
+    character_id: &str,
+    link_id: &str,
+    frozen_files: &[PortableArtifactFile],
+) -> WorkerResult<Option<PathBuf>> {
+    if !link_id.starts_with("character_lora_") {
+        return Ok(None);
+    }
+    let store =
+        sceneworks_core::character_store::CharacterStore::new(&settings.data_dir, project_path);
+    let Ok(character) = store.get_character(project_id, character_id) else {
+        return Ok(None);
+    };
+    for link in character
+        .get("loras")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|link| link.get("id").and_then(serde_json::Value::as_str) == Some(link_id))
+    {
+        let Some(path) = character_lora_copy_path(settings, project_path, link) else {
+            continue;
+        };
+        if capture_registered_files(&path).is_ok_and(|files| files == frozen_files) {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
 }
 
 fn converted_builtin_model_ids() -> Vec<String> {
@@ -1069,6 +1174,112 @@ fn capture_one(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn character_sidecar_lora_is_advertised_and_rebound_to_its_project_copy() {
+        use sceneworks_core::character_store::{
+            CharacterCreateInput, CharacterLoraInput, CharacterStore,
+        };
+        use sceneworks_core::project_store::ProjectStore;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let mut settings = Settings::for_test(data.clone());
+        settings.config_dir = temp.path().join("config");
+        let projects = ProjectStore::new(data.clone(), "worker");
+        let project = projects.create_project("Character claim").unwrap();
+        let project_path = PathBuf::from(&project.path);
+        let characters = CharacterStore::new(&data, &project_path);
+        let character = characters
+            .create_character(
+                &project.id,
+                CharacterCreateInput {
+                    name: "Mira".to_owned(),
+                    character_type: "person".to_owned(),
+                    description: String::new(),
+                },
+            )
+            .unwrap();
+        let character_id = character["id"].as_str().unwrap();
+        let before = catalog_hash(&settings);
+        let source = data.join("loras/mira.safetensors");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"original weights").unwrap();
+        let attached = characters
+            .attach_lora(
+                &project.id,
+                character_id,
+                CharacterLoraInput {
+                    lora_id: None,
+                    name: "Mira LoRA".to_owned(),
+                    source_path: Some(source.to_string_lossy().into_owned()),
+                    trigger_words: Vec::new(),
+                    default_weight: 1.0,
+                    compatibility: serde_json::Map::new(),
+                    scope: "project".to_owned(),
+                },
+            )
+            .unwrap();
+        assert_ne!(
+            catalog_hash(&settings),
+            before,
+            "sidecar edit schedules a rescan"
+        );
+        let link = &attached["loras"][0];
+        let link_id = link["id"].as_str().unwrap();
+        let copy = project_path.join(link["projectPath"].as_str().unwrap());
+        let canonical_copy = std::fs::canonicalize(&copy).unwrap();
+        let files = capture_registered_files(&copy).unwrap();
+        let ledger =
+            sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(&files)
+                .unwrap();
+        let expected_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+            "lora", link_id, None, &ledger,
+        )
+        .unwrap();
+        let mut claims = Vec::new();
+        registered_digest_source_claims(&settings, |claim| claims.push(claim));
+        assert!(claims
+            .iter()
+            .any(|claim| claim.source_id == expected_id && claim.files == files));
+        assert_eq!(
+            registered_character_lora_path(
+                &settings,
+                &project_path,
+                &project.id,
+                character_id,
+                link_id,
+                &files,
+            )
+            .unwrap(),
+            Some(canonical_copy.clone())
+        );
+        std::fs::write(&source, b"changed original").unwrap();
+        assert_eq!(
+            registered_character_lora_path(
+                &settings,
+                &project_path,
+                &project.id,
+                character_id,
+                link_id,
+                &files,
+            )
+            .unwrap(),
+            Some(canonical_copy),
+            "the detached original cannot replace the project copy"
+        );
+        std::fs::write(&copy, b"changed project copy").unwrap();
+        assert!(registered_character_lora_path(
+            &settings,
+            &project_path,
+            &project.id,
+            character_id,
+            link_id,
+            &files,
+        )
+        .unwrap()
+        .is_none());
+    }
 
     #[cfg(native_lane)]
     #[test]

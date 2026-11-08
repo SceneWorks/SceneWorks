@@ -2938,6 +2938,38 @@ fn worker_lora_catalog_member_path(
     id: &str,
     member: &PortableArtifactMember,
 ) -> WorkerResult<Option<PathBuf>> {
+    if id.starts_with("character_lora_") {
+        let Some(project_id) = payload.get("projectId").and_then(serde_json::Value::as_str) else {
+            return Err(invalid_binding(
+                "registered character LoRA has no project ID",
+            ));
+        };
+        let Some(character_id) = payload
+            .get("characterId")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return Err(invalid_binding(
+                "registered character LoRA has no character ID",
+            ));
+        };
+        let Some(project) = crate::paths::project_path_for_payload(settings, payload)
+            .map_err(|_| invalid_binding("worker project source is unavailable"))?
+        else {
+            return Err(invalid_binding("registered character LoRA has no project"));
+        };
+        return crate::portable_source_claims::registered_character_lora_path(
+            settings,
+            &project,
+            project_id,
+            character_id,
+            id,
+            &member.files,
+        )
+        .and_then(|path| {
+            path.map(Some)
+                .ok_or_else(|| invalid_binding("registered character LoRA bytes are unavailable"))
+        });
+    }
     if let Some(global) =
         worker_catalog_member_path(settings, "user.loras.jsonc", "loras", id, None, member)?
     {
