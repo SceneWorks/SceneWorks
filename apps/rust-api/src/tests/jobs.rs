@@ -10449,7 +10449,10 @@ async fn ref2va_reference_caps_refuse_fifteen_files_and_admit_twelve() {
               "type": "video",
               "adapter": "stub",
               "capabilities": ["text_to_video", "reference_to_video"],
-              "downloads": [],
+              "downloads": [{
+                "provider": "huggingface", "repo": "fixture/minimax-h3-ref",
+                "files": ["transformer_ref/model.safetensors"], "default": true
+              }],
               "paths": {},
               "defaults": {},
               "limits": {
@@ -10484,7 +10487,7 @@ async fn ref2va_reference_caps_refuse_fifteen_files_and_admit_twelve() {
     )
     .expect("user models writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     crate::tests::support::create_project(app.clone(), &"Ref2VA").await;
 
     let submit = |model: &str, images: usize, clips: usize, audio: usize| {
@@ -14733,12 +14736,12 @@ async fn qwen_image_2_1_edit_validates_the_whole_ordered_conditioning_list() {
           "schemaVersion": 1,
           "models": [
             {
-              "id": "unbounded_image",
+              "id": "qwen_image_2_1_turbo",
               "name": "Unbounded",
-              "family": "z-image",
+              "family": "qwen-image-2-1",
               "type": "image",
-              "adapter": "z_image_diffusers",
-              "capabilities": ["text_to_image", "image_to_image", "edit_image"],
+              "adapter": "qwen_image_2_1_turbo",
+              "capabilities": ["text_to_image", "image_to_image"],
               "downloads": [
                 { "provider": "huggingface", "repo": "owner/unbounded", "files": ["*.safetensors"], "default": true }
               ],
@@ -14773,7 +14776,7 @@ async fn qwen_image_2_1_edit_validates_the_whole_ordered_conditioning_list() {
     )
     .expect("user models writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Qwen 2.1 Ordered Conditioning").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -14972,24 +14975,23 @@ async fn qwen_image_2_1_edit_validates_the_whole_ordered_conditioning_list() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 
-    // ── Every one of these is armed by the SAME declaration as the cap, so a model that declares
-    // nothing pays none of it — not the refusals, and not the asset reads.
+    // ── The declared cap applies only to this model. A second native route with no authored
+    // reference cap admits both one and eleven valid references through its own source contract.
     for body in [
         json!({
-            "projectId": project_id, "model": "unbounded_image", "mode": "edit_image",
-            "prompt": "compose these"
+            "projectId": project_id, "model": "qwen_image_2_1_turbo", "mode": "edit_image",
+            "prompt": "compose these", "referenceAssetIds": [assets[0]]
         }),
         json!({
-            "projectId": project_id, "model": "unbounded_image", "mode": "edit_image",
-            "prompt": "compose these", "referenceAssetIds": ["not-an-asset"],
-            "advanced": { "strength": 0.5 }
+            "projectId": project_id, "model": "qwen_image_2_1_turbo", "mode": "edit_image",
+            "prompt": "compose these", "referenceAssetIds": assets[0..11]
         }),
     ] {
         let (status, response) = post(body.clone()).await;
         assert_eq!(
             status,
             StatusCode::CREATED,
-            "a model declaring no cap is byte-for-byte unchanged: {body} -> {response}"
+            "a model declaring no cap admits its own valid reference request: {body} -> {response}"
         );
     }
 
