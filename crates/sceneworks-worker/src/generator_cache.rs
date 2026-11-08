@@ -5422,17 +5422,33 @@ mod tests {
         );
     }
 
-    // sc-6067: a panic inside a job closure (e.g. mlx-rs `.unwrap()`-ing a Metal OOM) must be
-    // CONTAINED — it fails only that job with a clean error AND the single shared cache thread keeps
-    // serving. Without the `catch_unwind` guard the worker thread unwinds and dies, and every later
-    // generation fails with "MLX generator cache worker stopped" until a process restart. (The panic
-    // backtrace this test triggers is printed by the default panic hook — that is expected.)
+    // On macOS a fatal owner panic poisons the process-local cache. Run that case alone in a
+    // child test process so the intentional fault cannot strand unrelated workspace tests.
     #[tokio::test]
-    async fn panicking_job_is_contained_and_worker_keeps_serving() {
+    async fn panicking_job_preserves_platform_cache_fault_contract() {
+        #[cfg(target_os = "macos")]
+        if std::env::var_os("SCENEWORKS_CACHE_PANIC_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "generator_cache::tests::panicking_job_preserves_platform_cache_fault_contract",
+                    "--nocapture",
+                ])
+                .env("SCENEWORKS_CACHE_PANIC_CHILD", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated cache fault test failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         let weights = tempfile::tempdir().expect("weights tempdir");
         let spec = LoadSpec::new(WeightsSource::Dir(weights.path().to_path_buf()));
 
-        // A run closure that panics mid-generation → comes back as a clean Engine error, not a hang.
+        // The error preserves the original fault. macOS also poisons the owner to avoid reusing
+        // potentially invalid Metal state; other platforms contain the panic and keep serving.
         let panicked = with_cached_generator_using(
             "sc3724_stub",
             spec.clone(),
@@ -5443,8 +5459,12 @@ mod tests {
             },
         )
         .await;
-        let Err(WorkerError::Engine(msg)) = &panicked else {
-            panic!("a job-closure panic must map to a clean Engine error, got {panicked:?}");
+        let msg = match &panicked {
+            #[cfg(target_os = "macos")]
+            Err(WorkerError::ProcessPoisoned(msg)) => msg,
+            #[cfg(not(target_os = "macos"))]
+            Err(WorkerError::Engine(msg)) => msg,
+            _ => panic!("a job-closure panic used the wrong fault contract: {panicked:?}"),
         };
         assert!(
             msg.contains("was contained"),
@@ -5455,28 +5475,24 @@ mod tests {
             "the original panic text must surface for diagnostics: {msg}"
         );
 
-        // The shared cache thread must still be alive and serving: a subsequent job succeeds.
+        // A second job cannot reuse a poisoned owner; non-Mac owners remain usable.
         let after = with_cached_generator_using(
             "sc3724_stub",
             spec,
             "stub load",
             |_id, spec| stub_load(spec),
-            move |generator| {
-                let req = gen_core::GenerationRequest {
-                    width: 2,
-                    height: 2,
-                    ..Default::default()
-                };
-                generator
-                    .generate(&req, &mut |_progress| {})
-                    .map(|_| ())
-                    .map_err(|error| WorkerError::Engine(error.to_string()))
-            },
+            move |_generator| Ok(()),
         )
         .await;
+        #[cfg(target_os = "macos")]
+        assert!(
+            matches!(&after, Err(WorkerError::Engine(_))),
+            "a poisoned owner must refuse later work, got {after:?}"
+        );
+        #[cfg(not(target_os = "macos"))]
         assert!(
             after.is_ok(),
-            "worker must keep serving after a contained panic, got {after:?}"
+            "non-Mac owner should keep serving: {after:?}"
         );
     }
 }
