@@ -203,7 +203,7 @@ async fn the_library_root_lifecycle_is_reachable_over_http() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "{job:?}");
     assert_eq!(job["payload"]["linkedRootId"], json!(root_id));
-    assert_eq!(job["payload"]["targetDir"], Value::Null);
+    assert!(job["payload"].get("targetDir").is_none());
 
     // ---- relocated / relinked ---------------------------------------------------------------
     let moved = temp_dir.path().join("moved-library");

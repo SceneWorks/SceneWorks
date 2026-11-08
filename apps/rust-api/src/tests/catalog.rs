@@ -1942,7 +1942,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     assert_eq!(job["payload"]["modelName"], "User Model");
     assert_eq!(job["payload"]["repo"], "owner/model");
     assert_eq!(job["payload"]["files"][0], "*.safetensors");
-    assert_eq!(job["payload"]["targetDir"], models[0]["installedPath"]);
+    assert!(job["payload"].get("targetDir").is_none());
 
     // Removing a user overlay does not remove or reclassify the protected builtin. The direct
     // manifest lookup in the delete route owns this behavior independently of routing scope.
@@ -1981,10 +1981,8 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     assert_eq!(job["payload"]["repo"], "owner/lora");
     assert_eq!(job["payload"]["loraId"], "imported_lora");
     assert_eq!(job["payload"]["scope"], "global");
-    assert!(job["payload"]["targetDir"]
-        .as_str()
-        .is_some_and(|value| value.ends_with("data/loras/imported_lora")
-            || value.ends_with("data\\loras\\imported_lora")));
+    assert!(job["payload"].get("targetDir").is_none());
+    assert!(job["payload"].get("manifestPath").is_none());
     assert_eq!(job["payload"]["manifestEntry"]["scope"], "global");
     assert!(job["payload"].get("sourcePath").is_none());
 
@@ -2378,13 +2376,19 @@ async fn paired_moe_lora_upload_writes_convention_files_and_records_base_model()
     // exact files to import. GET uses the same public projection as the enqueue response.
     assert!(job["payload"].get("sourcePath").is_none(), "{job}");
     assert!(job["payload"].get("secondarySourcePath").is_none(), "{job}");
+    assert!(job["payload"].get("targetDir").is_none(), "{job}");
+    assert!(job["payload"].get("manifestPath").is_none(), "{job}");
     let job_id = job["id"].as_str().expect("job id");
     let (get_status, public_job) =
         request(app, "GET", &format!("/api/v1/jobs/{job_id}"), Value::Null).await;
     assert_eq!(get_status, StatusCode::OK);
     assert!(public_job["payload"].get("sourcePath").is_none());
     assert!(public_job["payload"].get("secondarySourcePath").is_none());
+    assert!(public_job["payload"].get("targetDir").is_none());
+    assert!(public_job["payload"].get("manifestPath").is_none());
     let worker_job = state.jobs_store.get_job(job_id).expect("worker-owned job");
+    assert!(worker_job.payload["targetDir"].is_string());
+    assert!(worker_job.payload["manifestPath"].is_string());
 
     // Both halves staged on disk; the worker renames them on import.
     let primary = std::path::PathBuf::from(
@@ -8721,10 +8725,9 @@ async fn model_import_accepts_a_linked_library_root_and_refuses_unconfined_ones(
         job["payload"]["linkedRelativePath"],
         json!("checkpoints/dit.safetensors")
     );
-    assert_eq!(
-        job["payload"]["targetDir"],
-        Value::Null,
-        "a linked import installs nothing, so it gets no install directory: {job:?}"
+    assert!(
+        job["payload"].get("targetDir").is_none(),
+        "a linked import publishes no install directory: {job:?}"
     );
     let entry = &job["payload"]["manifestEntry"];
     assert_eq!(entry["source"]["provider"], json!("linked-library"));

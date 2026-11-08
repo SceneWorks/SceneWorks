@@ -2711,7 +2711,7 @@ async fn create_training_job_resolves_plan_and_queues_lora_train() {
         job["payload"]["manifestEntry"]["provenance"]["trainingJobId"],
         job_id
     );
-    assert!(job["payload"]["manifestPath"].is_null());
+    assert!(job["payload"].get("manifestPath").is_none());
 
     // The job is queued and visible to the queue/worker surface.
     let (status, queued) = request(

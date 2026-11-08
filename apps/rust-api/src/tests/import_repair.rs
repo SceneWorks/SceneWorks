@@ -404,7 +404,7 @@ async fn check_managed_repair(missing_original: bool, publication_change: Option
     } else {
         model.install_dir.clone()
     };
-    let app = create_app(settings.clone()).unwrap();
+    let (app, state) = create_app_with_state(settings.clone()).unwrap();
     let body = json!({"modelId":"repair_selection","name":"New display name","family":"minimax-h3","type":"video",
         "baseModel":"minimax_h3","minimaxH3Partition":"fl2va", "licenseAcknowledged":true, "source":{"kind":"localPath","path":settings.data_dir.join("models/incoming/repair_selection")}});
     let (status, duplicate) =
@@ -430,10 +430,14 @@ async fn check_managed_repair(missing_original: bool, publication_change: Option
         queued["payload"]["manifestEntry"]["name"],
         "New display name"
     );
-    assert_ne!(
-        queued["payload"]["targetDir"],
-        model.install_dir.to_string_lossy().as_ref()
-    );
+    assert!(queued["payload"].get("targetDir").is_none());
+    assert!(queued["payload"].get("manifestPath").is_none());
+    let private_job = state
+        .jobs_store
+        .get_job(queued["id"].as_str().unwrap())
+        .unwrap();
+    let repair_target = private_job.payload["targetDir"].as_str().unwrap();
+    assert_ne!(repair_target, model.install_dir.to_string_lossy().as_ref());
     assert_eq!(
         queued["payload"]["repairExpectedBinding"]["importPlan"],
         model.entry["importPlan"]
@@ -456,7 +460,7 @@ async fn check_managed_repair(missing_original: bool, publication_change: Option
         let failed = terminal(&app, queued["id"].as_str().unwrap()).await;
         assert_eq!(failed["status"], "failed", "{change}: {failed}");
         assert!(
-            !std::path::Path::new(queued["payload"]["targetDir"].as_str().unwrap()).exists(),
+            !std::path::Path::new(repair_target).exists(),
             "CAS refusal rolls back the replacement, not the original"
         );
         assert_eq!(
@@ -484,7 +488,7 @@ async fn check_managed_repair(missing_original: bool, publication_change: Option
     let failed = terminal(&app, queued["id"].as_str().unwrap()).await;
     assert_eq!(failed["status"], "failed", "{failed}");
     assert!(
-        !std::path::Path::new(queued["payload"]["targetDir"].as_str().unwrap()).exists(),
+        !std::path::Path::new(repair_target).exists(),
         "failed repair must roll back only its new installation"
     );
     let manifest_path = settings.config_dir.join("manifests/user.models.jsonc");
