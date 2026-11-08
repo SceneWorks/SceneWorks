@@ -249,7 +249,7 @@ fn persisted_output(state: &crate::AppState, job_id: &str) -> (std::path::PathBu
     (dir, stem)
 }
 
-async fn advertise_trained_source(
+pub(super) async fn advertise_trained_source(
     app: &axum::Router,
     model_id: &str,
     export: &std::path::Path,

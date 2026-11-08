@@ -820,6 +820,7 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
         .expect("the export is stored")
         .clone();
     assert_eq!(stored["trainedCheckpoint"]["engineModel"], "iris_3b");
+    assert_eq!(stored["provenance"]["trainingJobId"], json!(job_id));
     for key in [
         "loraCompatibility",
         "limits",
@@ -866,6 +867,8 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
 
     // Generate it: the job runs `iris_3b` on the export, with the generation install's entry (its
     // text-encoder co-requisite) and the user's pick kept for provenance.
+    super::iris_task_training::advertise_trained_source(&app, &model_id, &export, "image_generate")
+        .await;
     let (status, generation) = request(
         app.clone(),
         "POST",
@@ -887,9 +890,9 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
     assert_eq!(payload["checkpointModelId"], json!(model_id));
     let worker_entry = &payload["modelManifestEntry"];
     assert_eq!(worker_entry["id"], "iris_3b");
-    assert_eq!(
-        worker_entry["modelPath"],
-        json!(export.canonicalize().unwrap().display().to_string())
+    assert!(
+        worker_entry["modelPath"].is_null(),
+        "the public job projection omits the local checkpoint path: {worker_entry}"
     );
     assert_eq!(
         worker_entry["trainedCheckpoint"]["modelId"],
@@ -914,11 +917,7 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
         json!({ "payloadChanges": { "model": "sdxl" } }),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED, "{duplicate}");
-    let payload = &duplicate["payload"];
-    assert_eq!(payload["model"], "sdxl", "{payload:#}");
-    assert!(payload["checkpointModelId"].is_null(), "{payload:#}");
-    assert_eq!(payload["modelManifestEntry"]["id"], "sdxl", "{payload:#}");
+    assert_eq!(status, StatusCode::CONFLICT, "{duplicate}");
     // A plain duplicate of the aliased job still re-derives the checkpoint alias.
     let (status, replay) = request(
         app.clone(),
@@ -1278,6 +1277,51 @@ async fn a_trained_iris_adapter_is_accepted_by_the_iris_image_job_gate() {
         .as_str()
         .unwrap()
         .to_owned();
+
+    // The trained adapter is a local Digest source. Advertise its exact registered bytes from a
+    // job-capable worker before asking admission to freeze the generation closure.
+    let mut files = [file_name.as_str(), "training-config.json"]
+        .into_iter()
+        .map(|name| {
+            let path = output_dir.join(name);
+            sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile {
+                relative_path: name.into(),
+                size_bytes: std::fs::metadata(&path).unwrap().len(),
+                sha256: format!(
+                    "sha256:{}",
+                    sceneworks_core::hashing::sha256_file(&path).unwrap()
+                ),
+            }
+        })
+        .collect::<Vec<_>>();
+    files.sort();
+    let ledger =
+        sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(&files)
+            .unwrap();
+    let claim_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+        "lora", &lora_id, None, &ledger,
+    )
+    .unwrap();
+    let claim = sceneworks_core::model_artifacts::portable_binding::PortableSourceClaim::new(
+        claim_id,
+        sceneworks_core::model_artifacts::portable_binding::PortableSourceProvenance::OperatorOverride,
+        files,
+    )
+    .unwrap();
+    let mut registration = portable_test_worker_registration(
+        "test-iris-adapter-source-worker",
+        &["gpu", "mlx", "image_generate"],
+        TestPortableRoute::MlxMacos,
+    );
+    registration["portableSourceClaims"] = serde_json::to_value(vec![claim]).unwrap();
+    let (status, response) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        registration,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
 
     let (status, generation) = request(
         app.clone(),

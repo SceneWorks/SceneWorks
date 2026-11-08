@@ -189,13 +189,24 @@ impl RuntimeSourceGuard {
                         .iter()
                         .find(|member| member.role == ArtifactMemberRole::Primary)
                 });
+                let registered_id = model_binding
+                    .filter(|_| primary.is_some_and(|member| matches!(member.source, PortableSourceIdentity::Digest { .. })))
+                    .map(|model| {
+                        sceneworks_core::model_artifacts::portable_binding::registered_primary_digest_catalog_id(
+                            model,
+                            &serde_json::Value::Object(payload.clone()),
+                        )
+                    })
+                    .transpose()
+                    .map_err(|error| invalid_binding(error.to_string()))?
+                    .unwrap_or_else(|| id.clone());
                 if let Some(local) = primary
                     .map(|member| {
                         worker_catalog_member_path(
                             settings,
                             "user.models.jsonc",
                             "models",
-                            &id,
+                            &registered_id,
                             None,
                             member,
                         )
@@ -1210,7 +1221,7 @@ fn prepare_portable_snapshot(
             } else if let Some(layer) = &plan_layer {
                 layer.source_path.clone()
             } else {
-                selected_local_artifact_path(member, &model.slot, entry, payload, settings)?
+                selected_local_artifact_path(member, model, entry, payload, settings)?
             };
             if matches!(member.source, PortableSourceIdentity::WorkerClaim { .. })
                 || plan_layer.is_some()
@@ -2422,7 +2433,7 @@ fn verify_portable_binding(
                 {
                     layer.source_path
                 } else {
-                    selected_local_artifact_path(member, &binding.slot, entry, payload, settings)?
+                    selected_local_artifact_path(member, binding, entry, payload, settings)?
                 };
                 let is_file = selected.is_file();
                 if !is_file && !selected.is_dir() {
@@ -2533,7 +2544,7 @@ fn verify_portable_binding(
             let selected = if let Some(layer) = plan_layer {
                 layer.source_path
             } else {
-                selected_local_artifact_path(member, &binding.slot, entry, payload, settings)?
+                selected_local_artifact_path(member, binding, entry, payload, settings)?
             };
             allowed_roots.push(selected.parent().unwrap_or(&selected).to_path_buf());
         }
@@ -2746,11 +2757,12 @@ fn verify_manifest_globs(
 
 fn selected_local_artifact_path(
     member: &PortableArtifactMember,
-    model_slot: &str,
+    model: &PortableModelBinding,
     entry: &serde_json::Value,
     payload: &JsonObject,
     settings: &Settings,
 ) -> WorkerResult<PathBuf> {
+    let model_slot = model.slot.as_str();
     if member.component_id.as_deref() == Some("selected_text_encoder") {
         if model_slot != "modelManifestEntry" {
             return Err(invalid_binding(
@@ -2811,21 +2823,12 @@ fn selected_local_artifact_path(
         return Ok(selected);
     }
     let local_catalog = if member.role == ArtifactMemberRole::Primary {
-        entry
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .and_then(|id| {
-                worker_catalog_member_path(
-                    settings,
-                    "user.models.jsonc",
-                    "models",
-                    id,
-                    None,
-                    member,
-                )
-                .transpose()
-            })
-            .transpose()?
+        let id = sceneworks_core::model_artifacts::portable_binding::registered_primary_digest_catalog_id(
+            model,
+            &serde_json::Value::Object(payload.clone()),
+        )
+        .map_err(|error| invalid_binding(error.to_string()))?;
+        worker_catalog_member_path(settings, "user.models.jsonc", "models", &id, None, member)?
     } else if member.role == ArtifactMemberRole::Lora {
         let claim = serde_json::Value::Object(payload.clone());
         member

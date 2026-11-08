@@ -2541,6 +2541,25 @@ fn verify_produced_local_source(
         .get("id")
         .and_then(Value::as_str)
         .ok_or_else(|| incomplete("local model entry has no id"))?;
+    let output_model_id = if entry.get("family").and_then(Value::as_str)
+        == Some(sceneworks_core::training::iris::IRIS_FAMILY)
+        && entry
+            .pointer("/trainedCheckpoint/task")
+            .and_then(Value::as_str)
+            == Some("generation")
+        && entry
+            .pointer("/trainedCheckpoint/engineModel")
+            .and_then(Value::as_str)
+            == Some(model_id)
+    {
+        entry
+            .pointer("/trainedCheckpoint/modelId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .unwrap_or(model_id)
+    } else {
+        model_id
+    };
     let root = if source.is_file() {
         source
             .parent()
@@ -2558,7 +2577,7 @@ fn verify_produced_local_source(
             ))
         })?)
         .map_err(|error| incomplete(format!("local model producer receipt is invalid: {error}")))?;
-    if receipt.output_model_id != model_id {
+    if receipt.output_model_id != output_model_id {
         return Err(incomplete(
             "local model producer output id differs from catalog",
         ));
@@ -2577,11 +2596,11 @@ fn verify_produced_local_source(
                 .data_dir
                 .join("models")
                 .join("mlx")
-                .join(model_id);
+                .join(output_model_id);
             let expected = confine_artifact_path(&expected, &allowed_local_roots(state))
                 .map_err(|error| incomplete(error.to_string()))?;
             if root != expected
-                || producer.payload.get("modelId").and_then(Value::as_str) != Some(model_id)
+                || producer.payload.get("modelId").and_then(Value::as_str) != Some(output_model_id)
                 || producer.payload.get("sourceRepo").and_then(Value::as_str)
                     != Some(receipt.source_artifact_id.as_str())
             {
@@ -2599,7 +2618,8 @@ fn verify_produced_local_source(
                     .ok_or_else(|| incomplete("trained model producer has no plan"))?,
             )
             .map_err(|error| incomplete(format!("trained model plan is invalid: {error}")))?;
-            let (output, _) = crate::training::resolve_finetune_output_location(state, model_id);
+            let (output, _) =
+                crate::training::resolve_finetune_output_location(state, output_model_id);
             let output = if entry.get("family").and_then(Value::as_str)
                 == Some(sceneworks_core::training::iris::IRIS_FAMILY)
             {
@@ -2616,7 +2636,7 @@ fn verify_produced_local_source(
                     .get("manifestEntry")
                     .and_then(|manifest| manifest.get("id"))
                     .and_then(Value::as_str)
-                    != Some(model_id)
+                    != Some(output_model_id)
                 || plan.target.base_model != receipt.source_artifact_id
                 || entry
                     .pointer("/provenance/trainingJobId")
@@ -2638,7 +2658,7 @@ fn verify_produced_local_source(
         &root,
         &producer.id,
         &receipt.source_artifact_id,
-        model_id,
+        output_model_id,
     )
     .map_err(|error| incomplete(format!("local model producer bytes changed: {error}")))?;
     Ok(())

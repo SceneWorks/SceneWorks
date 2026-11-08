@@ -426,8 +426,17 @@ pub fn registered_digest_member_claim_id(
             .map_err(error);
         }
     }
+    let primary_catalog_id = (member.role == ArtifactMemberRole::Primary)
+        .then(|| registered_primary_digest_catalog_id(model, payload))
+        .transpose()?;
     let (kind, logical_id, component_id) = match member.role {
-        ArtifactMemberRole::Primary => ("model", model.model_id.as_str(), None),
+        ArtifactMemberRole::Primary => (
+            "model",
+            primary_catalog_id
+                .as_deref()
+                .expect("primary catalog id resolved"),
+            None,
+        ),
         ArtifactMemberRole::OptionalComponent
             if member.component_id.as_deref() == Some("selected_text_encoder") =>
         {
@@ -534,6 +543,45 @@ pub fn registered_digest_member_claim_id(
     let ledger = portable_file_ledger_sha256(&member.files)?;
     crate::portable_sources::registered_digest_claim_id(kind, logical_id, component_id, &ledger)
         .map_err(error)
+}
+
+/// A trained Iris checkpoint renders through its builtin engine carrier, while its registered
+/// source bytes belong to the selected checkpoint's catalog ID. Require the server-authored alias
+/// fields to agree before using that ID for a private worker availability claim.
+pub fn registered_primary_digest_catalog_id(
+    model: &PortableModelBinding,
+    payload: &Value,
+) -> Result<String, ArtifactContractError> {
+    if model.slot != "modelManifestEntry" {
+        return Ok(model.model_id.clone());
+    }
+    let Some(checkpoint_id) = payload.get("checkpointModelId").and_then(Value::as_str) else {
+        return Ok(model.model_id.clone());
+    };
+    let entry = payload
+        .get(&model.slot)
+        .ok_or_else(|| error("trained checkpoint has no model carrier"))?;
+    let selected = entry
+        .pointer("/trainedCheckpoint/modelId")
+        .and_then(Value::as_str);
+    if model.model_id != "iris_3b"
+        || entry.get("id").and_then(Value::as_str) != Some(model.model_id.as_str())
+        || entry
+            .pointer("/trainedCheckpoint/engineModel")
+            .and_then(Value::as_str)
+            != Some(model.model_id.as_str())
+        || entry
+            .pointer("/trainedCheckpoint/task")
+            .and_then(Value::as_str)
+            != Some("generation")
+        || selected != Some(checkpoint_id)
+        || checkpoint_id.is_empty()
+    {
+        return Err(error(
+            "trained checkpoint alias differs from registered source",
+        ));
+    }
+    Ok(checkpoint_id.to_owned())
 }
 
 fn canonical_json(value: &Value) -> Value {
@@ -1593,6 +1641,59 @@ mod tests {
                 &payload("text_encoder_worker", "/worker/encoder.safetensors")
             )
             .unwrap()
+        );
+    }
+
+    #[test]
+    fn trained_iris_primary_claim_uses_selected_checkpoint_catalog_id() {
+        let files = vec![PortableArtifactFile {
+            relative_path: "model.safetensors".into(),
+            size_bytes: 7,
+            sha256: format!("sha256:{}", "a".repeat(64)),
+        }];
+        let model = PortableModelBinding::new(
+            "modelManifestEntry",
+            "iris_3b",
+            "mlx",
+            "local",
+            None,
+            canonical_authored_options_sha256(&serde_json::json!({})).unwrap(),
+            vec![PortableArtifactMember {
+                role: ArtifactMemberRole::Primary,
+                component_id: None,
+                source: PortableSourceIdentity::Digest {
+                    sha256: portable_closure_sha256(&files).unwrap(),
+                },
+                tier: None,
+                files: files.clone(),
+            }],
+        )
+        .unwrap();
+        let payload = serde_json::json!({
+            "checkpointModelId":"trained_iris",
+            "modelManifestEntry":{
+                "id":"iris_3b",
+                "trainedCheckpoint":{
+                    "engineModel":"iris_3b", "modelId":"trained_iris", "task":"generation"
+                }
+            }
+        });
+        let expected = crate::portable_sources::registered_digest_claim_id(
+            "model",
+            "trained_iris",
+            None,
+            &portable_file_ledger_sha256(&files).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            registered_digest_member_claim_id(&model, &model.members[0], &payload).unwrap(),
+            expected
+        );
+        let mut substituted = payload;
+        substituted["modelManifestEntry"]["trainedCheckpoint"]["modelId"] =
+            serde_json::json!("other_iris");
+        assert!(
+            registered_digest_member_claim_id(&model, &model.members[0], &substituted).is_err()
         );
     }
 
