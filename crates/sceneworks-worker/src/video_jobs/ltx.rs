@@ -1035,7 +1035,7 @@ fn install_portable_gemma(
             }
             hasher.update(&buffer[..count]);
         }
-        if format!("{:x}", hasher.finalize()) != expected.sha256 {
+        if format!("sha256:{:x}", hasher.finalize()) != expected.sha256 {
             return Err(WorkerError::Engine(format!(
                 "frozen Gemma file {} has different bytes",
                 path.display()
@@ -1085,8 +1085,12 @@ fn install_portable_gemma(
             || !path
                 .components()
                 .all(|component| matches!(component, std::path::Component::Normal(_)))
-            || file.sha256.len() != 64
-            || !file.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || file.sha256.strip_prefix("sha256:").is_none_or(|digest| {
+                digest.len() != 64
+                    || !digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
             || !seen.insert(relative.to_owned())
         {
             return Err(WorkerError::InvalidPayload(
@@ -1176,6 +1180,8 @@ mod portable_gemma_tests {
 
     #[test]
     fn frozen_gemma_survives_source_removal_and_refuses_divergent_sibling() {
+        use sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile;
+
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("attempt/gemma");
         std::fs::create_dir_all(&source).unwrap();
@@ -1189,17 +1195,19 @@ mod portable_gemma_tests {
             ("tokenizer.json", br#"{"model":{}}"#.to_vec()),
             ("model.safetensors", weights),
         ];
-        let files: Vec<_> = sources
+        let frozen: Vec<_> = sources
             .iter()
             .map(|(name, bytes)| {
                 std::fs::write(source.join(name), bytes).unwrap();
-                PortableGemmaFile {
-                    relative_path: format!("gemma/{name}"),
+                PortableArtifactFile {
+                    relative_path: format!("gemma/{name}").into(),
                     size_bytes: bytes.len() as u64,
-                    sha256: format!("{:x}", Sha256::digest(bytes)),
+                    sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
                 }
             })
             .collect();
+        let files: Vec<PortableGemmaFile> =
+            serde_json::from_value(serde_json::to_value(frozen).unwrap()).unwrap();
         let data = temp.path().join("data");
         install_portable_gemma(&source, &data, &files).unwrap();
         std::fs::remove_dir_all(source.parent().unwrap()).unwrap();
