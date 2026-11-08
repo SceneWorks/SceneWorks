@@ -234,8 +234,9 @@ tag commit**, not with the tag-object SHA.
 
 The tag starts two independent workflows:
 
-- `.github/workflows/release.yml` builds macOS first, creates the draft, then
-  builds Windows and Linux and attaches their artifacts.
+- `.github/workflows/release.yml` builds macOS, Windows, and Linux concurrently.
+  macOS creates the draft; a final job attaches Windows and Linux assets and
+  merges the updater manifest after all three builds succeed.
 - `.github/workflows/publish-runpod.yml` builds and publishes
   `ghcr.io/sceneworks/sceneworks-runpod:X.Y.Z` and `:latest`.
 
