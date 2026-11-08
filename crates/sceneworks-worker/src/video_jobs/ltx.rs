@@ -564,7 +564,7 @@ fn portable_ltx_sources_bound(request: &VideoRequest) -> bool {
 /// The required Gemma encoder must come from the verified portable publisher snapshot.
 /// Both base and Eros routes bind that co-requisite, including when their primary is converted.
 #[cfg(target_os = "macos")]
-fn portable_ltx_gemma_dir() -> WorkerResult<PathBuf> {
+pub(super) fn portable_ltx_gemma_dir() -> WorkerResult<PathBuf> {
     let (_, snapshot) =
         sceneworks_core::model_artifacts::local_preference::unique_portable_snapshot(
             LTX_BUNDLE_REPO,
