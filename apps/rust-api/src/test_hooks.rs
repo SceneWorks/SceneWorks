@@ -3,6 +3,9 @@
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 
+pub(crate) type PinnedMetadataFixture =
+    fn(&[String]) -> Vec<sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile>;
+
 #[derive(Default)]
 pub(crate) struct TestHooks {
     pub(crate) parquet_finalize_before_validation_once: Mutex<Option<Arc<BlockingIoTestHook>>>,
@@ -12,6 +15,7 @@ pub(crate) struct TestHooks {
         Arc<Mutex<Option<crate::models::ModelSizeEstimateTestHook>>>,
     pub(crate) model_size_estimate_disabled_override: Arc<Mutex<Option<bool>>>,
     pub(crate) video_platform_override: Arc<Mutex<Option<&'static str>>>,
+    pub(crate) pinned_metadata_override: Arc<Mutex<Option<PinnedMetadataFixture>>>,
     /// Deterministic catalog scheduler seams. Production has no hook fields or
     /// branch overhead.
     pub(crate) catalog_scan_before_driver_start_once: Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,

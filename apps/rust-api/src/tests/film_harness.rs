@@ -28,6 +28,20 @@ use crate::film_harness::{
 use crate::film_planner;
 use crate::tests::support::{create_app_with_state, request, test_settings};
 
+fn pinned_film_metadata(
+    selectors: &[String],
+) -> Vec<sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile> {
+    use sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile;
+    selectors
+        .iter()
+        .map(|selector| PortableArtifactFile {
+            relative_path: PathBuf::from(selector.replace('*', "fixture")),
+            size_bytes: 1,
+            sha256: format!("sha256:{}", "a".repeat(64)),
+        })
+        .collect()
+}
+
 pub(crate) const FIXTURE_DIR: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../config/film-harness/courier-workshop"
@@ -1081,6 +1095,7 @@ async fn register_fake_worker(app: &axum::Router, capabilities: &[&str]) {
         json!({
             "workerId": WORKER_ID,
             "gpuId": "mlx",
+            "platform": "macos",
             "gpuName": "Apple M-series (fake)",
             "capabilities": capabilities,
             "loadedModels": [],
@@ -1135,7 +1150,12 @@ fn spawn_fake_worker(
                 app.clone(),
                 "POST",
                 "/api/v1/jobs/claim",
-                json!({ "workerId": WORKER_ID }),
+                json!({
+                    "workerId": WORKER_ID,
+                    "portableModelBindingVersion": sceneworks_core::model_artifacts::portable_binding::PORTABLE_MODEL_BINDING_VERSION,
+                    "portableBackend": "mlx",
+                    "portablePlatform": "macos",
+                }),
             )
             .await;
             assert_eq!(status, axum::http::StatusCode::OK, "{claim}");
@@ -2140,6 +2160,7 @@ impl Harness {
         // The fixture's image-conditioned shot is only MLX-routed; judge the enqueue as a Mac on
         // every lane so the suite means the same thing on ubuntu and on the hosted macOS job.
         *state.test_hooks.video_platform_override.lock() = Some("macos");
+        *state.test_hooks.pinned_metadata_override.lock() = Some(pinned_film_metadata);
         let script = Arc::new(Mutex::new(WorkerScript {
             behaviors: behaviors
                 .into_iter()
@@ -2211,6 +2232,7 @@ impl Harness {
             .model_size_estimate_disabled_override
             .lock() = Some(true);
         *state.test_hooks.video_platform_override.lock() = Some("macos");
+        *state.test_hooks.pinned_metadata_override.lock() = Some(pinned_film_metadata);
         let mut server_app = app.clone();
         if let Some(boundary) = boundary {
             server_app = server_app.layer(axum::middleware::from_fn(
