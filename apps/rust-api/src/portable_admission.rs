@@ -2179,8 +2179,8 @@ async fn resolve_trusted_pinned_files(
     selectors: &[String],
 ) -> Result<Vec<PortableArtifactFile>, ApiError> {
     #[cfg(test)]
-    if let Some(fixture) = *state.test_hooks.pinned_metadata_override.lock() {
-        return Ok(fixture(selectors));
+    if let Some(fixture) = state.test_hooks.pinned_metadata_override.lock().clone() {
+        return Ok(fixture(repo, revision, selectors));
     }
     let base_url = std::env::var("SCENEWORKS_HUGGINGFACE_BASE_URL")
         .unwrap_or_else(|_| "https://huggingface.co".to_owned());

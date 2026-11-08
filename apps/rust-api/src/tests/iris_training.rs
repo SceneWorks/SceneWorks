@@ -202,7 +202,7 @@ async fn iris_generation_training_needs_its_own_backbone_and_text_encoder() {
     let _env = iris_env("256");
     let temp_dir = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp_dir);
-    let app = create_app(settings.clone()).unwrap();
+    let app = create_training_fixture_app(settings.clone()).unwrap();
     // The adapter-family guardrail is satisfied, and the repo-wide marker says "installed".
     seed_installed_training_base(&settings.data_dir, "iris_3b");
     let manifests = settings.config_dir.join("manifests");
@@ -251,7 +251,7 @@ async fn iris_generation_training_needs_its_own_backbone_and_text_encoder() {
     // The backbone without its encoder: a fresh data dir.
     let bare_dir = tempfile::tempdir().unwrap();
     let bare_settings = test_settings(&bare_dir);
-    let bare_app = create_app(bare_settings.clone()).unwrap();
+    let bare_app = create_training_fixture_app(bare_settings.clone()).unwrap();
     seed_installed_training_base(&bare_settings.data_dir, "iris_3b");
     std::fs::create_dir_all(bare_settings.config_dir.join("manifests")).unwrap();
     std::fs::copy(
@@ -300,7 +300,7 @@ async fn iris_submit_refuses_what_the_trainer_refuses() {
     let _env = iris_env("256");
     let temp_dir = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp_dir);
-    let app = create_app(settings.clone()).unwrap();
+    let app = create_training_fixture_app(settings.clone()).unwrap();
     seed_iris_install(&settings);
     let project_id = project(&app).await;
     let dataset_id = dataset(&app, &project_id, one_item()).await;
@@ -425,7 +425,7 @@ async fn iris_submit_refuses_what_the_trainer_refuses() {
 #[tokio::test]
 async fn data_walk_reports_the_unused_tail_before_launch() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let app = create_app(test_settings(&temp_dir)).unwrap();
+    let app = create_training_fixture_app(test_settings(&temp_dir)).unwrap();
     let (status, walk) = request(
         app.clone(),
         "GET",
@@ -495,7 +495,7 @@ async fn an_iris_rerun_never_shares_an_output_with_another_run() {
     let _env = iris_env("256");
     let temp_dir = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp_dir);
-    let app = create_app(settings.clone()).unwrap();
+    let app = create_training_fixture_app(settings.clone()).unwrap();
     seed_iris_install(&settings);
     let project_id = project(&app).await;
     let dataset_id = dataset(&app, &project_id, one_item()).await;
@@ -619,7 +619,7 @@ async fn iris_adapter_registers_with_task_identity_and_resumes() {
     let _env = iris_env("256");
     let temp_dir = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp_dir);
-    let app = create_app(settings.clone()).unwrap();
+    let app = create_training_fixture_app(settings.clone()).unwrap();
     seed_iris_install(&settings);
     let project_id = project(&app).await;
     let dataset_id = dataset(
@@ -732,7 +732,7 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
     let _env = iris_env("256");
     let temp_dir = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp_dir);
-    let app = create_app(settings.clone()).unwrap();
+    let app = create_training_fixture_app(settings.clone()).unwrap();
     seed_iris_install(&settings);
     let project_id = project(&app).await;
     let dataset_id = dataset(&app, &project_id, one_item()).await;
@@ -854,7 +854,7 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
         serde_json::to_vec_pretty(&builtin).unwrap(),
     )
     .unwrap();
-    let later_app = create_app(settings.clone()).unwrap();
+    let later_app = create_training_fixture_app(settings.clone()).unwrap();
     let (_, models) = request(later_app, "GET", "/api/v1/models", Value::Null).await;
     let later = models
         .as_array()
@@ -1006,7 +1006,7 @@ async fn a_failed_generation_export_registers_nothing_and_leaves_its_sources_unt
     let _env = iris_env("256");
     let temp_dir = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp_dir);
-    let app = create_app(settings.clone()).unwrap();
+    let app = create_training_fixture_app(settings.clone()).unwrap();
     seed_iris_install(&settings);
     let project_id = project(&app).await;
     let dataset_id = dataset(&app, &project_id, one_item()).await;
@@ -1112,7 +1112,7 @@ async fn a_canceled_run_registers_only_what_the_trainer_exported() {
     let _env = iris_env("256");
     let temp_dir = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp_dir);
-    let app = create_app(settings.clone()).unwrap();
+    let app = create_training_fixture_app(settings.clone()).unwrap();
     seed_iris_install(&settings);
     let project_id = project(&app).await;
     let dataset_id = dataset(&app, &project_id, one_item()).await;
@@ -1155,7 +1155,7 @@ async fn a_canceled_run_registers_only_what_the_trainer_exported() {
 async fn parquet_import_forwards_caption_field_columns() {
     let temp_dir = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp_dir);
-    let app = create_app(settings.clone()).unwrap();
+    let app = create_training_fixture_app(settings.clone()).unwrap();
     let project_id = project(&app).await;
     let (_, dataset) = request(
         app.clone(),
@@ -1235,7 +1235,7 @@ async fn a_trained_iris_adapter_is_accepted_by_the_iris_image_job_gate() {
         json!({ "schemaVersion": 1, "models": [iris] }).to_string(),
     )
     .expect("builtin models writes");
-    let app = create_app(settings.clone()).unwrap();
+    let app = create_training_fixture_app(settings.clone()).unwrap();
     let project_id = project(&app).await;
     let dataset_id = dataset(&app, &project_id, one_item()).await;
     let target = iris_target(&app).await;

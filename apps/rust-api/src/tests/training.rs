@@ -1,6 +1,20 @@
 //! rust-api training tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
 
+// Training endpoint fixtures use small staged snapshots; bind their exact local bytes as the
+// test publisher metadata instead of querying the real multi-gigabyte model repositories.
+fn create_app(
+    settings: Settings,
+) -> Result<axum::Router, sceneworks_core::jobs_store::JobsStoreError> {
+    create_training_fixture_app(settings)
+}
+
+fn create_app_with_state(
+    settings: Settings,
+) -> Result<(axum::Router, crate::AppState), sceneworks_core::jobs_store::JobsStoreError> {
+    create_training_fixture_app_with_state(settings)
+}
+
 /// Shape errors precede even dataset lookup, for both checkpoints/methods and dry/real submits.
 /// No worker is dispatched and no model fixture is installed by this test.
 #[tokio::test]
@@ -3749,7 +3763,7 @@ async fn completed_moss_lokr_registers_exact_provenance_for_library_selection() 
     let _env = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
-    seed_installed_training_base(&settings.data_dir, "moss_image_base");
+    seed_pinned_training_base_fixture(&settings.data_dir, "moss_image_base");
     let app = create_app(settings.clone()).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project_with_request(app.clone(), &"MOSS Library", request)
@@ -7640,8 +7654,7 @@ async fn qwen_image_2_1_real_training_requires_the_licence_and_records_it_on_the
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings.clone()).expect("app creates");
-    let dense = seed_hf_snapshot(&settings.data_dir, "Qwen/Qwen-Image-2.1", "dense-rev");
-    std::fs::write(dense.join("config.json"), "{}").expect("dense snapshot marker");
+    seed_pinned_training_base_fixture(&settings.data_dir, "qwen_image_2_1");
 
     let (_, project) =
         crate::tests::support::create_project_with_request(app.clone(), &"Qwen Training", request)

@@ -3,8 +3,15 @@
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 
-pub(crate) type PinnedMetadataFixture =
-    fn(&[String]) -> Vec<sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile>;
+pub(crate) type PinnedMetadataFixture = Arc<
+    dyn Fn(
+            &str,
+            &str,
+            &[String],
+        ) -> Vec<sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile>
+        + Send
+        + Sync,
+>;
 
 #[derive(Default)]
 pub(crate) struct TestHooks {

@@ -75,7 +75,7 @@ async fn the_official_stage_presets_are_served_and_submit_once_edited() {
     let _env = iris_env("256");
     let temp_dir = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp_dir);
-    let app = create_app(settings.clone()).unwrap();
+    let app = create_training_fixture_app(settings.clone()).unwrap();
     seed_iris_install(&settings);
     let (status, body) = request(
         app.clone(),
@@ -147,7 +147,7 @@ async fn the_plan_check_shows_the_global_batch_and_the_engines_refusal() {
     let _env = iris_env("256");
     let temp_dir = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp_dir);
-    let app = create_app(settings.clone()).unwrap();
+    let app = create_training_fixture_app(settings.clone()).unwrap();
     seed_iris_install(&settings);
     stage_backbone_config(&settings);
     stage_teacher(&settings);
@@ -232,7 +232,7 @@ async fn a_continuing_stage_names_its_parent_run_and_carries_the_receipts() {
     let _env = iris_env("256");
     let temp_dir = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp_dir);
-    let app = create_app(settings.clone()).unwrap();
+    let app = create_training_fixture_app(settings.clone()).unwrap();
     seed_iris_install(&settings);
     stage_teacher(&settings);
     let project_id = project(&app).await;
@@ -358,7 +358,7 @@ async fn holdout_and_teacher_refusals_are_typed_at_submit() {
     let _env = iris_env("256");
     let temp_dir = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp_dir);
-    let app = create_app(settings.clone()).unwrap();
+    let app = create_training_fixture_app(settings.clone()).unwrap();
     seed_iris_install(&settings);
     let project_id = project(&app).await;
     let dataset_id = dataset(&app, &project_id, json!([{ "caption": { "text": "a" } }])).await;
@@ -405,7 +405,7 @@ async fn the_topology_is_refused_before_launch_against_the_registered_workers() 
     let _env = iris_env("256");
     let temp_dir = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp_dir);
-    let app = create_app(settings.clone()).unwrap();
+    let app = create_training_fixture_app(settings.clone()).unwrap();
     seed_iris_install(&settings);
     let defaults = iris_target(&app).await["defaults"].clone();
     let ranks = |world: u64, share: bool| {

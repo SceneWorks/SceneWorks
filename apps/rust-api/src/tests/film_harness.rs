@@ -29,6 +29,8 @@ use crate::film_planner;
 use crate::tests::support::{create_app_with_state, request, test_settings};
 
 fn pinned_film_metadata(
+    _repo: &str,
+    _revision: &str,
     selectors: &[String],
 ) -> Vec<sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile> {
     use sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile;
@@ -2160,7 +2162,7 @@ impl Harness {
         // The fixture's image-conditioned shot is only MLX-routed; judge the enqueue as a Mac on
         // every lane so the suite means the same thing on ubuntu and on the hosted macOS job.
         *state.test_hooks.video_platform_override.lock() = Some("macos");
-        *state.test_hooks.pinned_metadata_override.lock() = Some(pinned_film_metadata);
+        *state.test_hooks.pinned_metadata_override.lock() = Some(Arc::new(pinned_film_metadata));
         let script = Arc::new(Mutex::new(WorkerScript {
             behaviors: behaviors
                 .into_iter()
@@ -2232,7 +2234,7 @@ impl Harness {
             .model_size_estimate_disabled_override
             .lock() = Some(true);
         *state.test_hooks.video_platform_override.lock() = Some("macos");
-        *state.test_hooks.pinned_metadata_override.lock() = Some(pinned_film_metadata);
+        *state.test_hooks.pinned_metadata_override.lock() = Some(Arc::new(pinned_film_metadata));
         let mut server_app = app.clone();
         if let Some(boundary) = boundary {
             server_app = server_app.layer(axum::middleware::from_fn(
