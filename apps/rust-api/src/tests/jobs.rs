@@ -3282,11 +3282,12 @@ fn shared_repo_convert_manifest(config_dir: &std::path::Path) {
                 "downloads": [{
                     "provider": "huggingface",
                     "repo": "owner/shared",
+                    "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     "files": [format!("split_files/diffusion_models/{variant}.safetensors")]
                 }],
                 "mlx": {
                     "requiresConversion": true,
-                    "converter": "fixture_quant",
+                    "converter": "anima_quant",
                     "convertSourceRepo": "owner/shared",
                     "convertSourceFile": format!("split_files/diffusion_models/{variant}.safetensors")
                 }
@@ -3328,7 +3329,7 @@ async fn model_convert_is_refused_while_its_source_weights_are_still_downloading
     shared_repo_convert_manifest(&temp_dir.path().join("config/manifests"));
     let settings = test_settings(&temp_dir);
     let data_dir = settings.data_dir.clone();
-    let app = create_app(settings).expect("app creates");
+    let app = create_training_fixture_app(settings).expect("app creates");
 
     // Nothing cached at all: the source repo, not just one variant's file, is missing.
     let (status, body) = request(
@@ -6087,9 +6088,76 @@ async fn retry_and_duplicate_gate_a_merged_video_lora_set_the_create_path_refuse
 /// refuses an imported request shape the resolved provider registration cannot execute; the merged
 /// boundary never ran that check, so a retry could swap `advanced` for one carrying a shape the
 /// backend has no route for.
+fn register_imported_fixture_worker(
+    state: &crate::AppState,
+    model_id: &str,
+    source: &std::path::Path,
+    backend: &str,
+    platform: &str,
+) {
+    use sceneworks_core::contracts::WorkerCapability;
+    use sceneworks_core::jobs_store::RegisterWorker;
+    use sceneworks_core::model_artifacts::portable_binding::{
+        portable_file_ledger_sha256, PortableArtifactFile, PortableSourceClaim,
+        PortableSourceProvenance,
+    };
+
+    let file = if source.is_dir() {
+        source.join("model.safetensors")
+    } else {
+        source.to_path_buf()
+    };
+    let bytes = std::fs::read(&file).expect("fixture source reads");
+    let relative_path = if source.is_dir() {
+        file.strip_prefix(source)
+            .expect("source member")
+            .to_path_buf()
+    } else {
+        file.file_name().expect("source filename").into()
+    };
+    let files = vec![PortableArtifactFile {
+        relative_path,
+        size_bytes: bytes.len() as u64,
+        sha256: format!("sha256:{}", sceneworks_core::hashing::sha256_bytes(&bytes)),
+    }];
+    let source_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+        "model",
+        model_id,
+        None,
+        &portable_file_ledger_sha256(&files).expect("ledger hash"),
+    )
+    .expect("source ID");
+    let claim =
+        PortableSourceClaim::new(source_id, PortableSourceProvenance::OperatorOverride, files)
+            .expect("worker claim");
+    let mut capabilities = vec![WorkerCapability::Gpu, WorkerCapability::ImageGenerate];
+    if backend == "candle" {
+        capabilities.push(WorkerCapability::Unknown("candle".into()));
+    }
+    state
+        .jobs_store
+        .register_worker_with_portable_sources(
+            RegisterWorker {
+                worker_id: format!("fixture-{model_id}-{backend}"),
+                gpu_id: if backend == "mlx" { "mlx" } else { "cuda:0" }.into(),
+                gpu_name: None,
+                capabilities,
+                loaded_models: vec![],
+                utilization: None,
+            },
+            Some(platform),
+            Some(&[claim]),
+        )
+        .expect("fixture worker registers exact source");
+}
+
 #[tokio::test]
 async fn retry_and_duplicate_gate_a_merged_imported_shape_the_create_path_refuses() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let model_path = temp_dir.path().join("data/imported/user-krea.safetensors");
+    std::fs::create_dir_all(model_path.parent().expect("model parent"))
+        .expect("model directory creates");
+    std::fs::write(&model_path, b"fixture weights").expect("model source writes");
     let manifest_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
     write_empty_sibling_manifests(&manifest_dir);
@@ -6100,24 +6168,19 @@ async fn retry_and_duplicate_gate_a_merged_imported_shape_the_create_path_refuse
     .expect("builtin manifest writes");
     std::fs::write(
         manifest_dir.join("user.models.jsonc"),
-        r#"{
-          "schemaVersion": 1,
-          "models": [{
-            "id": "user_krea",
-            "name": "User Krea",
-            "type": "image",
-            "family": "krea_2",
-            "importSourceShape": "transformer_file",
-            "paths": { "model": "/probe/user-krea.safetensors" }
-          }]
-        }"#,
+        json!({"schemaVersion": 1, "models": [{
+            "id": "user_krea", "name": "User Krea", "type": "image", "family": "krea_2",
+            "importSourceShape": "transformer_file", "paths": {"model": model_path}
+        }]})
+        .to_string(),
     )
     .expect("user manifest writes");
     let mut settings = test_settings(&temp_dir);
     // Candle declares krea_2/transformer_file for `generate` but NOT for `pose`, so the plain
     // request is admitted and the pose replay is the shape with no route.
     settings.candle_required = true;
-    let app = create_app(settings).expect("app creates");
+    let (app, state) = pinned_jobs_fixture_app_with_state(settings).expect("app creates");
+    register_imported_fixture_worker(&state, "user_krea", &model_path, "candle", "linux");
 
     let (status, original) = request(
         app.clone(),
@@ -6188,6 +6251,10 @@ async fn retry_and_duplicate_gate_a_merged_imported_shape_the_create_path_refuse
 #[tokio::test]
 async fn native_imported_control_requires_pose_but_preserves_krea_pose_user_map() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let model_path = temp_dir.path().join("data/imported/user-krea.safetensors");
+    std::fs::create_dir_all(model_path.parent().expect("model parent"))
+        .expect("model directory creates");
+    std::fs::write(&model_path, b"fixture weights").expect("model source writes");
     let manifest_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
     write_empty_sibling_manifests(&manifest_dir);
@@ -6198,22 +6265,18 @@ async fn native_imported_control_requires_pose_but_preserves_krea_pose_user_map(
     .expect("builtin manifest writes");
     std::fs::write(
         manifest_dir.join("user.models.jsonc"),
-        r#"{
-          "schemaVersion": 1,
-          "models": [{
-            "id": "user_krea",
-            "name": "User Krea",
-            "type": "image",
-            "family": "krea_2",
-            "importSourceShape": "transformer_file",
-            "paths": { "model": "/probe/user-krea.safetensors" }
-          }]
-        }"#,
+        json!({"schemaVersion": 1, "models": [{
+            "id": "user_krea", "name": "User Krea", "type": "image", "family": "krea_2",
+            "baseModel": "krea_2_turbo",
+            "importSourceShape": "transformer_file", "paths": {"model": model_path}
+        }]})
+        .to_string(),
     )
     .expect("user manifest writes");
     let settings = test_settings(&temp_dir);
     let jobs_db_path = settings.jobs_db_path.clone();
-    let app = create_app(settings).expect("app creates");
+    let (app, state) = pinned_jobs_fixture_app_with_state(settings).expect("app creates");
+    register_imported_fixture_worker(&state, "user_krea", &model_path, "mlx", "macos");
 
     for advanced in [
         json!({ "controlImage": "control-1" }),
@@ -6279,6 +6342,10 @@ async fn native_imported_control_requires_pose_but_preserves_krea_pose_user_map(
 #[tokio::test]
 async fn native_imported_mage_queues_only_the_exact_registered_generate_shape() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let model_path = temp_dir.path().join("data/imported/finetune-mage");
+    std::fs::create_dir_all(&model_path).expect("model directory creates");
+    std::fs::write(model_path.join("model.safetensors"), b"fixture weights")
+        .expect("model source writes");
     let manifest_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
     write_empty_sibling_manifests(&manifest_dir);
@@ -6289,22 +6356,18 @@ async fn native_imported_mage_queues_only_the_exact_registered_generate_shape() 
     .expect("builtin manifest writes");
     std::fs::write(
         manifest_dir.join("user.models.jsonc"),
-        r#"{
-          "schemaVersion": 1,
-          "models": [{
-            "id": "finetune_mage",
-            "name": "Fine-tuned Mage",
-            "type": "image",
-            "family": "mage-flow",
-            "importSourceShape": "transformer_directory",
-            "paths": { "model": "/probe/finetune-mage" }
-          }]
-        }"#,
+        json!({"schemaVersion": 1, "models": [{
+            "id": "finetune_mage", "name": "Fine-tuned Mage", "type": "image",
+            "family": "mage-flow", "importSourceShape": "transformer_directory",
+            "paths": {"model": model_path}
+        }]})
+        .to_string(),
     )
     .expect("user manifest writes");
     let settings = test_settings(&temp_dir);
     let jobs_db_path = settings.jobs_db_path.clone();
-    let app = create_app(settings).expect("app creates");
+    let (app, state) = pinned_jobs_fixture_app_with_state(settings).expect("app creates");
+    register_imported_fixture_worker(&state, "finetune_mage", &model_path, "mlx", "macos");
 
     for (label, extra) in [
         (
