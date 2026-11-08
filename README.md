@@ -337,14 +337,20 @@ GPU inference worker from target `rust-worker-candle`. The API sets
 `SCENEWORKS_CANDLE_REQUIRED=1`, so a job candle can't serve fails with a precise
 error instead of waiting forever.
 
-The API and both Compose workers share the credentials bind. At first startup,
-the API creates a `0600` worker-source proof master there; workers derive keys
+The API and both Compose workers share the credentials bind. A one-shot Compose
+service prepares a newly created, empty directory as `0700` for the configured
+host UID/GID before the non-root API starts. It refuses to re-own a nonempty
+directory belonging to another UID. At first startup, the API creates a `0600`
+worker-source proof master there; workers derive keys
 for their own IDs from that file. To provision an existing master, pass a
 64-hex `SCENEWORKS_WORKER_PROOF_MASTER` to the API through the host environment.
 Keep that value outside the repository. A standalone worker on another host
 needs its derived `SCENEWORKS_WORKER_PROOF_KEY` because it cannot read the shared
 credentials mount. A dynamic local model path without authenticated worker
 proof is refused before enqueue.
+If you change `SCENEWORKS_UID` or `SCENEWORKS_GID` after first startup, transfer
+ownership of existing credential files to that identity; the initializer only
+prepares the directory and never changes ownership of stored secrets.
 
 To build a production API image that serves the React SPA, static assets, and
 `/api/v1/*` from the same process and origin, use the opt-in `rust-api-embed`
