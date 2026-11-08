@@ -674,6 +674,57 @@ pub fn selected_model_artifact_closure_with_choices(
     select_model_artifact_closure(model, platform, requested_variant, Some(choices))
 }
 
+/// A queued YuE2 song job opens the decoder named in its canonical `yue2` block. The same
+/// resolved choice must drive API freezing and every worker requirement/closure check.
+pub fn selected_portable_model_artifact_closure(
+    model: &Value,
+    platform: &str,
+    requested_variant: Option<&str>,
+    payload: &Map<String, Value>,
+) -> Result<Value, String> {
+    if model.get("id").and_then(Value::as_str) != Some("yue2") {
+        return Ok(selected_model_artifact_closure(
+            model,
+            platform,
+            requested_variant,
+        ));
+    }
+    let mut requested = BTreeMap::new();
+    if let Some(block) = payload.get("yue2").filter(|block| !block.is_null()) {
+        let decoder = block
+            .as_object()
+            .ok_or("YuE2 request block is not an object")?
+            .get("decoder")
+            .filter(|decoder| !decoder.is_null());
+        if let Some(decoder) = decoder {
+            let option = decoder
+                .as_str()
+                .ok_or("YuE2 decoder choice is not a string")?;
+            requested.insert("decoder".to_owned(), option.to_owned());
+        }
+    }
+    let choices = resolve_co_requisite_choices(model, requested_variant, &requested)
+        .map_err(|error| error.to_string())?;
+    Ok(selected_model_artifact_closure_with_choices(
+        model,
+        platform,
+        requested_variant,
+        &choices,
+    ))
+}
+
+pub fn selected_portable_requirements_for_model(
+    model: &Value,
+    platform: &str,
+    requested_variant: Option<&str>,
+    payload: &Map<String, Value>,
+    data_dir: &Path,
+) -> Result<SelectedRequirements, String> {
+    let selected =
+        selected_portable_model_artifact_closure(model, platform, requested_variant, payload)?;
+    Ok(selected_requirements_for_closure(&selected, data_dir))
+}
+
 fn select_model_artifact_closure(
     model: &Value,
     platform: &str,
@@ -1593,6 +1644,37 @@ mod tests {
             repos(closure["downloads"].as_array().unwrap()),
             ["m-a-p/YuE2-3B", "m-a-p/YuE2-Vae-legacy"]
         );
+    }
+
+    #[test]
+    fn portable_yue2_choice_matches_the_queued_decoder() {
+        let yue2 = builtin_yue2();
+        let selected = |decoder: Value| {
+            let payload = json!({"model":"yue2","yue2":{"decoder":decoder}});
+            selected_portable_model_artifact_closure(
+                &yue2,
+                "macos",
+                Some("bf16"),
+                payload.as_object().unwrap(),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            repos(selected(json!("legacy"))["downloads"].as_array().unwrap()),
+            ["m-a-p/YuE2-3B", "m-a-p/YuE2-Vae-legacy"]
+        );
+        assert_eq!(
+            repos(selected(json!("standard"))["downloads"].as_array().unwrap()),
+            ["m-a-p/YuE2-3B", "m-a-p/YuE2-Vae"]
+        );
+        let invalid = json!({"model":"yue2","yue2":{"decoder":"unknown"}});
+        assert!(selected_portable_model_artifact_closure(
+            &yue2,
+            "macos",
+            Some("bf16"),
+            invalid.as_object().unwrap(),
+        )
+        .is_err());
     }
 
     #[test]

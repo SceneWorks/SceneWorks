@@ -141,17 +141,7 @@ pub(crate) fn pid_effective_dims(
 /// like `mlxQuantize` / `schedulerShift` — no top-level `ImageRequest` field, so zero contract-snapshot
 /// drift). Accepts a JSON bool or the string `"true"`.
 pub(super) fn pid_requested(request: &ImageRequest) -> bool {
-    request
-        .advanced
-        .get("usePid")
-        .map(|value| {
-            value.as_bool().unwrap_or_else(|| {
-                value
-                    .as_str()
-                    .is_some_and(|s| s.trim().eq_ignore_ascii_case("true"))
-            })
-        })
-        .unwrap_or(false)
+    sceneworks_core::portable_sources::pid_requested(request.advanced.get("usePid"))
 }
 
 /// The `res2k` (2K-tuned) student filename for a backbone that ships one — flux + flux2 (sc-10056).

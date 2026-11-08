@@ -24,9 +24,11 @@
 use crate::{emit_event_value, JsonObject, Settings, WorkerError, WorkerResult};
 use sceneworks_core::contracts::JobType;
 use sceneworks_core::file_lock::FileLock;
+#[cfg(test)]
+use sceneworks_core::model_artifacts::artifact_selection::selected_model_artifact_closure;
 use sceneworks_core::model_artifacts::artifact_selection::{
-    is_co_requisite_download, requested_runtime_variant, selected_model_artifact_closure,
-    selected_requirements_for_model,
+    is_co_requisite_download, requested_runtime_variant, selected_portable_model_artifact_closure,
+    selected_portable_requirements_for_model, selected_requirements_for_model,
 };
 use sceneworks_core::model_artifacts::external_library::{
     resolve_model_availability, ExternalArtifactRequirement, ExternalSourceSession,
@@ -347,12 +349,14 @@ impl RuntimeSourceGuard {
             }
             // This worker's OWN platform and the request's selected tier define the closure —
             // never the API host's platform, never a sibling variant's receipts.
-            let selected = selected_requirements_for_model(
+            let selected = selected_portable_requirements_for_model(
                 entry,
                 std::env::consts::OS,
                 requested_variant.as_deref(),
+                payload,
                 &settings.data_dir,
-            );
+            )
+            .map_err(invalid_binding)?;
             if verified_converted_slots.contains(slot) {
                 // The converted output replaces the publisher primary. A co-requisite-only
                 // ModelResolution is invalid (the source contract requires one primary), so
@@ -2097,6 +2101,13 @@ fn verify_portable_binding(
         .flat_map(|plan| plan.requirements.iter())
         .collect();
     let requested_variant = selected_runtime_variant(job_type, payload, &binding.model_id)?;
+    let selected_manifest = selected_portable_model_artifact_closure(
+        entry,
+        std::env::consts::OS,
+        requested_variant.as_deref(),
+        payload,
+    )
+    .map_err(invalid_binding)?;
     let source_library = sceneworks_core::hf_home::model_source_library(&settings.data_dir);
     // Raw ModelConvert admission can freeze the immutable source privately while the synthetic
     // public manifest entry only carries repo/file hints. The binding is the source authority;
@@ -2135,8 +2146,7 @@ fn verify_portable_binding(
                     .is_some_and(|id| selected_aux_ids.contains(id));
                 let selected_manifest = selected_manifest_row_covers_member(
                     member,
-                    entry,
-                    requested_variant.as_deref(),
+                    &selected_manifest,
                     raw_conversion_primary,
                 );
                 if !selected_auxiliary
@@ -2216,14 +2226,14 @@ fn verify_portable_binding(
         .iter()
         .find(|member| member.role == ArtifactMemberRole::Primary)
         .expect("portable binding validates exactly one primary");
-    let selected = selected_requirements_for_model(
+    let selected = selected_portable_requirements_for_model(
         entry,
         std::env::consts::OS,
         requested_variant.as_deref(),
+        payload,
         &settings.data_dir,
-    );
-    let selected_manifest =
-        selected_model_artifact_closure(entry, std::env::consts::OS, requested_variant.as_deref());
+    )
+    .map_err(invalid_binding)?;
     let manifest_variant = selected_manifest
         .get("downloads")
         .and_then(serde_json::Value::as_array)
@@ -2281,8 +2291,7 @@ fn verify_portable_binding(
             && crate::portable_source_claims::is_converted_builtin_model_id(&binding.model_id);
     verify_manifest_globs(
         binding,
-        entry,
-        requested_variant.as_deref(),
+        &selected_manifest,
         settings,
         verified_derivative_primary,
     )
@@ -2290,14 +2299,12 @@ fn verify_portable_binding(
 
 fn selected_manifest_row_covers_member(
     member: &PortableArtifactMember,
-    entry: &serde_json::Value,
-    requested_variant: Option<&str>,
+    selected: &serde_json::Value,
     raw_conversion_primary: bool,
 ) -> bool {
     let PortableSourceIdentity::Revision { identity } = &member.source else {
         return false;
     };
-    let selected = selected_model_artifact_closure(entry, std::env::consts::OS, requested_variant);
     selected
         .get("downloads")
         .and_then(serde_json::Value::as_array)
@@ -2408,12 +2415,10 @@ fn recursive_snapshot_matches(snapshot: &Path, selector: &str) -> WorkerResult<V
 
 fn verify_manifest_globs(
     binding: &PortableModelBinding,
-    entry: &serde_json::Value,
-    requested_variant: Option<&str>,
+    selected: &serde_json::Value,
     settings: &Settings,
     verified_derivative_primary: bool,
 ) -> WorkerResult<()> {
-    let selected = selected_model_artifact_closure(entry, std::env::consts::OS, requested_variant);
     for download in selected
         .get("downloads")
         .and_then(serde_json::Value::as_array)

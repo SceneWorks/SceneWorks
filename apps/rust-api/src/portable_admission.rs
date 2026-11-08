@@ -10,7 +10,7 @@ use crate::AppState;
 use sceneworks_core::contracts::{JobStatus, JobType, JsonObject};
 use sceneworks_core::model_artifacts::artifact_selection::{
     is_co_requisite_download, is_supported_model_download, requested_runtime_variant,
-    safe_download_dir, selected_model_artifact_closure,
+    safe_download_dir, selected_portable_model_artifact_closure,
 };
 use sceneworks_core::model_artifacts::portable_binding::{
     canonical_authored_options_sha256, enumerate_portable_array_slots, portable_closure_sha256,
@@ -993,7 +993,13 @@ async fn capture_model_slot(
         .as_ref()
         .map(|selection| selection.tier.clone())
         .or_else(|| requested_runtime_variant(payload));
-    let selected = selected_model_artifact_closure(entry, platform, requested_variant.as_deref());
+    let selected = selected_portable_model_artifact_closure(
+        entry,
+        platform,
+        requested_variant.as_deref(),
+        payload,
+    )
+    .map_err(incomplete)?;
     let downloads = selected
         .get("downloads")
         .and_then(Value::as_array)

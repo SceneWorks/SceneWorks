@@ -9,6 +9,17 @@ pub enum PortableAuxSourceShape {
     Directory,
 }
 
+/// The image loader accepts both a JSON boolean and the legacy string spelling.
+pub fn pid_requested(value: Option<&Value>) -> bool {
+    value.is_some_and(|value| {
+        value.as_bool().unwrap_or_else(|| {
+            value
+                .as_str()
+                .is_some_and(|text| text.trim().eq_ignore_ascii_case("true"))
+        })
+    })
+}
+
 /// Path-free key for a worker's registered local digest source. The API computes the same key
 /// from the frozen route's logical catalog identity before deciding claim eligibility.
 pub fn registered_digest_claim_id(
@@ -402,10 +413,7 @@ pub fn required_portable_aux_source_ids(
                         .and_then(Value::as_array)
                         .is_some_and(|poses| poses.iter().any(Value::is_object))))
             && (id != "pulid_flux_dev" || backend == "candle")
-            && advanced
-                .and_then(|value| value.get("usePid"))
-                .and_then(Value::as_bool)
-                == Some(true)
+            && pid_requested(advanced.and_then(|value| value.get("usePid")))
         {
             ids.extend(["pid_checkpoint", "pid_gemma"].map(str::to_owned));
         }
@@ -671,6 +679,15 @@ mod tests {
                 Some(PortableAuxSourceShape::Directory)
             );
         }
+        let legacy = json!({"model":"instantid_realvisxl","advanced":{"poses":[{"id":"front"}],"usePid":" TrUe "}});
+        let legacy_ids = required_portable_aux_source_ids(
+            &JobType::ImageGenerate,
+            legacy.as_object().unwrap(),
+            &instant,
+            "candle",
+        )
+        .unwrap();
+        assert_eq!(legacy_ids, ids);
         assert!(!ids.contains(&"strict_control".to_owned()));
         let pulid = json!({"id":"pulid_flux_dev"});
         let selected = json!({"model":"pulid_flux_dev","advanced":{"usePid":true}});

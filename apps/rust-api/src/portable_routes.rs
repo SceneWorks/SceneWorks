@@ -488,10 +488,9 @@ pub(crate) fn selected_route_source_rows(
                         .and_then(Value::as_array)
                         .is_some_and(|poses| poses.iter().any(Value::is_object))))
             && (id != "pulid_flux_dev" || backend == "candle")
-            && advanced
-                .and_then(|value| value.get("usePid"))
-                .and_then(Value::as_bool)
-                == Some(true)
+            && sceneworks_core::portable_sources::pid_requested(
+                advanced.and_then(|value| value.get("usePid")),
+            )
             && payload.get("model").and_then(Value::as_str) == Some(id)
         {
             let backbone =
@@ -1169,6 +1168,21 @@ mod tests {
             .any(|row| row.component_id == "kolors_ip_adapter"));
         assert!(rows.iter().any(|row| row.component_id == "pid_checkpoint"));
         assert!(rows.iter().any(|row| row.component_id == "pid_gemma"));
+        let legacy_pose = json!({"model":"kolors","referenceAssetId":"asset","advanced":{"poses":[{"id":"front"}],"usePid":" TrUe "}});
+        let legacy_rows = selected_route_source_rows(
+            &JobType::ImageGenerate,
+            legacy_pose.as_object().unwrap(),
+            &entries,
+            "candle",
+            "linux",
+        )
+        .unwrap();
+        assert!(legacy_rows
+            .iter()
+            .any(|row| row.component_id == "pid_checkpoint"));
+        assert!(legacy_rows
+            .iter()
+            .any(|row| row.component_id == "pid_gemma"));
     }
 
     fn routes(job_type: JobType, payload: Value, entry: Value) -> Vec<(String, String)> {
