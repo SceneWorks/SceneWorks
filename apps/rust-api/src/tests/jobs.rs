@@ -29,6 +29,36 @@ fn pin_handwritten_jobs_manifest(settings: &Settings) {
     std::fs::write(path, manifest.to_string()).expect("pinned fixture manifest writes");
 }
 
+/// A route fixture may customize UI or resource fields, but its executable model identity and
+/// default package must remain a real registered native model with a pinned source closure.
+fn use_shipped_default_image_package(manifest_dir: &std::path::Path, model_id: &str) {
+    let path = manifest_dir.join("builtin.models.jsonc");
+    let raw = std::fs::read_to_string(&path).expect("handwritten models manifest");
+    let mut manifest: Value =
+        serde_json::from_str(&strip_jsonc_comments(&raw)).expect("handwritten catalog parses");
+    let shipped = sceneworks_core::builtin_manifests::builtin_model_entries()
+        .iter()
+        .find(|entry| entry["id"] == model_id)
+        .expect("registered native fixture model");
+    let default = shipped["downloads"]
+        .as_array()
+        .expect("shipped downloads")
+        .iter()
+        .find(|row| row["default"] == true)
+        .expect("shipped default package");
+    let row = manifest["models"]
+        .as_array_mut()
+        .expect("fixture models")
+        .iter_mut()
+        .find(|row| row["id"] == model_id)
+        .expect("fixture model");
+    for field in ["family", "adapter", "capabilities"] {
+        row[field] = shipped[field].clone();
+    }
+    row["downloads"] = json!([default]);
+    std::fs::write(path, manifest.to_string()).expect("native fixture package writes");
+}
+
 fn pinned_jobs_fixture_metadata(
     selectors: &[String],
 ) -> Vec<sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile> {
@@ -3535,6 +3565,7 @@ async fn image_create_retry_and_duplicate_resolve_text_encoder_fresh_and_fail_cl
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let manifest_dir = temp_dir.path().join("config/manifests");
     single_model_manifest(&manifest_dir, "krea_2_turbo", "SceneWorks/krea-2-turbo-mlx");
+    use_shipped_default_image_package(&manifest_dir, "krea_2_turbo");
     let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
 
     let stale_id = "text_encoder_ffffffffffffffffffffffffffffffff";
@@ -8589,7 +8620,8 @@ async fn image_job_route_threads_upscale_contract_when_enabled() {
         "#,
     )
     .expect("builtin models writes");
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    use_shipped_default_image_package(&config_dir, "z_image_turbo");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
 
     let base_request = json!({
         "projectId": "project-1",
