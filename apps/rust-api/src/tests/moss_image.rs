@@ -187,10 +187,15 @@ async fn moss_duplicate_revalidates_merged_controls_and_resets_inherited_mode() 
     let _hf = isolate_hf_cache();
     let temp = tempfile::tempdir().unwrap();
     setup(&temp);
-    let app = create_app(test_settings(&temp)).unwrap();
+    let (app, state) = create_app_with_state(test_settings(&temp)).unwrap();
     let (_, project) = crate::tests::support::create_project(app.clone(), &"MOSS").await;
     let (status,job)=request(app.clone(),"POST","/api/v1/image/jobs",json!({"projectId":project["id"],"model":"moss_image_sft","prompt":"subject","advanced":{"mossImage":{"acceleration":"off"}}})).await;
     assert_eq!(status, StatusCode::CREATED, "{job}");
+    let original_binding = state
+        .jobs_store
+        .portable_model_binding(job["id"].as_str().unwrap())
+        .unwrap()
+        .expect("original binding");
     let route = format!("/api/v1/jobs/{}/duplicate", job["id"].as_str().unwrap());
     let (status,body)=request(app.clone(),"POST",&route,json!({"payloadChanges":{"advanced":{"mossImage":{"acceleration":"full_fp32"},"schedulerShift":5}}})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
@@ -202,10 +207,78 @@ async fn moss_duplicate_revalidates_merged_controls_and_resets_inherited_mode() 
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
+    let duplicate_binding = state
+        .jobs_store
+        .portable_model_binding(body["id"].as_str().unwrap())
+        .unwrap()
+        .expect("new model binding");
+    assert_ne!(duplicate_binding, original_binding);
+    assert_eq!(
+        duplicate_binding["authoredOptions"]["model"],
+        "moss_image_base"
+    );
     assert_eq!(
         body["payload"]["advanced"]["mossImage"]["acceleration"],
         "off"
     );
+    // Caller-supplied source metadata cannot authorize a missing accelerator component.
+    let (status, refused) = request(
+        app,
+        "POST",
+        &route,
+        json!({"payloadChanges":{
+            "model":"moss_image_base",
+            "modelManifestEntry":{"id":"forged", "downloads":[{"repo":"attacker/model"}]},
+            "advanced":{"mossImage":{"acceleration":"unmerged_bf16"}}
+        }}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+}
+
+#[tokio::test]
+async fn moss_prompt_only_duplicate_keeps_frozen_source_after_catalog_drift() {
+    let _hf = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    setup(&temp);
+    let (app, state) = create_app_with_state(test_settings(&temp)).unwrap();
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"MOSS").await;
+    let (status, original) = request(
+        app,
+        "POST",
+        "/api/v1/image/jobs",
+        json!({"projectId":project["id"], "model":"moss_image_sft", "prompt":"first"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    let original_id = original["id"].as_str().unwrap();
+    let frozen = state
+        .jobs_store
+        .portable_model_binding(original_id)
+        .unwrap()
+        .expect("original binding");
+
+    let manifest_path = temp.path().join("config/manifests/builtin.models.jsonc");
+    let mut catalog: Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    catalog["models"][0]["downloads"][0]["revision"] = json!("1".repeat(40));
+    std::fs::write(manifest_path, catalog.to_string()).unwrap();
+    let (reloaded, reloaded_state) = create_app_with_state(test_settings(&temp)).unwrap();
+    let (status, duplicate) = request(
+        reloaded,
+        "POST",
+        &format!("/api/v1/jobs/{original_id}/duplicate"),
+        json!({"payloadChanges":{"prompt":"second"}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{duplicate}");
+    assert_eq!(duplicate["payload"]["prompt"], "second");
+    let replayed = reloaded_state
+        .jobs_store
+        .portable_model_binding(duplicate["id"].as_str().unwrap())
+        .unwrap()
+        .expect("replayed binding");
+    assert_eq!(replayed, frozen);
 }
 
 #[tokio::test]

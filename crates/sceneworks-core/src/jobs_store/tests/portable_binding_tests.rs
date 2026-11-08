@@ -296,9 +296,26 @@ fn retry_and_duplicate_cannot_replace_a_frozen_portable_binding() {
             },
             None,
             None,
-            Some(&changed)
+            Some(&changed),
         )
         .is_err());
+    assert!(
+        store
+            .duplicate_job_with_portable_binding(
+                None,
+                &original.id,
+                DuplicateJob {
+                    payload_changes: Default::default(),
+                    requested_gpu: None,
+                },
+                None,
+                None,
+                Some(&changed),
+                true,
+            )
+            .is_err(),
+        "the rebind flag cannot authorize changed bytes for the same choices"
+    );
     assert!(store
         .duplicate_job_with_portable_binding(
             None,
@@ -309,7 +326,8 @@ fn retry_and_duplicate_cannot_replace_a_frozen_portable_binding() {
             },
             None,
             None,
-            Some(&changed)
+            Some(&changed),
+            false,
         )
         .is_err());
     assert_eq!(store.list_jobs(None, None, 10).unwrap().len(), count);

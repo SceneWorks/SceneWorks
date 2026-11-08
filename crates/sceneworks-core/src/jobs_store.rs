@@ -2289,7 +2289,9 @@ impl JobsStore {
         provenance: Option<&Value>,
         binding: Option<&Value>,
     ) -> JobsStoreResult<JobSnapshot> {
-        self.duplicate_job_with_portable_binding(id, job_id, request, provenance, binding, None)
+        self.duplicate_job_with_portable_binding(
+            id, job_id, request, provenance, binding, None, false,
+        )
     }
 
     pub fn duplicate_job_with_portable_binding(
@@ -2300,6 +2302,7 @@ impl JobsStore {
         provenance: Option<&Value>,
         download_binding: Option<&Value>,
         portable_binding: Option<&Value>,
+        allow_portable_rebind: bool,
     ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
@@ -2326,9 +2329,23 @@ impl JobsStore {
                 ));
             }
         }
-        if previous_binding.is_some() && previous_binding.as_ref() != portable_binding {
+        if !allow_portable_rebind
+            && previous_binding.is_some()
+            && previous_binding.as_ref() != portable_binding
+        {
             return Err(JobsStoreError::InvalidStatus(
                 "Portable model identity changed during duplicate".to_owned(),
+            ));
+        }
+        if allow_portable_rebind
+            && !matches!(
+                (previous_binding.as_ref(), portable_binding),
+                (Some(previous), Some(next))
+                    if previous.get("authoredOptions") != next.get("authoredOptions")
+            )
+        {
+            return Err(JobsStoreError::InvalidStatus(
+                "Portable source rebind requires changed authored choices".to_owned(),
             ));
         }
         // A duplicated YuE2 job is a new take with its own run directory (sc-22999).

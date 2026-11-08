@@ -583,7 +583,7 @@ pub(crate) async fn retry_job(
     {
         return Ok((StatusCode::CREATED, Json(public_job_snapshot(job))));
     }
-    let (canonical_payload, model_provenance, download_binding, portable_binding) =
+    let (canonical_payload, model_provenance, download_binding, portable_binding, _) =
         validate_and_canonicalize_merged_generation_payload(
             &state,
             &job_id,
@@ -856,15 +856,20 @@ pub(crate) async fn duplicate_job(
     {
         return Ok((StatusCode::CREATED, Json(public_job_snapshot(job))));
     }
-    let (canonical_payload, model_provenance, download_binding, portable_binding) =
-        validate_and_canonicalize_merged_generation_payload(
-            &state,
-            &job_id,
-            &payload.payload_changes,
-            false,
-            payload.requested_gpu.as_deref(),
-        )
-        .await?;
+    let (
+        canonical_payload,
+        model_provenance,
+        download_binding,
+        portable_binding,
+        fresh_portable_selection,
+    ) = validate_and_canonicalize_merged_generation_payload(
+        &state,
+        &job_id,
+        &payload.payload_changes,
+        false,
+        payload.requested_gpu.as_deref(),
+    )
+    .await?;
     payload.payload_changes = canonical_payload;
     // An Iris training duplicate trains under its own output id (merged last: never overridable).
     if let Some(fresh_output) = fresh_output {
@@ -894,6 +899,7 @@ pub(crate) async fn duplicate_job(
             model_provenance.as_ref(),
             download_binding.as_ref(),
             portable_binding.as_ref(),
+            fresh_portable_selection,
         )
     })
     .await?;
@@ -1069,7 +1075,16 @@ async fn validate_and_canonicalize_merged_generation_payload(
     payload_changes: &JsonObject,
     retry: bool,
     requested_gpu_override: Option<&str>,
-) -> Result<(JsonObject, Option<Value>, Option<Value>, Option<Value>), ApiError> {
+) -> Result<
+    (
+        JsonObject,
+        Option<Value>,
+        Option<Value>,
+        Option<Value>,
+        bool,
+    ),
+    ApiError,
+> {
     let job_id = job_id.to_owned();
     let (job, download_binding, frozen_portable_binding) =
         store_call(state.clone(), move |store, _timeout| {
@@ -1421,6 +1436,14 @@ async fn validate_and_canonicalize_merged_generation_payload(
             }
         }
     }
+    // A duplicate with an explicitly changed source selection is a new admission. Only a
+    // server-canonicalized carrier can take this path; retries and prompt-only duplicates keep
+    // the original frozen source even if the catalog has changed since their first admission.
+    let fresh_portable_selection = !retry
+        && canonical_selection
+        && frozen_portable_binding.is_some()
+        && crate::portable_admission::portable_authored_options(&merged)
+            != crate::portable_admission::portable_authored_options(&persisted);
     if frozen_portable_binding.is_some() {
         let license_acknowledged = merged
             .get(crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
@@ -1452,15 +1475,17 @@ async fn validate_and_canonicalize_merged_generation_payload(
         // revision and logical slots across a mutable catalog/HF HEAD change. The frozen replay
         // validator below checks authored choices and re-verifies the exact bound sources against
         // current local paths or worker claims; it never treats these old locators as authority.
-        for key in [
-            "modelManifestEntry",
-            "baseModelManifestEntry",
-            "modelManifestEntries",
-        ] {
-            if let Some(original) = persisted.get(key) {
-                merged.insert(key.to_owned(), original.clone());
-            } else {
-                merged.remove(key);
+        if !fresh_portable_selection {
+            for key in [
+                "modelManifestEntry",
+                "baseModelManifestEntry",
+                "modelManifestEntries",
+            ] {
+                if let Some(original) = persisted.get(key) {
+                    merged.insert(key.to_owned(), original.clone());
+                } else {
+                    merged.remove(key);
+                }
             }
         }
     }
@@ -1470,7 +1495,10 @@ async fn validate_and_canonicalize_merged_generation_payload(
         None
     };
     let provenance = canonical_model_provenance(state, selected_entry, &merged).await?;
-    let candidate = if let Some(frozen) = &frozen_portable_binding {
+    let candidate = if let Some(frozen) = frozen_portable_binding
+        .as_ref()
+        .filter(|_| !fresh_portable_selection)
+    {
         let frozen: sceneworks_core::model_artifacts::portable_binding::PortableJobBinding =
             serde_json::from_value(frozen.clone()).map_err(|error| {
                 ApiError::bad_request(format!("Invalid saved source binding: {error}"))
@@ -1502,6 +1530,7 @@ async fn validate_and_canonicalize_merged_generation_payload(
         })
         .transpose()?;
     match (&frozen_portable_binding, &candidate) {
+        (Some(_), Some(_)) if fresh_portable_selection => {}
         (Some(expected), Some(actual))
             if portable_replay_matches_frozen(
                 expected,
@@ -1516,11 +1545,17 @@ async fn validate_and_canonicalize_merged_generation_payload(
         )),
         (None, None) => {}
     }
+    let portable_binding = if fresh_portable_selection {
+        candidate
+    } else {
+        frozen_portable_binding
+    };
     Ok((
         merged,
         provenance,
         download_binding,
-        frozen_portable_binding,
+        portable_binding,
+        fresh_portable_selection,
     ))
 }
 

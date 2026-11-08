@@ -64,7 +64,7 @@ fn payload_model_entries(payload: &JsonObject) -> Result<Vec<(String, &Value)>, 
 /// Bind source-affecting authored choices. Prompt, seed and render controls remain in the
 /// canonical job payload and may change on an explicitly duplicated job without changing the
 /// frozen source. Model/variant/decoder/adapter choices cannot silently change that source.
-fn portable_authored_options(payload: &JsonObject) -> Value {
+pub(crate) fn portable_authored_options(payload: &JsonObject) -> Value {
     fn project(value: &Value, parent: Option<&str>) -> Value {
         match value {
             Value::Object(fields) => {
