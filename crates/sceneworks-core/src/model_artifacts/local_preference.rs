@@ -31,9 +31,10 @@
 //!   `an_out_of_union_reader_sees_absent_never_the_wrong_bytes`. Narrowing this further means
 //!   giving API read paths a non-preferring library, which is a change across every
 //!   `model_source_library` caller rather than a local one.
-//! - Preference is keyed on the exact `(repository, immutable revision)` pair. A superseded
-//!   revision therefore never matches, and a bundle is never consulted for a revision it does not
-//!   contain — the source tier keeps serving those.
+//! - Exact pinned lookups are keyed on `(repository, immutable revision)`, but scopes with
+//!   different revisions of one repository cannot overlap: unpinned portable and disconnected
+//!   source lookups choose a revision by repository alone. A superseded revision never matches an
+//!   exact lookup, and a bundle is never consulted for a revision it does not contain.
 //! - Nothing here downloads, writes, or mutates anything. Redirection only ever answers with a
 //!   path inside an already-published, already-verified bundle.
 
@@ -193,7 +194,7 @@ struct ActiveOverlay {
 #[derive(Debug)]
 struct WaitingScope {
     ticket: u64,
-    pairs: Vec<(String, String)>,
+    repositories: Vec<String>,
 }
 
 fn active() -> &'static Mutex<ActiveOverlay> {
@@ -243,15 +244,16 @@ impl Drop for WaitRegistration {
     }
 }
 
-fn register_waiter(
-    pairs: Vec<(String, String)>,
-) -> Result<WaitRegistration, ArtifactContractError> {
+fn register_waiter(repositories: Vec<String>) -> Result<WaitRegistration, ArtifactContractError> {
     let mut active = lock_active();
     let ticket = active.next_ticket;
     active.next_ticket = active.next_ticket.checked_add(1).ok_or_else(|| {
         ArtifactContractError("portable overlay waiter sequence exhausted".to_owned())
     })?;
-    active.waiters.push(WaitingScope { ticket, pairs });
+    active.waiters.push(WaitingScope {
+        ticket,
+        repositories,
+    });
     Ok(WaitRegistration {
         ticket,
         armed: true,
@@ -306,7 +308,8 @@ impl Drop for ActiveLocalArtifacts {
 /// so a pair is either serveable for every consumer in the process or served to none of them.
 ///
 /// A pair already served by a live scope is refcounted, and only when the serving entry is
-/// IDENTICAL. This immediate form refuses a different bundle claiming the same snapshot:
+/// IDENTICAL. Different revisions of a repository also conflict because unpinned lookup cannot
+/// distinguish their owning jobs. This immediate form refuses a different bundle claiming the same snapshot:
 /// silently picking one is exactly how a load gets handed a snapshot verified for a different
 /// selection. In-process utility jobs use [`wait_for_portable_snapshots`] instead.
 pub fn prefer_local_snapshots(
@@ -325,8 +328,8 @@ pub fn prefer_portable_snapshots(
 }
 
 /// The in-process utility pool may run two jobs whose independently verified private bundles
-/// cover the same pinned repository revision. Wait for the prior scope to finish instead of
-/// reporting a source failure; other repository pairs remain free to run concurrently. The
+/// cover the same repository, even at different revisions. Wait for the prior scope to finish
+/// instead of reporting a source failure; other repositories remain free to run concurrently. The
 /// caller runs this blocking wait on the worker's blocking pool while heartbeats continue.
 pub fn wait_for_portable_snapshots(
     entries: Vec<LocalArtifactOverlayEntry>,
@@ -351,9 +354,9 @@ fn prefer_snapshots(
             None => requested.push(entry),
         }
     }
-    let requested_pairs = requested
+    let requested_repositories = requested
         .iter()
-        .map(|entry| (entry.repository.clone(), entry.revision.clone()))
+        .map(|entry| entry.repository.clone())
         .collect::<Vec<_>>();
     if cancellation.is_some_and(PortableOverlayWaitCancellation::is_cancelled) {
         return Err(ArtifactContractError(
@@ -363,7 +366,7 @@ fn prefer_snapshots(
     // Declared before `active`: on a panic the mutex guard drops first, then registration Drop
     // removes this ticket and wakes the next waiter.
     let mut registration = cancellation
-        .map(|_| register_waiter(requested_pairs.clone()))
+        .map(|_| register_waiter(requested_repositories.clone()))
         .transpose()?;
     let mut active = lock_active();
     loop {
@@ -373,27 +376,24 @@ fn prefer_snapshots(
             ));
         }
         let active_conflict = requested.iter().find(|entry| {
-            active.entries.iter().any(|held| {
-                held.entry.repository == entry.repository
-                    && held.entry.revision == entry.revision
-                    && &held.entry != *entry
-            })
+            active
+                .entries
+                .iter()
+                .any(|held| held.entry.repository == entry.repository && &held.entry != *entry)
         });
         let earlier_waiter = active.waiters.iter().find(|waiter| {
             registration
                 .as_ref()
                 .is_none_or(|mine| waiter.ticket < mine.ticket)
-                && requested_pairs
+                && requested_repositories
                     .iter()
-                    .any(|pair| waiter.pairs.contains(pair))
+                    .any(|repository| waiter.repositories.contains(repository))
         });
         let Some(conflict) = active_conflict.or_else(|| {
             earlier_waiter.and_then(|waiter| {
-                requested.iter().find(|entry| {
-                    waiter
-                        .pairs
-                        .contains(&(entry.repository.clone(), entry.revision.clone()))
-                })
+                requested
+                    .iter()
+                    .find(|entry| waiter.repositories.contains(&entry.repository))
             })
         }) else {
             break;

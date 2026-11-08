@@ -514,6 +514,73 @@ fn conflicting_portable_jobs_wait_without_serializing_unrelated_sources() {
     assert!(local_snapshot("owner/model", PRIMARY_REV).is_none());
 }
 
+/// Converter paths without an explicit revision ask the source library for one frozen revision
+/// by repository. Different revisions in different jobs must therefore take turns, even though
+/// their exact `(repository, revision)` keys differ.
+#[test]
+fn different_revisions_of_one_repository_wait_for_unique_portable_lookup() {
+    let _serialized = overlay_guard();
+    let temp = tempfile::tempdir().unwrap();
+    let first_root = temp.path().join("first");
+    let second_root = temp.path().join("second");
+    let unrelated_root = temp.path().join("unrelated");
+    for root in [&first_root, &second_root, &unrelated_root] {
+        std::fs::create_dir_all(root).unwrap();
+    }
+    let entry = |revision: &str, root: &Path| LocalArtifactOverlayEntry {
+        repository: "owner/model".to_owned(),
+        revision: revision.to_owned(),
+        snapshot_root: root.to_path_buf(),
+        files: Vec::new(),
+    };
+    let first = prefer_portable_snapshots(vec![entry(PRIMARY_REV, &first_root)]).unwrap();
+    let second_entry = entry(OTHER_REV, &second_root);
+    assert!(prefer_portable_snapshots(vec![second_entry.clone()]).is_err());
+    let (scope_tx, scope_rx) = std::sync::mpsc::channel();
+    let waiting = std::thread::spawn(move || {
+        scope_tx
+            .send(
+                wait_for_portable_snapshots(
+                    vec![second_entry],
+                    &PortableOverlayWaitCancellation::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    });
+    wait_for_overlay_waiters(1);
+    let configured =
+        ArtifactSourceLibrary::new_preferring_local(&temp.path().join("absent-source")).unwrap();
+    assert_eq!(
+        configured.discover_snapshot("owner/model", None).unwrap().1,
+        first_root
+    );
+    assert!(scope_rx.try_recv().is_err());
+
+    let unrelated = wait_for_portable_snapshots(
+        vec![LocalArtifactOverlayEntry {
+            repository: "other/model".to_owned(),
+            revision: OTHER_REV.to_owned(),
+            snapshot_root: unrelated_root,
+            files: Vec::new(),
+        }],
+        &PortableOverlayWaitCancellation::default(),
+    )
+    .unwrap();
+    drop(unrelated);
+
+    drop(first);
+    let second = scope_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(
+        configured.discover_snapshot("owner/model", None).unwrap().1,
+        second_root
+    );
+    drop(second);
+    waiting.join().unwrap();
+}
+
 #[test]
 fn conflicting_portable_waiters_follow_order_after_owner_fault() {
     let _serialized = overlay_guard();
