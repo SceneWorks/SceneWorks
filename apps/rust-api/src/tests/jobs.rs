@@ -59,6 +59,35 @@ fn use_shipped_default_image_package(manifest_dir: &std::path::Path, model_id: &
     std::fs::write(path, manifest.to_string()).expect("native fixture package writes");
 }
 
+/// Preserve a small routing fixture's authored model fields and alternate downloads while
+/// selecting the exact shipped default source declaration with its file selectors.
+fn use_shipped_default_download(manifest_dir: &std::path::Path, model_id: &str) {
+    let shipped = sceneworks_core::builtin_manifests::builtin_model_entry(model_id)
+        .expect("shipped fixture model");
+    let default = shipped
+        .get("downloads")
+        .and_then(Value::as_array)
+        .and_then(|downloads| {
+            downloads
+                .iter()
+                .find(|download| download["default"] == true)
+        })
+        .expect("shipped default download");
+    let path = manifest_dir.join("builtin.models.jsonc");
+    let raw = std::fs::read_to_string(&path).expect("fixture manifest reads");
+    let mut manifest: Value =
+        serde_json::from_str(&strip_jsonc_comments(&raw)).expect("fixture manifest parses");
+    let row = manifest["models"]
+        .as_array_mut()
+        .expect("fixture models")
+        .iter_mut()
+        .find(|row| row["id"] == model_id)
+        .expect("fixture model row");
+    assert_eq!(row["downloads"][0]["repo"], default["repo"]);
+    row["downloads"][0] = default.clone();
+    std::fs::write(path, manifest.to_string()).expect("fixture manifest writes");
+}
+
 fn pinned_jobs_fixture_metadata(
     selectors: &[String],
 ) -> Vec<sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile> {
@@ -5028,6 +5057,7 @@ async fn candle_required_builtin_krea_keeps_builtin_scope_and_queues() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let manifest_dir = temp_dir.path().join("config/manifests");
     single_model_manifest(&manifest_dir, "krea_2_turbo", "SceneWorks/krea-2-turbo-mlx");
+    use_shipped_default_download(&manifest_dir, "krea_2_turbo");
     let mut settings = test_settings(&temp_dir);
     settings.candle_required = true;
     let app = pinned_jobs_fixture_app(settings).expect("app creates");
@@ -5164,6 +5194,7 @@ fn write_decoder_capable_catalog(temp_dir: &tempfile::TempDir) {
         ),
     )
     .expect("builtin models writes");
+    use_shipped_default_download(&manifest_dir, "qwen_image");
 
     let data_dir = temp_dir.path().join("data");
     std::fs::create_dir_all(&data_dir).expect("data dir creates");
