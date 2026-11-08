@@ -7152,7 +7152,7 @@ dependencies = [
 
 [[package]]
 name = "sceneworks-core"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "directories",
  "flate2",
@@ -7193,7 +7193,7 @@ dependencies = [
 
 [[package]]
 name = "sceneworks-desktop"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "futures-util",
  "if-addrs",
@@ -7413,7 +7413,7 @@ dependencies = [
 
 [[package]]
 name = "sceneworks-image-quality"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "image",
  "image_hasher",
@@ -7430,7 +7430,7 @@ source = "git+https://github.com/SceneWorks/inference?rev=2b09938e33370915d4f853
 
 [[package]]
 name = "sceneworks-mcp"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -7451,7 +7451,7 @@ dependencies = [
 
 [[package]]
 name = "sceneworks-memory-adapter"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "candle-gen",
  "candle-gen-scail2",
@@ -7486,7 +7486,7 @@ dependencies = [
 
 [[package]]
 name = "sceneworks-rust-api"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -7526,14 +7526,14 @@ dependencies = [
 
 [[package]]
 name = "sceneworks-rust-worker"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "sceneworks-worker",
 ]
 
 [[package]]
 name = "sceneworks-worker"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "axum",
  "base64 0.22.1",
