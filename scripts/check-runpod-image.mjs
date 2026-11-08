@@ -39,7 +39,8 @@ assert.match(
   "combined image must retain the validated CUDA 12.9.1 / Ubuntu 24.04 runtime",
 );
 assert.equal(candleRuntime.base, "rust-worker-candle-base", "standalone candle image must inherit the shared CUDA runtime");
-assert.equal(runpod.base, "rust-worker-candle-base", "combined image must inherit the shared CUDA runtime");
+assert.equal(runpod.base, "${RUNPOD_PREBUILT_CANDLE_IMAGE}", "combined image must inherit the pinned prebuilt CUDA worker");
+assert.match(dockerfile, /^ARG RUNPOD_PREBUILT_CANDLE_IMAGE=ghcr\.io\/sceneworks\/sceneworks-runpod@sha256:[0-9a-f]{64}$/m);
 assert.ok(candleBase.body.includes("install -d -m 0755 -o 1000 -g 1000 /home/sceneworks"));
 assert.match(candleRuntime.body, /^USER 1000:1000$/m, "explicit primary GID must exclude the base user's supplementary groups");
 for (const body of [candleBase.body, candleRuntime.body, runpod.body]) {
@@ -94,7 +95,7 @@ for (const contract of [
   assert.ok(runpod.body.includes(contract), `runpod stage is missing ${contract}`);
 }
 
-assert.ok(!/^USER\s/m.test(runpod.body), "provider initialization must retain root entrypoint access");
+assert.match(runpod.body, /^USER root$/m, "provider initialization must retain root entrypoint access");
 for (const contract of ["COPY docker/runpod-privileges.sh", "acl util-linux", "SCENEWORKS_SERVICE_UID=1000"]) {
   assert.ok(runpod.body.includes(contract), `RunPod privilege setup is missing ${contract}`);
 }

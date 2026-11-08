@@ -2639,7 +2639,7 @@ test("Docker relevance step consumes the exhaustive shared diff and fails safe o
 test("every release job is confined to refs/tags/v", async () => {
   const workflow = await source(".github/workflows/release.yml");
   const jobConditions = [...workflow.matchAll(/^\s{4}if:\s*(.+)$/gm)].map((match) => match[1]);
-  assert.equal(jobConditions.length, 3);
+  assert.equal(jobConditions.length, 4);
   for (const condition of jobConditions) {
     assert.match(condition, /startsWith\(github\.ref, 'refs\/tags\/v'\)/);
   }
@@ -2647,6 +2647,29 @@ test("every release job is confined to refs/tags/v", async () => {
     workflow.includes('if [[ "${TAG#v}" == *-* ]]; then'),
     "prerelease classification must use the validated v-tag",
   );
+});
+
+test("desktop builds run independently and publish signed assets after all succeed", async () => {
+  const workflow = await source(".github/workflows/release.yml");
+  for (const platform of ["macos", "windows", "linux"]) {
+    const job = workflowJob(workflow, platform);
+    assert.doesNotMatch(job, /^    needs:/m, `${platform} must start without waiting for another build`);
+    if (platform !== "macos") {
+      assert.doesNotMatch(job, /gh release (upload|download)/, `${platform} must defer shared manifest writes`);
+      const guard = job.indexOf("- name: Guard against NC model weights");
+      const pack = job.indexOf(`tar -cf release-${platform}.tar`);
+      assert.ok(guard >= 0 && pack > guard, `${platform} packages pass the weight guard before transfer`);
+      assert.match(job, /if-no-files-found: error/);
+    }
+  }
+  const publisher = workflowJob(workflow, "publish-desktop");
+  assert.match(publisher, /^    needs: \[macos, windows, linux\]$/m);
+  assert.doesNotMatch(publisher, /always\(\)|secrets\.(TAURI_SIGNING|APPLE_|AZURE_)/);
+  assert.match(publisher, /tar -xf release-artifacts\/windows\/release-windows.tar -C target\/release\/bundle/);
+  assert.match(publisher, /tar -xf release-artifacts\/linux\/release-linux.tar -C target\/release\/bundle/);
+  assert.ok(publisher.indexOf("--target windows-x86_64") < publisher.indexOf("--target linux-x86_64"));
+  assert.equal((publisher.match(/gh release download "\$TAG" -p latest.json --clobber/g) ?? []).length, 2);
+  assert.equal((publisher.match(/gh release upload "\$TAG" --clobber latest.json/g) ?? []).length, 2);
 });
 
 test("Lens smoke only terminates processes it started", async () => {
