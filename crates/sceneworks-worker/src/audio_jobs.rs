@@ -4864,8 +4864,8 @@ mod tests {
         assert_eq!(track.sample_rate, 24_000);
         assert_eq!(track.channels, 1);
 
-        // The pump forwarded ≥2 incremental "Streaming audio…" job updates BEFORE the clip finished —
-        // the observable proof the worker streams (a non-streaming model posts none; see below).
+        // The coalescing pump forwards a streaming update even when the five chunks arrive
+        // within one 250 ms interval; a non-streaming generator posts none (see below).
         let posts = progress.lock().expect("progress lock");
         let streaming_posts = posts
             .iter()
@@ -4876,8 +4876,14 @@ mod tests {
             })
             .count();
         assert!(
-            streaming_posts >= 2,
-            "expected ≥2 incremental streaming progress posts, got {streaming_posts}: {posts:?}"
+            streaming_posts >= 1,
+            "expected a streaming progress post, got {streaming_posts}: {posts:?}"
+        );
+        assert!(
+            posts
+                .iter()
+                .any(|post| post["message"] == "Streaming audio… (5 chunks)"),
+            "the final coalesced update must count all five streamed chunks: {posts:?}"
         );
         // None of the incremental posts is terminal — the pump only ever emits Running/Generating.
         assert!(

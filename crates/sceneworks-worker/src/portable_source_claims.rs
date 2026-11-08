@@ -361,6 +361,12 @@ fn scan_due(schedule: &InventorySchedule, now: Instant, catalog_hash: [u8; 32]) 
     schedule.next_due.is_none_or(|next| now >= next) || schedule.catalog_hash != Some(catalog_hash)
 }
 
+fn registered_projects(settings: &Settings) -> Vec<sceneworks_core::project_store::ProjectSummary> {
+    let store =
+        sceneworks_core::project_store::ProjectStore::new(settings.data_dir.clone(), "worker");
+    store.list_projects_read_only().unwrap_or_default()
+}
+
 fn catalog_hash(settings: &Settings) -> [u8; 32] {
     let manifests = settings.config_dir.join("manifests");
     let mut paths = vec![
@@ -393,23 +399,20 @@ fn catalog_hash(settings: &Settings) -> [u8; 32] {
             .join(id)
             .join(".sceneworks-produced-artifact.json")
     }));
-    let projects =
-        sceneworks_core::project_store::ProjectStore::new(settings.data_dir.clone(), "worker");
-    if let Ok(projects) = projects.list_projects() {
-        for project in &projects {
-            paths.extend(character_sidecar_paths(Path::new(&project.path)));
-        }
-        paths.extend(
-            projects
-                .iter()
-                .map(|project| PathBuf::from(&project.path).join("loras/manifest.jsonc")),
-        );
-        paths.extend(
-            projects
-                .into_iter()
-                .map(|project| PathBuf::from(project.path).join("control-overlays/manifest.jsonc")),
-        );
+    let projects = registered_projects(settings);
+    for project in &projects {
+        paths.extend(character_sidecar_paths(Path::new(&project.path)));
     }
+    paths.extend(
+        projects
+            .iter()
+            .map(|project| PathBuf::from(&project.path).join("loras/manifest.jsonc")),
+    );
+    paths.extend(
+        projects
+            .into_iter()
+            .map(|project| PathBuf::from(project.path).join("control-overlays/manifest.jsonc")),
+    );
     paths.sort();
     let mut digest = Sha256::new();
     for path in paths {
@@ -463,8 +466,13 @@ pub(crate) fn start_background_inventory(settings: Settings) {
         next_due: Some(Instant::now() + INVENTORY_RESCAN_INTERVAL),
         catalog_hash: Some(catalog_hash(&settings)),
     };
+    #[cfg(test)]
+    let fixture_cache_root =
+        sceneworks_core::hf_home::test_support::CacheRootGuard::retain(&settings.data_dir);
     tokio::spawn(async move {
         let result = crate::load_progress::spawn_blocking(move || {
+            #[cfg(test)]
+            let _fixture_cache_root = fixture_cache_root;
             let mut scanned = Vec::new();
             collect_source_claims(&settings, |claim| {
                 scanned.push(claim.clone());
@@ -693,15 +701,11 @@ fn registered_digest_source_claims(
         }
     }
     let mut lora_manifests = vec![manifests.join("user.loras.jsonc")];
-    let projects =
-        sceneworks_core::project_store::ProjectStore::new(settings.data_dir.clone(), "worker");
-    if let Ok(projects) = projects.list_projects() {
-        lora_manifests.extend(
-            projects
-                .into_iter()
-                .map(|project| PathBuf::from(project.path).join("loras/manifest.jsonc")),
-        );
-    }
+    lora_manifests.extend(
+        registered_projects(settings)
+            .into_iter()
+            .map(|project| PathBuf::from(project.path).join("loras/manifest.jsonc")),
+    );
     for manifest in lora_manifests {
         for lora in catalog_records(&manifest, "loras") {
             let Some(id) = lora.get("id").and_then(serde_json::Value::as_str) else {
@@ -718,34 +722,28 @@ fn registered_digest_source_claims(
             }
         }
     }
-    let projects =
-        sceneworks_core::project_store::ProjectStore::new(settings.data_dir.clone(), "worker");
-    if let Ok(projects) = projects.list_projects() {
-        for project in projects {
-            let project_path = Path::new(&project.path);
-            let characters = sceneworks_core::character_store::CharacterStore::new(
-                &settings.data_dir,
-                project_path,
-            );
-            let Ok(characters) = characters.list_characters(&project.id, true) else {
-                continue;
-            };
-            for character in characters {
-                for link in character
-                    .get("loras")
-                    .and_then(serde_json::Value::as_array)
-                    .into_iter()
-                    .flatten()
-                {
-                    let Some(id) = link.get("id").and_then(serde_json::Value::as_str) else {
-                        continue;
-                    };
-                    if let Some(path) = character_lora_copy_path(settings, project_path, link) {
-                        append_registered_claim(&mut claims, "lora", id, None, &path);
-                    }
-                    for claim in claims.drain(..) {
-                        publish(claim);
-                    }
+    for project in registered_projects(settings) {
+        let project_path = Path::new(&project.path);
+        let characters =
+            sceneworks_core::character_store::CharacterStore::new(&settings.data_dir, project_path);
+        let Ok(characters) = characters.list_characters(&project.id, true) else {
+            continue;
+        };
+        for character in characters {
+            for link in character
+                .get("loras")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let Some(id) = link.get("id").and_then(serde_json::Value::as_str) else {
+                    continue;
+                };
+                if let Some(path) = character_lora_copy_path(settings, project_path, link) {
+                    append_registered_claim(&mut claims, "lora", id, None, &path);
+                }
+                for claim in claims.drain(..) {
+                    publish(claim);
                 }
             }
         }
@@ -923,15 +921,11 @@ fn control_overlay_manifests(settings: &Settings) -> Vec<PathBuf> {
     let mut manifests = vec![settings
         .config_dir
         .join("manifests/user.control_overlays.jsonc")];
-    let projects =
-        sceneworks_core::project_store::ProjectStore::new(settings.data_dir.clone(), "worker");
-    if let Ok(projects) = projects.list_projects() {
-        manifests.extend(
-            projects
-                .into_iter()
-                .map(|project| PathBuf::from(project.path).join("control-overlays/manifest.jsonc")),
-        );
-    }
+    manifests.extend(
+        registered_projects(settings)
+            .into_iter()
+            .map(|project| PathBuf::from(project.path).join("control-overlays/manifest.jsonc")),
+    );
     manifests
 }
 
@@ -1630,6 +1624,27 @@ fn capture_one(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn catalog_hash_does_not_initialize_training_directories_without_projects() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = Settings::for_test(temp.path().join("worker-data"));
+        assert!(!settings.data_dir.join("loras").exists());
+        let _ = catalog_hash(&settings);
+        assert!(!settings.data_dir.join("loras").exists());
+    }
+
+    #[test]
+    fn catalog_hash_preserves_registered_projects_without_initializing_training_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = Settings::for_test(temp.path().join("worker-data"));
+        let store = sceneworks_core::project_store::ProjectStore::new(&settings.data_dir, "worker");
+        let created = store.create_project("Existing").unwrap();
+        std::fs::remove_dir(settings.data_dir.join("loras")).unwrap();
+        assert_eq!(registered_projects(&settings), vec![created]);
+        let _ = catalog_hash(&settings);
+        assert!(!settings.data_dir.join("loras").exists());
+    }
 
     #[test]
     fn app_managed_probe_finds_cross_root_bytes_and_refuses_substitution() {

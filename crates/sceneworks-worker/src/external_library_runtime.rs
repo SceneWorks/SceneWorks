@@ -993,9 +993,9 @@ fn discover_frozen_member_snapshot(
     Ok(source_snapshot)
 }
 
-/// Wildcard checks must inspect the same complete source tier that member verification and
-/// preparation select. Another in-process job may currently overlay this repository with only
-/// its own files, so a direct preferring-library lookup can see the wrong partial snapshot.
+/// Wildcard checks prefer the authoritative source snapshot. An active local preference can
+/// contain only another job's frozen files and hide additional files selected by this job's
+/// manifest glob. If the original source has gone away, a verified local snapshot remains usable.
 fn discover_frozen_selector_snapshot<'a>(
     settings: &Settings,
     members: impl Iterator<Item = &'a PortableArtifactMember>,
@@ -1019,6 +1019,14 @@ fn discover_frozen_selector_snapshot<'a>(
             _ => None,
         })
         .ok_or_else(|| invalid_binding("wildcard source has no frozen member"))?;
+    let preferred = sceneworks_core::hf_home::model_source_library(&settings.data_dir);
+    let source = ArtifactSourceLibrary::new(preferred.root())
+        .map_err(|error| invalid_binding(error.to_string()))?;
+    if let Ok((_, snapshot)) =
+        source.discover_snapshot(&identity.repository, Some(&identity.revision))
+    {
+        return Ok(snapshot);
+    }
     let files = selected
         .iter()
         .flat_map(|member| member.files.iter().cloned())
@@ -4286,6 +4294,7 @@ mod tests {
         });
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn converted_eros_keeps_both_runtime_co_requisites_bound() {
         use sceneworks_core::model_artifacts::ArtifactIdentity;
@@ -4465,7 +4474,7 @@ mod tests {
             slot,
             model,
             "cpu",
-            "default",
+            "local",
             None,
             canonical_authored_options_sha256(&json!({})).unwrap(),
             members,
@@ -4983,7 +4992,7 @@ mod tests {
             "modelManifestEntry",
             "multi-local",
             "cpu",
-            "default",
+            "local",
             None,
             canonical_authored_options_sha256(&json!({})).unwrap(),
             members,
@@ -5312,17 +5321,9 @@ mod tests {
         let source = data.join("models/imports/base/model.safetensors");
         std::fs::create_dir_all(source.parent().unwrap()).unwrap();
         std::fs::write(&source, b"frozen training base").unwrap();
-        let binding = PortableRouteBinding::new(
-            "cpu",
-            std::env::consts::OS,
-            vec![local_binding(
-                "baseModelManifestEntry",
-                "sdxl",
-                &source,
-                None,
-            )],
-        )
-        .unwrap();
+        let mut model = local_binding("baseModelManifestEntry", "sdxl", &source, None);
+        model.variant = "bf16".to_owned();
+        let binding = PortableRouteBinding::new("cpu", std::env::consts::OS, vec![model]).unwrap();
         let payload = json!({
             "baseModelManifestEntry":{"id":"sdxl", "downloads":[], "paths":{"model":source}},
             "plan":{
@@ -5822,7 +5823,7 @@ mod tests {
                 "modelManifestEntry",
                 "m",
                 "cpu",
-                "default",
+                "local",
                 None,
                 canonical_authored_options_sha256(&json!({})).unwrap(),
                 members,
@@ -6344,7 +6345,31 @@ mod tests {
         .as_object()
         .unwrap()
         .clone();
+        let partial = data.join("partial-snapshot");
+        std::fs::create_dir_all(partial.join("q4")).unwrap();
+        std::fs::write(partial.join("q4/a.safetensors"), b"weights").unwrap();
+        let _serialized = overlay_guard();
         with_library(&library, || {
+            let scope =
+                sceneworks_core::model_artifacts::local_preference::prefer_local_snapshots(vec![
+                    LocalArtifactOverlayEntry {
+                        repository: "guardfx/glob".to_owned(),
+                        revision: REV_A.to_owned(),
+                        snapshot_root: partial,
+                        files: vec!["q4/a.safetensors".into()],
+                    },
+                ])
+                .unwrap();
+            let selected = selected_model_artifact_closure(
+                &payload["modelManifestEntry"],
+                std::env::consts::OS,
+                Some("q4"),
+            );
+            let error =
+                verify_manifest_globs(&route.models[0], &selected, &settings(data.clone()), false)
+                    .unwrap_err();
+            assert!(error.to_string().contains("file set differs"), "{error}");
+            drop(scope);
             let error = RuntimeSourceGuard::begin_with_binding(
                 &JobType::ImageGenerate,
                 &payload,
@@ -6365,19 +6390,26 @@ mod tests {
                 "advanced".to_owned(),
                 json!({"modelPath":"/unverified/alternate.safetensors"}),
             );
-            let error = RuntimeSourceGuard::begin_with_binding(
+            let guard = RuntimeSourceGuard::begin_with_binding(
                 &JobType::ImageGenerate,
                 &overridden,
                 &settings(data),
                 Some(&route),
             )
-            .unwrap_err();
-            assert!(
-                error
-                    .to_string()
-                    .contains("advanced model path requires a digest-bound primary"),
-                "{error}"
+            .expect("a publisher path hint rebinds to the frozen private snapshot");
+            let rebound = guard.dispatch_payload()["advanced"]["modelPath"]
+                .as_str()
+                .unwrap();
+            assert_ne!(rebound, "/unverified/alternate.safetensors");
+            assert_eq!(
+                guard.dispatch_payload()["modelManifestEntry"]["paths"]["model"],
+                rebound
             );
+            assert_eq!(
+                std::fs::read(Path::new(rebound).join("a.safetensors")).unwrap(),
+                b"weights"
+            );
+            drop(guard);
             let mut remote_hint = payload.clone();
             remote_hint.get_mut("modelManifestEntry").unwrap()["paths"] =
                 json!({"model":"/api-host/models/q4"});
