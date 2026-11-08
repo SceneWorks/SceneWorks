@@ -5671,13 +5671,8 @@ async fn advertise_fixture_lora_sources(
                 "lora", lora_id, None, &ledger,
             )
             .expect("registered LoRA source id");
-            let claim = PortableSourceClaim::new(
-                source_id,
-                PortableSourceProvenance::OperatorOverride,
-                files,
-            )
-            .expect("LoRA source claim");
-            claim
+            PortableSourceClaim::new(source_id, PortableSourceProvenance::OperatorOverride, files)
+                .expect("LoRA source claim")
         })
         .collect::<Vec<_>>();
     let mut registration = portable_test_worker_registration(
@@ -11132,7 +11127,7 @@ async fn scail2_animate_character_reaches_the_queue_and_validates_media() {
 fn write_scail2_reference_test_manifest(config_dir: &std::path::Path, multi_reference: bool) {
     std::fs::create_dir_all(config_dir).expect("manifest dir creates");
     let mut model = sceneworks_core::builtin_manifests::builtin_model_entries()
-        .into_iter()
+        .iter()
         .find(|entry| entry["id"] == "scail2_14b")
         .expect("shipped SCAIL-2 source row")
         .clone();

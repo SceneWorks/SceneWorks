@@ -1,4 +1,46 @@
 services:
+  credentials-init:
+    # Docker creates a missing host bind as root. Re-own only an empty root-owned
+    # directory; refuse any other owner rather than taking over existing secrets.
+    # The API/workers still run non-root.
+    build:
+      context: .
+      dockerfile: docker/rust.Dockerfile
+      target: rust-api
+      args:
+        BIN: sceneworks-rust-api
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    restart: "no"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER]
+    security_opt: [no-new-privileges:true]
+    environment:
+      SCENEWORKS_UID: ${SCENEWORKS_UID:-1000}
+      SCENEWORKS_GID: ${SCENEWORKS_GID:-1000}
+    entrypoint: ["/bin/sh", "-euc"]
+    command:
+      - |
+        case "$$SCENEWORKS_UID" in ''|*[!0-9]*) exit 2;; esac
+        case "$$SCENEWORKS_GID" in ''|*[!0-9]*) exit 2;; esac
+        owner="$$(stat -c %u /sceneworks/credentials)"
+        if [ "$$owner" != "$$SCENEWORKS_UID" ]; then
+          if [ "$$owner" != 0 ]; then
+            echo 'credentials bind belongs to another UID; set SCENEWORKS_UID or repair ownership on the host' >&2
+            exit 1
+          fi
+          first_entry="$$(find /sceneworks/credentials -mindepth 1 -maxdepth 1 -print -quit)"
+          if [ -n "$$first_entry" ]; then
+            echo 'credentials bind is not owned by the configured UID and is not empty' >&2
+            exit 1
+          fi
+          chown "$$SCENEWORKS_UID:$$SCENEWORKS_GID" /sceneworks/credentials
+        fi
+        chmod 0700 /sceneworks/credentials
+    volumes:
+      - ${SCENEWORKS_CREDENTIALS_BIND:-${USERPROFILE:-$HOME}/.sceneworks/credentials}:/sceneworks/credentials
+
   api:
     # Run as the invoking host user (not root) so bind-mounted files stay
     # host-owned and a compromised payload can't act as root over the mounts
@@ -52,6 +94,9 @@ services:
       - ${SCENEWORKS_HF_CACHE_BIND:-${HF_HOME:-${USERPROFILE:-$HOME}/.cache/huggingface}}:/sceneworks/data/cache/huggingface
       - ${SCENEWORKS_CONFIG_BIND:-./config}:/sceneworks/config
       - ${SCENEWORKS_CREDENTIALS_BIND:-${USERPROFILE:-$HOME}/.sceneworks/credentials}:/sceneworks/credentials
+    depends_on:
+      credentials-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS \"http://127.0.0.1:$${SCENEWORKS_API_PORT:-8010}/api/v1/health\" >/dev/null"]
       interval: 20s
