@@ -1277,8 +1277,8 @@ pub(crate) async fn run_model_convert_job(
 
     // The native MLX converters are blocking and not interruptible mid-run (minutes on real
     // weights), so honor cancel up front and run on a blocking thread. On any failure the partial
-    // temp dir is removed so it can never be promoted by the atomic rename below. The Flux2 path's
-    // borrowed vae/text-encoder/tokenizer are absolute symlinks that survive the rename.
+    // temp dir is removed so it can never be promoted by the atomic rename below. Finalization
+    // makes any borrowed private-snapshot links durable before the rename.
     let convert_cancel_message = format!("{backend} conversion canceled by user.");
     check_cancel(api, &job.id, &convert_cancel_message).await?;
     let temp = temp_dir.clone();
