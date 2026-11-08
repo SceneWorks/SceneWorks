@@ -1,7 +1,7 @@
 {
   "_comment": "Per-model loader-closure digests: the memory anchor currency key (sc-22511). An anchor is CURRENT while the digest it recorded still equals the digest here for its (model, backend lane). The unit is the source files the model's loader reaches, and nothing else — not the pin, not sibling models, not shared crates the loader never reaches. Regenerate when the pinned inference revision changes: node scripts/anchor-loader-closure.mjs --repo <inference> --write. A regeneration that leaves the digests unchanged is the expected case. A catalog alias (a model id the inference tree never names, such as z_image_edit) declares the engine id it resolves to as engineId; the alias is part of its hashed closure text.",
   "digestVersion": "anchor-loader-closure v2",
-  "inferenceRevision": "2b09938e33370915d4f853389961709b8bbf8bf9",
+  "inferenceRevision": "c6c0393c59382a1956577f7073676a48db68ab03",
   "models": {
     "bernini:candle": {
       "entryPoints": [
@@ -17840,7 +17840,7 @@
       "entryPoints": [
         "crates/media/candle-gen/candle-gen-krea/src/lib.rs"
       ],
-      "digest": "300650e8127e9bcdce91733d9e569a6a7a3aba306b1ec5d74ef79d263831ed87",
+      "digest": "297ebeec62558c7cff079a8eff5e94f4608691f53068428bba1fe9d2d6917cb7",
       "closureFileCount": 415,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -18265,7 +18265,7 @@
         "crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-krea/src/model.rs"
       ],
-      "digest": "033bf710984a1e3128620fa876e9ab3328af2f77079f62c68ea4444862a8227f",
+      "digest": "6123e7948767c4bb1d6a4e9d87b7fe748c2ebe99c8a4fc57bb4139595eb99f55",
       "closureFileCount": 528,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -18802,7 +18802,7 @@
       "entryPoints": [
         "crates/media/candle-gen/candle-gen-krea/src/lib.rs"
       ],
-      "digest": "6ccca3cc67d84554f10fcb81a25923f8b19c45bc84977b17c2c756d438926447",
+      "digest": "a10797a15b5e05f3107b4ad096317a8681bf79e7b56b640be5f9c2e3f30ace69",
       "closureFileCount": 415,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -19227,7 +19227,7 @@
         "crates/media/mlx-gen/mlx-gen-krea/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-krea/src/model.rs"
       ],
-      "digest": "f5c185ed0e9436a252a3e56ee62a6a059a53399fd4c4b7007a37c8f28a87bc31",
+      "digest": "29e5d7ba55f1720e718ec433b24d32138c8a928835e6c7b05c69317b14b5e411",
       "closureFileCount": 528,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
