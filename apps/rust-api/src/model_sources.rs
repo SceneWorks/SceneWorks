@@ -271,10 +271,7 @@ pub(crate) async fn ensure_runtime_model_sources(
         // established convert/download path.
         let entry = match resolve_model_manifest_entry_by_repo(state, &repository).await {
             Ok(entry) => entry,
-            Err(_) => json!({
-                "id": format!("model_convert:{repository}"),
-                "downloads": [{ "provider": "huggingface", "repo": repository }],
-            }),
+            Err(_) => uncataloged_conversion_entry(&repository, payload)?,
         };
         payload.remove("modelManifestEntry");
         payload.insert("modelManifestEntries".to_owned(), json!([entry]));
@@ -378,6 +375,43 @@ pub(crate) async fn ensure_runtime_model_sources(
     }
 
     preflight_payload_model_sources(state, payload).await
+}
+
+/// Arbitrary-repository LTX conversions still load the pinned Gemma bundle after promotion.
+/// Borrow its declaration from the shipped Eros catalog so admission and the worker freeze the
+/// same immutable co-requisite as a cataloged Eros conversion.
+fn uncataloged_conversion_entry(repository: &str, payload: &JsonObject) -> Result<Value, ApiError> {
+    let mut downloads = vec![json!({ "provider": "huggingface", "repo": repository })];
+    if payload.get("converter").and_then(Value::as_str) == Some("ltx_video") {
+        let gemma = sceneworks_core::builtin_manifests::builtin_model_entry("ltx_2_3_eros")
+            .and_then(|entry| entry.get("downloads"))
+            .and_then(Value::as_array)
+            .and_then(|rows| {
+                rows.iter().find(|row| {
+                    row.get("repo").and_then(Value::as_str) == Some("SceneWorks/ltx-2.3-mlx")
+                        && row.get("coRequisite").and_then(Value::as_bool) == Some(true)
+                        && row
+                            .get("files")
+                            .and_then(Value::as_array)
+                            .is_some_and(|files| {
+                                files.iter().any(|file| file.as_str() == Some("gemma/*"))
+                            })
+                        && row
+                            .get("revision")
+                            .and_then(Value::as_str)
+                            .is_some_and(|revision| {
+                                revision.len() == 40
+                                    && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+                            })
+                })
+            })
+            .ok_or_else(|| ApiError::internal("LTX Gemma co-requisite is not pinned"))?;
+        downloads.push(gemma.clone());
+    }
+    Ok(json!({
+        "id": format!("model_convert:{repository}"),
+        "downloads": downloads,
+    }))
 }
 
 /// Resolve the exact catalog model whose supported download names `repository`.
@@ -689,6 +723,7 @@ async fn preflight_payload_model_sources(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sceneworks_core::model_artifacts::artifact_selection::selected_model_artifact_closure;
     use sceneworks_core::model_artifacts::external_library::{
         ExternalArtifactRequirement, ExternalLibraryBindingStore,
     };
@@ -696,6 +731,39 @@ mod tests {
     use std::path::PathBuf;
 
     const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    #[test]
+    fn uncataloged_ltx_conversion_carries_pinned_gemma_into_selected_closure() {
+        let payload = json!({ "converter": "ltx_video" })
+            .as_object()
+            .unwrap()
+            .clone();
+        let entry = uncataloged_conversion_entry("owner/custom-eros", &payload).unwrap();
+        let selected = selected_model_artifact_closure(&entry, "macos", None);
+        let downloads = selected["downloads"].as_array().unwrap();
+        assert_eq!(downloads.len(), 2);
+        assert_eq!(downloads[0]["repo"], "owner/custom-eros");
+        assert_eq!(downloads[0]["coRequisite"], Value::Null);
+        assert_eq!(downloads[1]["repo"], "SceneWorks/ltx-2.3-mlx");
+        assert_eq!(downloads[1]["coRequisite"], true);
+        assert_eq!(
+            downloads[1]["revision"],
+            "254989c3ca7ee691187647f350b112c0c448789d"
+        );
+        assert_eq!(downloads[1]["files"], json!(["gemma/*"]));
+
+        let other = json!({ "converter": "flux2_dev_quant" })
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            uncataloged_conversion_entry("owner/custom-eros", &other).unwrap()["downloads"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
 
     /// The catalog READ path must reflect disconnect/reconnect from ONE binding probe and must be
     /// write-free: no binding or validated-closure ledger byte may change on a catalog GET.
