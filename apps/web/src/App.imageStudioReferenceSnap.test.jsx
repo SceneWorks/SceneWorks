@@ -82,6 +82,7 @@ function stubImageDecode(naturalWidth, naturalHeight) {
 describe("Image Studio img2img reference aspect snap", () => {
   let container;
   let root;
+  let createImageJob;
   const originalImage = global.Image;
 
   beforeEach(() => {
@@ -92,6 +93,7 @@ describe("Image Studio img2img reference aspect snap", () => {
     window.EventSource = FakeEventSource;
     window.localStorage.clear();
     global.fetch = vi.fn(() => Promise.resolve(response([])));
+    createImageJob = vi.fn();
     stubImageDecode(1080, 1920);
   });
 
@@ -111,6 +113,14 @@ describe("Image Studio img2img reference aspect snap", () => {
       button.textContent.trim().startsWith(text),
     );
   const aspectSelect = () => document.body.querySelector(".settings-field-aspect select");
+  const enterPrompt = async (label, value) => {
+    await act(async () => {
+      const field = document.querySelector(`textarea[aria-label="${label}"]`);
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(field, value);
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await settle();
+  };
 
   async function pickReference() {
     await act(async () => {
@@ -132,7 +142,7 @@ describe("Image Studio img2img reference aspect snap", () => {
       activeProject: { id: "project-1", name: "Noir" },
       assets,
       characters: [],
-      createImageJob: () => {},
+      createImageJob,
       deleteAsset: () => {},
       purgeAsset: () => {},
       gpuOptions: ["auto"],
@@ -186,6 +196,123 @@ describe("Image Studio img2img reference aspect snap", () => {
     });
     await settle();
     expect(aspectSelect().value).toBe("768x1024");
+  });
+
+  it("names a deleted image reference before Generate and lets the user remove it", async () => {
+    root = createRoot(container);
+    await act(async () => { root.render(studio([REFERENCE_ASSET])); });
+    await settle();
+    await act(async () => { buttonByText("Image reference").click(); });
+    await pickReference();
+    await enterPrompt("Prompt", "A portrait");
+    expect(buttonByText("Generate").disabled).toBe(false);
+
+    await act(async () => { root.render(studio([])); });
+    await settle();
+    const summary = document.querySelector('[aria-label="Active image reference"]');
+    expect(summary.textContent).toContain("Image reference: On");
+    expect(summary.textContent).toContain("Portrait reference");
+    expect(summary.textContent).toContain("assets/uploads/portrait.jpg");
+    expect(summary.textContent).toContain("Remove it or select another reference image");
+    expect(buttonByText("Generate").disabled).toBe(true);
+    await act(async () => {
+      document.querySelector("form.studio-shell").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    expect(createImageJob).not.toHaveBeenCalled();
+
+    await act(async () => { buttonByText("Remove image reference").click(); });
+    await settle();
+    expect(document.querySelector('[aria-label="Active image reference"]')).toBeNull();
+    expect(buttonByText("Generate").disabled).toBe(false);
+  });
+
+  it("keeps the reference visible in batch mode and blocks the batch when its file is missing", async () => {
+    global.fetch = vi.fn((_url, options) => Promise.resolve(options?.method === "HEAD"
+      ? { ok: false, status: 404 } : response([])));
+    root = createRoot(container);
+    await act(async () => { root.render(studio([REFERENCE_ASSET])); });
+    await settle();
+    await act(async () => { buttonByText("Image reference").click(); });
+    await pickReference();
+    await act(async () => { buttonByText("Batch").click(); });
+    await enterPrompt("Batch prompts", "A portrait\nAnother portrait");
+    const summary = document.querySelector('[aria-label="Active image reference"]');
+    expect(summary.textContent).toContain("Portrait reference");
+    expect(summary.textContent).toContain("original file");
+    expect(buttonByText("Run batch").disabled).toBe(true);
+    expect(global.fetch.mock.calls.some(([, options]) => options?.method === "HEAD")).toBe(true);
+
+    // Repair is checked explicitly, and does not replace the chosen reference or batch.
+    global.fetch = vi.fn(() => Promise.resolve(response([])));
+    await act(async () => { buttonByText("Retry reference check").click(); });
+    await settle();
+    expect(buttonByText("Run batch").disabled).toBe(false);
+    expect(document.querySelector('textarea[aria-label="Batch prompts"]').value).toBe("A portrait\nAnother portrait");
+    await act(async () => { buttonByText("Remove image reference").click(); });
+    await settle();
+    expect(buttonByText("Run batch").disabled).toBe(false);
+  });
+
+  it.each(["trashed", "rejected"])("blocks a %s reference even while its catalog record exists", async (status) => {
+    root = createRoot(container);
+    await act(async () => { root.render(studio([REFERENCE_ASSET])); });
+    await settle();
+    await act(async () => { buttonByText("Image reference").click(); });
+    await pickReference();
+    await enterPrompt("Prompt", "A portrait");
+    await act(async () => { root.render(studio([{ ...REFERENCE_ASSET, status: { [status]: true } }])); });
+    await settle();
+    expect(buttonByText("Generate").disabled).toBe(true);
+    expect(document.querySelector('[aria-label="Active image reference"]').textContent).toContain("no longer available");
+  });
+
+  it("blocks while checking and ignores an old check after the reference is removed", async () => {
+    let resolveHead;
+    global.fetch = vi.fn((_url, options) => options?.method === "HEAD"
+      ? new Promise((resolve) => { resolveHead = resolve; }) : Promise.resolve(response([])));
+    root = createRoot(container);
+    await act(async () => { root.render(studio([REFERENCE_ASSET])); });
+    await settle();
+    await act(async () => { buttonByText("Image reference").click(); });
+    await pickReference();
+    await enterPrompt("Prompt", "A portrait");
+    expect(buttonByText("Generate").disabled).toBe(true);
+    expect(document.querySelector('[aria-label="Active image reference"]').textContent).toContain("Checking the reference image");
+    await act(async () => { buttonByText("Remove image reference").click(); });
+    await settle();
+    await act(async () => { resolveHead({ ok: false, status: 404 }); });
+    await settle();
+    expect(buttonByText("Generate").disabled).toBe(false);
+    expect(document.querySelector('[aria-label="Active image reference"]')).toBeNull();
+  });
+
+  it("blocks a reference whose original file cannot decode", async () => {
+    root = createRoot(container);
+    await act(async () => { root.render(studio([REFERENCE_ASSET])); });
+    await settle();
+    global.Image = class {
+      set src(value) { if (value) Promise.resolve().then(() => this.onerror?.()); }
+    };
+    await act(async () => { buttonByText("Image reference").click(); });
+    await pickReference();
+    await enterPrompt("Prompt", "A portrait");
+    expect(buttonByText("Generate").disabled).toBe(true);
+    expect(document.querySelector('[aria-label="Active image reference"]').textContent).toContain("original file for “Portrait reference");
+  });
+
+  it.each(["tiff", "heic", "x-exr"])("accepts a readable %s reference without requiring a browser codec", async (format) => {
+    const asset = { ...REFERENCE_ASSET, file: { path: `assets/uploads/reference.${format}`, mimeType: `image/${format}` } };
+    global.Image = class {
+      set src(value) { if (value) Promise.resolve().then(() => this.onerror?.()); }
+    };
+    root = createRoot(container);
+    await act(async () => { root.render(studio([asset])); });
+    await settle();
+    await act(async () => { buttonByText("Image reference").click(); });
+    await pickReference();
+    await enterPrompt("Prompt", "A portrait");
+    expect(buttonByText("Generate").disabled).toBe(false);
+    expect(document.querySelector('[aria-label="Active image reference"] [role="alert"]')).toBeNull();
   });
 
   it("re-snaps when the reference is cleared and re-picked (sc-18255)", async () => {

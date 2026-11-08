@@ -344,6 +344,7 @@ export function buildImageJobRequest(state) {
       // img2img (sc-8593): emit advanced.strength when an img2img-capable model has a reference.
       supportsImg2img,
       img2imgReferenceAssetId,
+      imageReferenceDetails: state.imageReferenceDetails,
       img2imgStrength,
       // Krea "text style" tap-reweight gain (sc-11878).
       supportsTextStyle,
