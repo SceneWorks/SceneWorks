@@ -1240,7 +1240,7 @@ impl JobsStore {
                 .map_err(|error| JobsStoreError::InvalidStatus(error.to_string()))?;
             connection.execute(
                 "update jobs set portable_model_binding_json = ?1 where id = ?2",
-                params![dumps(binding)?, job_id],
+                params![serde_json::to_string(binding)?, job_id],
             )?;
         }
         Ok(())

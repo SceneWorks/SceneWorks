@@ -64,6 +64,86 @@ fn binding() -> Value {
 }
 
 #[test]
+fn private_portable_binding_roundtrips_nested_plan_context_for_claim() {
+    use crate::checkpoint_import::{
+        CheckpointContainerV1, ImportLayerV1, ImportPlanV1, SourceLocatorV1,
+    };
+    use crate::model_artifacts::portable_binding::PortableCheckpointPlan;
+
+    let mut plan = ImportPlanV1::new(
+        "plan-fixture",
+        "example",
+        vec![ImportLayerV1 {
+            layer_id: "artifact:weights.safetensors".into(),
+            role: "model".into(),
+            target_path: "weights.safetensors".into(),
+            container: CheckpointContainerV1::Safetensors,
+            source: SourceLocatorV1::linked(
+                "approved-root",
+                "weights.safetensors",
+                &"a".repeat(64),
+            )
+            .unwrap(),
+        }],
+    )
+    .unwrap();
+    plan.context
+        .insert("declaration".into(), json!({"z":1,"a":2}));
+    let portable = PortableCheckpointPlan::from_import_plan(
+        &plan,
+        Some("artifact:weights.safetensors".into()),
+    )
+    .unwrap();
+    let mut envelope: PortableJobBinding = serde_json::from_value(binding()).unwrap();
+    let mut routes = envelope.routes.clone();
+    let model = &mut routes.values_mut().next().unwrap().models[0];
+    model.members[0].files[0].relative_path = "artifact".into();
+    model.members[0].source = PortableSourceIdentity::Digest {
+        sha256: format!("sha256:{}", "a".repeat(64)),
+    };
+    model.checkpoint_plan = Some(portable);
+    envelope = PortableJobBinding::new(envelope.authored_options, routes).unwrap();
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = JobsStore::new(temp.path().join("jobs.db"));
+    store.initialize().unwrap();
+    let mut model_job = request();
+    model_job.job_type = JobType::ImageGenerate;
+    let job = store
+        .create_job_with_portable_binding(
+            model_job,
+            None,
+            None,
+            Some(&serde_json::to_value(envelope).unwrap()),
+        )
+        .unwrap();
+    let stored: PortableJobBinding =
+        serde_json::from_value(store.portable_model_binding(&job.id).unwrap().unwrap()).unwrap();
+    stored.validate().unwrap();
+    let model = &stored.routes.values().next().unwrap().models[0];
+    let claim = PortableSourceClaim::new(
+        crate::model_artifacts::portable_binding::registered_digest_member_claim_id(
+            model,
+            &model.members[0],
+            &Value::Object(request().payload),
+        )
+        .unwrap(),
+        PortableSourceProvenance::OperatorOverride,
+        model.members[0].files.clone(),
+    )
+    .unwrap();
+    let connection = store.open_connection().unwrap();
+    assert!(candidate_matches_portable_worker_sources(
+        &connection,
+        &job.id,
+        Some(("cpu", std::env::consts::OS)),
+        &[claim],
+        false,
+    )
+    .unwrap());
+}
+
+#[test]
 fn claim_requires_one_worker_with_primary_digest_and_auxiliary_claim() {
     use crate::model_artifacts::portable_binding::{
         portable_closure_sha256, registered_digest_member_claim_id,
