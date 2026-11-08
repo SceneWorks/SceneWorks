@@ -192,6 +192,7 @@ pub(crate) async fn claim_job(
     {
         return Err(ApiError::bad_request("Worker source proof is required"));
     }
+    let historical_changed = upgrade_historical_queued_carriers(&state).await?;
     let mlx_required = state.settings.mlx_required;
     let enforce_unsupported = state.settings.mlx_enforce_unsupported;
     let candle_required = state.settings.candle_required;
@@ -324,6 +325,7 @@ pub(crate) async fn claim_job(
         publish(&state, "job.updated", job);
     }
     if response.is_some()
+        || historical_changed
         || !stale_sweep.workers.is_empty()
         || !stale_sweep.jobs.is_empty()
         || !stranded.is_empty()
@@ -344,6 +346,93 @@ pub(crate) async fn claim_job(
         portable_model_binding,
         extra: Default::default(),
     }))
+}
+
+/// Older queued jobs have no private portable ledger. Rebuild a small batch from their original
+/// immutable carrier before selecting a claim; the store independently excludes every unbound
+/// model-backed row, so an unavailable source or a concurrent poll can never reach a worker.
+async fn upgrade_historical_queued_carriers(state: &AppState) -> Result<bool, ApiError> {
+    let originals =
+        store_call(state.clone(), |store, _| store.unbound_queued_model_jobs(8)).await?;
+    let mut changed = false;
+    for original in originals {
+        let mut current = original.payload.clone();
+        let canonical = match original.job_type {
+            JobType::ImageGenerate | JobType::ImageEdit | JobType::ImageDetail => {
+                canonicalize_image_model_payload(state, &original.job_type, &mut current)
+                    .await
+                    .map(|_| ())
+            }
+            JobType::VideoGenerate
+            | JobType::VideoExtend
+            | JobType::VideoBridge
+            | JobType::PersonReplace => {
+                let model_id = current
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let entry = resolve_model_manifest_entry(state, model_id).await;
+                entry.map(|entry| {
+                    current.insert("modelManifestEntry".to_owned(), entry);
+                })
+            }
+            _ => Ok(()),
+        };
+        if canonical.is_err() {
+            // A disconnected library or other transient catalog resolution failure cannot
+            // establish a replacement. The row remains unbound and unclaimable for retry.
+            let original_for_store = original.clone();
+            store_call(state.clone(), move |store, _| {
+                store.defer_historical_queued_job(&original_for_store)
+            })
+            .await?;
+            continue;
+        }
+        let authority = crate::portable_admission::validate_historical_source_carrier(
+            state,
+            &original.payload,
+            &current,
+        )
+        .await;
+        if authority.is_err() {
+            let original_for_store = original.clone();
+            let failed = store_call(state.clone(), move |store, _| {
+                store.fail_historical_unbound_queued_job(&original_for_store)
+            })
+            .await?;
+            if let Some(failed) = failed {
+                publish(state, "job.updated", &failed);
+                changed = true;
+            }
+            continue;
+        }
+        let Some(binding) = crate::portable_admission::capture_portable_model_binding(
+            state,
+            &original.job_type,
+            &current,
+            &original.requested_gpu,
+        )
+        .await
+        .ok()
+        .flatten() else {
+            // The original authority is valid, but no current exact route is provable yet.
+            // Leave the row unbound and unclaimable; a later worker heartbeat can retry.
+            let original_for_store = original.clone();
+            store_call(state.clone(), move |store, _| {
+                store.defer_historical_queued_job(&original_for_store)
+            })
+            .await?;
+            continue;
+        };
+        let binding = serde_json::to_value(binding)
+            .map_err(|error| ApiError::internal(format!("Serialize historical source: {error}")))?;
+        let original_for_store = original.clone();
+        changed |= store_call(state.clone(), move |store, _| {
+            store.bind_historical_queued_job(&original_for_store, &current, &binding)
+        })
+        .await?;
+    }
+    Ok(changed)
 }
 
 /// Emit the macOS `mlx_unsupported` gap event (epic 3482 / sc-3484) as a structured JSON line
@@ -1502,6 +1591,18 @@ async fn validate_and_canonicalize_merged_generation_payload(
         && frozen_portable_binding.is_some()
         && crate::portable_admission::portable_authored_options(&merged)
             != crate::portable_admission::portable_authored_options(&persisted);
+    let historical_new_selection = !retry
+        && frozen_portable_binding.is_none()
+        && merged.get("model") != persisted.get("model");
+    let historical_same_selection = frozen_portable_binding.is_none()
+        && !historical_new_selection
+        && !sceneworks_core::model_artifacts::portable_binding::model_free_job(&job_type, &merged)
+        && crate::portable_admission::portable_authored_options(&merged)
+            == crate::portable_admission::portable_authored_options(&persisted);
+    if historical_same_selection {
+        crate::portable_admission::validate_historical_source_carrier(state, &persisted, &merged)
+            .await?;
+    }
     if frozen_portable_binding.is_some() {
         let license_acknowledged = merged
             .get(crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
@@ -1598,16 +1699,18 @@ async fn validate_and_canonicalize_merged_generation_payload(
         (Some(_), _) => return Err(ApiError::bad_request(
             "The model source changed since this job was admitted. Restore the original source bytes before replaying.",
         )),
+        (None, Some(_)) if historical_same_selection || historical_new_selection => {}
         (None, Some(_)) => return Err(ApiError::bad_request(
             "This historical job has no portable source binding. Upgrade its manifest before retrying.",
         )),
         (None, None) => {}
     }
-    let portable_binding = if fresh_portable_selection {
-        candidate
-    } else {
-        frozen_portable_binding
-    };
+    let portable_binding =
+        if fresh_portable_selection || historical_same_selection || historical_new_selection {
+            candidate
+        } else {
+            frozen_portable_binding
+        };
     Ok((
         merged,
         provenance,

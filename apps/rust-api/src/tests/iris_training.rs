@@ -919,6 +919,13 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{duplicate}");
     // A plain duplicate of the aliased job still re-derives the checkpoint alias.
+    let connection = rusqlite::Connection::open(&settings.jobs_db_path).unwrap();
+    connection
+        .execute(
+            "update jobs set portable_model_binding_json = null where id = ?1",
+            [&generation_id],
+        )
+        .unwrap();
     let (status, replay) = request(
         app.clone(),
         "POST",
@@ -927,6 +934,14 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{replay}");
+    let binding: Option<String> = connection
+        .query_row(
+            "select portable_model_binding_json from jobs where id = ?1",
+            [replay["id"].as_str().unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(binding.is_some());
     assert_eq!(replay["payload"]["checkpointModelId"], json!(model_id));
     assert_eq!(
         replay["payload"]["modelManifestEntry"]["trainedCheckpoint"]["modelId"],

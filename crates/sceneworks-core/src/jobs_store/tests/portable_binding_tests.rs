@@ -64,6 +64,126 @@ fn binding() -> Value {
 }
 
 #[test]
+fn historical_unbound_model_jobs_cannot_reach_versionless_claims() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = JobsStore::new(temp.path().join("jobs.db"));
+    store.initialize().unwrap();
+    let mut image = request();
+    image.job_type = JobType::ImageGenerate;
+    image.payload = json!({"model":"example", "modelManifestEntry":{"id":"example"}})
+        .as_object()
+        .unwrap()
+        .clone();
+    let image = store.create_job(image).unwrap();
+    let download = store.create_job(request()).unwrap();
+    let mut training = request();
+    training.job_type = JobType::LoraTrain;
+    training.payload = json!({"model":"example"}).as_object().unwrap().clone();
+    let training = store.create_job(training).unwrap();
+    let connection = store.open_connection().unwrap();
+    assert!(
+        !candidate_matches_portable_worker_sources(&connection, &image.id, None, &[], false,)
+            .unwrap()
+    );
+    assert!(
+        candidate_matches_portable_worker_sources(&connection, &download.id, None, &[], false,)
+            .unwrap()
+    );
+    let queued = store.unbound_queued_model_jobs(8).unwrap();
+    assert_eq!(
+        queued.iter().map(|job| &job.id).collect::<Vec<_>>(),
+        vec![&image.id, &training.id]
+    );
+}
+
+#[test]
+fn historical_binding_install_is_atomic_and_refuses_a_changed_job() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = JobsStore::new(temp.path().join("jobs.db"));
+    store.initialize().unwrap();
+    let mut request = request();
+    request.job_type = JobType::ImageGenerate;
+    request.payload = json!({"model":"example", "modelManifestEntry":{"id":"example"}})
+        .as_object()
+        .unwrap()
+        .clone();
+    let original = store.create_job(request).unwrap();
+    let mut canonical = original.payload.clone();
+    canonical.insert("prompt".into(), json!("canonical historical prompt"));
+    let frozen = binding();
+    assert!(store
+        .bind_historical_queued_job(&original, &canonical, &frozen)
+        .unwrap());
+    assert_eq!(
+        store.portable_model_binding(&original.id).unwrap(),
+        Some(frozen)
+    );
+    assert_eq!(store.get_job(&original.id).unwrap().payload, canonical);
+    let connection = store.open_connection().unwrap();
+    assert!(candidate_matches_portable_worker_sources(
+        &connection,
+        &original.id,
+        Some(("cpu", std::env::consts::OS)),
+        &[],
+        false,
+    )
+    .unwrap());
+    assert!(!candidate_matches_portable_worker_sources(
+        &connection,
+        &original.id,
+        None,
+        &[],
+        false,
+    )
+    .unwrap());
+    assert!(!store
+        .bind_historical_queued_job(&original, &original.payload, &binding())
+        .unwrap());
+}
+
+#[test]
+fn unauthenticated_historical_carrier_fails_before_claim() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = JobsStore::new(temp.path().join("jobs.db"));
+    store.initialize().unwrap();
+    let mut request = request();
+    request.job_type = JobType::ImageGenerate;
+    request.payload = json!({"model":"example", "modelManifestEntry":{"id":"example"}})
+        .as_object()
+        .unwrap()
+        .clone();
+    let original = store.create_job(request).unwrap();
+    let failed = store
+        .fail_historical_unbound_queued_job(&original)
+        .unwrap()
+        .unwrap();
+    assert_eq!(failed.status, JobStatus::Failed);
+    assert!(store.unbound_queued_model_jobs(8).unwrap().is_empty());
+    assert!(store
+        .fail_historical_unbound_queued_job(&original)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn unavailable_historical_source_rotates_without_starving_a_later_job() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = JobsStore::new(temp.path().join("jobs.db"));
+    store.initialize().unwrap();
+    let mut request = request();
+    request.job_type = JobType::ImageGenerate;
+    request.payload = json!({"model":"example", "modelManifestEntry":{"id":"example"}})
+        .as_object()
+        .unwrap()
+        .clone();
+    let first = store.create_job(request.clone()).unwrap();
+    let second = store.create_job(request).unwrap();
+    assert_eq!(store.unbound_queued_model_jobs(1).unwrap()[0].id, first.id);
+    store.defer_historical_queued_job(&first).unwrap();
+    assert_eq!(store.unbound_queued_model_jobs(1).unwrap()[0].id, second.id);
+}
+
+#[test]
 fn claim_requires_one_worker_with_primary_digest_and_auxiliary_claim() {
     use crate::model_artifacts::portable_binding::{
         portable_closure_sha256, registered_digest_member_claim_id,
@@ -114,9 +234,13 @@ fn claim_requires_one_worker_with_primary_digest_and_auxiliary_claim() {
     let frozen =
         serde_json::to_value(PortableJobBinding::new(original.authored_options, routes).unwrap())
             .unwrap();
-    let job = store
-        .create_job_with_portable_binding(request(), None, None, Some(&frozen))
-        .unwrap();
+    let mut legacy = request();
+    legacy.job_type = JobType::ImageGenerate;
+    let job = store.create_job(legacy).unwrap();
+    let original = store.get_job(&job.id).unwrap();
+    assert!(store
+        .bind_historical_queued_job(&original, &original.payload, &frozen)
+        .unwrap());
     let connection = store.open_connection().unwrap();
     let route = Some(("cpu", std::env::consts::OS));
     assert!(

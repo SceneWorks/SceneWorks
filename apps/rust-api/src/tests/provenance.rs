@@ -254,6 +254,56 @@ fn authority_plan_fixture(settings: &Settings) -> (Value, Value) {
     )
 }
 
+#[tokio::test]
+async fn historical_import_carrier_requires_original_plan_and_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let settings = test_settings(&temp);
+    let (entry, _) = authority_plan_fixture(&settings);
+    let (_, state) = create_app_with_state(settings).unwrap();
+    let original = json!({"model":"actual_import", "modelManifestEntry":entry})
+        .as_object()
+        .unwrap()
+        .clone();
+    crate::portable_admission::validate_historical_source_carrier(&state, &original, &original)
+        .await
+        .expect("compiled import plan authenticates original bytes");
+
+    let mut replacement = original.clone();
+    replacement.get_mut("modelManifestEntry").unwrap()["importPlan"]["semanticDigest"] =
+        json!("b".repeat(64));
+    assert!(
+        crate::portable_admission::validate_historical_source_carrier(
+            &state,
+            &original,
+            &replacement
+        )
+        .await
+        .is_err()
+    );
+
+    let source = state
+        .settings
+        .data_dir
+        .join("authority-library/model.safetensors");
+    let bytes = std::fs::read(&source).unwrap();
+    std::fs::write(&source, vec![b'X'; bytes.len()]).unwrap();
+    assert!(
+        crate::portable_admission::validate_historical_source_carrier(&state, &original, &original)
+            .await
+            .is_err()
+    );
+    std::fs::remove_file(&source).unwrap();
+    assert!(
+        crate::portable_admission::validate_historical_source_carrier(&state, &original, &original)
+            .await
+            .is_err()
+    );
+    std::fs::write(&source, bytes).unwrap();
+    crate::portable_admission::validate_historical_source_carrier(&state, &original, &original)
+        .await
+        .expect("restored original bytes authenticate");
+}
+
 fn register_authority_import_worker(state: &crate::AppState) {
     let bytes = std::fs::read(
         state
@@ -479,6 +529,16 @@ async fn raw_http_carriers_cannot_freeze_another_import_and_replays_keep_executi
         assert_eq!(state.jobs_store.model_provenance(id).unwrap(), None);
         assert!(asset.get("modelProvenance").is_none());
         assert!(asset["recipe"].get("modelProvenance").is_none());
+        if actual_model == "realvisxl" {
+            // Reopen a pre-ledger job with its original pinned publisher carrier intact.
+            let connection = rusqlite::Connection::open(&state.settings.jobs_db_path).unwrap();
+            connection
+                .execute(
+                    "update jobs set portable_model_binding_json = null where id = ?1",
+                    [id],
+                )
+                .unwrap();
+        }
         let (status, replay) = request(app.clone(), "POST", &format!("/api/v1/jobs/{id}/duplicate"), json!({"payloadChanges":{
             "modelManifestEntry":forged,"modelManifestEntries":[forged],"baseModelManifestEntry":forged,"modelProvenance":{"forged":true}}})).await;
         assert_eq!(status, StatusCode::CREATED, "{job_type}: {replay}");
@@ -491,6 +551,13 @@ async fn raw_http_carriers_cannot_freeze_another_import_and_replays_keep_executi
             );
         }
         let replay_id = replay["id"].as_str().unwrap();
+        if actual_model == "realvisxl" {
+            assert!(state
+                .jobs_store
+                .portable_model_binding(replay_id)
+                .unwrap()
+                .is_some());
+        }
         assert_eq!(
             replay["payload"],
             serde_json::to_value(crate::job_redaction::public_job_snapshot(

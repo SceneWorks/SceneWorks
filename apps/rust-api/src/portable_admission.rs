@@ -240,6 +240,152 @@ fn payload_model_entries(payload: &JsonObject) -> Result<Vec<(String, &Value)>, 
     Ok(entries)
 }
 
+/// A pre-registry job may be rebound only from its persisted, server-stamped source carrier.
+/// Local paths are locators, not identity: a moved root is allowed, while a changed publisher,
+/// import plan, producer, component declaration or model id is not. A path-only user entry has
+/// no immutable byte authority and remains unbound.
+pub(crate) async fn validate_historical_source_carrier(
+    state: &AppState,
+    original: &JsonObject,
+    current: &JsonObject,
+) -> Result<(), ApiError> {
+    let old = payload_model_entries(original)?;
+    let new = payload_model_entries(current)?;
+    if old.is_empty() || old.len() != new.len() {
+        return Err(ApiError::bad_request(
+            "This historical job has no portable source binding. Upgrade its manifest before retrying.",
+        ));
+    }
+    for ((old_slot, old_entry), (new_slot, new_entry)) in old.iter().zip(new.iter()) {
+        if old_slot != new_slot
+            || historical_source_projection(old_entry) != historical_source_projection(new_entry)
+        {
+            return Err(incomplete(format!(
+                "historical model source {old_slot} differs from its original declaration"
+            )));
+        }
+        let old_entry = old_entry
+            .as_object()
+            .ok_or_else(|| incomplete("historical model source is not an object"))?;
+        let new_entry = new_entry
+            .as_object()
+            .ok_or_else(|| incomplete("current model source is not an object"))?;
+        let plan = old_entry.get("importPlan").and_then(Value::as_object);
+        let pinned_plan = plan.is_some_and(|plan| {
+            ["checkpointId", "planId", "semanticDigest"]
+                .into_iter()
+                .all(|key| {
+                    plan.get(key)
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| !s.is_empty())
+                })
+        });
+        let produced = old_entry
+            .get("provenance")
+            .and_then(|value| value.get("trainingJobId"))
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.is_empty());
+        let pinned = |download: &Value| {
+            download
+                .get("repo")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.is_empty())
+                && download
+                    .get("revision")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| {
+                        s.len() == 40 && s.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+        };
+        let pinned_download = (old_entry.get("download").is_some_and(pinned)
+            || old_entry
+                .get("downloads")
+                .and_then(Value::as_array)
+                .is_some_and(|downloads| !downloads.is_empty() && downloads.iter().all(pinned)))
+            && !["modelPath", "installedPath", "paths"]
+                .into_iter()
+                .any(|key| old_entry.get(key).is_some_and(|value| !value.is_null()))
+            && old_entry
+                .get("components")
+                .and_then(Value::as_array)
+                .is_none_or(|components| {
+                    components
+                        .iter()
+                        .all(|component| component.get("path").is_none_or(Value::is_null))
+                });
+        if !pinned_plan && !produced && !pinned_download {
+            return Err(incomplete(format!(
+                "historical model source {old_slot} has no immutable byte authority"
+            )));
+        }
+        if pinned_plan {
+            let plan = plan.expect("pinned plan has its source declaration");
+            let checkpoint_id = plan["checkpointId"].as_str().unwrap();
+            let data_dir = state.settings.data_dir.clone();
+            let checkpoint_id = checkpoint_id.to_owned();
+            let resolved = tokio::task::spawn_blocking(move || {
+                sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir)
+                    .resolve(&checkpoint_id)
+            })
+            .await
+            .map_err(|error| incomplete(format!("historical import verification failed: {error}")))?
+            .map_err(|error| incomplete(format!("historical import bytes are invalid: {error}")))?;
+            if resolved.plan.plan_id != plan["planId"].as_str().unwrap()
+                || resolved.record.plan.semantic_digest != plan["semanticDigest"].as_str().unwrap()
+            {
+                return Err(incomplete(
+                    "historical import plan differs from its source declaration",
+                ));
+            }
+            let provenance =
+                sceneworks_core::model_artifacts::provenance::resolved_model_provenance(
+                    &state.settings.data_dir,
+                    new_entry,
+                )
+                .map_err(|error| {
+                    incomplete(format!("historical import plan is invalid: {error}"))
+                })?;
+            if provenance.is_none() {
+                return Err(incomplete(
+                    "historical import plan has no validated provenance",
+                ));
+            }
+            crate::ensure_expected_imported_model_reference(
+                state,
+                original,
+                &Value::Object(new_entry.clone()),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn historical_source_projection(entry: &Value) -> Value {
+    let Some(entry) = entry.as_object() else {
+        return Value::Null;
+    };
+    let mut source = JsonObject::new();
+    for (key, value) in entry {
+        let projected = if key == "paths" {
+            match value {
+                Value::Object(paths) => Value::Object(
+                    paths
+                        .keys()
+                        .map(|key| (key.clone(), Value::String("<locator>".to_owned())))
+                        .collect(),
+                ),
+                _ => Value::Null,
+            }
+        } else if matches!(key.as_str(), "modelPath" | "installedPath") {
+            Value::String("<locator>".to_owned())
+        } else {
+            value.clone()
+        };
+        source.insert(key.to_owned(), projected);
+    }
+    Value::Object(source)
+}
+
 /// Bind source-affecting authored choices. Prompt, seed and render controls remain in the
 /// canonical job payload and may change on an explicitly duplicated job without changing the
 /// frozen source. Model/variant/decoder/adapter choices cannot silently change that source.
@@ -775,7 +921,7 @@ async fn capture_portable_model_binding_inner(
             }
         }
     }
-    if model_free_job(job_type, payload) {
+    if sceneworks_core::model_artifacts::portable_binding::model_free_job(job_type, payload) {
         return Ok(None);
     }
     let entries = payload_model_entries(payload)?;
@@ -1045,31 +1191,6 @@ fn conversion_claim_tier_rank(
 
 fn incomplete(message: impl Into<String>) -> ApiError {
     ApiError::model_artifact_conflict(message.into(), "model_artifact_incomplete")
-}
-
-fn model_free_job(job_type: &JobType, payload: &JsonObject) -> bool {
-    matches!(
-        job_type,
-        JobType::Placeholder
-            | JobType::FrameExtract
-            | JobType::TimelineExport
-            | JobType::DatasetParquetImport
-            | JobType::ModelImport
-            | JobType::LoraImport
-            | JobType::ModelDownload
-            | JobType::LoraDownload
-    ) || matches!(job_type, JobType::LoraTrain | JobType::ControlTraining)
-        && payload.get("dryRun").and_then(Value::as_bool) == Some(true)
-        || matches!(job_type, JobType::TrainingCaption)
-            && payload.get("mode").and_then(Value::as_str) == Some("triggerOnly")
-        || matches!(job_type, JobType::CatalogAnalysis)
-            && [
-                "structuredAnalysisEnabled",
-                "visionAnalysisEnabled",
-                "semanticEmbeddingsEnabled",
-            ]
-            .into_iter()
-            .all(|key| payload.get(key).and_then(Value::as_bool) == Some(false))
 }
 
 struct TrainingBaseSelection {
@@ -3117,7 +3238,56 @@ async fn capture_selected_request_overlays_offloaded(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sceneworks_core::model_artifacts::portable_binding::model_free_job;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn historical_carrier_allows_root_move_but_not_catalog_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, state) = crate::create_app_with_state(crate::tests::support::test_settings(&root))
+            .expect("test API state");
+        let old = json!({"modelManifestEntry":{
+            "id":"example", "family":"flux", "type":"image",
+            "download":{"repo":"owner/model", "revision":"a".repeat(40)},
+            "files":["model.safetensors"]
+        }})
+        .as_object()
+        .unwrap()
+        .clone();
+        validate_historical_source_carrier(&state, &old, &old)
+            .await
+            .unwrap();
+        let mut replaced = old.clone();
+        replaced.get_mut("modelManifestEntry").unwrap()["download"]["revision"] =
+            json!("b".repeat(40));
+        assert!(validate_historical_source_carrier(&state, &old, &replaced)
+            .await
+            .is_err());
+        let mut swapped_file = old.clone();
+        swapped_file.get_mut("modelManifestEntry").unwrap()["download"]["path"] =
+            json!("other-weights.safetensors");
+        assert!(
+            validate_historical_source_carrier(&state, &old, &swapped_file)
+                .await
+                .is_err()
+        );
+        let mut path_only = old.clone();
+        path_only.get_mut("modelManifestEntry").unwrap()["download"] = Value::Null;
+        path_only.get_mut("modelManifestEntry").unwrap()["paths"] =
+            json!({"model":"/root-a/model.safetensors"});
+        let mut moved = path_only.clone();
+        moved.get_mut("modelManifestEntry").unwrap()["paths"] =
+            json!({"model":"/root-b/model.safetensors"});
+        assert_eq!(
+            historical_source_projection(&path_only["modelManifestEntry"]),
+            historical_source_projection(&moved["modelManifestEntry"])
+        );
+        assert!(
+            validate_historical_source_carrier(&state, &path_only, &moved)
+                .await
+                .is_err()
+        );
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn installed_hash_does_not_block_unrelated_request_task() {

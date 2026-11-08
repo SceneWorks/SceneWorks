@@ -735,6 +735,18 @@ impl JobsStore {
         ensure_column(&transaction, "jobs", "download_binding_json", "text")?;
         // A portable source commitment is private claim authority, not public job metadata.
         ensure_column(&transaction, "jobs", "portable_model_binding_json", "text")?;
+        ensure_column(
+            &transaction,
+            "jobs",
+            "historical_source_attempts",
+            "integer not null default 0",
+        )?;
+        ensure_column(
+            &transaction,
+            "jobs",
+            "historical_source_retry_after",
+            "integer not null default 0",
+        )?;
         // Durable worker-queue priority. Zero is the normal FIFO lane; positive ranks are
         // assigned monotonically whenever a job jumps to the front. Prompt-refinement jobs get a
         // rank automatically at creation, while the Queue screen can rank any still-pending jobs
@@ -1250,6 +1262,141 @@ impl JobsStore {
     pub fn portable_model_binding(&self, job_id: &str) -> JobsStoreResult<Option<Value>> {
         let connection = self.open_connection()?;
         Self::read_portable_binding(&connection, job_id)
+    }
+
+    /// Small bounded batch for the API's historical source upgrade before a worker claim.
+    /// The claim selector itself never admits an unbound model job, even if this batch cannot
+    /// authenticate it or a worker speaks only the versionless protocol.
+    pub fn unbound_queued_model_jobs(&self, limit: usize) -> JobsStoreResult<Vec<JobSnapshot>> {
+        let connection = self.open_connection()?;
+        let mut statement = connection.prepare(
+            "select * from jobs where status = 'queued' and portable_model_binding_json is null
+             and historical_source_retry_after <= ?2
+             and type not in ('placeholder','frame_extract','timeline_export',
+                              'dataset_parquet_import','model_import','lora_import',
+                              'model_download','lora_download')
+             and not (type in ('lora_train','control_training')
+                      and coalesce(json_extract(payload_json, '$.dryRun'), -1) = 1)
+             and not (type = 'training_caption'
+                      and coalesce(json_extract(payload_json, '$.mode'), '') = 'triggerOnly')
+             and not (type = 'catalog_analysis'
+                      and coalesce(json_extract(payload_json, '$.structuredAnalysisEnabled'), -1) = 0
+                      and coalesce(json_extract(payload_json, '$.visionAnalysisEnabled'), -1) = 0
+                      and coalesce(json_extract(payload_json, '$.semanticEmbeddingsEnabled'), -1) = 0)
+             order by historical_source_attempts asc, queue_rank desc,
+                      created_at asc, rowid asc limit ?1",
+        )?;
+        let jobs = statement
+            .query_map(params![limit.min(8) as i64, now_unix_seconds()], row_to_job)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(jobs)
+    }
+
+    /// Install a validated historical carrier and its canonical payload in one transaction.
+    /// A raced cancel, claim, payload edit or competing upgrade leaves this row untouched.
+    pub fn bind_historical_queued_job(
+        &self,
+        original: &JobSnapshot,
+        canonical_payload: &Map<String, Value>,
+        binding: &Value,
+    ) -> JobsStoreResult<bool> {
+        let typed: crate::model_artifacts::portable_binding::PortableJobBinding =
+            serde_json::from_value(binding.clone())?;
+        typed
+            .validate()
+            .map_err(|error| JobsStoreError::InvalidStatus(error.to_string()))?;
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = self.get_job_on_connection(&transaction, &original.id)?;
+        if current.status != JobStatus::Queued
+            || current.payload != original.payload
+            || current.requested_gpu != original.requested_gpu
+            || Self::read_portable_binding(&transaction, &original.id)?.is_some()
+        {
+            return Ok(false);
+        }
+        let facts = ClaimRoutingFacts::from_parts(&current.job_type, canonical_payload);
+        let updated = transaction.execute(
+            "update jobs set payload_json = ?1, portable_model_binding_json = ?2,
+                    claim_facts_version = ?3, claim_payload_revision = payload_revision + 1,
+                    claim_mlx_eligible = ?4, claim_candle_eligible = ?5,
+                    claim_candle_pose_reject = ?6, claim_training_mlx_only = ?7,
+                    claim_seedvr2_upscale = ?8, claim_required_capability = ?9,
+                    claim_real_training = ?10, claim_model_key_1 = ?11,
+                    claim_model_key_2 = ?12, claim_model_key_3 = ?13,
+                    claim_model_key_4 = ?14, updated_at = ?15
+              where id = ?16 and status = 'queued' and portable_model_binding_json is null",
+            params![
+                dumps(canonical_payload)?,
+                dumps(binding)?,
+                CLAIM_ROUTING_FACTS_VERSION,
+                i64::from(facts.mlx_eligible),
+                i64::from(facts.candle_eligible),
+                i64::from(facts.candle_pose_reject),
+                i64::from(facts.training_mlx_only),
+                i64::from(facts.seedvr2_upscale),
+                facts.required_capability.as_str(),
+                i64::from(facts.real_training),
+                facts.model_key(0),
+                facts.model_key(1),
+                facts.model_key(2),
+                facts.model_key(3),
+                utc_now(),
+                original.id,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(updated == 1)
+    }
+
+    pub fn fail_historical_unbound_queued_job(
+        &self,
+        original: &JobSnapshot,
+    ) -> JobsStoreResult<Option<JobSnapshot>> {
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = self.get_job_on_connection(&transaction, &original.id)?;
+        if current.status != JobStatus::Queued
+            || current.payload != original.payload
+            || current.requested_gpu != original.requested_gpu
+            || Self::read_portable_binding(&transaction, &original.id)?.is_some()
+        {
+            return Ok(None);
+        }
+        let now = utc_now();
+        transaction.execute(
+            "update jobs set status = 'failed', stage = 'failed',
+                    message = 'Historical model source could not be verified',
+                    error = 'Historical model source could not be verified',
+                    completed_at = ?1, updated_at = ?1, worker_id = null
+              where id = ?2 and status = 'queued' and portable_model_binding_json is null",
+            params![now, original.id],
+        )?;
+        let failed = self.get_job_on_connection(&transaction, &original.id)?;
+        transaction.commit()?;
+        Ok(Some(failed))
+    }
+
+    /// A valid original carrier can wait for a compatible worker's exact source claim. Rotate it
+    /// behind untried historical jobs so a fixed prefix cannot starve the rest of the queue.
+    pub fn defer_historical_queued_job(&self, original: &JobSnapshot) -> JobsStoreResult<()> {
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
+        let current = self.get_job_on_connection(connection, &original.id)?;
+        if current.status == JobStatus::Queued
+            && current.payload == original.payload
+            && current.requested_gpu == original.requested_gpu
+        {
+            connection.execute(
+                "update jobs set historical_source_attempts = historical_source_attempts + 1,
+                        historical_source_retry_after = ?2
+                  where id = ?1 and status = 'queued' and portable_model_binding_json is null",
+                params![original.id, now_unix_seconds() + 30],
+            )?;
+        }
+        Ok(())
     }
 
     fn read_portable_binding(
@@ -6042,7 +6189,19 @@ fn candidate_matches_portable_worker_sources(
     authenticated_for_dynamic_source: bool,
 ) -> JobsStoreResult<bool> {
     let Some(binding) = JobsStore::read_portable_binding(connection, job_id)? else {
-        return Ok(true);
+        // A pre-registry model job has no authenticated source closure. It must be upgraded
+        // before a worker can fetch or load it, including a versionless worker. Model-free
+        // operational jobs retain their existing claim protocol.
+        let (raw_type, raw_payload): (String, Option<String>) = connection.query_row(
+            "select type, payload_json from jobs where id = ?1",
+            params![job_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let job_type: JobType = parse_string_enum(&raw_type);
+        let payload = loads_object(raw_payload.as_deref());
+        return Ok(crate::model_artifacts::portable_binding::model_free_job(
+            &job_type, &payload,
+        ));
     };
     let Some((backend, platform)) = portable_route else {
         return Ok(false);

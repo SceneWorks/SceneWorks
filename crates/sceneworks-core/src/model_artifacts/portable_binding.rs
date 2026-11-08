@@ -1451,6 +1451,38 @@ fn error(message: impl Into<String>) -> ArtifactContractError {
     ArtifactContractError(message.into())
 }
 
+/// Jobs with no model bytes to bind may keep the historical versionless claim protocol.
+/// Keep this predicate shared by API admission and the store's claim gate.
+pub fn model_free_job(
+    job_type: &crate::contracts::JobType,
+    payload: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    use crate::contracts::JobType;
+    use serde_json::Value;
+    matches!(
+        job_type,
+        JobType::Placeholder
+            | JobType::FrameExtract
+            | JobType::TimelineExport
+            | JobType::DatasetParquetImport
+            | JobType::ModelImport
+            | JobType::LoraImport
+            | JobType::ModelDownload
+            | JobType::LoraDownload
+    ) || matches!(job_type, JobType::LoraTrain | JobType::ControlTraining)
+        && payload.get("dryRun").and_then(Value::as_bool) == Some(true)
+        || matches!(job_type, JobType::TrainingCaption)
+            && payload.get("mode").and_then(Value::as_str) == Some("triggerOnly")
+        || matches!(job_type, JobType::CatalogAnalysis)
+            && [
+                "structuredAnalysisEnabled",
+                "visionAnalysisEnabled",
+                "semanticEmbeddingsEnabled",
+            ]
+            .into_iter()
+            .all(|key| payload.get(key).and_then(Value::as_bool) == Some(false))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
