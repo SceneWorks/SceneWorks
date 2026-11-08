@@ -1,6 +1,7 @@
 //! Private advertisements for selected worker-owned auxiliary model sources.
 //! Physical paths stay on the worker; the API receives only logical IDs and file hashes.
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -56,7 +57,7 @@ struct InventorySchedule {
 struct InventoryProgress {
     claims: Vec<PortableSourceClaim>,
     generation: u64,
-    acknowledged: u64,
+    acknowledged_by_worker: BTreeMap<String, u64>,
 }
 
 impl InventoryProgress {
@@ -85,12 +86,26 @@ impl InventoryProgress {
         }
     }
 
-    fn pending(&self) -> Option<(u64, Vec<PortableSourceClaim>)> {
-        (self.generation > self.acknowledged).then(|| (self.generation, self.claims.clone()))
+    fn pending(&self, worker_id: &str) -> Option<(u64, Vec<PortableSourceClaim>)> {
+        (self.generation
+            > self
+                .acknowledged_by_worker
+                .get(worker_id)
+                .copied()
+                .unwrap_or(0))
+        .then(|| (self.generation, self.claims.clone()))
     }
 
-    fn acknowledge(&mut self, generation: u64) {
-        self.acknowledged = self.acknowledged.max(generation.min(self.generation));
+    fn acknowledge(&mut self, worker_id: &str, generation: u64) {
+        let acknowledged = self
+            .acknowledged_by_worker
+            .entry(worker_id.to_owned())
+            .or_default();
+        *acknowledged = (*acknowledged).max(generation.min(self.generation));
+    }
+
+    fn reset_worker(&mut self, worker_id: &str) {
+        self.acknowledged_by_worker.remove(worker_id);
     }
 }
 
@@ -169,21 +184,18 @@ pub(crate) fn refresh_background_inventory(settings: Settings) {
 /// blocking inventory hashes it in the background. Each completed source is published on the
 /// next ordinary heartbeat; unverified sources remain ineligible until their own hash completes.
 pub(crate) fn start_background_inventory(settings: Settings) {
-    if INVENTORY_STARTED.swap(true, Ordering::AcqRel) {
-        // Registration replaces the server's claim vector. If a scan is already running,
-        // republish its completed claims and let it continue producing fresh ones.
-        pending_inventory()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .acknowledged = 0;
-        return;
-    }
-    // Registration replaces the server vector even when the preceding scan finished. Republish
-    // the last verified snapshot while its replacement is being built.
+    // Registration replaces only this worker's server-side claim vector. Another worker in the
+    // same process must retain its independent publication progress across this registration.
     pending_inventory()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .acknowledged = 0;
+        .reset_worker(&settings.worker_id);
+    if INVENTORY_STARTED.swap(true, Ordering::AcqRel) {
+        // Registration replaces the server's claim vector. If a scan is already running,
+        // republish its completed claims and let it continue producing fresh ones.
+        return;
+    }
+    // Republish this worker's last verified snapshot while its replacement is being built.
     *inventory_schedule()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = InventorySchedule {
@@ -224,18 +236,18 @@ pub(crate) fn start_background_inventory(settings: Settings) {
     });
 }
 
-pub(crate) fn pending_inventory_claims() -> Option<(u64, Vec<PortableSourceClaim>)> {
+pub(crate) fn pending_inventory_claims(worker_id: &str) -> Option<(u64, Vec<PortableSourceClaim>)> {
     pending_inventory()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .pending()
+        .pending(worker_id)
 }
 
-pub(crate) fn mark_inventory_published(generation: u64) {
+pub(crate) fn mark_inventory_published(worker_id: &str, generation: u64) {
     pending_inventory()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .acknowledge(generation);
+        .acknowledge(worker_id, generation);
 }
 
 #[cfg(test)]
@@ -1387,16 +1399,57 @@ mod tests {
         };
         let mut progress = InventoryProgress::default();
         progress.publish(make("first"));
-        let (first_generation, first_claims) = progress.pending().unwrap();
+        let (first_generation, first_claims) = progress.pending("worker-a").unwrap();
         assert_eq!(first_claims.len(), 1);
         progress.publish(make("second"));
-        progress.acknowledge(first_generation);
-        let (second_generation, second_claims) = progress.pending().unwrap();
+        progress.acknowledge("worker-a", first_generation);
+        let (second_generation, second_claims) = progress.pending("worker-a").unwrap();
         assert_eq!(second_claims.len(), 2);
-        progress.acknowledge(second_generation);
-        assert!(progress.pending().is_none());
+        progress.acknowledge("worker-a", second_generation);
+        assert!(progress.pending("worker-a").is_none());
         progress.publish(make("second"));
-        assert!(progress.pending().is_none());
+        assert!(progress.pending("worker-a").is_none());
+    }
+
+    #[test]
+    fn sibling_worker_must_publish_the_same_inventory_generation_independently() {
+        let claim = PortableSourceClaim::new(
+            "shared-source",
+            PortableSourceProvenance::OperatorOverride,
+            vec![PortableArtifactFile {
+                relative_path: PathBuf::from("model.safetensors"),
+                size_bytes: 1,
+                sha256: format!("sha256:{}", "a".repeat(64)),
+            }],
+        )
+        .unwrap();
+        let mut progress = InventoryProgress::default();
+        progress.publish(claim.clone());
+        let (generation, first_claims) = progress.pending("worker-a").unwrap();
+        assert_eq!(first_claims, vec![claim.clone()]);
+        progress.acknowledge("worker-a", generation);
+        assert!(progress.pending("worker-a").is_none());
+        assert_eq!(
+            progress.pending("worker-b"),
+            Some((generation, vec![claim.clone()])),
+            "worker A's heartbeat must not consume worker B's advertisement"
+        );
+        progress.acknowledge("worker-b", generation);
+        assert!(progress.pending("worker-b").is_none());
+
+        // A re-registration clears only A's server vector; B remains caught up. The next
+        // completed rescan, including a withdrawal, must then reach both workers.
+        progress.reset_worker("worker-a");
+        assert_eq!(
+            progress.pending("worker-a"),
+            Some((generation, vec![claim]))
+        );
+        assert!(progress.pending("worker-b").is_none());
+        progress.replace_scanned(Vec::new());
+        let (withdrawal, claims) = progress.pending("worker-b").unwrap();
+        assert!(claims.is_empty());
+        progress.acknowledge("worker-b", withdrawal);
+        assert_eq!(progress.pending("worker-a"), Some((withdrawal, Vec::new())));
     }
 
     #[test]
@@ -1415,20 +1468,20 @@ mod tests {
         };
         let mut progress = InventoryProgress::default();
         progress.publish(make("removed", 'a'));
-        progress.acknowledge(progress.pending().unwrap().0);
+        progress.acknowledge("worker-a", progress.pending("worker-a").unwrap().0);
         progress.publish(make("new", 'b'));
-        assert_eq!(progress.pending().unwrap().1.len(), 2);
+        assert_eq!(progress.pending("worker-a").unwrap().1.len(), 2);
         progress.publish(make("removed", 'c'));
         assert_eq!(
-            progress.pending().unwrap().1[1].files[0].sha256,
+            progress.pending("worker-a").unwrap().1[1].files[0].sha256,
             format!("sha256:{}", "c".repeat(64))
         );
         progress.replace_scanned(vec![make("new", 'b')]);
-        let (generation, claims) = progress.pending().unwrap();
+        let (generation, claims) = progress.pending("worker-a").unwrap();
         assert_eq!(claims.len(), 1);
         assert_eq!(claims[0].source_id, "new");
-        progress.acknowledge(generation);
-        assert!(progress.pending().is_none());
+        progress.acknowledge("worker-a", generation);
+        assert!(progress.pending("worker-a").is_none());
 
         let now = Instant::now();
         let hash = [1; 32];
@@ -1472,21 +1525,21 @@ mod tests {
         registered_digest_source_claims(&settings, |claim| scanned.push(claim));
         progress.replace_scanned(scanned);
         let (generation, claims) = progress
-            .pending()
+            .pending("worker-a")
             .expect("new trained source is advertised");
         assert_eq!(claims.len(), 1);
         assert_eq!(
             claims[0].files,
             capture_registered_files(adapter.parent().unwrap()).unwrap()
         );
-        progress.acknowledge(generation);
+        progress.acknowledge("worker-a", generation);
 
         std::fs::write(&manifest, br#"{"loras":[]}"#).unwrap();
         let mut rescanned = Vec::new();
         registered_digest_source_claims(&settings, |claim| rescanned.push(claim));
         progress.replace_scanned(rescanned);
         assert!(
-            progress.pending().unwrap().1.is_empty(),
+            progress.pending("worker-a").unwrap().1.is_empty(),
             "removed source is withdrawn"
         );
     }

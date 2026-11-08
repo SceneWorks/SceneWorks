@@ -2011,7 +2011,7 @@ pub(crate) async fn heartbeat_with_reason(
     // Capture the label before `status` is moved into the request, for the log line.
     let status_label = status.as_str().to_owned();
     portable_source_claims::refresh_background_inventory(settings.clone());
-    let portable_claims = portable_source_claims::pending_inventory_claims();
+    let portable_claims = portable_source_claims::pending_inventory_claims(&settings.worker_id);
     let outcome: WorkerResult<WorkerSnapshot> = api
         .post_json(
             &format!("/api/v1/workers/{}/heartbeat", settings.worker_id),
@@ -2029,7 +2029,7 @@ pub(crate) async fn heartbeat_with_reason(
     match outcome {
         Ok(_) => {
             if let Some((generation, _)) = portable_claims {
-                portable_source_claims::mark_inventory_published(generation);
+                portable_source_claims::mark_inventory_published(&settings.worker_id, generation);
             }
             Ok(())
         }
