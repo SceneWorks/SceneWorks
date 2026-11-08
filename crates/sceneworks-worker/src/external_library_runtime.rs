@@ -72,6 +72,7 @@ pub(crate) struct RuntimeSourceGuard {
     portable_scope: Option<ActiveLocalArtifacts>,
     _portable_snapshot: Option<PortableAttemptSnapshot>,
     plan_layers: Option<std::sync::Arc<VerifiedPlanLayers>>,
+    verified_revision_sources: Vec<VerifiedRevisionSource>,
     resolutions: Vec<ModelResolution>,
     sessions: Vec<ExternalSourceSession>,
     /// The ONE process-wide local-tier preference scope for this job, holding exactly the
@@ -516,6 +517,7 @@ impl RuntimeSourceGuard {
         let mut portable_snapshot = None;
         let mut portable_scope = None;
         let mut plan_layers = None;
+        let mut verified_revision_sources = Vec::new();
         if let Some(binding) = binding {
             verify_portable_route(
                 binding,
@@ -552,6 +554,7 @@ impl RuntimeSourceGuard {
             }
             rebind_revision_primary_paths(binding, settings, &mut dispatch_payload)?;
             rewrite_training_plan_source(binding, settings, &mut dispatch_payload)?;
+            verified_revision_sources = revision_primary_handoffs(binding, &dispatch_payload)?;
             dispatch_payload
                 .entry("advanced".to_owned())
                 .or_insert_with(|| json!({}))
@@ -604,6 +607,7 @@ impl RuntimeSourceGuard {
             portable_scope,
             _portable_snapshot: portable_snapshot,
             plan_layers,
+            verified_revision_sources,
             resolutions,
             sessions,
             local_scope,
@@ -635,6 +639,7 @@ impl RuntimeSourceGuard {
             portable_scope: None,
             _portable_snapshot: None,
             plan_layers: None,
+            verified_revision_sources: Vec::new(),
             resolutions: Vec::new(),
             sessions: Vec::new(),
             local_scope: None,
@@ -649,6 +654,10 @@ impl RuntimeSourceGuard {
 
     pub(crate) fn plan_layers(&self) -> Option<std::sync::Arc<VerifiedPlanLayers>> {
         self.plan_layers.clone()
+    }
+
+    pub(crate) fn verified_revision_sources(&self) -> Vec<VerifiedRevisionSource> {
+        self.verified_revision_sources.clone()
     }
 
     pub(crate) fn finish_success(mut self) -> WorkerResult<()> {
@@ -1879,6 +1888,54 @@ fn model_slot_entry_mut<'a>(
             .get_mut(index.parse::<usize>().ok()?);
     }
     payload.get_mut(slot)
+}
+
+/// A worker-local proof of one pinned primary source selected by the portable guard. This is
+/// built only after route verification and copy-then-verify, and is carried in Settings while the
+/// guard keeps the private snapshot leased. A job payload cannot create one.
+#[derive(Clone, Debug)]
+pub(crate) struct VerifiedRevisionSource {
+    pub(crate) model_id: String,
+    pub(crate) repository: String,
+    pub(crate) revision: String,
+    pub(crate) path: PathBuf,
+}
+
+fn revision_primary_handoffs(
+    route: &PortableRouteBinding,
+    dispatch: &JsonObject,
+) -> WorkerResult<Vec<VerifiedRevisionSource>> {
+    route
+        .models
+        .iter()
+        .filter_map(|model| {
+            let primary = model
+                .members
+                .iter()
+                .find(|member| member.role == ArtifactMemberRole::Primary)?;
+            let PortableSourceIdentity::Revision { identity } = &primary.source else {
+                return None;
+            };
+            Some((model, identity))
+        })
+        .map(|(model, identity)| {
+            let (_, entry) = payload_model_slots(dispatch)
+                .into_iter()
+                .find(|(slot, _)| slot == &model.slot)
+                .ok_or_else(|| invalid_binding("verified revision model slot disappeared"))?;
+            let path = entry
+                .pointer("/paths/model")
+                .or_else(|| entry.get("modelPath"))
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| invalid_binding("verified revision primary has no loader path"))?;
+            Ok(VerifiedRevisionSource {
+                model_id: model.model_id.clone(),
+                repository: identity.repository.clone(),
+                revision: identity.revision.clone(),
+                path: PathBuf::from(path),
+            })
+        })
+        .collect()
 }
 
 /// Rebind every model in the claimed route to this worker's installation before dispatch.
@@ -5781,6 +5838,51 @@ mod tests {
         )
         .unwrap();
         PortableRouteBinding::new("cpu", std::env::consts::OS, vec![model]).unwrap()
+    }
+
+    #[test]
+    fn cold_portable_revision_yields_worker_only_primary_handoff() {
+        let temp = TempDir::new().unwrap();
+        let (settings, library, payload) = installed_model(&temp);
+        let receipt = settings
+            .data_dir
+            .join("models")
+            .join(
+                sceneworks_core::model_artifacts::artifact_selection::safe_download_dir(
+                    "guardfx/model",
+                ),
+            )
+            .join(".sceneworks-download-complete.json");
+        std::fs::remove_file(receipt).unwrap();
+        assert!(settings
+            .verified_revision_source("m", "guardfx/model", REV_A)
+            .is_none());
+        with_library(&library, || {
+            let guard = RuntimeSourceGuard::begin_with_binding(
+                &JobType::ImageGenerate,
+                &payload,
+                &settings,
+                Some(&portable_installed_model_binding()),
+            )
+            .expect("portable verification serves a cold source without an install receipt");
+            let handoffs = guard.verified_revision_sources();
+            assert_eq!(handoffs.len(), 1);
+            assert_eq!(handoffs[0].model_id, "m");
+            assert_eq!(handoffs[0].repository, "guardfx/model");
+            assert_eq!(handoffs[0].revision, REV_A);
+            assert_eq!(
+                handoffs[0].path,
+                PathBuf::from(
+                    guard.dispatch_payload()["modelManifestEntry"]["paths"]["model"]
+                        .as_str()
+                        .unwrap()
+                )
+            );
+            assert_eq!(
+                std::fs::read(handoffs[0].path.join("model.safetensors")).unwrap(),
+                b"weights"
+            );
+        });
     }
 
     // The resident-base rows this THREAD resolves, replacing the production table for the body of

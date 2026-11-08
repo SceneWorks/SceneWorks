@@ -294,6 +294,7 @@ async fn run_utility_job_inner(
         // The typed paths belong to the source guard's verified, immutable attempt snapshot.
         // The guard below outlives this dispatch, retaining its exclusive lease through load.
         dispatch_settings.verified_plan_layers = source_guard.plan_layers();
+        dispatch_settings.verified_revision_sources = source_guard.verified_revision_sources();
         let dispatch_result = dispatch_utility_job(
             api,
             &dispatch_settings,

@@ -3216,6 +3216,32 @@ fn resolve_trainer_components(
 /// DINOv2 teacher TRAINING resource). Shared by the in-process trainer and every Iris rank process
 /// (sc-25689), so they can never load different inputs.
 #[cfg(native_lane)]
+fn flux3_trusted_training_base(settings: &Settings, weights_dir: &Path) -> WorkerResult<PathBuf> {
+    use sceneworks_core::training::flux3::{BASE_ID, BASE_REPO, BASE_REVISION};
+    let trusted = settings
+        .verified_revision_source(BASE_ID, BASE_REPO, BASE_REVISION)
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            crate::flux3_receipted_snapshot(&settings.data_dir, BASE_REPO, BASE_REVISION, BASE_ID)
+        })
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "FLUX.3 training requires the installed receipt-backed publisher base or a verified portable source at its pinned revision.".to_owned(),
+            )
+        })?;
+    let actual = std::fs::canonicalize(weights_dir)
+        .map_err(|error| WorkerError::InvalidPayload(format!("FLUX.3 baseModelPath: {error}")))?;
+    let expected = std::fs::canonicalize(&trusted)
+        .map_err(|error| WorkerError::InvalidPayload(format!("FLUX.3 publisher base: {error}")))?;
+    if actual != expected {
+        return Err(WorkerError::InvalidPayload(
+            "FLUX.3 baseModelPath does not name the pinned publisher training base.".to_owned(),
+        ));
+    }
+    Ok(trusted)
+}
+
+#[cfg(native_lane)]
 pub(crate) struct TrainerLoadInputs {
     weights_dir: PathBuf,
     text_encoder: Option<WeightsSource>,
@@ -3235,22 +3261,8 @@ impl TrainerLoadInputs {
             "Training baseModelPath",
         )?;
         if engine_id == "flux3_klein_base" {
-            use sceneworks_core::training::flux3::{BASE_ID, BASE_REPO, BASE_REVISION};
-            let trusted = crate::flux3_receipted_snapshot(&settings.data_dir, BASE_REPO, BASE_REVISION, BASE_ID)
-                .ok_or_else(|| WorkerError::InvalidPayload("FLUX.3 training requires the installed receipt-backed publisher base at its pinned revision.".to_owned()))?;
-            let actual = std::fs::canonicalize(&weights_dir).map_err(|error| {
-                WorkerError::InvalidPayload(format!("FLUX.3 baseModelPath: {error}"))
-            })?;
-            let expected = std::fs::canonicalize(&trusted).map_err(|error| {
-                WorkerError::InvalidPayload(format!("FLUX.3 publisher base: {error}"))
-            })?;
-            if actual != expected {
-                return Err(WorkerError::InvalidPayload(
-                    "FLUX.3 baseModelPath does not name the pinned publisher training base."
-                        .to_owned(),
-                ));
-            }
-            crate::flux3_runtime_bundle_check(&trusted, BASE_ID)
+            let trusted = flux3_trusted_training_base(settings, &weights_dir)?;
+            crate::flux3_runtime_bundle_check(&trusted, sceneworks_core::training::flux3::BASE_ID)
                 .map_err(WorkerError::InvalidPayload)?;
         }
         // LTX-2.3's Gemma-3 text encoder lives OUTSIDE `weights_dir` — thread the bundled sibling onto
@@ -9703,6 +9715,31 @@ mod tests {
                 .and_then(|value| value.get("frames")),
             Some(&json!(89))
         );
+    }
+
+    #[cfg(native_lane)]
+    #[test]
+    fn flux3_training_accepts_only_exact_guard_verified_publisher_path() {
+        use sceneworks_core::training::flux3::{BASE_ID, BASE_REPO, BASE_REVISION};
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("models/portable-attempts/base");
+        let other = temp.path().join("models/portable-attempts/other");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let mut settings = test_settings(temp.path());
+        assert!(flux3_trusted_training_base(&settings, &path).is_err());
+        settings.verified_revision_sources.push(
+            crate::external_library_runtime::VerifiedRevisionSource {
+                model_id: BASE_ID.to_owned(),
+                repository: BASE_REPO.to_owned(),
+                revision: BASE_REVISION.to_owned(),
+                path: path.clone(),
+            },
+        );
+        assert_eq!(flux3_trusted_training_base(&settings, &path).unwrap(), path);
+        assert!(flux3_trusted_training_base(&settings, &other).is_err());
+        settings.verified_revision_sources[0].revision = "wrong-revision".to_owned();
+        assert!(flux3_trusted_training_base(&settings, &path).is_err());
     }
 
     #[cfg(native_lane)]
