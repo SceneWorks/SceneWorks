@@ -58,10 +58,12 @@ test("pre-tag sidecars are unsigned and source-bound; tag jobs verify before sig
   assert.match(windowsPrep, /runs-on: \[self-hosted, Windows, X64, cuda\]/);
   assert.match(windowsPrep, /build-sidecar\.mjs/);
   assert.match(windowsPrep, /seal windows/);
+  assert.ok(windowsPrep.indexOf("seal windows") < windowsPrep.indexOf("verify windows"));
   assert.match(linuxPrep, /runs-on: ubuntu-22\.04/);
   assert.ok(linuxPrep.indexOf("select-linux-flash-cache.mjs") < linuxPrep.indexOf("cache-directories:"));
   assert.ok(linuxPrep.indexOf("cache-directories:") < linuxPrep.indexOf("build-sidecar.mjs"));
   assert.match(linuxPrep, /seal linux/);
+  assert.ok(linuxPrep.indexOf("seal linux") < linuxPrep.indexOf("verify linux"));
   for (const platform of ["windows", "linux"]) {
     const packaging = job(release, platform);
     assert.ok(packaging.indexOf(`find ${platform}`) < packaging.indexOf(`release-sidecar-${platform}`));
