@@ -24,6 +24,7 @@ const STATIC_SOURCE_IDS: &[&str] = &[
     "flux_ip_encoder",
     "sdxl_ip_adapter",
     "sdxl_ip_encoder",
+    "sdxl_detail_tile_control",
     "depth_anything_v2_small",
     "instantid_mlx",
     "instantid_controlnet",
@@ -1055,6 +1056,65 @@ fn capture_one(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn default_detail_tile_source_is_advertised_for_exact_worker_claim() {
+        use sceneworks_core::model_artifacts::portable_binding::{
+            PortableArtifactMember, PortableSourceIdentity,
+        };
+        use sceneworks_core::model_artifacts::ArtifactMemberRole;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let hub = temp.path().join("hub");
+        let settings = Settings::for_test(temp.path().join("data"));
+        let source =
+            sceneworks_core::control_weights::shipped_auxiliary_source("sdxl_detail_tile_control")
+                .unwrap();
+        let file = hub
+            .join("models--xinsir--controlnet-tile-sdxl-1.0/snapshots")
+            .join(source.revision)
+            .join("diffusion_pytorch_model.safetensors");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"tile control weights").unwrap();
+
+        crate::test_env::temp_env_vars(&[("HF_HUB_CACHE", hub.to_str().unwrap())], || {
+            let (selected_claim, selected_path) =
+                capture_selected_source("sdxl_detail_tile_control", &settings, &JsonObject::new())
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(selected_path, file);
+            assert_eq!(
+                selected_claim.provenance,
+                PortableSourceProvenance::PinnedRepo {
+                    repository: source.repo.to_owned(),
+                    revision: source.revision.to_owned(),
+                }
+            );
+            let advertised = static_source_claims(&settings)
+                .into_iter()
+                .find(|claim| claim.source_id == "sdxl_detail_tile_control")
+                .expect("default Detail tile source must be in worker inventory");
+            assert_eq!(advertised, selected_claim);
+            let member = PortableArtifactMember {
+                role: ArtifactMemberRole::Control,
+                component_id: Some("sdxl_detail_tile_control".to_owned()),
+                source: PortableSourceIdentity::WorkerClaim {
+                    source_id: advertised.source_id.clone(),
+                    provenance: advertised.provenance.clone(),
+                    closure_sha256: advertised.closure_sha256.clone(),
+                },
+                tier: None,
+                files: advertised.files.clone(),
+            };
+            assert!(advertised.matches_worker_claim_member(&member).is_ok());
+            std::fs::write(&file, b"changed tile weights").unwrap();
+            let changed = static_source_claims(&settings)
+                .into_iter()
+                .find(|claim| claim.source_id == "sdxl_detail_tile_control")
+                .unwrap();
+            assert!(changed.matches_worker_claim_member(&member).is_err());
+        });
+    }
 
     #[test]
     fn receipt_backed_builtin_conversion_advertises_and_rebinds_exact_model_bytes() {
