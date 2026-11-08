@@ -57,6 +57,7 @@ pub(crate) enum SourceGuardBeforeFetch {
 /// The source guard owns local-tier selection and the installed-external refusal. Let it select
 /// and lease a complete local bundle before considering any network fetch. Only a genuinely absent
 /// frozen revision member may reach the downloader; every other guard refusal stays terminal.
+#[cfg(test)]
 pub(crate) fn begin_source_guard_before_fetch(
     job_type: &JobType,
     payload: &JsonObject,

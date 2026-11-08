@@ -102,6 +102,7 @@ impl RuntimeSourceGuard {
         Self::begin_with_binding(job_type, payload, settings, None)
     }
 
+    #[cfg(test)]
     pub(crate) fn begin_with_binding(
         job_type: &JobType,
         payload: &JsonObject,
