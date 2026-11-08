@@ -9736,6 +9736,7 @@ async fn a_qwen_rewrite_result_offers_an_editable_prompt_beside_the_untouched_or
 async fn direct_prompting_needs_neither_rewriter_installed() {
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let _hub_guard = pin_hf_hub_cache(&temp_dir.path().join("fixture-hub"));
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
     std::fs::write(
