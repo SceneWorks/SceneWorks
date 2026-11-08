@@ -87,10 +87,11 @@ pub(super) async fn register(app: &axum::Router, worker: &str) {
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": worker, "gpuId": "test-gpu", "gpuName": "Test GPU",
-            "capabilities": ["gpu", "audio_generate"], "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            worker,
+            &["gpu", "audio_generate"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -101,7 +102,7 @@ pub(super) async fn claim(app: &axum::Router, worker: &str) -> Value {
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": worker }),
+        portable_test_worker_claim(worker, TestPortableRoute::MlxMacos),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{claimed}");

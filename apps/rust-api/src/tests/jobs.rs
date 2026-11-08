@@ -1461,11 +1461,12 @@ async fn vector_route_validates_and_stamps_typed_image_to_svg_request() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(wrong_claim["job"].is_null());
-    claim_job_as_worker(
+    claim_job_as_worker_on_route(
         &app,
         created["id"].as_str().expect("job id"),
         "image-vector-worker",
         &["gpu", "vector_image_to_svg"],
+        TestPortableRoute::MlxMacos,
     )
     .await;
 
@@ -1558,11 +1559,12 @@ async fn vector_worker_fact_publishes_through_the_api_sidecar_contract() {
     let (status, legacy_job) = create(app.clone()).await;
     assert_eq!(status, StatusCode::CREATED, "{legacy_job}");
     let legacy_job_id = legacy_job["id"].as_str().expect("legacy job id");
-    claim_job_as_worker(
+    claim_job_as_worker_on_route(
         &app,
         legacy_job_id,
         "legacy-vector-worker",
         &["gpu", "vector_image_to_svg"],
+        TestPortableRoute::MlxMacos,
     )
     .await;
     let mut legacy_fact = fact("asset_vector_legacy", "genset_vector_legacy");
@@ -1604,11 +1606,12 @@ async fn vector_worker_fact_publishes_through_the_api_sidecar_contract() {
     let (status, generated_job) = create(app.clone()).await;
     assert_eq!(status, StatusCode::CREATED, "{generated_job}");
     let generated_job_id = generated_job["id"].as_str().expect("generated job id");
-    claim_job_as_worker(
+    claim_job_as_worker_on_route(
         &app,
         generated_job_id,
         "fixed-vector-worker",
         &["gpu", "vector_image_to_svg"],
+        TestPortableRoute::MlxMacos,
     )
     .await;
     let generated_fact = fact("asset_vector_fixed", "genset_vector_fixed");
@@ -3759,13 +3762,11 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "worker-1",
-            "gpuId": "gpu-0",
-            "gpuName": "Test GPU",
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "worker-1",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -3773,7 +3774,7 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-1" }),
+        portable_test_worker_claim("worker-1", TestPortableRoute::MlxMacos),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{claimed}");
@@ -3923,7 +3924,7 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-1" }),
+        portable_test_worker_claim("worker-1", TestPortableRoute::MlxMacos),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{termination_claim}");
@@ -7393,13 +7394,11 @@ async fn worker_can_register_claim_and_complete_job_through_http() {
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "worker-1",
-            "gpuId": "gpu-0",
-            "gpuName": "GPU 0",
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "worker-1",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -7423,7 +7422,7 @@ async fn worker_can_register_claim_and_complete_job_through_http() {
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-1" }),
+        portable_test_worker_claim("worker-1", TestPortableRoute::MlxMacos),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -7478,7 +7477,14 @@ async fn in_flight_running_progress_cannot_resurrect_a_canceled_job() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     let job_id = created["id"].as_str().expect("job id").to_owned();
-    claim_job_as_worker(&app, &job_id, "stream-worker", &["image_detail"]).await;
+    claim_job_as_worker_on_route(
+        &app,
+        &job_id,
+        "stream-worker",
+        &["gpu", "mlx", "image_detail"],
+        TestPortableRoute::MlxMacos,
+    )
+    .await;
 
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
     *state.test_hooks.progress_before_accept_once.lock() = Some(barrier.clone());
@@ -7602,13 +7608,11 @@ async fn progress_ticks_only_republish_queue_on_status_change() {
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "worker-1",
-            "gpuId": "gpu-0",
-            "gpuName": "GPU 0",
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "worker-1",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     let (_, created) = request(
@@ -7629,7 +7633,7 @@ async fn progress_ticks_only_republish_queue_on_status_change() {
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-1" }),
+        portable_test_worker_claim("worker-1", TestPortableRoute::MlxMacos),
     )
     .await;
     // Move the job into `running` (a transition from `preparing`).
@@ -7696,13 +7700,11 @@ async fn live_job_events_drop_result_assets_on_running_ticks_but_not_terminal() 
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "worker-1",
-            "gpuId": "gpu-0",
-            "gpuName": "GPU 0",
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "worker-1",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     let (_, created) = request(
@@ -7723,7 +7725,7 @@ async fn live_job_events_drop_result_assets_on_running_ticks_but_not_terminal() 
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-1" }),
+        portable_test_worker_claim("worker-1", TestPortableRoute::MlxMacos),
     )
     .await;
 
@@ -7819,13 +7821,11 @@ async fn cleared_terminal_noop_retry_is_owner_checked_and_emits_no_events() {
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "worker-1",
-            "gpuId": "gpu-0",
-            "gpuName": "GPU 0",
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "worker-1",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     let (_, created) = request(
@@ -7846,7 +7846,7 @@ async fn cleared_terminal_noop_retry_is_owner_checked_and_emits_no_events() {
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-1" }),
+        portable_test_worker_claim("worker-1", TestPortableRoute::MlxMacos),
     )
     .await;
     let terminal_payload = json!({
@@ -7960,13 +7960,11 @@ async fn canceling_queued_job_finishes_without_worker_acknowledgement() {
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "worker-1",
-            "gpuId": "gpu-0",
-            "gpuName": "GPU 0",
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "worker-1",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -7975,7 +7973,7 @@ async fn canceling_queued_job_finishes_without_worker_acknowledgement() {
         app,
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-1" }),
+        portable_test_worker_claim("worker-1", TestPortableRoute::MlxMacos),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -8129,13 +8127,11 @@ async fn cancel_pending_jobs_cancels_every_queued_item_but_not_active_ones() {
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "worker-1",
-            "gpuId": "gpu-0",
-            "gpuName": "GPU 0",
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "worker-1",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -8163,7 +8159,7 @@ async fn cancel_pending_jobs_cancels_every_queued_item_but_not_active_ones() {
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-1" }),
+        portable_test_worker_claim("worker-1", TestPortableRoute::MlxMacos),
     )
     .await;
     let active_id = claimed["job"]["id"]
@@ -8225,13 +8221,11 @@ async fn prioritize_jobs_moves_selected_pending_work_ahead_for_the_next_claim() 
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "worker-priority",
-            "gpuId": "gpu-0",
-            "gpuName": "GPU 0",
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "worker-priority",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -8280,7 +8274,7 @@ async fn prioritize_jobs_moves_selected_pending_work_ahead_for_the_next_claim() 
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-priority" }),
+        portable_test_worker_claim("worker-priority", TestPortableRoute::MlxMacos),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -8904,7 +8898,14 @@ async fn ideogram_plain_text_job_degrades_to_original_prompt_when_expansion_fail
 
     let refine_id = wait_for_prompt_refine_job(&app).await;
     const WORKER_ID: &str = "test-prompt-refine-worker";
-    claim_job_as_worker(&app, &refine_id, WORKER_ID, &["gpu", "prompt_refine"]).await;
+    claim_job_as_worker_on_route(
+        &app,
+        &refine_id,
+        WORKER_ID,
+        &["gpu", "prompt_refine"],
+        TestPortableRoute::MlxMacos,
+    )
+    .await;
     let (status, _) = request(
         app.clone(),
         "POST",
@@ -12546,13 +12547,11 @@ async fn worker_heartbeat_interrupts_previous_active_job_through_http() {
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "worker-1",
-            "gpuId": "gpu-0",
-            "gpuName": null,
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "worker-1",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     let (_, created) = request(
@@ -12566,7 +12565,7 @@ async fn worker_heartbeat_interrupts_previous_active_job_through_http() {
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-1" }),
+        portable_test_worker_claim("worker-1", TestPortableRoute::MlxMacos),
     )
     .await;
 
@@ -12613,13 +12612,11 @@ async fn worker_heartbeat_broadcasts_job_updated_for_the_job_it_interrupts() {
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "worker-1",
-            "gpuId": "gpu-0",
-            "gpuName": null,
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "worker-1",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     let (_, created) = request(
@@ -12634,7 +12631,7 @@ async fn worker_heartbeat_broadcasts_job_updated_for_the_job_it_interrupts() {
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-1" }),
+        portable_test_worker_claim("worker-1", TestPortableRoute::MlxMacos),
     )
     .await;
     // Establish the job's first heartbeat, so the idle heartbeat below is treated as a
@@ -12687,13 +12684,11 @@ async fn worker_heartbeat_without_an_interrupt_broadcasts_no_job_event() {
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "worker-1",
-            "gpuId": "gpu-0",
-            "gpuName": null,
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "worker-1",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     let (_, created) = request(
@@ -12708,7 +12703,7 @@ async fn worker_heartbeat_without_an_interrupt_broadcasts_no_job_event() {
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-1" }),
+        portable_test_worker_claim("worker-1", TestPortableRoute::MlxMacos),
     )
     .await;
 
@@ -12746,13 +12741,11 @@ async fn stale_sweep_broadcasts_job_updated_for_interrupted_jobs() {
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "worker-1",
-            "gpuId": "gpu-0",
-            "gpuName": null,
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "worker-1",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     let (_, created) = request(
@@ -12767,7 +12760,7 @@ async fn stale_sweep_broadcasts_job_updated_for_interrupted_jobs() {
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-1" }),
+        portable_test_worker_claim("worker-1", TestPortableRoute::MlxMacos),
     )
     .await;
 
@@ -12810,13 +12803,11 @@ async fn claim_sweeps_stale_jobs_once_and_still_refreshes_the_queue() {
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "worker-1",
-            "gpuId": "gpu-0",
-            "gpuName": null,
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "worker-1",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     let (_, created) = request(
@@ -12831,7 +12822,7 @@ async fn claim_sweeps_stale_jobs_once_and_still_refreshes_the_queue() {
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-1" }),
+        portable_test_worker_claim("worker-1", TestPortableRoute::MlxMacos),
     )
     .await;
 
@@ -12842,13 +12833,11 @@ async fn claim_sweeps_stale_jobs_once_and_still_refreshes_the_queue() {
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "worker-2",
-            "gpuId": "gpu-1",
-            "gpuName": null,
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "worker-2",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     request(
@@ -12868,7 +12857,7 @@ async fn claim_sweeps_stale_jobs_once_and_still_refreshes_the_queue() {
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-2" }),
+        portable_test_worker_claim("worker-2", TestPortableRoute::MlxMacos),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -17665,7 +17654,14 @@ async fn image_depth_route_queues_a_typed_job_and_publishes_a_depth_asset() {
 
     // The worker reports the depth fact; the API persists it as a depth asset with its raw map, its
     // separate preview and its reload contract.
-    claim_job_as_worker(&app, &job_id, "depth-worker", &["gpu", "image_depth"]).await;
+    claim_job_as_worker_on_route(
+        &app,
+        &job_id,
+        "depth-worker",
+        &["gpu", "image_depth"],
+        TestPortableRoute::MlxMacos,
+    )
+    .await;
     let npy_rel = "assets/depth/genset_dapi/map.npy";
     let preview_rel = "assets/depth/genset_dapi/map.preview.png";
     std::fs::create_dir_all(project_path.join("assets/depth/genset_dapi")).unwrap();

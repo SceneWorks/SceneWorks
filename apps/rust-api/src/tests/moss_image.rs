@@ -1421,11 +1421,12 @@ async fn water_bottle_edit_survives_api_enqueue_and_candle_claim_with_its_refere
     let (status, job) = request(app.clone(), "POST", "/api/v1/image/jobs", body.clone()).await;
     assert_eq!(status, StatusCode::CREATED, "{job}");
     assert_eq!(job["type"], "image_edit");
-    claim_job_as_worker(
+    claim_job_as_worker_on_route(
         &app,
         job["id"].as_str().unwrap(),
         "bottle-recorder",
         &["gpu", "image_edit", "candle"],
+        TestPortableRoute::CandleLinux,
     )
     .await;
     let claimed = state

@@ -944,8 +944,72 @@ pub(crate) async fn wait_for_prompt_refine_job(app: &axum::Router) -> String {
     wait_for_prompt_refine_job_excluding(app, None).await
 }
 
-/// Register a production-shaped worker, claim the next compatible job, and
-/// assert that it is the target the test intends to drive.
+/// The portable route a fake worker advertises in both registration and claim.
+#[derive(Clone, Copy)]
+pub(crate) enum TestPortableRoute {
+    MlxMacos,
+    CandleLinux,
+}
+
+impl TestPortableRoute {
+    fn parts(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Self::MlxMacos => ("mlx", "macos", "mlx"),
+            Self::CandleLinux => ("candle", "linux", "0"),
+        }
+    }
+}
+
+pub(crate) fn portable_test_worker_registration(
+    worker_id: &str,
+    capabilities: &[&str],
+    route: TestPortableRoute,
+) -> Value {
+    let (_, platform, gpu_id) = route.parts();
+    json!({
+        "workerId": worker_id, "gpuId": gpu_id, "platform": platform,
+        "gpuName": "Test worker", "capabilities": capabilities, "loadedModels": []
+    })
+}
+
+pub(crate) fn portable_test_worker_claim(worker_id: &str, route: TestPortableRoute) -> Value {
+    let (backend, platform, _) = route.parts();
+    json!({
+        "workerId": worker_id,
+        "portableModelBindingVersion": sceneworks_core::model_artifacts::portable_binding::PORTABLE_MODEL_BINDING_VERSION,
+        "portableBackend": backend,
+        "portablePlatform": platform,
+    })
+}
+
+/// Register a production-shaped worker and claim the expected portable job.
+pub(crate) async fn claim_job_as_worker_on_route(
+    app: &axum::Router,
+    job_id: &str,
+    worker_id: &str,
+    capabilities: &[&str],
+    route: TestPortableRoute,
+) {
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        portable_test_worker_registration(worker_id, capabilities, route),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, claimed) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        portable_test_worker_claim(worker_id, route),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claimed["job"]["id"], job_id, "{claimed}");
+}
+
+/// Legacy helper for tests that insert unbound jobs directly into JobsStore.
 pub(crate) async fn claim_job_as_worker(
     app: &axum::Router,
     job_id: &str,
@@ -980,11 +1044,12 @@ pub(crate) async fn claim_job_as_worker(
 pub(crate) const TEST_TRAINING_WORKER_ID: &str = "test-training-worker";
 
 pub(crate) async fn claim_training_job(app: &axum::Router, job_id: &str) {
-    claim_job_as_worker(
+    claim_job_as_worker_on_route(
         app,
         job_id,
         TEST_TRAINING_WORKER_ID,
         &["gpu", "lora_train", "lora_train_execute"],
+        TestPortableRoute::MlxMacos,
     )
     .await;
 }
@@ -998,13 +1063,11 @@ pub(crate) async fn claim_training_job_as_mlx_worker(app: &axum::Router, job_id:
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": TEST_TRAINING_WORKER_ID,
-            "gpuId": "mlx",
-            "gpuName": "Apple Silicon",
-            "capabilities": ["gpu", "lora_train", "lora_train_execute"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            TEST_TRAINING_WORKER_ID,
+            &["gpu", "mlx", "lora_train", "lora_train_execute"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -1012,7 +1075,7 @@ pub(crate) async fn claim_training_job_as_mlx_worker(app: &axum::Router, job_id:
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": TEST_TRAINING_WORKER_ID }),
+        portable_test_worker_claim(TEST_TRAINING_WORKER_ID, TestPortableRoute::MlxMacos),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -1023,7 +1086,14 @@ pub(crate) async fn claim_training_job_as_mlx_worker(app: &axum::Router, job_id:
 /// shape production uses; `result` carries the model reply.
 pub(crate) async fn complete_prompt_refine_job(app: &axum::Router, job_id: &str, result: Value) {
     const WORKER_ID: &str = "test-prompt-refine-worker";
-    claim_job_as_worker(app, job_id, WORKER_ID, &["gpu", "prompt_refine"]).await;
+    claim_job_as_worker_on_route(
+        app,
+        job_id,
+        WORKER_ID,
+        &["gpu", "prompt_refine"],
+        TestPortableRoute::MlxMacos,
+    )
+    .await;
     let (status, _) = request(
         app.clone(),
         "POST",
