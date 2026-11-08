@@ -261,7 +261,7 @@ pub(super) async fn advertise_trained_source(
     };
     let mut files = std::fs::read_dir(export)
         .expect("export directory reads")
-        .map(|entry| {
+        .filter_map(|entry| {
             let path = entry.expect("export file reads").path();
             let name = path.file_name().expect("export file name");
             if matches!(
@@ -286,7 +286,6 @@ pub(super) async fn advertise_trained_source(
                 ),
             })
         })
-        .flatten()
         .collect::<Vec<_>>();
     files.sort();
     let ledger = portable_file_ledger_sha256(&files).expect("export ledger");
