@@ -50,7 +50,7 @@ pub(crate) fn missing_portable_revision_files(
 
 #[derive(Debug)]
 pub(crate) enum SourceGuardBeforeFetch {
-    Ready(external_library_runtime::RuntimeSourceGuard),
+    Ready(Box<external_library_runtime::RuntimeSourceGuard>),
     Missing(std::collections::BTreeMap<(String, String), Vec<String>>),
 }
 
@@ -119,7 +119,7 @@ fn begin_source_guard_before_fetch_cancelable(
         binding,
         cancellation,
     ) {
-        Ok(guard) => Ok(SourceGuardBeforeFetch::Ready(guard)),
+        Ok(guard) => Ok(SourceGuardBeforeFetch::Ready(Box::new(guard))),
         Err(error) => {
             let cold_revision = matches!(&error, WorkerError::InvalidPayload(detail)
                 if detail == "portable model binding: frozen source snapshot is unavailable"
@@ -253,7 +253,7 @@ async fn run_utility_job_inner(
         .await
         .map_err(|error| ("Model source unavailable.", error))?;
         let source_guard = match first_guard {
-            SourceGuardBeforeFetch::Ready(guard) => guard,
+            SourceGuardBeforeFetch::Ready(guard) => *guard,
             SourceGuardBeforeFetch::Missing(missing) => {
                 for ((repo, revision), files) in missing {
                     crate::model_jobs::ensure_hf_files_cached(
