@@ -857,6 +857,57 @@ async fn typed_http_admission_freezes_catalog_authority_before_asset_persistence
         .portable_model_binding(claimed_id)
         .unwrap()
         .is_some());
+    let old_carrier = state
+        .jobs_store
+        .create_job(crate::CreateJob {
+            job_type: queued.job_type.clone(),
+            project_id: queued.project_id.clone(),
+            project_name: None,
+            payload: queued.payload.clone(),
+            requested_gpu: queued.requested_gpu.clone(),
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+            initial_status: None,
+        })
+        .unwrap();
+    let catalog_path = state
+        .settings
+        .config_dir
+        .join("manifests/builtin.models.jsonc");
+    let original_catalog = std::fs::read(&catalog_path).unwrap();
+    let mut replacement_catalog: Value = serde_json::from_slice(&original_catalog).unwrap();
+    replacement_catalog["models"][0]["baseModel"] = json!("replacement-base");
+    std::fs::write(&catalog_path, replacement_catalog.to_string()).unwrap();
+    let (replacement_status, replacement) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{}/duplicate", old_carrier.id),
+        json!({"payloadChanges":{}}),
+    )
+    .await;
+    assert_eq!(replacement_status, StatusCode::CONFLICT, "{replacement}");
+    let (replaced_claim_status, replaced_claim) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({"workerId":"authority-candle-worker",
+            "portableModelBindingVersion":sceneworks_core::model_artifacts::portable_binding::PORTABLE_MODEL_BINDING_VERSION,
+            "portableBackend":"candle", "portablePlatform":"windows"}),
+    )
+    .await;
+    assert_eq!(replaced_claim_status, StatusCode::OK, "{replaced_claim}");
+    assert_ne!(replaced_claim["job"]["id"], json!(old_carrier.id));
+    assert_eq!(
+        state.jobs_store.get_job(&old_carrier.id).unwrap().status,
+        crate::JobStatus::Failed
+    );
+    assert!(state
+        .jobs_store
+        .portable_model_binding(&old_carrier.id)
+        .unwrap()
+        .is_none());
+    std::fs::write(&catalog_path, original_catalog).unwrap();
     // Completion must retain admitted authority even if the source catalog changes/disappears.
     std::fs::remove_file(state.settings.data_dir.join("checkpoints/inventory.json")).unwrap();
     let asset = persist_authority_output(

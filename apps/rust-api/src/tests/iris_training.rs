@@ -1016,6 +1016,66 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
         claimed_id == generation_id || claimed_id == replay["id"].as_str().unwrap(),
         "{claimed}"
     );
+    let jobs_store = sceneworks_core::jobs_store::JobsStore::new(settings.jobs_db_path.clone());
+    let original = jobs_store.get_job(&generation_id).unwrap();
+    let old_carrier = jobs_store
+        .create_job(crate::CreateJob {
+            job_type: original.job_type.clone(),
+            project_id: original.project_id.clone(),
+            project_name: None,
+            payload: original.payload.clone(),
+            requested_gpu: original.requested_gpu.clone(),
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+            initial_status: None,
+        })
+        .unwrap();
+    let old_id = old_carrier.id.as_str();
+    let user_catalog_path = manifests.join("user.models.jsonc");
+    let original_user_catalog = std::fs::read(&user_catalog_path).unwrap();
+    let mut replacement_catalog: Value = serde_json::from_str(&crate::strip_jsonc_comments(
+        &String::from_utf8(original_user_catalog.clone()).unwrap(),
+    ))
+    .unwrap();
+    let replacement_entry = replacement_catalog["models"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|entry| entry["id"] == json!(model_id))
+        .unwrap();
+    replacement_entry["provenance"]["trainingJobId"] = json!("replacement-producer");
+    std::fs::write(&user_catalog_path, replacement_catalog.to_string()).unwrap();
+    let (replacement_status, replacement) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{old_id}/duplicate"),
+        json!({"payloadChanges":{}}),
+    )
+    .await;
+    assert_eq!(replacement_status, StatusCode::CONFLICT, "{replacement}");
+    let (replaced_claim_status, replaced_claim) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        portable_test_worker_claim("test-iris-source-worker", TestPortableRoute::MlxMacos),
+    )
+    .await;
+    assert_eq!(replaced_claim_status, StatusCode::OK, "{replaced_claim}");
+    assert_ne!(replaced_claim["job"]["id"], json!(old_id));
+    assert_eq!(
+        jobs_store.get_job(old_id).unwrap().status,
+        crate::JobStatus::Failed
+    );
+    let private_binding: Option<String> = connection
+        .query_row(
+            "select portable_model_binding_json from jobs where id = ?1",
+            [old_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(private_binding.is_none());
+    std::fs::write(&user_catalog_path, original_user_catalog).unwrap();
 
     // A client-authored `checkpointModelId` naming something that is not a trained checkpoint of
     // `model` is dropped: `model`'s own manifest is what resolves.
