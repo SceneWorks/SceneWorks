@@ -33,8 +33,8 @@ use sceneworks_core::model_artifacts::external_library::{
     ModelAvailability, ModelResolution,
 };
 use sceneworks_core::model_artifacts::local_preference::{
-    hub_cache_member_destination, wait_for_portable_snapshots, ActiveLocalArtifacts,
-    LocalArtifactOverlayEntry,
+    hub_cache_member_destination, prefer_portable_snapshots, wait_for_portable_snapshots,
+    ActiveLocalArtifacts, LocalArtifactOverlayEntry, PortableOverlayWaitCancellation,
 };
 use sceneworks_core::model_artifacts::portable_binding::{
     enumerate_portable_array_slots, LocalArtifactFile, LocalArtifactMember, PortableArtifactFile,
@@ -107,6 +107,16 @@ impl RuntimeSourceGuard {
         payload: &JsonObject,
         settings: &Settings,
         binding: Option<&PortableRouteBinding>,
+    ) -> WorkerResult<Self> {
+        Self::begin_with_binding_cancelable(job_type, payload, settings, binding, None)
+    }
+
+    pub(crate) fn begin_with_binding_cancelable(
+        job_type: &JobType,
+        payload: &JsonObject,
+        settings: &Settings,
+        binding: Option<&PortableRouteBinding>,
+        cancellation: Option<&PortableOverlayWaitCancellation>,
     ) -> WorkerResult<Self> {
         let explicit_download = payload
             .get("modelArtifactOperation")
@@ -513,10 +523,17 @@ impl RuntimeSourceGuard {
             if let Some(prepared) = prepared {
                 local_scope = None;
                 if !prepared.overlays.is_empty() {
-                    portable_scope =
-                        Some(wait_for_portable_snapshots(prepared.overlays).map_err(|_| {
+                    let scope = match cancellation {
+                        Some(token) => wait_for_portable_snapshots(prepared.overlays, token),
+                        None => prefer_portable_snapshots(prepared.overlays),
+                    };
+                    portable_scope = Some(scope.map_err(|_| {
+                        if cancellation.is_some_and(PortableOverlayWaitCancellation::is_cancelled) {
+                            WorkerError::Canceled("portable overlay wait canceled".to_owned())
+                        } else {
                             invalid_binding("frozen snapshot overlay is unavailable")
-                        })?);
+                        }
+                    })?);
                 }
                 portable_snapshot = Some(prepared.snapshot);
                 plan_layers = prepared.plan_layers;

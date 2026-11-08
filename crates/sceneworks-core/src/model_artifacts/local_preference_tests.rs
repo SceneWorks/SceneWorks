@@ -466,7 +466,13 @@ fn conflicting_portable_jobs_wait_without_serializing_unrelated_sources() {
     let waiting = std::thread::spawn(move || {
         ready_tx.send(()).unwrap();
         scope_tx
-            .send(wait_for_portable_snapshots(second_entries).unwrap())
+            .send(
+                wait_for_portable_snapshots(
+                    second_entries,
+                    &PortableOverlayWaitCancellation::default(),
+                )
+                .unwrap(),
+            )
             .unwrap();
     });
     ready_rx
@@ -480,12 +486,15 @@ fn conflicting_portable_jobs_wait_without_serializing_unrelated_sources() {
 
     let unrelated_root = temp.path().join("unrelated");
     std::fs::create_dir_all(&unrelated_root).unwrap();
-    let unrelated = wait_for_portable_snapshots(vec![LocalArtifactOverlayEntry {
-        repository: "other/model".to_owned(),
-        revision: OTHER_REV.to_owned(),
-        snapshot_root: unrelated_root.clone(),
-        files: Vec::new(),
-    }])
+    let unrelated = wait_for_portable_snapshots(
+        vec![LocalArtifactOverlayEntry {
+            repository: "other/model".to_owned(),
+            revision: OTHER_REV.to_owned(),
+            snapshot_root: unrelated_root.clone(),
+            files: Vec::new(),
+        }],
+        &PortableOverlayWaitCancellation::default(),
+    )
     .unwrap();
     assert_eq!(
         local_snapshot("other/model", OTHER_REV),
@@ -519,14 +528,26 @@ fn conflicting_portable_waiters_follow_order_after_owner_fault() {
     let (second_tx, second_rx) = std::sync::mpsc::channel();
     let second = std::thread::spawn(move || {
         second_tx
-            .send(wait_for_portable_snapshots(second_entries).unwrap())
+            .send(
+                wait_for_portable_snapshots(
+                    second_entries,
+                    &PortableOverlayWaitCancellation::default(),
+                )
+                .unwrap(),
+            )
             .unwrap();
     });
     wait_for_overlay_waiters(1);
     let (third_tx, third_rx) = std::sync::mpsc::channel();
     let third = std::thread::spawn(move || {
         third_tx
-            .send(wait_for_portable_snapshots(third_entries).unwrap())
+            .send(
+                wait_for_portable_snapshots(
+                    third_entries,
+                    &PortableOverlayWaitCancellation::default(),
+                )
+                .unwrap(),
+            )
             .unwrap();
     });
     wait_for_overlay_waiters(2);
@@ -548,6 +569,60 @@ fn conflicting_portable_waiters_follow_order_after_owner_fault() {
         .unwrap();
     drop(third_scope);
     second.join().unwrap();
+    third.join().unwrap();
+}
+
+/// A owns the pair; B and C queue in that order. If B's async heartbeat owner goes away,
+/// cancellation must remove B's ticket while A still runs so C can take the pair next.
+#[test]
+fn canceled_portable_waiter_releases_fifo_place_for_live_job() {
+    let _serialized = overlay_guard();
+    let temp = tempfile::tempdir().unwrap();
+    let first = prefer_portable_snapshots(
+        overlay_entries_for_artifact(&bundle(&temp.path().join("first"))).unwrap(),
+    )
+    .unwrap();
+    let second_entries =
+        overlay_entries_for_artifact(&bundle(&temp.path().join("second"))).unwrap();
+    let third_entries = overlay_entries_for_artifact(&bundle(&temp.path().join("third"))).unwrap();
+    let canceled = PortableOverlayWaitCancellation::default();
+    let second_token = canceled.clone();
+    let (second_tx, second_rx) = std::sync::mpsc::channel();
+    let second = std::thread::spawn(move || {
+        second_tx
+            .send(wait_for_portable_snapshots(second_entries, &second_token))
+            .unwrap();
+    });
+    wait_for_overlay_waiters(1);
+    let (third_tx, third_rx) = std::sync::mpsc::channel();
+    let third = std::thread::spawn(move || {
+        third_tx
+            .send(
+                wait_for_portable_snapshots(
+                    third_entries,
+                    &PortableOverlayWaitCancellation::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    });
+    wait_for_overlay_waiters(2);
+
+    // Simulates the heartbeat future exiting on 409/transport while B's blocking guard waits.
+    canceled.cancel();
+    assert!(second_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap()
+        .is_err());
+    second.join().unwrap();
+    assert_eq!(lock_active().waiters.len(), 1);
+    assert!(third_rx.try_recv().is_err());
+    drop(first);
+    let third_scope = third_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(lock_active().waiters.len(), 0);
+    drop(third_scope);
     third.join().unwrap();
 }
 

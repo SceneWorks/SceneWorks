@@ -42,7 +42,9 @@ use super::{
     MODEL_ARTIFACT_CONTRACT_VERSION,
 };
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 /// One `(repository, revision)` pair served from a leased local bundle.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -208,6 +210,54 @@ fn lock_active() -> MutexGuard<'static, ActiveOverlay> {
     active().lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The async owner cancels a blocking overlay wait when its heartbeat fails or its job future
+/// goes away. A wake is paired with a bounded retry so a notification racing `Condvar::wait`
+/// cannot leave an abandoned utility job ahead of live FIFO waiters.
+#[derive(Clone, Debug, Default)]
+pub struct PortableOverlayWaitCancellation(Arc<AtomicBool>);
+
+impl PortableOverlayWaitCancellation {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+        overlay_changed().notify_all();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+struct WaitRegistration {
+    ticket: u64,
+    armed: bool,
+}
+
+impl Drop for WaitRegistration {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut active = lock_active();
+            active.waiters.retain(|waiter| waiter.ticket != self.ticket);
+            drop(active);
+            overlay_changed().notify_all();
+        }
+    }
+}
+
+fn register_waiter(
+    pairs: Vec<(String, String)>,
+) -> Result<WaitRegistration, ArtifactContractError> {
+    let mut active = lock_active();
+    let ticket = active.next_ticket;
+    active.next_ticket = active.next_ticket.checked_add(1).ok_or_else(|| {
+        ArtifactContractError("portable overlay waiter sequence exhausted".to_owned())
+    })?;
+    active.waiters.push(WaitingScope { ticket, pairs });
+    Ok(WaitRegistration {
+        ticket,
+        armed: true,
+    })
+}
+
 /// RAII preference scope. Dropping it restores source-tier resolution exactly; it holds no locks
 /// and performs no I/O, so a panicking load still leaves the process on the source tier.
 #[derive(Debug)]
@@ -262,7 +312,7 @@ impl Drop for ActiveLocalArtifacts {
 pub fn prefer_local_snapshots(
     entries: Vec<LocalArtifactOverlayEntry>,
 ) -> Result<ActiveLocalArtifacts, ArtifactContractError> {
-    prefer_snapshots(entries, false, false)
+    prefer_snapshots(entries, false, None)
 }
 
 /// Install an authoritative portable-job scope. The worker has already frozen and verified
@@ -271,7 +321,7 @@ pub fn prefer_local_snapshots(
 pub fn prefer_portable_snapshots(
     entries: Vec<LocalArtifactOverlayEntry>,
 ) -> Result<ActiveLocalArtifacts, ArtifactContractError> {
-    prefer_snapshots(entries, true, false)
+    prefer_snapshots(entries, true, None)
 }
 
 /// The in-process utility pool may run two jobs whose independently verified private bundles
@@ -280,14 +330,15 @@ pub fn prefer_portable_snapshots(
 /// caller runs this blocking wait on the worker's blocking pool while heartbeats continue.
 pub fn wait_for_portable_snapshots(
     entries: Vec<LocalArtifactOverlayEntry>,
+    cancellation: &PortableOverlayWaitCancellation,
 ) -> Result<ActiveLocalArtifacts, ArtifactContractError> {
-    prefer_snapshots(entries, true, true)
+    prefer_snapshots(entries, true, Some(cancellation))
 }
 
 fn prefer_snapshots(
     entries: Vec<LocalArtifactOverlayEntry>,
     portable: bool,
-    wait_for_conflict: bool,
+    cancellation: Option<&PortableOverlayWaitCancellation>,
 ) -> Result<ActiveLocalArtifacts, ArtifactContractError> {
     let mut requested: Vec<LocalArtifactOverlayEntry> = Vec::new();
     for entry in entries {
@@ -300,25 +351,27 @@ fn prefer_snapshots(
             None => requested.push(entry),
         }
     }
-    let mut active = lock_active();
     let requested_pairs = requested
         .iter()
         .map(|entry| (entry.repository.clone(), entry.revision.clone()))
         .collect::<Vec<_>>();
-    let ticket = if wait_for_conflict {
-        let ticket = active.next_ticket;
-        active.next_ticket = active.next_ticket.checked_add(1).ok_or_else(|| {
-            ArtifactContractError("portable overlay waiter sequence exhausted".to_owned())
-        })?;
-        active.waiters.push(WaitingScope {
-            ticket,
-            pairs: requested_pairs.clone(),
-        });
-        Some(ticket)
-    } else {
-        None
-    };
+    if cancellation.is_some_and(PortableOverlayWaitCancellation::is_cancelled) {
+        return Err(ArtifactContractError(
+            "portable overlay wait canceled".to_owned(),
+        ));
+    }
+    // Declared before `active`: on a panic the mutex guard drops first, then registration Drop
+    // removes this ticket and wakes the next waiter.
+    let mut registration = cancellation
+        .map(|_| register_waiter(requested_pairs.clone()))
+        .transpose()?;
+    let mut active = lock_active();
     loop {
+        if cancellation.is_some_and(PortableOverlayWaitCancellation::is_cancelled) {
+            return Err(ArtifactContractError(
+                "portable overlay wait canceled".to_owned(),
+            ));
+        }
         let active_conflict = requested.iter().find(|entry| {
             active.entries.iter().any(|held| {
                 held.entry.repository == entry.repository
@@ -327,7 +380,9 @@ fn prefer_snapshots(
             })
         });
         let earlier_waiter = active.waiters.iter().find(|waiter| {
-            ticket.is_none_or(|mine| waiter.ticket < mine)
+            registration
+                .as_ref()
+                .is_none_or(|mine| waiter.ticket < mine.ticket)
                 && requested_pairs
                     .iter()
                     .any(|pair| waiter.pairs.contains(pair))
@@ -343,15 +398,19 @@ fn prefer_snapshots(
         }) else {
             break;
         };
-        if !wait_for_conflict {
+        if cancellation.is_none() {
             return Err(conflicting_claim(conflict));
         }
         active = overlay_changed()
-            .wait(active)
-            .unwrap_or_else(PoisonError::into_inner);
+            .wait_timeout(active, Duration::from_millis(250))
+            .unwrap_or_else(PoisonError::into_inner)
+            .0;
     }
-    if let Some(ticket) = ticket {
-        active.waiters.retain(|waiter| waiter.ticket != ticket);
+    if let Some(registration) = registration.as_mut() {
+        active
+            .waiters
+            .retain(|waiter| waiter.ticket != registration.ticket);
+        registration.armed = false;
     }
     for entry in &requested {
         match active.entries.iter_mut().find(|held| &held.entry == entry) {

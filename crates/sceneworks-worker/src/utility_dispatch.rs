@@ -1,5 +1,16 @@
 //! Utility dispatch and terminal failure reconciliation.
 use super::*;
+use sceneworks_core::model_artifacts::local_preference::PortableOverlayWaitCancellation;
+
+/// Dropping the async owner (including heartbeat failure or job cancellation) wakes its
+/// blocking source guard so it cannot retain a FIFO ticket after the job has gone away.
+struct CancelOverlayWaitOnDrop(PortableOverlayWaitCancellation);
+
+impl Drop for CancelOverlayWaitOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
 
 pub(crate) fn missing_portable_revision_files(
     binding: &PortableRouteBinding,
@@ -52,8 +63,60 @@ pub(crate) fn begin_source_guard_before_fetch(
     settings: &Settings,
     binding: Option<&PortableRouteBinding>,
 ) -> WorkerResult<SourceGuardBeforeFetch> {
-    match external_library_runtime::RuntimeSourceGuard::begin_with_binding(
-        job_type, payload, settings, binding,
+    begin_source_guard_before_fetch_cancelable(job_type, payload, settings, binding, None)
+}
+
+#[cfg(test)]
+#[test]
+fn lost_guard_heartbeat_cancels_blocking_overlay_wait() {
+    use sceneworks_core::model_artifacts::local_preference::{
+        prefer_portable_snapshots, wait_for_portable_snapshots, LocalArtifactOverlayEntry,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let entry = |root: &str| LocalArtifactOverlayEntry {
+        repository: "overlay-heartbeat-test/model".to_owned(),
+        revision: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+        snapshot_root: temp.path().join(root),
+        files: Vec::new(),
+    };
+    let first_entry = entry("first");
+    let second_entry = entry("second");
+    let first = prefer_portable_snapshots(vec![first_entry]).unwrap();
+    let cancellation = PortableOverlayWaitCancellation::default();
+    let owner = CancelOverlayWaitOnDrop(cancellation.clone());
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        result_tx
+            .send(wait_for_portable_snapshots(
+                vec![second_entry],
+                &cancellation,
+            ))
+            .unwrap();
+    });
+    // Dropping the async heartbeat owner must release its blocking waiter before A exits.
+    drop(owner);
+    assert!(result_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .is_err());
+    waiter.join().unwrap();
+    drop(first);
+}
+
+fn begin_source_guard_before_fetch_cancelable(
+    job_type: &JobType,
+    payload: &JsonObject,
+    settings: &Settings,
+    binding: Option<&PortableRouteBinding>,
+    cancellation: Option<&PortableOverlayWaitCancellation>,
+) -> WorkerResult<SourceGuardBeforeFetch> {
+    match external_library_runtime::RuntimeSourceGuard::begin_with_binding_cancelable(
+        job_type,
+        payload,
+        settings,
+        binding,
+        cancellation,
     ) {
         Ok(guard) => Ok(SourceGuardBeforeFetch::Ready(guard)),
         Err(error) => {
@@ -164,12 +227,15 @@ async fn run_utility_job_inner(
         let guard_payload = job.payload.clone();
         let guard_settings = settings.clone();
         let guard_binding = portable_model_binding.clone();
+        let guard_cancellation = PortableOverlayWaitCancellation::default();
+        let _cancel_wait_on_drop = CancelOverlayWaitOnDrop(guard_cancellation.clone());
         let guard_task = crate::load_progress::spawn_blocking(move || {
-            begin_source_guard_before_fetch(
+            begin_source_guard_before_fetch_cancelable(
                 &guard_job_type,
                 &guard_payload,
                 &guard_settings,
                 guard_binding.as_ref(),
+                Some(&guard_cancellation),
             )
         });
         // The guard's admission pass can re-verify a multi-GB resolved bundle, which outlasts the
@@ -199,12 +265,15 @@ async fn run_utility_job_inner(
                 let guard_payload = job.payload.clone();
                 let guard_settings = settings.clone();
                 let guard_binding = portable_model_binding.clone();
+                let guard_cancellation = PortableOverlayWaitCancellation::default();
+                let _cancel_wait_on_drop = CancelOverlayWaitOnDrop(guard_cancellation.clone());
                 let guard_task = crate::load_progress::spawn_blocking(move || {
-                    external_library_runtime::RuntimeSourceGuard::begin_with_binding(
+                    external_library_runtime::RuntimeSourceGuard::begin_with_binding_cancelable(
                         &guard_job_type,
                         &guard_payload,
                         &guard_settings,
                         guard_binding.as_ref(),
+                        Some(&guard_cancellation),
                     )
                 });
                 progress::heartbeat_while_blocking(
