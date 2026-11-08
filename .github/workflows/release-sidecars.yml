@@ -1,0 +1,101 @@
+name: Prepare release sidecars
+
+# Run on the final, versioned release/next commit before creating a tag.
+# No signing material is available here. The tag workflow verifies each binary
+# against this exact commit before packaging and signing it.
+on:
+  push:
+    branches: [release/next]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-sidecars-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    if: ${{ github.repository == 'SceneWorks/SceneWorks' && github.ref == 'refs/heads/release/next' }}
+    runs-on: [self-hosted, Windows, X64, cuda]
+    timeout-minutes: 90
+    env:
+      CUDA_COMPUTE_CAP: "80"
+      CARGO_NET_OFFLINE: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/prepare-rust-runner
+      - name: Fetch the pinned inference release
+        env:
+          CARGO_NET_OFFLINE: "false"
+        run: cargo fetch --locked
+      - name: Build and seal the CUDA API sidecar
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          call npm ci --prefix apps/web --ignore-scripts || exit /b 1
+          call node apps/desktop/scripts/build-sidecar.mjs || exit /b 1
+          call node scripts/release-sidecar-artifact.mjs seal windows apps/desktop/binaries/sceneworks-api-x86_64-pc-windows-msvc.exe "%RUNNER_TEMP%\release-sidecar-windows-%GITHUB_RUN_ID%" || exit /b 1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-sidecar-windows
+          path: ${{ runner.temp }}/release-sidecar-windows-${{ github.run_id }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  linux:
+    if: ${{ github.repository == 'SceneWorks/SceneWorks' && github.ref == 'refs/heads/release/next' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    env:
+      CUDA_COMPUTE_CAP: "80"
+      CARGO_NET_OFFLINE: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: "1.98.0"
+      - name: Install API build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y build-essential libssl-dev pkg-config
+      - name: Install CUDA Toolkit 12.9
+        uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d # v0.2.36
+        with:
+          cuda: "12.9.1"
+          method: "network"
+          linux-local-args: '["--toolkit"]'
+      # This is a release/next branch cache, so a later candidate can restore it.
+      # Tag-scoped caches in release.yml cannot supply that reuse.
+      - name: Select persistent FlashAttention build directory
+        run: node scripts/select-linux-flash-cache.mjs
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2 (v2.9.1+1)
+        with:
+          cache-directories: ${{ env.CANDLE_FLASH_ATTN_BUILD_DIR }}
+          env-vars: CANDLE_FLASH_ATTN_BUILD_DIR NVCC NVCC_CCBIN
+      - name: Fetch the pinned inference release
+        env:
+          CARGO_NET_OFFLINE: "false"
+        run: cargo fetch --locked
+      - name: Guard against gen-core version skew (candle)
+        run: |
+          bash scripts/check-gen-core-skew.sh --self-test
+          bash scripts/check-gen-core-skew.sh sceneworks-worker --features backend-candle
+          bash scripts/check-gen-core-skew.sh sceneworks-rust-api --features embed-web,backend-candle
+      - name: Build and seal the CUDA API sidecar
+        run: |
+          npm ci --prefix apps/web --ignore-scripts
+          node apps/desktop/scripts/build-sidecar.mjs
+          node scripts/release-sidecar-artifact.mjs seal linux apps/desktop/binaries/sceneworks-api-x86_64-unknown-linux-gnu "$RUNNER_TEMP/release-sidecar-linux-$GITHUB_RUN_ID"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-sidecar-linux
+          path: ${{ runner.temp }}/release-sidecar-linux-${{ github.run_id }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

@@ -5,14 +5,13 @@ name: Release (desktop)
 # builds run concurrently; the final job serializes release asset publication:
 #   macos   — signs + notarizes the .app via the APPLE_* env (from repo secrets),
 #             then staple-dmg.mjs staples the DMG; CREATES the draft release.
-#   windows — builds the candle/CUDA NSIS + MSI installers, Authenticode-signs them
+#   windows — packages the prepared candle/CUDA sidecar into NSIS + MSI installers, Authenticode-signs them
 #             through Azure Artifact Signing when the AZURE_* secrets are set
 #             (sc-1357; see RELEASING.md), and stores the signed installers as
-#             a workflow artifact. Mirrors the build steps in
-#             desktop-windows.yml; keep the two in sync when either changes.
-#   linux   — builds the candle/CUDA AppImage + deb and stores them as a workflow
-#             artifact.
-#             Mirrors desktop-linux.yml; keep the two in sync when either changes.
+#             a workflow artifact. Its sidecar is built by release-sidecars.yml.
+#   linux   — packages the prepared candle/CUDA sidecar into AppImage + deb and
+#             stores them as a workflow artifact. Its sidecar is built by
+#             release-sidecars.yml.
 #   publish-desktop — attaches Windows and Linux assets to the macOS draft and
 #             merges latest.json entries in order after all three builds succeed.
 # Mirrors the local mac flow (`npm run release:mac`): `tauri build` signs + notarizes
@@ -50,6 +49,7 @@ on:
 
 permissions:
   contents: write # create releases + upload assets
+  actions: read # fetch exact-commit sidecars from the pre-tag preparation run
 
 concurrency:
   group: release-${{ github.ref }}
@@ -233,9 +233,8 @@ jobs:
           gh release upload "$TAG" --clobber latest.json
 
   windows:
-    # Build steps mirror desktop-windows.yml's
-    # build-windows job — keep them in sync. This is the heavy candle CUDA release
-    # build (the SHIPPED artifacts), so it needs the CUDA Toolkit + MSVC toolset.
+    # Package and sign the exact CUDA sidecar built from this commit by
+    # release-sidecars.yml. The hosted signing runner never compiles CUDA.
     if: ${{ github.repository == 'SceneWorks/SceneWorks' && startsWith(github.ref, 'refs/tags/v') }}
     runs-on: windows-2022
     env:
@@ -245,35 +244,38 @@ jobs:
       # signing key is scoped to the bundle step below, not here (sc-8864).
       CUDA_COMPUTE_CAP: "80"
       CARGO_NET_OFFLINE: "true"
-    # Guardrail below GitHub's 6-hour default (sc-10420, sc-13603). The hosted
-    # release runner has no warm cache: the 0.11.0 cold Candle/CUDA installer
-    # build was still compiling at both the former 90- and 150-minute limits.
-    timeout-minutes: 240
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "20"
+      - name: Find exact-commit Windows CUDA sidecar
+        id: sidecar
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/release-sidecar-artifact.mjs find windows
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-sidecar-windows
+          run-id: ${{ steps.sidecar.outputs.run-id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/release-sidecar-windows
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
           toolchain: "1.98.0"
+      - name: Verify exact-commit Windows CUDA sidecar
+        env:
+          CUDA_COMPUTE_CAP: "80"
+          SCENEWORKS_RELEASE_SIDECAR_RUN_ID: ${{ steps.sidecar.outputs.run-id }}
+        run: node scripts/release-sidecar-artifact.mjs verify windows "${{ runner.temp }}/release-sidecar-windows"
       - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"
         run: cargo fetch --locked
-      # Put the VS2022 MSVC toolchain (cl.exe) on PATH so nvcc finds the host
-      # compiler when candle-kernels' build script compiles the CUDA kernels.
+      # Tauri's Windows shell still compiles and links with MSVC.
       - name: Set up MSVC developer environment
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
-      # Install the CUDA 12.9 Toolkit (nvcc + cudart/cublas/curand/nvrtc dev libs)
-      # the candle `cuda` feature links against. Sets CUDA_PATH for the build +
-      # the redist staging in build-sidecar.mjs. (Pin kept in lockstep with
-      # desktop-windows.yml / server-candle-linux.yml.)
-      - name: Install CUDA Toolkit 12.9
-        uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d # v0.2.36
-        with:
-          cuda: "12.9.1"
-          method: "network"
       # The candle-gen single-rev invariant the default skew gate is blind to: with
       # `--features backend-candle` a candle-gen pin resolving a different gen-core
       # rev would split contract types from the explicit runtime catalog
@@ -293,9 +295,8 @@ jobs:
         run: npm ci --prefix apps/web --ignore-scripts
       - name: Install desktop dependencies
         run: npm ci --prefix apps/desktop --ignore-scripts
-      # `tauri build` runs build-sidecar.mjs, which on Windows builds the candle
-      # sidecar by default (nvcc compiles every provider's CUDA kernels) and stages
-      # the ffmpeg resource, then packages both installers. The ~2.7 GB CUDA/cuDNN/
+      # `tauri build` verifies and stages the prebuilt Candle sidecar and ffmpeg
+      # resource, then packages both installers. The ~2.7 GB CUDA/cuDNN/
       # onnxruntime runtime is downloaded on first run (cuda_provision.rs), so the
       # installers stay small. `--config updater.release.conf.json` also signs the
       # NSIS `-setup.exe` updater payload (+ `.sig`) for the in-app updater (sc-1355).
@@ -358,6 +359,8 @@ jobs:
       - name: Build Windows candle installers (NSIS + MSI)
         shell: pwsh
         env:
+          SCENEWORKS_RELEASE_SIDECAR_ROOT: ${{ runner.temp }}/release-sidecar-windows
+          SCENEWORKS_RELEASE_SIDECAR_RUN_ID: ${{ steps.sidecar.outputs.run-id }}
           # Same minisign keypair as the macos job — signs the NSIS updater
           # payload so the shipped app verifies it against plugins.updater.pubkey
           # (sc-1355). Scoped to this step so `npm ci` / build.rs never see it
@@ -426,9 +429,7 @@ jobs:
       # with desktop-linux.yml, server-candle-linux.yml, and Windows.
       CUDA_COMPUTE_CAP: "80"
       CARGO_NET_OFFLINE: "true"
-    # The same cold Linux CUDA worker took 131 minutes in the 0.11.0 RunPod
-    # build; allow the desktop shell and packaging to finish after that compile.
-    timeout-minutes: 240
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -438,9 +439,24 @@ jobs:
           cache-dependency-path: |
             apps/web/package-lock.json
             apps/desktop/package-lock.json
+      - name: Find exact-commit Linux CUDA sidecar
+        id: sidecar
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/release-sidecar-artifact.mjs find linux
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-sidecar-linux
+          run-id: ${{ steps.sidecar.outputs.run-id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/release-sidecar-linux
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
           toolchain: "1.98.0"
+      - name: Verify exact-commit Linux CUDA sidecar
+        env:
+          SCENEWORKS_RELEASE_SIDECAR_RUN_ID: ${{ steps.sidecar.outputs.run-id }}
+        run: node scripts/release-sidecar-artifact.mjs verify linux "$RUNNER_TEMP/release-sidecar-linux"
       # Save only on `main` — see the note on the `parity-rust` cache step in check.yml. This lane
       # runs on `refs/tags/v*`, and a tag-scoped cache is readable from no other ref at all, so
       # saving here only ever consumed budget that the PR lanes needed.
@@ -474,6 +490,8 @@ jobs:
           CARGO_NET_OFFLINE: "false"
         run: cargo fetch --locked
 
+      # Packaging may need the same CUDA shared libraries available to linuxdeploy
+      # as the previous release lane, although it never invokes nvcc here.
       - name: Install CUDA Toolkit 12.9
         uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d # v0.2.36
         with:
@@ -501,6 +519,8 @@ jobs:
       # the normal AppImage and deb. Only this step receives the minisign key.
       - name: Build Linux candle packages + signed AppImage updater
         env:
+          SCENEWORKS_RELEASE_SIDECAR_ROOT: ${{ runner.temp }}/release-sidecar-linux
+          SCENEWORKS_RELEASE_SIDECAR_RUN_ID: ${{ steps.sidecar.outputs.run-id }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm --prefix apps/desktop run build -- --bundles appimage,deb --config updater.release.conf.json
