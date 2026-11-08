@@ -27,7 +27,7 @@ if (hasRevision.status !== 0) {
 // never be released with an old executable. Workflow-only changes are safe.
 const workerInputs = [
   "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "rustfmt.toml",
-  ".cargo", "vendor", "crates", "apps/rust-api/Cargo.toml", "apps/rust-worker",
+  ".cargo", "vendor", "crates", "apps/rust-api", "apps/rust-worker",
   "apps/desktop/Cargo.toml", "apps/desktop/build.rs", "apps/web/src",
   "apps/web/content-security-policy.txt", "config", "docs/generated",
   "docs/calibration",
