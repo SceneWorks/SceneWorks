@@ -1392,8 +1392,8 @@ fn flux2_conversion_source_claims(
     settings: &Settings,
     mut publish: impl FnMut(PortableSourceClaim),
 ) {
-    let hub = sceneworks_core::hf_home::huggingface_hub_cache_dir(&settings.data_dir);
-    let Ok(repos) = std::fs::read_dir(hub) else {
+    let library = sceneworks_core::hf_home::model_source_library(&settings.data_dir);
+    let Ok(repos) = std::fs::read_dir(library.root()) else {
         return;
     };
     for repo in repos.flatten() {
@@ -1405,7 +1405,10 @@ fn flux2_conversion_source_claims(
             continue;
         };
         let repository = format!("{owner}/{name}");
-        let Ok(revisions) = std::fs::read_dir(repo.path().join("snapshots")) else {
+        let Ok(snapshots) = library.snapshots_root_from_repository_root(&repo.path()) else {
+            continue;
+        };
+        let Ok(revisions) = std::fs::read_dir(snapshots) else {
             continue;
         };
         for revision in revisions.flatten() {
@@ -1454,11 +1457,11 @@ pub(crate) fn capture_selected_source(
     if let Some((repository, revision, tier)) =
         sceneworks_core::portable_sources::parse_flux2_convert_base_claim_id(source_id)
     {
-        let hub = sceneworks_core::hf_home::huggingface_hub_cache_dir(&settings.data_dir);
-        let library =
-            sceneworks_core::model_artifacts::ArtifactSourceLibrary::new(hub).map_err(|_| {
-                WorkerError::InvalidPayload("conversion source root is invalid".to_owned())
-            })?;
+        let source_library = sceneworks_core::hf_home::model_source_library(&settings.data_dir);
+        let library = sceneworks_core::model_artifacts::ArtifactSourceLibrary::new(
+            source_library.root().to_path_buf(),
+        )
+        .map_err(|_| WorkerError::InvalidPayload("conversion source root is invalid".to_owned()))?;
         let Ok((_, snapshot)) = library.discover_snapshot(repository, Some(revision)) else {
             return Ok(None);
         };

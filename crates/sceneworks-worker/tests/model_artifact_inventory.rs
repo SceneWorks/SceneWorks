@@ -314,7 +314,11 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
     // job's carriers (all categories) against the typed source-library availability contract and
     // is deliberately the ONLY worker surface holding external-library availability policy.
     ModelConsumerInventoryEntry {
-        source_files: &["crates/sceneworks-worker/src/external_library_runtime.rs"],
+        source_files: &[
+            "crates/sceneworks-worker/src/external_library_runtime.rs",
+            "crates/sceneworks-worker/src/portable_source_claims.rs",
+            "crates/sceneworks-worker/src/utility_dispatch.rs",
+        ],
         categories: &[
             Category::Image,
             Category::Video,
@@ -359,7 +363,10 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
     // sc-19708: the API's single model-source seam (carrier attachment + submission preflight);
     // same shared source-library contract, mirrored on the API side of the boundary.
     ModelConsumerInventoryEntry {
-        source_files: &["apps/rust-api/src/model_sources.rs"],
+        source_files: &[
+            "apps/rust-api/src/model_sources.rs",
+            "apps/rust-api/src/portable_admission.rs",
+        ],
         categories: &[
             Category::Image,
             Category::Video,
@@ -504,6 +511,10 @@ mod tests {
         (
             "crates/sceneworks-worker/src/job_time_download_guard.rs",
             "download admission guard, not a model loader",
+        ),
+        (
+            "crates/sceneworks-worker/src/portable_aux_sources.rs",
+            "selected auxiliary path helper for the typed portable source guard",
         ),
         (
             "crates/sceneworks-worker/src/lib.rs",
