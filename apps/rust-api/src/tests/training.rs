@@ -3902,7 +3902,36 @@ fn seed_installed_wan_i2v_a14b_training_base(data_dir: &std::path::Path) {
     }
 
     #[cfg(not(target_os = "macos"))]
-    seed_installed_training_base(data_dir, "wan_2_2_i2v_14b");
+    {
+        // The off-Mac trainer reads the pinned upstream Diffusers snapshot. A
+        // managed install marker alone cannot provide the exact file closure
+        // required by portable admission.
+        let repo = "Wan-AI/Wan2.2-I2V-A14B-Diffusers";
+        let revision = "596658fd9ca6b7b71d5057529bbf319ecbc61d74";
+        let cache = huggingface_repo_cache_path(data_dir, repo).expect("Wan cache path");
+        let snapshot = cache.join("snapshots").join(revision);
+        std::fs::create_dir_all(cache.join("refs")).expect("Wan refs dir");
+        std::fs::write(cache.join("refs/main"), revision).expect("Wan pinned ref");
+        std::fs::create_dir_all(snapshot.join("transformer")).expect("Wan transformer dir");
+        std::fs::write(snapshot.join("model_index.json"), b"{}").expect("Wan model index");
+        std::fs::write(
+            snapshot.join("transformer/diffusion_pytorch_model.safetensors"),
+            b"fixture",
+        )
+        .expect("Wan model weights");
+    }
+}
+
+async fn claim_wan_i2v_a14b_training_job(app: &axum::Router, job_id: &str) {
+    #[cfg(target_os = "macos")]
+    let route = TestPortableRoute::MlxMacos;
+    #[cfg(not(target_os = "macos"))]
+    let route = TestPortableRoute::CandleLinux;
+    #[cfg(target_os = "macos")]
+    let capabilities = &["gpu", "lora_train", "lora_train_execute"][..];
+    #[cfg(not(target_os = "macos"))]
+    let capabilities = &["gpu", "candle", "lora_train", "lora_train_execute"][..];
+    claim_job_as_worker_on_route(app, job_id, TEST_TRAINING_WORKER_ID, capabilities, route).await;
 }
 
 #[tokio::test]
@@ -3964,7 +3993,7 @@ async fn wan_a14b_registration_requires_and_registers_both_expert_files() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "{missing_job}");
     let missing_job_id = missing_job["id"].as_str().expect("missing job id");
-    claim_training_job(&app, missing_job_id).await;
+    claim_wan_i2v_a14b_training_job(&app, missing_job_id).await;
     let missing_output_dir = private_training_output_dir(&settings.data_dir, missing_job_id);
     std::fs::create_dir_all(&missing_output_dir).expect("missing output dir creates");
     write_test_safetensors(&missing_output_dir.join("wan_missing.high_noise.safetensors"));
@@ -4013,7 +4042,7 @@ async fn wan_a14b_registration_requires_and_registers_both_expert_files() {
     );
 
     let job_id = job["id"].as_str().expect("job id");
-    claim_training_job(&app, job_id).await;
+    claim_wan_i2v_a14b_training_job(&app, job_id).await;
     let output_dir = private_training_output_dir(&settings.data_dir, job_id);
     std::fs::create_dir_all(&output_dir).expect("output dir creates");
     for name in [

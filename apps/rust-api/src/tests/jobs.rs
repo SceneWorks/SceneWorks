@@ -2439,7 +2439,7 @@ async fn raw_batch_detail_rejects_every_explicit_packed_tier_carrier() {
 async fn retry_and_duplicate_recanonicalize_batch_detail_manifest_and_dense_tier() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_shipped_image_model_manifests(temp_dir.path());
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (app, _state) = raw_detail_fixture_app(test_settings(&temp_dir));
     let (status, original) = request(
         app.clone(),
         "POST",
