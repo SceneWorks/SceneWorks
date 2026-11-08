@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { artifactBinary, selectCandidateRun, verifyReceiptFields } from "./release-sidecar-artifact.mjs";
+import { artifactBinary, cudaReleaseLine, selectCandidateRun, verifyReceiptFields } from "./release-sidecar-artifact.mjs";
 
 const source = async (name) => readFile(new URL(`../${name}`, import.meta.url), "utf8");
 const job = (workflow, name) => {
@@ -17,11 +17,13 @@ test("release sidecar receipt rejects source, target, compiler, size and content
     features: "embed-web,backend-candle", compute_cap: "80",
     source_sha: "a".repeat(40), cargo_lock_sha256: "b".repeat(64), rustc: "rustc 1.98.0",
   };
+  const compilerOutput = "nvcc: NVIDIA (R) Cuda compiler driver\nCuda compilation tools, release 12.9, V12.9.86\nBuild cuda_12.9.r12.9/compiler.36037853_0";
   const receipt = {
-    ...expected, nvcc: "Cuda compilation tools, release 12.9, V12.9.86", host_compiler: "gcc 11.4",
+    ...expected, nvcc: cudaReleaseLine(compilerOutput), host_compiler: "gcc 11.4",
     binary_bytes: 100, binary_sha256: "c".repeat(64),
   };
   assert.doesNotThrow(() => verifyReceiptFields(receipt, expected, 100, "c".repeat(64)));
+  assert.throws(() => cudaReleaseLine(compilerOutput.replace("release 12.9", "release 12.8")), /CUDA 12.9/);
   for (const key of Object.keys(expected)) {
     assert.throws(() => verifyReceiptFields({ ...receipt, [key]: "wrong" }, expected, 100, "c".repeat(64)), /mismatch/);
   }

@@ -12,7 +12,7 @@ const targets = {
   windows: "x86_64-pc-windows-msvc",
   linux: "x86_64-unknown-linux-gnu",
 };
-const command = (name, args) => execFileSync(name, args, { cwd: repoRoot, encoding: "utf8" }).trim();
+const command = (name, args) => execFileSync(name, args, { cwd: repoRoot, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 }).trim();
 async function sha256(file) {
   const hash = createHash("sha256");
   for await (const chunk of createReadStream(file)) hash.update(chunk);
@@ -21,6 +21,11 @@ async function sha256(file) {
 export function artifactBinary(dir, platform) {
   if (!targets[platform]) throw new Error(`unsupported release sidecar platform: ${platform}`);
   return path.join(dir, platform === "windows" ? "sceneworks-api.exe" : "sceneworks-api");
+}
+export function cudaReleaseLine(output) {
+  const line = output.split(/\r?\n/).find((candidate) => /^Cuda compilation tools, release 12\.9,/.test(candidate.trim()));
+  if (!line) throw new Error("release sidecar requires CUDA 12.9 nvcc");
+  return line.trim();
 }
 export function selectCandidateRun(runs, sourceSha, platform) {
   if (!targets[platform] || !/^[0-9a-f]{40}$/.test(sourceSha)) throw new Error("invalid sidecar lookup input");
@@ -82,8 +87,7 @@ export async function sealReleaseSidecar(platform, builtBinary, artifactDir) {
   if (command("rustc", ["-vV"]).match(/^host:\s*(\S+)/m)?.[1] !== identity.target) {
     throw new Error("release sidecar builder has the wrong Rust host target");
   }
-  const nvcc = command("nvcc", ["--version"]);
-  if (!/release 12\.9,/.test(nvcc)) throw new Error("release sidecar requires CUDA 12.9 nvcc");
+  const nvcc = cudaReleaseLine(command("nvcc", ["--version"]));
   const hostCompiler = platform === "windows" ? process.env.VCToolsVersion : command("g++", ["--version"]).split("\n")[0];
   if (!hostCompiler?.trim()) throw new Error("release sidecar requires host compiler provenance");
   await mkdir(artifactDir, { recursive: true });
@@ -94,7 +98,7 @@ export async function sealReleaseSidecar(platform, builtBinary, artifactDir) {
   await verifyExecutableFormat(binary, platform);
   const receipt = {
     ...identity,
-    nvcc: nvcc.split("\n").at(-1),
+    nvcc,
     host_compiler: hostCompiler.trim(),
     binary_bytes: info.size,
     binary_sha256: await sha256(binary),
@@ -123,7 +127,7 @@ async function findRun(platform) {
   if (repository !== "SceneWorks/SceneWorks" || !process.env.GH_TOKEN) {
     throw new Error("release sidecar lookup requires the SceneWorks repository and GH_TOKEN");
   }
-  const uri = `repos/${repository}/actions/runs?branch=release%2Fnext&event=push&per_page=100`;
+  const uri = `repos/${repository}/actions/runs?branch=release%2Fnext&event=push&head_sha=${sourceSha}&per_page=100`;
   const runs = JSON.parse(command("gh", ["api", uri])).workflow_runs ?? [];
   const run = selectCandidateRun(runs, sourceSha, platform);
   if (!run) throw new Error(`no successful release-sidecars run for ${sourceSha}; wait for its release/next push run before tagging`);
