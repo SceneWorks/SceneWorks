@@ -22,6 +22,21 @@ use crate::model_artifacts::portable_binding::{
 use crate::store_util::{ensure_column, parse_string_enum, random_hex};
 use crate::time::{format_unix_seconds, now_unix_seconds, parse_utc_seconds, utc_now};
 
+/// Server-minted, claim-only proof for an import worker. Never project this payload field to HTTP.
+pub const IMPORT_CLAIM_CAPABILITY_KEY: &str = "importClaimCapability";
+
+fn mint_import_claim_capability(
+    payload: &mut serde_json::Map<String, Value>,
+) -> JobsStoreResult<()> {
+    let secret = random_hex(32)
+        .map_err(|error| JobsStoreError::Io(std::io::Error::other(error.to_string())))?;
+    payload.insert(
+        IMPORT_CLAIM_CAPABILITY_KEY.to_owned(),
+        Value::String(secret),
+    );
+    Ok(())
+}
+
 mod routing;
 
 // Re-export the moved routing/gating surface so the store's remaining SQL-coupled dispatch,
@@ -3512,6 +3527,18 @@ impl JobsStore {
         // only unstamped H3 record left is one claimed and rendered before the upgrade (replayed
         // as the legacy `diffusers`). The stamp changes no routing fact, so the projected claim
         // facts stay current with the new payload revision.
+        if queued.job_type == JobType::ModelImport {
+            // Rotate the proof at every claim, including pre-upgrade queued imports. A stale
+            // worker snapshot or legacy caller field cannot authorize the current execution.
+            // This does not alter import recovery's authored-payload commitment.
+            let mut payload = queued.payload.clone();
+            mint_import_claim_capability(&mut payload)?;
+            transaction.execute(
+                "update jobs set payload_json = ?1, claim_payload_revision = payload_revision + 1
+                  where id = ?2 and status = 'queued'",
+                params![dumps(&payload)?, queued.id],
+            )?;
+        }
         if matches!(
             queued.job_type,
             JobType::VideoGenerate
@@ -4052,6 +4079,12 @@ impl JobsStore {
                 "{} jobs cannot target CPU workers. Choose auto or a GPU id.",
                 request.job_type.as_str()
             )));
+        }
+        let mut request = request;
+        if request.job_type == JobType::ModelImport {
+            // Overwrite any raw caller field, and issue a new capability for every retry or
+            // duplicate. An import's recovery commitment deliberately excludes this proof.
+            mint_import_claim_capability(&mut request.payload)?;
         }
         let now = utc_now();
         let job_id = match job_id {

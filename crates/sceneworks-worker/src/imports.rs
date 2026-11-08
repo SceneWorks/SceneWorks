@@ -129,8 +129,10 @@ pub(crate) fn model_file_identity(path: &Path) -> Option<ModelFileIdentity> {
 /// Bind recovery to the server-normalized import request, not just its destination/model ID.
 /// Retry payload edits intentionally require a fresh transaction; they cannot adopt old bytes.
 pub(crate) fn model_import_commitment(payload: &JsonObject) -> String {
+    let mut authored_payload = payload.clone();
+    authored_payload.remove(sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY);
     sceneworks_core::model_artifacts::portable_binding::canonical_object_sha256(&Value::Object(
-        payload.clone(),
+        authored_payload,
     ))
     .expect("JSON import payload")
 }

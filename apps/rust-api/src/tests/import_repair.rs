@@ -183,38 +183,79 @@ async fn import_claim_probe_compares_private_payload_without_disclosing_its_sour
         .unwrap()
         .unwrap();
     assert_eq!(claimed.id, job.id);
+    let capability = claimed.payload[sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY]
+        .as_str()
+        .unwrap();
+    assert_eq!(capability.len(), 64);
+    assert_ne!(
+        claimed.payload[sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY],
+        job.payload[sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY]
+    );
     let commitment =
         sceneworks_core::model_artifacts::portable_binding::canonical_object_sha256(&payload)
             .unwrap();
     let route = format!("/api/v1/jobs/{}/import-claim", job.id);
-    let body = |worker: &str, digest: &str| json!({"workerId":worker,"targetJobId":job.id,"commitment":digest});
+    let body = |worker: &str, digest: &str, proof: &str| json!({"workerId":worker,"targetJobId":job.id,"commitment":digest,"capability":proof});
     let (status, denied) = request(
         app.clone(),
         "POST",
         &route,
-        body("other-worker", &commitment),
+        body("other-worker", &commitment, capability),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    let (status, no_proof) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({"workerId":"import-proof-worker","targetJobId":job.id,"commitment":commitment}),
+    )
+    .await;
+    assert!(!status.is_success(), "{no_proof}");
+    let (status, wrong_proof) = request(
+        app.clone(),
+        "POST",
+        &route,
+        body("import-proof-worker", &commitment, &"0".repeat(64)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{wrong_proof}");
     let (status, mismatch) = request(
         app.clone(),
         "POST",
         &route,
-        body("import-proof-worker", &format!("sha256:{}", "f".repeat(64))),
+        body(
+            "import-proof-worker",
+            &format!("sha256:{}", "f".repeat(64)),
+            capability,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{mismatch}");
     assert_eq!(mismatch["payloadMatches"], false);
     let (status, verified) = request(
-        app,
+        app.clone(),
         "POST",
         &route,
-        body("import-proof-worker", &commitment),
+        body("import-proof-worker", &commitment, capability),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{verified}");
     assert_eq!(verified["payloadMatches"], true);
     assert!(verified["job"]["payload"]["sourcePath"].is_null());
+    assert!(
+        verified["job"]["payload"][sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY]
+            .is_null()
+    );
+    let (status, public) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{}", job.id),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(public.to_string().find(capability).is_none());
     assert_eq!(
         store.get_job(&job.id).unwrap().payload["sourcePath"],
         payload["sourcePath"]
@@ -295,7 +336,15 @@ async fn actual_api_retry_chain_recovers_committed_h3_and_refuses_unrelated_or_c
     let stored_retry = JobsStore::new(&settings.jobs_db_path)
         .get_job(retry["id"].as_str().unwrap())
         .unwrap();
-    assert_eq!(stored_retry.payload, original.payload);
+    let mut retry_authored = stored_retry.payload.clone();
+    retry_authored.remove(sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY);
+    let mut original_authored = original.payload.clone();
+    original_authored.remove(sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY);
+    assert_eq!(retry_authored, original_authored);
+    assert_ne!(
+        stored_retry.payload[sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY],
+        original.payload[sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY]
+    );
     assert!(retry["payload"]["sourcePath"].is_null());
     let _runtime = start_worker(app.clone(), &settings).await;
     let unrelated = terminal(&app, unrelated["id"].as_str().unwrap()).await;

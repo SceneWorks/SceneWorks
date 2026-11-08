@@ -39,12 +39,15 @@ pub(super) fn public_job_snapshot(mut job: JobSnapshot) -> JobSnapshot {
     for map in [&mut job.payload, &mut job.result] {
         map.remove("portableModelBinding");
         map.remove("portableJobBinding");
+        map.remove(sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY);
         for value in map.values_mut() {
             redact_private_binding_markers(value);
         }
     }
     job.extra.remove("portableModelBinding");
     job.extra.remove("portableJobBinding");
+    job.extra
+        .remove(sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY);
     for value in job.extra.values_mut() {
         redact_private_binding_markers(value);
     }
@@ -65,6 +68,7 @@ pub(super) fn redact_private_binding_markers(value: &mut Value) {
         Value::Object(fields) => {
             fields.remove("portableModelBinding");
             fields.remove("portableJobBinding");
+            fields.remove(sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY);
             fields.remove("__portableAuxPaths");
             for child in fields.values_mut() {
                 redact_private_binding_markers(child);
@@ -703,9 +707,13 @@ mod portable_redaction_tests {
             "Portable source refused: /private/worker/weights.safetensors".into();
         raw_with_echo.error = Some("Cannot confine C:\\private\\worker\\model.safetensors".into());
         raw_with_echo.title = Some("Source \\\\worker\\share\\model refused".into());
+        raw_with_echo.payload.insert(
+            sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY.into(),
+            json!("private-import-proof"),
+        );
         raw_with_echo.result.insert(
             "nested".into(),
-            json!({"portableModelBinding":{"secret":"must-not-leak"}}),
+            json!({"portableModelBinding":{"secret":"must-not-leak"},"importClaimCapability":"private-import-proof"}),
         );
         let public = public_job_snapshot(raw_with_echo);
         let encoded = serde_json::to_string(&public.payload).unwrap();
@@ -715,6 +723,9 @@ mod portable_redaction_tests {
         assert!(!serde_json::to_string(&public)
             .unwrap()
             .contains("must-not-leak"));
+        assert!(!serde_json::to_string(&public)
+            .unwrap()
+            .contains("private-import-proof"));
         let diagnostics = format!("{} {:?} {:?}", public.message, public.error, public.title);
         assert!(!diagnostics.contains("/private/worker"));
         assert!(!diagnostics.contains("C:\\private"));
@@ -787,9 +798,12 @@ mod portable_redaction_tests {
             .unwrap()
             .contains("/private/worker/reference.safetensors"));
         let mut event = serde_json::to_value(raw).unwrap();
+        event["payload"][sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY] =
+            json!("private-import-proof");
         event["message"] = json!("Portable source refused: /private/worker/weights.safetensors");
         event["error"] = json!("Cannot confine C:\\private\\worker\\model.safetensors");
         redact_private_job_metadata_from_event("job.updated", &mut event);
+        assert!(!event.to_string().contains("private-import-proof"));
         assert!(!serde_json::to_string(&event).unwrap().contains("/private"));
         assert!(!serde_json::to_string(&event)
             .unwrap()

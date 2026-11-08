@@ -480,6 +480,7 @@ pub(crate) struct ImportClaimProbeRequest {
     worker_id: String,
     target_job_id: String,
     commitment: String,
+    capability: String,
 }
 
 #[derive(Serialize)]
@@ -497,6 +498,8 @@ pub(crate) async fn verify_model_import_claim(
     Path(claimed_job_id): Path<String>,
     ApiJson(request): ApiJson<ImportClaimProbeRequest>,
 ) -> Result<Json<ImportClaimProbeResponse>, ApiError> {
+    use subtle::ConstantTimeEq;
+
     if !sceneworks_core::ids::is_safe_id(&request.target_job_id)
         || !request.commitment.starts_with("sha256:")
         || request.commitment.len() != 71
@@ -508,11 +511,21 @@ pub(crate) async fn verify_model_import_claim(
     }
     let target_id = request.target_job_id;
     let worker_id = request.worker_id;
+    let capability = request.capability;
     let candidate = store_call(state.clone(), move |store, _| {
         let mut current = store.get_job(&claimed_job_id)?;
         if current.job_type != JobType::ModelImport
             || current.worker_id.as_deref() != Some(worker_id.as_str())
             || !sceneworks_core::jobs_store::ACTIVE_STATUSES.contains(&current.status.as_str())
+            || current
+                .payload
+                .get(sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY)
+                .and_then(Value::as_str)
+                .is_none_or(|expected| {
+                    expected.len() != 64
+                        || capability.len() != 64
+                        || !bool::from(expected.as_bytes().ct_eq(capability.as_bytes()))
+                })
         {
             return Ok(None);
         }
@@ -532,9 +545,11 @@ pub(crate) async fn verify_model_import_claim(
     })
     .await?
     .ok_or_else(|| ApiError::forbidden("Import claim is not owned by this worker"))?;
+    let mut authored_payload = candidate.payload.clone();
+    authored_payload.remove(sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY);
     let payload_matches =
         sceneworks_core::model_artifacts::portable_binding::canonical_object_sha256(
-            &Value::Object(candidate.payload.clone()),
+            &Value::Object(authored_payload),
         )
         .map_err(|error| ApiError::internal(error.to_string()))?
             == request.commitment;

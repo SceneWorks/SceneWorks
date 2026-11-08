@@ -1462,7 +1462,7 @@ async fn publish_claimed_model_import_manifest(
         runtime.block_on(async {
             let commitment = crate::imports::model_import_commitment(&job.payload);
             let (mut current, payload_matches) =
-                authenticated_import_claim(&api, &job.id, &job.id, &commitment).await?;
+                authenticated_import_claim(&api, &job, &job.id, &commitment).await?;
             if !payload_matches {
                 return Err(WorkerError::InvalidPayload(
                     "Import claim changed or was interrupted before publication; no selection was modified".into(),
@@ -1486,17 +1486,23 @@ struct ImportClaimProbeResponse {
 
 async fn authenticated_import_claim(
     api: &ApiClient,
-    claimed_job_id: &str,
+    claimed_job: &JobSnapshot,
     target_job_id: &str,
     commitment: &str,
 ) -> WorkerResult<(JobSnapshot, bool)> {
+    let capability = claimed_job
+        .payload
+        .get(sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY)
+        .and_then(Value::as_str)
+        .ok_or_else(|| WorkerError::InvalidPayload("Import claim lacks private worker proof".into()))?;
     let response: ImportClaimProbeResponse = api
         .post_json(
-            &format!("/api/v1/jobs/{claimed_job_id}/import-claim"),
+            &format!("/api/v1/jobs/{}/import-claim", claimed_job.id),
             &json!({
                 "workerId": api.worker_id,
                 "targetJobId": target_job_id,
                 "commitment": commitment,
+                "capability": capability,
             }),
         )
         .await?;
@@ -1522,7 +1528,7 @@ async fn authenticate_import_recovery(
     // Even the original ID must still be owned by this worker. A stale snapshot is not recovery
     // authority; read ancestry from the authenticated control plane, never a mutable payload.
     let (mut current, mut payload_matches) =
-        authenticated_import_claim(api, &job.id, &job.id, &commitment).await?;
+        authenticated_import_claim(api, job, &job.id, &commitment).await?;
     if current.id != job.id
         || current.worker_id.as_deref() != Some(api.worker_id.as_str())
         || matches!(
@@ -1552,7 +1558,7 @@ async fn authenticate_import_recovery(
             return Ok(false);
         }
         let (previous, previous_matches) =
-            authenticated_import_claim(api, &job.id, parent, &commitment).await?;
+            authenticated_import_claim(api, job, parent, &commitment).await?;
         if previous.attempts.checked_add(1) != Some(current.attempts) {
             return Ok(false);
         }
