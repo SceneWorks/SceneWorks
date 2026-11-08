@@ -33,7 +33,7 @@ use sceneworks_core::model_artifacts::external_library::{
     ModelAvailability, ModelResolution,
 };
 use sceneworks_core::model_artifacts::local_preference::{
-    hub_cache_member_destination, prefer_portable_snapshots, ActiveLocalArtifacts,
+    hub_cache_member_destination, wait_for_portable_snapshots, ActiveLocalArtifacts,
     LocalArtifactOverlayEntry,
 };
 use sceneworks_core::model_artifacts::portable_binding::{
@@ -482,7 +482,7 @@ impl RuntimeSourceGuard {
                 local_scope = None;
                 if !prepared.overlays.is_empty() {
                     portable_scope =
-                        Some(prefer_portable_snapshots(prepared.overlays).map_err(|_| {
+                        Some(wait_for_portable_snapshots(prepared.overlays).map_err(|_| {
                             invalid_binding("frozen snapshot overlay is unavailable")
                         })?);
                 }

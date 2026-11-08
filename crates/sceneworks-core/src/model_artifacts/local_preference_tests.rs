@@ -18,6 +18,17 @@ fn overlay_guard() -> MutexGuard<'static, ()> {
         .unwrap_or_else(PoisonError::into_inner)
 }
 
+fn wait_for_overlay_waiters(count: usize) {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while lock_active().waiters.len() < count {
+        assert!(
+            std::time::Instant::now() < until,
+            "portable waiter did not queue"
+        );
+        std::thread::yield_now();
+    }
+}
+
 /// Install a scope over one artifact's own snapshots. Production makes this decision at the WORKER
 /// GUARD across the whole job (see `select_local_tier`); at this layer the entries are simply the
 /// artifact's own, which is what every single-artifact case below means.
@@ -431,6 +442,113 @@ fn a_shared_snapshot_stays_served_until_the_last_scope_drops() {
     drop(second);
     assert!(local_snapshot("owner/encoder", COMPONENT_REV).is_none());
     assert!(local_snapshot("owner/model", PRIMARY_REV).is_none());
+}
+
+/// Two in-process utility conversions may freeze different complete closures of the same
+/// publisher revision. The second must wait for its own verified bundle to become serveable;
+/// it must neither fail terminally nor read the first job's private path. An unrelated job may
+/// still use the other worker loop while the conflict waits.
+#[test]
+fn conflicting_portable_jobs_wait_without_serializing_unrelated_sources() {
+    let _serialized = overlay_guard();
+    let temp = tempfile::tempdir().unwrap();
+    let first_artifact = bundle(&temp.path().join("first"));
+    let second_artifact = bundle(&temp.path().join("second"));
+    let first_root = first_artifact.location.root().to_path_buf();
+    let second_root = second_artifact.location.root().to_path_buf();
+    let second_entries = overlay_entries_for_artifact(&second_artifact).unwrap();
+    let first =
+        prefer_portable_snapshots(overlay_entries_for_artifact(&first_artifact).unwrap()).unwrap();
+
+    assert!(prefer_portable_snapshots(second_entries.clone()).is_err());
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (scope_tx, scope_rx) = std::sync::mpsc::channel();
+    let waiting = std::thread::spawn(move || {
+        ready_tx.send(()).unwrap();
+        scope_tx
+            .send(wait_for_portable_snapshots(second_entries).unwrap())
+            .unwrap();
+    });
+    ready_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .unwrap();
+    wait_for_overlay_waiters(1);
+    assert!(scope_rx.try_recv().is_err());
+    assert!(local_snapshot("owner/model", PRIMARY_REV)
+        .unwrap()
+        .starts_with(&first_root));
+
+    let unrelated_root = temp.path().join("unrelated");
+    std::fs::create_dir_all(&unrelated_root).unwrap();
+    let unrelated = wait_for_portable_snapshots(vec![LocalArtifactOverlayEntry {
+        repository: "other/model".to_owned(),
+        revision: OTHER_REV.to_owned(),
+        snapshot_root: unrelated_root.clone(),
+        files: Vec::new(),
+    }])
+    .unwrap();
+    assert_eq!(
+        local_snapshot("other/model", OTHER_REV),
+        Some(unrelated_root)
+    );
+    drop(unrelated);
+
+    drop(first);
+    let second = scope_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .unwrap();
+    assert!(local_snapshot("owner/model", PRIMARY_REV)
+        .unwrap()
+        .starts_with(&second_root));
+    drop(second);
+    waiting.join().unwrap();
+    assert!(local_snapshot("owner/model", PRIMARY_REV).is_none());
+}
+
+#[test]
+fn conflicting_portable_waiters_follow_order_after_owner_fault() {
+    let _serialized = overlay_guard();
+    let temp = tempfile::tempdir().unwrap();
+    let first = prefer_portable_snapshots(
+        overlay_entries_for_artifact(&bundle(&temp.path().join("first"))).unwrap(),
+    )
+    .unwrap();
+    let second_entries =
+        overlay_entries_for_artifact(&bundle(&temp.path().join("second"))).unwrap();
+    let third_entries = overlay_entries_for_artifact(&bundle(&temp.path().join("third"))).unwrap();
+    let (second_tx, second_rx) = std::sync::mpsc::channel();
+    let second = std::thread::spawn(move || {
+        second_tx
+            .send(wait_for_portable_snapshots(second_entries).unwrap())
+            .unwrap();
+    });
+    wait_for_overlay_waiters(1);
+    let (third_tx, third_rx) = std::sync::mpsc::channel();
+    let third = std::thread::spawn(move || {
+        third_tx
+            .send(wait_for_portable_snapshots(third_entries).unwrap())
+            .unwrap();
+    });
+    wait_for_overlay_waiters(2);
+
+    // A job fault unwinds its guard. That drop must wake the first waiter, while the later
+    // conflicting job remains queued until the first waiter releases its own scope.
+    let owner = std::thread::spawn(move || {
+        let _scope = first;
+        panic!("synthetic utility owner fault");
+    });
+    assert!(owner.join().is_err());
+    let second_scope = second_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    assert!(third_rx.try_recv().is_err());
+    drop(second_scope);
+    let third_scope = third_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    drop(third_scope);
+    second.join().unwrap();
+    third.join().unwrap();
 }
 
 /// The subset primitive the guard's coverage rule is built on. A pair may only be served by a

@@ -18,9 +18,9 @@
 //!   is decided by the GUARD — the only layer that can see every model a job will load — and handed
 //!   here already decided (see [`prefer_local_snapshots`]); a directory-level seam cannot re-ask
 //!   "does this bundle hold what THIS caller needs" once it has answered with a path.
-//! - **The bound on "process-wide", stated honestly.** The worker claim loop runs one job at a
-//!   time, so no two JOBS overlap. That is not the whole story: in the desktop deployment the
-//!   utility worker runs INSIDE the API process (`spawn_inprocess_utility_worker`), so an API read
+//! - **The bound on "process-wide", stated honestly.** A standalone worker claim loop runs one
+//!   job at a time. The desktop API runs multiple in-process utility loops; conflicting portable
+//!   job scopes wait for the earlier verified bundle while independent scopes may overlap. An API read
 //!   path resolving through the same prefer-local
 //!   [`crate::hf_home::model_source_library`] can observe a scope a job installed. For a file
 //!   OUTSIDE that job's union the leased bundle does not hold it, and such a reader sees it as
@@ -42,7 +42,7 @@ use super::{
     MODEL_ARTIFACT_CONTRACT_VERSION,
 };
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 /// One `(repository, revision)` pair served from a leased local bundle.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -184,11 +184,24 @@ struct HeldEntry {
 #[derive(Debug, Default)]
 struct ActiveOverlay {
     entries: Vec<HeldEntry>,
+    next_ticket: u64,
+    waiters: Vec<WaitingScope>,
+}
+
+#[derive(Debug)]
+struct WaitingScope {
+    ticket: u64,
+    pairs: Vec<(String, String)>,
 }
 
 fn active() -> &'static Mutex<ActiveOverlay> {
     static ACTIVE: std::sync::OnceLock<Mutex<ActiveOverlay>> = std::sync::OnceLock::new();
     ACTIVE.get_or_init(|| Mutex::new(ActiveOverlay::default()))
+}
+
+fn overlay_changed() -> &'static Condvar {
+    static CHANGED: Condvar = Condvar::new();
+    &CHANGED
 }
 
 fn lock_active() -> MutexGuard<'static, ActiveOverlay> {
@@ -229,6 +242,8 @@ impl Drop for ActiveLocalArtifacts {
                 active.entries.remove(index);
             }
         }
+        drop(active);
+        overlay_changed().notify_all();
     }
 }
 
@@ -241,12 +256,13 @@ impl Drop for ActiveLocalArtifacts {
 /// so a pair is either serveable for every consumer in the process or served to none of them.
 ///
 /// A pair already served by a live scope is refcounted, and only when the serving entry is
-/// IDENTICAL. A different bundle claiming the same snapshot is refused outright: silently picking
-/// one is exactly how a load gets handed a snapshot verified for a different selection.
+/// IDENTICAL. This immediate form refuses a different bundle claiming the same snapshot:
+/// silently picking one is exactly how a load gets handed a snapshot verified for a different
+/// selection. In-process utility jobs use [`wait_for_portable_snapshots`] instead.
 pub fn prefer_local_snapshots(
     entries: Vec<LocalArtifactOverlayEntry>,
 ) -> Result<ActiveLocalArtifacts, ArtifactContractError> {
-    prefer_snapshots(entries, false)
+    prefer_snapshots(entries, false, false)
 }
 
 /// Install an authoritative portable-job scope. The worker has already frozen and verified
@@ -255,12 +271,23 @@ pub fn prefer_local_snapshots(
 pub fn prefer_portable_snapshots(
     entries: Vec<LocalArtifactOverlayEntry>,
 ) -> Result<ActiveLocalArtifacts, ArtifactContractError> {
-    prefer_snapshots(entries, true)
+    prefer_snapshots(entries, true, false)
+}
+
+/// The in-process utility pool may run two jobs whose independently verified private bundles
+/// cover the same pinned repository revision. Wait for the prior scope to finish instead of
+/// reporting a source failure; other repository pairs remain free to run concurrently. The
+/// caller runs this blocking wait on the worker's blocking pool while heartbeats continue.
+pub fn wait_for_portable_snapshots(
+    entries: Vec<LocalArtifactOverlayEntry>,
+) -> Result<ActiveLocalArtifacts, ArtifactContractError> {
+    prefer_snapshots(entries, true, true)
 }
 
 fn prefer_snapshots(
     entries: Vec<LocalArtifactOverlayEntry>,
     portable: bool,
+    wait_for_conflict: bool,
 ) -> Result<ActiveLocalArtifacts, ArtifactContractError> {
     let mut requested: Vec<LocalArtifactOverlayEntry> = Vec::new();
     for entry in entries {
@@ -274,14 +301,57 @@ fn prefer_snapshots(
         }
     }
     let mut active = lock_active();
-    for entry in &requested {
-        if let Some(held) = active.entries.iter().find(|held| {
-            held.entry.repository == entry.repository && held.entry.revision == entry.revision
-        }) {
-            if &held.entry != entry {
-                return Err(conflicting_claim(entry));
-            }
+    let requested_pairs = requested
+        .iter()
+        .map(|entry| (entry.repository.clone(), entry.revision.clone()))
+        .collect::<Vec<_>>();
+    let ticket = if wait_for_conflict {
+        let ticket = active.next_ticket;
+        active.next_ticket = active.next_ticket.checked_add(1).ok_or_else(|| {
+            ArtifactContractError("portable overlay waiter sequence exhausted".to_owned())
+        })?;
+        active.waiters.push(WaitingScope {
+            ticket,
+            pairs: requested_pairs.clone(),
+        });
+        Some(ticket)
+    } else {
+        None
+    };
+    loop {
+        let active_conflict = requested.iter().find(|entry| {
+            active.entries.iter().any(|held| {
+                held.entry.repository == entry.repository
+                    && held.entry.revision == entry.revision
+                    && &held.entry != *entry
+            })
+        });
+        let earlier_waiter = active.waiters.iter().find(|waiter| {
+            ticket.is_none_or(|mine| waiter.ticket < mine)
+                && requested_pairs
+                    .iter()
+                    .any(|pair| waiter.pairs.contains(pair))
+        });
+        let Some(conflict) = active_conflict.or_else(|| {
+            earlier_waiter.and_then(|waiter| {
+                requested.iter().find(|entry| {
+                    waiter
+                        .pairs
+                        .contains(&(entry.repository.clone(), entry.revision.clone()))
+                })
+            })
+        }) else {
+            break;
+        };
+        if !wait_for_conflict {
+            return Err(conflicting_claim(conflict));
         }
+        active = overlay_changed()
+            .wait(active)
+            .unwrap_or_else(PoisonError::into_inner);
+    }
+    if let Some(ticket) = ticket {
+        active.waiters.retain(|waiter| waiter.ticket != ticket);
     }
     for entry in &requested {
         match active.entries.iter_mut().find(|held| &held.entry == entry) {
@@ -299,6 +369,7 @@ fn prefer_snapshots(
         }
     }
     drop(active);
+    overlay_changed().notify_all();
     Ok(ActiveLocalArtifacts {
         entries: Arc::new(requested),
         portable,
