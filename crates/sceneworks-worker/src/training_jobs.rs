@@ -2089,18 +2089,36 @@ fn apply_latent_perceptual(
         // decoder, or none for a trainer that decodes through its own VAE.
         config.perceptual_decoder_dir =
             perceptual_decoder_dir(settings, engine_id, "The VAE anchor loss")?;
-        let vae_dir = crate::model_jobs::huggingface_pinned_snapshot_dir(
-            &settings.data_dir,
-            FLUX2_VAE_MODEL.repo,
-            FLUX2_VAE_MODEL.revision,
-        )
-        .and_then(|snapshot| {
-            FLUX2_VAE_TIER_DIRS
-                .iter()
-                .map(|tier| snapshot.join(tier))
-                .find(|dir| dir.join("diffusion_pytorch_model.safetensors").is_file())
-        })
-        .ok_or_else(|| not_installed(&FLUX2_VAE_MODEL, "The VAE anchor loss"))?;
+        let vae_dir = if let Some(paths) = plan.extra.get("__portableAuxPaths") {
+            let path = paths
+                .get(FLUX2_VAE_MODEL.id)
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload(
+                        "portable FLUX.2 VAE anchor is not bound".to_owned(),
+                    )
+                })?;
+            if !path.join("diffusion_pytorch_model.safetensors").is_file() {
+                return Err(WorkerError::InvalidPayload(
+                    "portable FLUX.2 VAE anchor has no weight file".to_owned(),
+                ));
+            }
+            path
+        } else {
+            crate::model_jobs::huggingface_pinned_snapshot_dir(
+                &settings.data_dir,
+                FLUX2_VAE_MODEL.repo,
+                FLUX2_VAE_MODEL.revision,
+            )
+            .and_then(|snapshot| {
+                FLUX2_VAE_TIER_DIRS
+                    .iter()
+                    .map(|tier| snapshot.join(tier))
+                    .find(|dir| dir.join("diffusion_pytorch_model.safetensors").is_file())
+            })
+            .ok_or_else(|| not_installed(&FLUX2_VAE_MODEL, "The VAE anchor loss"))?
+        };
         config.vae_anchor = gen_core::VaeAnchorConfig {
             schedule: schedule(va),
             model_dir: Some(vae_dir),
@@ -2542,7 +2560,7 @@ fn engine_trainer_id(plan: &TrainingPlan) -> Option<&'static str> {
 }
 
 /// Pure production mapping used by both dispatch and matching-platform capability facts.
-pub(crate) fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'static str> {
+pub fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'static str> {
     match kernel {
         "moss_image_lora" => match base_model {
             "moss_image_base" => Some("moss_image_base"),
@@ -3198,6 +3216,32 @@ fn resolve_trainer_components(
 /// DINOv2 teacher TRAINING resource). Shared by the in-process trainer and every Iris rank process
 /// (sc-25689), so they can never load different inputs.
 #[cfg(native_lane)]
+fn flux3_trusted_training_base(settings: &Settings, weights_dir: &Path) -> WorkerResult<PathBuf> {
+    use sceneworks_core::training::flux3::{BASE_ID, BASE_REPO, BASE_REVISION};
+    let trusted = settings
+        .verified_revision_source(BASE_ID, BASE_REPO, BASE_REVISION)
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            crate::flux3_receipted_snapshot(&settings.data_dir, BASE_REPO, BASE_REVISION, BASE_ID)
+        })
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "FLUX.3 training requires the installed receipt-backed publisher base or a verified portable source at its pinned revision.".to_owned(),
+            )
+        })?;
+    let actual = std::fs::canonicalize(weights_dir)
+        .map_err(|error| WorkerError::InvalidPayload(format!("FLUX.3 baseModelPath: {error}")))?;
+    let expected = std::fs::canonicalize(&trusted)
+        .map_err(|error| WorkerError::InvalidPayload(format!("FLUX.3 publisher base: {error}")))?;
+    if actual != expected {
+        return Err(WorkerError::InvalidPayload(
+            "FLUX.3 baseModelPath does not name the pinned publisher training base.".to_owned(),
+        ));
+    }
+    Ok(trusted)
+}
+
+#[cfg(native_lane)]
 pub(crate) struct TrainerLoadInputs {
     weights_dir: PathBuf,
     text_encoder: Option<WeightsSource>,
@@ -3217,28 +3261,29 @@ impl TrainerLoadInputs {
             "Training baseModelPath",
         )?;
         if engine_id == "flux3_klein_base" {
-            use sceneworks_core::training::flux3::{BASE_ID, BASE_REPO, BASE_REVISION};
-            let trusted = crate::flux3_receipted_snapshot(&settings.data_dir, BASE_REPO, BASE_REVISION, BASE_ID)
-                .ok_or_else(|| WorkerError::InvalidPayload("FLUX.3 training requires the installed receipt-backed publisher base at its pinned revision.".to_owned()))?;
-            let actual = std::fs::canonicalize(&weights_dir).map_err(|error| {
-                WorkerError::InvalidPayload(format!("FLUX.3 baseModelPath: {error}"))
-            })?;
-            let expected = std::fs::canonicalize(&trusted).map_err(|error| {
-                WorkerError::InvalidPayload(format!("FLUX.3 publisher base: {error}"))
-            })?;
-            if actual != expected {
-                return Err(WorkerError::InvalidPayload(
-                    "FLUX.3 baseModelPath does not name the pinned publisher training base."
-                        .to_owned(),
-                ));
-            }
-            crate::flux3_runtime_bundle_check(&trusted, BASE_ID)
+            let trusted = flux3_trusted_training_base(settings, &weights_dir)?;
+            crate::flux3_runtime_bundle_check(&trusted, sceneworks_core::training::flux3::BASE_ID)
                 .map_err(WorkerError::InvalidPayload)?;
         }
         // LTX-2.3's Gemma-3 text encoder lives OUTSIDE `weights_dir` — thread the bundled sibling onto
         // the trainer `LoadSpec` so a self-contained install trains without a separate gemma download
         // (sc-9989).
-        let text_encoder = training_text_encoder(engine_id, &weights_dir);
+        let text_encoder =
+            if engine_id == "ltx_2_3" && plan.extra.contains_key("__portableAuxPaths") {
+                let path = plan
+                    .extra
+                    .get("__portableAuxPaths")
+                    .and_then(|paths| paths.get("ltx_training_text_encoder"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        WorkerError::InvalidPayload(
+                            "portable LTX training text encoder is not bound".to_owned(),
+                        )
+                    })?;
+                Some(WeightsSource::Dir(PathBuf::from(path)))
+            } else {
+                training_text_encoder(engine_id, &weights_dir)
+            };
         // Caller-staged model components (epic 13657, sc-13682): the base model's pinned
         // `coRequisite` downloads the trainer's engine consumes — SDXL's CLIP-L/bigG tokenizers +
         // fp16-fix VAE on candle, Iris' Qwen3-VL text encoder. A missing one fails the job with an
@@ -3247,7 +3292,45 @@ impl TrainerLoadInputs {
             resolve_trainer_components(engine_id, &plan.target.base_model, settings)?;
         // Iris REPA (sc-25689): the frozen teacher is a separately installed TRAINING resource,
         // re-verified (size + sha256) before every run and never downloaded here.
-        if let Some(teacher) = crate::iris_curricula::repa_teacher_component(settings, plan)? {
+        let bound_teacher = plan
+            .extra
+            .get("__portableAuxPaths")
+            .and_then(|paths| paths.get("repa_teacher"))
+            .and_then(Value::as_str)
+            .map(PathBuf::from);
+        if plan.extra.contains_key("__portableAuxPaths")
+            && sceneworks_core::training::iris::is_iris_training_kernel(&plan.target.kernel)
+            && sceneworks_core::training::iris::curricula::iris_repa_enabled(
+                &sceneworks_core::training::iris::iris_options(&plan.config)
+                    .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?,
+            )
+            && bound_teacher.is_none()
+        {
+            return Err(WorkerError::InvalidPayload(
+                "portable Iris REPA teacher is not bound".to_owned(),
+            ));
+        }
+        let teacher = if let Some(path) = bound_teacher {
+            let dir = if path.is_file() {
+                path.parent()
+                    .ok_or_else(|| {
+                        WorkerError::InvalidPayload(
+                            "portable REPA teacher path has no parent".to_owned(),
+                        )
+                    })?
+                    .to_path_buf()
+            } else {
+                path
+            };
+            crate::iris_curricula::verify_repa_teacher_file(
+                &dir.join(sceneworks_core::training::iris::curricula::IRIS_REPA_TEACHER_FILE),
+            )
+            .map_err(WorkerError::InvalidPayload)?;
+            Some(WeightsSource::Dir(dir))
+        } else {
+            crate::iris_curricula::repa_teacher_component(settings, plan)?
+        };
+        if let Some(teacher) = teacher {
             components.insert(
                 gen_core_iris::train::repa::TEACHER_COMPONENT.to_owned(),
                 teacher,
@@ -3470,8 +3553,14 @@ pub(crate) async fn run_training_execution_drive_observing_cancel(
         Some(objective) => {
             let task_settings = settings.clone();
             let config = plan.config.clone();
+            let bound_aux_paths = plan.extra.get("__portableAuxPaths").cloned();
             let resolved = crate::load_progress::spawn_blocking(move || {
-                crate::iris_task_training::task_load_inputs(&task_settings, objective, &config)
+                crate::iris_task_training::task_load_inputs_bound(
+                    &task_settings,
+                    objective,
+                    &config,
+                    bound_aux_paths.as_ref(),
+                )
             })
             .await
             .map_err(|error| task_join_error("Iris training resource check", error))
@@ -9626,6 +9715,31 @@ mod tests {
                 .and_then(|value| value.get("frames")),
             Some(&json!(89))
         );
+    }
+
+    #[cfg(native_lane)]
+    #[test]
+    fn flux3_training_accepts_only_exact_guard_verified_publisher_path() {
+        use sceneworks_core::training::flux3::{BASE_ID, BASE_REPO, BASE_REVISION};
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("models/portable-attempts/base");
+        let other = temp.path().join("models/portable-attempts/other");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let mut settings = test_settings(temp.path());
+        assert!(flux3_trusted_training_base(&settings, &path).is_err());
+        settings.verified_revision_sources.push(
+            crate::external_library_runtime::VerifiedRevisionSource {
+                model_id: BASE_ID.to_owned(),
+                repository: BASE_REPO.to_owned(),
+                revision: BASE_REVISION.to_owned(),
+                path: path.clone(),
+            },
+        );
+        assert_eq!(flux3_trusted_training_base(&settings, &path).unwrap(), path);
+        assert!(flux3_trusted_training_base(&settings, &other).is_err());
+        settings.verified_revision_sources[0].revision = "wrong-revision".to_owned();
+        assert!(flux3_trusted_training_base(&settings, &path).is_err());
     }
 
     #[cfg(native_lane)]

@@ -191,6 +191,9 @@ SCENEWORKS_CONFIG_DIR="${SCENEWORKS_CONFIG_DIR:-${SCENEWORKS_VOLUME}/config}"
 # dir: the store holds plaintext tokens and the config dir is a checkout in dev.
 # Must be on the durable volume or tokens vanish when the pod restarts.
 SCENEWORKS_CREDENTIALS_DIR="${SCENEWORKS_CREDENTIALS_DIR:-${SCENEWORKS_VOLUME}/credentials}"
+# The optional SCENEWORKS_WORKER_PROOF_MASTER environment value is inherited by
+# the API and worker supervisor. The API persists/verifies its 0600 master file
+# here; the supervisor passes only derived per-worker keys to its children.
 SCENEWORKS_JOBS_DB_PATH="${SCENEWORKS_JOBS_DB_PATH:-/tmp/sceneworks/cache/jobs.db}"
 HF_HOME="${HF_HOME:-${SCENEWORKS_VOLUME}/cache/huggingface}"
 

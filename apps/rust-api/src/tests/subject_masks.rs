@@ -513,7 +513,7 @@ async fn real_character_run_needs_the_sam3_segmenter_to_generate_masks() {
     let with = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&with);
     seed(&settings, true);
-    let app = create_app(settings).expect("app creates");
+    let app = create_training_fixture_app(settings).expect("app creates");
     let (project_id, dataset_id, item_ids, _) = masked_dataset_in(&app).await;
     let preset = zimage_character_preset(&app).await;
     let (status, job) = request(

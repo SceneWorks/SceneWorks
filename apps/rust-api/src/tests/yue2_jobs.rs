@@ -87,10 +87,11 @@ pub(super) async fn register(app: &axum::Router, worker: &str) {
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": worker, "gpuId": "test-gpu", "gpuName": "Test GPU",
-            "capabilities": ["gpu", "audio_generate"], "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            worker,
+            &["gpu", "audio_generate"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -101,7 +102,7 @@ pub(super) async fn claim(app: &axum::Router, worker: &str) -> Value {
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": worker }),
+        portable_test_worker_claim(worker, TestPortableRoute::MlxMacos),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{claimed}");
@@ -1123,7 +1124,7 @@ async fn replays_cannot_swap_the_model_inject_a_block_or_share_a_run() {
 }
 
 #[tokio::test]
-async fn replay_precision_requires_a_choice_for_new_runs_but_preserves_legacy_retries() {
+async fn replay_precision_requires_a_choice_and_rejects_unbound_legacy_retries() {
     let _env = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().unwrap();
     let (app, state) = app_with_yue1_and_yue2_state(&temp_dir);
@@ -1131,17 +1132,26 @@ async fn replay_precision_requires_a_choice_for_new_runs_but_preserves_legacy_re
     let legacy_id = stored_yue2_job(&state, &project_id, json!({}));
     let duplicate_route = format!("/api/v1/jobs/{legacy_id}/duplicate");
 
-    // A stored pre-policy job can retry the same run without changing its Legacy semantics.
-    let (status, retried) = request(
+    // SW-7031 AC4 owns the historical carrier upgrade. Until then, a stored pre-policy job
+    // without a portable source binding must refuse replay rather than adopt today's catalog.
+    let (status, refused) = request(
         app.clone(),
         "POST",
         &format!("/api/v1/jobs/{legacy_id}/retry"),
         json!({}),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED, "{retried}");
-    assert_eq!(retried["payload"]["yue2"]["runId"], "yue2run_stored");
-    assert!(retried["payload"]["yue2"].get("computePolicy").is_none());
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert_eq!(
+        refused["detail"],
+        "This historical job has no portable source binding. Upgrade its manifest before retrying."
+    );
+    let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        jobs.as_array().unwrap().len(),
+        1,
+        "retry queued a job: {jobs}"
+    );
 
     // A duplicate starts a fresh run. Removing this check would queue an implicit Legacy run.
     let (status, missing) = request(
@@ -1165,9 +1175,14 @@ async fn replay_precision_requires_a_choice_for_new_runs_but_preserves_legacy_re
         }}}),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED, "{duplicate}");
-    assert_eq!(duplicate["payload"]["yue2"]["computePolicy"], "bf16");
-    assert_ne!(duplicate["payload"]["yue2"]["runId"], "yue2run_stored");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{duplicate}");
+    assert_eq!(duplicate["detail"], refused["detail"]);
+    let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        jobs.as_array().unwrap().len(),
+        1,
+        "duplicate queued a job: {jobs}"
+    );
 
     let explicit = submit_ok(&app, &project_id, create_body()).await;
     let explicit_id = explicit[0]["id"].as_str().unwrap();

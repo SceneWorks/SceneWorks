@@ -1623,6 +1623,7 @@ fn backend_worker(facts: &RuntimeDescriptorFacts) -> Result<WorkerSnapshot, Stri
         .collect::<Result<Vec<_>, _>>()?;
     Ok(WorkerSnapshot {
         id: format!("capability-matrix-{}", facts.snapshot.backend),
+        platform: None,
         gpu_id: if facts.snapshot.backend == "mlx" {
             "mlx".to_owned()
         } else {

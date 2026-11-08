@@ -858,17 +858,23 @@ pub(super) fn attach_selected_decoder_unprepared(
     };
     let option = validate_selected_decoder_request(engine_id, decoder_id, &request.advanced)?;
     let manifest = Value::Object(request.model_manifest_entry.clone());
-    let source = crate::model_jobs::resolve_optional_component(
-        &manifest,
-        option.component_id,
-        settings,
-    )
-    .ok_or_else(|| {
-        WorkerError::InvalidPayload(format!(
-            "decoder '{}' needs its standalone pinned component '{}' to be installed; install or repair this model before generating",
-            option.label, option.component_id
-        ))
-    })?;
+    let source = if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
+        let path =
+            crate::portable_aux_sources::bound_aux_path(&request.advanced, option.component_id)
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload(format!(
+                        "portable decoder '{}' source is not bound",
+                        option.component_id
+                    ))
+                })?;
+        WeightsSource::File(path)
+    } else {
+        crate::model_jobs::resolve_optional_component(&manifest, option.component_id, settings)
+            .ok_or_else(|| WorkerError::InvalidPayload(format!(
+                "decoder '{}' needs its standalone pinned component '{}' to be installed; install or repair this model before generating",
+                option.label, option.component_id
+            )))?
+    };
     Ok(spec.with_component(option.component_id, source))
 }
 

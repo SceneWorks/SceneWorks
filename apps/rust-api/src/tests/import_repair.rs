@@ -1,7 +1,7 @@
 //! Hosted-only CPU integration: mounted retry/repair API plus the actual utility worker.
 //! Synthetic headers/components only; no native model execution or external download endpoint.
 use super::support::*;
-use sceneworks_core::jobs_store::{CreateJob, JobsStore};
+use sceneworks_core::jobs_store::{CreateJob, JobsStore, RegisterWorker};
 use sceneworks_worker::minimax_h3_import_fixture as fixture;
 
 fn manifests(settings: &crate::Settings, models: Value) {
@@ -55,30 +55,29 @@ async fn start_worker(app: axum::Router, settings: &crate::Settings) -> Runtime 
         .await
         .unwrap();
     });
-    let worker_settings = sceneworks_worker::Settings {
-        api_url: format!("http://{address}"),
-        access_token: None,
-        data_dir: settings.data_dir.clone(),
-        config_dir: settings.config_dir.clone(),
-        resolved_cache: Default::default(),
-        worker_id: "import-recovery-worker".into(),
-        gpu_id: "cpu".into(),
-        is_child_worker: true,
-        poll_seconds: 1,
-        heartbeat_seconds: 1,
-        shutdown_timeout_seconds: 1,
-        huggingface_base_url: "http://127.0.0.1:9".into(),
-        huggingface_token: None,
-        credentials: vec![],
-        max_lora_url_bytes: 1 << 20,
-        max_model_url_bytes: 1 << 20,
-        allow_private_lora_urls: false,
-        utility_workers: 1,
-        backend_mlx_enabled: false,
-        backend_candle_enabled: false,
-        external_model_roots: vec![],
-        gpu_memory_limit_bytes: 0,
-    };
+    let mut worker_settings = sceneworks_worker::Settings::from_env();
+    worker_settings.api_url = format!("http://{address}");
+    worker_settings.access_token = None;
+    worker_settings.data_dir = settings.data_dir.clone();
+    worker_settings.config_dir = settings.config_dir.clone();
+    worker_settings.resolved_cache = Default::default();
+    worker_settings.worker_id = "import-recovery-worker".into();
+    worker_settings.gpu_id = "cpu".into();
+    worker_settings.is_child_worker = true;
+    worker_settings.poll_seconds = 1;
+    worker_settings.heartbeat_seconds = 1;
+    worker_settings.shutdown_timeout_seconds = 1;
+    worker_settings.huggingface_base_url = "http://127.0.0.1:9".into();
+    worker_settings.huggingface_token = None;
+    worker_settings.credentials = vec![];
+    worker_settings.max_lora_url_bytes = 1 << 20;
+    worker_settings.max_model_url_bytes = 1 << 20;
+    worker_settings.allow_private_lora_urls = false;
+    worker_settings.utility_workers = 1;
+    worker_settings.backend_mlx_enabled = false;
+    worker_settings.backend_candle_enabled = false;
+    worker_settings.external_model_roots = vec![];
+    worker_settings.gpu_memory_limit_bytes = 0;
     let (stop, stop_rx) = tokio::sync::oneshot::channel();
     let worker = std::thread::Builder::new().name("import-recovery-test-worker".into())
         .stack_size(sceneworks_worker::WORKER_ENTRY_STACK_BYTES).spawn(move || {
@@ -146,6 +145,121 @@ fn seed_import(
     // below emulates a process dying specifically after commit and before manifest publication.
     store.cancel_job(&job.id).unwrap();
     job
+}
+
+#[tokio::test]
+async fn import_claim_probe_compares_private_payload_without_disclosing_its_source_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let settings = test_settings(&temp);
+    let app = create_app(settings.clone()).unwrap();
+    let store = JobsStore::new(&settings.jobs_db_path);
+    let source = settings.data_dir.join("models/incoming/private-checkpoint");
+    let payload = json!({"modelId":"private-checkpoint","sourcePath":source});
+    let job = store
+        .create_job(CreateJob {
+            job_type: crate::JobType::ModelImport,
+            project_id: None,
+            project_name: None,
+            payload: payload.as_object().unwrap().clone(),
+            requested_gpu: "auto".into(),
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+            initial_status: None,
+        })
+        .unwrap();
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "import-proof-worker".into(),
+            gpu_id: "cpu".into(),
+            gpu_name: None,
+            capabilities: vec![sceneworks_core::contracts::WorkerCapability::ModelImport],
+            loaded_models: vec![],
+            utilization: None,
+        })
+        .unwrap();
+    let claimed = store
+        .claim_next_job("import-proof-worker")
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.id, job.id);
+    let capability = claimed.payload[sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY]
+        .as_str()
+        .unwrap();
+    assert_eq!(capability.len(), 64);
+    assert_ne!(
+        claimed.payload[sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY],
+        job.payload[sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY]
+    );
+    let commitment =
+        sceneworks_core::model_artifacts::portable_binding::canonical_object_sha256(&payload)
+            .unwrap();
+    let route = format!("/api/v1/jobs/{}/import-claim", job.id);
+    let body = |worker: &str, digest: &str, proof: &str| json!({"workerId":worker,"targetJobId":job.id,"commitment":digest,"capability":proof});
+    let (status, denied) = request(
+        app.clone(),
+        "POST",
+        &route,
+        body("other-worker", &commitment, capability),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    let (status, no_proof) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({"workerId":"import-proof-worker","targetJobId":job.id,"commitment":commitment}),
+    )
+    .await;
+    assert!(!status.is_success(), "{no_proof}");
+    let (status, wrong_proof) = request(
+        app.clone(),
+        "POST",
+        &route,
+        body("import-proof-worker", &commitment, &"0".repeat(64)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{wrong_proof}");
+    let (status, mismatch) = request(
+        app.clone(),
+        "POST",
+        &route,
+        body(
+            "import-proof-worker",
+            &format!("sha256:{}", "f".repeat(64)),
+            capability,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{mismatch}");
+    assert_eq!(mismatch["payloadMatches"], false);
+    let (status, verified) = request(
+        app.clone(),
+        "POST",
+        &route,
+        body("import-proof-worker", &commitment, capability),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{verified}");
+    assert_eq!(verified["payloadMatches"], true);
+    assert!(verified["job"]["payload"]["sourcePath"].is_null());
+    assert!(
+        verified["job"]["payload"][sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY]
+            .is_null()
+    );
+    let (status, public) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{}", job.id),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(public.to_string().find(capability).is_none());
+    assert_eq!(
+        store.get_job(&job.id).unwrap().payload["sourcePath"],
+        payload["sourcePath"]
+    );
 }
 
 #[tokio::test]
@@ -219,10 +333,19 @@ async fn actual_api_retry_chain_recovers_committed_h3_and_refuses_unrelated_or_c
     assert_ne!(retry["id"], original.id);
     assert_eq!(retry["sourceJobId"], first_retry["id"]);
     assert_eq!(retry["attempts"], 3);
-    assert_eq!(
-        retry["payload"],
-        serde_json::to_value(&original.payload).unwrap()
+    let stored_retry = JobsStore::new(&settings.jobs_db_path)
+        .get_job(retry["id"].as_str().unwrap())
+        .unwrap();
+    let mut retry_authored = stored_retry.payload.clone();
+    retry_authored.remove(sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY);
+    let mut original_authored = original.payload.clone();
+    original_authored.remove(sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY);
+    assert_eq!(retry_authored, original_authored);
+    assert_ne!(
+        stored_retry.payload[sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY],
+        original.payload[sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY]
     );
+    assert!(retry["payload"]["sourcePath"].is_null());
     let _runtime = start_worker(app.clone(), &settings).await;
     let unrelated = terminal(&app, unrelated["id"].as_str().unwrap()).await;
     assert_eq!(
@@ -330,7 +453,7 @@ async fn check_managed_repair(missing_original: bool, publication_change: Option
     } else {
         model.install_dir.clone()
     };
-    let app = create_app(settings.clone()).unwrap();
+    let (app, state) = create_app_with_state(settings.clone()).unwrap();
     let body = json!({"modelId":"repair_selection","name":"New display name","family":"minimax-h3","type":"video",
         "baseModel":"minimax_h3","minimaxH3Partition":"fl2va", "licenseAcknowledged":true, "source":{"kind":"localPath","path":settings.data_dir.join("models/incoming/repair_selection")}});
     let (status, duplicate) =
@@ -356,10 +479,14 @@ async fn check_managed_repair(missing_original: bool, publication_change: Option
         queued["payload"]["manifestEntry"]["name"],
         "New display name"
     );
-    assert_ne!(
-        queued["payload"]["targetDir"],
-        model.install_dir.to_string_lossy().as_ref()
-    );
+    assert!(queued["payload"].get("targetDir").is_none());
+    assert!(queued["payload"].get("manifestPath").is_none());
+    let private_job = state
+        .jobs_store
+        .get_job(queued["id"].as_str().unwrap())
+        .unwrap();
+    let repair_target = private_job.payload["targetDir"].as_str().unwrap();
+    assert_ne!(repair_target, model.install_dir.to_string_lossy().as_ref());
     assert_eq!(
         queued["payload"]["repairExpectedBinding"]["importPlan"],
         model.entry["importPlan"]
@@ -382,7 +509,7 @@ async fn check_managed_repair(missing_original: bool, publication_change: Option
         let failed = terminal(&app, queued["id"].as_str().unwrap()).await;
         assert_eq!(failed["status"], "failed", "{change}: {failed}");
         assert!(
-            !std::path::Path::new(queued["payload"]["targetDir"].as_str().unwrap()).exists(),
+            !std::path::Path::new(repair_target).exists(),
             "CAS refusal rolls back the replacement, not the original"
         );
         assert_eq!(
@@ -410,7 +537,7 @@ async fn check_managed_repair(missing_original: bool, publication_change: Option
     let failed = terminal(&app, queued["id"].as_str().unwrap()).await;
     assert_eq!(failed["status"], "failed", "{failed}");
     assert!(
-        !std::path::Path::new(queued["payload"]["targetDir"].as_str().unwrap()).exists(),
+        !std::path::Path::new(repair_target).exists(),
         "failed repair must roll back only its new installation"
     );
     let manifest_path = settings.config_dir.join("manifests/user.models.jsonc");

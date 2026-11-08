@@ -125,6 +125,7 @@ pub(crate) fn readiness_worker(
     WorkerSnapshot {
         id: id.to_owned(),
         gpu_id: "0".to_owned(),
+        platform: None,
         gpu_name: None,
         status,
         current_job_id: None,
@@ -189,6 +190,96 @@ pub(crate) fn test_settings(temp_dir: &tempfile::TempDir) -> Settings {
         external_model_roots: Vec::new(),
         mcp_allowed_hosts_extra: Vec::new(),
     }
+}
+
+/// Test-only publisher metadata for staged pinned snapshots. These route tests use small files
+/// instead of real model weights; their metadata must describe those exact fixture bytes.
+pub(crate) fn create_training_fixture_app(
+    settings: Settings,
+) -> Result<axum::Router, sceneworks_core::jobs_store::JobsStoreError> {
+    Ok(create_training_fixture_app_with_state(settings)?.0)
+}
+
+pub(crate) fn create_training_fixture_app_with_state(
+    settings: Settings,
+) -> Result<(axum::Router, crate::AppState), sceneworks_core::jobs_store::JobsStoreError> {
+    use sceneworks_core::model_artifacts::artifact_selection::pattern_matches;
+    use sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile;
+
+    let data_dir = settings.data_dir.clone();
+    let pinned = std::sync::Mutex::new(std::collections::BTreeMap::<
+        String,
+        Vec<PortableArtifactFile>,
+    >::new());
+    let (app, state) = create_app_with_state(settings)?;
+    *state.test_hooks.pinned_metadata_override.lock() = Some(std::sync::Arc::new(
+        move |repo: &str, revision: &str, selectors: &[String]| {
+            let key = format!("{repo}\0{revision}\0{}", selectors.join("\0"));
+            if let Some(files) = pinned.lock().expect("fixture metadata lock").get(&key) {
+                return files.clone();
+            }
+            let Some(cache) = huggingface_repo_cache_path(&data_dir, repo) else {
+                return Vec::new();
+            };
+            let snapshot = cache.join("snapshots").join(revision);
+            fn walk(
+                root: &std::path::Path,
+                dir: &std::path::Path,
+                found: &mut Vec<std::path::PathBuf>,
+            ) {
+                let Ok(entries) = std::fs::read_dir(dir) else {
+                    return;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        walk(root, &path, found);
+                    } else if path.is_file() {
+                        found.push(
+                            path.strip_prefix(root)
+                                .expect("snapshot relative path")
+                                .to_path_buf(),
+                        );
+                    }
+                }
+            }
+            let mut paths = Vec::new();
+            walk(&snapshot, &snapshot, &mut paths);
+            let mut selected = std::collections::BTreeSet::new();
+            for selector in selectors {
+                let matches = paths
+                    .iter()
+                    .filter(|path| pattern_matches(selector, &path.to_string_lossy()))
+                    .collect::<Vec<_>>();
+                if matches.is_empty() {
+                    return Vec::new();
+                }
+                selected.extend(matches.into_iter().cloned());
+            }
+            let files = selected
+                .into_iter()
+                .map(|relative_path| {
+                    let path = snapshot.join(&relative_path);
+                    PortableArtifactFile {
+                        relative_path,
+                        size_bytes: std::fs::metadata(&path).expect("fixture metadata").len(),
+                        sha256: format!(
+                            "sha256:{}",
+                            sceneworks_core::hashing::sha256_file(&path).expect("fixture hash")
+                        ),
+                    }
+                })
+                .collect::<Vec<_>>();
+            if !files.is_empty() {
+                pinned
+                    .lock()
+                    .expect("fixture metadata lock")
+                    .insert(key, files.clone());
+            }
+            files
+        },
+    ));
+    Ok((app, state))
 }
 
 pub(crate) fn write_test_safetensors(path: &std::path::Path) {
@@ -549,12 +640,7 @@ pub(crate) fn seed_installed_base_model(data_dir: &std::path::Path) {
     // regardless of `base_model_repo`. Keying on the stable base_model (not the repo slug) keeps this
     // helper from breaking whenever a target's `base_model_repo` is re-homed — as it just was when
     // z_image_turbo moved off the flat `Tongyi-MAI/Z-Image-Turbo` upstream to its turnkey (sc-13860).
-    let model_dir = data_dir
-        .join("models")
-        .join(safe_download_dir("z_image_turbo"));
-    std::fs::create_dir_all(&model_dir).expect("model dir creates");
-    std::fs::write(model_dir.join(".sceneworks-download-complete.json"), "{}")
-        .expect("model marker writes");
+    seed_pinned_training_base_fixture(data_dir, "z_image_turbo");
 }
 
 /// Seed the installed-base marker for an arbitrary training base model id (sc-15036) — the
@@ -565,6 +651,111 @@ pub(crate) fn seed_installed_training_base(data_dir: &std::path::Path, base_mode
     std::fs::create_dir_all(&model_dir).expect("model dir creates");
     std::fs::write(model_dir.join(".sceneworks-download-complete.json"), "{}")
         .expect("model marker writes");
+}
+
+/// Stage tiny files under the catalog's pinned training tier. The route tests exercise the API
+/// contract, while the per-app metadata hook above makes their exact fixture bytes authoritative.
+pub(crate) fn seed_pinned_training_base_fixture(data_dir: &std::path::Path, base_model: &str) {
+    seed_installed_training_base(data_dir, base_model);
+    let entry = crate::models::embedded_builtin_catalog_entry(|entry| {
+        entry.get("id").and_then(Value::as_str) == Some(base_model)
+    })
+    .expect("builtin catalog")
+    .expect("training base catalog entry");
+    let selected_tier = if base_model == "ltx_2_5" {
+        "q4"
+    } else {
+        "bf16"
+    };
+    for download in entry["downloads"].as_array().expect("catalog downloads") {
+        if download
+            .get("platforms")
+            .and_then(Value::as_array)
+            .is_some_and(|platforms| !platforms.iter().any(|platform| platform == "macos"))
+            || download
+                .get("variant")
+                .and_then(Value::as_str)
+                .is_some_and(|variant| variant != selected_tier)
+        {
+            continue;
+        }
+        let (Some(repo), Some(revision)) = (
+            download.get("repo").and_then(Value::as_str),
+            download.get("revision").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        let Some(cache) = huggingface_repo_cache_path(data_dir, repo) else {
+            continue;
+        };
+        std::fs::create_dir_all(cache.join("refs")).expect("snapshot refs dir");
+        std::fs::write(cache.join("refs/main"), revision).expect("pinned snapshot ref");
+        let selectors = download["files"]
+            .as_array()
+            .expect("catalog file selectors");
+        let files = if selectors.is_empty() {
+            vec!["model.safetensors".to_owned()]
+        } else {
+            selectors
+                .iter()
+                .map(|selector| {
+                    selector
+                        .as_str()
+                        .expect("file selector")
+                        .replace('*', "fixture.safetensors")
+                })
+                .collect::<Vec<_>>()
+        };
+        for file in files {
+            let path = cache.join("snapshots").join(revision).join(file);
+            std::fs::create_dir_all(path.parent().expect("fixture parent")).expect("snapshot dir");
+            std::fs::write(path, b"fixture").expect("pinned training fixture file");
+        }
+        if download.get("coRequisite").and_then(Value::as_bool) != Some(true)
+            && selectors.iter().any(|file| file == "bf16/*")
+        {
+            let bf16 = cache.join("snapshots").join(revision).join("bf16");
+            let components: &[&str] = if base_model == "mage_flow_base" {
+                &["transformer", "scheduler"]
+            } else {
+                &["transformer", "text_encoder", "vae"]
+            };
+            let mut index = serde_json::Map::new();
+            for component in components {
+                let dir = bf16.join(component);
+                std::fs::create_dir_all(&dir).expect("training tier component dir");
+                std::fs::write(dir.join("fixture.safetensors"), b"fixture")
+                    .expect("training tier component file");
+                index.insert((*component).to_owned(), json!(["fixture", "Fixture"]));
+            }
+            std::fs::write(
+                bf16.join("model_index.json"),
+                Value::Object(index).to_string(),
+            )
+            .expect("training tier index");
+        }
+    }
+}
+
+/// Read the worker-owned payload for assertions about paths hidden from public job responses.
+pub(crate) fn private_training_payload(data_dir: &std::path::Path, job_id: &str) -> Value {
+    let db = data_dir.parent().expect("test data parent").join("jobs.db");
+    let job = sceneworks_core::jobs_store::JobsStore::new(db)
+        .get_job(job_id)
+        .expect("stored training job");
+    Value::Object(job.payload)
+}
+
+pub(crate) fn private_training_output_dir(
+    data_dir: &std::path::Path,
+    job_id: &str,
+) -> std::path::PathBuf {
+    let payload = private_training_payload(data_dir, job_id);
+    std::path::PathBuf::from(
+        payload["plan"]["output"]["outputDir"]
+            .as_str()
+            .expect("stored training output directory"),
+    )
 }
 
 /// Submit a real **FULL base fine-tune** (sc-15036, epic 14034 F6) against the Mage-Flow Base
@@ -580,7 +771,7 @@ pub(crate) async fn submit_full_finetune_job(
     project_id: &str,
     data_dir: &std::path::Path,
 ) -> (String, std::path::PathBuf) {
-    seed_installed_training_base(data_dir, "mage_flow_base");
+    seed_pinned_training_base_fixture(data_dir, "mage_flow_base");
     let (_, asset) = request_multipart_upload(
         app.clone(),
         &format!("/api/v1/projects/{project_id}/assets"),
@@ -641,8 +832,9 @@ pub(crate) async fn submit_full_finetune_job(
     .await;
     assert_eq!(status, StatusCode::CREATED, "submit failed: {job}");
     let job_id = job["id"].as_str().expect("job id").to_owned();
+    let payload = private_training_payload(data_dir, &job_id);
     let output_dir = std::path::PathBuf::from(
-        job["payload"]["plan"]["output"]["outputDir"]
+        payload["plan"]["output"]["outputDir"]
             .as_str()
             .expect("output dir"),
     );
@@ -718,12 +910,10 @@ pub(crate) async fn submit_real_training_job(
     .await;
     assert_eq!(status, StatusCode::CREATED);
     let job_id = job["id"].as_str().expect("job id").to_owned();
-    let output_dir = std::path::PathBuf::from(
-        job["payload"]["plan"]["output"]["outputDir"]
-            .as_str()
-            .unwrap(),
-    );
-    let file_name = job["payload"]["plan"]["output"]["fileName"]
+    let payload = private_training_payload(data_dir, &job_id);
+    let output_dir =
+        std::path::PathBuf::from(payload["plan"]["output"]["outputDir"].as_str().unwrap());
+    let file_name = payload["plan"]["output"]["fileName"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -767,8 +957,72 @@ pub(crate) async fn wait_for_prompt_refine_job(app: &axum::Router) -> String {
     wait_for_prompt_refine_job_excluding(app, None).await
 }
 
-/// Register a production-shaped worker, claim the next compatible job, and
-/// assert that it is the target the test intends to drive.
+/// The portable route a fake worker advertises in both registration and claim.
+#[derive(Clone, Copy)]
+pub(crate) enum TestPortableRoute {
+    MlxMacos,
+    CandleLinux,
+}
+
+impl TestPortableRoute {
+    fn parts(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Self::MlxMacos => ("mlx", "macos", "mlx"),
+            Self::CandleLinux => ("candle", "linux", "0"),
+        }
+    }
+}
+
+pub(crate) fn portable_test_worker_registration(
+    worker_id: &str,
+    capabilities: &[&str],
+    route: TestPortableRoute,
+) -> Value {
+    let (_, platform, gpu_id) = route.parts();
+    json!({
+        "workerId": worker_id, "gpuId": gpu_id, "platform": platform,
+        "gpuName": "Test worker", "capabilities": capabilities, "loadedModels": []
+    })
+}
+
+pub(crate) fn portable_test_worker_claim(worker_id: &str, route: TestPortableRoute) -> Value {
+    let (backend, platform, _) = route.parts();
+    json!({
+        "workerId": worker_id,
+        "portableModelBindingVersion": sceneworks_core::model_artifacts::portable_binding::PORTABLE_MODEL_BINDING_VERSION,
+        "portableBackend": backend,
+        "portablePlatform": platform,
+    })
+}
+
+/// Register a production-shaped worker and claim the expected portable job.
+pub(crate) async fn claim_job_as_worker_on_route(
+    app: &axum::Router,
+    job_id: &str,
+    worker_id: &str,
+    capabilities: &[&str],
+    route: TestPortableRoute,
+) {
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        portable_test_worker_registration(worker_id, capabilities, route),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, claimed) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        portable_test_worker_claim(worker_id, route),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claimed["job"]["id"], job_id, "{claimed}");
+}
+
+/// Legacy helper for tests that insert unbound jobs directly into JobsStore.
 pub(crate) async fn claim_job_as_worker(
     app: &axum::Router,
     job_id: &str,
@@ -803,11 +1057,12 @@ pub(crate) async fn claim_job_as_worker(
 pub(crate) const TEST_TRAINING_WORKER_ID: &str = "test-training-worker";
 
 pub(crate) async fn claim_training_job(app: &axum::Router, job_id: &str) {
-    claim_job_as_worker(
+    claim_job_as_worker_on_route(
         app,
         job_id,
         TEST_TRAINING_WORKER_ID,
         &["gpu", "lora_train", "lora_train_execute"],
+        TestPortableRoute::MlxMacos,
     )
     .await;
 }
@@ -821,13 +1076,11 @@ pub(crate) async fn claim_training_job_as_mlx_worker(app: &axum::Router, job_id:
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": TEST_TRAINING_WORKER_ID,
-            "gpuId": "mlx",
-            "gpuName": "Apple Silicon",
-            "capabilities": ["gpu", "lora_train", "lora_train_execute"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            TEST_TRAINING_WORKER_ID,
+            &["gpu", "mlx", "lora_train", "lora_train_execute"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -835,7 +1088,7 @@ pub(crate) async fn claim_training_job_as_mlx_worker(app: &axum::Router, job_id:
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": TEST_TRAINING_WORKER_ID }),
+        portable_test_worker_claim(TEST_TRAINING_WORKER_ID, TestPortableRoute::MlxMacos),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -846,7 +1099,14 @@ pub(crate) async fn claim_training_job_as_mlx_worker(app: &axum::Router, job_id:
 /// shape production uses; `result` carries the model reply.
 pub(crate) async fn complete_prompt_refine_job(app: &axum::Router, job_id: &str, result: Value) {
     const WORKER_ID: &str = "test-prompt-refine-worker";
-    claim_job_as_worker(app, job_id, WORKER_ID, &["gpu", "prompt_refine"]).await;
+    claim_job_as_worker_on_route(
+        app,
+        job_id,
+        WORKER_ID,
+        &["gpu", "prompt_refine"],
+        TestPortableRoute::MlxMacos,
+    )
+    .await;
     let (status, _) = request(
         app.clone(),
         "POST",

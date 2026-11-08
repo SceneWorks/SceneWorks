@@ -562,13 +562,13 @@ const RECORDED_FAMILY_ALLOW_LISTS: &[(&str, &str, &str)] = &[
          which families satisfy it; this is only where the app installed that tier.",
     ),
     (
-        "src/external_library_runtime.rs",
+        "../sceneworks-core/src/model_artifacts/artifact_selection.rs",
         "PLAN_BACKED_RESIDENT_BASE_MODELS",
-        "Catalog data, not family truth, and the same split the two plan tables above record: \
+        "Shared API/worker catalog data, not family truth, and the same split the two plan tables above record: \
          `CheckpointAdapterRegistration::base_compatibility` declares the base-snapshot dependency \
          and which families satisfy it, but carries no builtin catalog MODEL ID or tier — and an id \
          plus a tier is exactly what building the base's requirement closure through \
-         `selected_requirements_for_model` needs. NOT DERIVABLE here for a second reason the plan \
+         `selected_resident_base_closure_for_row` needs. NOT DERIVABLE here for a second reason the plan \
          tables do not have: this one lives in the pre-loader guard, which compiles on EVERY build, \
          while the adapter registry is cfg-gated to macOS-or-candle (see IMPORT_SUPPORTED_FAMILIES) \
          — a derived list would be empty on the candle-off build and silently return every imported \
@@ -1192,7 +1192,7 @@ fn the_source_guard_await_is_wrapped_in_the_heartbeat_keepalive() {
         .expect("worker must declare run_utility_job")
         .1;
     let after_guard_spawn = function
-        .split_once("RuntimeSourceGuard::begin(")
+        .split_once("RuntimeSourceGuard::begin_with_binding(")
         .expect("run_utility_job must admit every job through the source guard")
         .1;
     let between_guard_and_dispatch = after_guard_spawn

@@ -2278,7 +2278,13 @@ fn lora_huggingface_requested_file(lora: &Value, data_dir: &FsPath) -> Option<Pa
 }
 
 fn lora_huggingface_receipted_file(lora: &Value, data_dir: &FsPath) -> Option<PathBuf> {
-    let (repo, _, _) = lora_huggingface_source(lora)?;
+    let (repo, requested_file, requested_revision) = lora_huggingface_source(lora)?;
+    // A pinned catalog row is an immutable source declaration. Older unpinned rows may still
+    // surface a receipted prior version as stale so the catalog can offer an update.
+    let pinned = requested_revision.len() == 40
+        && requested_revision
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit());
     let id = lora.get("id").and_then(Value::as_str)?;
     let marker = data_dir
         .join("loras")
@@ -2300,6 +2306,17 @@ fn lora_huggingface_receipted_file(lora: &Value, data_dir: &FsPath) -> Option<Pa
         let Some(revision) = receipt.get("snapshotRevision").and_then(Value::as_str) else {
             continue;
         };
+        if pinned
+            && (revision != requested_revision
+                || requested_file.is_none_or(|file| {
+                    !receipt
+                        .get("resolvedFiles")
+                        .and_then(Value::as_array)
+                        .is_some_and(|files| files.iter().any(|value| value.as_str() == Some(file)))
+                }))
+        {
+            continue;
+        }
         let Ok((_, snapshot)) = resolver.discover_source_snapshot(repo, Some(revision)) else {
             continue;
         };
@@ -2307,6 +2324,9 @@ fn lora_huggingface_receipted_file(lora: &Value, data_dir: &FsPath) -> Option<Pa
             continue;
         };
         for file in files.iter().filter_map(Value::as_str) {
+            if pinned && Some(file) != requested_file {
+                continue;
+            }
             if sceneworks_core::model_artifacts::ArtifactFile::new(file).is_err() {
                 continue;
             }
@@ -2550,6 +2570,50 @@ mod huggingface_receipt_tests {
         assert_eq!(
             normalized["installedPath"],
             snapshot.join("v1.1.safetensors").display().to_string()
+        );
+    }
+
+    #[test]
+    fn pinned_hf_lora_receipt_selects_only_its_declared_revision_and_file() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "author/pinned";
+        let revision = "1111111111111111111111111111111111111111";
+        let stale_revision = "2222222222222222222222222222222222222222";
+        let root = huggingface_repo_cache_path(data_dir, repo)
+            .unwrap()
+            .join("snapshots");
+        let selected = root.join(revision).join("selected.safetensors");
+        let alternate = root.join(revision).join("alternate.safetensors");
+        let stale = root.join(stale_revision).join("selected.safetensors");
+        for path in [&selected, &alternate, &stale] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"adapter").unwrap();
+        }
+        let lora = json!({"id":"pinned","source":{
+            "provider":"huggingface","repo":repo,"revision":revision,"file":"selected.safetensors"
+        }});
+        let receipt = data_dir.join("loras/pinned/.sceneworks-download-complete.json");
+        std::fs::create_dir_all(receipt.parent().unwrap()).unwrap();
+        let write_receipt = |snapshot_revision: &str, file: &str| {
+            std::fs::write(
+                &receipt,
+                json!({"repo":repo,
+                    "snapshotRevision":snapshot_revision,"resolvedFiles":[file]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        };
+        write_receipt(stale_revision, "selected.safetensors");
+        assert_eq!(lora_huggingface_receipted_file(&lora, data_dir), None);
+        write_receipt(revision, "alternate.safetensors");
+        assert_eq!(lora_huggingface_receipted_file(&lora, data_dir), None);
+        write_receipt(revision, "selected.safetensors");
+        assert_eq!(
+            lora_huggingface_receipted_file(&lora, data_dir),
+            Some(selected)
         );
     }
 

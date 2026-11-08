@@ -393,6 +393,14 @@ fn env_secs(name: &str, default: Duration) -> Result<Duration, String> {
 pub struct AppState {
     pub(crate) settings: Settings,
     pub(crate) jobs_store: Arc<JobsStore>,
+    /// Private, short-lived exact-byte probes for app-managed utility model paths.
+    pub(crate) portable_source_challenges:
+        Arc<Mutex<HashMap<String, crate::portable_admission::PortableSourceChallenge>>>,
+    /// Separate from the user-facing API token; only a worker can read a pending private proof.
+    pub(crate) portable_worker_proof_master: Arc<String>,
+    pub(crate) authenticated_worker_claims:
+        Arc<AsyncMutex<HashMap<String, crate::workers::AuthenticatedWorkerClaims>>>,
+    pub(crate) portable_source_probe_slots: Arc<Semaphore>,
     pub(crate) project_store: Arc<ProjectStore>,
     pub(crate) events: Arc<EventHub>,
     /// Serializes authoritative SSE snapshots with queue publications. A

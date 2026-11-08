@@ -810,16 +810,40 @@ impl MossStreamRuntime for NativeMossStreamRuntime {
             if let Some(id) = row.get("componentId").and_then(Value::as_str).filter(|id| {
                 id.starts_with("moss-dmd-") || *id == gen_core::moss_image_edit::EDIT_COMPONENT
             }) {
-                let source = crate::model_jobs::resolve_optional_component(
-                    &Value::Object(entry.clone()),
-                    id,
-                    settings,
-                )
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload(format!(
-                    "MOSS component {id} missing; install the selected optional package in Models"
-                ))
-                })?;
+                let source = if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced)
+                {
+                    let path = crate::portable_aux_sources::bound_aux_path(&request.advanced, id)
+                        .ok_or_else(|| {
+                        WorkerError::InvalidPayload(format!(
+                            "portable MOSS component {id} is not bound"
+                        ))
+                    })?;
+                    match sceneworks_core::portable_sources::portable_aux_source_shape(
+                        id,
+                        &Value::Object(entry.clone()),
+                    ) {
+                        Some(sceneworks_core::portable_sources::PortableAuxSourceShape::File) => {
+                            WeightsSource::File(path)
+                        }
+                        Some(
+                            sceneworks_core::portable_sources::PortableAuxSourceShape::Directory,
+                        ) => WeightsSource::Dir(path),
+                        None => {
+                            return Err(WorkerError::InvalidPayload(format!(
+                                "portable MOSS component {id} has no declared source shape"
+                            )))
+                        }
+                    }
+                } else {
+                    crate::model_jobs::resolve_optional_component(
+                        &Value::Object(entry.clone()),
+                        id,
+                        settings,
+                    )
+                    .ok_or_else(|| WorkerError::InvalidPayload(format!(
+                        "MOSS component {id} missing; install the selected optional package in Models"
+                    )))?
+                };
                 spec = spec.with_component(id, source);
             }
         }

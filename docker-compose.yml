@@ -28,6 +28,9 @@ services:
       # the repo. Must be set explicitly here — the app's OS-default config dir is not a
       # mounted path, so the store would not survive a container restart.
       SCENEWORKS_CREDENTIALS_DIR: /sceneworks/credentials
+      # Optional 64-hex deployment master. The API writes/verifies the same 0600
+      # master in the shared credentials mount; workers derive their own keys there.
+      SCENEWORKS_WORKER_PROOF_MASTER: ${SCENEWORKS_WORKER_PROOF_MASTER:-}
       SCENEWORKS_JOBS_DB_PATH: /sceneworks/data/cache/jobs.db
       SCENEWORKS_ACCESS_TOKEN: ${SCENEWORKS_ACCESS_TOKEN:-}
       SCENEWORKS_ALLOW_OPEN_BIND: ${SCENEWORKS_ALLOW_OPEN_BIND:-}
@@ -80,6 +83,7 @@ services:
       # /sceneworks/config (sc-16540).
       SCENEWORKS_CREDENTIALS_DIR: /sceneworks/credentials
       SCENEWORKS_WORKER_ID: candle-inference-worker-0
+      # The shared credentials mount supplies the proof master file.
       # Real CUDA device index (not the macOS `mlx` sentinel). `auto` picks the first
       # visible GPU; override to pin a device (e.g. on a multi-GPU host).
       SCENEWORKS_GPU_ID: ${SCENEWORKS_CANDLE_GPU_ID:-auto}

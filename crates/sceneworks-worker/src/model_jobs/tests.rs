@@ -144,7 +144,14 @@ mod tests {
             .expect("temp dir");
         let out = out_guard.path();
 
-        convert_ltx_native(&source, &upscaler_dir, out, 4).expect("native LTX-2.3 eros convert");
+        convert_ltx_native(
+            &source,
+            &upscaler_dir,
+            Path::new(LTX_SPATIAL_UPSCALER_FILE),
+            out,
+            4,
+        )
+        .expect("native LTX-2.3 eros convert");
 
         for file in [
             "transformer.safetensors",

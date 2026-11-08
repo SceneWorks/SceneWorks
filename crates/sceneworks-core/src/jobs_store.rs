@@ -16,8 +16,26 @@ use crate::contracts::{
     JobType, ProgressStage, QueueSummary, WorkerCapability, WorkerSnapshot, WorkerStatus,
     WorkerUtilizationSnapshot,
 };
+use crate::model_artifacts::portable_binding::{
+    validate_portable_source_claims, PortableSourceClaim,
+};
 use crate::store_util::{ensure_column, parse_string_enum, random_hex};
 use crate::time::{format_unix_seconds, now_unix_seconds, parse_utc_seconds, utc_now};
+
+/// Server-minted, claim-only proof for an import worker. Never project this payload field to HTTP.
+pub const IMPORT_CLAIM_CAPABILITY_KEY: &str = "importClaimCapability";
+
+fn mint_import_claim_capability(
+    payload: &mut serde_json::Map<String, Value>,
+) -> JobsStoreResult<()> {
+    let secret = random_hex(32)
+        .map_err(|error| JobsStoreError::Io(std::io::Error::other(error.to_string())))?;
+    payload.insert(
+        IMPORT_CLAIM_CAPABILITY_KEY.to_owned(),
+        Value::String(secret),
+    );
+    Ok(())
+}
 
 mod routing;
 
@@ -64,9 +82,9 @@ pub use routing::matrix::{backend_capability_matrix, BackendCapabilityMatrix};
 // target's x0 decoder (`limits.x0Decoder`) through it (epic 2123).
 pub(crate) use routing::matrix::expected_backend_local_trainer_id;
 pub use routing::{
-    canonical_video_route_probe, is_qwen_image_2_1_model, qwen_image_2_1_reference_ids,
-    video_backend_mode_supported, video_mode_conditioning_requirements, video_ui_modes,
-    QWEN_IMAGE_2_1_MODEL_IDS,
+    canonical_video_route_probe, is_qwen_image_2_1_model, native_route_claims_request,
+    qwen_image_2_1_reference_ids, video_backend_mode_supported,
+    video_mode_conditioning_requirements, video_ui_modes, QWEN_IMAGE_2_1_MODEL_IDS,
 };
 
 pub const ACTIVE_STATUSES: &[&str] = &JobStatus::active_statuses();
@@ -484,6 +502,12 @@ pub struct DuplicateJob {
     pub requested_gpu: Option<String>,
 }
 
+/// The portable source selected by canonical admission for a duplicate job.
+pub struct DuplicatePortableBinding<'a> {
+    pub binding: Option<&'a Value>,
+    pub allow_rebind: bool,
+}
+
 /// Outcome of [`JobsStore::promote_pending_caption_job`] (sc-9120). `promoted` is `true` when the
 /// job was still `pending_caption` and this call transitioned it to `queued`; `false` when the
 /// guarded UPDATE matched nothing because the job had already left `pending_caption` (canceled by
@@ -691,10 +715,26 @@ impl JobsStore {
             ",
         )?;
         ensure_column(&transaction, "workers", "utilization_json", "text")?;
+        ensure_column(&transaction, "workers", "platform", "text")?;
+        // Authenticated worker source proofs remain private; WorkerSnapshot never reads this.
+        ensure_column(
+            &transaction,
+            "workers",
+            "portable_source_claims_json",
+            "text",
+        )?;
+        ensure_column(
+            &transaction,
+            "workers",
+            "source_proof_authenticated",
+            "integer not null default 0",
+        )?;
         // Unknown historical provenance is NULL, not a reconstruction from today's catalog.
         // Only the API's validated-plan handoff may freeze this write-once column.
         ensure_column(&transaction, "jobs", "model_provenance_json", "text")?;
         ensure_column(&transaction, "jobs", "download_binding_json", "text")?;
+        // A portable source commitment is private claim authority, not public job metadata.
+        ensure_column(&transaction, "jobs", "portable_model_binding_json", "text")?;
         // Durable worker-queue priority. Zero is the normal FIFO lane; positive ranks are
         // assigned monotonically whenever a job jumps to the front. Prompt-refinement jobs get a
         // rank automatically at creation, while the Queue screen can rank any still-pending jobs
@@ -1167,13 +1207,66 @@ impl JobsStore {
         provenance: Option<&Value>,
         binding: Option<&Value>,
     ) -> JobsStoreResult<JobSnapshot> {
+        self.create_job_with_portable_binding(request, provenance, binding, None)
+    }
+
+    pub fn create_job_with_portable_binding(
+        &self,
+        request: CreateJob,
+        provenance: Option<&Value>,
+        download_binding: Option<&Value>,
+        portable_binding: Option<&Value>,
+    ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let job = self.create_job_on_connection(&transaction, request, None, provenance)?;
-        Self::write_download_binding(&transaction, &job.id, binding)?;
+        Self::write_download_binding(&transaction, &job.id, download_binding)?;
+        Self::write_portable_binding(&transaction, &job.id, portable_binding)?;
         transaction.commit()?;
         Ok(job)
+    }
+
+    fn write_portable_binding(
+        connection: &Connection,
+        job_id: &str,
+        binding: Option<&Value>,
+    ) -> JobsStoreResult<()> {
+        if let Some(binding) = binding {
+            let typed: crate::model_artifacts::portable_binding::PortableJobBinding =
+                serde_json::from_value(binding.clone())?;
+            typed
+                .validate()
+                .map_err(|error| JobsStoreError::InvalidStatus(error.to_string()))?;
+            connection.execute(
+                "update jobs set portable_model_binding_json = ?1 where id = ?2",
+                params![dumps(binding)?, job_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Private portable source commitment. Public job snapshots do not contain this field.
+    pub fn portable_model_binding(&self, job_id: &str) -> JobsStoreResult<Option<Value>> {
+        let connection = self.open_connection()?;
+        Self::read_portable_binding(&connection, job_id)
+    }
+
+    fn read_portable_binding(
+        connection: &Connection,
+        job_id: &str,
+    ) -> JobsStoreResult<Option<Value>> {
+        let encoded: Option<String> = connection
+            .query_row(
+                "select portable_model_binding_json from jobs where id = ?1",
+                params![job_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| JobsStoreError::NotFound(job_id.to_owned()))?;
+        encoded
+            .map(|value| serde_json::from_str(&value).map_err(Into::into))
+            .transpose()
     }
 
     fn write_download_binding(
@@ -1215,10 +1308,20 @@ impl JobsStore {
         id: String,
         request: CreateJob,
     ) -> JobsStoreResult<JobSnapshot> {
+        self.create_job_with_id_and_portable_binding(id, request, None)
+    }
+
+    pub fn create_job_with_id_and_portable_binding(
+        &self,
+        id: String,
+        request: CreateJob,
+        portable_binding: Option<&Value>,
+    ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let job = self.create_job_on_connection(&transaction, request, Some(id), None)?;
+        Self::write_portable_binding(&transaction, &job.id, portable_binding)?;
         transaction.commit()?;
         Ok(job)
     }
@@ -2092,10 +2195,22 @@ impl JobsStore {
         provenance: Option<&Value>,
         binding: Option<&Value>,
     ) -> JobsStoreResult<JobSnapshot> {
+        self.retry_job_with_portable_binding(job_id, request, provenance, binding, None)
+    }
+
+    pub fn retry_job_with_portable_binding(
+        &self,
+        job_id: &str,
+        request: RetryJob,
+        provenance: Option<&Value>,
+        download_binding: Option<&Value>,
+        portable_binding: Option<&Value>,
+    ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let job = self.get_job_on_connection(&transaction, job_id)?;
+        let previous_binding = Self::read_portable_binding(&transaction, job_id)?;
         if job.attempts >= MAX_JOB_ATTEMPTS {
             return Err(JobsStoreError::RetryLimit {
                 max_attempts: MAX_JOB_ATTEMPTS,
@@ -2114,12 +2229,17 @@ impl JobsStore {
         });
         let mut payload = job.payload;
         payload.extend(request.payload_changes);
-        if let Some(binding) = binding {
+        if let Some(binding) = download_binding {
             if !download_binding_matches_payload(binding, &payload) {
                 return Err(JobsStoreError::InvalidStatus(
                     "Download binding changed during replay".to_owned(),
                 ));
             }
+        }
+        if previous_binding.is_some() && previous_binding.as_ref() != portable_binding {
+            return Err(JobsStoreError::InvalidStatus(
+                "Portable model identity changed during retry".to_owned(),
+            ));
         }
         let job = self.create_job_on_connection(
             &transaction,
@@ -2140,7 +2260,8 @@ impl JobsStore {
             None,
             source_provenance.as_ref(),
         )?;
-        Self::write_download_binding(&transaction, &job.id, binding)?;
+        Self::write_download_binding(&transaction, &job.id, download_binding)?;
+        Self::write_portable_binding(&transaction, &job.id, portable_binding)?;
         transaction.commit()?;
         Ok(job)
     }
@@ -2195,10 +2316,33 @@ impl JobsStore {
         provenance: Option<&Value>,
         binding: Option<&Value>,
     ) -> JobsStoreResult<JobSnapshot> {
+        self.duplicate_job_with_portable_binding(
+            id,
+            job_id,
+            request,
+            provenance,
+            binding,
+            DuplicatePortableBinding {
+                binding: None,
+                allow_rebind: false,
+            },
+        )
+    }
+
+    pub fn duplicate_job_with_portable_binding(
+        &self,
+        id: Option<String>,
+        job_id: &str,
+        request: DuplicateJob,
+        provenance: Option<&Value>,
+        download_binding: Option<&Value>,
+        portable: DuplicatePortableBinding<'_>,
+    ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let job = self.get_job_on_connection(&transaction, job_id)?;
+        let previous_binding = Self::read_portable_binding(&transaction, job_id)?;
         let same_source = !request.payload_changes.contains_key("model")
             && !request.payload_changes.contains_key("modelManifestEntry");
         let source_provenance = provenance.cloned().or_else(|| {
@@ -2212,12 +2356,31 @@ impl JobsStore {
         });
         let mut payload = job.payload;
         payload.extend(request.payload_changes);
-        if let Some(binding) = binding {
+        if let Some(binding) = download_binding {
             if !download_binding_matches_payload(binding, &payload) {
                 return Err(JobsStoreError::InvalidStatus(
                     "Download binding changed during replay".to_owned(),
                 ));
             }
+        }
+        if !portable.allow_rebind
+            && previous_binding.is_some()
+            && previous_binding.as_ref() != portable.binding
+        {
+            return Err(JobsStoreError::InvalidStatus(
+                "Portable model identity changed during duplicate".to_owned(),
+            ));
+        }
+        if portable.allow_rebind
+            && !matches!(
+                (previous_binding.as_ref(), portable.binding),
+                (Some(previous), Some(next))
+                    if previous.get("authoredOptions") != next.get("authoredOptions")
+            )
+        {
+            return Err(JobsStoreError::InvalidStatus(
+                "Portable source rebind requires changed authored choices".to_owned(),
+            ));
         }
         // A duplicated YuE2 job is a new take with its own run directory (sc-22999).
         crate::yue2_score::jobs::refresh_block_for_duplicate(&mut payload);
@@ -2239,7 +2402,8 @@ impl JobsStore {
             id,
             source_provenance.as_ref(),
         )?;
-        Self::write_download_binding(&transaction, &job.id, binding)?;
+        Self::write_download_binding(&transaction, &job.id, download_binding)?;
+        Self::write_portable_binding(&transaction, &job.id, portable.binding)?;
         transaction.commit()?;
         Ok(job)
     }
@@ -2336,6 +2500,26 @@ impl JobsStore {
     }
 
     pub fn register_worker(&self, request: RegisterWorker) -> JobsStoreResult<WorkerSnapshot> {
+        self.register_worker_with_platform(request, None)
+    }
+
+    pub fn register_worker_with_platform(
+        &self,
+        request: RegisterWorker,
+        platform: Option<&str>,
+    ) -> JobsStoreResult<WorkerSnapshot> {
+        self.register_worker_with_portable_sources(request, platform, None)
+    }
+
+    pub fn register_worker_with_portable_sources(
+        &self,
+        request: RegisterWorker,
+        platform: Option<&str>,
+        portable_source_claims: Option<&[PortableSourceClaim]>,
+    ) -> JobsStoreResult<WorkerSnapshot> {
+        let portable_source_claims = portable_source_claims.unwrap_or(&[]);
+        validate_portable_source_claims(portable_source_claims)
+            .map_err(|error| JobsStoreError::InvalidStatus(error.to_string()))?;
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2344,8 +2528,10 @@ impl JobsStore {
             "
             insert into workers (
               id, gpu_id, gpu_name, status, current_job_id, capabilities_json,
-              loaded_models_json, utilization_json, registered_at, last_seen_at
-            ) values (?1, ?2, ?3, 'idle', null, ?4, ?5, ?6, ?7, ?7)
+              loaded_models_json, utilization_json, platform, portable_source_claims_json,
+              source_proof_authenticated,
+              registered_at, last_seen_at
+            ) values (?1, ?2, ?3, 'idle', null, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?9)
             on conflict(id) do update set
               gpu_id = excluded.gpu_id,
               gpu_name = excluded.gpu_name,
@@ -2360,6 +2546,9 @@ impl JobsStore {
               capabilities_json = excluded.capabilities_json,
               loaded_models_json = excluded.loaded_models_json,
               utilization_json = excluded.utilization_json,
+              platform = excluded.platform,
+              portable_source_claims_json = excluded.portable_source_claims_json,
+              source_proof_authenticated = 0,
               last_seen_at = excluded.last_seen_at
             ",
             params![
@@ -2369,6 +2558,8 @@ impl JobsStore {
                 dumps(&request.capabilities)?,
                 dumps(&request.loaded_models)?,
                 optional_dumps(request.utilization.as_ref())?,
+                platform,
+                dumps(portable_source_claims)?,
                 now,
             ],
         )?;
@@ -2377,10 +2568,45 @@ impl JobsStore {
         Ok(worker)
     }
 
+    /// This flag is process-local authentication evidence for routing decisions, never a worker
+    /// assertion. The API clears it on startup and sets it only after verifying the derived key.
+    pub fn set_worker_source_proof_authenticated(
+        &self,
+        worker_id: &str,
+        authenticated: bool,
+    ) -> JobsStoreResult<()> {
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
+        connection.execute(
+            "update workers set source_proof_authenticated = ?2 where id = ?1",
+            params![worker_id, i64::from(authenticated)],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_worker_source_proof_authentication(&self) -> JobsStoreResult<()> {
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
+        connection.execute("update workers set source_proof_authenticated = 0", [])?;
+        Ok(())
+    }
+
     pub fn heartbeat_worker(
         &self,
         request: WorkerHeartbeat,
     ) -> JobsStoreResult<WorkerHeartbeatOutcome> {
+        self.heartbeat_worker_with_portable_sources(request, None)
+    }
+
+    pub fn heartbeat_worker_with_portable_sources(
+        &self,
+        request: WorkerHeartbeat,
+        portable_source_claims: Option<&[PortableSourceClaim]>,
+    ) -> JobsStoreResult<WorkerHeartbeatOutcome> {
+        if let Some(claims) = portable_source_claims {
+            validate_portable_source_claims(claims)
+                .map_err(|error| JobsStoreError::InvalidStatus(error.to_string()))?;
+        }
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2428,8 +2654,9 @@ impl JobsStore {
                    loaded_models_json = ?3,
                    utilization_json = ?4,
                    status_reason = ?5,
-                   last_seen_at = ?6
-             where id = ?7
+                   portable_source_claims_json = coalesce(?6, portable_source_claims_json),
+                   last_seen_at = ?7
+             where id = ?8
             ",
             params![
                 request.status.as_str(),
@@ -2440,6 +2667,7 @@ impl JobsStore {
                 // very next heartbeat rather than carrying a stale remedy for a fixed host
                 // (sc-16260 AC 4). `None` on every non-unhealthy heartbeat.
                 request.status_reason,
+                portable_source_claims.map(dumps).transpose()?,
                 now,
                 request.worker_id,
             ],
@@ -2466,6 +2694,141 @@ impl JobsStore {
             worker,
             interrupted_job,
         })
+    }
+
+    /// Authenticated registrations may advertise logical, exact-byte source claims. This private
+    /// view is used only during admission; stale or unhealthy workers cannot establish authority.
+    pub fn portable_source_claims_for_route(
+        &self,
+        backend: &str,
+        platform: &str,
+        requested_gpu: &str,
+        worker_timeout_seconds: u64,
+    ) -> JobsStoreResult<Vec<PortableSourceClaim>> {
+        Ok(self
+            .portable_source_claim_sets_for_route(
+                backend,
+                platform,
+                requested_gpu,
+                worker_timeout_seconds,
+            )?
+            .into_iter()
+            .flatten()
+            .collect())
+    }
+
+    /// Keep each authenticated worker's private claims together so replay can prove one eligible
+    /// worker has the entire frozen local digest closure before enqueue.
+    pub fn portable_source_claim_sets_for_route(
+        &self,
+        backend: &str,
+        platform: &str,
+        requested_gpu: &str,
+        worker_timeout_seconds: u64,
+    ) -> JobsStoreResult<Vec<Vec<PortableSourceClaim>>> {
+        Ok(self
+            .portable_source_claim_sets_for_route_with_facts(
+                backend,
+                platform,
+                requested_gpu,
+                worker_timeout_seconds,
+                None,
+            )?
+            .into_iter()
+            .map(|(_, claims)| claims)
+            .collect())
+    }
+
+    /// Replay availability must use the same capability and payload gates as claim selection.
+    pub fn portable_source_claim_sets_for_job_route(
+        &self,
+        backend: &str,
+        platform: &str,
+        requested_gpu: &str,
+        worker_timeout_seconds: u64,
+        job_type: &JobType,
+        payload: &Map<String, Value>,
+    ) -> JobsStoreResult<Vec<Vec<PortableSourceClaim>>> {
+        let facts = ClaimRoutingFacts::from_parts(job_type, payload);
+        Ok(self
+            .portable_source_claim_sets_for_route_with_facts(
+                backend,
+                platform,
+                requested_gpu,
+                worker_timeout_seconds,
+                Some(&facts),
+            )?
+            .into_iter()
+            .map(|(_, claims)| claims)
+            .collect())
+    }
+
+    /// Preserve worker identity for request-time proof, preventing claims from two hosts from
+    /// jointly satisfying a model closure.
+    pub fn portable_source_claim_sets_for_job_route_with_ids(
+        &self,
+        backend: &str,
+        platform: &str,
+        requested_gpu: &str,
+        worker_timeout_seconds: u64,
+        job_type: &JobType,
+        payload: &Map<String, Value>,
+    ) -> JobsStoreResult<Vec<(String, Vec<PortableSourceClaim>)>> {
+        let facts = ClaimRoutingFacts::from_parts(job_type, payload);
+        self.portable_source_claim_sets_for_route_with_facts(
+            backend,
+            platform,
+            requested_gpu,
+            worker_timeout_seconds,
+            Some(&facts),
+        )
+    }
+
+    fn portable_source_claim_sets_for_route_with_facts(
+        &self,
+        backend: &str,
+        platform: &str,
+        requested_gpu: &str,
+        worker_timeout_seconds: u64,
+        facts: Option<&ClaimRoutingFacts>,
+    ) -> JobsStoreResult<Vec<(String, Vec<PortableSourceClaim>)>> {
+        let connection = self.open_connection()?;
+        let cutoff = format_unix_seconds(
+            now_unix_seconds().saturating_sub(worker_timeout_seconds.min(i64::MAX as u64) as i64),
+        );
+        let mut statement = connection.prepare(
+            "select * from workers where platform = ?1 and last_seen_at >= ?2 and status != 'unhealthy'",
+        )?;
+        let workers =
+            collect_workers(statement.query_map(params![platform, cutoff], row_to_worker)?)?;
+        drop(statement);
+        let mut claims = Vec::new();
+        for worker in workers {
+            let backend_matches = match backend {
+                "mlx" => worker.gpu_id.eq_ignore_ascii_case("mlx"),
+                "candle" => worker_is_candle(&worker),
+                "cpu" => worker.gpu_id.eq_ignore_ascii_case("cpu"),
+                _ => false,
+            };
+            if !backend_matches
+                || (requested_gpu != "auto" && requested_gpu != worker.gpu_id)
+                || facts.is_some_and(|facts| !worker_supports_claim_routing_facts(&worker, facts))
+            {
+                continue;
+            }
+            let raw: Option<String> = connection.query_row(
+                "select portable_source_claims_json from workers where id = ?1",
+                params![worker.id],
+                |row| row.get(0),
+            )?;
+            if let Some(raw) = raw {
+                let worker_claims: Vec<PortableSourceClaim> = serde_json::from_str(&raw)?;
+                validate_portable_source_claims(&worker_claims)
+                    .map_err(|error| JobsStoreError::InvalidStatus(error.to_string()))?;
+                claims.push((worker.id, worker_claims));
+            }
+        }
+        Ok(claims)
     }
 
     pub fn mark_stale_workers_interrupted(
@@ -3013,6 +3376,39 @@ impl JobsStore {
         worker_id: &str,
         mlx_required: bool,
     ) -> JobsStoreResult<(Option<JobSnapshot>, Option<RouteDecision>)> {
+        self.claim_next_job_routed_with_portable_binding(worker_id, mlx_required, 0, None, None)
+            .map(|(job, decision, _)| (job, decision))
+    }
+
+    /// A worker must explicitly advertise support before claiming a binding-bearing job.
+    /// Versionless workers retain their normal access to historical unbound jobs.
+    pub fn claim_next_job_routed_with_portable_binding(
+        &self,
+        worker_id: &str,
+        mlx_required: bool,
+        portable_binding_version: u32,
+        portable_backend: Option<&str>,
+        portable_platform: Option<&str>,
+    ) -> JobsStoreResult<(Option<JobSnapshot>, Option<RouteDecision>, Option<Value>)> {
+        self.claim_next_job_routed_with_portable_binding_authenticated(
+            worker_id,
+            mlx_required,
+            portable_binding_version,
+            portable_backend,
+            portable_platform,
+            false,
+        )
+    }
+
+    pub fn claim_next_job_routed_with_portable_binding_authenticated(
+        &self,
+        worker_id: &str,
+        mlx_required: bool,
+        portable_binding_version: u32,
+        portable_backend: Option<&str>,
+        portable_platform: Option<&str>,
+        authenticated_for_dynamic_source: bool,
+    ) -> JobsStoreResult<(Option<JobSnapshot>, Option<RouteDecision>, Option<Value>)> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         // BEGIN IMMEDIATE: take the write lock up front. The claim reads the worker, the
@@ -3023,6 +3419,34 @@ impl JobsStore {
         // overlapping claims would race and one would fail. IMMEDIATE serializes claimers.
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let worker = self.get_worker_on_connection(&transaction, worker_id)?;
+        let route_key = match (portable_backend, portable_platform) {
+            (Some(backend), Some(platform))
+                if portable_binding_version
+                    == crate::model_artifacts::portable_binding::PORTABLE_MODEL_BINDING_VERSION
+                    && worker.platform.as_deref() == Some(platform)
+                    && match backend {
+                        "mlx" => worker.gpu_id.eq_ignore_ascii_case("mlx"),
+                        "candle" => worker_is_candle(&worker),
+                        "cpu" => worker.gpu_id.eq_ignore_ascii_case("cpu"),
+                        _ => false,
+                    } =>
+            {
+                Some(format!("{backend}:{platform}"))
+            }
+            _ => None,
+        };
+        let worker_claims_raw: Option<String> = transaction.query_row(
+            "select portable_source_claims_json from workers where id = ?1",
+            params![worker_id],
+            |row| row.get(0),
+        )?;
+        let worker_claims: Vec<PortableSourceClaim> = worker_claims_raw
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?
+            .unwrap_or_default();
+        validate_portable_source_claims(&worker_claims)
+            .map_err(|error| JobsStoreError::InvalidStatus(error.to_string()))?;
         let worker_gpu_id = worker.gpu_id.clone();
         let has_active_gpu_job = active_gpu_job_exists(&transaction, &worker.gpu_id)?;
         let mut hydration = ClaimHydrationStats::default();
@@ -3074,6 +3498,10 @@ impl JobsStore {
                    claim_model_key_3, claim_model_key_4
               from jobs
              where status = 'queued'
+               and (portable_model_binding_json is null or
+                    (?4 is not null and exists (
+                        select 1 from json_each(portable_model_binding_json, '$.routes')
+                         where key = ?4)))
                and (type in ({list}) or requested_gpu = 'auto' or requested_gpu = ?1)
                and (?2 = 0 or type in ({list}))
                and claim_facts_version = ?3
@@ -3086,7 +3514,8 @@ impl JobsStore {
             params![
                 worker.gpu_id,
                 i64::from(has_active_gpu_job),
-                CLAIM_ROUTING_FACTS_VERSION
+                CLAIM_ROUTING_FACTS_VERSION,
+                route_key,
             ],
             row_to_claim_candidate,
         )?)?;
@@ -3100,6 +3529,9 @@ impl JobsStore {
             queued_rows,
             &worker,
             &mut hydration,
+            portable_backend.zip(portable_platform),
+            &worker_claims,
+            authenticated_for_dynamic_source,
         ) {
             Ok(queued) => queued,
             Err(error) => {
@@ -3109,23 +3541,47 @@ impl JobsStore {
         };
         let Some(queued) = queued else {
             *self.last_claim_hydration.lock() = hydration;
-            return Ok((None, None));
+            return Ok((None, None, None));
         };
         drop(statement);
+        let portable_binding = Self::read_portable_binding(&transaction, &queued.id)?;
+        if let Some(binding) = &portable_binding {
+            let typed: crate::model_artifacts::portable_binding::PortableJobBinding =
+                serde_json::from_value(binding.clone())?;
+            typed
+                .select_route(
+                    portable_backend.unwrap_or_default(),
+                    portable_platform.unwrap_or_default(),
+                )
+                .map_err(|error| JobsStoreError::InvalidStatus(error.to_string()))?;
+        }
         if should_defer_auto_gpu_claim(&transaction, &queued, &worker)? {
             *self.last_claim_hydration.lock() = hydration;
-            return Ok((None, None));
+            return Ok((None, None, None));
         }
-        if should_defer_image_to_mlx_worker(&transaction, &queued, &worker, mlx_required)?
-            || should_defer_video_to_mlx_worker(&transaction, &queued, &worker, mlx_required)?
-            || should_defer_training_to_mlx_worker(&transaction, &queued, &worker, mlx_required)?
-            || should_defer_caption_to_mlx_worker(&transaction, &queued, &worker, mlx_required)?
-            || should_defer_understanding_to_mlx_worker(
-                &transaction,
-                &queued,
-                &worker,
-                mlx_required,
-            )?
+        let mlx_deferral_allowed = portable_binding.is_none()
+            || portable_mlx_worker_can_claim(&transaction, &queued, &worker, false)?;
+        if mlx_deferral_allowed
+            && (should_defer_image_to_mlx_worker(&transaction, &queued, &worker, mlx_required)?
+                || should_defer_video_to_mlx_worker(&transaction, &queued, &worker, mlx_required)?
+                || should_defer_training_to_mlx_worker(
+                    &transaction,
+                    &queued,
+                    &worker,
+                    mlx_required,
+                )?
+                || should_defer_caption_to_mlx_worker(
+                    &transaction,
+                    &queued,
+                    &worker,
+                    mlx_required,
+                )?
+                || should_defer_understanding_to_mlx_worker(
+                    &transaction,
+                    &queued,
+                    &worker,
+                    mlx_required,
+                )?)
         {
             // A non-mlx worker is yielding this MLX-eligible job to an idle mlx worker.
             let decision = RouteDecision::new(
@@ -3136,7 +3592,7 @@ impl JobsStore {
                 "idle_mlx_available",
             );
             *self.last_claim_hydration.lock() = hydration;
-            return Ok((None, Some(decision)));
+            return Ok((None, Some(decision), None));
         }
 
         let assigned_gpu = if is_non_gpu_job_type(queued.job_type.as_str()) {
@@ -3151,6 +3607,18 @@ impl JobsStore {
         // only unstamped H3 record left is one claimed and rendered before the upgrade (replayed
         // as the legacy `diffusers`). The stamp changes no routing fact, so the projected claim
         // facts stay current with the new payload revision.
+        if queued.job_type == JobType::ModelImport {
+            // Rotate the proof at every claim, including pre-upgrade queued imports. A stale
+            // worker snapshot or legacy caller field cannot authorize the current execution.
+            // This does not alter import recovery's authored-payload commitment.
+            let mut payload = queued.payload.clone();
+            mint_import_claim_capability(&mut payload)?;
+            transaction.execute(
+                "update jobs set payload_json = ?1, claim_payload_revision = payload_revision + 1
+                  where id = ?2 and status = 'queued'",
+                params![dumps(&payload)?, queued.id],
+            )?;
+        }
         if matches!(
             queued.job_type,
             JobType::VideoGenerate
@@ -3192,7 +3660,7 @@ impl JobsStore {
         transaction.commit()?;
         let decision = route_decision_for_claim(&queued, &worker);
         *self.last_claim_hydration.lock() = hydration;
-        Ok((Some(job), decision))
+        Ok((Some(job), decision, portable_binding))
     }
 
     pub fn update_job_progress(
@@ -3691,6 +4159,12 @@ impl JobsStore {
                 "{} jobs cannot target CPU workers. Choose auto or a GPU id.",
                 request.job_type.as_str()
             )));
+        }
+        let mut request = request;
+        if request.job_type == JobType::ModelImport {
+            // Overwrite any raw caller field, and issue a new capability for every retry or
+            // duplicate. An import's recovery commitment deliberately excludes this proof.
+            mint_import_claim_capability(&mut request.payload)?;
         }
         let now = utc_now();
         let job_id = match job_id {
@@ -4298,6 +4772,7 @@ fn row_to_worker(row: &Row<'_>) -> rusqlite::Result<WorkerSnapshot> {
                 .as_deref(),
         ),
         utilization: loads_optional(row.get::<_, Option<String>>("utilization_json")?.as_deref()),
+        platform: row.get("platform")?,
         status_reason: row.get("status_reason")?,
         registered_at: row.get("registered_at")?,
         last_seen_at: row.get("last_seen_at")?,
@@ -4729,6 +5204,9 @@ fn should_defer_auto_gpu_claim(
         if !worker_supports_job(&candidate, job) {
             continue;
         }
+        if !portable_worker_can_claim_job(connection, job, &candidate)? {
+            continue;
+        }
         let gpu_busy = match active_by_gpu.get(&candidate.gpu_id) {
             Some(&busy) => busy,
             None => {
@@ -4881,23 +5359,88 @@ fn idle_mlx_worker_can_claim(
     job: &JobSnapshot,
     worker: &WorkerSnapshot,
 ) -> JobsStoreResult<bool> {
-    let mut statement = connection.prepare(
+    portable_mlx_worker_can_claim(connection, job, worker, true)
+}
+
+fn portable_mlx_worker_can_claim(
+    connection: &Connection,
+    job: &JobSnapshot,
+    worker: &WorkerSnapshot,
+    idle_only: bool,
+) -> JobsStoreResult<bool> {
+    let status_filter = if idle_only {
+        "and status = 'idle'"
+    } else {
+        "and status in ('idle', 'busy')"
+    };
+    let mut statement = connection.prepare(&format!(
         "
         select * from workers
          where id != ?1
            and gpu_id = 'mlx'
-           and status = 'idle'
+           {status_filter}
          order by id
-        ",
-    )?;
+        "
+    ))?;
     let candidates = collect_workers(statement.query_map(params![worker.id], row_to_worker)?)?;
     // Every candidate here has `gpu_id = 'mlx'`, so the active-GPU-job fact is
     // identical for all of them — resolve a supporting candidate first, then run
     // `active_gpu_job_exists` once instead of once per candidate (sc-4273).
-    let Some(candidate) = candidates.iter().find(|c| worker_supports_job(c, job)) else {
+    for candidate in candidates {
+        if worker_supports_job(&candidate, job)
+            && portable_worker_can_claim_job(connection, job, &candidate)?
+        {
+            return Ok(!idle_only || !active_gpu_job_exists(connection, &candidate.gpu_id)?);
+        }
+    }
+    Ok(false)
+}
+
+fn portable_worker_can_claim_job(
+    connection: &Connection,
+    job: &JobSnapshot,
+    worker: &WorkerSnapshot,
+) -> JobsStoreResult<bool> {
+    let Some(binding) = JobsStore::read_portable_binding(connection, &job.id)? else {
+        return Ok(true);
+    };
+    let Some(platform) = worker.platform.as_deref() else {
         return Ok(false);
     };
-    Ok(!active_gpu_job_exists(connection, &candidate.gpu_id)?)
+    let backend = if worker.gpu_id.eq_ignore_ascii_case("mlx") {
+        "mlx"
+    } else if worker_is_candle(worker) {
+        "candle"
+    } else if worker.gpu_id.eq_ignore_ascii_case("cpu") {
+        "cpu"
+    } else {
+        return Ok(false);
+    };
+    let binding: crate::model_artifacts::portable_binding::PortableJobBinding =
+        serde_json::from_value(binding)?;
+    if !binding
+        .routes
+        .contains_key(&format!("{backend}:{platform}"))
+    {
+        return Ok(false);
+    }
+    let (claims_raw, authenticated): (Option<String>, bool) = connection.query_row(
+        "select portable_source_claims_json, source_proof_authenticated from workers where id = ?1",
+        params![worker.id],
+        |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0)),
+    )?;
+    let claims: Vec<PortableSourceClaim> = claims_raw
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()?
+        .unwrap_or_default();
+    candidate_matches_portable_worker_sources(
+        connection,
+        &job.id,
+        Some((backend, platform)),
+        &claims,
+        authenticated,
+    )
 }
 
 fn active_gpu_job_exists(connection: &Connection, gpu_id: &str) -> JobsStoreResult<bool> {
@@ -5445,6 +5988,9 @@ fn choose_claimable_job_from_candidates(
     candidates: Vec<ClaimCandidate>,
     worker: &WorkerSnapshot,
     hydration: &mut ClaimHydrationStats,
+    portable_route: Option<(&str, &str)>,
+    worker_claims: &[PortableSourceClaim],
+    authenticated_for_dynamic_source: bool,
 ) -> JobsStoreResult<Option<JobSnapshot>> {
     let mut compatible = Vec::new();
     let mut highest_compatible_rank = None;
@@ -5455,6 +6001,15 @@ fn choose_claimable_job_from_candidates(
             break;
         }
         if !worker_may_support_claim_candidate(worker, &candidate) {
+            continue;
+        }
+        if !candidate_matches_portable_worker_sources(
+            connection,
+            &candidate.id,
+            portable_route,
+            worker_claims,
+            authenticated_for_dynamic_source,
+        )? {
             continue;
         }
         highest_compatible_rank.get_or_insert(candidate.queue_rank);
@@ -5477,6 +6032,91 @@ fn choose_claimable_job_from_candidates(
         });
     }
     Ok(Some(job))
+}
+
+fn candidate_matches_portable_worker_sources(
+    connection: &Connection,
+    job_id: &str,
+    portable_route: Option<(&str, &str)>,
+    worker_claims: &[PortableSourceClaim],
+    authenticated_for_dynamic_source: bool,
+) -> JobsStoreResult<bool> {
+    let Some(binding) = JobsStore::read_portable_binding(connection, job_id)? else {
+        return Ok(true);
+    };
+    let Some((backend, platform)) = portable_route else {
+        return Ok(false);
+    };
+    let binding: crate::model_artifacts::portable_binding::PortableJobBinding =
+        serde_json::from_value(binding)?;
+    let route = binding
+        .select_route(backend, platform)
+        .map_err(|error| JobsStoreError::InvalidStatus(error.to_string()))?;
+    let has_digest = route
+        .models
+        .iter()
+        .flat_map(|model| &model.members)
+        .any(|member| {
+            matches!(
+                member.source,
+                crate::model_artifacts::portable_binding::PortableSourceIdentity::Digest { .. }
+            )
+        });
+    let (job_type, payload) = if has_digest {
+        let (raw_type, raw): (String, String) = connection.query_row(
+            "select type, payload_json from jobs where id = ?1",
+            params![job_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        (
+            parse_string_enum::<JobType>(&raw_type),
+            serde_json::from_str(&raw)?,
+        )
+    } else {
+        (JobType::Placeholder, Value::Null)
+    };
+    let dynamic_utility_primary = matches!(
+        job_type,
+        JobType::DatasetAnalysis | JobType::TrainingCaption
+    ) && route.models.iter().any(|model| {
+        model.slot == "modelManifestEntries/0" && model.members.iter().any(|member| {
+            member.role == crate::model_artifacts::ArtifactMemberRole::Primary
+                && matches!(
+                    member.source,
+                    crate::model_artifacts::portable_binding::PortableSourceIdentity::Digest { .. }
+                )
+        })
+    });
+    if dynamic_utility_primary && !authenticated_for_dynamic_source {
+        return Ok(false);
+    }
+    Ok(route.models.iter().all(|model| {
+        model.members.iter().all(|member| {
+            use crate::model_artifacts::portable_binding::{
+                portable_closure_sha256, registered_digest_member_claim_id, PortableSourceIdentity,
+                PortableSourceProvenance,
+            };
+            match &member.source {
+                PortableSourceIdentity::Revision { .. } => true,
+                PortableSourceIdentity::WorkerClaim { .. } => worker_claims
+                    .iter()
+                    .any(|claim| claim.matches_worker_claim_member(member).is_ok()),
+                PortableSourceIdentity::Digest { sha256 } => {
+                    let Ok(source_id) = registered_digest_member_claim_id(model, member, &payload)
+                    else {
+                        return false;
+                    };
+                    worker_claims.iter().any(|claim| {
+                        claim.source_id == source_id
+                            && claim.provenance == PortableSourceProvenance::OperatorOverride
+                            && claim.files == member.files
+                            && portable_closure_sha256(&claim.files).ok().as_deref()
+                                == Some(sha256.as_str())
+                    })
+                }
+            }
+        })
+    }))
 }
 
 fn choose_claimable_candidate(

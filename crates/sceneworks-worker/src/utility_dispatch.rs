@@ -1,5 +1,144 @@
 //! Utility dispatch and terminal failure reconciliation.
 use super::*;
+use sceneworks_core::model_artifacts::local_preference::PortableOverlayWaitCancellation;
+
+/// Dropping the async owner (including heartbeat failure or job cancellation) wakes its
+/// blocking source guard so it cannot retain a FIFO ticket after the job has gone away.
+struct CancelOverlayWaitOnDrop(PortableOverlayWaitCancellation);
+
+impl Drop for CancelOverlayWaitOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+pub(crate) fn missing_portable_revision_files(
+    binding: &PortableRouteBinding,
+    settings: &Settings,
+) -> std::collections::BTreeMap<(String, String), Vec<String>> {
+    let mut missing = std::collections::BTreeMap::new();
+    let library = sceneworks_core::hf_home::model_source_library(&settings.data_dir);
+    for member in binding.models.iter().flat_map(|model| &model.members) {
+        let sceneworks_core::model_artifacts::portable_binding::PortableSourceIdentity::Revision {
+            identity,
+        } = &member.source
+        else {
+            continue;
+        };
+        let snapshot = library
+            .discover_snapshot(&identity.repository, Some(&identity.revision))
+            .ok()
+            .map(|(_, path)| path);
+        for file in &member.files {
+            if !snapshot
+                .as_ref()
+                .is_some_and(|root| root.join(&file.relative_path).is_file())
+            {
+                missing
+                    .entry((identity.repository.clone(), identity.revision.clone()))
+                    .or_insert_with(Vec::new)
+                    .push(file.relative_path.to_string_lossy().into_owned());
+            }
+        }
+    }
+    for files in missing.values_mut() {
+        files.sort();
+        files.dedup();
+    }
+    missing
+}
+
+#[derive(Debug)]
+pub(crate) enum SourceGuardBeforeFetch {
+    Ready(Box<external_library_runtime::RuntimeSourceGuard>),
+    Missing(std::collections::BTreeMap<(String, String), Vec<String>>),
+}
+
+/// The source guard owns local-tier selection and the installed-external refusal. Let it select
+/// and lease a complete local bundle before considering any network fetch. Only a genuinely absent
+/// frozen revision member may reach the downloader; every other guard refusal stays terminal.
+#[cfg(test)]
+pub(crate) fn begin_source_guard_before_fetch(
+    job_type: &JobType,
+    payload: &JsonObject,
+    settings: &Settings,
+    binding: Option<&PortableRouteBinding>,
+) -> WorkerResult<SourceGuardBeforeFetch> {
+    begin_source_guard_before_fetch_cancelable(job_type, payload, settings, binding, None)
+}
+
+#[cfg(test)]
+#[test]
+fn lost_guard_heartbeat_cancels_blocking_overlay_wait() {
+    use sceneworks_core::model_artifacts::local_preference::{
+        prefer_portable_snapshots, wait_for_portable_snapshots, LocalArtifactOverlayEntry,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let entry = |root: &str| LocalArtifactOverlayEntry {
+        repository: "overlay-heartbeat-test/model".to_owned(),
+        revision: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+        snapshot_root: temp.path().join(root),
+        files: Vec::new(),
+    };
+    let first_entry = entry("first");
+    let second_entry = entry("second");
+    let first = prefer_portable_snapshots(vec![first_entry]).unwrap();
+    let cancellation = PortableOverlayWaitCancellation::default();
+    let owner = CancelOverlayWaitOnDrop(cancellation.clone());
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        result_tx
+            .send(wait_for_portable_snapshots(
+                vec![second_entry],
+                &cancellation,
+            ))
+            .unwrap();
+    });
+    // Dropping the async heartbeat owner must release its blocking waiter before A exits.
+    drop(owner);
+    assert!(result_rx
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .is_err());
+    waiter.join().unwrap();
+    drop(first);
+}
+
+fn begin_source_guard_before_fetch_cancelable(
+    job_type: &JobType,
+    payload: &JsonObject,
+    settings: &Settings,
+    binding: Option<&PortableRouteBinding>,
+    cancellation: Option<&PortableOverlayWaitCancellation>,
+) -> WorkerResult<SourceGuardBeforeFetch> {
+    match external_library_runtime::RuntimeSourceGuard::begin_with_binding_cancelable(
+        job_type,
+        payload,
+        settings,
+        binding,
+        cancellation,
+    ) {
+        Ok(guard) => Ok(SourceGuardBeforeFetch::Ready(Box::new(guard))),
+        Err(error) => {
+            let cold_revision = matches!(&error, WorkerError::InvalidPayload(detail)
+                if detail == "portable model binding: frozen source snapshot is unavailable"
+                    || detail == "portable model binding: a frozen member is missing from every authorized source tier"
+                    || detail.starts_with("portable model binding: artifact file is unavailable:")
+                    || (detail.starts_with("portable model binding: source snapshot ")
+                        && detail.ends_with(" is not installed")));
+            let Some(binding) = binding.filter(|_| cold_revision) else {
+                return Err(error);
+            };
+            let missing = missing_portable_revision_files(binding, settings);
+            if missing.is_empty() {
+                Err(error)
+            } else {
+                Ok(SourceGuardBeforeFetch::Missing(missing))
+            }
+        }
+    }
+}
 
 /// Dispatch one claimed job to its handler and reconcile the terminal state.
 ///
@@ -19,13 +158,21 @@ pub(super) async fn run_utility_job(
     settings: &Settings,
     http_client: &reqwest::Client,
     job: JobSnapshot,
+    portable_model_binding: Option<PortableRouteBinding>,
     shutdown: gen_core::CancelFlag,
 ) {
     let job_id = job.id.clone();
     load_progress::with_job(
         api,
         &job_id,
-        run_utility_job_inner(api, settings, http_client, job, shutdown),
+        run_utility_job_inner(
+            api,
+            settings,
+            http_client,
+            job,
+            portable_model_binding,
+            shutdown,
+        ),
     )
     .await;
 }
@@ -35,6 +182,7 @@ async fn run_utility_job_inner(
     settings: &Settings,
     http_client: &reqwest::Client,
     job: JobSnapshot,
+    portable_model_binding: Option<PortableRouteBinding>,
     shutdown: gen_core::CancelFlag,
 ) {
     // Bind the process-shutdown flag as a task-local for the whole dispatch (sc-9618, F-043 follow-up)
@@ -49,6 +197,26 @@ async fn run_utility_job_inner(
     // timings are posted separately by the handlers and coalesce-merge server-side.
     let metrics_probe = job_metrics::JobMetricsProbe::start(&settings.gpu_id);
     let result = with_shutdown_flag(shutdown.clone(), async {
+        // Validate the claimed route before any source work. The guard below selects a local
+        // bundle first, then a genuinely cold revision may be fetched and re-guarded.
+        if let Some(binding) = portable_model_binding.as_ref() {
+            binding.validate().map_err(|_| {
+                (
+                    "Model source unavailable.",
+                    WorkerError::InvalidPayload("portable model binding is invalid".to_owned()),
+                )
+            })?;
+            if binding.backend != crate::portable_runtime_backend(settings)
+                || binding.platform != std::env::consts::OS
+            {
+                return Err((
+                    "Model source unavailable.",
+                    WorkerError::InvalidPayload(
+                        "portable model route does not match this worker".to_owned(),
+                    ),
+                ));
+            }
+        }
         // sc-19708: the ONE pre-loader guard. Typed model-source admission happens here for every
         // job type, before any handler runs; handlers never carry availability or cache policy.
         //
@@ -59,18 +227,23 @@ async fn run_utility_job_inner(
         let guard_job_type = job.job_type.clone();
         let guard_payload = job.payload.clone();
         let guard_settings = settings.clone();
+        let guard_binding = portable_model_binding.clone();
+        let guard_cancellation = PortableOverlayWaitCancellation::default();
+        let _cancel_wait_on_drop = CancelOverlayWaitOnDrop(guard_cancellation.clone());
         let guard_task = crate::load_progress::spawn_blocking(move || {
-            external_library_runtime::RuntimeSourceGuard::begin(
+            begin_source_guard_before_fetch_cancelable(
                 &guard_job_type,
                 &guard_payload,
                 &guard_settings,
+                guard_binding.as_ref(),
+                Some(&guard_cancellation),
             )
         });
         // The guard's admission pass can re-verify a multi-GB resolved bundle, which outlasts the
         // API's stale-worker timeout — the sc-13856 hazard at a new call site. Awaiting the handle
         // bare let the sweep mark a still-healthy worker offline mid-verification (the Krea bf16
         // 90s lost-heartbeat incident), so the wait must pump heartbeats on the progress interval.
-        let source_guard = progress::heartbeat_while_blocking(
+        let first_guard = progress::heartbeat_while_blocking(
             api,
             settings,
             &job.id,
@@ -79,8 +252,57 @@ async fn run_utility_job_inner(
         )
         .await
         .map_err(|error| ("Model source unavailable.", error))?;
-        let dispatch_result =
-            dispatch_utility_job(api, settings, http_client, &job, &shutdown).await;
+        let source_guard = match first_guard {
+            SourceGuardBeforeFetch::Ready(guard) => *guard,
+            SourceGuardBeforeFetch::Missing(missing) => {
+                for ((repo, revision), files) in missing {
+                    crate::model_jobs::ensure_hf_files_cached(
+                        api, settings, &job, &repo, &revision, &files,
+                    )
+                    .await
+                    .map_err(|error| ("Model source unavailable.", error))?;
+                }
+                let guard_job_type = job.job_type.clone();
+                let guard_payload = job.payload.clone();
+                let guard_settings = settings.clone();
+                let guard_binding = portable_model_binding.clone();
+                let guard_cancellation = PortableOverlayWaitCancellation::default();
+                let _cancel_wait_on_drop = CancelOverlayWaitOnDrop(guard_cancellation.clone());
+                let guard_task = crate::load_progress::spawn_blocking(move || {
+                    external_library_runtime::RuntimeSourceGuard::begin_with_binding_cancelable(
+                        &guard_job_type,
+                        &guard_payload,
+                        &guard_settings,
+                        guard_binding.as_ref(),
+                        Some(&guard_cancellation),
+                    )
+                });
+                progress::heartbeat_while_blocking(
+                    api,
+                    settings,
+                    &job.id,
+                    "model source guard",
+                    guard_task,
+                )
+                .await
+                .map_err(|error| ("Model source unavailable.", error))?
+            }
+        };
+        let mut dispatch_job = job.clone();
+        dispatch_job.payload = source_guard.dispatch_payload().clone();
+        let mut dispatch_settings = settings.clone();
+        // The typed paths belong to the source guard's verified, immutable attempt snapshot.
+        // The guard below outlives this dispatch, retaining its exclusive lease through load.
+        dispatch_settings.verified_plan_layers = source_guard.plan_layers();
+        dispatch_settings.verified_revision_sources = source_guard.verified_revision_sources();
+        let dispatch_result = dispatch_utility_job(
+            api,
+            &dispatch_settings,
+            http_client,
+            &dispatch_job,
+            &shutdown,
+        )
+        .await;
         // Success releases the operation-owned source sessions; failure re-probes the exact bound
         // sources so a mid-load disconnect surfaces as the typed unavailable condition instead of
         // a raw loader error (sc-19708). An error with the source still present stays verbatim.

@@ -32,7 +32,7 @@ fn seed_snapshot(hub: &Path, repository: &str) {
 
 /// A durable download receipt: the install evidence that lets a disconnected library read
 /// `installed_external_unavailable` instead of `missing`.
-fn write_receipt(data_dir: &Path, repository: &str) {
+fn write_receipt_for_model(data_dir: &Path, repository: &str, model_id: &str) {
     let managed = data_dir
         .join("models")
         .join(sceneworks_core::model_artifacts::artifact_selection::safe_download_dir(repository));
@@ -42,7 +42,7 @@ fn write_receipt(data_dir: &Path, repository: &str) {
         serde_json::to_vec(&json!({
             "receipts": [{
                 "repo": repository,
-                "modelId": "relocatable",
+                "modelId": model_id,
                 "variant": "default",
                 "resolvedFiles": ["model.safetensors"],
                 "snapshotRevision": REVISION,
@@ -51,6 +51,10 @@ fn write_receipt(data_dir: &Path, repository: &str) {
         .expect("receipt serializes"),
     )
     .expect("receipt writes");
+}
+
+fn write_receipt(data_dir: &Path, repository: &str) {
+    write_receipt_for_model(data_dir, repository, "relocatable");
 }
 
 fn requirement(repository: &str) -> ExternalArtifactRequirement {
@@ -66,9 +70,13 @@ fn requirement(repository: &str) -> ExternalArtifactRequirement {
 /// Bind the library, then rename it away so the configured path no longer resolves — the CI-safe
 /// stand-in for unplugging the drive.
 fn install_then_disconnect(data_dir: &Path, repository: &str) -> PathBuf {
+    install_then_disconnect_for_model(data_dir, repository, "relocatable")
+}
+
+fn install_then_disconnect_for_model(data_dir: &Path, repository: &str, model_id: &str) -> PathBuf {
     let hub = isolated_hub(data_dir);
     seed_snapshot(&hub, repository);
-    write_receipt(data_dir, repository);
+    write_receipt_for_model(data_dir, repository, model_id);
     ExternalLibraryBindingStore::new(data_dir)
         .expect("binding store")
         .bind_or_probe_validated(&hub, &[requirement(repository)])
@@ -88,21 +96,26 @@ async fn a_disconnected_library_rejects_with_typed_context_and_a_reconnect_resum
     let _env = isolate_hf_cache();
     let settings = test_settings(&temp_dir);
     let data_dir = settings.data_dir.clone();
-    single_model_manifest(
+    manifest_with_downloads(
         &settings.config_dir.join("manifests"),
-        "relocatable",
-        "owner/model",
+        "qwen_image",
+        json!([{
+            "provider": "huggingface",
+            "repo": "owner/model",
+            "revision": REVISION,
+            "files": ["model.safetensors"],
+        }]),
     );
     std::fs::create_dir_all(&data_dir).expect("data dir creates");
-    let detached = install_then_disconnect(&data_dir, "owner/model");
-    let app = create_app(settings).expect("app creates");
+    let detached = install_then_disconnect_for_model(&data_dir, "owner/model", "qwen_image");
+    let app = create_training_fixture_app(settings).expect("app creates");
 
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Library Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let submission = json!({
         "projectId": project_id,
         "prompt": "a lighthouse",
-        "model": "relocatable",
+        "model": "qwen_image",
         "count": 1,
         "width": 512,
         "height": 512,
@@ -123,8 +136,8 @@ async fn a_disconnected_library_rejects_with_typed_context_and_a_reconnect_resum
     assert_eq!(body["code"], EXTERNAL_LIBRARY_UNAVAILABLE_CODE);
     let context = &body["context"];
     assert_eq!(context["availability"], "installed_external_unavailable");
-    assert_eq!(context["modelId"], "relocatable");
-    assert_eq!(context["modelName"], "relocatable");
+    assert_eq!(context["modelId"], "qwen_image");
+    assert_eq!(context["modelName"], "qwen_image");
     assert!(
         context["configuredLibraryPath"]
             .as_str()
@@ -157,7 +170,7 @@ async fn a_disconnected_library_rejects_with_typed_context_and_a_reconnect_resum
         StatusCode::CREATED,
         "the resumed submission must enqueue after reconnect: {body}"
     );
-    assert_eq!(body["payload"]["model"], "relocatable");
+    assert_eq!(body["payload"]["model"], "qwen_image");
 }
 
 /// Relocation at the wire: an unrelated folder is refused with a typed `reason` the prompt can
