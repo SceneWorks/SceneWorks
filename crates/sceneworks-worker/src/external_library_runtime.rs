@@ -355,6 +355,9 @@ impl RuntimeSourceGuard {
         settings: &Settings,
         original: WorkerError,
     ) -> WorkerError {
+        if matches!(original, WorkerError::ProcessPoisoned(_)) {
+            return original;
+        }
         let configured_library = sceneworks_core::hf_home::model_source_library(&settings.data_dir)
             .root()
             .to_path_buf();
@@ -2760,6 +2763,13 @@ mod tests {
                 remapped,
                 WorkerError::ExternalLibraryUnavailable(_)
             ));
+            let fatal = guard.classify_failure(
+                &settings,
+                WorkerError::ProcessPoisoned("owner device lost".to_owned()),
+            );
+            assert!(
+                matches!(fatal, WorkerError::ProcessPoisoned(ref detail) if detail == "owner device lost")
+            );
             assert!(
                 !remapped.to_string().contains("os error 2"),
                 "a proven disconnect must never surface as a raw ENOENT"

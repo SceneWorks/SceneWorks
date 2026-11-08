@@ -101,6 +101,7 @@ impl MlxWorkerRecovery {
         job_failure(&inner)
     }
 
+    #[cfg(any(native_lane, not(test)))]
     pub(crate) fn process_fault_detail(&self) -> Option<String> {
         self.inner
             .lock()
