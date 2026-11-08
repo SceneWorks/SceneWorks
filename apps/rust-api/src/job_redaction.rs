@@ -65,6 +65,7 @@ pub(super) fn redact_private_binding_markers(value: &mut Value) {
         Value::Object(fields) => {
             fields.remove("portableModelBinding");
             fields.remove("portableJobBinding");
+            fields.remove("__portableAuxPaths");
             for child in fields.values_mut() {
                 redact_private_binding_markers(child);
             }
@@ -767,7 +768,10 @@ mod portable_redaction_tests {
         assert!(!shared.contains("portableModelBinding"));
         let mut receipt = json!({
             "model":"trained_iris",
-            "rawAdapterSettings":{"portableModelBinding":{"secret":"must-not-leak"}},
+            "rawAdapterSettings":{
+                "portableModelBinding":{"secret":"must-not-leak"},
+                "advanced":{"__portableAuxPaths":{"reference":"/private/worker/reference.safetensors"}}
+            },
             "modelProvenance":{"modelId":"trained_iris"}
         });
         redact_private_binding_markers(&mut receipt);
@@ -776,6 +780,9 @@ mod portable_redaction_tests {
         assert!(!serde_json::to_string(&receipt)
             .unwrap()
             .contains("must-not-leak"));
+        assert!(!serde_json::to_string(&receipt)
+            .unwrap()
+            .contains("/private/worker/reference.safetensors"));
         let mut event = serde_json::to_value(raw).unwrap();
         event["message"] = json!("Portable source refused: /private/worker/weights.safetensors");
         event["error"] = json!("Cannot confine C:\\private\\worker\\model.safetensors");
