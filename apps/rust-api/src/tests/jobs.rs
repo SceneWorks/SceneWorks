@@ -16222,6 +16222,7 @@ async fn styled_image_job_skips_fold_when_prompt_resolved_client_side() {
 
 #[tokio::test]
 async fn appearance_catalog_and_job_route_share_model_aware_composition() {
+    let _hf_cache = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let (app, project_id) = shipped_manifest_app(&temp_dir).await;
     let (status, catalog) = request(app.clone(), "GET", "/api/v1/appearance", Value::Null).await;
@@ -16404,6 +16405,7 @@ async fn shipped_manifest_app_on_os(
 /// in sceneworks-core, since this route can no longer write one.)
 #[tokio::test]
 async fn video_route_stamps_and_replays_the_h3_reference_resize_mode() {
+    let _hf_cache = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let (app, project_id) = shipped_manifest_app(&temp_dir).await;
     let submit = |model: &str, advanced: Value| {
@@ -16509,6 +16511,7 @@ async fn video_route_stamps_and_replays_the_h3_reference_resize_mode() {
 /// appears in a list is what GH #2074 already passed.
 #[tokio::test]
 async fn minimax_h3_every_declared_mode_is_accepted_end_to_end() {
+    let _hf_cache = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let (app, project_id) = shipped_manifest_app(&temp_dir).await;
 
@@ -16662,6 +16665,7 @@ async fn minimax_h3_every_declared_mode_is_accepted_end_to_end() {
 /// is compared in full.
 #[tokio::test]
 async fn minimax_h3_refusals_each_name_their_own_reason() {
+    let _hf_cache = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let (app, project_id) = shipped_manifest_app(&temp_dir).await;
 
@@ -16951,6 +16955,7 @@ async fn minimax_h3_refusals_each_name_their_own_reason() {
 /// worker." forever next to an idle worker (sc-15328).
 #[tokio::test]
 async fn a_video_mode_no_lane_serves_is_refused_at_submission() {
+    let _hf_cache = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let (app, project_id) = shipped_manifest_app(&temp_dir).await;
 
@@ -17197,6 +17202,7 @@ fn video_job_body(project_id: &str, model: &str, case: &Value) -> Value {
 /// accepting these off-Mac does not resurrect the hang.
 #[tokio::test]
 async fn the_video_enqueue_contract_is_identical_on_every_platform() {
+    let _hf_cache = isolate_hf_cache();
     let stranded = mlx_only_stranded_pairs();
     let served = candle_served_pairs();
     // Was 20 when sc-19570 measured it. Syncing `main` into this epic branch gave thirteen of those
@@ -17251,6 +17257,7 @@ async fn the_video_enqueue_contract_is_identical_on_every_platform() {
 /// developer's machine instead of only on the Linux CI lane hours later.
 #[tokio::test]
 async fn the_parity_replace_person_fixture_is_platform_independent() {
+    let _hf_cache = isolate_hf_cache();
     for os in ["macos", "windows", "linux"] {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
         let (app, project_id) = shipped_manifest_app_on_os(&temp_dir, os).await;
@@ -17305,6 +17312,7 @@ async fn the_parity_replace_person_fixture_is_platform_independent() {
 ///     so a sweep that failed everything cannot pass.
 #[tokio::test]
 async fn an_mlx_only_video_job_reaches_a_terminal_failed_state_off_mac() {
+    let _hf_cache = isolate_hf_cache();
     let stranded = mlx_only_stranded_pairs();
     let served = candle_served_pairs();
 
@@ -17408,6 +17416,7 @@ async fn an_mlx_only_video_job_reaches_a_terminal_failed_state_off_mac() {
 /// check anywhere on that path, and must be terminal again after a single claim.
 #[tokio::test]
 async fn a_requeued_unreachable_job_is_failed_by_the_claim_sweep() {
+    let _hf_cache = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let (app, project_id) = shipped_manifest_app_on_os(&temp_dir, "windows").await;
 
@@ -17514,6 +17523,7 @@ async fn a_requeued_unreachable_job_is_failed_by_the_claim_sweep() {
 /// A future edit that turns either into the other turns this red.
 #[tokio::test]
 async fn the_no_lane_anywhere_gate_still_400s_and_is_distinct_from_the_platform_case() {
+    let _hf_cache = isolate_hf_cache();
     for os in ["macos", "windows", "linux"] {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
         let (app, project_id) = shipped_manifest_app_on_os(&temp_dir, os).await;
@@ -17590,6 +17600,7 @@ async fn the_no_lane_anywhere_gate_still_400s_and_is_distinct_from_the_platform_
 /// asserted by the macOS rust lane — which is how the off-Mac half of this defect stayed invisible.
 #[tokio::test]
 async fn the_models_endpoint_carries_a_candle_support_block_for_every_video_model() {
+    let _hf_cache = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let (app, _project_id) = shipped_manifest_app(&temp_dir).await;
     let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
