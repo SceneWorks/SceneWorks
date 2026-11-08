@@ -14273,6 +14273,7 @@ async fn iris_and_plain_app() -> (tempfile::TempDir, axum::Router, String) {
 /// controls refuses them by name.
 #[tokio::test]
 async fn iris_sampling_controls_are_typed_at_image_enqueue() {
+    let _hf_cache = isolate_hf_cache();
     let (_temp_dir, app, project_id) = iris_and_plain_app().await;
     let project_id = project_id.as_str();
     let post = |model: &'static str, negative: &'static str, advanced: Value| {
@@ -14362,6 +14363,7 @@ async fn iris_sampling_controls_are_typed_at_image_enqueue() {
 /// *Mutation that reds this:* drop the `prompt_batch_error` call in `create_image_job`.
 #[tokio::test]
 async fn a_native_prompt_batch_is_typed_at_image_enqueue() {
+    let _hf_cache = isolate_hf_cache();
     let (_temp_dir, app, project_id) = iris_and_plain_app().await;
     let post = |model: &'static str, prompt: &'static str, prompts: Value, count: u32| {
         let app = app.clone();
