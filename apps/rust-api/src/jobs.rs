@@ -984,11 +984,10 @@ fn persisted_character_inline_loras(persisted_payload: &JsonObject) -> Vec<Value
 /// Whether `candidate` IS one of the persisted character links in `permitted`, and therefore may be
 /// hydrated inline.
 ///
-/// Identity is the link id AND agreement on every path field the candidate carries. Matching on the
-/// id alone would leave the narrowing hollow: `normalize_inline_job_lora` passes a caller's object
-/// through almost verbatim, so replaying a persisted link id with a swapped `sourcePath` would carry
-/// an arbitrary file into the enqueued payload. A candidate that omits a path field is still a match
-/// — it is asking for the persisted link, not redirecting it.
+/// Identity is the link id AND agreement on every loader locator the candidate carries. Matching
+/// on the id alone would let `normalize_inline_job_lora` retain a caller's `installedPath`, `path`,
+/// `source.path`, or file selector instead of the admitted source. Omitted locators ask for the
+/// persisted link; supplied locators must agree exactly.
 fn matches_permitted_inline_lora(candidate: &Value, permitted: &[Value]) -> bool {
     let Some(candidate_id) = job_lora_id(candidate) else {
         return false;
@@ -997,18 +996,21 @@ fn matches_permitted_inline_lora(candidate: &Value, permitted: &[Value]) -> bool
         if job_lora_id(link) != Some(candidate_id) {
             return false;
         }
-        ["sourcePath", "projectPath"].iter().all(|field| {
-            match (
-                candidate.get(*field).and_then(Value::as_str),
-                link.get(*field).and_then(Value::as_str),
-            ) {
-                (Some(requested), Some(persisted)) => requested == persisted,
-                // The candidate names no path for this field, so it cannot redirect it.
-                (None, _) => true,
-                // The candidate names a path the persisted link does not have at all.
-                (Some(_), None) => false,
-            }
-        })
+        [
+            "installedPath",
+            "sourcePath",
+            "projectPath",
+            "path",
+            "files",
+        ]
+        .iter()
+        .all(|field| {
+            candidate
+                .get(*field)
+                .is_none_or(|value| link.get(*field) == Some(value))
+        }) && candidate
+            .pointer("/source/path")
+            .is_none_or(|value| link.pointer("/source/path") == Some(value))
     })
 }
 
@@ -1046,18 +1048,31 @@ async fn validate_merged_job_loras(
     let mut catalog_slots = Vec::new();
     for (slot, lora) in loras.iter().enumerate() {
         if matches_permitted_inline_lora(lora, permitted_inline) {
-            // Public job snapshots redact private locators. A caller may return that same link
-            // alongside a newly selected catalog adapter; restore only its admitted path fields
-            // from the persisted job, after the exact-id/path check above.
-            let mut hydrated = lora.clone();
+            // Public job snapshots redact private locators. Restore every loader locator from
+            // the persisted link after the exact-id/locator check, including aliases that the
+            // safetensors header inspector would otherwise prefer over `sourcePath`.
             let admitted = permitted_inline
                 .iter()
                 .find(|link| job_lora_id(link) == job_lora_id(lora))
                 .expect("matched persisted inline LoRA");
+            let mut hydrated = if lora.is_object() {
+                lora.clone()
+            } else {
+                admitted.clone()
+            };
             if let Some(fields) = hydrated.as_object_mut() {
-                for key in ["sourcePath", "projectPath"] {
+                for key in [
+                    "installedPath",
+                    "sourcePath",
+                    "projectPath",
+                    "path",
+                    "source",
+                    "files",
+                ] {
                     if let Some(value) = admitted.get(key) {
                         fields.insert(key.to_owned(), value.clone());
+                    } else {
+                        fields.remove(key);
                     }
                 }
             }

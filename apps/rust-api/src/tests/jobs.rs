@@ -5993,6 +5993,40 @@ async fn retry_honours_character_inline_lora_provenance_without_letting_others_b
         }
     }
 
+    // The public link omits private paths. A caller who knows its id cannot redirect the loader
+    // through an alternate path spelling or file selector before portable confinement runs.
+    for (field, value) in [
+        ("installedPath", json!(foreign.display().to_string())),
+        ("path", json!(foreign.display().to_string())),
+        (
+            "source",
+            json!({ "provider": "local", "path": foreign.display().to_string() }),
+        ),
+        ("files", json!(["foreign.safetensors"])),
+    ] {
+        let mut redirected = inline_lora.clone();
+        redirected[field] = value;
+        for operation in ["retry", "duplicate"] {
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{character_job_id}/{operation}"),
+                json!({ "payloadChanges": { "loras": [redirected.clone()] } }),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{field} {operation}: {error}"
+            );
+            assert_eq!(
+                error["detail"],
+                format!("LoRA not found: {inline_lora_id}"),
+                "{field} {operation} must not inspect a caller-selected source"
+            );
+        }
+    }
+
     // A CATALOG adapter added alongside the persisted inline set is admitted — the narrowing must
     // not turn a character job into one that can never gain an adapter — and both survive, in order.
     let (status, widened) = request(
