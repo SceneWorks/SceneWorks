@@ -2995,6 +2995,18 @@ pub(crate) fn resolve_base_model_path(target: &TrainingTarget, data_dir: &FsPath
                 }
             }
             if let Some(snapshot) = snapshots.into_iter().next() {
+                // Iris depth and restoration are separate exports in one pinned repository.
+                // Bind only the task directory the trainer loads, even when both are installed.
+                if target.kernel == "iris_train" {
+                    let task_dir = match target.base_model.as_str() {
+                        "iris_3b_depth" => Some("depth"),
+                        "iris_3b_restore" => Some("upscaler"),
+                        _ => None,
+                    };
+                    if let Some(task_dir) = task_dir {
+                        return snapshot.join(task_dir).display().to_string();
+                    }
+                }
                 return tiered_turnkey_train_dir(snapshot, target)
                     .display()
                     .to_string();

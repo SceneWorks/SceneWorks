@@ -1078,6 +1078,18 @@ fn entries_support_route(
             && !(*job_type != JobType::PromptRefine
                 && crate::model_sources::fixed_runtime_model_ids(job_type, payload).contains(&id))
             && crate::model_sources::iris_training_task_source_id(job_type, payload) != Some(id)
+            && !crate::model_sources::trained_iris_task_source(job_type, payload).is_some_and(
+                |(selected, task, engine_model)| {
+                    selected == id
+                        && entry.get("irisTask").and_then(Value::as_str) == Some(task)
+                        && entry.pointer("/trainedCheckpoint/task").and_then(Value::as_str)
+                            == Some(task)
+                        && entry
+                            .pointer("/trainedCheckpoint/engineModel")
+                            .and_then(Value::as_str)
+                            == Some(engine_model)
+                },
+            )
         {
             return false;
         }
@@ -1725,6 +1737,71 @@ mod tests {
             &JobType::LoraTrain,
             &selected,
             &[("modelManifestEntries/0".to_owned(), &foreign)],
+            "mlx",
+            "macos"
+        ));
+    }
+
+    #[test]
+    fn trained_iris_array_source_requires_selected_task_and_engine_identity() {
+        let depth = json!({"id":"trained-depth","type":"utility","irisTask":"depth",
+            "trainedCheckpoint":{"task":"depth","engineModel":"iris_3b_depth"},
+            "downloads":[{"provider":"huggingface","repo":"example/depth",
+                "revision":"0123456789012345678901234567890123456789",
+                "files":["model.safetensors"]}]});
+        let depth_request = json!({"irisModel":"trained-depth"})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(entries_support_route(
+            &JobType::ImageDepth,
+            &depth_request,
+            &[("modelManifestEntries/0".to_owned(), &depth)],
+            "mlx",
+            "macos"
+        ));
+        let wrong_task = json!({"id":"trained-depth","type":"utility","irisTask":"restoration",
+            "trainedCheckpoint":{"task":"restoration","engineModel":"iris_3b_restore"}});
+        assert!(!entries_support_route(
+            &JobType::ImageDepth,
+            &depth_request,
+            &[("modelManifestEntries/0".to_owned(), &wrong_task)],
+            "mlx",
+            "macos"
+        ));
+        let foreign_request = json!({"irisModel":"other-depth"})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(!entries_support_route(
+            &JobType::ImageDepth,
+            &foreign_request,
+            &[("modelManifestEntries/0".to_owned(), &depth)],
+            "mlx",
+            "macos"
+        ));
+        let restoration = json!({"id":"trained-restore","type":"utility",
+            "irisTask":"restoration","trainedCheckpoint":{"task":"restoration",
+                "engineModel":"iris_3b_restore"}});
+        let restore_request = json!({"engine":"iris","irisModel":"trained-restore"})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(entries_support_route(
+            &JobType::ImageUpscale,
+            &restore_request,
+            &[("modelManifestEntries/0".to_owned(), &restoration)],
+            "mlx",
+            "macos"
+        ));
+        let wrong_engine = json!({"engine":"real-esrgan","irisModel":"trained-restore"})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(!entries_support_route(
+            &JobType::ImageUpscale,
+            &wrong_engine,
+            &[("modelManifestEntries/0".to_owned(), &restoration)],
             "mlx",
             "macos"
         ));

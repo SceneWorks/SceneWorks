@@ -217,6 +217,52 @@ pub(crate) fn iris_training_task_source_id<'a>(
     (payload.get("baseModel")?.as_str()? == base_model).then_some(base_model)
 }
 
+/// A trained Iris task export is selected by its request field, not by a catalog route for the
+/// release task model. The caller validates its registered task identity before admission.
+pub(crate) fn trained_iris_task_source<'a>(
+    job_type: &JobType,
+    payload: &'a JsonObject,
+) -> Option<(&'a str, &'static str, &'static str)> {
+    let (selected, task, engine_model) = match job_type {
+        JobType::ImageDepth => (
+            payload.get("irisModel")?.as_str()?,
+            "depth",
+            sceneworks_core::depth_map::DEPTH_MODEL_ID,
+        ),
+        JobType::ImageUpscale
+            if payload
+                .get("engine")
+                .and_then(Value::as_str)
+                .is_some_and(sceneworks_core::image_restoration::is_iris_engine) =>
+        {
+            (
+                payload.get("irisModel")?.as_str()?,
+                "restoration",
+                sceneworks_core::image_restoration::IRIS_RESTORE_MODEL_ID,
+            )
+        }
+        JobType::ImageGenerate | JobType::ImageEdit => {
+            let upscale = payload.get("upscale")?.as_object()?;
+            if upscale.get("enabled").and_then(Value::as_bool) != Some(true)
+                || !upscale
+                    .get("engine")
+                    .and_then(Value::as_str)
+                    .is_some_and(sceneworks_core::image_restoration::is_iris_engine)
+            {
+                return None;
+            }
+            (
+                upscale.get("irisModel")?.as_str()?,
+                "restoration",
+                sceneworks_core::image_restoration::IRIS_RESTORE_MODEL_ID,
+            )
+        }
+        _ => return None,
+    };
+    let selected = selected.trim();
+    (!selected.is_empty() && selected != engine_model).then_some((selected, task, engine_model))
+}
+
 fn payload_has_model_entry(payload: &JsonObject, model_id: &str) -> bool {
     payload_model_entries(payload)
         .into_iter()
@@ -337,10 +383,13 @@ pub(crate) async fn ensure_runtime_model_sources(
     // Fixed runtime sources belong to the server's catalog. A request may carry a same-id
     // manifest from an older client, but its source metadata must never replace that catalog row.
     let task_source = iris_training_task_source_id(job_type, payload).map(str::to_owned);
+    let trained_iris_source =
+        trained_iris_task_source(job_type, payload).map(|(id, _, _)| id.to_owned());
     let selected_source_ids = fixed_ids
         .iter()
         .copied()
         .chain(task_source.as_deref())
+        .chain(trained_iris_source.as_deref())
         .collect::<Vec<_>>();
     discard_client_fixed_source_carriers(payload, &selected_source_ids);
     let primary_id = if canonical_primary {
@@ -361,6 +410,7 @@ pub(crate) async fn ensure_runtime_model_sources(
         None
     };
     let mut ids = fixed_ids.into_iter().map(str::to_owned).collect::<Vec<_>>();
+    ids.extend(trained_iris_source);
     let mut repositories = Vec::new();
     let has_primary_carrier = payload.contains_key("modelManifestEntry");
     for reference in payload_reference_spec(job_type) {
