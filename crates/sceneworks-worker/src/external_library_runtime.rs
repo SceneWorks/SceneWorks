@@ -1665,6 +1665,71 @@ fn rewrite_loader_locator(
     selected: &Path,
     is_selected_aux: bool,
 ) -> WorkerResult<()> {
+    if member.component_id.as_deref() == Some("selected_text_encoder") {
+        if model_slot != "modelManifestEntry" {
+            return Err(invalid_binding(
+                "selected text encoder has the wrong model slot",
+            ));
+        }
+        let resolution = payload
+            .get("modelManifestEntry")
+            .and_then(|entry| entry.get("resolvedTextEncoder"))
+            .ok_or_else(|| invalid_binding("selected text encoder resolution disappeared"))?;
+        let is_file = match resolution
+            .get("sourceKind")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("file") => true,
+            Some("directory") => false,
+            _ => {
+                return Err(invalid_binding(
+                    "selected text encoder source kind disappeared",
+                ))
+            }
+        };
+        let loader_path = if is_file {
+            let original = resolution
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| invalid_binding("selected text encoder path disappeared"))?;
+            let name = Path::new(original)
+                .file_name()
+                .ok_or_else(|| invalid_binding("selected text encoder file has no name"))?;
+            if !member
+                .files
+                .iter()
+                .any(|file| file.relative_path == Path::new(name))
+            {
+                return Err(invalid_binding(
+                    "selected text encoder file is outside its frozen closure",
+                ));
+            }
+            selected.join(name)
+        } else {
+            selected.to_path_buf()
+        };
+        let loader_path = crate::paths::normalize_absolute_path(&loader_path)?;
+        let source = if is_file {
+            gen_core::WeightsSource::File(loader_path.clone())
+        } else {
+            gen_core::WeightsSource::Dir(loader_path.clone())
+        };
+        let worker_id =
+            crate::text_encoder_selection::opaque_id(&source).map_err(WorkerError::Io)?;
+        payload
+            .get_mut("advanced")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| invalid_binding("selected text encoder has no advanced options"))?
+            .insert("textEncoderModel".to_owned(), json!(worker_id));
+        let resolution = payload
+            .get_mut("modelManifestEntry")
+            .and_then(|entry| entry.get_mut("resolvedTextEncoder"))
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| invalid_binding("selected text encoder resolution disappeared"))?;
+        resolution.insert("selectionId".to_owned(), json!(worker_id));
+        resolution.insert("path".to_owned(), json!(loader_path));
+        return Ok(());
+    }
     let path = selected
         .to_str()
         .ok_or_else(|| invalid_binding("private snapshot path is not UTF-8"))?
@@ -2048,6 +2113,31 @@ fn verify_portable_route(
         ));
     }
     for (model, (_, entry)) in route.models.iter().zip(slots) {
+        let selected_encoder = matches!(
+            job_type,
+            JobType::ImageGenerate | JobType::ImageEdit | JobType::ImageDetail
+        ) && model.slot == "modelManifestEntry"
+            && payload
+                .get("advanced")
+                .and_then(|advanced| advanced.get("textEncoderModel"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| id != "default" && !id.is_empty());
+        let bound_encoder = model
+            .members
+            .iter()
+            .filter(|member| member.component_id.as_deref() == Some("selected_text_encoder"))
+            .collect::<Vec<_>>();
+        if selected_encoder != (bound_encoder.len() == 1)
+            || bound_encoder.len() > 1
+            || bound_encoder.iter().any(|member| {
+                member.role != ArtifactMemberRole::OptionalComponent
+                    || !matches!(member.source, PortableSourceIdentity::Digest { .. })
+            })
+        {
+            return Err(invalid_binding(
+                "selected text encoder closure differs from the admitted route",
+            ));
+        }
         let required = selected_portable_aux_ids(job_type, payload, entry, &route.backend)?;
         for source_id in &required {
             let admitted = model
@@ -2638,6 +2728,50 @@ fn selected_local_artifact_path(
     payload: &JsonObject,
     settings: &Settings,
 ) -> WorkerResult<PathBuf> {
+    if member.component_id.as_deref() == Some("selected_text_encoder") {
+        if model_slot != "modelManifestEntry" {
+            return Err(invalid_binding(
+                "selected text encoder has the wrong model slot",
+            ));
+        }
+        let resolution = entry
+            .get("resolvedTextEncoder")
+            .ok_or_else(|| invalid_binding("selected text encoder has no private resolution"))?;
+        let selected_id = payload
+            .get("advanced")
+            .and_then(|advanced| advanced.get("textEncoderModel"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| invalid_binding("selected text encoder has no authored id"))?;
+        if resolution
+            .get("selectionId")
+            .and_then(serde_json::Value::as_str)
+            != Some(selected_id)
+        {
+            return Err(invalid_binding(
+                "selected text encoder id differs from private resolution",
+            ));
+        }
+        let is_file = match resolution
+            .get("sourceKind")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("file") => true,
+            Some("directory") => false,
+            _ => return Err(invalid_binding("selected text encoder has no source kind")),
+        };
+        let model_id = entry
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| invalid_binding("selected text encoder has no model identity"))?;
+        return crate::portable_source_claims::registered_text_encoder_path(
+            settings,
+            model_id,
+            is_file,
+            &member.files,
+        )?
+        .map(|(root, _)| root)
+        .ok_or_else(|| invalid_binding("registered selected text encoder bytes are unavailable"));
+    }
     if let PortableSourceIdentity::WorkerClaim { source_id, .. } = &member.source {
         let (claim, selected) = crate::portable_source_claims::capture_selected_source(
             source_id, settings, payload,
@@ -3788,6 +3922,79 @@ mod tests {
 
     fn settings(data_dir: PathBuf) -> Settings {
         Settings::for_test(data_dir)
+    }
+
+    #[test]
+    fn selected_encoder_loader_receives_only_the_worker_private_path_and_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let api_file = temp.path().join("api/model.safetensors");
+        let private_root = temp.path().join("worker/private");
+        std::fs::create_dir_all(&private_root).unwrap();
+        std::fs::write(private_root.join("model.safetensors"), b"weights").unwrap();
+        std::fs::write(private_root.join("config.json"), b"config").unwrap();
+        let api_id = crate::text_encoder_selection::opaque_id(&gen_core::WeightsSource::File(
+            api_file.clone(),
+        ))
+        .unwrap();
+        let member = PortableArtifactMember {
+            role: ArtifactMemberRole::OptionalComponent,
+            component_id: Some("selected_text_encoder".to_owned()),
+            source: PortableSourceIdentity::Digest {
+                sha256: format!("sha256:{}", "a".repeat(64)),
+            },
+            tier: None,
+            files: vec![
+                sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile {
+                    relative_path: PathBuf::from("config.json"),
+                    size_bytes: 6,
+                    sha256: format!("sha256:{}", "b".repeat(64)),
+                },
+                sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile {
+                    relative_path: PathBuf::from("model.safetensors"),
+                    size_bytes: 7,
+                    sha256: format!("sha256:{}", "c".repeat(64)),
+                },
+            ],
+        };
+        let mut payload = json!({
+            "advanced":{"textEncoderModel":api_id},
+            "modelManifestEntry":{"resolvedTextEncoder":{
+                "selectionId":api_id,"sourceKind":"file","path":api_file
+            }}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        rewrite_loader_locator(
+            &mut payload,
+            "modelManifestEntry",
+            &member,
+            &private_root,
+            false,
+        )
+        .unwrap();
+        let worker_file = private_root.join("model.safetensors");
+        let normalized_worker_file = crate::paths::normalize_absolute_path(&worker_file).unwrap();
+        let worker_id = crate::text_encoder_selection::opaque_id(&gen_core::WeightsSource::File(
+            normalized_worker_file.clone(),
+        ))
+        .unwrap();
+        assert_ne!(
+            api_id, worker_id,
+            "different roots have different UI option ids"
+        );
+        assert_eq!(payload["advanced"]["textEncoderModel"], worker_id);
+        assert_eq!(
+            payload["modelManifestEntry"]["resolvedTextEncoder"]["selectionId"],
+            worker_id
+        );
+        assert_eq!(
+            payload["modelManifestEntry"]["resolvedTextEncoder"]["path"],
+            json!(normalized_worker_file)
+        );
+        assert!(!Value::Object(payload)
+            .to_string()
+            .contains(temp.path().join("api").to_string_lossy().as_ref()));
     }
 
     #[test]

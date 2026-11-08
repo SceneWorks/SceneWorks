@@ -43,7 +43,7 @@ pub fn registered_digest_claim_id(
 ) -> Result<String, String> {
     if !matches!(
         kind,
-        "model" | "model-bytes" | "lora" | "control" | "component"
+        "model" | "model-bytes" | "lora" | "control" | "component" | "text-encoder"
     ) || model_id.trim().is_empty()
         || model_id != model_id.trim()
         || model_id.chars().any(char::is_control)

@@ -274,7 +274,74 @@ fn collect_source_claims(settings: &Settings, mut publish: impl FnMut(PortableSo
         }
     }
     flux2_conversion_source_claims(settings, &mut publish);
+    for (model_id, path, is_file) in
+        crate::text_encoder_selection::portable_registered_source_paths(settings)
+    {
+        if let Ok((_, files)) = selected_text_encoder_root_and_files(&path, is_file) {
+            let mut claims = Vec::new();
+            append_registered_claim_files(
+                &mut claims,
+                "text-encoder",
+                &format!("{model_id}:{}", if is_file { "file" } else { "directory" }),
+                None,
+                files,
+            );
+            for claim in claims {
+                publish(claim);
+            }
+        }
+    }
     registered_digest_source_claims(settings, publish);
+}
+
+fn selected_text_encoder_root_and_files(
+    selected: &Path,
+    is_file: bool,
+) -> WorkerResult<(PathBuf, Vec<PortableArtifactFile>)> {
+    if !is_file {
+        if !selected.is_dir() {
+            return Err(WorkerError::InvalidPayload(
+                "selected text encoder is not a directory".to_owned(),
+            ));
+        }
+        return capture_registered_files(selected).map(|files| (selected.to_path_buf(), files));
+    }
+    if !selected.is_file() {
+        return Err(WorkerError::InvalidPayload(
+            "selected text encoder is not a file".to_owned(),
+        ));
+    }
+    let parent = selected.parent().ok_or_else(|| {
+        WorkerError::InvalidPayload("selected text encoder has no parent".to_owned())
+    })?;
+    let mut files = capture_files(selected)?;
+    files.extend(capture_files(&parent.join("config.json"))?);
+    files.sort();
+    files.dedup();
+    Ok((parent.to_path_buf(), files))
+}
+
+/// Rebind an API-selected encoder by its frozen file ledger, never by the API host's path hash.
+pub(crate) fn registered_text_encoder_path(
+    settings: &Settings,
+    model_id: &str,
+    is_file: bool,
+    expected: &[PortableArtifactFile],
+) -> WorkerResult<Option<(PathBuf, PathBuf)>> {
+    for (candidate_model, path, candidate_file) in
+        crate::text_encoder_selection::portable_registered_source_paths(settings)
+    {
+        if candidate_model != model_id || candidate_file != is_file {
+            continue;
+        }
+        let Ok((root, files)) = selected_text_encoder_root_and_files(&path, is_file) else {
+            continue;
+        };
+        if files == expected {
+            return Ok(Some((root, path)));
+        }
+    }
+    Ok(None)
 }
 
 fn registered_digest_source_claims(
@@ -1174,6 +1241,116 @@ fn capture_one(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn file_selected_encoder_ledger_includes_its_behavior_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("encoder");
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("model.safetensors");
+        std::fs::write(&file, b"weights").unwrap();
+        std::fs::write(root.join("config.json"), b"config").unwrap();
+        let (selected_root, before) = selected_text_encoder_root_and_files(&file, true).unwrap();
+        assert_eq!(selected_root, root);
+        assert_eq!(
+            before
+                .iter()
+                .map(|file| file.relative_path.as_path())
+                .collect::<Vec<_>>(),
+            vec![Path::new("config.json"), Path::new("model.safetensors")]
+        );
+        std::fs::write(root.join("config.json"), b"changed").unwrap();
+        assert_ne!(
+            selected_text_encoder_root_and_files(&file, true).unwrap().1,
+            before
+        );
+    }
+
+    #[cfg(native_lane)]
+    #[test]
+    fn selected_encoder_claim_rebinds_equal_bytes_across_roots_and_refuses_tamper() {
+        let temp = tempfile::tempdir().unwrap();
+        let api_source = temp.path().join("api/encoder");
+        let worker_source = temp.path().join("worker/encoder");
+        let production = crate::inference_runtime::media_encoder_contract("qwen_image").unwrap();
+        let bounded = gen_core::EncoderContract {
+            hidden_size: 64,
+            intermediate_size: 128,
+            num_hidden_layers: 1,
+            num_attention_heads: 2,
+            num_key_value_heads: 1,
+            head_dim: 32,
+            output_width: 64,
+            loaded_hidden_layers: 1,
+            max_position_embeddings: 512,
+            mrope_section: &[4, 6, 6],
+            selected_hidden_layers: &[1],
+            ..production
+        };
+        let _contract =
+            crate::inference_runtime::scoped_test_media_encoder_contract(&["qwen_image"], bounded);
+        gen_core_testkit::write_encoder_contract_fixture(&api_source, bounded).unwrap();
+        gen_core_testkit::write_encoder_contract_fixture(&worker_source, bounded).unwrap();
+        let api_option = crate::text_encoder_selection::opaque_id(&gen_core::WeightsSource::Dir(
+            api_source.clone(),
+        ))
+        .unwrap();
+        let worker_option = crate::text_encoder_selection::opaque_id(
+            &gen_core::WeightsSource::Dir(worker_source.clone()),
+        )
+        .unwrap();
+        assert_ne!(
+            api_option, worker_option,
+            "host paths must not enter the content claim"
+        );
+        let mut settings = Settings::for_test(temp.path().join("worker-data"));
+        let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+            settings.data_dir.clone(),
+            settings.data_dir.join("cache/huggingface/hub"),
+        );
+        settings.config_dir = temp.path().join("worker-config");
+        settings.external_model_roots = vec![temp.path().join("worker")];
+        std::fs::create_dir_all(settings.config_dir.join("manifests")).unwrap();
+        std::fs::write(
+            settings.config_dir.join("manifests/user.models.jsonc"),
+            json!({"models":[{"id":"qwen_image","installedPath":worker_source}]}).to_string(),
+        )
+        .unwrap();
+        let (_, frozen) = selected_text_encoder_root_and_files(&api_source, false).unwrap();
+        let (selected_root, selected_path) =
+            registered_text_encoder_path(&settings, "qwen_image", false, &frozen)
+                .unwrap()
+                .expect("same ledger under worker root is available");
+        assert_eq!(
+            selected_root,
+            std::fs::canonicalize(&worker_source).unwrap()
+        );
+        assert_eq!(
+            selected_path,
+            std::fs::canonicalize(&worker_source).unwrap()
+        );
+        let ledger =
+            sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(
+                &frozen,
+            )
+            .unwrap();
+        let claim_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+            "text-encoder",
+            "qwen_image:directory",
+            None,
+            &ledger,
+        )
+        .unwrap();
+        assert!(static_source_claims(&settings)
+            .iter()
+            .any(|claim| claim.source_id == claim_id && claim.files == frozen));
+        std::fs::write(worker_source.join("config.json"), b"changed").unwrap();
+        assert!(
+            registered_text_encoder_path(&settings, "qwen_image", false, &frozen)
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn character_sidecar_lora_is_advertised_and_rebound_to_its_project_copy() {

@@ -13,6 +13,12 @@ use crate::ApiError;
 pub(crate) enum SelectedSourceLocation {
     ManifestDownload(Value),
     LocalPath(String),
+    /// Server-resolved Image Studio choice. The opaque UI id is host-path based; the
+    /// portable member is keyed by the selected bytes and rebound on the worker.
+    SelectedTextEncoder {
+        path: String,
+        source_kind: String,
+    },
     /// Admission resolves the request-selected repository HEAD to an immutable revision.
     DynamicHfRepo(String),
     /// A server-shipped mutable ref is resolved to a commit before the route is frozen.
@@ -154,6 +160,47 @@ pub(crate) fn selected_route_source_rows(
         }
     }
     let advanced = payload.get("advanced").and_then(Value::as_object);
+    if matches!(
+        job_type,
+        JobType::ImageGenerate | JobType::ImageEdit | JobType::ImageDetail
+    ) {
+        if let Some(selected_id) = advanced
+            .and_then(|advanced| advanced.get("textEncoderModel"))
+            .and_then(Value::as_str)
+            .filter(|id| *id != "default")
+        {
+            let (slot, entry) = entries
+                .iter()
+                .find(|(slot, _)| slot == "modelManifestEntry")
+                .ok_or("selected text encoder has no model carrier")?;
+            let resolution = entry
+                .get("resolvedTextEncoder")
+                .ok_or("selected text encoder has no server resolution")?;
+            if resolution.get("selectionId").and_then(Value::as_str) != Some(selected_id) {
+                return Err("selected text encoder differs from server resolution".to_owned());
+            }
+            let path = resolution
+                .get("path")
+                .and_then(Value::as_str)
+                .filter(|path| !path.is_empty())
+                .ok_or("selected text encoder has no resolved path")?;
+            let source_kind = resolution
+                .get("sourceKind")
+                .and_then(Value::as_str)
+                .filter(|kind| matches!(*kind, "file" | "directory"))
+                .ok_or("selected text encoder has no resolved source kind")?;
+            rows.push(SelectedRouteSource {
+                model_slot: slot.clone(),
+                component_id: "selected_text_encoder".to_owned(),
+                role: ArtifactMemberRole::OptionalComponent,
+                source: SelectedSourceLocation::SelectedTextEncoder {
+                    path: path.to_owned(),
+                    source_kind: source_kind.to_owned(),
+                },
+                selected_tier: None,
+            });
+        }
+    }
     let has_reference = payload
         .get("referenceAssetId")
         .and_then(Value::as_str)
@@ -1056,6 +1103,42 @@ fn entries_support_route(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_studio_selected_encoder_is_a_required_private_source_row() {
+        let entry = serde_json::json!({
+            "id":"qwen_image",
+            "resolvedTextEncoder":{
+                "selectionId":"text_encoder_host_choice",
+                "sourceKind":"directory",
+                "path":"/api-host/selected-encoder"
+            }
+        });
+        let entries = vec![("modelManifestEntry".to_owned(), &entry)];
+        let payload = serde_json::json!({
+            "advanced":{"textEncoderModel":"text_encoder_host_choice"}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let rows =
+            selected_route_source_rows(&JobType::ImageGenerate, &payload, &entries, "mlx", "macos")
+                .unwrap();
+        assert!(rows.iter().any(|row| row.model_slot == "modelManifestEntry"
+            && row.component_id == "selected_text_encoder"
+            && matches!(&row.source, SelectedSourceLocation::SelectedTextEncoder { path, source_kind }
+                if path == "/api-host/selected-encoder" && source_kind == "directory")));
+        let mut mismatched = payload;
+        mismatched.get_mut("advanced").unwrap()["textEncoderModel"] = serde_json::json!("other");
+        assert!(selected_route_source_rows(
+            &JobType::ImageGenerate,
+            &mismatched,
+            &entries,
+            "mlx",
+            "macos"
+        )
+        .is_err());
+    }
 
     #[test]
     fn imported_checkpoint_freezes_selected_resident_base_components() {

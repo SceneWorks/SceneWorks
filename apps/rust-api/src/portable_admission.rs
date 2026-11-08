@@ -1219,6 +1219,9 @@ async fn capture_model_slot(
                 Some(source.component_id.clone()),
                 source.selected_tier.clone(),
             )?,
+            SelectedSourceLocation::SelectedTextEncoder { path, source_kind } => {
+                capture_selected_text_encoder_member(state, path, source_kind)?
+            }
             SelectedSourceLocation::OperatorCachedRepo(source_id) => {
                 let claims = frozen_worker_claims(
                     frozen_model,
@@ -1734,6 +1737,44 @@ fn capture_local_member(
         component_id,
         source: PortableSourceIdentity::Digest { sha256: digest },
         tier,
+        files,
+    };
+    member
+        .validate()
+        .map_err(|error| incomplete(error.to_string()))?;
+    Ok(member)
+}
+
+fn capture_selected_text_encoder_member(
+    state: &AppState,
+    path: &str,
+    source_kind: &str,
+) -> Result<PortableArtifactMember, ApiError> {
+    let selected = Path::new(path);
+    let roots = allowed_local_roots(state);
+    let mut files = match source_kind {
+        "directory" if selected.is_dir() => capture_local_source_files(selected, &roots)?,
+        "file" if selected.is_file() => {
+            // A File encoder reads its sibling behavior config. Its tokenizer comes from the
+            // already-bound base; a complete snapshot instead carries its own tokenizer below.
+            let config = selected
+                .parent()
+                .ok_or_else(|| incomplete("selected text encoder has no parent"))?
+                .join("config.json");
+            let mut files = capture_local_source_files(selected, &roots)?;
+            files.extend(capture_local_source_files(&config, &roots)?);
+            files
+        }
+        _ => return Err(incomplete("selected text encoder source kind changed")),
+    };
+    files.sort();
+    files.dedup();
+    let digest = portable_closure_sha256(&files).map_err(|error| incomplete(error.to_string()))?;
+    let member = PortableArtifactMember {
+        role: ArtifactMemberRole::OptionalComponent,
+        component_id: Some("selected_text_encoder".to_owned()),
+        source: PortableSourceIdentity::Digest { sha256: digest },
+        tier: None,
         files,
     };
     member

@@ -403,6 +403,40 @@ pub fn registered_digest_member_claim_id(
     }
     let (kind, logical_id, component_id) = match member.role {
         ArtifactMemberRole::Primary => ("model", model.model_id.as_str(), None),
+        ArtifactMemberRole::OptionalComponent
+            if member.component_id.as_deref() == Some("selected_text_encoder") =>
+        {
+            let selected = payload
+                .pointer("/modelManifestEntry/resolvedTextEncoder")
+                .ok_or_else(|| error("selected text encoder has no private resolution"))?;
+            let selected_id = payload
+                .pointer("/advanced/textEncoderModel")
+                .and_then(Value::as_str)
+                .filter(|id| *id != "default" && !id.is_empty())
+                .ok_or_else(|| error("selected text encoder is no longer authored"))?;
+            if selected.get("selectionId").and_then(Value::as_str) != Some(selected_id)
+                || selected
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
+            {
+                return Err(error(
+                    "selected text encoder differs from private resolution",
+                ));
+            }
+            let source_kind = selected
+                .get("sourceKind")
+                .and_then(Value::as_str)
+                .filter(|kind| matches!(*kind, "file" | "directory"))
+                .ok_or_else(|| error("selected text encoder has no source kind"))?;
+            return crate::portable_sources::registered_digest_claim_id(
+                "text-encoder",
+                &format!("{}:{source_kind}", model.model_id),
+                None,
+                &portable_file_ledger_sha256(&member.files)?,
+            )
+            .map_err(error);
+        }
         ArtifactMemberRole::Control if member.component_id.as_deref() == Some("strict_control") => {
             let selected = payload
                 .pointer("/advanced/controlWeights")
@@ -1459,6 +1493,77 @@ mod tests {
             registered_digest_member_claim_id(&second, &second.members[1], &serde_json::json!({}))
                 .unwrap();
         assert_eq!(first_id, second_id);
+    }
+
+    #[test]
+    fn selected_encoder_claim_uses_model_and_bytes_not_host_option_id() {
+        let files = vec![PortableArtifactFile {
+            relative_path: "model.safetensors".into(),
+            size_bytes: 7,
+            sha256: format!("sha256:{}", "a".repeat(64)),
+        }];
+        let source = PortableSourceIdentity::Digest {
+            sha256: portable_closure_sha256(&files).unwrap(),
+        };
+        let make = |model_id: &str| {
+            PortableModelBinding::new(
+                "modelManifestEntry",
+                model_id,
+                "mlx",
+                "local",
+                None,
+                canonical_authored_options_sha256(&serde_json::json!({})).unwrap(),
+                vec![
+                    PortableArtifactMember {
+                        role: ArtifactMemberRole::Primary,
+                        component_id: None,
+                        source: source.clone(),
+                        tier: None,
+                        files: files.clone(),
+                    },
+                    PortableArtifactMember {
+                        role: ArtifactMemberRole::OptionalComponent,
+                        component_id: Some("selected_text_encoder".to_owned()),
+                        source: source.clone(),
+                        tier: None,
+                        files: files.clone(),
+                    },
+                ],
+            )
+            .unwrap()
+        };
+        let payload = |option: &str, path: &str| {
+            serde_json::json!({
+                "advanced":{"textEncoderModel":option},
+                "modelManifestEntry":{"resolvedTextEncoder":{
+                    "selectionId":option,"sourceKind":"file","path":path
+                }}
+            })
+        };
+        let model = make("qwen_image");
+        let api = registered_digest_member_claim_id(
+            &model,
+            &model.members[1],
+            &payload("text_encoder_api", "/api/encoder.safetensors"),
+        )
+        .unwrap();
+        let worker = registered_digest_member_claim_id(
+            &model,
+            &model.members[1],
+            &payload("text_encoder_worker", "/worker/encoder.safetensors"),
+        )
+        .unwrap();
+        assert_eq!(api, worker);
+        let other = make("qwen_image_edit");
+        assert_ne!(
+            api,
+            registered_digest_member_claim_id(
+                &other,
+                &other.members[1],
+                &payload("text_encoder_worker", "/worker/encoder.safetensors")
+            )
+            .unwrap()
+        );
     }
 
     #[test]
