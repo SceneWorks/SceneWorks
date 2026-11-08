@@ -30,7 +30,10 @@ async fn wan_vace_fun_video_enqueue_keeps_a_pinned_source() {
         .model_size_estimate_disabled_override
         .lock() = Some(true);
     *state.test_hooks.video_platform_override.lock() = Some("macos");
-    *state.test_hooks.pinned_metadata_override.lock() = Some(pinned_metadata);
+    *state.test_hooks.pinned_metadata_override.lock() =
+        Some(std::sync::Arc::new(|_, _, selectors| {
+            pinned_metadata(selectors)
+        }));
     let (_, project) = create_project(app.clone(), &"VACE pin regression").await;
     let (status, job) = request(
         app,
@@ -6495,7 +6498,10 @@ fn audio_fixture_app(temp_dir: &tempfile::TempDir) -> axum::Router {
     write_audio_manifest(&temp_dir.path().join("config/manifests"));
     let (app, state) =
         create_app_with_state(test_settings(temp_dir)).expect("audio fixture app creates");
-    *state.test_hooks.pinned_metadata_override.lock() = Some(pinned_audio_fixture_metadata);
+    *state.test_hooks.pinned_metadata_override.lock() =
+        Some(std::sync::Arc::new(|_, _, selectors| {
+            pinned_audio_fixture_metadata(selectors)
+        }));
     app
 }
 

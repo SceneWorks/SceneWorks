@@ -3863,7 +3863,10 @@ mod imported_minimax_h3_video_tests {
         let (app, state) = create_app_with_state(test_settings(temp_dir)).expect("app creates");
         // The imported primary is real managed checkpoint bytes. The unrelated publisher
         // companions need deterministic pinned metadata for this weights-free API route test.
-        *state.test_hooks.pinned_metadata_override.lock() = Some(pinned_component_metadata);
+        *state.test_hooks.pinned_metadata_override.lock() =
+            Some(std::sync::Arc::new(|_, _, selectors| {
+                pinned_component_metadata(selectors)
+            }));
         (app, state)
     }
 

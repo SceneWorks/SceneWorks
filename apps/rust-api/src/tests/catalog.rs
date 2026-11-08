@@ -31,7 +31,10 @@ fn pin_catalog_convert_metadata(state: &crate::AppState) {
     // These license and replay tests name synthetic repositories; admission still validates the
     // immutable revision and file closure returned by these per-app fixtures.
     *state.test_hooks.dynamic_hf_revision_override.lock() = Some(catalog_convert_revision);
-    *state.test_hooks.pinned_metadata_override.lock() = Some(catalog_convert_pinned_files);
+    *state.test_hooks.pinned_metadata_override.lock() =
+        Some(std::sync::Arc::new(|_, _, selectors| {
+            catalog_convert_pinned_files(selectors)
+        }));
 }
 
 /// Retain this guard across the complete fixture, including awaited catalog mutations.
