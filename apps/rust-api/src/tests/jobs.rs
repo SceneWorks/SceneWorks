@@ -110,17 +110,7 @@ fn pinned_jobs_fixture_metadata(
     files
 }
 
-fn pinned_jobs_fixture_app_with_state(
-    settings: Settings,
-) -> Result<(axum::Router, crate::AppState), sceneworks_core::jobs_store::JobsStoreError> {
-    pin_handwritten_jobs_manifest(&settings);
-    jobs_fixture_app_with_pinned_metadata(settings)
-}
-
-fn jobs_fixture_app_with_pinned_metadata(
-    settings: Settings,
-) -> Result<(axum::Router, crate::AppState), sceneworks_core::jobs_store::JobsStoreError> {
-    let (app, state) = create_app_with_state(settings)?;
+fn install_pinned_jobs_fixture_metadata(state: &crate::AppState) {
     *state
         .test_hooks
         .model_size_estimate_disabled_override
@@ -129,7 +119,21 @@ fn jobs_fixture_app_with_pinned_metadata(
         Some(std::sync::Arc::new(|_, _, selectors| {
             pinned_jobs_fixture_metadata(selectors)
         }));
+}
+
+fn jobs_fixture_app_with_pinned_metadata(
+    settings: Settings,
+) -> Result<(axum::Router, crate::AppState), sceneworks_core::jobs_store::JobsStoreError> {
+    let (app, state) = create_app_with_state(settings)?;
+    install_pinned_jobs_fixture_metadata(&state);
     Ok((app, state))
+}
+
+fn pinned_jobs_fixture_app_with_state(
+    settings: Settings,
+) -> Result<(axum::Router, crate::AppState), sceneworks_core::jobs_store::JobsStoreError> {
+    pin_handwritten_jobs_manifest(&settings);
+    jobs_fixture_app_with_pinned_metadata(settings)
 }
 
 fn pinned_jobs_fixture_app(
@@ -11093,25 +11097,22 @@ async fn scail2_animate_character_reaches_the_queue_and_validates_media() {
 
 fn write_scail2_reference_test_manifest(config_dir: &std::path::Path, multi_reference: bool) {
     std::fs::create_dir_all(config_dir).expect("manifest dir creates");
+    let mut model = sceneworks_core::builtin_manifests::builtin_model_entries()
+        .into_iter()
+        .find(|entry| entry["id"] == "scail2_14b")
+        .expect("shipped SCAIL-2 source row")
+        .clone();
+    model["ui"]["scail2MultiReference"] = json!(multi_reference);
     std::fs::write(
         config_dir.join("builtin.models.jsonc"),
         serde_json::to_string_pretty(&json!({
             "schemaVersion": 1,
-            "models": [{
-                "id": "scail2_14b",
-                "name": "SCAIL-2 14B",
-                "family": "scail2",
-                "type": "video",
-                "capabilities": ["image_to_video"],
-                "downloads": [],
-                "ui": { "scail2MultiReference": multi_reference }
-            }]
+            "models": [model]
         }))
         .expect("multi-reference manifest serializes"),
     )
     .expect("multi-reference manifest writes");
     write_empty_sibling_manifests(config_dir);
-    use_shipped_default_download(config_dir, "scail2_14b");
 }
 
 /// The paired SCAIL-2 provider has six source-position slots: the first character plus five
@@ -11123,7 +11124,8 @@ fn write_scail2_reference_test_manifest(config_dir: &std::path::Path, multi_refe
 #[tokio::test]
 async fn scail2_animate_character_preserves_ordered_multi_references_and_rejects_seven() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (app, state) = create_app_with_state(test_settings(&temp_dir)).expect("app creates");
+    install_pinned_jobs_fixture_metadata(&state);
     crate::tests::support::create_project(app.clone(), &"SCAIL-2 multi-reference").await;
 
     let base = || {
@@ -11244,7 +11246,8 @@ async fn scail2_animate_character_preserves_ordered_multi_references_and_rejects
     let enabled_temp_dir = tempfile::tempdir().expect("enabled temp dir creates");
     let config_dir = enabled_temp_dir.path().join("config/manifests");
     write_scail2_reference_test_manifest(&config_dir, true);
-    let enabled_app = create_app(test_settings(&enabled_temp_dir)).expect("enabled app creates");
+    let enabled_app =
+        pinned_jobs_fixture_app(test_settings(&enabled_temp_dir)).expect("enabled app creates");
     crate::tests::support::create_project(enabled_app.clone(), &"SCAIL-2 paired descriptor").await;
     for count in [2usize, 6] {
         let references: Vec<String> = (0..count)
@@ -11258,7 +11261,7 @@ async fn scail2_animate_character_preserves_ordered_multi_references_and_rejects
         assert_eq!(
             status,
             StatusCode::CREATED,
-            "{count} references must be accepted"
+            "{count} references must be accepted: {job}"
         );
         assert_eq!(
             job["payload"]["referenceAssetIds"],
@@ -11904,6 +11907,50 @@ async fn video_jobs_expand_recipe_presets_server_side() {
         crate::tests::support::create_project(app.clone(), &"Video Preset Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
+    // The preset's LoRA is a local source. A native video worker must advertise the exact
+    // registered file closure before the API can admit the merged preset request.
+    let adapter = lora_dir.join("motion.safetensors");
+    let files = vec![
+        sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile {
+            relative_path: "motion.safetensors".into(),
+            size_bytes: std::fs::metadata(&adapter).expect("LoRA metadata").len(),
+            sha256: format!(
+                "sha256:{}",
+                sceneworks_core::hashing::sha256_file(&adapter).expect("LoRA hash")
+            ),
+        },
+    ];
+    let ledger =
+        sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(&files)
+            .expect("LoRA ledger");
+    let source_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+        "lora",
+        "motion-lora",
+        None,
+        &ledger,
+    )
+    .expect("LoRA source id");
+    let claim = sceneworks_core::model_artifacts::portable_binding::PortableSourceClaim::new(
+        source_id,
+        sceneworks_core::model_artifacts::portable_binding::PortableSourceProvenance::OperatorOverride,
+        files,
+    )
+    .expect("LoRA source claim");
+    let mut registration = portable_test_worker_registration(
+        "video-preset-source-worker",
+        &["gpu", "mlx", "video_generate"],
+        TestPortableRoute::MlxMacos,
+    );
+    registration["portableSourceClaims"] = serde_json::to_value(vec![claim]).unwrap();
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        registration,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
     let (status, video_job) = request(
         app.clone(),
         "POST",
@@ -11926,7 +11973,7 @@ async fn video_jobs_expand_recipe_presets_server_side() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(status, StatusCode::CREATED, "{video_job}");
     // Prompt prefix/suffix are folded in server-side around the raw client
     // prompt — the regression that motivated this path.
     assert_eq!(
@@ -12080,7 +12127,7 @@ async fn preset_overridden_video_model_carries_its_own_manifest_entry() {
     )
     .expect("user recipe presets writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Preset Override Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -12099,7 +12146,7 @@ async fn preset_overridden_video_model_carries_its_own_manifest_entry() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(status, StatusCode::CREATED, "{video_job}");
     // The preset's model won over the omitted-model default...
     assert_eq!(video_job["payload"]["model"], "mochi_1");
     // ...and the entry travelling with it must describe THAT model, not the default's.
@@ -16307,7 +16354,8 @@ async fn shipped_manifest_app_on_os(
         sceneworks_core::builtin_manifests::SeedMode::Overwrite,
     )
     .expect("builtin manifests seed");
-    let app = create_app(settings).expect("app creates");
+    let (app, state) = create_app_with_state(settings).expect("app creates");
+    install_pinned_jobs_fixture_metadata(&state);
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"MiniMax-H3 Reachability").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
