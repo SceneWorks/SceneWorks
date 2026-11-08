@@ -2672,6 +2672,19 @@ test("desktop builds run independently and publish signed assets after all succe
   assert.equal((publisher.match(/gh release upload "\$TAG" --clobber latest.json/g) ?? []).length, 2);
 });
 
+test("Linux release scan bounds the measured CUDA sidecar without changing other archive guards", async () => {
+  const guard = "Guard against NC model weights in the desktop bundle (sc-10526, sc-10551)";
+  const release = await source(".github/workflows/release.yml");
+  const job = workflowJob(release, "linux");
+  const step = workflowStep(job, guard);
+  assert.match(step, /check-no-nc-weights\.mjs --dir target\/release\/bundle --scan-archives --skip-uninspectable --max-entry-bytes 1610612736/);
+  assert.doesNotMatch(step, /--max-(?:archive-bytes|uncompressed|entries|depth)|continue-on-error/);
+  assert.ok(job.indexOf(`- name: ${guard}`) > job.indexOf("- name: Reject host NVIDIA drivers"));
+  for (const platform of ["macos", "windows"]) {
+    assert.doesNotMatch(workflowStep(workflowJob(release, platform), guard), /--max-entry-bytes/);
+  }
+});
+
 test("Lens smoke only terminates processes it started", async () => {
   const script = await source("scripts/smoke-lens.ps1");
   assert.doesNotMatch(script, /Get-Process/);
