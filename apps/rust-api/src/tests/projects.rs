@@ -735,7 +735,7 @@ async fn character_studio_routes_manage_references_loras_and_test_jobs() {
                     utilization: None,
                 },
                 Some(platform),
-                Some(&[claim.clone()]),
+                Some(std::slice::from_ref(&claim)),
             )
             .unwrap();
     }
