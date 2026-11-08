@@ -898,8 +898,10 @@ pub(crate) async fn duplicate_job(
             },
             model_provenance.as_ref(),
             download_binding.as_ref(),
-            portable_binding.as_ref(),
-            fresh_portable_selection,
+            DuplicatePortableBinding {
+                binding: portable_binding.as_ref(),
+                allow_rebind: fresh_portable_selection,
+            },
         )
     })
     .await?;

@@ -39,9 +39,9 @@ use sceneworks_core::image_request::{
 use sceneworks_core::jobs_store::{
     candle_supported, mac_capabilities, mac_rust_supported, model_candle_support,
     model_mac_support, video_job_type_for_mode, video_request_is_claimable_by_any_lane, CreateJob,
-    DuplicateJob, JobsStore, JobsStoreError, MacCapabilities, ProgressUpdate, RegisterWorker,
-    RetryJob, RouteDecision, StaleSweep, UnsupportedReason, WorkerHeartbeat, JOB_STATUSES,
-    MAX_LISTED_JOBS,
+    DuplicateJob, DuplicatePortableBinding, JobsStore, JobsStoreError, MacCapabilities,
+    ProgressUpdate, RegisterWorker, RetryJob, RouteDecision, StaleSweep, UnsupportedReason,
+    WorkerHeartbeat, JOB_STATUSES, MAX_LISTED_JOBS,
 };
 use sceneworks_core::limits::{requested_steps, steps_limit_error};
 use sceneworks_core::lora_family::{

@@ -487,6 +487,12 @@ pub struct DuplicateJob {
     pub requested_gpu: Option<String>,
 }
 
+/// The portable source selected by canonical admission for a duplicate job.
+pub struct DuplicatePortableBinding<'a> {
+    pub binding: Option<&'a Value>,
+    pub allow_rebind: bool,
+}
+
 /// Outcome of [`JobsStore::promote_pending_caption_job`] (sc-9120). `promoted` is `true` when the
 /// job was still `pending_caption` and this call transitioned it to `queued`; `false` when the
 /// guarded UPDATE matched nothing because the job had already left `pending_caption` (canceled by
@@ -2290,7 +2296,15 @@ impl JobsStore {
         binding: Option<&Value>,
     ) -> JobsStoreResult<JobSnapshot> {
         self.duplicate_job_with_portable_binding(
-            id, job_id, request, provenance, binding, None, false,
+            id,
+            job_id,
+            request,
+            provenance,
+            binding,
+            DuplicatePortableBinding {
+                binding: None,
+                allow_rebind: false,
+            },
         )
     }
 
@@ -2301,8 +2315,7 @@ impl JobsStore {
         request: DuplicateJob,
         provenance: Option<&Value>,
         download_binding: Option<&Value>,
-        portable_binding: Option<&Value>,
-        allow_portable_rebind: bool,
+        portable: DuplicatePortableBinding<'_>,
     ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
@@ -2329,17 +2342,17 @@ impl JobsStore {
                 ));
             }
         }
-        if !allow_portable_rebind
+        if !portable.allow_rebind
             && previous_binding.is_some()
-            && previous_binding.as_ref() != portable_binding
+            && previous_binding.as_ref() != portable.binding
         {
             return Err(JobsStoreError::InvalidStatus(
                 "Portable model identity changed during duplicate".to_owned(),
             ));
         }
-        if allow_portable_rebind
+        if portable.allow_rebind
             && !matches!(
-                (previous_binding.as_ref(), portable_binding),
+                (previous_binding.as_ref(), portable.binding),
                 (Some(previous), Some(next))
                     if previous.get("authoredOptions") != next.get("authoredOptions")
             )
@@ -2369,7 +2382,7 @@ impl JobsStore {
             source_provenance.as_ref(),
         )?;
         Self::write_download_binding(&transaction, &job.id, download_binding)?;
-        Self::write_portable_binding(&transaction, &job.id, portable_binding)?;
+        Self::write_portable_binding(&transaction, &job.id, portable.binding)?;
         transaction.commit()?;
         Ok(job)
     }
