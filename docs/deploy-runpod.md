@@ -83,6 +83,12 @@ The template will refer to the secret without containing its value:
 {{ RUNPOD_SECRET_sceneworks_access_token }}
 ```
 
+The API normally creates a private worker-source proof master on the persistent
+volume. To pre-provision one, generate 32 random bytes as 64 hex characters,
+store the value in a separate RunPod Secret named `sceneworks_worker_proof_master`,
+and add `SCENEWORKS_WORKER_PROOF_MASTER={{ RUNPOD_SECRET_sceneworks_worker_proof_master }}`
+to your private template. Keep the value out of the checked-in template.
+
 If you plan to use a gated Hugging Face model:
 
 1. Accept the model's license on Hugging Face.
@@ -109,6 +115,7 @@ SceneWorks uses `/workspace` for durable data:
 | --- | --- |
 | `/workspace/data` | Projects, generated assets, imported models, and application data |
 | `/workspace/config` | SceneWorks configuration and user manifests |
+| `/workspace/credentials` | Service credentials and the private `0600` worker-source proof master |
 | `/workspace/cache/huggingface` | Downloaded Hugging Face model files |
 
 The live job queue is intentionally stored on the Pod's local disk. Projects,
@@ -305,10 +312,20 @@ that bypasses RunPod's HTTPS proxy.
 | `SCENEWORKS_VOLUME` | No | `/workspace` | Base for durable SceneWorks data, config, and model-cache directories. |
 | `SCENEWORKS_API_PORT` | No | `8010` | Internal UI/API port. If changed, expose the same HTTP port in RunPod. |
 | `SCENEWORKS_CORS_ORIGINS` | Only for a different-origin frontend | built-in development origins | Exact allowed origins. Not needed for the default same-origin embedded UI. |
+| `SCENEWORKS_WORKER_PROOF_MASTER` | No | generated in `/workspace/credentials` | Optional 64-hex worker-source proof master. Supply it through a RunPod Secret if you need a pre-provisioned value; never put the value in the template. |
 
 The combined image intentionally binds to `0.0.0.0` so RunPod's proxy can reach
 it. It refuses to start without a nonblank access token.
 `SCENEWORKS_CORS_ORIGINS` is not needed for the default embedded UI.
+The API creates or verifies a `0600` proof master at
+`/workspace/credentials/worker-source-proof-master`. The GPU and utility workers
+share this durable credentials directory, while the supervisor gives each child
+only its derived key. If you supply `SCENEWORKS_WORKER_PROOF_MASTER`, add it as a
+RunPod Secret reference to the private template's environment. A standalone
+worker without this shared directory must receive its own 64-hex
+`SCENEWORKS_WORKER_PROOF_KEY`, derived as HMAC-SHA256 of its exact worker ID using
+the 64-hex master **text** as the key. Dynamic local model paths fail closed when
+an eligible worker cannot authenticate and prove their source bytes.
 
 ## Supported GPU architectures
 
