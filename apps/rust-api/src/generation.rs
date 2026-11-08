@@ -3778,11 +3778,28 @@ mod plan_backed_video_enqueue_tests {
 #[cfg(test)]
 mod imported_minimax_h3_video_tests {
     use crate::tests::support::*;
+    use sceneworks_core::model_artifacts::portable_binding::{
+        canonical_authored_options_sha256, registered_digest_member_claim_id, PortableArtifactFile,
+        PortableCheckpointPlan, PortableJobBinding, PortableModelBinding, PortableSourceClaim,
+        PortableSourceIdentity, PortableSourceProvenance,
+    };
+    use sceneworks_core::model_artifacts::ArtifactMemberRole;
     use sceneworks_worker::minimax_h3_import_fixture::{
         stage_managed_minimax_h3_import, ManagedMiniMaxH3Import,
     };
 
     const IMPORTED_ID: &str = "minimax_h3_custom";
+
+    fn pinned_component_metadata(selectors: &[String]) -> Vec<PortableArtifactFile> {
+        selectors
+            .iter()
+            .map(|selector| PortableArtifactFile {
+                relative_path: selector.replace('*', "fixture.safetensors").into(),
+                size_bytes: 1,
+                sha256: format!("sha256:{}", "a".repeat(64)),
+            })
+            .collect()
+    }
 
     /// E6/E8/E9: a fresh import captures real component contents BEFORE committing its plan.
     /// Retain the fixture's scoped source-library guard for the entire API request lifetime.
@@ -3799,7 +3816,10 @@ mod imported_minimax_h3_video_tests {
         imported
     }
 
-    fn app_with(temp_dir: &tempfile::TempDir, entry: Value) -> axum::Router {
+    fn app_and_state_with(
+        temp_dir: &tempfile::TempDir,
+        entry: Value,
+    ) -> (axum::Router, crate::AppState) {
         let config_dir = temp_dir.path().join("config/manifests");
         std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
         let user_models = json!({ "schemaVersion": 1, "models": [entry] }).to_string();
@@ -3840,7 +3860,85 @@ mod imported_minimax_h3_video_tests {
             )
             .unwrap();
         }
-        create_app(test_settings(temp_dir)).expect("app creates")
+        let (app, state) = create_app_with_state(test_settings(temp_dir)).expect("app creates");
+        // The imported primary is real managed checkpoint bytes. The unrelated publisher
+        // companions need deterministic pinned metadata for this weights-free API route test.
+        *state.test_hooks.pinned_metadata_override.lock() = Some(pinned_component_metadata);
+        (app, state)
+    }
+
+    fn app_with(temp_dir: &tempfile::TempDir, entry: Value) -> axum::Router {
+        app_and_state_with(temp_dir, entry).0
+    }
+
+    fn register_imported_h3_worker(state: &crate::AppState, entry: &Value) {
+        use sceneworks_core::contracts::WorkerCapability;
+        use sceneworks_core::jobs_store::RegisterWorker;
+
+        let slot = "modelManifestEntry";
+        let checkpoint_id = entry["importPlan"]["checkpointId"]
+            .as_str()
+            .expect("import checkpoint id");
+        let resolved = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(
+            &state.settings.data_dir,
+        )
+        .resolve(checkpoint_id)
+        .expect("trusted imported plan");
+        let members = crate::portable_admission::capture_local_model_entry(state, entry, slot)
+            .expect("exact managed local bytes");
+        let layer_prefix = format!("{slot}/importPlan/layers/");
+        let primary_layer = resolved.plan.layers.iter().find(|layer| {
+            !members.iter().any(|member| {
+                member.component_id.as_deref()
+                    == Some(format!("{layer_prefix}{}", layer.layer_id).as_str())
+            })
+        });
+        let plan = PortableCheckpointPlan::from_import_plan(
+            &resolved.plan,
+            primary_layer.map(|layer| layer.layer_id.clone()),
+        )
+        .expect("portable imported plan");
+        let binding = PortableModelBinding::new(
+            slot,
+            IMPORTED_ID,
+            "mlx",
+            "local",
+            None,
+            canonical_authored_options_sha256(&json!({})).expect("authored options hash"),
+            members,
+        )
+        .expect("portable model")
+        .with_checkpoint_plan(plan)
+        .expect("plan-backed portable model");
+        let claims = binding
+            .members
+            .iter()
+            .filter(|member| matches!(member.source, PortableSourceIdentity::Digest { .. }))
+            .map(|member| {
+                PortableSourceClaim::new(
+                    registered_digest_member_claim_id(&binding, member, &json!({}))
+                        .expect("logical source ID"),
+                    PortableSourceProvenance::OperatorOverride,
+                    member.files.clone(),
+                )
+                .expect("exact worker source claim")
+            })
+            .collect::<Vec<_>>();
+        state
+            .jobs_store
+            .register_worker_with_portable_sources(
+                RegisterWorker {
+                    worker_id: "imported-h3-worker".into(),
+                    gpu_id: "mlx".into(),
+                    gpu_name: None,
+                    capabilities: vec![WorkerCapability::Gpu, WorkerCapability::VideoGenerate],
+                    loaded_models: vec![],
+                    utilization: None,
+                },
+                Some("macos"),
+                Some(&claims),
+            )
+            .expect("worker advertises all imported bytes");
     }
 
     async fn create_project(app: &axum::Router) {
@@ -3935,7 +4033,8 @@ mod imported_minimax_h3_video_tests {
     async fn a_public_request_for_the_imported_h3_entry_enqueues_with_its_binding() {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
         let imported = imported_entry(&temp_dir, true);
-        let app = app_with(&temp_dir, Value::Object(imported.entry.clone()));
+        let (app, state) = app_and_state_with(&temp_dir, Value::Object(imported.entry.clone()));
+        register_imported_h3_worker(&state, &Value::Object(imported.entry.clone()));
         create_project(&app).await;
 
         let (status, job) = enqueue_t2v(&app).await;
@@ -3957,6 +4056,43 @@ mod imported_minimax_h3_video_tests {
         // The base partition's surface resolved the request: its 24 fps and its default canvas.
         assert_eq!(job["payload"]["fps"], 24);
         assert_eq!(job["payload"]["width"], 1344);
+        let binding =
+            sceneworks_core::jobs_store::JobsStore::new(test_settings(&temp_dir).jobs_db_path)
+                .portable_model_binding(job["id"].as_str().expect("job id"))
+                .expect("binding read")
+                .expect("portable binding persisted");
+        let binding: PortableJobBinding = serde_json::from_value(binding).expect("typed binding");
+        assert!(
+            !binding.routes.is_empty(),
+            "at least one native route is bound"
+        );
+        for route in binding.routes.values() {
+            let model = route
+                .models
+                .iter()
+                .find(|model| model.model_id == IMPORTED_ID)
+                .expect("imported model slot");
+            assert!(
+                model.checkpoint_plan.is_some(),
+                "trusted import plan is frozen"
+            );
+            assert!(
+                model
+                    .members
+                    .iter()
+                    .any(|member| member.role == ArtifactMemberRole::Primary
+                        && matches!(member.source, PortableSourceIdentity::Digest { .. })),
+                "local primary is bound by exact bytes"
+            );
+            assert!(
+                model
+                    .members
+                    .iter()
+                    .any(|member| member.role == ArtifactMemberRole::CoRequisite
+                        && matches!(member.source, PortableSourceIdentity::Revision { .. })),
+                "publisher companions remain pinned revisions"
+            );
+        }
     }
 
     #[tokio::test]

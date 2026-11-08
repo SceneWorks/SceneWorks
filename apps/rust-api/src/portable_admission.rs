@@ -1038,7 +1038,11 @@ async fn capture_model_slot(
     let mut members = Vec::new();
     let variant;
     let tier;
-    if downloads.is_empty() {
+    let local_plan_primary = entry.pointer("/importPlan/checkpointId").is_some()
+        && downloads
+            .iter()
+            .all(|download| is_co_requisite_download(download));
+    if downloads.is_empty() || local_plan_primary {
         if frozen_model.is_none() {
             let registered = crate::models::resolve_model_manifest_entry(state, model_id).await?;
             if registered.as_object().is_none_or(JsonObject::is_empty)
@@ -1081,6 +1085,19 @@ async fn capture_model_slot(
             }
         }
         members.extend(local);
+        // A managed imported checkpoint supplies its own transformer. Its manifest downloads
+        // name the publisher components that the plan reads alongside that local primary.
+        for (index, download) in downloads.iter().enumerate() {
+            members.push(
+                capture_download_member(
+                    state,
+                    download,
+                    ArtifactMemberRole::CoRequisite,
+                    Some(format!("{slot}/downloads/{index}")),
+                )
+                .await?,
+            );
+        }
         variant = requested_variant.unwrap_or_else(|| "local".to_owned());
         tier = training.as_ref().map(|training| training.tier.clone());
     } else {
@@ -2272,7 +2289,7 @@ fn capture_receipted_local_files(
 
 /// A non-HF imported, external, or trained entry is bound from its actual loader locators. A
 /// provenance-only `source.path` is deliberately omitted: the loader never opens that field.
-fn capture_local_model_entry(
+pub(crate) fn capture_local_model_entry(
     state: &AppState,
     entry: &Value,
     slot: &str,
