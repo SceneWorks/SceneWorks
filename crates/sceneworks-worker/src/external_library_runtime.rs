@@ -237,6 +237,11 @@ impl RuntimeSourceGuard {
                     for member in model_binding.members.iter().filter(|member| {
                         member.role == ArtifactMemberRole::RequiredComponent
                             && matches!(member.source, PortableSourceIdentity::Digest { .. })
+                            && !model_binding.checkpoint_plan.as_ref().is_some_and(|plan| {
+                                checkpoint_plan_layer_id(member, &slot).is_some_and(|layer_id| {
+                                    plan.layers.iter().any(|layer| layer.layer_id == layer_id)
+                                })
+                            })
                     }) {
                         let Some(component_id) = member.component_id.as_deref() else {
                             continue;
@@ -2478,6 +2483,20 @@ fn verify_portable_binding(
                 .unwrap_or("default")
                 .to_owned()
         });
+    let plan_backed_local_primary = binding.checkpoint_plan.is_some()
+        && matches!(primary.source, PortableSourceIdentity::Digest { .. })
+        && entry
+            .pointer("/importPlan/checkpointId")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| !id.is_empty())
+        && selected
+            .requirements
+            .iter()
+            .all(|requirement| !requirement.is_primary)
+        && selected_manifest
+            .get("downloads")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|rows| rows.iter().all(is_co_requisite_download));
     let selected_variant = selected
         .requirements
         .iter()
@@ -2486,10 +2505,14 @@ fn verify_portable_binding(
         .or(manifest_variant)
         .or_else(|| requested_variant.clone())
         .unwrap_or_else(|| {
-            if entry
-                .get("downloads")
-                .and_then(serde_json::Value::as_array)
-                .is_none_or(Vec::is_empty)
+            // A verified imported checkpoint remains the primary source even when its catalog
+            // downloads contain pinned publisher companions. Those rows do not select a primary
+            // tier; the API freezes the local plan-backed Digest as variant `local`.
+            if plan_backed_local_primary
+                || entry
+                    .get("downloads")
+                    .and_then(serde_json::Value::as_array)
+                    .is_none_or(Vec::is_empty)
             {
                 "local".to_owned()
             } else {
@@ -4383,6 +4406,162 @@ mod tests {
             Some(&route),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn managed_h3_import_uses_local_primary_variant_with_pinned_companions() {
+        use sceneworks_core::model_artifacts::portable_binding::{
+            portable_closure_sha256, PortableCheckpointPlan,
+        };
+
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import(
+            &data,
+            "imported-h3-guard",
+        );
+        let mut settings = settings(data);
+        settings.gpu_id = "mlx".to_owned();
+        settings.config_dir = temp.path().join("config");
+        let catalog = settings.config_dir.join("manifests/user.models.jsonc");
+        std::fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        std::fs::write(
+            &catalog,
+            json!({"models":[imported.entry.clone()]}).to_string(),
+        )
+        .unwrap();
+        let entry = Value::Object(imported.entry.clone());
+        let payload = json!({
+            "model":"imported-h3-guard",
+            "mode":"text_to_video",
+            "modelManifestEntry":entry,
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let slot = "modelManifestEntry";
+        let source = sceneworks_core::hf_home::model_source_library(&settings.data_dir);
+        let primary_files =
+            crate::portable_source_claims::capture_registered_files(&imported.install_dir).unwrap();
+        assert_eq!(
+            crate::paths::normalize_app_managed_model_entry_path(
+                &settings,
+                Path::new(entry.pointer("/paths/model").unwrap().as_str().unwrap()),
+                "portable catalog source",
+            )
+            .ok()
+            .and_then(|path| crate::portable_source_claims::capture_registered_files(&path).ok()),
+            Some(primary_files.clone()),
+            "the worker catalog locator must resolve the admitted primary closure",
+        );
+        let mut members = vec![PortableArtifactMember {
+            role: ArtifactMemberRole::Primary,
+            component_id: None,
+            source: PortableSourceIdentity::Digest {
+                sha256: portable_closure_sha256(&primary_files).unwrap(),
+            },
+            tier: None,
+            files: primary_files,
+        }];
+        let resolved =
+            sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir)
+                .resolve(&imported.checkpoint_id)
+                .unwrap();
+        for layer in resolved.layers {
+            let bytes = std::fs::read(&layer.path).unwrap();
+            let sha256 = format!("sha256:{:x}", Sha256::digest(&bytes));
+            members.push(PortableArtifactMember {
+                role: ArtifactMemberRole::RequiredComponent,
+                component_id: Some(format!("{slot}/importPlan/layers/{}", layer.layer.layer_id)),
+                source: PortableSourceIdentity::Digest {
+                    sha256: sha256.clone(),
+                },
+                tier: None,
+                files: vec![PortableArtifactFile {
+                    relative_path: "artifact".into(),
+                    size_bytes: bytes.len() as u64,
+                    sha256,
+                }],
+            });
+        }
+        for (index, download) in entry["downloads"].as_array().unwrap().iter().enumerate() {
+            let repo = download["repo"].as_str().unwrap();
+            let revision = download["revision"].as_str().unwrap();
+            let variant = download["variant"].as_str().unwrap_or("default");
+            let (_, snapshot) = source.discover_snapshot(repo, Some(revision)).unwrap();
+            let all = crate::portable_source_claims::capture_registered_files(&snapshot).unwrap();
+            let files = all
+                .into_iter()
+                .filter(|file| {
+                    download["files"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|selector| {
+                            glob::Pattern::new(selector.as_str().unwrap())
+                                .unwrap()
+                                .matches(&file.relative_path.to_string_lossy())
+                        })
+                })
+                .collect::<Vec<_>>();
+            assert!(!files.is_empty(), "publisher companion selector {index}");
+            members.push(PortableArtifactMember {
+                role: ArtifactMemberRole::CoRequisite,
+                component_id: Some(format!("{slot}/downloads/{index}")),
+                source: PortableSourceIdentity::Revision {
+                    identity: ArtifactIdentity::pinned(repo, revision, variant).unwrap(),
+                },
+                tier: Some(variant.to_owned()),
+                files,
+            });
+        }
+        let plan = PortableCheckpointPlan::from_import_plan(&resolved.plan, None).unwrap();
+        let model = PortableModelBinding::new(
+            slot,
+            "imported-h3-guard",
+            "mlx",
+            "local",
+            None,
+            canonical_authored_options_sha256(&json!({})).unwrap(),
+            members,
+        )
+        .unwrap()
+        .with_checkpoint_plan(plan)
+        .unwrap();
+        let route = PortableRouteBinding::new("mlx", std::env::consts::OS, vec![model]).unwrap();
+        let mut wrong_variant = route.clone();
+        wrong_variant.models[0].variant = "default".to_owned();
+        assert!(
+            RuntimeSourceGuard::begin_with_binding(
+                &JobType::VideoGenerate,
+                &payload,
+                &settings,
+                Some(&wrong_variant),
+            )
+            .is_err(),
+            "a plan does not authorize changing the admitted local variant"
+        );
+        let selected = imported.install_dir.join("config.json");
+        let original = std::fs::read(&selected).unwrap();
+        std::fs::write(&selected, b"substituted config").unwrap();
+        assert!(
+            RuntimeSourceGuard::begin_with_binding(
+                &JobType::VideoGenerate,
+                &payload,
+                &settings,
+                Some(&route),
+            )
+            .is_err(),
+            "changed imported primary bytes refuse before loader dispatch"
+        );
+        std::fs::write(&selected, original).unwrap();
+        RuntimeSourceGuard::begin_with_binding(
+            &JobType::VideoGenerate,
+            &payload,
+            &settings,
+            Some(&route),
+        )
+        .expect("unchanged imported primary and pinned companions pass the guard");
     }
 
     #[test]
