@@ -2,6 +2,99 @@
 use super::support::*;
 use crate::{validate_prompt_enhancement_fields, validate_prompt_enhancement_payload};
 
+const JOBS_FIXTURE_REVISION: &str = "1111111111111111111111111111111111111111";
+
+/// Menu and routing tests use deliberately small handwritten catalogs. Give their positive
+/// source rows immutable revisions before exercising portable admission; keep missing-revision
+/// refusal in its own test below instead of weakening the production boundary.
+fn pin_handwritten_jobs_manifest(settings: &Settings) {
+    let path = settings.config_dir.join("manifests/builtin.models.jsonc");
+    let raw = std::fs::read_to_string(&path).expect("handwritten models manifest");
+    let mut manifest: Value = serde_json::from_str(&strip_jsonc_comments(&raw))
+        .expect("handwritten models manifest parses");
+    for model in manifest["models"].as_array_mut().expect("models array") {
+        for download in model["downloads"].as_array_mut().into_iter().flatten() {
+            if download["provider"] != "huggingface" || download.get("revision").is_some() {
+                continue;
+            }
+            let repo = download["repo"].as_str().expect("fixture repository");
+            let shipped = sceneworks_core::builtin_manifests::builtin_model_entries()
+                .iter()
+                .flat_map(|entry| entry["downloads"].as_array().into_iter().flatten())
+                .find(|row| row["repo"] == repo)
+                .and_then(|row| row["revision"].as_str());
+            download["revision"] = json!(shipped.unwrap_or(JOBS_FIXTURE_REVISION));
+        }
+    }
+    std::fs::write(path, manifest.to_string()).expect("pinned fixture manifest writes");
+}
+
+fn pinned_jobs_fixture_metadata(
+    selectors: &[String],
+) -> Vec<sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile> {
+    use sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile;
+    let mut files = selectors
+        .iter()
+        .map(|selector| PortableArtifactFile {
+            relative_path: std::path::PathBuf::from(selector.replace('*', "fixture.safetensors")),
+            size_bytes: 1,
+            sha256: format!("sha256:{}", "a".repeat(64)),
+        })
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    files.dedup_by(|left, right| left.relative_path == right.relative_path);
+    files
+}
+
+fn pinned_jobs_fixture_app_with_state(
+    settings: Settings,
+) -> Result<(axum::Router, crate::AppState), sceneworks_core::jobs_store::JobsStoreError> {
+    pin_handwritten_jobs_manifest(&settings);
+    let (app, state) = create_app_with_state(settings)?;
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(true);
+    *state.test_hooks.pinned_metadata_override.lock() =
+        Some(std::sync::Arc::new(|_, _, selectors| {
+            pinned_jobs_fixture_metadata(selectors)
+        }));
+    Ok((app, state))
+}
+
+fn pinned_jobs_fixture_app(
+    settings: Settings,
+) -> Result<axum::Router, sceneworks_core::jobs_store::JobsStoreError> {
+    pinned_jobs_fixture_app_with_state(settings).map(|(app, _)| app)
+}
+
+#[tokio::test]
+async fn handwritten_job_source_without_immutable_revision_still_fails_admission() {
+    for revision in [None, Some("main")] {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let manifest_dir = temp.path().join("config/manifests");
+        single_model_manifest(&manifest_dir, "krea_2_turbo", "SceneWorks/krea-2-turbo-mlx");
+        if let Some(revision) = revision {
+            let path = manifest_dir.join("builtin.models.jsonc");
+            let raw = std::fs::read_to_string(&path).expect("test catalog");
+            let mut catalog: Value = serde_json::from_str(&raw).expect("test catalog parses");
+            catalog["models"][0]["downloads"][0]["revision"] = json!(revision);
+            std::fs::write(path, catalog.to_string()).expect("mutable test catalog writes");
+        }
+        let app = create_app(test_settings(&temp)).expect("unmodified admission app");
+        let (status, body) = request(
+            app,
+            "POST",
+            "/api/v1/image/jobs",
+            json!({"projectId":"project-1","model":"krea_2_turbo",
+                "mode":"text_to_image","prompt":"a lighthouse","count":1}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{revision:?}: {body}");
+        assert_eq!(body["code"], "model_artifact_incomplete");
+    }
+}
+
 #[tokio::test]
 async fn wan_vace_fun_video_enqueue_keeps_a_pinned_source() {
     use sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile;
@@ -3442,7 +3535,7 @@ async fn image_create_retry_and_duplicate_resolve_text_encoder_fresh_and_fail_cl
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let manifest_dir = temp_dir.path().join("config/manifests");
     single_model_manifest(&manifest_dir, "krea_2_turbo", "SceneWorks/krea-2-turbo-mlx");
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
 
     let stale_id = "text_encoder_ffffffffffffffffffffffffffffffff";
     let base_payload = json!({
@@ -4906,7 +4999,7 @@ async fn candle_required_builtin_krea_keeps_builtin_scope_and_queues() {
     single_model_manifest(&manifest_dir, "krea_2_turbo", "SceneWorks/krea-2-turbo-mlx");
     let mut settings = test_settings(&temp_dir);
     settings.candle_required = true;
-    let app = create_app(settings).expect("app creates");
+    let app = pinned_jobs_fixture_app(settings).expect("app creates");
 
     let (status, created) = request(
         app,
@@ -5079,7 +5172,7 @@ async fn candle_required_moves_the_decoder_gate_onto_the_candle_option_list() {
     write_decoder_capable_catalog(&candle_dir);
     let mut candle_settings = test_settings(&candle_dir);
     candle_settings.candle_required = true;
-    let candle_app = create_app(candle_settings).expect("app creates");
+    let candle_app = pinned_jobs_fixture_app(candle_settings).expect("app creates");
     let (status, error) = request(
         candle_app,
         "POST",
@@ -5105,7 +5198,7 @@ async fn candle_required_moves_the_decoder_gate_onto_the_candle_option_list() {
     // refusal above came from the backend swap and not from the option being unusable.
     let native_dir = tempfile::tempdir().expect("temp dir creates");
     write_decoder_capable_catalog(&native_dir);
-    let native_app = create_app(test_settings(&native_dir)).expect("app creates");
+    let native_app = pinned_jobs_fixture_app(test_settings(&native_dir)).expect("app creates");
     let (status, body) = request(
         native_app,
         "POST",
@@ -5136,7 +5229,7 @@ async fn retry_and_duplicate_gate_a_merged_decoder_selection_the_create_path_ref
     let _env = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_decoder_capable_catalog(&temp_dir);
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
 
     // The original job selects no decoder, so it is admitted on either lane.
     let (status, original) = request(
@@ -9709,7 +9802,7 @@ async fn direct_prompting_needs_neither_rewriter_installed() {
     )
     .expect("user models writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Direct Prompting Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -11485,7 +11578,7 @@ async fn video_jobs_expand_recipe_presets_server_side() {
     std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
     write_test_safetensors(&lora_dir.join("motion.safetensors"));
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Video Preset Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -11781,7 +11874,7 @@ async fn mac_only_video_is_rejected_before_enqueue_on_direct_preset_and_replay_r
     .expect("user presets writes");
 
     let (app, state) =
-        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+        pinned_jobs_fixture_app_with_state(test_settings(&temp_dir)).expect("app and state create");
     *state.test_hooks.video_platform_override.lock() = Some("windows");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Platform Withdrawal Project").await;
@@ -12983,7 +13076,7 @@ async fn video_duration_past_the_post_preset_models_hard_cap_is_rejected() {
     )
     .expect("user recipe presets writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Duration Cap Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -13147,7 +13240,7 @@ async fn video_fps_outside_the_post_preset_models_menu_is_rejected() {
     )
     .expect("user recipe presets writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Fps Menu Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -13342,7 +13435,7 @@ async fn image_steps_under_the_models_hard_floor_is_rejected() {
     )
     .expect("user models writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Image Step Floor Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -13620,7 +13713,7 @@ async fn image_sampler_off_the_models_menu_is_rejected() {
     )
     .expect("user models writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Image Sampler Menu Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -13960,7 +14053,7 @@ async fn image_reference_count_and_free_size_are_bounded_by_the_models_declared_
     )
     .expect("user models writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Qwen 2.1 Controls Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -14752,7 +14845,7 @@ async fn video_steps_under_the_post_preset_models_hard_floor_is_rejected() {
     )
     .expect("user recipe presets writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Step Floor Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -14961,7 +15054,7 @@ async fn video_steps_off_the_post_preset_models_exact_menu_is_rejected() {
     )
     .expect("user recipe presets writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Step Menu Project").await;
     let project_id = project["id"].as_str().expect("project id");
