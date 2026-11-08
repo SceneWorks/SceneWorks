@@ -2341,10 +2341,10 @@ async fn paired_moe_lora_upload_writes_convention_files_and_records_base_model()
     // import normalizes both halves to the dot-delimited high/low_noise convention
     // (off-convention upload names included) and persists the chosen A14B baseModel.
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (app, state) = create_app_with_state(test_settings(&temp_dir)).expect("app creates");
     let wan_bytes = test_safetensors_bytes_with_keys(&wan_video_tensor_keys());
     let (status, job) = request_multipart_lora_pair_upload(
-        app,
+        app.clone(),
         &[
             ("name", "Wan MoE"),
             ("scope", "global"),
@@ -2374,14 +2374,26 @@ async fn paired_moe_lora_upload_writes_convention_files_and_records_base_model()
         format!("{lora_id}.low_noise.safetensors")
     );
 
+    // The API must not publish either host staging path, while the worker-owned row retains both
+    // exact files to import. GET uses the same public projection as the enqueue response.
+    assert!(job["payload"].get("sourcePath").is_none(), "{job}");
+    assert!(job["payload"].get("secondarySourcePath").is_none(), "{job}");
+    let job_id = job["id"].as_str().expect("job id");
+    let (get_status, public_job) =
+        request(app, "GET", &format!("/api/v1/jobs/{job_id}"), Value::Null).await;
+    assert_eq!(get_status, StatusCode::OK);
+    assert!(public_job["payload"].get("sourcePath").is_none());
+    assert!(public_job["payload"].get("secondarySourcePath").is_none());
+    let worker_job = state.jobs_store.get_job(job_id).expect("worker-owned job");
+
     // Both halves staged on disk; the worker renames them on import.
     let primary = std::path::PathBuf::from(
-        job["payload"]["sourcePath"]
+        worker_job.payload["sourcePath"]
             .as_str()
             .expect("primary source path"),
     );
     let secondary = std::path::PathBuf::from(
-        job["payload"]["secondarySourcePath"]
+        worker_job.payload["secondarySourcePath"]
             .as_str()
             .expect("secondary source path"),
     );

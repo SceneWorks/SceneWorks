@@ -86,6 +86,7 @@ fn redact_manifest_locators_from_job_payload(payload: &mut JsonObject) {
     payload.remove("modelPath");
     payload.remove("installedPath");
     payload.remove("sourcePath");
+    payload.remove("secondarySourcePath");
     for (key, value) in payload {
         redact_nested_manifest_carriers(key, value);
     }
