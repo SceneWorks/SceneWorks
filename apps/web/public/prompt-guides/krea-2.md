@@ -64,7 +64,8 @@ realistic subjects you don't need to say "photorealistic"; that's already the de
 ## Quality & Speed Notes
 
 - **Resolution:** use a native bucket (1024² / 768×1024 / 1024×768 / 1280×720 / 720×1280 / 1536²); width
-  and height must be multiples of 16. 1024² is the default. The model supports up to 2048².
+  and height must be multiples of 16. 1024² is the default. Native presets go up to 2048²;
+  Hires.fix can refine the generated image at up to 4096 pixels per side.
 - **Steps:** ~8 (few-step distilled — more steps rarely help and slow you down).
 - **Guidance:** none — Krea Turbo is CFG-free (the guidance slider is inert).
 - **Sampler / scheduler:** `default` is the native rectified-flow loop and the best starting point; the
