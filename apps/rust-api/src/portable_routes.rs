@@ -933,7 +933,10 @@ pub(crate) fn eligible_portable_routes(
         routes.extend(
             platforms
                 .iter()
-                .filter(|platform| entries_support_route(job_type, entries, backend, platform))
+                .filter(|platform| {
+                    entries_support_route(job_type, entries, backend, platform)
+                        && selected_decoder_available_on_route(job_type, payload, entries, backend)
+                })
                 .map(|platform| (backend.to_owned(), (*platform).to_owned())),
         );
     }
@@ -943,6 +946,45 @@ pub(crate) fn eligible_portable_routes(
         ));
     }
     Ok(routes)
+}
+
+fn selected_decoder_available_on_route(
+    job_type: &JobType,
+    payload: &JsonObject,
+    entries: &[(String, &Value)],
+    backend: &str,
+) -> bool {
+    if !matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
+        return true;
+    }
+    let Some(decoder) = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("decoder"))
+        .and_then(Value::as_str)
+        .filter(|decoder| !decoder.is_empty() && *decoder != "native")
+    else {
+        return true;
+    };
+    entries.iter().all(|(_, entry)| {
+        let component = entry
+            .pointer(&format!("/decoders/byBackend/{backend}"))
+            .and_then(Value::as_array)
+            .and_then(|options| {
+                options
+                    .iter()
+                    .find(|option| option.get("id").and_then(Value::as_str) == Some(decoder))
+            })
+            .and_then(|option| option.get("componentId"))
+            .and_then(Value::as_str);
+        component.is_some_and(|component| {
+            ["downloads", "conditionalComponents"]
+                .into_iter()
+                .filter_map(|field| entry.get(field).and_then(Value::as_array))
+                .flatten()
+                .any(|row| row.get("componentId").and_then(Value::as_str) == Some(component))
+        })
+    })
 }
 
 fn entries_support_route(
@@ -1403,6 +1445,32 @@ mod tests {
             "linux"
         )
         .is_err());
+    }
+
+    #[test]
+    fn auto_request_keeps_mlx_when_candle_lacks_selected_decoder() {
+        let entry = json!({
+            "id":"qwen_image",
+            "decoders":{"byBackend":{"mlx":[{"id":"wan_2_1_vae","componentId":"vae"}]}},
+            "downloads":[{"componentId":"vae","required":"soft","repo":"donor/vae",
+                "revision":"0123456789012345678901234567890123456789","files":["vae.safetensors"]}]
+        });
+        let entries = [("modelManifestEntry".to_owned(), &entry)];
+        let payload = json!({"model":"qwen_image","advanced":{"decoder":"wan_2_1_vae"}});
+        let payload = payload.as_object().unwrap();
+        assert_eq!(
+            eligible_portable_routes(&JobType::ImageGenerate, payload, &entries, "auto").unwrap(),
+            vec![("mlx".to_owned(), "macos".to_owned())]
+        );
+        assert!(eligible_portable_routes(&JobType::ImageGenerate, payload, &entries, "0").is_err());
+        assert!(selected_route_source_rows(
+            &JobType::ImageGenerate,
+            payload,
+            &entries,
+            "mlx",
+            "macos"
+        )
+        .is_ok());
     }
 
     #[test]
