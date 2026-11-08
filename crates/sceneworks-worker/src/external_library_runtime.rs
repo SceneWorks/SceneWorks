@@ -147,6 +147,7 @@ impl RuntimeSourceGuard {
         }
 
         let mut planning_payload = payload.clone();
+        let mut verified_converted_slots = std::collections::BTreeSet::new();
         if binding.is_some() {
             // The claim's manifest was assembled on the API host. Its physical paths cannot
             // establish this worker's installation, including during the legacy source pass.
@@ -182,6 +183,16 @@ impl RuntimeSourceGuard {
                     .transpose()?
                     .flatten()
                 {
+                    if primary.is_some_and(|member| {
+                        member.role == ArtifactMemberRole::Primary
+                            && matches!(member.source, PortableSourceIdentity::Digest { .. })
+                            && crate::portable_source_claims::is_converted_builtin_model_id(&id)
+                    }) {
+                        // The registered fixed output root has a valid producer receipt and
+                        // exactly the frozen bytes. Its publisher download was an install-time
+                        // input, not a runtime source requirement for this route.
+                        verified_converted_slots.insert(slot.clone());
+                    }
                     let entry = model_slot_entry_mut(&mut planning_payload, &slot)
                         .and_then(serde_json::Value::as_object_mut)
                         .ok_or_else(|| invalid_binding("worker model slot disappeared"))?;
@@ -235,7 +246,7 @@ impl RuntimeSourceGuard {
                 }
             }
         }
-        let model_entries = payload_model_entries(&planning_payload);
+        let model_entries = payload_model_slots(&planning_payload);
         // Fail closed on an EMPTY model carrier set for every model-backed route. Routes that
         // genuinely load no model bytes are declared in the exhaustive table below — a job type
         // absent from that allowlist cannot pass without carriers.
@@ -273,7 +284,7 @@ impl RuntimeSourceGuard {
         // beside each resolution. Nothing is leased and nothing is served yet: which pairs may be
         // served at all cannot be known until every entry in the job has been resolved.
         let mut plans: Vec<EntryPlan> = Vec::new();
-        for entry in &model_entries {
+        for (slot, entry) in &model_entries {
             let requested_variant = selected_runtime_variant(
                 job_type,
                 payload,
@@ -324,12 +335,20 @@ impl RuntimeSourceGuard {
             }
             // This worker's OWN platform and the request's selected tier define the closure —
             // never the API host's platform, never a sibling variant's receipts.
-            let selected = selected_requirements_for_model(
+            let mut selected = selected_requirements_for_model(
                 entry,
                 std::env::consts::OS,
                 requested_variant.as_deref(),
                 &settings.data_dir,
             );
+            if verified_converted_slots.contains(slot) {
+                selected
+                    .requirements
+                    .retain(|requirement| !requirement.is_primary);
+                if selected.requirements.is_empty() {
+                    continue;
+                }
+            }
             let resolution = resolve_model_availability(
                 &settings.data_dir,
                 &configured_library,
@@ -2221,7 +2240,16 @@ fn verify_portable_binding(
     binding
         .verify_local(&local, &allowed_roots)
         .map_err(|error| invalid_binding(error.to_string()))?;
-    verify_manifest_globs(binding, entry, requested_variant.as_deref(), settings)
+    let verified_derivative_primary =
+        matches!(primary.source, PortableSourceIdentity::Digest { .. })
+            && crate::portable_source_claims::is_converted_builtin_model_id(&binding.model_id);
+    verify_manifest_globs(
+        binding,
+        entry,
+        requested_variant.as_deref(),
+        settings,
+        verified_derivative_primary,
+    )
 }
 
 fn selected_manifest_row_covers_member(
@@ -2347,6 +2375,7 @@ fn verify_manifest_globs(
     entry: &serde_json::Value,
     requested_variant: Option<&str>,
     settings: &Settings,
+    verified_derivative_primary: bool,
 ) -> WorkerResult<()> {
     let selected = selected_model_artifact_closure(entry, std::env::consts::OS, requested_variant);
     for download in selected
@@ -2356,6 +2385,7 @@ fn verify_manifest_globs(
         .flatten()
         .filter(|download| {
             download.get("required").and_then(serde_json::Value::as_str) != Some("soft")
+                && (!verified_derivative_primary || is_co_requisite_download(download))
         })
     {
         let Some(repo) = download.get("repo").and_then(serde_json::Value::as_str) else {
@@ -3462,21 +3492,6 @@ fn job_requires_typed_model_source(job_type: &JobType) -> bool {
     }
 }
 
-fn payload_model_entries(payload: &JsonObject) -> Vec<&serde_json::Value> {
-    ["modelManifestEntry", "baseModelManifestEntry"]
-        .into_iter()
-        .filter_map(|key| payload.get(key))
-        .chain(
-            payload
-                .get("modelManifestEntries")
-                .and_then(serde_json::Value::as_array)
-                .into_iter()
-                .flatten(),
-        )
-        .filter(|entry| !entry.is_null())
-        .collect()
-}
-
 fn payload_model_slots(payload: &JsonObject) -> Vec<(String, &serde_json::Value)> {
     let mut slots = Vec::new();
     for key in ["modelManifestEntry", "baseModelManifestEntry"] {
@@ -3716,6 +3731,101 @@ mod tests {
             &member
         )
         .is_err());
+    }
+
+    #[test]
+    fn converted_builtin_digest_replaces_only_its_publisher_runtime_requirement() {
+        let temp = TempDir::new().unwrap();
+        let mut settings = settings(temp.path().join("data"));
+        settings.config_dir = temp.path().join("config");
+        settings.gpu_id = "mlx".to_owned();
+        let id = "flux2_klein_9b_true_v2";
+        let root = settings.data_dir.join("models/mlx").join(id);
+        let entry = sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .unwrap()["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == id)
+            .unwrap()
+            .clone();
+        let payload = json!({"model":id,"modelManifestEntry":entry})
+            .as_object()
+            .unwrap()
+            .clone();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("model_index.json"), b"{}").unwrap();
+        std::fs::write(root.join("model.safetensors"), b"converted weights").unwrap();
+        crate::write_produced_artifact_receipt(&root, "convert-job", "source/repo", id).unwrap();
+        let files = crate::portable_source_claims::capture_registered_files(&root).unwrap();
+        let binding = PortableRouteBinding::new(
+            "mlx",
+            std::env::consts::OS,
+            vec![PortableModelBinding::new(
+                "modelManifestEntry",
+                id,
+                "mlx",
+                "default",
+                Some("default".to_owned()),
+                canonical_authored_options_sha256(&json!({})).unwrap(),
+                vec![PortableArtifactMember {
+                    role: ArtifactMemberRole::Primary,
+                    component_id: None,
+                    source: PortableSourceIdentity::Digest {
+                        sha256: sceneworks_core::model_artifacts::portable_binding::portable_closure_sha256(&files).unwrap(),
+                    },
+                    tier: Some("default".to_owned()),
+                    files,
+                }],
+            )
+            .unwrap()],
+        )
+        .unwrap();
+
+        let library = temp.path().join("empty-hf");
+        std::fs::create_dir_all(&library).unwrap();
+        with_library(&library, || {
+            let guard = RuntimeSourceGuard::begin_with_binding(
+                &JobType::ImageGenerate,
+                &payload,
+                &settings,
+                Some(&binding),
+            )
+            .expect("converted output must load without the publisher conversion input installed");
+            let selected = guard.dispatch_payload()["modelManifestEntry"]["paths"]["model"]
+                .as_str()
+                .unwrap();
+            assert_eq!(
+                std::fs::read(Path::new(selected).join("model.safetensors")).unwrap(),
+                b"converted weights"
+            );
+            drop(guard);
+
+            std::fs::remove_file(root.join(".sceneworks-produced-artifact.json")).unwrap();
+            assert!(
+                RuntimeSourceGuard::begin_with_binding(
+                    &JobType::ImageGenerate,
+                    &payload,
+                    &settings,
+                    Some(&binding)
+                )
+                .is_err(),
+                "missing producer receipt must refuse before loading"
+            );
+            crate::write_produced_artifact_receipt(&root, "convert-job", "source/repo", id)
+                .unwrap();
+            std::fs::remove_file(root.join("model.safetensors")).unwrap();
+            assert!(
+                RuntimeSourceGuard::begin_with_binding(
+                    &JobType::ImageGenerate,
+                    &payload,
+                    &settings,
+                    Some(&binding)
+                )
+                .is_err(),
+                "missing converted bytes must refuse before loading"
+            );
+        });
     }
 
     fn local_binding(
