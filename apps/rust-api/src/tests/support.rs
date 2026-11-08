@@ -737,12 +737,25 @@ pub(crate) fn seed_pinned_training_base_fixture(data_dir: &std::path::Path, base
     }
 }
 
-fn private_training_payload(data_dir: &std::path::Path, job_id: &str) -> Value {
+/// Read the worker-owned payload for assertions about paths hidden from public job responses.
+pub(crate) fn private_training_payload(data_dir: &std::path::Path, job_id: &str) -> Value {
     let db = data_dir.parent().expect("test data parent").join("jobs.db");
     let job = sceneworks_core::jobs_store::JobsStore::new(db)
         .get_job(job_id)
         .expect("stored training job");
     Value::Object(job.payload)
+}
+
+pub(crate) fn private_training_output_dir(
+    data_dir: &std::path::Path,
+    job_id: &str,
+) -> std::path::PathBuf {
+    let payload = private_training_payload(data_dir, job_id);
+    std::path::PathBuf::from(
+        payload["plan"]["output"]["outputDir"]
+            .as_str()
+            .expect("stored training output directory"),
+    )
 }
 
 /// Submit a real **FULL base fine-tune** (sc-15036, epic 14034 F6) against the Mage-Flow Base

@@ -500,13 +500,8 @@ async fn an_iris_rerun_never_shares_an_output_with_another_run() {
     let project_id = project(&app).await;
     let dataset_id = dataset(&app, &project_id, one_item()).await;
     let config = iris_target(&app).await["defaults"].clone();
-    let output_dir = |job: &Value| {
-        std::path::PathBuf::from(
-            job["payload"]["plan"]["output"]["outputDir"]
-                .as_str()
-                .unwrap(),
-        )
-    };
+    let output_dir =
+        |job: &Value| private_training_output_dir(&settings.data_dir, job["id"].as_str().unwrap());
     let output_id = |job: &Value| {
         job["payload"]["manifestEntry"]["id"]
             .as_str()
@@ -642,7 +637,7 @@ async fn iris_adapter_registers_with_task_identity_and_resumes() {
     );
     assert_eq!(job["payload"]["manifestEntry"]["irisTask"], "generation");
     let job_id = job["id"].as_str().unwrap().to_owned();
-    let output_dir = std::path::PathBuf::from(plan["output"]["outputDir"].as_str().unwrap());
+    let output_dir = private_training_output_dir(&settings.data_dir, &job_id);
     let file_name = plan["output"]["fileName"].as_str().unwrap().to_owned();
 
     claim_training_job_as_mlx_worker(&app, &job_id).await;
@@ -746,7 +741,7 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
     let plan = &job["payload"]["plan"];
     assert_eq!(plan["target"]["outputKind"], "base_checkpoint");
     let job_id = job["id"].as_str().unwrap().to_owned();
-    let output_dir = std::path::PathBuf::from(plan["output"]["outputDir"].as_str().unwrap());
+    let output_dir = private_training_output_dir(&settings.data_dir, &job_id);
     assert!(output_dir.starts_with(settings.data_dir.join("models").join("finetunes")));
     let stem = plan["output"]["fileName"]
         .as_str()
@@ -1043,8 +1038,7 @@ async fn a_failed_generation_export_registers_nothing_and_leaves_its_sources_unt
             assert_eq!(code, StatusCode::CREATED, "{network}: {job}");
             let plan = &job["payload"]["plan"];
             let job_id = job["id"].as_str().unwrap().to_owned();
-            let output_dir =
-                std::path::PathBuf::from(plan["output"]["outputDir"].as_str().unwrap());
+            let output_dir = private_training_output_dir(&settings.data_dir, &job_id);
             let file_name = plan["output"]["fileName"].as_str().unwrap().to_owned();
             claim_training_job_as_mlx_worker(&app, &job_id).await;
             std::fs::create_dir_all(&output_dir).unwrap();
@@ -1134,7 +1128,7 @@ async fn a_canceled_run_registers_only_what_the_trainer_exported() {
     let (_, job) = submit(&app, &project_id, &dataset_id, config, false).await;
     let job_id = job["id"].as_str().unwrap().to_owned();
     let plan = &job["payload"]["plan"];
-    let output_dir = std::path::PathBuf::from(plan["output"]["outputDir"].as_str().unwrap());
+    let output_dir = private_training_output_dir(&settings.data_dir, &job_id);
     let file_name = plan["output"]["fileName"].as_str().unwrap().to_owned();
     claim_training_job_as_mlx_worker(&app, &job_id).await;
     std::fs::create_dir_all(&output_dir).unwrap();
@@ -1250,7 +1244,7 @@ async fn a_trained_iris_adapter_is_accepted_by_the_iris_image_job_gate() {
     assert_eq!(status, StatusCode::CREATED, "{job}");
     let job_id = job["id"].as_str().unwrap().to_owned();
     let plan = &job["payload"]["plan"];
-    let output_dir = std::path::PathBuf::from(plan["output"]["outputDir"].as_str().unwrap());
+    let output_dir = private_training_output_dir(&settings.data_dir, &job_id);
     let file_name = plan["output"]["fileName"].as_str().unwrap().to_owned();
 
     claim_training_job_as_mlx_worker(&app, &job_id).await;

@@ -716,8 +716,10 @@ async fn parquet_import_job_queues_for_empty_dataset_and_finalizes_staged_items(
 // source (it loads no captioner), and persists the mode a caption sidecar reports.
 #[tokio::test]
 async fn caption_job_modes_validate_and_the_stored_caption_records_the_mode() {
+    let _env = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
+    seed_pinned_training_base_fixture(&settings.data_dir, "joycaption_beta_one");
     let app = create_app(settings).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project_with_request(app.clone(), &"Caption Modes", request)
@@ -886,8 +888,10 @@ async fn caption_job_modes_validate_and_the_stored_caption_records_the_mode() {
 // dataset write paths is a field error, never stored.
 #[tokio::test]
 async fn caption_job_request_trigger_words_fill_items_and_caption_mode_is_validated_on_writes() {
+    let _env = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
+    seed_pinned_training_base_fixture(&settings.data_dir, "joycaption_beta_one");
     let app = create_app(settings).expect("app creates");
     let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
@@ -1076,8 +1080,12 @@ async fn caption_job_request_trigger_words_fill_items_and_caption_mode_is_valida
 
 #[tokio::test]
 async fn training_dataset_routes_persist_and_validate_project_assets() {
+    let _env = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
+    seed_pinned_training_base_fixture(&settings.data_dir, "joycaption_beta_one");
+    seed_pinned_training_base_fixture(&settings.data_dir, "clip_vit_l14");
+    seed_pinned_training_base_fixture(&settings.data_dir, "instantid_face_stack");
     let app = create_app(settings.clone()).expect("app creates");
 
     let (_, project) = crate::tests::support::create_project_with_request(
@@ -2589,7 +2597,7 @@ async fn asset_library_scope_excludes_character_studio_outputs() {
 async fn create_training_job_resolves_plan_and_queues_lora_train() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
-    let app = create_app(settings).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
 
     let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
@@ -2648,7 +2656,8 @@ async fn create_training_job_resolves_plan_and_queues_lora_train() {
     assert_eq!(job["payload"]["dryRun"], true);
 
     let job_id = job["id"].as_str().expect("job id").to_owned();
-    let plan = &job["payload"]["plan"];
+    let private_payload = private_training_payload(&settings.data_dir, &job_id);
+    let plan = &private_payload["plan"];
     // The resolved plan is self-referential and fully normalized in Rust.
     assert_eq!(plan["jobId"], job_id);
     assert_eq!(plan["provenance"]["sourceJobId"], job_id);
@@ -3815,11 +3824,7 @@ async fn completed_moss_lokr_registers_exact_provenance_for_library_selection() 
     .await;
     assert_eq!(status, StatusCode::CREATED, "{job}");
     let job_id = job["id"].as_str().expect("job id").to_owned();
-    let output_dir = std::path::PathBuf::from(
-        job["payload"]["plan"]["output"]["outputDir"]
-            .as_str()
-            .expect("output dir"),
-    );
+    let output_dir = private_training_output_dir(&settings.data_dir, &job_id);
     let adapter_path = output_dir.join(
         job["payload"]["plan"]["output"]["fileName"]
             .as_str()
@@ -3888,7 +3893,7 @@ fn seed_installed_wan_i2v_a14b_training_base(data_dir: &std::path::Path) {
         let snapshot = materialize_snapshot(
             data_dir,
             "SceneWorks/wan2.2-i2v-a14b-mlx",
-            "test-wan-i2v-a14b-training",
+            "c6c786170031eccc3a1fac0f98f1ad4ff988271e",
         );
         seed_wan_mlx_tier(&snapshot.join("bf16"), true);
     }
@@ -3903,7 +3908,7 @@ async fn wan_a14b_registration_requires_and_registers_both_expert_files() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     seed_installed_wan_i2v_a14b_training_base(&settings.data_dir);
-    let app = create_app(settings).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
         &"Wan Experts Project",
@@ -3957,11 +3962,7 @@ async fn wan_a14b_registration_requires_and_registers_both_expert_files() {
     assert_eq!(status, StatusCode::CREATED, "{missing_job}");
     let missing_job_id = missing_job["id"].as_str().expect("missing job id");
     claim_training_job(&app, missing_job_id).await;
-    let missing_output_dir = std::path::PathBuf::from(
-        missing_job["payload"]["plan"]["output"]["outputDir"]
-            .as_str()
-            .expect("missing output dir"),
-    );
+    let missing_output_dir = private_training_output_dir(&settings.data_dir, missing_job_id);
     std::fs::create_dir_all(&missing_output_dir).expect("missing output dir creates");
     write_test_safetensors(&missing_output_dir.join("wan_missing.high_noise.safetensors"));
     let (status, missing_completed) = request(
@@ -4010,11 +4011,7 @@ async fn wan_a14b_registration_requires_and_registers_both_expert_files() {
 
     let job_id = job["id"].as_str().expect("job id");
     claim_training_job(&app, job_id).await;
-    let output_dir = std::path::PathBuf::from(
-        job["payload"]["plan"]["output"]["outputDir"]
-            .as_str()
-            .expect("output dir"),
-    );
+    let output_dir = private_training_output_dir(&settings.data_dir, job_id);
     std::fs::create_dir_all(&output_dir).expect("output dir creates");
     for name in [
         "wan_pair.high_noise.safetensors",
@@ -4955,193 +4952,61 @@ async fn crafted_training_job_cannot_register_outside_canonical_manifest() {
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(project["path"].as_str().unwrap());
-
-    // A `lora_train` job can be crafted directly via the generic job endpoint
-    // with an attacker-chosen payload. Stage a real adapter under the canonical
-    // project output dir so registration would succeed if (and only if) it uses
-    // the recomputed path.
-    let crafted_lora_id = "lora_crafted01";
-    let adapter_dir = project_path.join("loras").join(crafted_lora_id);
-    std::fs::create_dir_all(&adapter_dir).expect("adapter dir creates");
-    write_test_safetensors(&adapter_dir.join("crafted.safetensors"));
-
-    // The payload points the manifest write and the source path at locations
-    // outside the canonical project manifest. Both must be ignored.
     let evil_manifest = temp_dir.path().join("evil-manifest.jsonc");
-    let (status, job) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/jobs",
+
+    // Raw training jobs have no server-built plan or frozen base source. Reject each
+    // attacker-authored manifest at admission, before a worker can register anything.
+    for manifest_entry in [
         json!({
-            "type": "lora_train",
-            "projectId": project_id,
-            "projectName": "Training Project",
-            "requestedGpu": "auto",
-            "payload": {
-                "dryRun": false,
-                "manifestPath": evil_manifest.display().to_string(),
-                "manifestEntry": {
-                    "id": crafted_lora_id,
-                    "name": "Crafted LoRA",
-                    "scope": "project",
-                    "family": "z-image",
-                    "source": { "provider": "evil", "path": "../../../../escape/loras" },
-                    "files": ["crafted.safetensors"]
+            "id": "lora_crafted01", "name": "Crafted LoRA", "scope": "project",
+            "family": "z-image", "source": {"provider": "evil", "path": "../../../../escape/loras"},
+            "files": ["crafted.safetensors"]
+        }),
+        json!({
+            "id": "../../pwned", "name": "Traversal", "scope": "project",
+            "source": {"provider": "evil", "path": "loras/x"}
+        }),
+        json!({
+            "id": "lora_filestrav01", "name": "Files Traversal", "scope": "project",
+            "source": {"provider": "evil", "path": "loras/x"},
+            "files": ["../../../../escape/evil.safetensors"]
+        }),
+    ] {
+        let (status, refused) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs",
+            json!({
+                "type": "lora_train", "projectId": project_id,
+                "projectName": "Training Project", "requestedGpu": "auto",
+                "payload": {
+                    "dryRun": false,
+                    "manifestPath": evil_manifest.display().to_string(),
+                    "manifestEntry": manifest_entry
                 }
-            }
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
-    let job_id = job["id"].as_str().expect("job id").to_owned();
-    claim_training_job(&app, &job_id).await;
-
-    let (status, completed) = request(
-        app.clone(),
-        "POST",
-        &format!("/api/v1/jobs/{job_id}/progress"),
-        json!({
-            "status": "completed",
-            "stage": "completed",
-            "progress": 1,
-            "message": "Crafted completion.",
-            "workerId": TEST_TRAINING_WORKER_ID
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-
-    // The write went to the canonical project manifest, not the payload path.
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+        assert_eq!(refused["code"], "model_artifact_incomplete", "{refused}");
+    }
     assert!(
         !evil_manifest.exists(),
-        "payload manifestPath must be ignored"
+        "the payload cannot choose a manifest path"
     );
-    assert_eq!(completed["result"]["loraRegistered"], true);
-    assert_eq!(
-        completed["result"]["loraManifestPath"]
-            .as_str()
-            .expect("manifest path"),
-        project_path
-            .join("loras")
-            .join("manifest.jsonc")
-            .display()
-            .to_string()
-    );
-
-    // The registered entry's source path was recomputed, not taken from the
-    // attacker payload.
+    assert!(!project_path.join("loras/manifest.jsonc").exists());
+    let (status, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(jobs.as_array().unwrap().is_empty(), "{jobs}");
     let (status, loras) = request(
-        app.clone(),
+        app,
         "GET",
         &format!("/api/v1/loras?projectId={project_id}"),
         Value::Null,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let entry = loras
-        .as_array()
-        .expect("loras array")
-        .iter()
-        .find(|item| item["id"] == json!(crafted_lora_id))
-        .expect("crafted LoRA registered under canonical manifest")
-        .clone();
-    assert_eq!(entry["scope"], "project");
-    assert_eq!(entry["source"]["provider"], "training");
-    assert_eq!(entry["source"]["path"], format!("loras/{crafted_lora_id}"));
-    // `files` was validated against the recomputed output dir (the declared
-    // name exists there), so the registered entry points only inside the
-    // canonical LoRA directory.
-    assert_eq!(entry["files"], json!(["crafted.safetensors"]));
-
-    // A traversal id is rejected outright: nothing registers and the failure
-    // is visible.
-    let (_, evil_job) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/jobs",
-        json!({
-            "type": "lora_train",
-            "projectId": project_id,
-            "projectName": "Training Project",
-            "requestedGpu": "auto",
-            "payload": {
-                "dryRun": false,
-                "manifestEntry": {
-                    "id": "../../pwned",
-                    "name": "Traversal",
-                    "scope": "project",
-                    "source": { "provider": "evil", "path": "loras/x" }
-                }
-            }
-        }),
-    )
-    .await;
-    let evil_job_id = evil_job["id"].as_str().expect("job id").to_owned();
-    claim_training_job(&app, &evil_job_id).await;
-    let (status, completed) = request(
-        app.clone(),
-        "POST",
-        &format!("/api/v1/jobs/{evil_job_id}/progress"),
-        json!({
-            "status": "completed",
-            "stage": "completed",
-            "progress": 1,
-            "message": "Traversal completion.",
-            "workerId": TEST_TRAINING_WORKER_ID
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(completed["result"]["loraRegistered"], false);
-    assert!(completed["result"]["loraRegistrationError"].is_string());
-
-    // A `..`-traversing files entry is rejected even when a valid adapter
-    // exists under the canonical output dir: registration only accepts plain
-    // in-tree file names, so generation can never be pointed outside it.
-    let traversal_lora_id = "lora_filestrav01";
-    let traversal_dir = project_path.join("loras").join(traversal_lora_id);
-    std::fs::create_dir_all(&traversal_dir).expect("adapter dir creates");
-    write_test_safetensors(&traversal_dir.join("real.safetensors"));
-    let (_, files_job) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/jobs",
-        json!({
-            "type": "lora_train",
-            "projectId": project_id,
-            "projectName": "Training Project",
-            "requestedGpu": "auto",
-            "payload": {
-                "dryRun": false,
-                "manifestEntry": {
-                    "id": traversal_lora_id,
-                    "name": "Files Traversal",
-                    "scope": "project",
-                    "source": { "provider": "evil", "path": "loras/x" },
-                    "files": ["../../../../escape/evil.safetensors"]
-                }
-            }
-        }),
-    )
-    .await;
-    let files_job_id = files_job["id"].as_str().expect("job id").to_owned();
-    claim_training_job(&app, &files_job_id).await;
-    let (status, completed) = request(
-        app.clone(),
-        "POST",
-        &format!("/api/v1/jobs/{files_job_id}/progress"),
-        json!({
-            "status": "completed",
-            "stage": "completed",
-            "progress": 1,
-            "message": "Files traversal completion.",
-            "workerId": TEST_TRAINING_WORKER_ID
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(completed["result"]["loraRegistered"], false);
-    assert!(completed["result"]["loraRegistrationError"].is_string());
+    assert!(loras.as_array().unwrap().is_empty(), "{loras}");
 }
 
 #[tokio::test]
@@ -7285,6 +7150,7 @@ fn flux3_training_base_requires_exact_publisher_revision_and_receipt() {
 async fn flux3_training_surface_preserves_both_targets_and_adapter_identity() {
     async fn duplicate_isolated(
         app: &axum::Router,
+        data_dir: &std::path::Path,
         source_id: &str,
         checkpoint: &std::path::Path,
     ) -> Value {
@@ -7299,7 +7165,8 @@ async fn flux3_training_surface_preserves_both_targets_and_adapter_identity() {
             ["running", "queued"].contains(&before["status"].as_str().unwrap()),
             "{before}"
         );
-        let source_plan = &before["payload"]["plan"];
+        let source_payload = private_training_payload(data_dir, source_id);
+        let source_plan = &source_payload["plan"];
         let bytes = std::fs::read(checkpoint).unwrap();
         // Explicitly resend the old bindings and a resume request: server-owned duplicate bindings
         // must win in the ACTUALLY STORED job, not just in a pre-validation temporary value.
@@ -7317,7 +7184,8 @@ async fn flux3_training_surface_preserves_both_targets_and_adapter_identity() {
         )
         .await;
         assert_eq!(stored["payload"], duplicate["payload"]);
-        let plan = &stored["payload"]["plan"];
+        let stored_payload = private_training_payload(data_dir, duplicate_id);
+        let plan = &stored_payload["plan"];
         let entry = &stored["payload"]["manifestEntry"];
         let id = entry["id"].as_str().unwrap();
         assert_ne!(
@@ -7386,7 +7254,7 @@ async fn flux3_training_surface_preserves_both_targets_and_adapter_identity() {
     let placeholder = settings.data_dir.join("models").join("flux3_klein_base");
     std::fs::create_dir_all(&placeholder).unwrap();
     std::fs::write(placeholder.join("config.json"), "{}").unwrap();
-    let app = create_app(settings).unwrap();
+    let app = create_app(settings.clone()).unwrap();
     let (_, project) =
         crate::tests::support::create_project_with_request(app.clone(), &"Flux3 Training", request)
             .await;
@@ -7467,8 +7335,8 @@ async fn flux3_training_surface_preserves_both_targets_and_adapter_identity() {
         claim_training_job_as_mlx_worker(&app, id).await;
         // Declared synthetic host checkpoint: no real model/training claim is made by this API
         // filename-discovery fixture. The worker test covers native identity/admission separately.
-        let output = std::path::Path::new(plan["output"]["outputDir"].as_str().unwrap());
-        std::fs::create_dir_all(output).unwrap();
+        let output = private_training_output_dir(&settings.data_dir, id);
+        std::fs::create_dir_all(&output).unwrap();
         let stem =
             sceneworks_worker::training_resume_stem(plan["output"]["fileName"].as_str().unwrap());
         let checkpoint = output.join(format!("{stem}-step000100.resume.safetensors"));
@@ -7476,7 +7344,7 @@ async fn flux3_training_surface_preserves_both_targets_and_adapter_identity() {
         let checkpoint_bytes = std::fs::read(&checkpoint).unwrap();
         let (status, progress) = request(app.clone(), "POST", &format!("/api/v1/jobs/{id}/progress"), json!({"status":"running","stage":"training","progress":0.1,"message":"Synthetic checkpoint saved","workerId":TEST_TRAINING_WORKER_ID,"result":{"resumeCheckpointStep":100}})).await;
         assert_eq!(status, StatusCode::OK, "{progress}");
-        let active_duplicate = duplicate_isolated(&app, id, &checkpoint).await;
+        let active_duplicate = duplicate_isolated(&app, &settings.data_dir, id, &checkpoint).await;
         let (status, _) = request(
             app.clone(),
             "POST",
@@ -7532,7 +7400,8 @@ async fn flux3_training_surface_preserves_both_targets_and_adapter_identity() {
                 resumed["payload"]["plan"]["config"]["advanced"]["resume"],
                 true
             );
-            let resumed_duplicate = duplicate_isolated(&app, resumed_id, &checkpoint).await;
+            let resumed_duplicate =
+                duplicate_isolated(&app, &settings.data_dir, resumed_id, &checkpoint).await;
             assert_ne!(
                 resumed_duplicate["payload"]["plan"]["output"]["loraId"],
                 active_duplicate["payload"]["plan"]["output"]["loraId"]
