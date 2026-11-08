@@ -425,7 +425,8 @@ pub(super) fn ltx_bundle_subdir_across_revisions(
     })
 }
 
-/// Resolve the converted LTX MLX snapshot dir. Env override (`SCENEWORKS_MLX_LTX_DIR` /
+/// Resolve the converted LTX MLX snapshot dir. A portable job uses the guard's verified private
+/// manifest locator and bound tier exclusively. Ordinary jobs retain env override (`SCENEWORKS_MLX_LTX_DIR` /
 /// `…_EROS_DIR`) → `<data>/models/mlx/<candidate>` → (base only) the turnkey SceneWorks bundle
 /// [`LTX_BUNDLE_REPO`], descending into its `q4/`/`q8/` subdir. Only a dir **complete for the
 /// current engine** ([`ltx_dir_is_complete`]) counts, so a stale local conversion is skipped. For
@@ -436,6 +437,45 @@ pub(super) fn resolve_ltx_model_dir(
     settings: &Settings,
     request: &VideoRequest,
 ) -> WorkerResult<PathBuf> {
+    if portable_ltx_sources_bound(request) {
+        let root = request
+            .model_manifest_entry
+            .get("paths")
+            .and_then(Value::as_object)
+            .and_then(|paths| paths.get("model"))
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("portable LTX primary has no verified path".to_owned())
+            })?;
+        let dir = if request.model == "ltx_2_5" {
+            let tier = request
+                .advanced
+                .get("__portableBoundTier")
+                .and_then(Value::as_str)
+                .filter(|tier| matches!(*tier, "q4" | "q8" | "bf16"))
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload(
+                        "portable LTX-2.5 primary has no verified tier".to_owned(),
+                    )
+                })?;
+            root.join(ltx25_transformer_variant(request)?.component_dir())
+                .join(tier)
+        } else {
+            root
+        };
+        let complete = if request.model == "ltx_2_5" {
+            ltx25_dir_is_complete(&dir)
+        } else {
+            ltx_dir_is_complete(&dir)
+        };
+        return complete.then_some(dir).ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "portable LTX primary is incomplete at its verified path".to_owned(),
+            )
+        });
+    }
     if request.model == "ltx_2_5" {
         let variant = ltx25_transformer_variant(request)?;
         let tier = ltx_bundle_tier_order(request)
@@ -514,6 +554,33 @@ pub(super) fn resolve_ltx_model_dir(
         request.model,
         settings.data_dir.join("models").join("mlx").display(),
     )))
+}
+
+#[cfg(target_os = "macos")]
+fn portable_ltx_sources_bound(request: &VideoRequest) -> bool {
+    request.advanced.get("__portableFrozenSources") == Some(&Value::Bool(true))
+}
+
+/// The required Gemma encoder must come from the verified portable publisher snapshot.
+/// Both base and Eros routes bind that co-requisite, including when their primary is converted.
+#[cfg(target_os = "macos")]
+fn portable_ltx_gemma_dir() -> WorkerResult<PathBuf> {
+    let (_, snapshot) =
+        sceneworks_core::model_artifacts::local_preference::unique_portable_snapshot(
+            LTX_BUNDLE_REPO,
+        )
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload("portable LTX Gemma has no verified source".to_owned())
+        })?;
+    let gemma = snapshot.join("gemma");
+    ltx_gemma_dir_is_complete(&gemma)
+        .then_some(gemma)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "portable LTX Gemma is incomplete at its verified path".to_owned(),
+            )
+        })
 }
 
 /// The complete Gemma-3 text encoder managed with a resolved LTX dir, if present (sc-5608).
@@ -2117,11 +2184,15 @@ pub(super) async fn generate_ltx(
     // The macOS default download is lean (q4 + gemma); a Q8 / bf16 job fetches the bundle's q8/ or
     // bf16/ on demand before resolving (sc-5679 / sc-8513). No-op unless that tier is requested and
     // its subdir is absent.
-    ensure_ltx_q8_present(api, settings, job, request).await?;
-    ensure_ltx_bf16_present(api, settings, job, request).await?;
+    if !portable_ltx_sources_bound(request) {
+        ensure_ltx_q8_present(api, settings, job, request).await?;
+        ensure_ltx_bf16_present(api, settings, job, request).await?;
+    }
     // The eros install ships no bundled TE, so provision the bundle's `gemma/` on demand (no-op for
     // the base model, which bundles gemma with its checkpoint). Self-heals installs that predate this.
-    ensure_ltx_gemma_present(api, settings, job, request).await?;
+    if !portable_ltx_sources_bound(request) {
+        ensure_ltx_gemma_present(api, settings, job, request).await?;
+    }
     let model_dir = resolve_ltx_model_dir(settings, request)?;
     // Thread the Gemma-3 text encoder onto the 2.3 LoadSpec (sc-8827, was `$LTX_GEMMA_DIR`).
     // LTX-2.5 deliberately leaves this slot empty: its self-contained Gemma-4 encoder is the
@@ -2129,6 +2200,8 @@ pub(super) async fn generate_ltx(
     // engine. The separate `enhancer/` directory is the stock prompt enhancer, not this slot.
     let text_encoder_dir = if request.model == "ltx_2_5" {
         None
+    } else if portable_ltx_sources_bound(request) {
+        Some(portable_ltx_gemma_dir()?)
     } else if request.model == "ltx_2_3_eros" {
         resolve_ltx_eros_gemma_dir(settings, &model_dir)
     } else {

@@ -12679,6 +12679,108 @@ fn resolve_ltx_model_dir_reaches_bf16_in_a_sibling_revision() {
     assert_eq!(default.expect("default resolves"), old.join("q4"));
 }
 
+/// The guard's private manifest locator wins over complete operator and mutable app installs.
+/// A missing frozen byte must fail instead of falling back to either unverified source.
+#[cfg(target_os = "macos")]
+#[test]
+fn portable_ltx_primary_and_gemma_ignore_operator_overrides() {
+    fn write_complete_ltx_dir(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        for file in [
+            "connector.safetensors",
+            "transformer.safetensors",
+            "upsampler.safetensors",
+            "vae_decoder.safetensors",
+            "vae_encoder.safetensors",
+            "audio_vae.safetensors",
+            "vocoder.safetensors",
+        ] {
+            std::fs::write(dir.join(file), b"x").unwrap();
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let frozen_snapshot = temp.path().join("frozen");
+    let frozen_model = frozen_snapshot.join("q4");
+    let frozen_gemma = frozen_snapshot.join("gemma");
+    let override_model = temp.path().join("operator-model");
+    let override_gemma = temp.path().join("operator-gemma");
+    write_complete_ltx_dir(&frozen_model);
+    write_complete_ltx_dir(&override_model);
+    write_complete_gemma_dir(&frozen_gemma);
+    write_complete_gemma_dir(&override_gemma);
+    let settings = Settings {
+        data_dir: temp.path().to_path_buf(),
+        ..offline_settings()
+    };
+    write_complete_ltx_dir(&settings.data_dir.join("models/mlx/ltx_2_3_base_q4"));
+    let _frozen_scope =
+        sceneworks_core::model_artifacts::local_preference::prefer_portable_snapshots(vec![
+            sceneworks_core::model_artifacts::local_preference::LocalArtifactOverlayEntry {
+                repository: LTX_BUNDLE_REPO.to_owned(),
+                revision: LTX_BUNDLE_REVISION.to_owned(),
+                snapshot_root: frozen_snapshot,
+                files: Vec::new(),
+            },
+        ])
+        .unwrap();
+    let request = request(json!({
+        "projectId": "p", "model": "ltx_2_3", "prompt": "frozen",
+        "advanced": {"__portableFrozenSources": true, "__portableBoundTier": "q4"},
+        "modelManifestEntry": {"paths": {"model": frozen_model}}
+    }));
+    temp_env_vars(
+        &[
+            ("SCENEWORKS_MLX_LTX_DIR", override_model.to_str().unwrap()),
+            ("LTX_GEMMA_DIR", override_gemma.to_str().unwrap()),
+        ],
+        || {
+            assert_eq!(
+                resolve_ltx_model_dir(&settings, &request).unwrap(),
+                frozen_model
+            );
+            assert_eq!(portable_ltx_gemma_dir().unwrap(), frozen_gemma);
+            std::fs::remove_file(frozen_model.join("vocoder.safetensors")).unwrap();
+            assert!(resolve_ltx_model_dir(&settings, &request).is_err());
+            std::fs::remove_file(frozen_gemma.join("config.json")).unwrap();
+            assert!(portable_ltx_gemma_dir().is_err());
+        },
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn portable_ltx25_primary_uses_bound_variant_and_tier() {
+    let temp = tempfile::tempdir().unwrap();
+    let frozen = temp.path().join("frozen");
+    let selected = frozen.join("dev/q8");
+    std::fs::create_dir_all(&selected).unwrap();
+    for file in LTX25_TIER_REQUIRED_FILES {
+        std::fs::write(selected.join(file), b"x").unwrap();
+    }
+    let settings = Settings {
+        data_dir: temp.path().to_path_buf(),
+        ..offline_settings()
+    };
+    let payload = json!({
+        "projectId": "p", "model": "ltx_2_5", "prompt": "frozen",
+        "advanced": {"transformerVariant": "dev", "mlxQuantize": 8,
+                     "__portableFrozenSources": true, "__portableBoundTier": "q8"},
+        "modelManifestEntry": {"paths": {"model": frozen}}
+    });
+    let selected_request = request(payload.clone());
+    assert_eq!(
+        resolve_ltx_model_dir(&settings, &selected_request).unwrap(),
+        selected
+    );
+    let mut missing_tier = payload;
+    missing_tier["advanced"]
+        .as_object_mut()
+        .unwrap()
+        .remove("__portableBoundTier");
+    assert!(resolve_ltx_model_dir(&settings, &request(missing_tier)).is_err());
+}
+
 /// LTX-2.5 is a sealed public bundle. A mutable main ref or a larger sibling snapshot must never
 /// replace the exact revision named by the builtin manifest.
 #[cfg(target_os = "macos")]
