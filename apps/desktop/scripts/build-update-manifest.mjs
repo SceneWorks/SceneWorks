@@ -2,11 +2,11 @@
 // Builds (or merges into) the Tauri updater manifest `latest.json` (sc-1355).
 //
 // The platform release jobs build on separate runners, so none can produce the
-// complete manifest alone. macOS initializes `darwin-aarch64`, Windows (which
-// `needs: macos`) merges `windows-x86_64`, and Linux (which `needs: windows`)
-// merges `linux-x86_64`. Those dependencies serialize the manifest's
-// read/modify/write sequence. The result is uploaded to the GitHub Release and
-// served at plugins.updater.endpoints (…/releases/latest/download/latest.json).
+// complete manifest alone. macOS initializes `darwin-aarch64`; the release
+// publication job adds `windows-x86_64` and then `linux-x86_64`. That job
+// serializes the manifest's read/modify/write sequence. The result is uploaded
+// to the GitHub Release and served at plugins.updater.endpoints
+// (…/releases/latest/download/latest.json).
 //
 // The per-platform `signature` is the CONTENTS of the `.sig` file emitted next to
 // the updater bundle (createUpdaterArtifacts) — the app verifies it against
