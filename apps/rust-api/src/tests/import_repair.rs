@@ -1,7 +1,7 @@
 //! Hosted-only CPU integration: mounted retry/repair API plus the actual utility worker.
 //! Synthetic headers/components only; no native model execution or external download endpoint.
 use super::support::*;
-use sceneworks_core::jobs_store::{CreateJob, JobsStore};
+use sceneworks_core::jobs_store::{CreateJob, JobsStore, RegisterWorker};
 use sceneworks_worker::minimax_h3_import_fixture as fixture;
 
 fn manifests(settings: &crate::Settings, models: Value) {
@@ -148,6 +148,80 @@ fn seed_import(
 }
 
 #[tokio::test]
+async fn import_claim_probe_compares_private_payload_without_disclosing_its_source_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let settings = test_settings(&temp);
+    let app = create_app(settings.clone()).unwrap();
+    let store = JobsStore::new(&settings.jobs_db_path);
+    let source = settings.data_dir.join("models/incoming/private-checkpoint");
+    let payload = json!({"modelId":"private-checkpoint","sourcePath":source});
+    let job = store
+        .create_job(CreateJob {
+            job_type: crate::JobType::ModelImport,
+            project_id: None,
+            project_name: None,
+            payload: payload.as_object().unwrap().clone(),
+            requested_gpu: "auto".into(),
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+            initial_status: None,
+        })
+        .unwrap();
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "import-proof-worker".into(),
+            gpu_id: "cpu".into(),
+            gpu_name: None,
+            capabilities: vec![sceneworks_core::contracts::WorkerCapability::ModelImport],
+            loaded_models: vec![],
+            utilization: None,
+        })
+        .unwrap();
+    let claimed = store
+        .claim_next_job("import-proof-worker")
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.id, job.id);
+    let commitment =
+        sceneworks_core::model_artifacts::portable_binding::canonical_object_sha256(&payload)
+            .unwrap();
+    let route = format!("/api/v1/jobs/{}/import-claim", job.id);
+    let body = |worker: &str, digest: &str| json!({"workerId":worker,"targetJobId":job.id,"commitment":digest});
+    let (status, denied) = request(
+        app.clone(),
+        "POST",
+        &route,
+        body("other-worker", &commitment),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    let (status, mismatch) = request(
+        app.clone(),
+        "POST",
+        &route,
+        body("import-proof-worker", &format!("sha256:{}", "f".repeat(64))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{mismatch}");
+    assert_eq!(mismatch["payloadMatches"], false);
+    let (status, verified) = request(
+        app,
+        "POST",
+        &route,
+        body("import-proof-worker", &commitment),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{verified}");
+    assert_eq!(verified["payloadMatches"], true);
+    assert!(verified["job"]["payload"]["sourcePath"].is_null());
+    assert_eq!(
+        store.get_job(&job.id).unwrap().payload["sourcePath"],
+        payload["sourcePath"]
+    );
+}
+
+#[tokio::test]
 async fn actual_api_retry_chain_recovers_committed_h3_and_refuses_unrelated_or_changed_imports() {
     let temp = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp);
@@ -218,10 +292,11 @@ async fn actual_api_retry_chain_recovers_committed_h3_and_refuses_unrelated_or_c
     assert_ne!(retry["id"], original.id);
     assert_eq!(retry["sourceJobId"], first_retry["id"]);
     assert_eq!(retry["attempts"], 3);
-    assert_eq!(
-        retry["payload"],
-        serde_json::to_value(&original.payload).unwrap()
-    );
+    let stored_retry = JobsStore::new(&settings.jobs_db_path)
+        .get_job(retry["id"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(stored_retry.payload, original.payload);
+    assert!(retry["payload"]["sourcePath"].is_null());
     let _runtime = start_worker(app.clone(), &settings).await;
     let unrelated = terminal(&app, unrelated["id"].as_str().unwrap()).await;
     assert_eq!(

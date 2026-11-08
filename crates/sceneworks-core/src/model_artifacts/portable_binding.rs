@@ -340,6 +340,12 @@ async fn hash_pinned_non_lfs(
 /// Hash only the API-authorized options object, never a raw request carrying local paths or
 /// credentials. Both admission and the receiving worker use the same canonical key order.
 pub fn canonical_authored_options_sha256(options: &Value) -> Result<String, ArtifactContractError> {
+    canonical_object_sha256(options)
+}
+
+/// Hash a complete object with stable recursive key order. The import claim fence uses this on
+/// the stored payload before the API removes private filesystem locators from its public view.
+pub fn canonical_object_sha256(options: &Value) -> Result<String, ArtifactContractError> {
     if !options.is_object() {
         return Err(error("authored options must be an object"));
     }

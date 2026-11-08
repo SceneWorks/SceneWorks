@@ -474,6 +474,76 @@ pub(crate) async fn get_job(
     )))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ImportClaimProbeRequest {
+    worker_id: String,
+    target_job_id: String,
+    commitment: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ImportClaimProbeResponse {
+    job: JobSnapshot,
+    payload_matches: bool,
+}
+
+/// Worker-only read of a claimed import or its retry ancestry. The public snapshot keeps its
+/// source-path redaction; the comparison reads the same stored row before that redaction. A worker
+/// must own the active claimed job, and the target must lie on that job's server-owned retry chain.
+pub(crate) async fn verify_model_import_claim(
+    State(state): State<AppState>,
+    Path(claimed_job_id): Path<String>,
+    ApiJson(request): ApiJson<ImportClaimProbeRequest>,
+) -> Result<Json<ImportClaimProbeResponse>, ApiError> {
+    if !sceneworks_core::ids::is_safe_id(&request.target_job_id)
+        || !request.commitment.starts_with("sha256:")
+        || request.commitment.len() != 71
+        || !request.commitment[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(ApiError::bad_request("Invalid import claim probe"));
+    }
+    let target_id = request.target_job_id;
+    let worker_id = request.worker_id;
+    let candidate = store_call(state.clone(), move |store, _| {
+        let mut current = store.get_job(&claimed_job_id)?;
+        if current.job_type != JobType::ModelImport
+            || current.worker_id.as_deref() != Some(worker_id.as_str())
+            || !sceneworks_core::jobs_store::ACTIVE_STATUSES.contains(&current.status.as_str())
+        {
+            return Ok(None);
+        }
+        for _ in 0..64 {
+            if current.id == target_id {
+                return Ok(Some(current));
+            }
+            let Some(parent) = current.source_job_id.as_deref() else {
+                break;
+            };
+            if !sceneworks_core::ids::is_safe_id(parent) {
+                break;
+            }
+            current = store.get_job(parent)?;
+        }
+        Ok(None)
+    })
+    .await?
+    .ok_or_else(|| ApiError::forbidden("Import claim is not owned by this worker"))?;
+    let payload_matches =
+        sceneworks_core::model_artifacts::portable_binding::canonical_object_sha256(
+            &Value::Object(candidate.payload.clone()),
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?
+            == request.commitment;
+    Ok(Json(ImportClaimProbeResponse {
+        job: public_job_snapshot(candidate),
+        payload_matches,
+    }))
+}
+
 pub(crate) async fn cancel_job(
     State(state): State<AppState>,
     Path(job_id): Path<String>,
