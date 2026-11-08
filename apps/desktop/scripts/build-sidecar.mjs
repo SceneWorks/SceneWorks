@@ -21,6 +21,7 @@ import {
   sidecarBuildPlan,
   stageNonMacResourcePlaceholders,
 } from "./build-sidecar-platform.mjs";
+import { verifyReleaseSidecar } from "../../../scripts/release-sidecar-artifact.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const desktopDir = resolve(scriptDir, ".."); // apps/desktop
@@ -211,7 +212,15 @@ function codesignForNotarization(file) {
 // .github/workflows/server-candle-linux.yml. macOS is unaffected — it bakes MLX
 // into the api binary and never builds candle.
 const buildPlan = sidecarBuildPlan(process.platform, process.env);
-if (buildPlan.candle) {
+const prebuiltRoot = process.env.SCENEWORKS_RELEASE_SIDECAR_ROOT;
+let prebuiltBinary;
+if (prebuiltRoot) {
+  if (!buildPlan.candle || !["win32", "linux"].includes(process.platform)) {
+    throw new Error("release sidecar artifact is valid only for a CUDA desktop build");
+  }
+  prebuiltBinary = await verifyReleaseSidecar(process.platform === "win32" ? "windows" : "linux", prebuiltRoot);
+  console.log(`build-sidecar: verified prebuilt CUDA binary ${prebuiltBinary}`);
+} else if (buildPlan.candle) {
   // CUDA_COMPUTE_CAP=80 builds `compute_80` PTX the driver JITs forward to sm_120
   // (Blackwell) — one binary covers Ampere→Blackwell (per sc-3676). That claim holds
   // for candle-kernels' dense build_ptx() kernels only: the GGUF quant/moe kernels are
@@ -264,7 +273,7 @@ if (buildPlan.candle) {
   run(npmCmd, ["run", buildPlan.npmScript], buildPlan.env);
 }
 
-const src = join(repoRoot, "target", "release", `sceneworks-rust-api${exe}`);
+const src = prebuiltBinary ?? join(repoRoot, "target", "release", `sceneworks-rust-api${exe}`);
 const outDir = join(desktopDir, "binaries");
 mkdirSync(outDir, { recursive: true });
 const dest = join(outDir, `sceneworks-api-${triple}${exe}`);
