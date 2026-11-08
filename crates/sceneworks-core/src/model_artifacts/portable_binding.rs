@@ -1296,7 +1296,10 @@ impl PortableJobBinding {
 fn route_map_sha256(
     routes: &BTreeMap<String, PortableRouteBinding>,
 ) -> Result<String, ArtifactContractError> {
-    let bytes = serde_json::to_vec(routes)
+    let mut canonical = serde_json::to_value(routes)
+        .map_err(|cause| error(format!("cannot encode portable routes: {cause}")))?;
+    canonical.sort_all_objects();
+    let bytes = serde_json::to_vec(&canonical)
         .map_err(|cause| error(format!("cannot encode portable routes: {cause}")))?;
     Ok(format!("sha256:{}", crate::hashing::sha256_bytes(&bytes)))
 }
@@ -1992,6 +1995,45 @@ mod tests {
         assert!(envelope.select_route("candle", "windows").is_err());
         envelope.routes.get_mut("candle:linux").unwrap().models[0].variant = "q8".to_owned();
         assert!(envelope.validate().is_err());
+    }
+
+    #[test]
+    fn route_hash_survives_recursively_sorted_store_json() {
+        let root = tempfile::tempdir().unwrap();
+        let source = local(root.path(), false, b"model");
+        let primary =
+            PortableArtifactMember::capture(&source, &[root.path().to_path_buf()]).unwrap();
+        let options = serde_json::json!({"model":"example"});
+        let hash = canonical_authored_options_sha256(&options).unwrap();
+        let mut model = PortableModelBinding::new(
+            "modelManifestEntry",
+            "example",
+            "mlx",
+            "default",
+            None,
+            hash,
+            vec![primary],
+        )
+        .unwrap();
+        model.checkpoint_plan = Some(PortableCheckpointPlan {
+            semantic_digest: "a".repeat(64),
+            family: "example".into(),
+            primary_layer_id: None,
+            layers: vec![],
+            context: BTreeMap::from([("nested".into(), serde_json::json!({"z":1,"a":2}))]),
+        });
+        let route = PortableRouteBinding {
+            backend: "mlx".into(),
+            platform: "macos".into(),
+            models: vec![model],
+        };
+        let routes = BTreeMap::from([(route.key(), route)]);
+        let before = route_map_sha256(&routes).unwrap();
+        let mut stored = serde_json::to_value(&routes).unwrap();
+        stored.sort_all_objects();
+        let restored: BTreeMap<String, PortableRouteBinding> =
+            serde_json::from_value(stored).unwrap();
+        assert_eq!(before, route_map_sha256(&restored).unwrap());
     }
 
     #[test]
