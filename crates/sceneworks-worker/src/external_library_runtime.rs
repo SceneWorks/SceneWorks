@@ -24,11 +24,17 @@
 use crate::{emit_event_value, JsonObject, Settings, WorkerError, WorkerResult};
 use sceneworks_core::contracts::JobType;
 use sceneworks_core::file_lock::FileLock;
-#[cfg(test)]
-use sceneworks_core::model_artifacts::artifact_selection::selected_model_artifact_closure;
 use sceneworks_core::model_artifacts::artifact_selection::{
-    is_co_requisite_download, requested_runtime_variant, selected_portable_model_artifact_closure,
-    selected_portable_requirements_for_model, selected_requirements_for_model,
+    is_co_requisite_download, requested_runtime_variant, resident_base_component_downloads,
+    selected_portable_model_artifact_closure, selected_portable_requirements_for_model,
+    selected_resident_base_closure_for_row,
+};
+#[cfg(test)]
+use sceneworks_core::model_artifacts::artifact_selection::{
+    selected_model_artifact_closure, selected_requirements_for_model,
+};
+pub(crate) use sceneworks_core::model_artifacts::artifact_selection::{
+    ResidentBaseShape, PLAN_BACKED_RESIDENT_BASE_MODELS,
 };
 use sceneworks_core::model_artifacts::external_library::{
     resolve_model_availability, ExternalArtifactRequirement, ExternalSourceSession,
@@ -1979,10 +1985,18 @@ fn verify_portable_route(
     }
     // The complete route must cover each selected HF requirement, including the resident base of
     // an imported checkpoint. A valid primary cannot hide an omitted protected component.
-    for requirement in plans
+    for (requirement, resident_base) in plans
         .iter()
-        .flat_map(|plan| plan.requirements.iter())
-        .chain(converted_co_requirements)
+        .flat_map(|plan| {
+            plan.requirements
+                .iter()
+                .map(move |requirement| (requirement, plan.resident_base))
+        })
+        .chain(
+            converted_co_requirements
+                .iter()
+                .map(|requirement| (requirement, false)),
+        )
     {
         let covered = route
             .models
@@ -1995,7 +2009,15 @@ fn verify_portable_route(
                 identity.repository == requirement.repository
                     && Some(identity.revision.as_str()) == requirement.revision.as_deref()
                     && identity.variant == requirement.variant
-                    && requirement.is_primary == (member.role == ArtifactMemberRole::Primary)
+                    && (if resident_base {
+                        member.role == ArtifactMemberRole::RequiredComponent
+                            && member
+                                .component_id
+                                .as_deref()
+                                .is_some_and(|id| id.starts_with("resident_base/downloads/"))
+                    } else {
+                        requirement.is_primary == (member.role == ArtifactMemberRole::Primary)
+                    })
                     && requirement.files.iter().all(|selector| {
                         glob::Pattern::new(&selector.to_string_lossy()).is_ok_and(|pattern| {
                             member
@@ -2099,10 +2121,14 @@ fn verify_portable_binding(
 
     let requirements: Vec<_> = plans
         .iter()
-        .flat_map(|plan| plan.requirements.iter())
+        .flat_map(|plan| {
+            plan.requirements
+                .iter()
+                .map(move |requirement| (requirement, plan.resident_base))
+        })
         .collect();
     let requested_variant = selected_runtime_variant(job_type, payload, &binding.model_id)?;
-    let selected_manifest = selected_portable_model_artifact_closure(
+    let mut selected_manifest = selected_portable_model_artifact_closure(
         entry,
         binding.backend.as_str(),
         std::env::consts::OS,
@@ -2110,6 +2136,21 @@ fn verify_portable_binding(
         payload,
     )
     .map_err(invalid_binding)?;
+    if entry
+        .get("downloads")
+        .and_then(serde_json::Value::as_array)
+        .is_none_or(Vec::is_empty)
+    {
+        if let Some(base) = selected_resident_base_closure_for_entry(entry, std::env::consts::OS) {
+            selected_manifest
+                .as_object_mut()
+                .ok_or_else(|| invalid_binding("selected model manifest is invalid"))?
+                .insert(
+                    "downloads".to_owned(),
+                    serde_json::Value::Array(resident_base_component_downloads(&base)),
+                );
+        }
+    }
     let source_library = sceneworks_core::hf_home::model_source_library(&settings.data_dir);
     // Raw ModelConvert admission can freeze the immutable source privately while the synthetic
     // public manifest entry only carries repo/file hints. The binding is the source authority;
@@ -2134,12 +2175,19 @@ fn verify_portable_binding(
                 let matching: Vec<_> = requirements
                     .iter()
                     .copied()
-                    .filter(|requirement| {
+                    .filter(|(requirement, resident_base)| {
                         requirement.repository == identity.repository
                             && requirement.revision.as_deref() == Some(identity.revision.as_str())
                             && requirement.variant == identity.variant
-                            && requirement.is_primary
-                                == (member.role == ArtifactMemberRole::Primary)
+                            && (if *resident_base {
+                                member.role == ArtifactMemberRole::RequiredComponent
+                                    && member.component_id.as_deref().is_some_and(|id| {
+                                        id.starts_with("resident_base/downloads/")
+                                    })
+                            } else {
+                                requirement.is_primary
+                                    == (member.role == ArtifactMemberRole::Primary)
+                            })
                     })
                     .collect();
                 let selected_auxiliary = member
@@ -2155,7 +2203,7 @@ fn verify_portable_binding(
                     && !selected_manifest
                     && (matching.is_empty()
                         || member.files.iter().any(|file| {
-                            !matching.iter().any(|requirement| {
+                            !matching.iter().any(|(requirement, _)| {
                                 requirement.files.iter().any(|selector| {
                                     glob::Pattern::new(&selector.to_string_lossy()).is_ok_and(
                                         |pattern| {
@@ -2960,59 +3008,6 @@ struct EntryPlan {
 /// closure naming a repository the route never reads cannot merely cost a cache miss: it BLOCKS
 /// the pairs the route does read whenever the extra repository is uncached, and enqueues its
 /// bytes for promotion on top.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum ResidentBaseShape {
-    /// The route opens the base model's own tier directory — its primary download, with the
-    /// selected closure's co-requisites. `resolve_krea_imported_base_tier` reads
-    /// `<krea-2-turbo-mlx>/bf16/{transformer/config.json,text_encoder,vae,tokenizer}`, so the
-    /// primary repository at that tier IS what it needs.
-    FullTier,
-    /// The route opens only the base model's declared COMPONENT co-requisites at the tier, never
-    /// its primary. `resolve_mage_finetuned_components` rides `resolve_co_requisites_for_tier`
-    /// and reads `SceneWorks/Mage-Flow-Components-mlx` alone — the fine-tune supplies the
-    /// transformer, so `SceneWorks/Mage-Flow-Base`'s 8 GB primary is never opened.
-    ComponentsOnly,
-}
-
-/// One plan-backed imported family's resident base model: the builtin catalog entry whose
-/// installed components the family's imported checkpoints pair with, the tier those components
-/// resolve from, and which of that entry's repositories the family's route actually reads.
-pub(crate) struct PlanBackedResidentBase {
-    pub(crate) family: &'static str,
-    /// The `builtin.models.jsonc` id of the base model —
-    /// [`crate::training_jobs::builtin_model_manifest_entry`]'s key.
-    pub(crate) base_model_id: &'static str,
-    /// The tier the family's imported route resolves base components from. Fixed per family (the
-    /// dense-TE/VAE tier), NEVER the request's quant tier: `resolve_krea_imported_base_tier` and
-    /// `resolve_mage_finetuned_components` both pin `bf16` regardless of what tier the imported
-    /// transformer itself runs at.
-    pub(crate) tier: &'static str,
-    pub(crate) shape: ResidentBaseShape,
-}
-
-/// sc-22329 — the guard-side mirror of the checkpoint-plan family tables
-/// (`CHECKPOINT_PLAN_RESIDENT_BASE_TIERS` / `CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS` in
-/// `image_jobs/checkpoint_plan.rs`): one row per family whose imported checkpoints load resident
-/// base components. Those tables map family → path resolver and live behind the macOS/candle cfg;
-/// this one maps family → installed base model identity and must compile on every build the guard
-/// does. `image_jobs/tests.rs` pins the two against each other, and pins each row's identity
-/// against the family's own resolver constants, so a family added to one table cannot silently
-/// miss the other.
-pub(crate) const PLAN_BACKED_RESIDENT_BASE_MODELS: &[PlanBackedResidentBase] = &[
-    PlanBackedResidentBase {
-        family: "krea_2",
-        base_model_id: "krea_2_turbo",
-        tier: "bf16",
-        shape: ResidentBaseShape::FullTier,
-    },
-    PlanBackedResidentBase {
-        family: "mage-flow",
-        base_model_id: "mage_flow_base",
-        tier: "bf16",
-        shape: ResidentBaseShape::ComponentsOnly,
-    },
-];
-
 /// The `(tier, shape, builtin catalog entry)` this build resolves a resident base for `family`
 /// through, or `None` when the family has no resident base.
 ///
@@ -3033,6 +3028,15 @@ fn resident_base_row(family: &str) -> Option<(String, ResidentBaseShape, serde_j
     Some((row.tier.to_owned(), row.shape, entry))
 }
 
+fn selected_resident_base_closure_for_entry(
+    entry: &serde_json::Value,
+    platform: &str,
+) -> Option<serde_json::Value> {
+    let family = entry.get("family")?.as_str()?.trim();
+    let (tier, shape, base_entry) = resident_base_row(family)?;
+    selected_resident_base_closure_for_row(&base_entry, &tier, shape, platform)
+}
+
 /// The synthetic [`EntryPlan`] for a provably-non-HF-local entry's resident base model, or `None`
 /// when the entry has none (no declared family, a family without a resident base, or a base whose
 /// installed closure cannot be recovered) — in which case the guard behaves exactly as it did
@@ -3051,10 +3055,7 @@ fn plan_backed_resident_base_plan(
     configured_library: &Path,
     local_artifacts: &[sceneworks_core::model_artifacts::ResolvedModelArtifact],
 ) -> Option<EntryPlan> {
-    use sceneworks_core::model_artifacts::artifact_selection::{
-        model_co_requisite_downloads_for_variant, retain_downloads_for_os,
-        selected_requirements_for_closure,
-    };
+    use sceneworks_core::model_artifacts::artifact_selection::selected_requirements_for_closure;
 
     let family = entry
         .get("family")
@@ -3064,62 +3065,9 @@ fn plan_backed_resident_base_plan(
     let (tier, shape, base_entry) = resident_base_row(family)?;
     // This worker's OWN platform, and the family's fixed base tier — deliberately not the
     // request's runtime variant (see [`PlanBackedResidentBase::tier`]).
-    let selected = match shape {
-        ResidentBaseShape::FullTier => selected_requirements_for_model(
-            &base_entry,
-            std::env::consts::OS,
-            Some(&tier),
-            &settings.data_dir,
-        ),
-        ResidentBaseShape::ComponentsOnly => {
-            let mut platform_entry = base_entry.clone();
-            retain_downloads_for_os(&mut platform_entry, std::env::consts::OS);
-            // The component rows the family's resolver reads, ONE per repository: the requirement
-            // files come from the install receipt's own `resolvedFiles`, so a second row for the
-            // same repository would only duplicate it. The declared globs are unioned onto the
-            // survivor because they still decide matching for a legacy variant-less receipt.
-            let mut rows: Vec<serde_json::Value> = Vec::new();
-            for download in model_co_requisite_downloads_for_variant(&platform_entry, Some(&tier))
-                .into_iter()
-                .filter(|download| {
-                    download.get("required").and_then(serde_json::Value::as_str) != Some("soft")
-                })
-            {
-                let repository = download
-                    .get("repo")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned();
-                let files = download.get("files").cloned().unwrap_or(json!([]));
-                match rows.iter_mut().find(|held| {
-                    held.get("repo").and_then(serde_json::Value::as_str) == Some(&repository)
-                }) {
-                    Some(held) => {
-                        if let (Some(held), Some(extra)) = (
-                            held.get_mut("files")
-                                .and_then(serde_json::Value::as_array_mut),
-                            files.as_array(),
-                        ) {
-                            held.extend(extra.iter().cloned());
-                        }
-                    }
-                    None => rows.push(download),
-                }
-            }
-            // Exactly one primary, which the closure contract requires — and it is produced by
-            // CLEARING `coRequisite` on the first row rather than by hand-marking a requirement,
-            // so the row travels the ordinary path. The synthetic entry deliberately carries NO
-            // `id`: `receipt_requirements_for_model` filters a PRIMARY row's receipts by
-            // `modelId`, and these components are installed by whichever sibling card the user
-            // actually downloaded (every Mage card declares the same Components rows), so keying
-            // on the base model's id would ignore a perfectly good install.
-            let first = rows.first_mut()?;
-            if let Some(object) = first.as_object_mut() {
-                object.remove("coRequisite");
-            }
-            selected_requirements_for_closure(&json!({ "downloads": rows }), &settings.data_dir)
-        }
-    };
+    let closure =
+        selected_resident_base_closure_for_row(&base_entry, &tier, shape, std::env::consts::OS)?;
+    let selected = selected_requirements_for_closure(&closure, &settings.data_dir);
     if selected.requirements.is_empty() {
         return None;
     }

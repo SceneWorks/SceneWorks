@@ -781,6 +781,107 @@ pub fn selected_portable_requirements_for_model(
     Ok(selected_requirements_for_closure(&selected, data_dir))
 }
 
+/// Installed base components opened alongside an imported checkpoint. The imported checkpoint
+/// remains the job's primary source; this closure supplies the separate resident-base plan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResidentBaseShape {
+    FullTier,
+    ComponentsOnly,
+}
+
+pub struct PlanBackedResidentBase {
+    pub family: &'static str,
+    pub base_model_id: &'static str,
+    pub tier: &'static str,
+    pub shape: ResidentBaseShape,
+}
+
+pub const PLAN_BACKED_RESIDENT_BASE_MODELS: &[PlanBackedResidentBase] = &[
+    PlanBackedResidentBase {
+        family: "krea_2",
+        base_model_id: "krea_2_turbo",
+        tier: "bf16",
+        shape: ResidentBaseShape::FullTier,
+    },
+    PlanBackedResidentBase {
+        family: "mage-flow",
+        base_model_id: "mage_flow_base",
+        tier: "bf16",
+        shape: ResidentBaseShape::ComponentsOnly,
+    },
+];
+
+pub fn selected_resident_base_closure_for_row(
+    base_entry: &Value,
+    tier: &str,
+    shape: ResidentBaseShape,
+    platform: &str,
+) -> Option<Value> {
+    match shape {
+        ResidentBaseShape::FullTier => Some(selected_model_artifact_closure(
+            base_entry,
+            platform,
+            Some(tier),
+        )),
+        ResidentBaseShape::ComponentsOnly => {
+            let mut platform_entry = base_entry.clone();
+            retain_downloads_for_os(&mut platform_entry, platform);
+            let mut rows: Vec<Value> = Vec::new();
+            for download in model_co_requisite_downloads_for_variant(&platform_entry, Some(tier))
+                .into_iter()
+                .filter(|download| download.get("required").and_then(Value::as_str) != Some("soft"))
+            {
+                let repository = download.get("repo").and_then(Value::as_str)?;
+                let files = download.get("files").and_then(Value::as_array)?;
+                match rows
+                    .iter_mut()
+                    .find(|held| held.get("repo").and_then(Value::as_str) == Some(repository))
+                {
+                    Some(held) => held
+                        .get_mut("files")?
+                        .as_array_mut()?
+                        .extend(files.iter().cloned()),
+                    None => rows.push(download),
+                }
+            }
+            // Requirements need one primary, but this is a component of the imported job. Do
+            // not put the base model id on the synthetic entry: component receipts can be written
+            // by any sibling Mage card.
+            rows.first_mut()?.as_object_mut()?.remove("coRequisite");
+            Some(serde_json::json!({ "downloads": rows }))
+        }
+    }
+}
+
+pub fn selected_resident_base_closure(entry: &Value, platform: &str) -> Option<Value> {
+    let family = entry.get("family")?.as_str()?.trim();
+    let row = PLAN_BACKED_RESIDENT_BASE_MODELS
+        .iter()
+        .find(|row| row.family == family)?;
+    let base =
+        Value::Object(crate::builtin_manifests::builtin_model_entry(row.base_model_id)?.clone());
+    selected_resident_base_closure_for_row(&base, row.tier, row.shape, platform)
+}
+
+/// The same selected rows, represented as supplemental members of the imported model binding.
+pub fn resident_base_component_downloads(closure: &Value) -> Vec<Value> {
+    closure
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|row| is_supported_model_download(row))
+        .filter(|row| row.get("required").and_then(Value::as_str) != Some("soft"))
+        .cloned()
+        .map(|mut row| {
+            row.as_object_mut()
+                .expect("selected download is an object")
+                .insert("coRequisite".to_owned(), Value::Bool(true));
+            row
+        })
+        .collect()
+}
+
 fn select_model_artifact_closure(
     model: &Value,
     platform: &str,

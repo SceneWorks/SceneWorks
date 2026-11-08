@@ -99,7 +99,7 @@ pub(crate) fn selected_route_source_rows(
     payload: &JsonObject,
     entries: &[(String, &Value)],
     backend: &str,
-    _platform: &str,
+    platform: &str,
 ) -> Result<Vec<SelectedRouteSource>, String> {
     let mut rows = Vec::new();
     if *job_type == JobType::ModelConvert {
@@ -412,6 +412,27 @@ pub(crate) fn selected_route_source_rows(
             .get("id")
             .and_then(Value::as_str)
             .ok_or("model entry lacks id")?;
+        if entry
+            .get("downloads")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+        {
+            if let Some(base) =
+                sceneworks_core::model_artifacts::artifact_selection::selected_resident_base_closure(
+                    entry, platform,
+                )
+            {
+                for (index, download) in sceneworks_core::model_artifacts::artifact_selection::resident_base_component_downloads(&base).into_iter().enumerate() {
+                    rows.push(SelectedRouteSource {
+                        model_slot: slot.clone(),
+                        component_id: format!("resident_base/downloads/{index}"),
+                        role: ArtifactMemberRole::RequiredComponent,
+                        source: SelectedSourceLocation::ManifestDownload(download),
+                        selected_tier: Some("bf16".to_owned()),
+                    });
+                }
+            }
+        }
         if id == "instantid_face_stack"
             && matches!(
                 job_type,
@@ -987,6 +1008,46 @@ fn entries_support_route(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imported_checkpoint_freezes_selected_resident_base_components() {
+        for (family, expected_repo) in [
+            ("krea_2", "SceneWorks/krea-2-turbo-mlx"),
+            ("mage-flow", "SceneWorks/Mage-Flow-Components-mlx"),
+        ] {
+            let entry = serde_json::json!({
+                "id": "imported-checkpoint", "family": family,
+                "installedPath": "/registered/imported-checkpoint.safetensors"
+            });
+            let entries = [("modelManifestEntry".to_owned(), &entry)];
+            let payload = serde_json::json!({"model":"imported-checkpoint"});
+            let selected = selected_route_source_rows(
+                &JobType::ImageGenerate,
+                payload.as_object().unwrap(),
+                &entries,
+                "mlx",
+                "macos",
+            )
+            .unwrap();
+            let resident: Vec<_> = selected
+                .iter()
+                .filter(|row| row.component_id.starts_with("resident_base/downloads/"))
+                .collect();
+            assert!(
+                !resident.is_empty(),
+                "{family} must freeze its resident base"
+            );
+            assert!(resident.iter().all(|row| {
+                row.role == ArtifactMemberRole::RequiredComponent
+                    && row.model_slot == "modelManifestEntry"
+                    && row.selected_tier.as_deref() == Some("bf16")
+                    && matches!(&row.source, SelectedSourceLocation::ManifestDownload(download)
+                        if download["repo"] == expected_repo
+                            && download["revision"].as_str().is_some_and(|revision| revision.len() == 40)
+                            && download["coRequisite"] == true)
+            }));
+        }
+    }
 
     #[test]
     fn conversion_freezes_borrowed_base_or_exact_upscaler_source() {
