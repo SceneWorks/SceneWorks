@@ -444,17 +444,6 @@ pub(crate) fn refresh_background_inventory(settings: Settings) {
     start_background_inventory(settings);
 }
 
-#[cfg(test)]
-pub(crate) async fn wait_for_background_inventory_in_fixture() {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while INVENTORY_STARTED.load(Ordering::Acquire) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("fixture source inventory finishes before its private cache root is released");
-}
-
 /// Registration stays fast even when installed source closure spans terabytes. Exactly one
 /// blocking inventory hashes it in the background. Each completed source is published on the
 /// next ordinary heartbeat; unverified sources remain ineligible until their own hash completes.
@@ -477,8 +466,13 @@ pub(crate) fn start_background_inventory(settings: Settings) {
         next_due: Some(Instant::now() + INVENTORY_RESCAN_INTERVAL),
         catalog_hash: Some(catalog_hash(&settings)),
     };
+    #[cfg(test)]
+    let fixture_cache_root =
+        sceneworks_core::hf_home::test_support::CacheRootGuard::retain(&settings.data_dir);
     tokio::spawn(async move {
         let result = crate::load_progress::spawn_blocking(move || {
+            #[cfg(test)]
+            let _fixture_cache_root = fixture_cache_root;
             let mut scanned = Vec::new();
             collect_source_claims(&settings, |claim| {
                 scanned.push(claim.clone());

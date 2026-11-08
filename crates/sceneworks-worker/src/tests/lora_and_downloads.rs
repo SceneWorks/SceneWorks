@@ -2258,9 +2258,7 @@ async fn run_claimed_model_import_fixture(
     job: &JobSnapshot,
 ) -> super::WorkerResult<()> {
     let claimed = claim_model_import_fixture(api, job).await?;
-    let result = super::model_jobs::run_model_import_job(api, settings, client, &claimed).await;
-    crate::portable_source_claims::wait_for_background_inventory_in_fixture().await;
-    result
+    super::model_jobs::run_model_import_job(api, settings, client, &claimed).await
 }
 
 async fn claim_model_import_fixture(
@@ -3486,7 +3484,6 @@ async fn manually_rerunning_a_snapshot_is_not_authenticated_import_recovery() {
         bytes,
         "unrelated installs must not be deleted"
     );
-    crate::portable_source_claims::wait_for_background_inventory_in_fixture().await;
 }
 
 #[tokio::test]
@@ -3681,8 +3678,6 @@ fn uploaded_h3_retry_survives_real_dispatch_failure_then_releases_input_on_succe
                         gen_core::CancelFlag::new(),
                     )
                     .await;
-                    crate::portable_source_claims::wait_for_background_inventory_in_fixture()
-                        .await;
                     let completed = posts.lock().unwrap().clone();
                     assert!(!completed.iter().any(|post| post["status"] == "failed"), "{completed:?}");
                     assert!(completed.iter().any(|post| post["status"] == "completed"), "{completed:?}");
