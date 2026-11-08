@@ -54,6 +54,17 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
         },
     },
     ModelConsumerInventoryEntry {
+        source_files: &["crates/sceneworks-worker/src/portable_aux_sources.rs"],
+        categories: &[
+            Category::Image,
+            Category::OptionalComponent,
+            Category::CoRequisite,
+        ],
+        resolution: Resolution::SharedContract {
+            entrypoint: TypedResolverEntrypoint::PinnedComponent,
+        },
+    },
+    ModelConsumerInventoryEntry {
         source_files: &[
             "crates/sceneworks-worker/src/image_jobs.rs",
             "crates/sceneworks-worker/src/image_jobs/artifact_resolution.rs",
@@ -511,10 +522,6 @@ mod tests {
         (
             "crates/sceneworks-worker/src/job_time_download_guard.rs",
             "download admission guard, not a model loader",
-        ),
-        (
-            "crates/sceneworks-worker/src/portable_aux_sources.rs",
-            "selected auxiliary path helper for the typed portable source guard",
         ),
         (
             "crates/sceneworks-worker/src/lib.rs",
