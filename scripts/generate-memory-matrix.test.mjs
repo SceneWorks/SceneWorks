@@ -181,6 +181,26 @@ test("provenance is stamped once on the document, never per row", async () => {
   );
 });
 
+test("published memory implementation sources resolve to the evidence store", async () => {
+  const matrix = await buildMatrix();
+  const evidence = await memoryContractSource("memoryEvidence");
+  const prefix = `${SOURCE_PATHS.memoryEvidence}#`;
+  const sources = matrix.cells.flatMap((cell) =>
+    (cell.evidence?.staticImplementation ?? []).map((row) => row.source),
+  );
+  const movedFields = /\/(?:calibrations|memoryStrategyCapabilities|turboFit)(?:\/|$)/;
+  assert.ok(sources.some((source) => source?.startsWith(prefix) && movedFields.test(source)));
+  for (const source of sources) {
+    if (source?.startsWith(`${SOURCE_PATHS.manifest}#`) && movedFields.test(source)) {
+      assert.fail(`moved memory fact still cites the product manifest: ${source}`);
+    }
+    if (!source?.startsWith(prefix)) continue;
+    const pointer = source.slice(prefix.length).split("/");
+    assert.ok(pointer.every((part) => part.length > 0), `invalid evidence pointer: ${source}`);
+    assert.ok(pointer.reduce((value, part) => value?.[part], evidence), `missing evidence pointer: ${source}`);
+  }
+});
+
 test("InstantID provenance hashes only the parsed backend-tier contract", async () => {
   const instantId = await readFile(
     new URL(`../${SOURCE_PATHS.instantId}`, import.meta.url),

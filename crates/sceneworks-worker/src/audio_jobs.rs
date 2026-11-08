@@ -1611,7 +1611,18 @@ async fn run_audio_synthesis_with(
     // removed), so this attach is the sole offline Cover source. An absent snapshot stages nothing; the
     // engine then surfaces the actionable Cover-needs-`sft_cover` error on the request that needs it.
     if request.edit_mode.as_deref() == Some("cover") {
-        if let Some(source) = crate::model_jobs::resolve_optional_component(
+        let bound = job
+            .payload
+            .get("advanced")
+            .and_then(Value::as_object)
+            .filter(|advanced| crate::portable_aux_sources::has_bound_aux_paths(advanced));
+        if let Some(advanced) = bound {
+            let path = crate::portable_aux_sources::bound_aux_path(advanced, "sft_cover")
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload("portable ACE Cover source is not bound".to_owned())
+                })?;
+            components.insert("sft_cover".to_string(), WeightsSource::Dir(path));
+        } else if let Some(source) = crate::model_jobs::resolve_optional_component(
             &request.model_manifest_entry,
             "sft_cover",
             settings,
@@ -4853,8 +4864,8 @@ mod tests {
         assert_eq!(track.sample_rate, 24_000);
         assert_eq!(track.channels, 1);
 
-        // The pump forwarded ≥2 incremental "Streaming audio…" job updates BEFORE the clip finished —
-        // the observable proof the worker streams (a non-streaming model posts none; see below).
+        // The coalescing pump forwards a streaming update even when the five chunks arrive
+        // within one 250 ms interval; a non-streaming generator posts none (see below).
         let posts = progress.lock().expect("progress lock");
         let streaming_posts = posts
             .iter()
@@ -4865,8 +4876,14 @@ mod tests {
             })
             .count();
         assert!(
-            streaming_posts >= 2,
-            "expected ≥2 incremental streaming progress posts, got {streaming_posts}: {posts:?}"
+            streaming_posts >= 1,
+            "expected a streaming progress post, got {streaming_posts}: {posts:?}"
+        );
+        assert!(
+            posts
+                .iter()
+                .any(|post| post["message"] == "Streaming audio… (5 chunks)"),
+            "the final coalesced update must count all five streamed chunks: {posts:?}"
         );
         // None of the incremental posts is terminal — the pump only ever emits Running/Generating.
         assert!(

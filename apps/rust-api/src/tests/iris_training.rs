@@ -202,7 +202,7 @@ async fn iris_generation_training_needs_its_own_backbone_and_text_encoder() {
     let _env = iris_env("256");
     let temp_dir = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp_dir);
-    let app = create_app(settings.clone()).unwrap();
+    let app = create_training_fixture_app(settings.clone()).unwrap();
     // The adapter-family guardrail is satisfied, and the repo-wide marker says "installed".
     seed_installed_training_base(&settings.data_dir, "iris_3b");
     let manifests = settings.config_dir.join("manifests");
@@ -251,7 +251,7 @@ async fn iris_generation_training_needs_its_own_backbone_and_text_encoder() {
     // The backbone without its encoder: a fresh data dir.
     let bare_dir = tempfile::tempdir().unwrap();
     let bare_settings = test_settings(&bare_dir);
-    let bare_app = create_app(bare_settings.clone()).unwrap();
+    let bare_app = create_training_fixture_app(bare_settings.clone()).unwrap();
     seed_installed_training_base(&bare_settings.data_dir, "iris_3b");
     std::fs::create_dir_all(bare_settings.config_dir.join("manifests")).unwrap();
     std::fs::copy(
@@ -300,7 +300,7 @@ async fn iris_submit_refuses_what_the_trainer_refuses() {
     let _env = iris_env("256");
     let temp_dir = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp_dir);
-    let app = create_app(settings.clone()).unwrap();
+    let app = create_training_fixture_app(settings.clone()).unwrap();
     seed_iris_install(&settings);
     let project_id = project(&app).await;
     let dataset_id = dataset(&app, &project_id, one_item()).await;
@@ -425,7 +425,7 @@ async fn iris_submit_refuses_what_the_trainer_refuses() {
 #[tokio::test]
 async fn data_walk_reports_the_unused_tail_before_launch() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let app = create_app(test_settings(&temp_dir)).unwrap();
+    let app = create_training_fixture_app(test_settings(&temp_dir)).unwrap();
     let (status, walk) = request(
         app.clone(),
         "GET",
@@ -495,18 +495,13 @@ async fn an_iris_rerun_never_shares_an_output_with_another_run() {
     let _env = iris_env("256");
     let temp_dir = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp_dir);
-    let app = create_app(settings.clone()).unwrap();
+    let app = create_training_fixture_app(settings.clone()).unwrap();
     seed_iris_install(&settings);
     let project_id = project(&app).await;
     let dataset_id = dataset(&app, &project_id, one_item()).await;
     let config = iris_target(&app).await["defaults"].clone();
-    let output_dir = |job: &Value| {
-        std::path::PathBuf::from(
-            job["payload"]["plan"]["output"]["outputDir"]
-                .as_str()
-                .unwrap(),
-        )
-    };
+    let output_dir =
+        |job: &Value| private_training_output_dir(&settings.data_dir, job["id"].as_str().unwrap());
     let output_id = |job: &Value| {
         job["payload"]["manifestEntry"]["id"]
             .as_str()
@@ -619,7 +614,7 @@ async fn iris_adapter_registers_with_task_identity_and_resumes() {
     let _env = iris_env("256");
     let temp_dir = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp_dir);
-    let app = create_app(settings.clone()).unwrap();
+    let app = create_training_fixture_app(settings.clone()).unwrap();
     seed_iris_install(&settings);
     let project_id = project(&app).await;
     let dataset_id = dataset(
@@ -642,7 +637,7 @@ async fn iris_adapter_registers_with_task_identity_and_resumes() {
     );
     assert_eq!(job["payload"]["manifestEntry"]["irisTask"], "generation");
     let job_id = job["id"].as_str().unwrap().to_owned();
-    let output_dir = std::path::PathBuf::from(plan["output"]["outputDir"].as_str().unwrap());
+    let output_dir = private_training_output_dir(&settings.data_dir, &job_id);
     let file_name = plan["output"]["fileName"].as_str().unwrap().to_owned();
 
     claim_training_job_as_mlx_worker(&app, &job_id).await;
@@ -732,7 +727,7 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
     let _env = iris_env("256");
     let temp_dir = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp_dir);
-    let app = create_app(settings.clone()).unwrap();
+    let app = create_training_fixture_app(settings.clone()).unwrap();
     seed_iris_install(&settings);
     let project_id = project(&app).await;
     let dataset_id = dataset(&app, &project_id, one_item()).await;
@@ -746,7 +741,7 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
     let plan = &job["payload"]["plan"];
     assert_eq!(plan["target"]["outputKind"], "base_checkpoint");
     let job_id = job["id"].as_str().unwrap().to_owned();
-    let output_dir = std::path::PathBuf::from(plan["output"]["outputDir"].as_str().unwrap());
+    let output_dir = private_training_output_dir(&settings.data_dir, &job_id);
     assert!(output_dir.starts_with(settings.data_dir.join("models").join("finetunes")));
     let stem = plan["output"]["fileName"]
         .as_str()
@@ -825,6 +820,7 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
         .expect("the export is stored")
         .clone();
     assert_eq!(stored["trainedCheckpoint"]["engineModel"], "iris_3b");
+    assert_eq!(stored["provenance"]["trainingJobId"], json!(job_id));
     for key in [
         "loraCompatibility",
         "limits",
@@ -854,7 +850,7 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
         serde_json::to_vec_pretty(&builtin).unwrap(),
     )
     .unwrap();
-    let later_app = create_app(settings.clone()).unwrap();
+    let later_app = create_training_fixture_app(settings.clone()).unwrap();
     let (_, models) = request(later_app, "GET", "/api/v1/models", Value::Null).await;
     let later = models
         .as_array()
@@ -871,6 +867,8 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
 
     // Generate it: the job runs `iris_3b` on the export, with the generation install's entry (its
     // text-encoder co-requisite) and the user's pick kept for provenance.
+    super::iris_task_training::advertise_trained_source(&app, &model_id, &export, "image_generate")
+        .await;
     let (status, generation) = request(
         app.clone(),
         "POST",
@@ -892,9 +890,9 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
     assert_eq!(payload["checkpointModelId"], json!(model_id));
     let worker_entry = &payload["modelManifestEntry"];
     assert_eq!(worker_entry["id"], "iris_3b");
-    assert_eq!(
-        worker_entry["modelPath"],
-        json!(export.canonicalize().unwrap().display().to_string())
+    assert!(
+        worker_entry["modelPath"].is_null(),
+        "the public job projection omits the local checkpoint path: {worker_entry}"
     );
     assert_eq!(
         worker_entry["trainedCheckpoint"]["modelId"],
@@ -919,12 +917,48 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
         json!({ "payloadChanges": { "model": "sdxl" } }),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED, "{duplicate}");
-    let payload = &duplicate["payload"];
-    assert_eq!(payload["model"], "sdxl", "{payload:#}");
-    assert!(payload["checkpointModelId"].is_null(), "{payload:#}");
-    assert_eq!(payload["modelManifestEntry"]["id"], "sdxl", "{payload:#}");
+    assert_eq!(status, StatusCode::CONFLICT, "{duplicate}");
     // A plain duplicate of the aliased job still re-derives the checkpoint alias.
+    let connection = rusqlite::Connection::open(&settings.jobs_db_path).unwrap();
+    let original_claims: String = connection
+        .query_row(
+            "select portable_source_claims_json from workers where id = 'test-iris-source-worker'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "update jobs set portable_model_binding_json = null where id = ?1",
+            [&generation_id],
+        )
+        .unwrap();
+    let worker_copy = temp_dir.path().join("other-worker-root/trained-iris");
+    std::fs::create_dir_all(&worker_copy).unwrap();
+    for entry in std::fs::read_dir(&export).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_file() {
+            std::fs::copy(entry.path(), worker_copy.join(entry.file_name())).unwrap();
+        }
+    }
+    super::iris_task_training::advertise_trained_source(
+        &app,
+        &model_id,
+        &worker_copy,
+        "image_generate",
+    )
+    .await;
+    let copied_claims: String = connection
+        .query_row(
+            "select portable_source_claims_json from workers where id = 'test-iris-source-worker'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        original_claims, copied_claims,
+        "worker copy must advertise the exact same portable ledger"
+    );
     let (status, replay) = request(
         app.clone(),
         "POST",
@@ -933,11 +967,115 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{replay}");
+    let binding: Option<String> = connection
+        .query_row(
+            "select portable_model_binding_json from jobs where id = ?1",
+            [replay["id"].as_str().unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(binding.is_some());
     assert_eq!(replay["payload"]["checkpointModelId"], json!(model_id));
     assert_eq!(
         replay["payload"]["modelManifestEntry"]["trainedCheckpoint"]["modelId"],
         json!(model_id)
     );
+    let trained_file = export.join("model.safetensors");
+    let original_bytes = std::fs::read(&trained_file).unwrap();
+    std::fs::write(&trained_file, vec![b'X'; original_bytes.len()]).unwrap();
+    let (altered_status, altered) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{generation_id}/duplicate"),
+        json!({"payloadChanges":{}}),
+    )
+    .await;
+    assert_eq!(altered_status, StatusCode::CONFLICT, "{altered}");
+    std::fs::remove_file(&trained_file).unwrap();
+    let (missing_status, missing) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{generation_id}/duplicate"),
+        json!({"payloadChanges":{}}),
+    )
+    .await;
+    assert_eq!(missing_status, StatusCode::BAD_REQUEST, "{missing}");
+    std::fs::write(&trained_file, original_bytes).unwrap();
+    let (claim_status, claimed) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        portable_test_worker_claim("test-iris-source-worker", TestPortableRoute::MlxMacos),
+    )
+    .await;
+    assert_eq!(claim_status, StatusCode::OK, "{claimed}");
+    let claimed_id = claimed["job"]["id"]
+        .as_str()
+        .expect("trained historical claim");
+    assert!(
+        claimed_id == generation_id || claimed_id == replay["id"].as_str().unwrap(),
+        "{claimed}"
+    );
+    let jobs_store = sceneworks_core::jobs_store::JobsStore::new(settings.jobs_db_path.clone());
+    let original = jobs_store.get_job(&generation_id).unwrap();
+    let old_carrier = jobs_store
+        .create_job(crate::CreateJob {
+            job_type: original.job_type.clone(),
+            project_id: original.project_id.clone(),
+            project_name: None,
+            payload: original.payload.clone(),
+            requested_gpu: original.requested_gpu.clone(),
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+            initial_status: None,
+        })
+        .unwrap();
+    let old_id = old_carrier.id.as_str();
+    let user_catalog_path = manifests.join("user.models.jsonc");
+    let original_user_catalog = std::fs::read(&user_catalog_path).unwrap();
+    let mut replacement_catalog: Value = serde_json::from_str(&crate::strip_jsonc_comments(
+        &String::from_utf8(original_user_catalog.clone()).unwrap(),
+    ))
+    .unwrap();
+    let replacement_entry = replacement_catalog["models"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|entry| entry["id"] == json!(model_id))
+        .unwrap();
+    replacement_entry["provenance"]["trainingJobId"] = json!("replacement-producer");
+    std::fs::write(&user_catalog_path, replacement_catalog.to_string()).unwrap();
+    let (replacement_status, replacement) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{old_id}/duplicate"),
+        json!({"payloadChanges":{}}),
+    )
+    .await;
+    assert_eq!(replacement_status, StatusCode::CONFLICT, "{replacement}");
+    let (replaced_claim_status, replaced_claim) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        portable_test_worker_claim("test-iris-source-worker", TestPortableRoute::MlxMacos),
+    )
+    .await;
+    assert_eq!(replaced_claim_status, StatusCode::OK, "{replaced_claim}");
+    assert_ne!(replaced_claim["job"]["id"], json!(old_id));
+    assert_eq!(
+        jobs_store.get_job(old_id).unwrap().status,
+        crate::JobStatus::Failed
+    );
+    let private_binding: Option<String> = connection
+        .query_row(
+            "select portable_model_binding_json from jobs where id = ?1",
+            [old_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(private_binding.is_none());
+    std::fs::write(&user_catalog_path, original_user_catalog).unwrap();
 
     // A client-authored `checkpointModelId` naming something that is not a trained checkpoint of
     // `model` is dropped: `model`'s own manifest is what resolves.
@@ -1006,7 +1144,7 @@ async fn a_failed_generation_export_registers_nothing_and_leaves_its_sources_unt
     let _env = iris_env("256");
     let temp_dir = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp_dir);
-    let app = create_app(settings.clone()).unwrap();
+    let app = create_training_fixture_app(settings.clone()).unwrap();
     seed_iris_install(&settings);
     let project_id = project(&app).await;
     let dataset_id = dataset(&app, &project_id, one_item()).await;
@@ -1043,8 +1181,7 @@ async fn a_failed_generation_export_registers_nothing_and_leaves_its_sources_unt
             assert_eq!(code, StatusCode::CREATED, "{network}: {job}");
             let plan = &job["payload"]["plan"];
             let job_id = job["id"].as_str().unwrap().to_owned();
-            let output_dir =
-                std::path::PathBuf::from(plan["output"]["outputDir"].as_str().unwrap());
+            let output_dir = private_training_output_dir(&settings.data_dir, &job_id);
             let file_name = plan["output"]["fileName"].as_str().unwrap().to_owned();
             claim_training_job_as_mlx_worker(&app, &job_id).await;
             std::fs::create_dir_all(&output_dir).unwrap();
@@ -1112,7 +1249,7 @@ async fn a_canceled_run_registers_only_what_the_trainer_exported() {
     let _env = iris_env("256");
     let temp_dir = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp_dir);
-    let app = create_app(settings.clone()).unwrap();
+    let app = create_training_fixture_app(settings.clone()).unwrap();
     seed_iris_install(&settings);
     let project_id = project(&app).await;
     let dataset_id = dataset(&app, &project_id, one_item()).await;
@@ -1134,7 +1271,7 @@ async fn a_canceled_run_registers_only_what_the_trainer_exported() {
     let (_, job) = submit(&app, &project_id, &dataset_id, config, false).await;
     let job_id = job["id"].as_str().unwrap().to_owned();
     let plan = &job["payload"]["plan"];
-    let output_dir = std::path::PathBuf::from(plan["output"]["outputDir"].as_str().unwrap());
+    let output_dir = private_training_output_dir(&settings.data_dir, &job_id);
     let file_name = plan["output"]["fileName"].as_str().unwrap().to_owned();
     claim_training_job_as_mlx_worker(&app, &job_id).await;
     std::fs::create_dir_all(&output_dir).unwrap();
@@ -1155,7 +1292,7 @@ async fn a_canceled_run_registers_only_what_the_trainer_exported() {
 async fn parquet_import_forwards_caption_field_columns() {
     let temp_dir = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp_dir);
-    let app = create_app(settings.clone()).unwrap();
+    let app = create_training_fixture_app(settings.clone()).unwrap();
     let project_id = project(&app).await;
     let (_, dataset) = request(
         app.clone(),
@@ -1235,7 +1372,7 @@ async fn a_trained_iris_adapter_is_accepted_by_the_iris_image_job_gate() {
         json!({ "schemaVersion": 1, "models": [iris] }).to_string(),
     )
     .expect("builtin models writes");
-    let app = create_app(settings.clone()).unwrap();
+    let app = create_training_fixture_app(settings.clone()).unwrap();
     let project_id = project(&app).await;
     let dataset_id = dataset(&app, &project_id, one_item()).await;
     let target = iris_target(&app).await;
@@ -1250,7 +1387,7 @@ async fn a_trained_iris_adapter_is_accepted_by_the_iris_image_job_gate() {
     assert_eq!(status, StatusCode::CREATED, "{job}");
     let job_id = job["id"].as_str().unwrap().to_owned();
     let plan = &job["payload"]["plan"];
-    let output_dir = std::path::PathBuf::from(plan["output"]["outputDir"].as_str().unwrap());
+    let output_dir = private_training_output_dir(&settings.data_dir, &job_id);
     let file_name = plan["output"]["fileName"].as_str().unwrap().to_owned();
 
     claim_training_job_as_mlx_worker(&app, &job_id).await;
@@ -1284,6 +1421,51 @@ async fn a_trained_iris_adapter_is_accepted_by_the_iris_image_job_gate() {
         .as_str()
         .unwrap()
         .to_owned();
+
+    // The trained adapter is a local Digest source. Advertise its exact registered bytes from a
+    // job-capable worker before asking admission to freeze the generation closure.
+    let mut files = [file_name.as_str(), "training-config.json"]
+        .into_iter()
+        .map(|name| {
+            let path = output_dir.join(name);
+            sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile {
+                relative_path: name.into(),
+                size_bytes: std::fs::metadata(&path).unwrap().len(),
+                sha256: format!(
+                    "sha256:{}",
+                    sceneworks_core::hashing::sha256_file(&path).unwrap()
+                ),
+            }
+        })
+        .collect::<Vec<_>>();
+    files.sort();
+    let ledger =
+        sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(&files)
+            .unwrap();
+    let claim_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+        "lora", &lora_id, None, &ledger,
+    )
+    .unwrap();
+    let claim = sceneworks_core::model_artifacts::portable_binding::PortableSourceClaim::new(
+        claim_id,
+        sceneworks_core::model_artifacts::portable_binding::PortableSourceProvenance::OperatorOverride,
+        files,
+    )
+    .unwrap();
+    let mut registration = portable_test_worker_registration(
+        "test-iris-adapter-source-worker",
+        &["gpu", "mlx", "image_generate"],
+        TestPortableRoute::MlxMacos,
+    );
+    registration["portableSourceClaims"] = serde_json::to_value(vec![claim]).unwrap();
+    let (status, response) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        registration,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
 
     let (status, generation) = request(
         app.clone(),

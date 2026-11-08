@@ -550,6 +550,20 @@ pub(super) fn qwen_control_tier_subdir(
     request: &ImageRequest,
     snapshot: Option<&Path>,
 ) -> &'static str {
+    // Portable dispatch writes this private field only after verifying the route binding.
+    // It fixes the source tier across hosts instead of clamping to this worker's cache.
+    if let Some(tier) = request
+        .advanced
+        .get("__portableBoundTier")
+        .and_then(Value::as_str)
+    {
+        return match tier {
+            "q4" => "q4",
+            "q8" => "q8",
+            "bf16" => "bf16",
+            _ => "q8", // the verified guard rejects any other tier before dispatch
+        };
+    }
     request.quant_bits().map_or_else(
         || qwen_control_installed_default_tier(snapshot),
         |bits| crate::payload::tier_for_bits(Some(bits), "q8"),
@@ -635,6 +649,11 @@ mod control_helper_tests {
         let request = ImageRequest::from_payload(payload.as_object().unwrap());
         assert_eq!(qwen_control_tier_subdir(&request, Some(dir.path())), "q4");
         assert_eq!(qwen_control_tier_subdir(&request, None), "q8");
+        let mut bound = request.clone();
+        bound
+            .advanced
+            .insert("__portableBoundTier".into(), json!("q8"));
+        assert_eq!(qwen_control_tier_subdir(&bound, Some(dir.path())), "q8");
         for (bits, expected) in [(0, "bf16"), (4, "q4"), (8, "q8")] {
             let mut request = request.clone();
             request.advanced.insert("mlxQuantize".into(), json!(bits));

@@ -263,6 +263,8 @@ enum CacheRole {
     /// Every entry here is either a job-time destination epic 17625 is migrating, or a read-only
     /// legacy root kept so an existing install keeps working without re-downloading (AC10).
     Weights,
+    /// A second read of a legacy weight root already listed above. It adds no install/write site.
+    ReadOnlyAlias,
     /// The sanctioned destination: the app-managed Hugging Face hub cache
     /// (`<data_dir>/cache/huggingface/hub`), which the Model Manager installs into.
     HfCache,
@@ -468,6 +470,57 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
         "image_jobs/strict_control.rs",
         "depth-anything-v2",
         CacheRole::Weights,
+    ),
+    // Portable source selection reads these existing legacy roots before a loader runs. The
+    // underlying weight destinations above remain the only installers; this file never writes
+    // under `<data_dir>/cache`. The assertion below requires every alias to match one of them.
+    (
+        "worker",
+        "portable_aux_sources.rs",
+        "depth-anything-v2",
+        CacheRole::ReadOnlyAlias,
+    ),
+    (
+        "worker",
+        "portable_aux_sources.rs",
+        "instantid-controlnet",
+        CacheRole::ReadOnlyAlias,
+    ),
+    (
+        "worker",
+        "portable_aux_sources.rs",
+        "instantid-mlx",
+        CacheRole::ReadOnlyAlias,
+    ),
+    (
+        "worker",
+        "portable_aux_sources.rs",
+        "instantid-openpose",
+        CacheRole::ReadOnlyAlias,
+    ),
+    (
+        "worker",
+        "portable_aux_sources.rs",
+        "ipadapter-flux",
+        CacheRole::ReadOnlyAlias,
+    ),
+    (
+        "worker",
+        "portable_aux_sources.rs",
+        "ipadapter-sdxl",
+        CacheRole::ReadOnlyAlias,
+    ),
+    (
+        "worker",
+        "portable_aux_sources.rs",
+        "pulid-flux",
+        CacheRole::ReadOnlyAlias,
+    ),
+    (
+        "worker",
+        "portable_aux_sources.rs",
+        "pulid-flux-mlx",
+        CacheRole::ReadOnlyAlias,
     ),
     // Legacy read-only roots the person/pose analyzers still consult so a pre-migration install
     // keeps working without re-downloading (AC10). Paired with a `models/<same>` root at each site.
@@ -2977,6 +3030,24 @@ fn cache_destinations_match_the_allow_list() {
         CACHE_DESTINATIONS.len(),
         "CACHE_DESTINATIONS has a duplicate (crate, file, subdir) entry"
     );
+    for ((label, file, subdir), role) in &allowed {
+        if *role == CacheRole::ReadOnlyAlias {
+            assert_eq!(
+                (label.as_str(), file.as_str()),
+                ("worker", "portable_aux_sources.rs")
+            );
+            assert!(
+                allowed
+                    .iter()
+                    .any(|((_, other_file, other_subdir), other_role)| {
+                        *other_role == CacheRole::Weights
+                            && other_file != file
+                            && other_subdir == subdir
+                    }),
+                "a read-only cache alias must point to an already recorded weight root: {subdir}"
+            );
+        }
+    }
 
     let added = unregistered_cache_destinations(&found, &allowed);
     let removed: Vec<String> = allowed

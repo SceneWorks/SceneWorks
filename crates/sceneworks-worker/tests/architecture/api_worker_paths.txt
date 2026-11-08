@@ -41,6 +41,7 @@ apps/rust-api/src/jobs.rs sceneworks_worker::latest_training_resume_step
 apps/rust-api/src/jobs.rs sceneworks_worker::resolve_model_convert_output
 apps/rust-api/src/jobs.rs sceneworks_worker::resolve_training_output_dir_under
 apps/rust-api/src/jobs.rs sceneworks_worker::training_resume_stem
+apps/rust-api/src/jobs.rs sceneworks_worker::write_produced_artifact_receipt
 apps/rust-api/src/lib.rs sceneworks_worker::Settings::try_from_env
 apps/rust-api/src/lib.rs sceneworks_worker::WORKER_ENTRY_STACK_BYTES
 apps/rust-api/src/lib.rs sceneworks_worker::WorkerError
@@ -70,6 +71,9 @@ apps/rust-api/src/models/tests/imported_checkpoint_product_surface_tests.rs scen
 apps/rust-api/src/models/tests/imported_checkpoint_product_surface_tests.rs sceneworks_worker::minimax_h3_import_fixture::shared_component_snapshot
 apps/rust-api/src/models/tests/imported_checkpoint_product_surface_tests.rs sceneworks_worker::minimax_h3_import_fixture::stage_managed_minimax_h3_import_source
 apps/rust-api/src/models/tests/minimax_h3_import_declaration_tests.rs sceneworks_worker::minimax_h3_import_fixture::captured_component_context
+apps/rust-api/src/portable_admission.rs sceneworks_worker::ProducedArtifactReceipt
+apps/rust-api/src/portable_admission.rs sceneworks_worker::verify_produced_artifact_receipt
+apps/rust-api/src/portable_routes.rs sceneworks_worker::portable_trainer_engine_id_for
 apps/rust-api/src/saved_voices.rs sceneworks_worker::voice_register
 apps/rust-api/src/saved_voices.rs sceneworks_worker::voice_register::VoiceEmbedError
 apps/rust-api/src/saved_voices.rs sceneworks_worker::voice_register::VoiceEmbedError::Decode
@@ -78,11 +82,11 @@ apps/rust-api/src/saved_voices.rs sceneworks_worker::voice_register::VoiceEmbedE
 apps/rust-api/src/saved_voices.rs sceneworks_worker::voice_register::embed_reference_clip
 apps/rust-api/src/server.rs sceneworks_worker::run
 apps/rust-api/src/tests/dataset_catalogs.rs sceneworks_worker::catalog_parquet_scanner::MAX_PARQUET_SHARDS
-apps/rust-api/src/tests/film_harness_fixes.rs sceneworks_worker::Settings
+apps/rust-api/src/tests/film_harness_fixes.rs sceneworks_worker::Settings::from_env
 apps/rust-api/src/tests/film_harness_fixes.rs sceneworks_worker::WORKER_ENTRY_STACK_BYTES
 apps/rust-api/src/tests/film_harness_fixes.rs sceneworks_worker::WORKER_ENTRY_THREAD_NAME
 apps/rust-api/src/tests/film_harness_fixes.rs sceneworks_worker::run_worker_loop
-apps/rust-api/src/tests/import_repair.rs sceneworks_worker::Settings
+apps/rust-api/src/tests/import_repair.rs sceneworks_worker::Settings::from_env
 apps/rust-api/src/tests/import_repair.rs sceneworks_worker::WORKER_ENTRY_STACK_BYTES
 apps/rust-api/src/tests/import_repair.rs sceneworks_worker::minimax_h3_import_fixture
 apps/rust-api/src/tests/import_repair.rs sceneworks_worker::minimax_h3_import_fixture::ManagedMiniMaxH3Import
@@ -116,6 +120,7 @@ apps/rust-api/src/tests/moss_training_acceleration.rs sceneworks_worker::test_su
 apps/rust-api/src/tests/moss_training_acceleration.rs sceneworks_worker::test_support::register_real_acceptance_worker
 apps/rust-api/src/tests/moss_training_acceleration.rs sceneworks_worker::test_support::run_training_execution_observing_request
 apps/rust-api/src/tests/moss_training_acceptance.rs sceneworks_worker::Settings
+apps/rust-api/src/tests/moss_training_acceptance.rs sceneworks_worker::Settings::from_env
 apps/rust-api/src/tests/moss_training_acceptance.rs sceneworks_worker::WorkerError::Canceled
 apps/rust-api/src/tests/moss_training_acceptance.rs sceneworks_worker::test_support
 apps/rust-api/src/tests/moss_training_acceptance.rs sceneworks_worker::test_support::AcceptanceProgressLedger
@@ -193,6 +198,7 @@ apps/rust-api/src/tests/moss_training_acceptance_contracts.rs sceneworks_worker:
 apps/rust-api/src/tests/moss_training_acceptance_contracts.rs sceneworks_worker::test_support::register_acceptance_cpu_utility_worker
 apps/rust-api/src/tests/moss_training_acceptance_contracts.rs sceneworks_worker::test_support::run_acceptance_utility_job
 apps/rust-api/src/tests/moss_training_native.rs sceneworks_worker::Settings
+apps/rust-api/src/tests/moss_training_native.rs sceneworks_worker::Settings::from_env
 apps/rust-api/src/tests/moss_training_native.rs sceneworks_worker::WorkerError::Canceled
 apps/rust-api/src/tests/moss_training_native.rs sceneworks_worker::WorkerError::InvalidPayload
 apps/rust-api/src/tests/moss_training_native.rs sceneworks_worker::WorkerResult

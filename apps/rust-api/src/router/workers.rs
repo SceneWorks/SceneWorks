@@ -18,6 +18,14 @@ pub(super) fn routes() -> Router<AppState> {
             post(heartbeat_worker),
         )
         .route(
+            "/api/v1/workers/:worker_id/portable-source-challenges",
+            post(portable_source_challenges),
+        )
+        .route(
+            "/api/v1/workers/:worker_id/portable-source-proof",
+            post(publish_portable_source_proof),
+        )
+        .route(
             "/api/v1/workers/:worker_id/terminated",
             post(worker_terminated),
         )

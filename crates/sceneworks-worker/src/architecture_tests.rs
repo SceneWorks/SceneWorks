@@ -562,13 +562,13 @@ const RECORDED_FAMILY_ALLOW_LISTS: &[(&str, &str, &str)] = &[
          which families satisfy it; this is only where the app installed that tier.",
     ),
     (
-        "src/external_library_runtime.rs",
+        "../sceneworks-core/src/model_artifacts/artifact_selection.rs",
         "PLAN_BACKED_RESIDENT_BASE_MODELS",
-        "Catalog data, not family truth, and the same split the two plan tables above record: \
+        "Shared API/worker catalog data, not family truth, and the same split the two plan tables above record: \
          `CheckpointAdapterRegistration::base_compatibility` declares the base-snapshot dependency \
          and which families satisfy it, but carries no builtin catalog MODEL ID or tier — and an id \
          plus a tier is exactly what building the base's requirement closure through \
-         `selected_requirements_for_model` needs. NOT DERIVABLE here for a second reason the plan \
+         `selected_resident_base_closure_for_row` needs. NOT DERIVABLE here for a second reason the plan \
          tables do not have: this one lives in the pre-loader guard, which compiles on EVERY build, \
          while the adapter registry is cfg-gated to macOS-or-candle (see IMPORT_SUPPORTED_FAMILIES) \
          — a derived list would be empty on the candle-off build and silently return every imported \
@@ -1183,7 +1183,7 @@ fn the_family_allow_list_scanner_recognises_the_shapes_it_must_judge() {
 /// pinned by `heartbeat_while_blocking_keeps_worker_live_through_a_long_pass`), never bare —
 /// a bare `.await` is exactly how the Krea bf16 lost-heartbeat incident swept a healthy worker.
 /// Source-structure assertion in the same style as the dispatch-matrix test above: behavior lives
-/// in the wrapper's own test; this pins the WIRING at the one admission call site.
+/// in the wrapper's own test; this pins the wiring at initial admission and after a cold fetch.
 #[test]
 fn the_source_guard_await_is_wrapped_in_the_heartbeat_keepalive() {
     let code = code_without_comments_or_literals(UTILITY_DISPATCH);
@@ -1192,9 +1192,20 @@ fn the_source_guard_await_is_wrapped_in_the_heartbeat_keepalive() {
         .expect("worker must declare run_utility_job")
         .1;
     let after_guard_spawn = function
-        .split_once("RuntimeSourceGuard::begin(")
+        .split_once("begin_source_guard_before_fetch_cancelable(")
         .expect("run_utility_job must admit every job through the source guard")
         .1;
+    let helper = code
+        .split_once("fn begin_source_guard_before_fetch_cancelable(")
+        .expect("the pre-fetch source guard helper must exist")
+        .1
+        .split_once("async fn run_utility_job_inner(")
+        .expect("the source guard helper must precede job dispatch")
+        .0;
+    assert!(
+        helper.contains("RuntimeSourceGuard::begin_with_binding_cancelable("),
+        "the pre-fetch helper must invoke the runtime source guard"
+    );
     let between_guard_and_dispatch = after_guard_spawn
         .split_once("dispatch_utility_job(")
         .expect("the guard must run before the job-type dispatch")
@@ -1216,5 +1227,21 @@ fn the_source_guard_await_is_wrapped_in_the_heartbeat_keepalive() {
             .0
             .contains("guard_task"),
         "heartbeat_while_blocking must receive the source guard's own JoinHandle (guard_task)"
+    );
+    let after_retry_guard = between_guard_and_dispatch
+        .split_once("RuntimeSourceGuard::begin_with_binding_cancelable(")
+        .expect("a cold source fetch must be followed by another source guard")
+        .1;
+    let after_retry_wrapper = after_retry_guard
+        .split_once("heartbeat_while_blocking(")
+        .expect("the post-fetch source guard must also keep the worker heartbeat live")
+        .1;
+    assert!(
+        after_retry_wrapper
+            .split_once(')')
+            .expect("the post-fetch keepalive call must close its argument list")
+            .0
+            .contains("guard_task"),
+        "the post-fetch heartbeat must receive its own source guard JoinHandle"
     );
 }

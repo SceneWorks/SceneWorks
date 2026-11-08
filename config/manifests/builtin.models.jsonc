@@ -11009,6 +11009,7 @@
           // revenue, ungated (no HF token). Worker loads the fp16 variant.
           "provider": "huggingface",
           "repo": "stabilityai/stable-video-diffusion-img2vid-xt",
+          "revision": "9e43909513c6714f1bc78bcb44d96e733cd242aa",
           "files": [],
           "estimatedSizeBytes": 9560000000
         }
@@ -11182,6 +11183,7 @@
         {
           "provider": "huggingface",
           "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+          "revision": "b8fff7315c768468a5333511427288870b2e9635",
           "variant": "bf16",
           "files": [],
           "platforms": ["windows", "linux"],
@@ -11750,6 +11752,7 @@
         {
           "provider": "huggingface",
           "repo": "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+          "revision": "596658fd9ca6b7b71d5057529bbf319ecbc61d74",
           "variant": "bf16",
           "files": [],
           "platforms": ["windows", "linux"],
@@ -11909,6 +11912,7 @@
           // macOS: the native MLX dual-expert VACE-Fun checkpoint (mlx-gen-wan "wan2_2_vace_fun_14b").
           "provider": "huggingface",
           "repo": "linoyts/Wan2.2-VACE-Fun-14B-diffusers",
+          "revision": "1abfb95801b7bd8f952083ebf80b93448ddb0ce4",
           "files": [],
           "platforms": ["macos"],
           "estimatedSizeBytes": 81200000000
@@ -11920,6 +11924,7 @@
           // HF cache and fails closed unless both expert configs are present.
           "provider": "huggingface",
           "repo": "linoyts/Wan2.2-VACE-Fun-14B-diffusers",
+          "revision": "1abfb95801b7bd8f952083ebf80b93448ddb0ce4",
           "files": [],
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 81200000000

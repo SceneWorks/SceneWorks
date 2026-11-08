@@ -76,8 +76,157 @@ use sceneworks_core::checkpoint_plan_store::{
 fn resolve_checkpoint_plan_with_progress(
     store: &CheckpointPlanStore,
     checkpoint_id: &str,
+    settings: &Settings,
 ) -> Result<ResolvedCheckpointV1, CheckpointPlanError> {
+    if let Some(verified) = &settings.verified_plan_layers {
+        // The guard already copied, hashed, froze and leased each source. The semantic plan and
+        // paths are typed in-process state, independent of the worker's local checkpoint ID.
+        return verified.resolve_checkpoint(checkpoint_id, &|| Ok(()));
+    }
     store.resolve(checkpoint_id)
+}
+
+#[cfg(test)]
+mod portable_plan_layer_tests {
+    use super::*;
+    use sceneworks_core::checkpoint_import::{ImportLayerV1, ImportPlanV1, SourceLocatorV1};
+
+    #[test]
+    fn private_plan_layers_keep_directory_siblings_and_refuse_missing_layer() {
+        let data = tempfile::tempdir().unwrap();
+        let mut settings = crate::test_env::offline_settings();
+        settings.data_dir = data.path().to_path_buf();
+        let original = data.path().join("library/transformer");
+        let leased = data
+            .path()
+            .join("models/portable-attempts/route/bundle/model0/checkpoint-plan/transformer");
+        std::fs::create_dir_all(&original).unwrap();
+        std::fs::create_dir_all(&leased).unwrap();
+        let files = [
+            (
+                "artifact:backbone",
+                "model.safetensors",
+                b"weights".as_slice(),
+            ),
+            ("artifact:descriptor", "config.json", b"{}".as_slice()),
+        ];
+        let mut layers = Vec::new();
+        let lease = std::sync::Arc::new(
+            sceneworks_core::file_lock::FileLock::open_exclusive(&data.path().join(".lease"))
+                .unwrap(),
+        );
+        let mut verified =
+            crate::external_library_runtime::VerifiedPlanLayers::new_for_test(lease.clone());
+        for (layer_id, name, bytes) in files {
+            let source = original.join(name);
+            let private = leased.join(name);
+            std::fs::write(&source, bytes).unwrap();
+            std::fs::write(&private, bytes).unwrap();
+            let digest = sceneworks_core::checkpoint_plan_store::source_file_sha256_with_check(
+                &source,
+                &|| Ok(()),
+            )
+            .unwrap();
+            let layer = ImportLayerV1 {
+                layer_id: layer_id.to_owned(),
+                role: if name == "config.json" {
+                    "descriptor"
+                } else {
+                    "transformer"
+                }
+                .to_owned(),
+                target_path: format!("transformer/{name}"),
+                container: if name == "config.json" {
+                    CheckpointContainerV1::JsonDescriptor
+                } else {
+                    CheckpointContainerV1::Safetensors
+                },
+                source: SourceLocatorV1::linked("root", format!("transformer/{name}"), digest)
+                    .unwrap(),
+            };
+            layers.push(layer);
+            verified
+                .insert("linked/root/checkpoint", layer_id, private)
+                .unwrap();
+        }
+        let plan =
+            ImportPlanV1::new("plan", CHECKPOINT_PLAN_RESIDENT_BASE_TIERS[0].0, layers).unwrap();
+        let portable = sceneworks_core::model_artifacts::portable_binding::PortableCheckpointPlan::from_import_plan(&plan, None).unwrap();
+        verified
+            .add_plan("linked/root/checkpoint", portable.clone())
+            .unwrap();
+        settings.verified_plan_layers = Some(std::sync::Arc::new(verified));
+        // The loader's source selection sees the private sibling directory, not library paths.
+        let rebound = resolve_checkpoint_plan_with_progress(
+            &CheckpointPlanStore::open(data.path()),
+            "linked/root/checkpoint",
+            &settings,
+        )
+        .unwrap();
+        let selected = checkpoint_plan_primary_selection(
+            &rebound,
+            gen_core::ImportedModelSource::TransformerDirectory,
+        )
+        .unwrap();
+        assert_eq!(selected.directory.as_deref(), Some(leased.as_path()));
+        assert_eq!(selected.layers.len(), 2);
+
+        let mut incomplete =
+            crate::external_library_runtime::VerifiedPlanLayers::new_for_test(lease);
+        incomplete
+            .insert(
+                "linked/root/checkpoint",
+                "artifact:backbone",
+                leased.join("model.safetensors"),
+            )
+            .unwrap();
+        incomplete
+            .add_plan("linked/root/checkpoint", portable.clone())
+            .unwrap();
+        settings.verified_plan_layers = Some(std::sync::Arc::new(incomplete));
+        assert!(resolve_checkpoint_plan_with_progress(
+            &CheckpointPlanStore::open(data.path()),
+            "linked/root/checkpoint",
+            &settings
+        )
+        .is_err());
+
+        let mut altered = portable.clone();
+        altered.layers[0].target_path = "elsewhere/model.safetensors".to_owned();
+        let mut rejected =
+            crate::external_library_runtime::VerifiedPlanLayers::new_for_test(std::sync::Arc::new(
+                sceneworks_core::file_lock::FileLock::open_exclusive(
+                    &data.path().join(".other-lease"),
+                )
+                .unwrap(),
+            ));
+        assert!(rejected
+            .add_plan("linked/root/checkpoint", altered)
+            .is_err());
+        rejected
+            .add_plan("linked/root/checkpoint", portable)
+            .unwrap();
+        rejected
+            .insert(
+                "linked/root/checkpoint",
+                "artifact:backbone",
+                leased.join("model.safetensors"),
+            )
+            .unwrap();
+        rejected
+            .insert(
+                "linked/root/checkpoint",
+                "artifact:descriptor",
+                leased.join("config.json"),
+            )
+            .unwrap();
+        rejected
+            .insert("linked/root/checkpoint", "unplanned", leased.join("extra"))
+            .unwrap();
+        assert!(rejected
+            .resolve_checkpoint("linked/root/checkpoint", &|| Ok(()))
+            .is_err());
+    }
 }
 
 /// The adapter/engine id recorded on assets rendered through the plan-driven route.
@@ -1171,7 +1320,7 @@ pub(super) fn prepare_checkpoint_plan_sources(
     let store = CheckpointPlanStore::open(&settings.data_dir);
     // Integrity: never declined, always fatal. A drifted, missing, or tampered plan must not fall
     // through to a lane that would load the same bytes unverified.
-    let resolved = resolve_checkpoint_plan_with_progress(&store, checkpoint_id)
+    let resolved = resolve_checkpoint_plan_with_progress(&store, checkpoint_id, settings)
         .map_err(checkpoint_plan_refusal)?;
     let family = resolved.family().to_owned();
     // Family truth, in the order a planner needs it: is there an adapter at all, is this backend
@@ -1513,7 +1662,7 @@ pub(crate) fn checkpoint_plan_bespoke_tree(
     }
     let checkpoint_id = checkpoint_id.to_owned();
     let store = CheckpointPlanStore::open(&settings.data_dir);
-    let resolved = resolve_checkpoint_plan_with_progress(&store, &checkpoint_id)
+    let resolved = resolve_checkpoint_plan_with_progress(&store, &checkpoint_id, settings)
         .map_err(checkpoint_plan_refusal)?;
     checkpoint_plan_family_matches(&resolved, &checkpoint_id, family)?;
     let adapter = checkpoint_plan_adapter(family, &checkpoint_id)?;
@@ -1626,7 +1775,7 @@ pub(crate) fn checkpoint_plan_bespoke_roles(
     }
     let checkpoint_id = checkpoint_id.to_owned();
     let store = CheckpointPlanStore::open(&settings.data_dir);
-    let resolved = resolve_checkpoint_plan_with_progress(&store, &checkpoint_id)
+    let resolved = resolve_checkpoint_plan_with_progress(&store, &checkpoint_id, settings)
         .map_err(checkpoint_plan_refusal)?;
     if resolved.family() != family {
         return Err(WorkerError::InvalidPayload(format!(
@@ -1677,7 +1826,7 @@ fn checkpoint_plan_bespoke_primary(
     }
     let checkpoint_id = checkpoint_id.to_owned();
     let store = CheckpointPlanStore::open(&settings.data_dir);
-    let resolved = resolve_checkpoint_plan_with_progress(&store, &checkpoint_id)
+    let resolved = resolve_checkpoint_plan_with_progress(&store, &checkpoint_id, settings)
         .map_err(checkpoint_plan_refusal)?;
     checkpoint_plan_family_matches(&resolved, &checkpoint_id, family)?;
     let adapter = checkpoint_plan_adapter(family, &checkpoint_id)?;

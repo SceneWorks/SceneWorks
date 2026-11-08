@@ -153,6 +153,14 @@ async fn ensure_kolors_ipadapter_weights(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<PathBuf> {
+    if let Some(advanced) = job.payload.get("advanced").and_then(Value::as_object) {
+        if crate::portable_aux_sources::has_bound_aux_paths(advanced) {
+            return crate::portable_aux_sources::bound_aux_path(advanced, "kolors_ip_adapter")
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload("missing bound Kolors IP-Adapter source".to_owned())
+                });
+        }
+    }
     let has_layout = |dir: &Path| {
         dir.join(KOLORS_IPADAPTER_BUNDLE).is_file()
             && dir

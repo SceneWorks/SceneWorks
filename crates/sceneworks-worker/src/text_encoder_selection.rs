@@ -79,7 +79,7 @@ fn source_kind(source: &WeightsSource) -> SourceKind {
     }
 }
 
-fn opaque_id(source: &WeightsSource) -> Result<String, std::io::Error> {
+pub(crate) fn opaque_id(source: &WeightsSource) -> Result<String, std::io::Error> {
     let path = std::path::absolute(crate::weights_source::WeightsSourceExt::path(source))?;
     let kind = match source_kind(source) {
         SourceKind::File => "file",
@@ -300,7 +300,7 @@ fn encoder_route_for_model(model: &Value) -> Option<EncoderRoute> {
     )?;
     Some(EncoderRoute {
         id: descriptor.id.to_owned(),
-        contract: descriptor.encoder_contract?,
+        contract: crate::inference_runtime::media_encoder_contract(descriptor.id)?,
     })
 }
 
@@ -347,6 +347,198 @@ fn candidates_for_model(
     });
     candidates.dedup_by(|left, right| left.id == right.id);
     Ok((route, candidates))
+}
+
+#[cfg(native_lane)]
+fn portable_builtin_seed(model: &Value, installed: Option<&Path>) -> Value {
+    let mut row = serde_json::Map::new();
+    for key in ["id", "family", "importSourceShape", "catalogScope"] {
+        if let Some(value) = model.get(key) {
+            row.insert(key.to_owned(), value.clone());
+        }
+    }
+    if let Some(installed) = installed {
+        row.insert(
+            "installedPath".to_owned(),
+            Value::String(installed.to_string_lossy().into_owned()),
+        );
+    }
+    Value::Object(row)
+}
+
+/// Enumerate only descriptor-compatible registered sources for portable worker advertisements.
+/// The API's opaque option id is based on its own absolute path, so a worker advertises the
+/// exact source ledger instead of trying to reuse that host-local id.
+#[cfg(native_lane)]
+pub(crate) fn portable_registered_source_paths(
+    settings: &Settings,
+) -> Vec<(String, PathBuf, bool)> {
+    let mut catalog = Vec::new();
+    // Live external_base_* rows are assembled only by the API scan and have host-local IDs.
+    // Enroll the corresponding imported descriptor families in the worker's source inventory.
+    for registration in crate::inference_runtime::media().imported_models() {
+        if registration.source == gen_core::ImportedModelSource::ComfyUiTree
+            && registration.operation == gen_core::ImportedModelOperation::Generate
+        {
+            catalog.push(serde_json::json!({
+                "id": format!("external-comfyui:{}", registration.family),
+                "family": registration.family,
+                "catalogScope": "external",
+                "importSourceShape": "comfy_ui_tree",
+            }));
+        }
+    }
+    let library = sceneworks_core::hf_home::model_source_library(&settings.data_dir);
+    let user_manifest = settings.config_dir.join("manifests/user.models.jsonc");
+    if let Ok(raw) = std::fs::read_to_string(user_manifest) {
+        if let Ok(value) =
+            serde_json::from_str::<Value>(&sceneworks_core::jsonc::strip_jsonc_comments(&raw))
+        {
+            for model in value
+                .get("models")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                catalog.push(model.clone());
+                for (_, raw) in crate::portable_source_claims::registered_model_locators(model) {
+                    if let Ok(path) = crate::paths::normalize_app_managed_model_entry_path(
+                        settings,
+                        &raw,
+                        "registered text encoder source",
+                    ) {
+                        catalog.push(portable_builtin_seed(model, Some(&path)));
+                    }
+                }
+                for variant in model
+                    .get("variants")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(raw) = variant.get("installedPath").and_then(Value::as_str) {
+                        if let Ok(path) = crate::paths::normalize_app_managed_model_entry_path(
+                            settings,
+                            Path::new(raw),
+                            "registered text encoder variant",
+                        ) {
+                            catalog.push(portable_builtin_seed(model, Some(&path)));
+                        }
+                    }
+                }
+                for download in model
+                    .get("downloads")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    let (Some(repo), Some(revision)) = (
+                        download.get("repo").and_then(Value::as_str),
+                        download.get("revision").and_then(Value::as_str),
+                    ) else {
+                        continue;
+                    };
+                    if let Ok((_, snapshot)) = library.discover_snapshot(repo, Some(revision)) {
+                        let variant = download
+                            .get("variant")
+                            .and_then(Value::as_str)
+                            .unwrap_or("default");
+                        let selected = if snapshot.join(variant).is_dir() {
+                            snapshot.join(variant)
+                        } else {
+                            snapshot
+                        };
+                        catalog.push(portable_builtin_seed(model, Some(&selected)));
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(manifest) =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+    {
+        for model in manifest
+            .get("models")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(id) = model.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            catalog.push(portable_builtin_seed(model, None));
+            for root in ["mlx", "candle"] {
+                let installed = settings.data_dir.join("models").join(root).join(id);
+                if installed.exists() {
+                    catalog.push(portable_builtin_seed(model, Some(&installed)));
+                }
+            }
+            for download in model
+                .get("downloads")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let (Some(repo), Some(revision)) = (
+                    download.get("repo").and_then(Value::as_str),
+                    download.get("revision").and_then(Value::as_str),
+                ) else {
+                    continue;
+                };
+                let Ok((_, snapshot)) = library.discover_snapshot(repo, Some(revision)) else {
+                    continue;
+                };
+                let variant = download
+                    .get("variant")
+                    .and_then(Value::as_str)
+                    .unwrap_or("default");
+                let selected = if snapshot.join(variant).is_dir() {
+                    snapshot.join(variant)
+                } else {
+                    snapshot
+                };
+                catalog.push(portable_builtin_seed(model, Some(&selected)));
+            }
+        }
+    }
+    let roots = allowed_roots(&settings.data_dir, &settings.external_model_roots);
+    let routes = catalog
+        .iter()
+        .filter_map(|model| {
+            Some((
+                model.get("id")?.as_str()?.to_owned(),
+                encoder_route_for_model(model)?,
+            ))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut result = Vec::new();
+    for (_, (source, _)) in
+        collect_sources(&catalog, &settings.data_dir, &settings.external_model_roots)
+    {
+        for (model_id, route) in &routes {
+            if route
+                .contract
+                .validate_source_for_discovery(&source, &roots)
+                .is_ok()
+            {
+                result.push((
+                    model_id.clone(),
+                    crate::weights_source::WeightsSourceExt::path(&source).to_path_buf(),
+                    matches!(source, WeightsSource::File(_)),
+                ));
+            }
+        }
+    }
+    result.sort();
+    result.dedup();
+    result
+}
+
+#[cfg(not(native_lane))]
+pub(crate) fn portable_registered_source_paths(
+    _settings: &crate::Settings,
+) -> Vec<(String, PathBuf, bool)> {
+    Vec::new()
 }
 
 /// Build path-free runtime choices for one catalog model.

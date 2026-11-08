@@ -404,7 +404,8 @@ pub(super) fn krea_control_payload_overlay_path(
 }
 
 /// Resolve the control-branch overlay checkpoint the `Krea2Control` provider loads, downloading on first
-/// use. Order (most specific wins): the `SCENEWORKS_CONTROLNET_KREA` env (validation / bring-your-own) → an
+/// use. Order (most specific wins): the verified portable strict-control path, then the
+/// `SCENEWORKS_CONTROLNET_KREA` env (validation / bring-your-own) → an
 /// `advanced.controlWeights.path` (a studio-trained or registered LOCAL overlay the API resolved,
 /// B4/sc-10165) → an `advanced.controlWeights.{repo,filename}` hosted override / the default published
 /// overlay repo (`SceneWorks/krea2-pose-controlnet-beta`, sc-8466), fetched into the app cache. The
@@ -416,12 +417,12 @@ async fn ensure_krea_control_weights(
     job: &JobSnapshot,
     request: &ImageRequest,
 ) -> WorkerResult<PathBuf> {
-    // 1. Env override — a local overlay `.safetensors` (validation against the spike, bring-your-own).
-    if let Ok(p) = std::env::var(KREA_CONTROL_WEIGHTS_ENV) {
-        let p = PathBuf::from(p.trim());
-        if p.is_file() {
-            return Ok(p);
-        }
+    let env_override = std::env::var(KREA_CONTROL_WEIGHTS_ENV).ok();
+    if let Some(path) = crate::portable_aux_sources::selected_krea_control_override(
+        &request.advanced,
+        env_override.as_deref(),
+    )? {
+        return Ok(path);
     }
     // 2. A LOCAL overlay path the API resolved from a studio-trained / registered overlay selection
     //    (B4/sc-10165 `resolve_control_overlay_selection` writes `advanced.controlWeights.path`),

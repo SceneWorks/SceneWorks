@@ -419,19 +419,7 @@ impl NativeStarVectorProvider {
                 "selected StarVector model does not bind exact {backend} provider {inference_provider_id}"
             )));
         }
-        let weights_dir = crate::model_jobs::huggingface_receipt_weights_dir_at_revision(
-            &settings.data_dir,
-            identity.repository,
-            identity.revision,
-            Some(identity.model_id),
-            Some("default"),
-        )
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "vector_model_unavailable: exact receipt-backed snapshot {}@{} is missing or unproven",
-                identity.repository, identity.revision
-            ))
-        })?;
+        let weights_dir = starvector_trusted_weights_dir(settings, identity)?;
         Ok(Self {
             identity: *identity,
             backend,
@@ -441,6 +429,30 @@ impl NativeStarVectorProvider {
             kv_cache: Arc::new(Mutex::new(None)),
         })
     }
+}
+
+fn starvector_trusted_weights_dir(
+    settings: &Settings,
+    identity: &StarVectorModelIdentity,
+) -> WorkerResult<PathBuf> {
+    settings
+        .verified_revision_source(identity.model_id, identity.repository, identity.revision)
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            crate::model_jobs::huggingface_receipt_weights_dir_at_revision(
+                &settings.data_dir,
+                identity.repository,
+                identity.revision,
+                Some(identity.model_id),
+                Some("default"),
+            )
+        })
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "vector_model_unavailable: exact receipt-backed or verified portable snapshot {}@{} is missing or unproven",
+                identity.repository, identity.revision
+            ))
+        })
 }
 
 impl MultimodalVectorProviderAdapter for NativeStarVectorProvider {

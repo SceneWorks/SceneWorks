@@ -54,6 +54,7 @@ png = { workspace = true }
 # embeddings (epic 6529 §6.3). Pinned to the workspace's existing 0.10 line (worker + desktop)
 # so no new locked version appears.
 sha2 = { workspace = true }
+uuid = { workspace = true }
 subtle = { workspace = true }
 # Fallible no-clobber TempPath adapter requires tempfile3.27 at runtime.
 tempfile = { workspace = true }

@@ -8,6 +8,8 @@ pub(crate) mod candle;
 pub(crate) mod catalog;
 pub(crate) mod gaps;
 pub(crate) mod mlx;
+mod portable;
+pub use portable::native_route_claims_request;
 
 #[cfg(test)]
 mod typed_registry_contract_tests;

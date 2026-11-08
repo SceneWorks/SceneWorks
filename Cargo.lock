@@ -7188,6 +7188,7 @@ dependencies = [
  "tracing-subscriber",
  "trash",
  "url",
+ "uuid",
  "winapi-util",
 ]
 
