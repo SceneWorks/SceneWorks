@@ -200,6 +200,23 @@ pub(crate) fn fixed_runtime_model_ids(
     }
 }
 
+/// Iris task training loads the task export named by the server-resolved training target.
+/// Its catalog source rides in an auxiliary carrier because the plan owns the primary model.
+pub(crate) fn iris_training_task_source_id<'a>(
+    job_type: &JobType,
+    payload: &'a JsonObject,
+) -> Option<&'a str> {
+    if *job_type != JobType::LoraTrain {
+        return None;
+    }
+    let target = payload.get("plan")?.get("target")?;
+    if target.get("kernel")?.as_str()? != "iris_train" {
+        return None;
+    }
+    let base_model = target.get("baseModel")?.as_str()?;
+    (payload.get("baseModel")?.as_str()? == base_model).then_some(base_model)
+}
+
 fn payload_has_model_entry(payload: &JsonObject, model_id: &str) -> bool {
     payload_model_entries(payload)
         .into_iter()
@@ -319,7 +336,13 @@ pub(crate) async fn ensure_runtime_model_sources(
     let fixed_ids = fixed_runtime_model_ids(job_type, payload);
     // Fixed runtime sources belong to the server's catalog. A request may carry a same-id
     // manifest from an older client, but its source metadata must never replace that catalog row.
-    discard_client_fixed_source_carriers(payload, &fixed_ids);
+    let task_source = iris_training_task_source_id(job_type, payload).map(str::to_owned);
+    let selected_source_ids = fixed_ids
+        .iter()
+        .copied()
+        .chain(task_source.as_deref())
+        .collect::<Vec<_>>();
+    discard_client_fixed_source_carriers(payload, &selected_source_ids);
     let primary_id = if canonical_primary {
         fixed_ids.first().map(|id| (*id).to_owned()).or_else(|| {
             payload_reference_spec(job_type)

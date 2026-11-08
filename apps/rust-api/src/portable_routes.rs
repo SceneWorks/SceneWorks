@@ -1077,6 +1077,7 @@ fn entries_support_route(
                 && entry.get("adapter").and_then(Value::as_str) == Some("prompt-refine"))
             && !(*job_type != JobType::PromptRefine
                 && crate::model_sources::fixed_runtime_model_ids(job_type, payload).contains(&id))
+            && crate::model_sources::iris_training_task_source_id(job_type, payload) != Some(id)
         {
             return false;
         }
@@ -1676,6 +1677,54 @@ mod tests {
             &JobType::ImageUpscale,
             &seedvr2,
             &[("modelManifestEntries/0".to_owned(), &fixed)],
+            "mlx",
+            "macos"
+        ));
+    }
+
+    #[test]
+    fn iris_training_task_array_source_requires_the_selected_plan_role() {
+        let depth = Value::Object(
+            sceneworks_core::builtin_manifests::builtin_model_entry("iris_3b_depth")
+                .expect("the Iris depth task export is shipped")
+                .clone(),
+        );
+        let entry = [("modelManifestEntries/0".to_owned(), &depth)];
+        let selected = json!({
+            "baseModel":"iris_3b_depth",
+            "plan":{"target":{"kernel":"iris_train","baseModel":"iris_3b_depth"}}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        assert!(entries_support_route(
+            &JobType::LoraTrain,
+            &selected,
+            &entry,
+            "mlx",
+            "macos"
+        ));
+        for rejected in [
+            json!({"baseModel":"iris_3b_restore","plan":{"target":{"kernel":"iris_train","baseModel":"iris_3b_depth"}}}),
+            json!({"baseModel":"iris_3b_depth","plan":{"target":{"kernel":"flux_lora","baseModel":"iris_3b_depth"}}}),
+            json!({"baseModel":"iris_3b_depth","plan":{"target":{"kernel":"iris_train","baseModel":"iris_3b_restore"}}}),
+        ] {
+            assert!(!entries_support_route(
+                &JobType::LoraTrain,
+                rejected.as_object().unwrap(),
+                &entry,
+                "mlx",
+                "macos"
+            ));
+        }
+        let foreign = json!({"id":"person_detector","type":"utility",
+            "downloads":[{"provider":"huggingface","repo":"example/foreign",
+                "revision":"0123456789012345678901234567890123456789",
+                "files":["model.onnx"]}]});
+        assert!(!entries_support_route(
+            &JobType::LoraTrain,
+            &selected,
+            &[("modelManifestEntries/0".to_owned(), &foreign)],
             "mlx",
             "macos"
         ));
