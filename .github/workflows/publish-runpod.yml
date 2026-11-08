@@ -1,7 +1,7 @@
 name: Publish RunPod image
 
 # A release build compiles every candle CUDA provider and can consume most of a
-# hosted runner's 120-minute budget. Keep this lane off pull requests and branch
+# hosted runner's release budget. Keep this lane off pull requests and branch
 # pushes; the normal Check workflow provides PR-time scaffold/parity coverage.
 on:
   push:
@@ -29,7 +29,7 @@ env:
 jobs:
   publish:
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -167,7 +167,9 @@ jobs:
           tags: ${{ env.IMAGE_NAME }}:staging-${{ github.run_id }}-${{ github.run_attempt }}
           labels: ${{ steps.metadata.outputs.labels }}
           cache-from: type=gha,scope=runpod-amd64
-          cache-to: type=gha,mode=max,scope=runpod-amd64
+          # A tag-scoped cache cannot seed the next release tag. Export only the
+          # final image layers so cache upload cannot consume the smoke-test window.
+          cache-to: type=gha,mode=min,scope=runpod-amd64
       - name: Pull and verify immutable staged RunPod image
         id: verify_staging
         env:

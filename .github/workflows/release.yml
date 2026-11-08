@@ -249,7 +249,7 @@ jobs:
     # Guardrail below GitHub's 6-hour default (sc-10420, sc-13603). The hosted
     # release runner has no warm cache: the 0.11.0 cold Candle/CUDA installer
     # build was still compiling when the former 90-minute job limit cancelled it.
-    timeout-minutes: 150
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
