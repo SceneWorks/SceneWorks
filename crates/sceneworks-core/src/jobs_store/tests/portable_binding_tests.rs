@@ -119,28 +119,139 @@ fn claim_requires_one_worker_with_primary_digest_and_auxiliary_claim() {
         .unwrap();
     let connection = store.open_connection().unwrap();
     let route = Some(("cpu", std::env::consts::OS));
-    assert!(!candidate_matches_portable_worker_sources(&connection, &job.id, route, &[]).unwrap());
+    assert!(
+        !candidate_matches_portable_worker_sources(&connection, &job.id, route, &[], false)
+            .unwrap()
+    );
     assert!(!candidate_matches_portable_worker_sources(
         &connection,
         &job.id,
         route,
-        std::slice::from_ref(&digest_claim)
+        std::slice::from_ref(&digest_claim),
+        false,
     )
     .unwrap());
     assert!(!candidate_matches_portable_worker_sources(
         &connection,
         &job.id,
         route,
-        std::slice::from_ref(&auxiliary_claim)
+        std::slice::from_ref(&auxiliary_claim),
+        false,
     )
     .unwrap());
     assert!(candidate_matches_portable_worker_sources(
         &connection,
         &job.id,
         route,
-        &[digest_claim, auxiliary_claim]
+        &[digest_claim, auxiliary_claim],
+        false,
     )
     .unwrap());
+}
+
+#[test]
+fn local_utility_digest_requires_keyed_worker_even_when_raw_kind_is_missing_or_spoofed() {
+    use crate::model_artifacts::portable_binding::{
+        portable_closure_sha256, registered_digest_member_claim_id,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let store = JobsStore::new(temp.path().join("jobs.db"));
+    store.initialize().unwrap();
+    let original: PortableJobBinding = serde_json::from_value(binding()).unwrap();
+    let mut routes = original.routes.clone();
+    let route = routes.values_mut().next().unwrap();
+    let model = &mut route.models[0];
+    model.slot = "modelManifestEntries/0".into();
+    model.members[0].source = PortableSourceIdentity::Digest {
+        sha256: portable_closure_sha256(&model.members[0].files).unwrap(),
+    };
+    let mut create = request();
+    create.job_type = JobType::DatasetAnalysis;
+    create
+        .payload
+        .insert("modelManifestEntries".into(), json!([{"id":"example"}]));
+    create
+        .payload
+        .insert("modelNameOrPath".into(), json!("/managed/selected"));
+    let claim = PortableSourceClaim::new(
+        registered_digest_member_claim_id(model, &model.members[0], &json!(create.payload))
+            .unwrap(),
+        PortableSourceProvenance::OperatorOverride,
+        model.members[0].files.clone(),
+    )
+    .unwrap();
+    let mut mlx_model = model.clone();
+    mlx_model.backend = "mlx".into();
+    let mlx_route =
+        PortableRouteBinding::new("mlx", std::env::consts::OS, vec![mlx_model]).unwrap();
+    routes.insert(mlx_route.key(), mlx_route);
+    let frozen =
+        serde_json::to_value(PortableJobBinding::new(original.authored_options, routes).unwrap())
+            .unwrap();
+    let job = store
+        .create_job_with_portable_binding(create, None, None, Some(&frozen))
+        .unwrap();
+    for worker_id in ["unkeyed", "keyed"] {
+        store
+            .register_worker_with_portable_sources(
+                RegisterWorker {
+                    worker_id: worker_id.into(),
+                    gpu_id: "cpu".into(),
+                    gpu_name: None,
+                    capabilities: vec![crate::contracts::WorkerCapability::DatasetAnalysis],
+                    loaded_models: Vec::new(),
+                    utilization: None,
+                },
+                Some(std::env::consts::OS),
+                Some(std::slice::from_ref(&claim)),
+            )
+            .unwrap();
+    }
+    store
+        .register_worker_with_portable_sources(
+            RegisterWorker {
+                worker_id: "mlx-alternative".into(),
+                gpu_id: "mlx".into(),
+                gpu_name: None,
+                capabilities: vec![crate::contracts::WorkerCapability::DatasetAnalysis],
+                loaded_models: Vec::new(),
+                utilization: None,
+            },
+            Some(std::env::consts::OS),
+            Some(std::slice::from_ref(&claim)),
+        )
+        .unwrap();
+    let connection = store.open_connection().unwrap();
+    let route = Some(("cpu", std::env::consts::OS));
+    assert!(!candidate_matches_portable_worker_sources(
+        &connection,
+        &job.id,
+        route,
+        std::slice::from_ref(&claim),
+        false,
+    )
+    .unwrap());
+    assert!(candidate_matches_portable_worker_sources(
+        &connection,
+        &job.id,
+        route,
+        std::slice::from_ref(&claim),
+        true,
+    )
+    .unwrap());
+    let unkeyed = store.get_worker("unkeyed").unwrap();
+    let keyed = store.get_worker("keyed").unwrap();
+    assert!(!portable_worker_can_claim_job(&connection, &job, &unkeyed).unwrap());
+    store
+        .set_worker_source_proof_authenticated("keyed", true)
+        .unwrap();
+    assert!(portable_worker_can_claim_job(&connection, &job, &keyed).unwrap());
+    assert!(!portable_mlx_worker_can_claim(&connection, &job, &keyed, true).unwrap());
+    store
+        .set_worker_source_proof_authenticated("mlx-alternative", true)
+        .unwrap();
+    assert!(portable_mlx_worker_can_claim(&connection, &job, &keyed, true).unwrap());
 }
 
 #[test]

@@ -365,7 +365,7 @@ pub(crate) async fn ensure_runtime_model_sources(
         };
         payload.remove("modelManifestEntry");
         payload.insert("modelManifestEntries".to_owned(), json!([entry]));
-        return preflight_payload_model_sources(state, payload).await;
+        return preflight_payload_model_sources(state, job_type, payload).await;
     }
 
     let canonical_primary = canonical_utility_model_carrier(job_type);
@@ -427,7 +427,18 @@ pub(crate) async fn ensure_runtime_model_sources(
             continue;
         };
         if is_repository {
-            repositories.push(value.to_owned());
+            if *job_type == JobType::TrainingCaption
+                && key == "modelNameOrPath"
+                && (!looks_like_huggingface_repository(value)
+                    || app_managed_utility_path_exists(&state.settings.data_dir, value))
+            {
+                // The captioner may load an app-managed local snapshot. Its executable family
+                // remains the server-owned JoyCaption catalog entry; admission binds the selected
+                // local bytes in place of that entry's publisher primary.
+                ids.push("joycaption_beta_one".to_owned());
+            } else {
+                repositories.push(value.to_owned());
+            }
         } else if !has_primary_carrier {
             ids.push(value.to_owned());
         }
@@ -477,7 +488,33 @@ pub(crate) async fn ensure_runtime_model_sources(
         payload.insert("modelManifestEntry".to_owned(), entry);
     }
 
-    preflight_payload_model_sources(state, payload).await
+    preflight_payload_model_sources(state, job_type, payload).await
+}
+
+pub(crate) fn looks_like_huggingface_repository(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty() || value.contains('\\') || Path::new(value).is_absolute() {
+        return false;
+    }
+    let mut parts = value.split('/');
+    let (Some(owner), Some(repository), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    !owner.is_empty()
+        && !repository.is_empty()
+        && ![owner, repository]
+            .iter()
+            .any(|part| *part == "." || *part == "..")
+}
+
+pub(crate) fn app_managed_utility_path_exists(data_dir: &Path, selection: &str) -> bool {
+    let path = Path::new(selection);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        data_dir.join(path)
+    };
+    path.is_dir()
 }
 
 /// Arbitrary-repository LTX conversions still load the pinned Gemma bundle after promotion.
@@ -770,9 +807,17 @@ fn refresh_live_external_availability_blocking(
 /// model's durable install identity proves it lives on an unavailable external library.
 async fn preflight_payload_model_sources(
     state: &AppState,
+    job_type: &JobType,
     payload: &JsonObject,
 ) -> Result<(), ApiError> {
     let requested_variant = requested_runtime_variant(payload);
+    let local_utility_selection = matches!(
+        job_type,
+        JobType::DatasetAnalysis | JobType::TrainingCaption
+    )
+    .then(|| payload.get("modelNameOrPath").and_then(Value::as_str))
+    .flatten()
+    .filter(|selection| !selection.trim().is_empty());
     let entries = payload_model_entries(payload)
         .into_iter()
         .filter(|entry| {
@@ -781,7 +826,31 @@ async fn preflight_payload_model_sources(
                 .and_then(Value::as_array)
                 .is_some_and(|downloads| !downloads.is_empty())
         })
-        .cloned()
+        .map(|entry| {
+            let mut entry = entry.clone();
+            if let Some(selection) = local_utility_selection.filter(|_| {
+                payload.get("modelManifestEntries").and_then(Value::as_array)
+                    .and_then(|entries| entries.first()) == Some(&entry)
+            }) {
+                let publisher_selected = !app_managed_utility_path_exists(&state.settings.data_dir, selection)
+                    && entry.get("downloads").and_then(Value::as_array)
+                    .is_some_and(|downloads| downloads.iter().any(|download| {
+                        !sceneworks_core::model_artifacts::artifact_selection::is_co_requisite_download(download)
+                            && download.get("repo").and_then(Value::as_str) == Some(selection)
+                    }));
+                if !publisher_selected {
+                    if let Some(downloads) = entry.get_mut("downloads").and_then(Value::as_array_mut) {
+                        downloads.retain(sceneworks_core::model_artifacts::artifact_selection::is_co_requisite_download);
+                    }
+                    if let Some(object) = entry.as_object_mut() {
+                        object.remove("modelAvailability");
+                        object.remove("modelResolution");
+                    }
+                }
+            }
+            entry
+        })
+        .filter(|entry| entry.get("downloads").and_then(Value::as_array).is_some_and(|downloads| !downloads.is_empty()))
         .collect::<Vec<_>>();
     if entries.is_empty() {
         return Ok(());
@@ -834,6 +903,21 @@ mod tests {
     use std::path::PathBuf;
 
     const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    #[test]
+    fn repository_shaped_local_utility_path_is_still_a_local_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("different/tree")).unwrap();
+        assert!(looks_like_huggingface_repository("different/tree"));
+        assert!(app_managed_utility_path_exists(
+            temp.path(),
+            "different/tree"
+        ));
+        assert!(!app_managed_utility_path_exists(
+            temp.path(),
+            "different/absent"
+        ));
+    }
 
     #[test]
     fn fixed_runtime_sources_discard_same_id_client_carriers_before_catalog_resolution() {

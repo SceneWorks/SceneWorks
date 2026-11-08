@@ -205,8 +205,8 @@ use jobs::{
 mod workers;
 use workers::{
     heartbeat_worker, host_capabilities, list_workers, mac_capability_support,
-    person_capability_readiness, queue_summary, register_worker, request_worker_restart,
-    worker_terminated,
+    person_capability_readiness, portable_source_challenges, publish_portable_source_proof,
+    queue_summary, register_worker, request_worker_restart, worker_terminated,
 };
 mod events;
 use events::{create_event_ticket, job_events, EventHub, EventMessage};
@@ -1362,6 +1362,8 @@ fn create_app_with_state_mode(
             JobsStore::new(&settings.jobs_db_path).with_session_started_at(now_unix_seconds()),
         );
         jobs_store.initialize()?;
+        // Authentication evidence belongs to this API process, not to a durable worker row.
+        jobs_store.clear_worker_source_proof_authentication()?;
         let purged_terminal_jobs =
             jobs_store.purge_terminal_jobs_older_than(settings.jobs_retention_days)?;
         tracing::info!(
@@ -1450,10 +1452,20 @@ fn create_app_with_state_mode(
         settings.port,
         &configured_hosts,
     ));
+    let portable_worker_proof_master = sceneworks_core::worker_proof::load_or_create_master(
+        &settings.credentials_dir,
+    )
+    .map_err(|error| {
+        JobsStoreError::InvalidStatus(format!("worker proof initialization failed: {error}"))
+    })?;
     let state = AppState {
         allowed_hosts,
         settings,
         jobs_store,
+        portable_source_challenges: Arc::new(Mutex::new(HashMap::new())),
+        portable_worker_proof_master: Arc::new(portable_worker_proof_master),
+        authenticated_worker_claims: Arc::new(AsyncMutex::new(HashMap::new())),
+        portable_source_probe_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         project_store,
         events: Arc::new(EventHub::default()),
         queue_snapshot_lock: Arc::new(AsyncMutex::new(())),

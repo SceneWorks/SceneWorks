@@ -182,6 +182,16 @@ pub(crate) async fn claim_job(
     State(state): State<AppState>,
     ApiJson(payload): ApiJson<ClaimRequest>,
 ) -> Result<Json<ClaimResponse>, ApiError> {
+    let keyed = crate::workers::presented_worker_proof(&state, &payload.worker_id, &payload.extra)?;
+    if state
+        .authenticated_worker_claims
+        .lock()
+        .await
+        .contains_key(&payload.worker_id)
+        && !keyed
+    {
+        return Err(ApiError::bad_request("Worker source proof is required"));
+    }
     let mlx_required = state.settings.mlx_required;
     let enforce_unsupported = state.settings.mlx_enforce_unsupported;
     let candle_required = state.settings.candle_required;
@@ -216,12 +226,13 @@ pub(crate) async fn claim_job(
             // paths that never pass through that route.
             let platform_unreachable = store.fail_platform_unreachable_jobs(&host_os)?;
             let (job, decision, portable_binding) = store
-                .claim_next_job_routed_with_portable_binding(
+                .claim_next_job_routed_with_portable_binding_authenticated(
                     &payload.worker_id,
                     mlx_required,
                     payload.portable_model_binding_version.unwrap_or(0),
                     payload.portable_backend.as_deref(),
                     payload.portable_platform.as_deref(),
+                    keyed,
                 )?;
             Ok::<_, JobsStoreError>((
                 job,

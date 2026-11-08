@@ -49,6 +49,46 @@ use tokio::time::MissedTickBehavior;
 use tracing::Level;
 use uuid::Uuid;
 
+fn portable_challenge_capability(settings: &Settings) -> Option<String> {
+    sceneworks_core::worker_proof::worker_key_from_env_or_file(
+        &settings.config_dir,
+        &settings.worker_id,
+    )
+    .ok()
+    .flatten()
+}
+
+fn portable_worker_proof_extra(settings: &Settings) -> BTreeMap<String, Value> {
+    let mut extra = BTreeMap::new();
+    if let Some(key) = portable_challenge_capability(settings) {
+        extra.insert("portableProofKey".to_owned(), Value::String(key));
+    }
+    extra
+}
+
+async fn poll_portable_source_challenges(api: &ApiClient, settings: &Settings) {
+    let Some(capability) = portable_challenge_capability(settings) else {
+        return;
+    };
+    let outcome: WorkerResult<Vec<portable_source_claims::PortableSourceChallenge>> = api
+        .post_json(
+            &format!(
+                "/api/v1/workers/{}/portable-source-challenges",
+                settings.worker_id
+            ),
+            &json!({"capability": capability}),
+        )
+        .await;
+    if let Ok(challenges) = outcome {
+        portable_source_claims::start_app_managed_challenges(
+            api.clone(),
+            settings.clone(),
+            challenges,
+            capability,
+        );
+    }
+}
+
 /// Resolve the same trusted receipt-backed immutable snapshot used by native generation.
 /// May baseline an unstamped, fully identified v2 source receipt; never mints a download receipt
 /// from an arbitrary cache directory, and never repairs an existing corrupt tree stamp.
@@ -1884,6 +1924,10 @@ async fn poll_once(
     if settings.gpu_id == "mlx" {
         generator_cache::sync_gpu_memory_limit(&settings.config_dir);
     }
+    // A local utility selection can be outside every registered catalog. Only the API knows
+    // which exact closure a pending request needs, so prove private path-free challenges before
+    // the next claim. Hashing runs off the poller's async executor.
+    poll_portable_source_challenges(api, settings).await;
     if idle_heartbeat.should_send() {
         // sc-16260: an unusable GPU reports `unhealthy` + the host-side remedy here instead of
         // `idle`. It keeps heartbeating on the same cadence — the process IS alive, it must stay
@@ -1918,7 +1962,7 @@ async fn poll_once(
                 portable_model_binding_version: Some(PORTABLE_MODEL_BINDING_VERSION),
                 portable_backend: Some(portable_runtime_backend(settings).to_owned()),
                 portable_platform: Some(std::env::consts::OS.to_owned()),
-                extra: BTreeMap::new(),
+                extra: portable_worker_proof_extra(settings),
             },
         )
         .await?;
@@ -1970,7 +2014,7 @@ async fn register_worker(
             capabilities: worker_capabilities(gpu),
             loaded_models: Vec::new(),
             utilization: gpu.utilization.clone(),
-            extra: BTreeMap::new(),
+            extra: portable_worker_proof_extra(settings),
         },
     )
     .await
@@ -2008,6 +2052,9 @@ pub(crate) async fn heartbeat_with_reason(
     current_job_id: Option<&str>,
     status_reason: Option<String>,
 ) -> WorkerResult<()> {
+    // Busy workers keep heartbeating while a job runs; probe in the background so their local
+    // app-managed bytes can authorize a new queued request without waiting for that job to end.
+    poll_portable_source_challenges(api, settings).await;
     // Capture the label before `status` is moved into the request, for the log line.
     let status_label = status.as_str().to_owned();
     portable_source_claims::refresh_background_inventory(settings.clone());
@@ -2022,7 +2069,7 @@ pub(crate) async fn heartbeat_with_reason(
                 utilization: gpu_utilization(&settings.gpu_id).await,
                 status_reason,
                 portable_source_claims: portable_claims.as_ref().map(|(_, claims)| claims.clone()),
-                extra: BTreeMap::new(),
+                extra: portable_worker_proof_extra(settings),
             },
         )
         .await;

@@ -723,6 +723,12 @@ impl JobsStore {
             "portable_source_claims_json",
             "text",
         )?;
+        ensure_column(
+            &transaction,
+            "workers",
+            "source_proof_authenticated",
+            "integer not null default 0",
+        )?;
         // Unknown historical provenance is NULL, not a reconstruction from today's catalog.
         // Only the API's validated-plan handoff may freeze this write-once column.
         ensure_column(&transaction, "jobs", "model_provenance_json", "text")?;
@@ -2523,8 +2529,9 @@ impl JobsStore {
             insert into workers (
               id, gpu_id, gpu_name, status, current_job_id, capabilities_json,
               loaded_models_json, utilization_json, platform, portable_source_claims_json,
+              source_proof_authenticated,
               registered_at, last_seen_at
-            ) values (?1, ?2, ?3, 'idle', null, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+            ) values (?1, ?2, ?3, 'idle', null, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?9)
             on conflict(id) do update set
               gpu_id = excluded.gpu_id,
               gpu_name = excluded.gpu_name,
@@ -2541,6 +2548,7 @@ impl JobsStore {
               utilization_json = excluded.utilization_json,
               platform = excluded.platform,
               portable_source_claims_json = excluded.portable_source_claims_json,
+              source_proof_authenticated = 0,
               last_seen_at = excluded.last_seen_at
             ",
             params![
@@ -2558,6 +2566,29 @@ impl JobsStore {
         let worker = self.get_worker_on_connection(&transaction, &request.worker_id)?;
         transaction.commit()?;
         Ok(worker)
+    }
+
+    /// This flag is process-local authentication evidence for routing decisions, never a worker
+    /// assertion. The API clears it on startup and sets it only after verifying the derived key.
+    pub fn set_worker_source_proof_authenticated(
+        &self,
+        worker_id: &str,
+        authenticated: bool,
+    ) -> JobsStoreResult<()> {
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
+        connection.execute(
+            "update workers set source_proof_authenticated = ?2 where id = ?1",
+            params![worker_id, i64::from(authenticated)],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_worker_source_proof_authentication(&self) -> JobsStoreResult<()> {
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
+        connection.execute("update workers set source_proof_authenticated = 0", [])?;
+        Ok(())
     }
 
     pub fn heartbeat_worker(
@@ -2695,13 +2726,17 @@ impl JobsStore {
         requested_gpu: &str,
         worker_timeout_seconds: u64,
     ) -> JobsStoreResult<Vec<Vec<PortableSourceClaim>>> {
-        self.portable_source_claim_sets_for_route_with_facts(
-            backend,
-            platform,
-            requested_gpu,
-            worker_timeout_seconds,
-            None,
-        )
+        Ok(self
+            .portable_source_claim_sets_for_route_with_facts(
+                backend,
+                platform,
+                requested_gpu,
+                worker_timeout_seconds,
+                None,
+            )?
+            .into_iter()
+            .map(|(_, claims)| claims)
+            .collect())
     }
 
     /// Replay availability must use the same capability and payload gates as claim selection.
@@ -2714,6 +2749,31 @@ impl JobsStore {
         job_type: &JobType,
         payload: &Map<String, Value>,
     ) -> JobsStoreResult<Vec<Vec<PortableSourceClaim>>> {
+        let facts = ClaimRoutingFacts::from_parts(job_type, payload);
+        Ok(self
+            .portable_source_claim_sets_for_route_with_facts(
+                backend,
+                platform,
+                requested_gpu,
+                worker_timeout_seconds,
+                Some(&facts),
+            )?
+            .into_iter()
+            .map(|(_, claims)| claims)
+            .collect())
+    }
+
+    /// Preserve worker identity for request-time proof, preventing claims from two hosts from
+    /// jointly satisfying a model closure.
+    pub fn portable_source_claim_sets_for_job_route_with_ids(
+        &self,
+        backend: &str,
+        platform: &str,
+        requested_gpu: &str,
+        worker_timeout_seconds: u64,
+        job_type: &JobType,
+        payload: &Map<String, Value>,
+    ) -> JobsStoreResult<Vec<(String, Vec<PortableSourceClaim>)>> {
         let facts = ClaimRoutingFacts::from_parts(job_type, payload);
         self.portable_source_claim_sets_for_route_with_facts(
             backend,
@@ -2731,7 +2791,7 @@ impl JobsStore {
         requested_gpu: &str,
         worker_timeout_seconds: u64,
         facts: Option<&ClaimRoutingFacts>,
-    ) -> JobsStoreResult<Vec<Vec<PortableSourceClaim>>> {
+    ) -> JobsStoreResult<Vec<(String, Vec<PortableSourceClaim>)>> {
         let connection = self.open_connection()?;
         let cutoff = format_unix_seconds(
             now_unix_seconds().saturating_sub(worker_timeout_seconds.min(i64::MAX as u64) as i64),
@@ -2765,7 +2825,7 @@ impl JobsStore {
                 let worker_claims: Vec<PortableSourceClaim> = serde_json::from_str(&raw)?;
                 validate_portable_source_claims(&worker_claims)
                     .map_err(|error| JobsStoreError::InvalidStatus(error.to_string()))?;
-                claims.push(worker_claims);
+                claims.push((worker.id, worker_claims));
             }
         }
         Ok(claims)
@@ -3330,6 +3390,25 @@ impl JobsStore {
         portable_backend: Option<&str>,
         portable_platform: Option<&str>,
     ) -> JobsStoreResult<(Option<JobSnapshot>, Option<RouteDecision>, Option<Value>)> {
+        self.claim_next_job_routed_with_portable_binding_authenticated(
+            worker_id,
+            mlx_required,
+            portable_binding_version,
+            portable_backend,
+            portable_platform,
+            false,
+        )
+    }
+
+    pub fn claim_next_job_routed_with_portable_binding_authenticated(
+        &self,
+        worker_id: &str,
+        mlx_required: bool,
+        portable_binding_version: u32,
+        portable_backend: Option<&str>,
+        portable_platform: Option<&str>,
+        authenticated_for_dynamic_source: bool,
+    ) -> JobsStoreResult<(Option<JobSnapshot>, Option<RouteDecision>, Option<Value>)> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         // BEGIN IMMEDIATE: take the write lock up front. The claim reads the worker, the
@@ -3452,6 +3531,7 @@ impl JobsStore {
             &mut hydration,
             portable_backend.zip(portable_platform),
             &worker_claims,
+            authenticated_for_dynamic_source,
         ) {
             Ok(queued) => queued,
             Err(error) => {
@@ -5344,10 +5424,10 @@ fn portable_worker_can_claim_job(
     {
         return Ok(false);
     }
-    let claims_raw: Option<String> = connection.query_row(
-        "select portable_source_claims_json from workers where id = ?1",
+    let (claims_raw, authenticated): (Option<String>, bool) = connection.query_row(
+        "select portable_source_claims_json, source_proof_authenticated from workers where id = ?1",
         params![worker.id],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0)),
     )?;
     let claims: Vec<PortableSourceClaim> = claims_raw
         .as_deref()
@@ -5359,6 +5439,7 @@ fn portable_worker_can_claim_job(
         &job.id,
         Some((backend, platform)),
         &claims,
+        authenticated,
     )
 }
 
@@ -5909,6 +5990,7 @@ fn choose_claimable_job_from_candidates(
     hydration: &mut ClaimHydrationStats,
     portable_route: Option<(&str, &str)>,
     worker_claims: &[PortableSourceClaim],
+    authenticated_for_dynamic_source: bool,
 ) -> JobsStoreResult<Option<JobSnapshot>> {
     let mut compatible = Vec::new();
     let mut highest_compatible_rank = None;
@@ -5926,6 +6008,7 @@ fn choose_claimable_job_from_candidates(
             &candidate.id,
             portable_route,
             worker_claims,
+            authenticated_for_dynamic_source,
         )? {
             continue;
         }
@@ -5956,6 +6039,7 @@ fn candidate_matches_portable_worker_sources(
     job_id: &str,
     portable_route: Option<(&str, &str)>,
     worker_claims: &[PortableSourceClaim],
+    authenticated_for_dynamic_source: bool,
 ) -> JobsStoreResult<bool> {
     let Some(binding) = JobsStore::read_portable_binding(connection, job_id)? else {
         return Ok(true);
@@ -5978,16 +6062,34 @@ fn candidate_matches_portable_worker_sources(
                 crate::model_artifacts::portable_binding::PortableSourceIdentity::Digest { .. }
             )
         });
-    let payload = if has_digest {
-        let raw: String = connection.query_row(
-            "select payload_json from jobs where id = ?1",
+    let (job_type, payload) = if has_digest {
+        let (raw_type, raw): (String, String) = connection.query_row(
+            "select type, payload_json from jobs where id = ?1",
             params![job_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        serde_json::from_str(&raw)?
+        (
+            parse_string_enum::<JobType>(&raw_type),
+            serde_json::from_str(&raw)?,
+        )
     } else {
-        Value::Null
+        (JobType::Placeholder, Value::Null)
     };
+    let dynamic_utility_primary = matches!(
+        job_type,
+        JobType::DatasetAnalysis | JobType::TrainingCaption
+    ) && route.models.iter().any(|model| {
+        model.slot == "modelManifestEntries/0" && model.members.iter().any(|member| {
+            member.role == crate::model_artifacts::ArtifactMemberRole::Primary
+                && matches!(
+                    member.source,
+                    crate::model_artifacts::portable_binding::PortableSourceIdentity::Digest { .. }
+                )
+        })
+    });
+    if dynamic_utility_primary && !authenticated_for_dynamic_source {
+        return Ok(false);
+    }
     Ok(route.models.iter().all(|model| {
         model.members.iter().all(|member| {
             use crate::model_artifacts::portable_binding::{

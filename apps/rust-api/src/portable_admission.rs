@@ -21,10 +21,177 @@ use sceneworks_core::model_artifacts::portable_binding::{
 use sceneworks_core::model_artifacts::{
     confine_artifact_path, ArtifactIdentity, ArtifactMemberRole, ModelArtifactResolver,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+/// Worker-private, path-free request to prove an app-managed utility source. The API retains the
+/// source only briefly; a worker independently finds the same exact closure under its own roots.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PortableSourceChallenge {
+    pub(crate) id: String,
+    pub(crate) source_id: String,
+    pub(crate) files: Vec<PortableArtifactFile>,
+    #[serde(skip)]
+    pub(crate) expires_at: Option<Instant>,
+    #[serde(skip)]
+    pub(crate) proved_worker_ids: BTreeSet<String>,
+    #[serde(skip)]
+    pub(crate) allowed_worker_ids: BTreeSet<String>,
+}
+
+const SOURCE_CHALLENGE_TIMEOUT: Duration = Duration::from_secs(3 * 60);
+
+pub(crate) fn pending_portable_source_challenges(
+    state: &AppState,
+    worker_id: &str,
+) -> Vec<PortableSourceChallenge> {
+    let mut pending = state.portable_source_challenges.lock();
+    let now = Instant::now();
+    pending.retain(|_, challenge| challenge.expires_at.is_some_and(|until| until > now));
+    pending
+        .values()
+        .filter(|challenge| challenge.allowed_worker_ids.contains(worker_id))
+        .cloned()
+        .collect()
+}
+
+fn route_has_local_utility_primary(job_type: &JobType, route: &PortableRouteBinding) -> bool {
+    matches!(
+        job_type,
+        JobType::DatasetAnalysis | JobType::TrainingCaption
+    ) && route.models.iter().any(|model| {
+        model.slot == "modelManifestEntries/0"
+            && model.members.iter().any(|member| {
+                member.role == ArtifactMemberRole::Primary
+                    && matches!(member.source, PortableSourceIdentity::Digest { .. })
+            })
+    })
+}
+
+async fn wait_for_utility_source_proof(
+    state: &AppState,
+    job_type: &JobType,
+    payload: &JsonObject,
+    requested_gpu: &str,
+    route: &PortableRouteBinding,
+) -> Result<bool, ApiError> {
+    let _capacity = state
+        .portable_source_probe_slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            ApiError::service_unavailable(
+                "source_proof_busy",
+                "Local source proof capacity is busy; retry shortly",
+            )
+        })?;
+    if !matches!(
+        job_type,
+        JobType::DatasetAnalysis | JobType::TrainingCaption
+    ) {
+        return Ok(false);
+    }
+    let Some(model) = route
+        .models
+        .iter()
+        .find(|model| model.slot == "modelManifestEntries/0")
+    else {
+        return Ok(false);
+    };
+    let Some(member) = model.members.iter().find(|member| {
+        member.role == ArtifactMemberRole::Primary
+            && matches!(member.source, PortableSourceIdentity::Digest { .. })
+    }) else {
+        return Ok(false);
+    };
+    let source_id =
+        registered_digest_member_claim_id(model, member, &Value::Object(payload.clone()))
+            .map_err(|error| incomplete(error.to_string()))?;
+    let challenge_id = uuid::Uuid::new_v4().to_string();
+    let initial_sets = state
+        .jobs_store
+        .portable_source_claim_sets_for_job_route_with_ids(
+            &route.backend,
+            &route.platform,
+            requested_gpu,
+            state.settings.worker_timeout_seconds,
+            job_type,
+            payload,
+        )
+        .map_err(|error| incomplete(format!("worker source claims are unavailable: {error}")))?;
+    let authenticated = state.authenticated_worker_claims.lock().await;
+    let allowed_worker_ids = initial_sets
+        .into_iter()
+        .map(|(id, _)| id)
+        .filter(|id| authenticated.contains_key(id))
+        .collect::<BTreeSet<_>>();
+    drop(authenticated);
+    if allowed_worker_ids.is_empty() {
+        return Ok(false);
+    }
+    state.portable_source_challenges.lock().insert(
+        challenge_id.clone(),
+        PortableSourceChallenge {
+            id: challenge_id.clone(),
+            source_id: source_id.clone(),
+            files: member.files.clone(),
+            expires_at: Some(Instant::now() + SOURCE_CHALLENGE_TIMEOUT),
+            proved_worker_ids: BTreeSet::new(),
+            allowed_worker_ids,
+        },
+    );
+    let deadline = Instant::now() + SOURCE_CHALLENGE_TIMEOUT;
+    loop {
+        let proved_workers = state
+            .portable_source_challenges
+            .lock()
+            .get(&challenge_id)
+            .map(|challenge| challenge.proved_worker_ids.clone())
+            .unwrap_or_default();
+        let sets = state
+            .jobs_store
+            .portable_source_claim_sets_for_job_route_with_ids(
+                &route.backend,
+                &route.platform,
+                requested_gpu,
+                state.settings.worker_timeout_seconds,
+                job_type,
+                payload,
+            )
+            .map_err(|error| {
+                incomplete(format!("worker source claims are unavailable: {error}"))
+            })?;
+        let authenticated = state.authenticated_worker_claims.lock().await;
+        let proof_matches = sets.iter().any(|(worker_id, _)| {
+            proved_workers.contains(worker_id)
+                && authenticated.get(worker_id).is_some_and(|record| {
+                    record.seen_at.elapsed().as_secs() <= state.settings.worker_timeout_seconds
+                        && replay_route_claims_match(route, payload, &record.claims).is_ok()
+                })
+        });
+        drop(authenticated);
+        if proof_matches {
+            state
+                .portable_source_challenges
+                .lock()
+                .remove(&challenge_id);
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            state
+                .portable_source_challenges
+                .lock()
+                .remove(&challenge_id);
+            return Ok(false);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
 
 #[cfg(test)]
 use sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256;
@@ -390,10 +557,13 @@ async fn filter_replay_routes_by_registered_claims(
                     "worker source availability is unavailable: {error}"
                 ))
             })?;
-        if sets
-            .iter()
-            .any(|claims| replay_route_claims_match(route, payload, claims).is_ok())
-        {
+        let matched = if route_has_local_utility_primary(job_type, route) {
+            wait_for_utility_source_proof(state, job_type, payload, requested_gpu, route).await?
+        } else {
+            sets.iter()
+                .any(|claims| replay_route_claims_match(route, payload, claims).is_ok())
+        };
+        if matched {
             available.insert(key.clone(), route.clone());
         }
     }
@@ -795,10 +965,15 @@ async fn capture_portable_model_binding_inner(
                             incomplete(format!("worker source claims are unavailable: {error}"))
                         })?
                 };
-                if !proof_sets
-                    .iter()
-                    .any(|claims| replay_route_claims_match(&route, payload, claims).is_ok())
-                {
+                let proved = if route_has_local_utility_primary(job_type, &route) {
+                    wait_for_utility_source_proof(state, job_type, payload, requested_gpu, &route)
+                        .await?
+                } else {
+                    proof_sets
+                        .iter()
+                        .any(|claims| replay_route_claims_match(&route, payload, claims).is_ok())
+                };
+                if !proved {
                     last_route_error = Some(incomplete(format!(
                         "no eligible worker advertises the complete local source closure for {backend}:{platform}"
                     )));
@@ -1047,6 +1222,30 @@ async fn capture_model_slot(
                 || !is_co_requisite_download(download)
         })
         .collect::<Vec<_>>();
+    let utility_local_selection = if matches!(
+        job_type,
+        JobType::DatasetAnalysis | JobType::TrainingCaption
+    ) && slot == "modelManifestEntries/0"
+    {
+        payload
+            .get("modelNameOrPath")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|selection| !selection.is_empty())
+            .filter(|selection| {
+                crate::model_sources::app_managed_utility_path_exists(
+                    &state.settings.data_dir,
+                    selection,
+                ) || !downloads.iter().any(|download| {
+                    !is_co_requisite_download(download)
+                        && download.get("repo").and_then(Value::as_str) == Some(*selection)
+                })
+            })
+            .map(|selection| selected_utility_model_path(state, selection))
+            .transpose()?
+    } else {
+        None
+    };
     let mut members = Vec::new();
     let variant;
     let tier;
@@ -1147,6 +1346,9 @@ async fn capture_model_slot(
             } else {
                 ArtifactMemberRole::Primary
             };
+            if role == ArtifactMemberRole::Primary && utility_local_selection.is_some() {
+                continue;
+            }
             let component_id =
                 (role != ArtifactMemberRole::Primary).then(|| format!("{slot}/downloads/{index}"));
             members.push(
@@ -1211,44 +1413,30 @@ async fn capture_model_slot(
             )));
         }
     }
-    // These utility loaders read the top-level selection, not the manifest entry locator.
-    // A different selected snapshot must therefore replace the manifest's primary identity.
-    if matches!(
-        job_type,
-        JobType::DatasetAnalysis | JobType::TrainingCaption
-    ) && slot == "modelManifestEntries/0"
-    {
-        if let Some(selection) = payload
-            .get("modelNameOrPath")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|selection| !selection.is_empty())
+    // The utility loader opens the top-level path. Capture that source before any superseded
+    // catalog primary metadata lookup; publisher co-requisites above remain frozen separately.
+    if let Some(selected) = utility_local_selection {
+        let mut roots = allowed_local_roots(state);
+        roots.push(
+            sceneworks_core::hf_home::model_source_library(&state.settings.data_dir)
+                .root()
+                .to_path_buf(),
+        );
+        let local = capture_local_member_offloaded(
+            &selected,
+            &roots,
+            ArtifactMemberRole::Primary,
+            None,
+            tier.clone(),
+        )
+        .await?;
+        if let Some(primary) = members
+            .iter_mut()
+            .find(|member| member.role == ArtifactMemberRole::Primary)
         {
-            let primary = members
-                .iter_mut()
-                .find(|member| member.role == ArtifactMemberRole::Primary)
-                .ok_or_else(|| incomplete("utility model has no primary source"))?;
-            let publisher_repo = match &primary.source {
-                PortableSourceIdentity::Revision { identity } => Some(identity.repository.as_str()),
-                _ => None,
-            };
-            if publisher_repo != Some(selection) {
-                let selected = selected_utility_model_path(state, selection)?;
-                let mut roots = allowed_local_roots(state);
-                roots.push(
-                    sceneworks_core::hf_home::model_source_library(&state.settings.data_dir)
-                        .root()
-                        .to_path_buf(),
-                );
-                *primary = capture_local_member_offloaded(
-                    &selected,
-                    &roots,
-                    ArtifactMemberRole::Primary,
-                    None,
-                    tier.clone(),
-                )
-                .await?;
-            }
+            *primary = local;
+        } else {
+            members.push(local);
         }
     }
     // The first model carrier owns selected request adapters and controls. Other carriers retain
@@ -2147,7 +2335,12 @@ fn selected_utility_model_path(state: &AppState, selection: &str) -> Result<Path
         && parts
             .iter()
             .all(|part| !part.is_empty() && *part != "." && *part != ".." && !part.contains('\\'));
-    if repository {
+    if repository
+        && !crate::model_sources::app_managed_utility_path_exists(
+            &state.settings.data_dir,
+            selection,
+        )
+    {
         let library = sceneworks_core::hf_home::model_source_library(&state.settings.data_dir);
         let resolver = ModelArtifactResolver::new(library);
         return resolver

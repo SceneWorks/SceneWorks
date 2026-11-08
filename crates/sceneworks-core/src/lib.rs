@@ -172,3 +172,4 @@ pub mod network_policy;
 pub mod test_env;
 
 pub mod appearance;
+pub mod worker_proof;

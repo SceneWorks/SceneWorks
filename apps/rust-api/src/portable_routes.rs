@@ -1081,9 +1081,15 @@ fn entries_support_route(
                 && slot == "modelManifestEntries/0"
                 && payload.get("captioner").and_then(Value::as_str) == Some("joy_caption")
                 && entry.get("adapter").and_then(Value::as_str) == Some("joycaption")
-                && downloads.iter().any(|download| {
+                && (downloads.iter().any(|download| {
                     download.get("repo") == payload.get("modelNameOrPath")
-                }))
+                }) || (id == "joycaption_beta_one"
+                    && payload
+                        .get("modelNameOrPath")
+                        .and_then(Value::as_str)
+                        .is_some_and(|selection| {
+                            !crate::model_sources::looks_like_huggingface_repository(selection)
+                        }))))
             // Dataset Doctor's selected CLIP embedder is likewise an executable utility in
             // the first auxiliary slot, selected by its catalog id rather than a repo string.
             && !(*job_type == JobType::DatasetAnalysis
@@ -1155,6 +1161,16 @@ mod tests {
                 .expect("selected JoyCaption repository is executable");
         assert!(routes.contains(&("mlx".to_owned(), "macos".to_owned())));
         assert!(routes.contains(&("candle".to_owned(), "windows".to_owned())));
+
+        let mut local = payload.clone();
+        local.insert(
+            "modelNameOrPath".to_owned(),
+            serde_json::json!("/managed/captioner"),
+        );
+        let local_routes =
+            eligible_portable_routes(&JobType::TrainingCaption, &local, &entries, "auto")
+                .expect("app-managed JoyCaption selection retains the native route");
+        assert!(local_routes.contains(&("mlx".to_owned(), "macos".to_owned())));
 
         let mut wrong_repo = payload.clone();
         wrong_repo.insert(

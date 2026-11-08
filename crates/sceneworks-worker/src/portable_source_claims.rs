@@ -7,7 +7,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Mutex, OnceLock,
+    Arc, Mutex, OnceLock,
 };
 use std::time::{Duration, Instant};
 
@@ -15,6 +15,7 @@ use sceneworks_core::contracts::JsonObject;
 use sceneworks_core::model_artifacts::portable_binding::{
     PortableArtifactFile, PortableSourceClaim, PortableSourceProvenance,
 };
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::{Settings, WorkerError, WorkerResult};
@@ -43,9 +44,208 @@ const STATIC_SOURCE_IDS: &[&str] = &[
 static INVENTORY_STARTED: AtomicBool = AtomicBool::new(false);
 static PENDING_INVENTORY: OnceLock<Mutex<InventoryProgress>> = OnceLock::new();
 static INVENTORY_SCHEDULE: OnceLock<Mutex<InventorySchedule>> = OnceLock::new();
+static CHALLENGE_ATTEMPTS: OnceLock<Mutex<BTreeMap<String, Instant>>> = OnceLock::new();
+static CHALLENGE_SLOTS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
 // Catalog writes are detected on the next ordinary heartbeat; this slower sweep covers a file
 // appearing at an already-registered path or an operator-installed source without a catalog edit.
 const INVENTORY_RESCAN_INTERVAL: Duration = Duration::from_secs(30 * 60);
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PortableSourceChallenge {
+    pub(crate) id: String,
+    source_id: String,
+    files: Vec<PortableArtifactFile>,
+}
+
+pub(crate) fn start_app_managed_challenges(
+    api: crate::api_client::ApiClient,
+    settings: Settings,
+    challenges: Vec<PortableSourceChallenge>,
+    capability: String,
+) {
+    let attempts = CHALLENGE_ATTEMPTS.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let slots = CHALLENGE_SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2)));
+    let mut grouped = BTreeMap::<String, Vec<PortableSourceChallenge>>::new();
+    for challenge in challenges {
+        grouped
+            .entry(challenge.source_id.clone())
+            .or_default()
+            .push(challenge);
+    }
+    for (source_id, mut group) in grouped {
+        let mut guard = attempts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = Instant::now();
+        guard.retain(|_, until| *until > now);
+        if guard.contains_key(&source_id) {
+            continue;
+        }
+        let Ok(permit) = slots.clone().try_acquire_owned() else {
+            continue;
+        };
+        guard.insert(source_id.clone(), now + Duration::from_secs(2 * 60 + 10));
+        drop(guard);
+        let challenge = group.remove(0);
+        let mut ids = group
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect::<std::collections::BTreeSet<_>>();
+        ids.insert(challenge.id.clone());
+        let api = api.clone();
+        let settings = settings.clone();
+        let capability = capability.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            let ledger =
+                sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(
+                    &challenge.files,
+                );
+            let local = settings.clone();
+            let proved = tokio::task::spawn_blocking(move || {
+                prove_app_managed_challenges(&local, vec![challenge])
+            })
+            .await
+            .is_ok_and(|result| result.unwrap_or(false));
+            if proved {
+                if let Ok(ledger_sha256) = ledger {
+                    let path = format!(
+                        "/api/v1/workers/{}/portable-source-challenges",
+                        settings.worker_id
+                    );
+                    let fresh: WorkerResult<Vec<PortableSourceChallenge>> = api
+                        .post_json(&path, &serde_json::json!({"capability":capability}))
+                        .await;
+                    if let Ok(fresh) = fresh {
+                        ids.extend(
+                            fresh
+                                .into_iter()
+                                .filter(|entry| entry.source_id == source_id)
+                                .map(|entry| entry.id),
+                        );
+                    }
+                    for id in ids {
+                        let _: WorkerResult<serde_json::Value> = api.post_json(
+                            &format!("/api/v1/workers/{}/portable-source-proof", settings.worker_id),
+                            &serde_json::json!({"id":id,"capability":capability,"ledgerSha256":ledger_sha256}),
+                        ).await;
+                    }
+                }
+            }
+            if let Some(attempts) = CHALLENGE_ATTEMPTS.get() {
+                attempts
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(source_id, Instant::now() + Duration::from_secs(10));
+            }
+        });
+    }
+}
+
+/// Resolve a path-free, API-authored probe against this worker's declared model roots. A claim
+/// is published only after the complete local file set, sizes and hashes match the challenge.
+pub(crate) fn prove_app_managed_challenges(
+    settings: &Settings,
+    challenges: Vec<PortableSourceChallenge>,
+) -> WorkerResult<bool> {
+    let mut published = false;
+    let mut seen = std::collections::BTreeSet::new();
+    for challenge in challenges {
+        if !seen.insert(challenge.source_id.clone()) {
+            continue;
+        }
+        let _challenge_id = challenge.id;
+        let source_id = challenge.source_id;
+        let Some(_source) = find_app_managed_exact_source(settings, &challenge.files)? else {
+            continue;
+        };
+        let claim = PortableSourceClaim::new(
+            source_id,
+            PortableSourceProvenance::OperatorOverride,
+            challenge.files,
+        )
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+        pending_inventory()
+            .lock()
+            .expect("inventory lock poisoned")
+            .publish_probe(claim);
+        published = true;
+    }
+    Ok(published)
+}
+
+/// Also used at the pre-loader guard, so a stale claim cannot authorize changed bytes.
+pub(crate) fn find_app_managed_exact_source(
+    settings: &Settings,
+    expected: &[PortableArtifactFile],
+) -> WorkerResult<Option<PathBuf>> {
+    let Some(first) = expected.first() else {
+        return Ok(None);
+    };
+    let roots = crate::paths::allowed_model_roots(settings)?;
+    let mut visited = std::collections::BTreeSet::new();
+    let mut stack = roots.clone();
+    let deadline = Instant::now() + Duration::from_secs(2 * 60);
+    while let Some(path) = stack.pop() {
+        if Instant::now() > deadline || visited.len() > 1_000_000 {
+            return Err(WorkerError::InvalidPayload(
+                "app-managed source probe exceeded its bounded scan".to_owned(),
+            ));
+        }
+        let Ok(canonical) = std::fs::canonicalize(&path) else {
+            continue;
+        };
+        if !visited.insert(canonical.clone()) {
+            continue;
+        }
+        if !roots.iter().any(|root| canonical.starts_with(root)) {
+            continue;
+        }
+        if path
+            .join(&first.relative_path)
+            .metadata()
+            .is_ok_and(|meta| meta.is_file() && meta.len() == first.size_bytes)
+            && capture_registered_files(&path).is_ok_and(|files| files == expected)
+        {
+            return Ok(Some(path));
+        }
+        let Ok(entries) = std::fs::read_dir(&path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                stack.push(entry.path());
+            }
+        }
+    }
+    Ok(None)
+}
+
+pub(crate) fn selected_app_managed_exact_source(
+    settings: &Settings,
+    selection: &str,
+    expected: &[PortableArtifactFile],
+) -> WorkerResult<Option<PathBuf>> {
+    let selected = crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, selection)
+        .unwrap_or_else(|| {
+            let path = PathBuf::from(selection);
+            if path.is_absolute() {
+                path
+            } else {
+                settings.data_dir.join(path)
+            }
+        });
+    if selected.is_dir() {
+        if capture_registered_files(&selected).is_ok_and(|files| files == expected) {
+            return Ok(Some(selected));
+        }
+        return Err(WorkerError::InvalidPayload(
+            "selected utility model differs from admitted bytes".to_owned(),
+        ));
+    }
+    find_app_managed_exact_source(settings, expected)
+}
 
 #[derive(Default)]
 struct InventorySchedule {
@@ -56,12 +256,35 @@ struct InventorySchedule {
 #[derive(Default)]
 struct InventoryProgress {
     claims: Vec<PortableSourceClaim>,
+    scanned: Vec<PortableSourceClaim>,
+    probed: BTreeMap<String, (PortableSourceClaim, Instant)>,
     generation: u64,
     acknowledged_by_worker: BTreeMap<String, u64>,
 }
 
 impl InventoryProgress {
     fn publish(&mut self, claim: PortableSourceClaim) {
+        if let Some(existing) = self
+            .scanned
+            .iter_mut()
+            .find(|existing| existing.source_id == claim.source_id)
+        {
+            *existing = claim.clone();
+        } else {
+            self.scanned.push(claim.clone());
+        }
+        self.publish_claim(claim);
+    }
+
+    fn publish_probe(&mut self, claim: PortableSourceClaim) {
+        self.probed.insert(
+            claim.source_id.clone(),
+            (claim.clone(), Instant::now() + Duration::from_secs(60)),
+        );
+        self.publish_claim(claim);
+    }
+
+    fn publish_claim(&mut self, claim: PortableSourceClaim) {
         if let Some(existing) = self
             .claims
             .iter_mut()
@@ -80,6 +303,23 @@ impl InventoryProgress {
     }
 
     fn replace_scanned(&mut self, claims: Vec<PortableSourceClaim>) {
+        self.scanned = claims;
+        self.rebuild_claims();
+    }
+
+    fn rebuild_claims(&mut self) {
+        self.probed
+            .retain(|_, (_, expires)| *expires > Instant::now());
+        let mut claims = self.scanned.clone();
+        for (claim, _) in self.probed.values() {
+            if !claims
+                .iter()
+                .any(|existing| existing.source_id == claim.source_id)
+            {
+                claims.push(claim.clone());
+            }
+        }
+        claims.sort_by(|left, right| left.source_id.cmp(&right.source_id));
         if self.claims != claims {
             self.claims = claims;
             self.generation += 1;
@@ -258,10 +498,11 @@ pub(crate) fn start_background_inventory(settings: Settings) {
 }
 
 pub(crate) fn pending_inventory_claims(worker_id: &str) -> Option<(u64, Vec<PortableSourceClaim>)> {
-    pending_inventory()
+    let mut inventory = pending_inventory()
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .pending(worker_id)
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    inventory.rebuild_claims();
+    inventory.pending(worker_id)
 }
 
 pub(crate) fn mark_inventory_published(worker_id: &str, generation: u64) {
@@ -1389,6 +1630,60 @@ fn capture_one(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn app_managed_probe_finds_cross_root_bytes_and_refuses_substitution() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = Settings::for_test(temp.path().join("worker-data"));
+        let selected = settings.data_dir.join("different/tree/clip");
+        std::fs::create_dir_all(&selected).unwrap();
+        std::fs::write(selected.join("model.safetensors"), b"frozen clip bytes").unwrap();
+        let expected = capture_registered_files(&selected).unwrap();
+        let api_path = "/api-host/another/root/clip";
+        assert_eq!(
+            selected_app_managed_exact_source(&settings, api_path, &expected).unwrap(),
+            Some(selected.canonicalize().unwrap())
+        );
+        let challenge = PortableSourceChallenge {
+            id: "test-challenge".to_owned(),
+            source_id: "test_app_managed_clip".to_owned(),
+            files: expected.clone(),
+        };
+        prove_app_managed_challenges(&settings, vec![challenge]).unwrap();
+        assert!(pending_inventory_claims(&settings.worker_id)
+            .unwrap()
+            .1
+            .iter()
+            .any(|claim| claim.source_id == "test_app_managed_clip" && claim.files == expected));
+
+        let substituted = settings.data_dir.join("different/tree/substituted");
+        std::fs::create_dir_all(&substituted).unwrap();
+        std::fs::write(substituted.join("model.safetensors"), b"other clip bytes").unwrap();
+        assert!(selected_app_managed_exact_source(
+            &settings,
+            substituted.to_str().unwrap(),
+            &expected,
+        )
+        .is_err());
+        std::fs::remove_dir_all(&selected).unwrap();
+        assert!(find_app_managed_exact_source(&settings, &expected)
+            .unwrap()
+            .is_none());
+        #[cfg(unix)]
+        {
+            let escaped = settings.data_dir.join("escaped");
+            std::os::unix::fs::symlink(temp.path().join("outside"), &escaped).unwrap();
+            std::fs::create_dir_all(temp.path().join("outside")).unwrap();
+            std::fs::write(
+                temp.path().join("outside/model.safetensors"),
+                b"frozen clip bytes",
+            )
+            .unwrap();
+            assert!(find_app_managed_exact_source(&settings, &expected)
+                .unwrap()
+                .is_none());
+        }
+    }
 
     #[test]
     fn builtin_hf_lora_is_advertised_and_rebound_by_exact_worker_bytes() {

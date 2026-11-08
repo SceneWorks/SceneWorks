@@ -1221,7 +1221,7 @@ fn prepare_portable_snapshot(
             } else if let Some(layer) = &plan_layer {
                 layer.source_path.clone()
             } else {
-                selected_local_artifact_path(member, model, entry, payload, settings)?
+                selected_local_artifact_path(member, model, entry, payload, settings, job_type)?
             };
             if matches!(member.source, PortableSourceIdentity::WorkerClaim { .. })
                 || plan_layer.is_some()
@@ -2484,7 +2484,9 @@ fn verify_portable_binding(
                 {
                     layer.source_path
                 } else {
-                    selected_local_artifact_path(member, binding, entry, payload, settings)?
+                    selected_local_artifact_path(
+                        member, binding, entry, payload, settings, job_type,
+                    )?
                 };
                 let is_file = selected.is_file();
                 if !is_file && !selected.is_dir() {
@@ -2595,7 +2597,7 @@ fn verify_portable_binding(
             let selected = if let Some(layer) = plan_layer {
                 layer.source_path
             } else {
-                selected_local_artifact_path(member, binding, entry, payload, settings)?
+                selected_local_artifact_path(member, binding, entry, payload, settings, job_type)?
             };
             allowed_roots.push(selected.parent().unwrap_or(&selected).to_path_buf());
         }
@@ -2816,6 +2818,7 @@ fn selected_local_artifact_path(
     entry: &serde_json::Value,
     payload: &JsonObject,
     settings: &Settings,
+    job_type: &JobType,
 ) -> WorkerResult<PathBuf> {
     let model_slot = model.slot.as_str();
     if member.component_id.as_deref() == Some("selected_text_encoder") {
@@ -2880,20 +2883,31 @@ fn selected_local_artifact_path(
     let utility_selected = if member.role == ArtifactMemberRole::Primary
         && model_slot == "modelManifestEntries/0"
         && matches!(
-            payload.get("kind").and_then(serde_json::Value::as_str),
-            Some("dataset_analysis" | "training_caption")
+            job_type,
+            JobType::DatasetAnalysis | JobType::TrainingCaption
         ) {
-        payload
-            .get("modelNameOrPath")
-            .and_then(serde_json::Value::as_str)
-            .and_then(|selection| {
-                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, selection).or_else(
-                    || {
-                        let path = PathBuf::from(selection);
-                        path.is_dir().then_some(path)
-                    },
-                )
-            })
+        if matches!(member.source, PortableSourceIdentity::Digest { .. }) {
+            let selection = payload
+                .get("modelNameOrPath")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| invalid_binding("utility model selection is missing"))?;
+            crate::portable_source_claims::selected_app_managed_exact_source(
+                settings,
+                selection,
+                &member.files,
+            )?
+        } else {
+            payload
+                .get("modelNameOrPath")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|selection| {
+                    crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, selection)
+                        .or_else(|| {
+                            let path = PathBuf::from(selection);
+                            path.is_dir().then_some(path)
+                        })
+                })
+        }
     } else {
         None
     };
