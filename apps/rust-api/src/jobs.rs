@@ -1046,7 +1046,22 @@ async fn validate_merged_job_loras(
     let mut catalog_slots = Vec::new();
     for (slot, lora) in loras.iter().enumerate() {
         if matches_permitted_inline_lora(lora, permitted_inline) {
-            inline_slots.push((slot, lora.clone()));
+            // Public job snapshots redact private locators. A caller may return that same link
+            // alongside a newly selected catalog adapter; restore only its admitted path fields
+            // from the persisted job, after the exact-id/path check above.
+            let mut hydrated = lora.clone();
+            let admitted = permitted_inline
+                .iter()
+                .find(|link| job_lora_id(link) == job_lora_id(lora))
+                .expect("matched persisted inline LoRA");
+            if let Some(fields) = hydrated.as_object_mut() {
+                for key in ["sourcePath", "projectPath"] {
+                    if let Some(value) = admitted.get(key) {
+                        fields.insert(key.to_owned(), value.clone());
+                    }
+                }
+            }
+            inline_slots.push((slot, hydrated));
         } else {
             catalog_slots.push((slot, lora.clone()));
         }
