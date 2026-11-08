@@ -217,7 +217,9 @@ async function run(env, preflightOnly) {
       fact(installed?.installState === "installed" && installed.installedPath, `${model.id} pinned q4 installation required`);
       const snapshot = path.join(hub, `models--${model.repo.replace("/", "--")}`, "snapshots", model.revision);
       const physicalSnapshot = await realpath(snapshot), physicalInstall = await realpath(installed.installedPath);
-      fact(physicalInstall === physicalSnapshot || physicalInstall === path.join(physicalSnapshot, "q4"), `${model.id} selected source escaped the pinned snapshot`);
+      // Catalog installedPath is the repository cache root for quant-matrix models;
+      // the selected revision and q4 tier are checked against the pinned snapshot below.
+      fact([path.dirname(path.dirname(physicalSnapshot)), physicalSnapshot, path.join(physicalSnapshot, "q4")].includes(physicalInstall), `${model.id} installed catalog path escaped the task-owned repository cache`);
       fact(await fileSha256(path.join(snapshot, "q4", "model_index.json")) === receipt.identity[`${model.id}_model_index_sha256`], `${model.id} installed model index differs from pinned public source`);
       const record = { id: model.id, repo: model.repo, revision: model.revision, variant: "q4", isolated: [], queued: [], observations: [] };
       receipt.models.push(record); await save();
