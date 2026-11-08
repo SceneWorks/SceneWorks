@@ -343,6 +343,7 @@ fn is_source_choice_leaf(key: &str, parent: Option<&str>) -> bool {
             | "variant"
             | "quantTier"
             | "mlxQuantize"
+            | "convRot"
             | "decoder"
             | "controlMode"
             | "overlayId"
@@ -3612,6 +3613,31 @@ mod tests {
         assert_ne!(
             portable_authored_options(original.as_object().unwrap()),
             portable_authored_options(changed_adapter.as_object().unwrap())
+        );
+    }
+
+    #[test]
+    fn duplicate_krea_convrot_change_requires_fresh_source_choice() {
+        let ordinary = json!({
+            "model":"krea_2_turbo", "prompt":"red kite",
+            "advanced":{"convRot":false}
+        });
+        let changed_prompt = json!({
+            "model":"krea_2_turbo", "prompt":"blue kite",
+            "advanced":{"convRot":false}
+        });
+        let convrot = json!({
+            "model":"krea_2_turbo", "prompt":"red kite",
+            "advanced":{"convRot":true}
+        });
+        let source = portable_authored_options(ordinary.as_object().unwrap());
+        assert_eq!(
+            source,
+            portable_authored_options(changed_prompt.as_object().unwrap())
+        );
+        assert_ne!(
+            source,
+            portable_authored_options(convrot.as_object().unwrap())
         );
     }
 

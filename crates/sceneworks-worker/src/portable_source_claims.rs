@@ -257,6 +257,9 @@ struct InventorySchedule {
 struct InventoryProgress {
     claims: Vec<PortableSourceClaim>,
     scanned: Vec<PortableSourceClaim>,
+    // A proved source may back a queued job for arbitrarily long while this worker is busy.
+    // Keep its last proved claim until replacement or worker restart; the pre-loader guard
+    // rechecks the exact bytes before opening the selected source.
     probed: BTreeMap<String, (PortableSourceClaim, Instant)>,
     generation: u64,
     acknowledged_by_worker: BTreeMap<String, u64>,
@@ -277,10 +280,8 @@ impl InventoryProgress {
     }
 
     fn publish_probe(&mut self, claim: PortableSourceClaim) {
-        self.probed.insert(
-            claim.source_id.clone(),
-            (claim.clone(), Instant::now() + Duration::from_secs(60)),
-        );
+        self.probed
+            .insert(claim.source_id.clone(), (claim.clone(), Instant::now()));
         self.publish_claim(claim);
     }
 
@@ -308,8 +309,6 @@ impl InventoryProgress {
     }
 
     fn rebuild_claims(&mut self) {
-        self.probed
-            .retain(|_, (_, expires)| *expires > Instant::now());
         let mut claims = self.scanned.clone();
         for (claim, _) in self.probed.values() {
             if !claims
@@ -1701,6 +1700,46 @@ mod tests {
                 .unwrap()
                 .is_none());
         }
+    }
+
+    #[test]
+    fn proved_utility_source_survives_busy_queue_and_rechecks_bytes_before_load() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = Settings::for_test(temp.path().join("worker-data"));
+        let selected = settings.data_dir.join("models/utility");
+        std::fs::create_dir_all(&selected).unwrap();
+        let weights = selected.join("model.safetensors");
+        std::fs::write(&weights, b"source").unwrap();
+        let files = capture_registered_files(&selected).unwrap();
+        let claim = PortableSourceClaim::new(
+            "test_queued_utility".to_owned(),
+            PortableSourceProvenance::OperatorOverride,
+            files.clone(),
+        )
+        .unwrap();
+        let mut inventory = InventoryProgress::default();
+        inventory.publish_probe(claim.clone());
+        let generation = inventory.generation;
+        inventory.acknowledge(&settings.worker_id, generation);
+        // The worker remains busy beyond the old 60-second probe lifetime, and an ordinary
+        // inventory sweep does not discover this uncataloged app-managed source.
+        inventory.probed.get_mut(&claim.source_id).unwrap().1 =
+            Instant::now() - Duration::from_secs(61);
+        inventory.replace_scanned(Vec::new());
+        assert!(inventory.claims.contains(&claim));
+        inventory.reset_worker(&settings.worker_id);
+        assert!(inventory
+            .pending(&settings.worker_id)
+            .unwrap()
+            .1
+            .contains(&claim));
+
+        // A retained scheduling claim does not authorize a changed checkpoint at the loader.
+        std::fs::write(&weights, b"mutate").unwrap();
+        assert!(
+            selected_app_managed_exact_source(&settings, selected.to_str().unwrap(), &files,)
+                .is_err()
+        );
     }
 
     #[test]
