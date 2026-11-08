@@ -42,6 +42,25 @@ use serde_json::json;
 pub(super) type PromptEnhancementReports =
     std::collections::HashMap<usize, (String, gen_core::PromptEnhancementReport)>;
 
+fn consumer_failure_after_join(
+    error: WorkerError,
+    joined: Option<Result<WorkerResult<()>, tokio::task::JoinError>>,
+    process_fault_at_start: Option<&str>,
+    recovery: &crate::mlx_worker_recovery::MlxWorkerRecovery,
+) -> WorkerError {
+    if let Some(Ok(Err(fatal @ WorkerError::ProcessPoisoned(_)))) = joined {
+        return fatal;
+    }
+    // A cache owner may latch its fault before a blocked task can reply. Only a newly
+    // observed latch belongs to this consumer; a preexisting latch must not relabel it.
+    if process_fault_at_start.is_none() {
+        if let Some(detail) = recovery.process_fault_detail() {
+            return WorkerError::ProcessPoisoned(detail);
+        }
+    }
+    error
+}
+
 pub(super) fn record_prompt_enhancement_report(
     reports: &mut PromptEnhancementReports,
     enhancement_expected: bool,
@@ -198,6 +217,7 @@ pub(super) async fn consume_gen_events_with_disclosure(
     blocking: tokio::task::JoinHandle<WorkerResult<()>>,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
+    let process_fault_at_start = crate::mlx_worker_recovery::global().process_fault_detail();
     let total_u32 = total as u32;
     // A native prompt batch (sc-25681) is ONE engine call over all `total` images: its steps
     // (the engine's `steps × count`) span the whole bar, not image 0's slice of it.
@@ -587,8 +607,14 @@ pub(super) async fn consume_gen_events_with_disclosure(
     }
     .await;
     if let Err(error) = loop_result {
-        guard.cancel_and_join().await;
-        return Err(error);
+        // A progress/heartbeat failure can race a fatal owner result. Reap the task before
+        // choosing the job error so the supervisor persists the process fault and recycles.
+        return Err(consumer_failure_after_join(
+            error,
+            guard.cancel_and_join_result().await,
+            process_fault_at_start.as_deref(),
+            crate::mlx_worker_recovery::global(),
+        ));
     }
 
     // Loop exited cleanly — reclaim the handle (disarming the drop-guard) and join the finished task.
@@ -664,6 +690,121 @@ pub(super) async fn consume_gen_events_with_disclosure(
 mod tests {
     use super::super::ImageRequest;
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn bounded_join_uses_only_a_fault_latched_during_this_consumer() {
+        let recovery = crate::mlx_worker_recovery::MlxWorkerRecovery::new();
+        let before = recovery.process_fault_detail();
+        recovery.observe_process_fault("owner device lost");
+        let error = consumer_failure_after_join(
+            WorkerError::Engine("progress post failed".into()),
+            None,
+            before.as_deref(),
+            &recovery,
+        );
+        assert!(
+            matches!(error, WorkerError::ProcessPoisoned(ref detail) if detail == "owner device lost")
+        );
+
+        let before = recovery.process_fault_detail();
+        let error = consumer_failure_after_join(
+            WorkerError::Engine("unrelated progress post failed".into()),
+            None,
+            before.as_deref(),
+            &recovery,
+        );
+        assert!(
+            matches!(error, WorkerError::Engine(ref detail) if detail == "unrelated progress post failed")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn process_fault_after_progress_post_failure_survives_bounded_teardown() {
+        use axum::extract::{Path as AxumPath, State};
+        use axum::http::StatusCode;
+        use axum::Json;
+
+        async fn job_route(AxumPath(id): AxumPath<String>) -> Json<Value> {
+            Json(crate::tests::job_snapshot_json(&id, false))
+        }
+        async fn progress_route(State(posts): State<Arc<AtomicUsize>>) -> StatusCode {
+            posts.fetch_add(1, Ordering::SeqCst);
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+        async fn heartbeat_route(AxumPath(id): AxumPath<String>) -> Json<Value> {
+            Json(crate::tests::worker_snapshot_json(&id))
+        }
+
+        let posts = Arc::new(AtomicUsize::new(0));
+        let app = crate::test_api_stub::job_progress_heartbeat_routes(
+            job_route,
+            progress_route,
+            heartbeat_route,
+        )
+        .with_state(posts.clone());
+        let url = crate::test_api_stub::serve(app).await;
+        let mut settings = crate::tests::test_settings(url.clone(), None);
+        settings.api_url = url;
+        let api = ApiClient::new(&settings);
+        let job: JobSnapshot =
+            serde_json::from_value(crate::tests::job_snapshot_json("job-1", false)).unwrap();
+        let request = ImageRequest::from_payload(
+            serde_json::json!({
+                "projectId": "p", "model": "flux_schnell", "mode": "text_to_image",
+                "prompt": "a fox", "count": 1
+            })
+            .as_object()
+            .unwrap(),
+        );
+        let plan = ImagePlan::with_count(&request, 1, None);
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = CancelFlag::new();
+        let producer_cancel = cancel.clone();
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let blocking = crate::load_progress::spawn(async move {
+            tx.send(GenEvent::Step {
+                index: 0,
+                current: 1,
+                total: 2,
+            })
+            .await
+            .unwrap();
+            while !producer_cancel.is_cancelled() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            Err(WorkerError::ProcessPoisoned("owner device lost".into()))
+        });
+        let mut assets = Vec::new();
+        let result = tokio::time::timeout(
+            Duration::from_secs(8),
+            consume_gen_events(
+                &api,
+                &settings,
+                &job,
+                &plan,
+                dir.path(),
+                "mlx",
+                "flux1",
+                &request.advanced,
+                1,
+                rx,
+                cancel.clone(),
+                blocking,
+                &mut assets,
+            ),
+        )
+        .await
+        .expect("the failing progress write and task teardown complete");
+        assert_eq!(posts.load(Ordering::SeqCst), 1);
+        assert!(cancel.is_cancelled(), "teardown canceled the backend task");
+        assert!(
+            matches!(&result, Err(WorkerError::ProcessPoisoned(detail)) if detail == "owner device lost"),
+            "{result:?}"
+        );
+        assert!(assets.is_empty());
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn process_fault_after_cancel_reaches_terminal_failure_reconciliation() {
