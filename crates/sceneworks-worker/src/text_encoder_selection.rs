@@ -300,7 +300,7 @@ fn encoder_route_for_model(model: &Value) -> Option<EncoderRoute> {
     )?;
     Some(EncoderRoute {
         id: descriptor.id.to_owned(),
-        contract: descriptor.encoder_contract?,
+        contract: crate::inference_runtime::media_encoder_contract(descriptor.id)?,
     })
 }
 
@@ -374,6 +374,20 @@ pub(crate) fn portable_registered_source_paths(
     settings: &Settings,
 ) -> Vec<(String, PathBuf, bool)> {
     let mut catalog = Vec::new();
+    // Live external_base_* rows are assembled only by the API scan and have host-local IDs.
+    // Enroll the corresponding imported descriptor families in the worker's source inventory.
+    for registration in crate::inference_runtime::media().imported_models() {
+        if registration.source == gen_core::ImportedModelSource::ComfyUiTree
+            && registration.operation == gen_core::ImportedModelOperation::Generate
+        {
+            catalog.push(serde_json::json!({
+                "id": format!("external-comfyui:{}", registration.family),
+                "family": registration.family,
+                "catalogScope": "external",
+                "importSourceShape": "comfy_ui_tree",
+            }));
+        }
+    }
     let library = sceneworks_core::hf_home::model_source_library(&settings.data_dir);
     let user_manifest = settings.config_dir.join("manifests/user.models.jsonc");
     if let Ok(raw) = std::fs::read_to_string(user_manifest) {

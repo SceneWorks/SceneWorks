@@ -1352,6 +1352,77 @@ mod tests {
         );
     }
 
+    #[cfg(all(native_lane, target_os = "windows"))]
+    #[test]
+    fn external_qwen_encoder_claim_rebinds_across_roots_only_when_registered() {
+        let temp = tempfile::tempdir().unwrap();
+        let api_source = temp.path().join("api/text_encoders/encoder");
+        let worker_root = temp.path().join("worker");
+        let worker_source = worker_root.join("text_encoders/encoder");
+        let production = crate::inference_runtime::media_encoder_contract("qwen_image").unwrap();
+        let bounded = gen_core::EncoderContract {
+            hidden_size: 64,
+            intermediate_size: 128,
+            num_hidden_layers: 1,
+            num_attention_heads: 2,
+            num_key_value_heads: 1,
+            head_dim: 32,
+            output_width: 64,
+            loaded_hidden_layers: 1,
+            max_position_embeddings: 512,
+            mrope_section: &[4, 6, 6],
+            selected_hidden_layers: &[1],
+            ..production
+        };
+        let _contract =
+            crate::inference_runtime::scoped_test_media_encoder_contract(&["qwen_image"], bounded);
+        gen_core_testkit::write_encoder_contract_fixture(&api_source, bounded).unwrap();
+        gen_core_testkit::write_encoder_contract_fixture(&worker_source, bounded).unwrap();
+        let api_id = crate::text_encoder_selection::opaque_id(&gen_core::WeightsSource::Dir(
+            api_source.clone(),
+        ))
+        .unwrap();
+        let worker_id = crate::text_encoder_selection::opaque_id(&gen_core::WeightsSource::Dir(
+            worker_source.clone(),
+        ))
+        .unwrap();
+        assert_ne!(api_id, worker_id);
+        let mut settings = Settings::for_test(temp.path().join("worker-data"));
+        let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+            settings.data_dir.clone(),
+            settings.data_dir.join("cache/huggingface/hub"),
+        );
+        settings.external_model_roots = vec![worker_root];
+        let (_, frozen) = selected_text_encoder_root_and_files(&api_source, false).unwrap();
+        let model_key = "external-comfyui:qwen-image";
+        assert!(
+            registered_text_encoder_path(&settings, model_key, false, &frozen)
+                .unwrap()
+                .is_some()
+        );
+        let ledger =
+            sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(
+                &frozen,
+            )
+            .unwrap();
+        let claim_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+            "text-encoder",
+            &format!("{model_key}:directory"),
+            None,
+            &ledger,
+        )
+        .unwrap();
+        assert!(static_source_claims(&settings)
+            .iter()
+            .any(|claim| claim.source_id == claim_id && claim.files == frozen));
+        settings.external_model_roots.clear();
+        assert!(
+            registered_text_encoder_path(&settings, model_key, false, &frozen)
+                .unwrap()
+                .is_none()
+        );
+    }
+
     #[test]
     fn character_sidecar_lora_is_advertised_and_rebound_to_its_project_copy() {
         use sceneworks_core::character_store::{

@@ -2786,9 +2786,14 @@ fn selected_local_artifact_path(
             .get("id")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| invalid_binding("selected text encoder has no model identity"))?;
+        let claim_model_id =
+            sceneworks_core::model_artifacts::portable_binding::selected_text_encoder_claim_model_id(
+                model_id, entry,
+            )
+            .ok_or_else(|| invalid_binding("selected text encoder has no registered model scope"))?;
         return crate::portable_source_claims::registered_text_encoder_path(
             settings,
-            model_id,
+            &claim_model_id,
             is_file,
             &member.files,
         )?

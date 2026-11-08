@@ -18,6 +18,25 @@ pub const PORTABLE_MODEL_BINDING_VERSION: u32 = 2;
 const MAX_NON_LFS_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_HF_TREE_PAGES: usize = 10_000;
 
+/// A scanned external base has a host-local catalog ID. Its encoder choice is instead
+/// registered under the imported family, with the exact selected file ledger in the claim.
+pub fn selected_text_encoder_claim_model_id(model_id: &str, entry: &Value) -> Option<String> {
+    if !model_id.starts_with("external_base_") {
+        return Some(model_id.to_owned());
+    }
+    if entry.get("id").and_then(Value::as_str) != Some(model_id)
+        || entry.get("catalogScope").and_then(Value::as_str) != Some("external")
+        || entry.get("importSourceShape").and_then(Value::as_str) != Some("comfy_ui_tree")
+    {
+        return None;
+    }
+    let family = entry.get("family").and_then(Value::as_str)?;
+    if family.is_empty() {
+        return None;
+    }
+    Some(format!("external-comfyui:{family}"))
+}
+
 /// Content identity for one selected member. A single file keeps its existing source SHA-256;
 /// a multi-file member hashes a canonical path/size/content-digest ledger.
 pub fn portable_closure_sha256(
@@ -429,9 +448,14 @@ pub fn registered_digest_member_claim_id(
                 .and_then(Value::as_str)
                 .filter(|kind| matches!(*kind, "file" | "directory"))
                 .ok_or_else(|| error("selected text encoder has no source kind"))?;
+            let entry = payload
+                .get("modelManifestEntry")
+                .ok_or_else(|| error("selected text encoder has no model carrier"))?;
+            let claim_model_id = selected_text_encoder_claim_model_id(&model.model_id, entry)
+                .ok_or_else(|| error("selected text encoder has no registered model scope"))?;
             return crate::portable_sources::registered_digest_claim_id(
                 "text-encoder",
-                &format!("{}:{source_kind}", model.model_id),
+                &format!("{claim_model_id}:{source_kind}"),
                 None,
                 &portable_file_ledger_sha256(&member.files)?,
             )
@@ -1563,6 +1587,49 @@ mod tests {
                 &payload("text_encoder_worker", "/worker/encoder.safetensors")
             )
             .unwrap()
+        );
+    }
+
+    #[test]
+    fn scanned_external_encoder_claim_uses_family_and_rejects_unscoped_rows() {
+        let scoped = |id: &str| {
+            serde_json::json!({
+                "id": id,
+                "catalogScope": "external",
+                "importSourceShape": "comfy_ui_tree",
+                "family": "qwen-image"
+            })
+        };
+        assert_eq!(
+            selected_text_encoder_claim_model_id(
+                "external_base_qwen_api",
+                &scoped("external_base_qwen_api")
+            ),
+            selected_text_encoder_claim_model_id(
+                "external_base_qwen_worker",
+                &scoped("external_base_qwen_worker")
+            )
+        );
+        assert_eq!(
+            selected_text_encoder_claim_model_id(
+                "external_base_qwen_api",
+                &scoped("external_base_qwen_api")
+            ),
+            Some("external-comfyui:qwen-image".to_owned())
+        );
+        let mut wrong_scope = scoped("external_base_qwen_api");
+        wrong_scope["catalogScope"] = serde_json::json!("builtin");
+        assert!(
+            selected_text_encoder_claim_model_id("external_base_qwen_api", &wrong_scope).is_none()
+        );
+        assert!(selected_text_encoder_claim_model_id(
+            "external_base_qwen_api",
+            &scoped("external_base_other")
+        )
+        .is_none());
+        assert_eq!(
+            selected_text_encoder_claim_model_id("qwen_image", &scoped("external_base_qwen_api")),
+            Some("qwen_image".to_owned())
         );
     }
 
