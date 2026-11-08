@@ -2054,6 +2054,57 @@ async fn generic_jobs_route_still_serves_non_generation_types() {
     }
 }
 
+fn raw_detail_fixture_app(settings: Settings) -> (axum::Router, crate::AppState) {
+    use sceneworks_core::contracts::WorkerCapability;
+    use sceneworks_core::jobs_store::RegisterWorker;
+    use sceneworks_core::model_artifacts::portable_binding::{
+        PortableSourceClaim, PortableSourceProvenance,
+    };
+
+    let (app, state) = create_app_with_state(settings).expect("app and state create");
+    *state.test_hooks.pinned_metadata_override.lock() =
+        Some(std::sync::Arc::new(|_, _, selectors| {
+            pinned_jobs_fixture_metadata(selectors)
+        }));
+    let tile =
+        sceneworks_core::control_weights::shipped_auxiliary_source("sdxl_detail_tile_control")
+            .expect("shipped Detail tile source");
+    let selectors = tile
+        .files
+        .iter()
+        .map(|file| (*file).to_owned())
+        .collect::<Vec<_>>();
+    let claim = PortableSourceClaim::new(
+        tile.source_id,
+        PortableSourceProvenance::PinnedRepo {
+            repository: tile.repo.into(),
+            revision: tile.revision.into(),
+        },
+        pinned_jobs_fixture_metadata(&selectors),
+    )
+    .expect("exact shipped tile claim");
+    state
+        .jobs_store
+        .register_worker_with_portable_sources(
+            RegisterWorker {
+                worker_id: "candle-detail-worker".into(),
+                gpu_id: "0".into(),
+                gpu_name: None,
+                capabilities: vec![
+                    WorkerCapability::Gpu,
+                    WorkerCapability::ImageDetail,
+                    WorkerCapability::Unknown("candle".into()),
+                ],
+                loaded_models: vec![],
+                utilization: None,
+            },
+            Some("linux"),
+            Some(&[claim]),
+        )
+        .expect("Detail worker registers exact pinned source");
+    (app, state)
+}
+
 /// sc-18480: Batch Detail keeps its established raw `/api/v1/jobs` contract, but the Candle SDXL
 /// provider needs the selected model's three descriptor-owned co-requisites. Start with the exact
 /// client shape (no `modelManifestEntry`) and prove the API enriches the persisted worker payload
@@ -2069,7 +2120,7 @@ async fn raw_batch_detail_injects_authoritative_sdxl_components_for_the_worker()
         include_str!("../../../../config/manifests/builtin.models.jsonc"),
     )
     .expect("shipped model manifest writes");
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (app, _state) = raw_detail_fixture_app(test_settings(&temp_dir));
 
     let (status, job) = request(
         app.clone(),
@@ -2119,25 +2170,11 @@ async fn raw_batch_detail_injects_authoritative_sdxl_components_for_the_worker()
         "the raw job must reach Candle with every component its SDXL descriptor requires"
     );
 
-    let (status, _) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/workers/register",
-        json!({
-            "workerId": "candle-detail-worker",
-            "gpuId": "0",
-            "gpuName": "Candle GPU",
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
     let (status, claimed) = request(
         app,
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "candle-detail-worker" }),
+        portable_test_worker_claim("candle-detail-worker", TestPortableRoute::CandleLinux),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "detail dispatches: {claimed}");
@@ -2271,7 +2308,7 @@ async fn raw_batch_detail_overwrites_untrusted_client_manifest_metadata() {
         include_str!("../../../../config/manifests/builtin.models.jsonc"),
     )
     .expect("shipped model manifest writes");
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (app, _state) = raw_detail_fixture_app(test_settings(&temp_dir));
 
     let (status, job) = request(
         app,
@@ -3700,14 +3737,21 @@ async fn image_create_retry_and_duplicate_resolve_text_encoder_fresh_and_fail_cl
 #[tokio::test]
 async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_retains_it() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    let (app, state) =
-        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        include_str!("../../../../config/manifests/builtin.models.jsonc"),
+    )
+    .expect("shipped model manifest writes");
+    let (app, state) = raw_detail_fixture_app(test_settings(&temp_dir));
     let selected = temp_dir.path().join("server/private/selected.safetensors");
     let selected_parent = selected.parent().expect("selected parent").to_path_buf();
     let distinct_server_root = temp_dir.path().join("other/managed/models");
     let distinct_canonical_target = temp_dir.path().join("outside/canonical/encoder.bin");
     let selection_id = "text_encoder_0123456789abcdef0123456789abcdef";
     let job_payload = json!({
+        "model": "realvisxl",
         "prompt": "/imagine a lake",
         "installedPath": "/public/models/base.safetensors",
         "sourcePath": "/public/loras/style.safetensors",
@@ -3812,20 +3856,19 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
         selection_id
     );
     assert_eq!(created["payload"]["prompt"], "/imagine a lake");
-    assert_eq!(
-        created["payload"]["installedPath"],
-        "/public/models/base.safetensors"
-    );
-    assert_eq!(
-        created["payload"]["sourcePath"],
-        "/public/loras/style.safetensors"
-    );
+    assert!(created["payload"].get("installedPath").is_none());
+    assert!(created["payload"].get("sourcePath").is_none());
     assert_eq!(
         created["payload"]["selectedEcho"],
         "[selected text encoder]"
     );
     let job_id = created["id"].as_str().expect("job id").to_owned();
     let raw = state.jobs_store.get_job(&job_id).expect("raw job reads");
+    assert_eq!(
+        raw.payload["installedPath"],
+        "/public/models/base.safetensors"
+    );
+    assert_eq!(raw.payload["sourcePath"], "/public/loras/style.safetensors");
     assert_eq!(
         raw.payload["modelManifestEntry"]["resolvedTextEncoder"]["path"],
         selected.display().to_string(),
@@ -3884,11 +3927,33 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
     assert_eq!(reconnect[2].0, "queue.updated");
     assert_public("reconnect queue.updated", &reconnect[2].1);
 
+    // Give replay a normally admitted Detail row with an immutable source binding. A direct
+    // jobs-store row above deliberately tests projection of historical private metadata, but
+    // portable replay must reject that row because it never went through source admission.
+    let (status, admitted) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "projectName": "Project 1",
+            "requestedGpu": "auto",
+            "payload": { "model": "realvisxl", "sourceAssetId": "asset-1", "prompt": "lake" }
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "admitted Detail job: {admitted}"
+    );
+    let admitted_id = admitted["id"].as_str().expect("admitted job id");
     for operation in ["retry", "duplicate"] {
         let (status, response) = request(
             app.clone(),
             "POST",
-            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            &format!("/api/v1/jobs/{admitted_id}/{operation}"),
             json!({ "payloadChanges": { "prompt": format!("safe {operation}") } }),
         )
         .await;
