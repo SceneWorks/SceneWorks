@@ -3890,6 +3890,9 @@ async fn completed_moss_lokr_registers_exact_provenance_for_library_selection() 
 fn seed_installed_wan_i2v_a14b_training_base(data_dir: &std::path::Path) {
     #[cfg(target_os = "macos")]
     {
+        // Admission also freezes the mandatory Wan Lightning high/low pair. Seed the complete
+        // pinned declaration before adding the native trainer's dual-expert tier layout.
+        seed_pinned_training_base_fixture(data_dir, "wan_2_2_i2v_14b");
         let snapshot = materialize_snapshot(
             data_dir,
             "SceneWorks/wan2.2-i2v-a14b-mlx",

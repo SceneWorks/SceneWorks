@@ -1075,6 +1075,21 @@ fn entries_support_route(
             && !(*job_type == JobType::PromptRefine
                 && slot == "modelManifestEntries/0"
                 && entry.get("adapter").and_then(Value::as_str) == Some("prompt-refine"))
+            // Dataset captioning selects JoyCaption by its authored repository. That selected
+            // executable utility is also carried in the first auxiliary slot.
+            && !(*job_type == JobType::TrainingCaption
+                && slot == "modelManifestEntries/0"
+                && payload.get("captioner").and_then(Value::as_str) == Some("joy_caption")
+                && entry.get("adapter").and_then(Value::as_str) == Some("joycaption")
+                && downloads.iter().any(|download| {
+                    download.get("repo") == payload.get("modelNameOrPath")
+                }))
+            // Dataset Doctor's selected CLIP embedder is likewise an executable utility in
+            // the first auxiliary slot, selected by its catalog id rather than a repo string.
+            && !(*job_type == JobType::DatasetAnalysis
+                && slot == "modelManifestEntries/0"
+                && payload.get("embedder").and_then(Value::as_str) == Some(id)
+                && entry.get("adapter").and_then(Value::as_str) == Some("clip"))
             && !(*job_type != JobType::PromptRefine
                 && crate::model_sources::fixed_runtime_model_ids(job_type, payload).contains(&id))
             && crate::model_sources::iris_training_task_source_id(job_type, payload) != Some(id)
@@ -1119,6 +1134,66 @@ fn entries_support_route(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_joycaption_repository_is_a_native_caption_route_only() {
+        let selected = serde_json::json!({
+            "id":"joycaption_beta_one", "type":"utility", "adapter":"joycaption",
+            "downloads":[{"repo":"fancyfeast/llama-joycaption-beta-one-hf-llava",
+                "files":["model.safetensors"]}]
+        });
+        let entries = vec![("modelManifestEntries/0".to_owned(), &selected)];
+        let payload = serde_json::json!({
+            "captioner":"joy_caption",
+            "modelNameOrPath":"fancyfeast/llama-joycaption-beta-one-hf-llava"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let routes =
+            eligible_portable_routes(&JobType::TrainingCaption, &payload, &entries, "auto")
+                .expect("selected JoyCaption repository is executable");
+        assert!(routes.contains(&("mlx".to_owned(), "macos".to_owned())));
+        assert!(routes.contains(&("candle".to_owned(), "windows".to_owned())));
+
+        let mut wrong_repo = payload.clone();
+        wrong_repo.insert(
+            "modelNameOrPath".to_owned(),
+            serde_json::json!("other/model"),
+        );
+        assert!(
+            eligible_portable_routes(&JobType::TrainingCaption, &wrong_repo, &entries, "auto")
+                .is_err()
+        );
+        assert!(
+            eligible_portable_routes(&JobType::DatasetAnalysis, &payload, &entries, "auto")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn selected_clip_embedder_is_a_native_dataset_analysis_route_only() {
+        let selected = serde_json::json!({
+            "id":"clip_vit_l14", "type":"utility", "adapter":"clip",
+            "downloads":[{"repo":"openai/clip-vit-large-patch14",
+                "files":["model.safetensors"]}]
+        });
+        let entries = vec![("modelManifestEntries/0".to_owned(), &selected)];
+        let payload = serde_json::json!({"embedder":"clip_vit_l14"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let routes =
+            eligible_portable_routes(&JobType::DatasetAnalysis, &payload, &entries, "auto")
+                .expect("selected CLIP embedder is executable");
+        assert!(routes.contains(&("mlx".to_owned(), "macos".to_owned())));
+        assert!(routes.contains(&("candle".to_owned(), "windows".to_owned())));
+        let mut wrong = payload.clone();
+        wrong.insert("embedder".to_owned(), serde_json::json!("other"));
+        assert!(
+            eligible_portable_routes(&JobType::DatasetAnalysis, &wrong, &entries, "auto").is_err()
+        );
+    }
 
     #[test]
     fn image_studio_selected_encoder_is_a_required_private_source_row() {
