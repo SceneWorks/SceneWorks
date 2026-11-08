@@ -17661,6 +17661,54 @@ async fn h3_veda_api_preserves_complete_controls_and_refuses_malformed_or_incomp
             "transformer_blocks.0.attn.to_q.lora_B.default.weight".into(),
         ],
     );
+    // Portable admission requires one real worker to advertise the exact installed LoRA closure.
+    // Both files are synthetic headers; the test exercises only route admission and never loads
+    // either adapter into an inference engine.
+    let lora_claim = |id: &str, path: &std::path::Path| {
+        use sceneworks_core::model_artifacts::portable_binding::{
+            portable_file_ledger_sha256, PortableArtifactFile, PortableSourceClaim,
+            PortableSourceProvenance,
+        };
+        let files = vec![PortableArtifactFile {
+            relative_path: path.file_name().unwrap().into(),
+            size_bytes: std::fs::metadata(path).unwrap().len(),
+            sha256: format!(
+                "sha256:{}",
+                sceneworks_core::hashing::sha256_file(path).unwrap()
+            ),
+        }];
+        let ledger = portable_file_ledger_sha256(&files).unwrap();
+        PortableSourceClaim::new(
+            sceneworks_core::portable_sources::registered_digest_claim_id(
+                "lora", id, None, &ledger,
+            )
+            .unwrap(),
+            PortableSourceProvenance::OperatorOverride,
+            files,
+        )
+        .unwrap()
+    };
+    let claims = [
+        lora_claim("minimax_h3_turbo_8step", &turbo_file),
+        lora_claim(
+            "user_style",
+            &temp.path().join("data/loras/h3_style.safetensors"),
+        ),
+    ];
+    sceneworks_core::jobs_store::JobsStore::new(test_settings(&temp).jobs_db_path)
+        .register_worker_with_portable_sources(
+            sceneworks_core::jobs_store::RegisterWorker {
+                worker_id: "h3-veda-fixture-worker".into(),
+                gpu_id: "mlx".into(),
+                gpu_name: None,
+                capabilities: vec![WorkerCapability::Gpu, WorkerCapability::VideoGenerate],
+                loaded_models: vec![],
+                utilization: None,
+            },
+            Some("macos"),
+            Some(&claims),
+        )
+        .unwrap();
     let controls = json!({"enabled":true,"generated":"32","reference":"0%","fullAttentionLayers":"49,2–0","fullAttentionSteps":"0;7"});
     let payload = json!({"projectId":project_id,"model":"minimax_h3","mode":"text_to_video","prompt":"a lighthouse","loras":[{"id":"minimax_h3_turbo_8step","weight":0.8},{"id":"user_style","weight":0.4}],"advanced":{"veda":controls}});
     let (status, created) =

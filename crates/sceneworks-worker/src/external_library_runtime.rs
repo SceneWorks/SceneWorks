@@ -3175,13 +3175,21 @@ fn worker_lora_catalog_member_path(
     {
         return Ok(Some(global));
     }
-    let Some(project) = crate::paths::project_path_for_payload(settings, payload)
-        .map_err(|_| invalid_binding("worker project source is unavailable"))?
-    else {
-        return Ok(None);
-    };
-    let manifest = project.join("loras/manifest.jsonc");
-    worker_catalog_member_path_at(settings, &manifest, "loras", id, None, member)
+    let project = crate::paths::project_path_for_payload(settings, payload)
+        .map_err(|_| invalid_binding("worker project source is unavailable"))?;
+    if let Some(project) = project {
+        let manifest = project.join("loras/manifest.jsonc");
+        if let Some(path) =
+            worker_catalog_member_path_at(settings, &manifest, "loras", id, None, member)?
+        {
+            return Ok(Some(path));
+        }
+    }
+    Ok(crate::portable_source_claims::registered_builtin_lora_path(
+        settings,
+        id,
+        &member.files,
+    ))
 }
 
 fn worker_catalog_member_path_at(

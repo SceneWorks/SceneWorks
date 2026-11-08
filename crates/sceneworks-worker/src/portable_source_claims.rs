@@ -125,9 +125,27 @@ fn catalog_hash(settings: &Settings) -> [u8; 32] {
     let manifests = settings.config_dir.join("manifests");
     let mut paths = vec![
         manifests.join("user.models.jsonc"),
+        manifests.join("builtin.loras.jsonc"),
         manifests.join("user.loras.jsonc"),
         manifests.join("user.control_overlays.jsonc"),
     ];
+    paths.extend(
+        catalog_records(&manifests.join("builtin.loras.jsonc"), "loras")
+            .into_iter()
+            .filter_map(|entry| {
+                entry
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .map(|id| {
+                settings
+                    .data_dir
+                    .join("loras")
+                    .join(crate::paths::safe_download_dir(&id))
+                    .join(".sceneworks-download-complete.json")
+            }),
+    );
     paths.extend(converted_builtin_model_ids().into_iter().map(|id| {
         settings
             .data_dir
@@ -417,6 +435,17 @@ fn registered_digest_source_claims(
         };
         if let Some(files) = capture_converted_builtin_files(settings, &root) {
             append_registered_claim_files(&mut claims, "model", &id, None, files);
+            for claim in claims.drain(..) {
+                publish(claim);
+            }
+        }
+    }
+    for lora in catalog_records(&manifests.join("builtin.loras.jsonc"), "loras") {
+        let Some(id) = lora.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        for path in builtin_lora_source_paths(settings, &lora) {
+            append_registered_claim(&mut claims, "lora", id, None, &path);
             for claim in claims.drain(..) {
                 publish(claim);
             }
@@ -858,6 +887,124 @@ fn catalog_records(path: &Path, collection: &str) -> Vec<serde_json::Value> {
         .unwrap_or_default()
 }
 
+/// The built-in LoRA catalog names pinned Hugging Face files rather than local paths. Resolve
+/// only its own snapshot or a receipt naming the same repository; never use a job's API-host path.
+fn builtin_lora_source_paths(settings: &Settings, entry: &serde_json::Value) -> Vec<PathBuf> {
+    let Some(id) = entry.get("id").and_then(serde_json::Value::as_str) else {
+        return Vec::new();
+    };
+    let Some(source) = entry.get("source") else {
+        return Vec::new();
+    };
+    if source.get("provider").and_then(serde_json::Value::as_str) != Some("huggingface") {
+        return Vec::new();
+    }
+    let Some(repo) = source.get("repo").and_then(serde_json::Value::as_str) else {
+        return Vec::new();
+    };
+    let Some(revision) = source.get("revision").and_then(serde_json::Value::as_str) else {
+        return Vec::new();
+    };
+    let Some(file) = source.get("file").and_then(serde_json::Value::as_str) else {
+        return Vec::new();
+    };
+    if revision.len() != 40
+        || !revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || sceneworks_core::model_artifacts::ArtifactFile::new(file).is_err()
+    {
+        return Vec::new();
+    }
+    let library = sceneworks_core::hf_home::model_source_library(&settings.data_dir);
+    let resolver = sceneworks_core::model_artifacts::ModelArtifactResolver::new(library.clone());
+    let repository_root = library.repository_root(repo).ok();
+    let mut paths = Vec::new();
+    let mut push = |snapshot: &Path, file: &str| {
+        if sceneworks_core::model_artifacts::ArtifactFile::new(file).is_err() {
+            return;
+        }
+        let candidate = snapshot.join(file);
+        if candidate.extension().and_then(|value| value.to_str()) != Some("safetensors") {
+            return;
+        }
+        let Ok(resolved) = candidate.canonicalize() else {
+            return;
+        };
+        // Standard HF snapshots symlink into their repository's `blobs/` sibling. A leased
+        // local-tier snapshot may live elsewhere; in that case confine to that exact root.
+        let allowed = repository_root
+            .as_deref()
+            .filter(|root| snapshot.starts_with(root))
+            .unwrap_or(snapshot);
+        let Ok(allowed) = allowed.canonicalize() else {
+            return;
+        };
+        if resolved.starts_with(&allowed) && resolved.is_file() && !paths.contains(&candidate) {
+            paths.push(candidate);
+        }
+    };
+    if let Ok((_, snapshot)) = resolver.discover_source_reference(repo, revision) {
+        push(&snapshot, file);
+    }
+    let marker = settings
+        .data_dir
+        .join("loras")
+        .join(crate::paths::safe_download_dir(id))
+        .join(".sceneworks-download-complete.json");
+    if let Ok(bytes) = std::fs::read(marker) {
+        if let Ok(receipt) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            let rows = receipt
+                .get("receipts")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_else(|| vec![receipt]);
+            for row in rows.iter().rev() {
+                if row.get("repo").and_then(serde_json::Value::as_str) != Some(repo) {
+                    continue;
+                }
+                let Some(snapshot_revision) = row
+                    .get("snapshotRevision")
+                    .and_then(serde_json::Value::as_str)
+                else {
+                    continue;
+                };
+                let Ok((_, snapshot)) =
+                    resolver.discover_source_snapshot(repo, Some(snapshot_revision))
+                else {
+                    continue;
+                };
+                if let Some(files) = row
+                    .get("resolvedFiles")
+                    .and_then(serde_json::Value::as_array)
+                {
+                    for file in files.iter().filter_map(serde_json::Value::as_str) {
+                        push(&snapshot, file);
+                    }
+                }
+            }
+        }
+    }
+    paths
+}
+
+/// Rebind a selected built-in LoRA under this worker's own catalog and exact local byte ledger.
+pub(crate) fn registered_builtin_lora_path(
+    settings: &Settings,
+    id: &str,
+    expected: &[PortableArtifactFile],
+) -> Option<PathBuf> {
+    let manifest = settings.config_dir.join("manifests/builtin.loras.jsonc");
+    let matches = catalog_records(&manifest, "loras")
+        .into_iter()
+        .filter(|entry| entry.get("id").and_then(serde_json::Value::as_str) == Some(id))
+        .collect::<Vec<_>>();
+    let [entry] = matches.as_slice() else {
+        return None;
+    };
+    builtin_lora_source_paths(settings, entry)
+        .into_iter()
+        .find(|path| capture_registered_files(path).is_ok_and(|files| files == expected))
+}
+
 fn append_registered_claim(
     claims: &mut Vec<PortableSourceClaim>,
     kind: &str,
@@ -1241,6 +1388,69 @@ fn capture_one(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn builtin_hf_lora_is_advertised_and_rebound_by_exact_worker_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut settings = Settings::for_test(temp.path().join("worker-data"));
+        settings.config_dir = temp.path().join("worker-config");
+        let hub = temp.path().join("worker-hub");
+        let _hub = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+            settings.data_dir.clone(),
+            hub.clone(),
+        );
+        let manifest = settings.config_dir.join("manifests/builtin.loras.jsonc");
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        let repo = "example/pinned-lora";
+        let revision = "1111111111111111111111111111111111111111";
+        let filename = "adapter.safetensors";
+        std::fs::write(&manifest, json!({"loras":[{"id":"builtin_adapter","source":{"provider":"huggingface","repo":repo,"revision":revision,"file":filename}}]}).to_string()).unwrap();
+        let worker_file = hub
+            .join("models--example--pinned-lora/snapshots")
+            .join(revision)
+            .join(filename);
+        std::fs::create_dir_all(worker_file.parent().unwrap()).unwrap();
+        std::fs::write(&worker_file, b"exact adapter bytes").unwrap();
+        let api_file = temp.path().join("api-root/adapter.safetensors");
+        std::fs::create_dir_all(api_file.parent().unwrap()).unwrap();
+        std::fs::write(&api_file, b"exact adapter bytes").unwrap();
+        let expected = capture_registered_files(&api_file).unwrap();
+        let ledger =
+            sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(
+                &expected,
+            )
+            .unwrap();
+        let id = sceneworks_core::portable_sources::registered_digest_claim_id(
+            "lora",
+            "builtin_adapter",
+            None,
+            &ledger,
+        )
+        .unwrap();
+        assert!(static_source_claims(&settings)
+            .iter()
+            .any(|claim| claim.source_id == id && claim.files == expected));
+        assert_eq!(
+            registered_builtin_lora_path(&settings, "builtin_adapter", &expected),
+            Some(worker_file.clone())
+        );
+        assert!(registered_builtin_lora_path(&settings, "other_adapter", &expected).is_none());
+        std::fs::write(&worker_file, b"replaced adapter bytes").unwrap();
+        assert!(registered_builtin_lora_path(&settings, "builtin_adapter", &expected).is_none());
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&worker_file).unwrap();
+            let outside = temp.path().join("outside.safetensors");
+            std::fs::write(&outside, b"exact adapter bytes").unwrap();
+            std::os::unix::fs::symlink(&outside, &worker_file).unwrap();
+            assert!(
+                registered_builtin_lora_path(&settings, "builtin_adapter", &expected).is_none()
+            );
+            assert!(!static_source_claims(&settings)
+                .iter()
+                .any(|claim| claim.source_id == id));
+        }
+    }
 
     #[test]
     fn file_selected_encoder_ledger_includes_its_behavior_config() {
