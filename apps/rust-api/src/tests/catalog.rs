@@ -1605,15 +1605,15 @@ async fn model_and_lora_routes_match_manifest_behavior() {
               "schemaVersion": 1,
               "models": [
                 {
-                  "id": "base-model",
+                  "id": "z_image_turbo",
                   "name": "Base Model",
                   "family": "z-image",
                   "type": "image",
                   "adapter": "z_image_diffusers",
                   "capabilities": ["text_to_image", "edit_image"],
                   "downloads": [
-                    { "provider": "huggingface", "repo": "owner/alternate-model", "files": ["*.bin"], "estimatedSizeBytes": 536870912 },
-                    { "provider": "huggingface", "repo": "owner/model", "files": ["*.safetensors"], "default": true, "estimatedSizeBytes": 12884901888 }
+                    { "provider": "huggingface", "repo": "owner/alternate-model", "revision": "fedcba9876543210fedcba9876543210fedcba98", "files": ["*.bin"], "estimatedSizeBytes": 536870912 },
+                    { "provider": "huggingface", "repo": "owner/model", "revision": "0123456789abcdef0123456789abcdef01234567", "files": ["*.safetensors"], "default": true, "estimatedSizeBytes": 12884901888 }
                   ],
                   "paths": {},
                   "defaults": {},
@@ -1633,7 +1633,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
               "schemaVersion": 1,
               "models": [
                 {
-                  "id": "base-model",
+                  "id": "z_image_turbo",
                   "name": "User Model",
                   "ui": { "label": "User" },
                   "customPluginMetadata": { "vendorKey": "preserved" }
@@ -1684,7 +1684,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
                   "id": "cinematic",
                   "name": "Cinematic",
                   "workflow": "text_to_image",
-                  "model": "base-model",
+                  "model": "z_image_turbo",
                   "defaults": { "count": 4, "resolution": "1280x720", "negativePrompt": "flat lighting" },
                   "prompt": { "suffix": "cinematic lighting" },
                   "loras": [{ "id": "style-lora", "weight": 0.5 }]
@@ -1715,7 +1715,72 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
     write_test_safetensors(&lora_dir.join("style.safetensors"));
 
-    let app = create_app(settings.clone()).expect("app creates");
+    let (app, state) = create_app_with_state(settings.clone()).expect("app creates");
+    *state.test_hooks.pinned_metadata_override.lock() =
+        Some(std::sync::Arc::new(|repository, revision, selectors| {
+            if repository == "owner/model"
+                && revision == "0123456789abcdef0123456789abcdef01234567"
+                && selectors == ["*.safetensors".to_owned()]
+            {
+                vec![
+                    sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile {
+                        relative_path: "model.safetensors".into(),
+                        size_bytes: 7,
+                        sha256: format!(
+                            "sha256:{}",
+                            sceneworks_core::hashing::sha256_bytes(b"fixture")
+                        ),
+                    },
+                ]
+            } else {
+                Vec::new()
+            }
+        }));
+    let lora_bytes = std::fs::read(lora_dir.join("style.safetensors")).unwrap();
+    let lora_files = vec![
+        sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile {
+            relative_path: "style.safetensors".into(),
+            size_bytes: lora_bytes.len() as u64,
+            sha256: format!(
+                "sha256:{}",
+                sceneworks_core::hashing::sha256_bytes(&lora_bytes)
+            ),
+        },
+    ];
+    let lora_source_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+        "lora",
+        "style-lora",
+        None,
+        &sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(
+            &lora_files,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let lora_claim = sceneworks_core::model_artifacts::portable_binding::PortableSourceClaim::new(
+        lora_source_id,
+        sceneworks_core::model_artifacts::portable_binding::PortableSourceProvenance::OperatorOverride,
+        lora_files,
+    )
+    .unwrap();
+    state
+        .jobs_store
+        .register_worker_with_portable_sources(
+            sceneworks_core::jobs_store::RegisterWorker {
+                worker_id: "catalog-mlx-worker".into(),
+                gpu_id: "mlx".into(),
+                gpu_name: None,
+                capabilities: vec![
+                    sceneworks_core::contracts::WorkerCapability::Gpu,
+                    sceneworks_core::contracts::WorkerCapability::ImageGenerate,
+                ],
+                loaded_models: vec![],
+                utilization: None,
+            },
+            Some("macos"),
+            Some(&[lora_claim]),
+        )
+        .unwrap();
     let (status, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(models[0]["name"], "User Model");
@@ -1772,7 +1837,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         .find(|preset| preset["id"] == "legacy_edit")
         .expect("legacy edit preset");
     assert_eq!(legacy_edit["workflow"], "edit_image");
-    assert_eq!(legacy_edit["model"], "base-model");
+    assert_eq!(legacy_edit["model"], "z_image_turbo");
     assert_eq!(legacy_edit["loras"][0]["id"], "style-lora");
     assert_eq!(
         legacy_edit["appliedDefaults"]["notes"][0],
@@ -1780,7 +1845,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     );
     assert_eq!(
         legacy_edit["appliedDefaults"]["notes"][1],
-        "model defaulted to base-model for legacy preset"
+        "model defaulted to z_image_turbo for legacy preset"
     );
     assert_eq!(
         legacy_edit["appliedDefaults"]["notes"][2],
@@ -1816,7 +1881,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         json!({
             "projectId": project_id,
             "prompt": "city at night",
-            "model": "base-model",
+            "model": "z_image_turbo",
             // Client render settings that DIFFER from the preset's declared
             // defaults (count 2 / 1280x720 / "flat lighting") — the studio seeds
             // the form from the preset but the user can override, so these
@@ -1830,13 +1895,18 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(status, StatusCode::CREATED, "{image_job}");
     assert_eq!(
         image_job["payload"]["prompt"],
         "city at night, cinematic lighting"
     );
     assert_eq!(image_job["payload"]["loras"][0]["id"], "style-lora");
-    assert!(image_job["payload"]["loras"][0]["installedPath"]
+    assert!(image_job["payload"]["loras"][0]["installedPath"].is_null());
+    let stored_image_job = state
+        .jobs_store
+        .get_job(image_job["id"].as_str().unwrap())
+        .unwrap();
+    assert!(stored_image_job.payload["loras"][0]["installedPath"]
         .as_str()
         .is_some_and(|value| value.ends_with("data/loras/style.safetensors")
             || value.ends_with("data\\loras\\style.safetensors")
@@ -1846,7 +1916,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         image_job["payload"]["loras"][0]["source"]["path"],
         "loras/style.safetensors"
     );
-    assert_eq!(image_job["payload"]["model"], "base-model");
+    assert_eq!(image_job["payload"]["model"], "z_image_turbo");
     assert_eq!(
         image_job["payload"]["modelManifestEntry"]["catalogScope"],
         "builtin"
@@ -1879,7 +1949,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         json!({
             "projectId": project_id,
             "prompt": "city with selected lora",
-            "model": "base-model",
+            "model": "z_image_turbo",
             "count": 1,
             "width": 512,
             "height": 512,
@@ -1905,7 +1975,12 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         null_path_job["payload"]["loras"][0]["compatibility"]["families"][0],
         "z-image"
     );
-    assert!(null_path_job["payload"]["loras"][0]["installedPath"]
+    assert!(null_path_job["payload"]["loras"][0]["installedPath"].is_null());
+    let stored_null_path_job = state
+        .jobs_store
+        .get_job(null_path_job["id"].as_str().unwrap())
+        .unwrap();
+    assert!(stored_null_path_job.payload["loras"][0]["installedPath"]
         .as_str()
         .is_some_and(|value| value.ends_with("data/loras/style.safetensors")
             || value.ends_with("data\\loras\\style.safetensors")
@@ -1927,12 +2002,12 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(preset_model_job["payload"]["model"], "base-model");
+    assert_eq!(preset_model_job["payload"]["model"], "z_image_turbo");
 
     let (status, job) = request(
         app.clone(),
         "POST",
-        "/api/v1/models/base-model/download",
+        "/api/v1/models/z_image_turbo/download",
         json!({ "requestedGpu": "" }),
     )
     .await;
@@ -1949,7 +2024,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     let (status, deleted_overlay) = request(
         app.clone(),
         "DELETE",
-        "/api/v1/models/base-model?permanent=true",
+        "/api/v1/models/z_image_turbo?permanent=true",
         Value::Null,
     )
     .await;
@@ -1963,7 +2038,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         .as_array()
         .expect("models array")
         .iter()
-        .find(|model| model["id"] == "base-model")
+        .find(|model| model["id"] == "z_image_turbo")
         .expect("protected builtin remains after overlay deletion");
     assert_eq!(restored_builtin["name"], "Base Model");
     assert_eq!(restored_builtin["catalogScope"], "builtin");
@@ -2041,10 +2116,15 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         upload_job["payload"]["manifestEntry"]["files"][0],
         "detail.safetensors"
     );
+    assert!(upload_job["payload"]["sourcePath"].is_null());
+    let stored_upload = state
+        .jobs_store
+        .get_job(upload_job["id"].as_str().unwrap())
+        .unwrap();
     let source_path = std::path::PathBuf::from(
-        upload_job["payload"]["sourcePath"]
+        stored_upload.payload["sourcePath"]
             .as_str()
-            .expect("source path"),
+            .expect("private source path"),
     );
     assert_eq!(
         std::fs::read(&source_path).expect("staged upload reads"),
@@ -2161,7 +2241,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
               "schemaVersion": 1,
               "models": [
                 {
-                  "id": "base-model",
+                  "id": "z_image_turbo",
                   "name": "Base Model",
                   "family": "z-image",
                   "type": "image",
