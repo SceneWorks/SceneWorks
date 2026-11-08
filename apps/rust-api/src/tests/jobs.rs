@@ -83,8 +83,13 @@ fn use_shipped_default_download(manifest_dir: &std::path::Path, model_id: &str) 
         .iter_mut()
         .find(|row| row["id"] == model_id)
         .expect("fixture model row");
-    assert_eq!(row["downloads"][0]["repo"], default["repo"]);
-    row["downloads"][0] = default.clone();
+    let downloads = row["downloads"].as_array_mut().expect("fixture downloads");
+    if let Some(first) = downloads.first_mut() {
+        assert_eq!(first["repo"], default["repo"]);
+        *first = default.clone();
+    } else {
+        downloads.push(default.clone());
+    }
     std::fs::write(path, manifest.to_string()).expect("fixture manifest writes");
 }
 
@@ -5531,7 +5536,7 @@ fn write_lora_gate_catalog(temp_dir: &tempfile::TempDir) {
           "schemaVersion": 1,
           "models": [
             {
-              "id": "gate_image",
+              "id": "z_image_turbo",
               "name": "Gate Image",
               "family": "z-image",
               "type": "image",
@@ -5559,6 +5564,8 @@ fn write_lora_gate_catalog(temp_dir: &tempfile::TempDir) {
         }"#,
     )
     .expect("builtin models writes");
+    use_shipped_default_download(&config_dir, "z_image_turbo");
+    use_shipped_default_download(&config_dir, "ltx_2_3");
     std::fs::write(
         config_dir.join("user.models.jsonc"),
         r#"{ "schemaVersion": 1, "models": [] }"#,
@@ -5614,6 +5621,48 @@ fn write_lora_gate_catalog(temp_dir: &tempfile::TempDir) {
     }
 }
 
+async fn advertise_fixture_lora_source(
+    app: &axum::Router,
+    lora_id: &str,
+    path: &std::path::Path,
+    capability: &str,
+) {
+    use sceneworks_core::model_artifacts::portable_binding::{
+        portable_file_ledger_sha256, PortableArtifactFile, PortableSourceClaim,
+        PortableSourceProvenance,
+    };
+    let files = vec![PortableArtifactFile {
+        relative_path: path.file_name().expect("LoRA file name").into(),
+        size_bytes: std::fs::metadata(path).expect("LoRA file metadata").len(),
+        sha256: format!(
+            "sha256:{}",
+            sceneworks_core::hashing::sha256_file(path).expect("LoRA file hash")
+        ),
+    }];
+    let ledger = portable_file_ledger_sha256(&files).expect("LoRA file ledger");
+    let source_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+        "lora", lora_id, None, &ledger,
+    )
+    .expect("registered LoRA source id");
+    let claim =
+        PortableSourceClaim::new(source_id, PortableSourceProvenance::OperatorOverride, files)
+            .expect("LoRA source claim");
+    let mut registration = portable_test_worker_registration(
+        "test-lora-source-worker",
+        &["gpu", "mlx", capability],
+        TestPortableRoute::MlxMacos,
+    );
+    registration["portableSourceClaims"] = serde_json::to_value(vec![claim]).unwrap();
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        registration,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
 /// sc-18420: `validate_job_lora_compatibility_with` runs at BOTH create boundaries
 /// (`create_image_job`, `create_video_job`) and at neither retry/duplicate one. `loras` is a
 /// TOP-LEVEL key, so the shallow `payload_changes` merge replaces the whole array — a retry could
@@ -5623,12 +5672,20 @@ fn write_lora_gate_catalog(temp_dir: &tempfile::TempDir) {
 /// Every refusal string here is the create path's own, asserted verbatim against the same catalog.
 #[tokio::test]
 async fn retry_and_duplicate_gate_a_merged_lora_set_the_create_path_refuses() {
+    let _env = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_lora_gate_catalog(&temp_dir);
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     // The LoRA catalog is project-scoped, so the gate needs a real project to resolve against.
     let (_, project) = crate::tests::support::create_project(app.clone(), &"LoRA Gate").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
+    advertise_fixture_lora_source(
+        &app,
+        "good_style",
+        &temp_dir.path().join("data/loras/good.safetensors"),
+        "image_generate",
+    )
+    .await;
 
     // Baseline: created with a COMPATIBLE adapter, so the refusals below are about the merged set
     // and not about the route rejecting adapters at all.
@@ -5640,7 +5697,7 @@ async fn retry_and_duplicate_gate_a_merged_lora_set_the_create_path_refuses() {
             "projectId": project_id,
             "mode": "text_to_image",
             "prompt": "mist over hills",
-            "model": "gate_image",
+            "model": "z_image_turbo",
             "count": 1,
             "loras": [{ "id": "good_style" }],
         }),
@@ -5654,7 +5711,7 @@ async fn retry_and_duplicate_gate_a_merged_lora_set_the_create_path_refuses() {
 
     for (expected, loras) in [
         (
-            "LoRA qwen_style is not compatible with model gate_image: the LoRA is a qwen-image adapter, and gate_image loads z-image adapters",
+            "LoRA qwen_style is not compatible with model z_image_turbo: the LoRA is a qwen-image adapter, and z_image_turbo loads z-image adapters",
             json!([{ "id": "qwen_style" }]),
         ),
         (
@@ -5667,7 +5724,7 @@ async fn retry_and_duplicate_gate_a_merged_lora_set_the_create_path_refuses() {
         ),
         // A mixed set must be refused for its bad member, not silently pruned to the good one.
         (
-            "LoRA qwen_style is not compatible with model gate_image: the LoRA is a qwen-image adapter, and gate_image loads z-image adapters",
+            "LoRA qwen_style is not compatible with model z_image_turbo: the LoRA is a qwen-image adapter, and z_image_turbo loads z-image adapters",
             json!([{ "id": "good_style" }, { "id": "qwen_style" }]),
         ),
     ] {
@@ -5681,7 +5738,7 @@ async fn retry_and_duplicate_gate_a_merged_lora_set_the_create_path_refuses() {
                 "projectId": project_id,
                 "mode": "text_to_image",
                 "prompt": "mist over hills",
-                "model": "gate_image",
+                "model": "z_image_turbo",
                 "count": 1,
                 "loras": loras,
             }),
@@ -5745,9 +5802,10 @@ async fn retry_and_duplicate_gate_a_merged_lora_set_the_create_path_refuses() {
 /// `payloadChanges`.
 #[tokio::test]
 async fn retry_honours_character_inline_lora_provenance_without_letting_others_borrow_it() {
+    let _env = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_lora_gate_catalog(&temp_dir);
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Character Retry").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let (_, character) = request(
@@ -5767,19 +5825,23 @@ async fn retry_honours_character_inline_lora_provenance_without_letting_others_b
         json!({
             "name": "Character Style",
             "sourcePath": source.display().to_string(),
-            // Compatible with `gate_image` so the test-job itself is admitted; the family gate is
+            // Compatible with `z_image_turbo` so the test-job itself is admitted; the family gate is
             // pinned elsewhere and is not what this test is about.
             "compatibility": { "families": ["z-image"] }
         }),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{attached}");
+    let linked_lora_id = attached["loras"][0]["id"]
+        .as_str()
+        .expect("attached character LoRA id");
+    advertise_fixture_lora_source(&app, linked_lora_id, &source, "image_generate").await;
 
     let (status, character_job) = request(
         app.clone(),
         "POST",
         &format!("/api/v1/projects/{project_id}/characters/{character_id}/test-jobs"),
-        json!({ "prompt": "portrait", "model": "gate_image" }),
+        json!({ "prompt": "portrait", "model": "z_image_turbo" }),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{character_job}");
@@ -5925,7 +5987,7 @@ async fn retry_honours_character_inline_lora_provenance_without_letting_others_b
             "mode": "character_image",
             "characterId": "character_not_really_mine",
             "prompt": "mist over hills",
-            "model": "gate_image",
+            "model": "z_image_turbo",
             "count": 1,
             "referenceAssetIds": [],
             "loras": [],
@@ -5993,12 +6055,20 @@ async fn retry_honours_character_inline_lora_provenance_without_letting_others_b
 /// The video half of the same LoRA bypass — `create_video_job` runs the identical gate.
 #[tokio::test]
 async fn retry_and_duplicate_gate_a_merged_video_lora_set_the_create_path_refuses() {
+    let _env = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_lora_gate_catalog(&temp_dir);
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     // The LoRA catalog is project-scoped, so the gate needs a real project to resolve against.
     let (_, project) = crate::tests::support::create_project(app.clone(), &"LoRA Gate").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
+    advertise_fixture_lora_source(
+        &app,
+        "motion_style",
+        &temp_dir.path().join("data/loras/motion.safetensors"),
+        "video_generate",
+    )
+    .await;
 
     let (status, original) = request(
         app.clone(),
