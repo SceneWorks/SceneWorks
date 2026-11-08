@@ -34,14 +34,46 @@ fn pinned_film_metadata(
     selectors: &[String],
 ) -> Vec<sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile> {
     use sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile;
-    selectors
-        .iter()
-        .map(|selector| PortableArtifactFile {
-            relative_path: PathBuf::from(selector.replace('*', "fixture")),
-            size_bytes: 1,
-            sha256: format!("sha256:{}", "a".repeat(64)),
-        })
-        .collect()
+    // The real pinned-tree resolver unions overlapping selectors by path and returns sorted files.
+    let mut files = std::collections::BTreeMap::new();
+    for selector in selectors {
+        let relative_path = PathBuf::from(selector.replace('*', "fixture"));
+        files
+            .entry(relative_path.clone())
+            .or_insert(PortableArtifactFile {
+                relative_path,
+                size_bytes: 1,
+                sha256: format!("sha256:{}", "a".repeat(64)),
+            });
+    }
+    files.into_values().collect()
+}
+
+#[test]
+fn film_pinned_metadata_matches_canonical_tree_order_and_keeps_the_source_guard() {
+    use sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256;
+
+    let files = pinned_film_metadata(
+        "owner/fixture",
+        "a".repeat(40).as_str(),
+        &["z/*".into(), "a/*".into(), "z/*".into()],
+    );
+    assert_eq!(
+        files
+            .iter()
+            .map(|file| file.relative_path.as_path())
+            .collect::<Vec<_>>(),
+        [Path::new("a/fixture"), Path::new("z/fixture")]
+    );
+    assert!(portable_file_ledger_sha256(&files).is_ok());
+    let mut noncanonical = files.clone();
+    noncanonical.reverse();
+    assert!(portable_file_ledger_sha256(&noncanonical)
+        .unwrap_err()
+        .to_string()
+        .contains("duplicated or not canonical"));
+    noncanonical = vec![files[0].clone(), files[0].clone()];
+    assert!(portable_file_ledger_sha256(&noncanonical).is_err());
 }
 
 pub(crate) const FIXTURE_DIR: &str = concat!(
@@ -2704,7 +2736,7 @@ impl Harness {
     /// must match no family detector (a detected family would be judged against the model's, which
     /// is a different rule from the one this test is about).
     pub(crate) fn install_turbo_loras(&self) {
-        let weights_dir = self.temp_dir.path().join("lora-weights");
+        let weights_dir = self.state.settings.data_dir.join("lora-weights");
         std::fs::create_dir_all(&weights_dir).expect("weights dir creates");
         let header = serde_json::json!({
             "inert.weight": { "dtype": "F32", "shape": [1], "data_offsets": [0, 4] }
@@ -2714,15 +2746,17 @@ impl Harness {
         bytes.extend_from_slice(&header_bytes);
         bytes.extend_from_slice(&[0_u8; 4]);
         let file = weights_dir.join("adapter.safetensors");
-        std::fs::write(&file, bytes).expect("adapter writes");
+        std::fs::write(&file, &bytes).expect("adapter writes");
 
         let shipped = include_str!("../../../../config/manifests/builtin.loras.jsonc");
         let mut manifest: Value =
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(shipped))
                 .expect("the shipped lora manifest parses");
+        let mut installed_ids = Vec::new();
         for lora in manifest["loras"].as_array_mut().expect("loras") {
             let id = lora["id"].as_str().unwrap_or_default().to_owned();
             if id.starts_with("minimax_h3") {
+                installed_ids.push(id);
                 lora["source"] = serde_json::json!({
                     "path": weights_dir.display().to_string()
                 });
@@ -2735,6 +2769,56 @@ impl Harness {
             serde_json::to_string_pretty(&manifest).expect("manifest serializes"),
         )
         .expect("lora manifest writes");
+
+        // The fake worker owns these same managed bytes. Advertise their exact closures so the
+        // portable admission gate proves worker availability instead of accepting an API-only path.
+        use sceneworks_core::jobs_store::WorkerHeartbeat;
+        use sceneworks_core::model_artifacts::portable_binding::{
+            portable_file_ledger_sha256, PortableArtifactFile, PortableSourceClaim,
+            PortableSourceProvenance,
+        };
+        let source = PortableArtifactFile {
+            relative_path: PathBuf::from("adapter.safetensors"),
+            size_bytes: bytes.len() as u64,
+            sha256: format!("sha256:{}", sceneworks_core::hashing::sha256_bytes(&bytes)),
+        };
+        let ledger = portable_file_ledger_sha256(std::slice::from_ref(&source))
+            .expect("fixture source ledger");
+        let claims = installed_ids
+            .iter()
+            .map(|id| {
+                let source_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+                    "lora", id, None, &ledger,
+                )
+                .expect("fixture LoRA source id");
+                PortableSourceClaim::new(
+                    source_id,
+                    PortableSourceProvenance::OperatorOverride,
+                    vec![source.clone()],
+                )
+                .expect("fixture LoRA source claim")
+            })
+            .collect::<Vec<_>>();
+        let utilization = self
+            .state
+            .jobs_store
+            .get_worker(WORKER_ID)
+            .expect("fake worker is registered")
+            .utilization;
+        self.state
+            .jobs_store
+            .heartbeat_worker_with_portable_sources(
+                WorkerHeartbeat {
+                    worker_id: WORKER_ID.into(),
+                    status: sceneworks_core::contracts::WorkerStatus::Idle,
+                    current_job_id: None,
+                    loaded_models: Vec::new(),
+                    utilization,
+                    status_reason: None,
+                },
+                Some(&claims),
+            )
+            .expect("fake worker advertises installed LoRA bytes");
     }
 
     pub(crate) fn run_record(&self) -> Value {
