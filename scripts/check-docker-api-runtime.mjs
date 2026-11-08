@@ -131,10 +131,26 @@ async function main() {
       execFileSync("docker", ["run", "--rm", "--entrypoint", "sh", image, "-ec",
         'test "$(id -u)" = 1000; test "$(id -g)" = 1000; test "$HOME" = /home/sceneworks; touch "$HOME/.docker-smoke"; rm "$HOME/.docker-smoke"'],
         { stdio: "inherit" });
+      // The API has now populated the bind. A different UID must fail before
+      // the initializer can inspect or re-own its stored secrets.
+      const wrongUidEnv = {
+        ...env,
+        SCENEWORKS_UID: String(Number(env.SCENEWORKS_UID ?? "1000") + 1),
+      };
+      let refusedForeignOwner = false;
+      try {
+        execFileSync("docker", [...compose, "run", "--no-deps", "--rm", "credentials-init"], {
+          env: wrongUidEnv, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+        });
+      } catch (error) {
+        if (!String(error.stderr).includes("credentials bind belongs to another UID")) throw error;
+        refusedForeignOwner = true;
+      }
+      if (!refusedForeignOwner) throw new Error("credentials init took over a populated foreign-owned bind");
       // The mounted data tree is the home/cache root for arbitrary host UID/GID
       // overrides. Prove the effective identity and a real bind-mounted write.
       execFileSync("docker", [...compose, "exec", "-T", "api", "sh", "-ec",
-        'test "$(id -u)" = "$1"; test "$(id -g)" = "$2"; test "$HOME" = /sceneworks/data; touch "$HOME/cache/.docker-smoke"; rm "$HOME/cache/.docker-smoke"; test -w /sceneworks/credentials; test "$(stat -c %a /sceneworks/credentials)" = 700; test "$(stat -c %a /sceneworks/credentials/worker-source-proof-master)" = 600',
+        'test "$(id -u)" = "$1"; test "$(id -g)" = "$2"; test "$HOME" = /sceneworks/data; touch "$HOME/cache/.docker-smoke"; rm "$HOME/cache/.docker-smoke"; test -w /sceneworks/credentials; test "$(stat -c %u /sceneworks/credentials)" = "$1"; test "$(stat -c %u /sceneworks/credentials/worker-source-proof-master)" = "$1"; test "$(stat -c %a /sceneworks/credentials)" = 700; test "$(stat -c %a /sceneworks/credentials/worker-source-proof-master)" = 600',
         "sh", env.SCENEWORKS_UID ?? "1000", env.SCENEWORKS_GID ?? "1000"], { env, stdio: "inherit" });
       console.log("Docker API image, Compose UID/GID, and persisted proof-key checks passed.");
     } catch (error) {

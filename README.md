@@ -338,9 +338,9 @@ GPU inference worker from target `rust-worker-candle`. The API sets
 error instead of waiting forever.
 
 The API and both Compose workers share the credentials bind. A one-shot Compose
-service prepares a newly created, empty directory as `0700` for the configured
-host UID/GID before the non-root API starts. It refuses to re-own a nonempty
-directory belonging to another UID. At first startup, the API creates a `0600`
+service prepares a newly created, empty root-owned directory as `0700` for the
+configured host UID/GID before the non-root API starts. It refuses any other
+owner or a nonempty root-owned directory. At first startup, the API creates a `0600`
 worker-source proof master there; workers derive keys
 for their own IDs from that file. To provision an existing master, pass a
 64-hex `SCENEWORKS_WORKER_PROOF_MASTER` to the API through the host environment.

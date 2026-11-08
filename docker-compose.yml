@@ -1,8 +1,8 @@
 services:
   credentials-init:
-    # Docker creates a missing host bind as root. Re-own only an empty credential
-    # directory; refuse a nonempty bind owned by another UID rather than taking
-    # ownership of existing secrets. The API/workers still run non-root.
+    # Docker creates a missing host bind as root. Re-own only an empty root-owned
+    # directory; refuse any other owner rather than taking over existing secrets.
+    # The API/workers still run non-root.
     build:
       context: .
       dockerfile: docker/rust.Dockerfile
@@ -26,6 +26,10 @@ services:
         case "$$SCENEWORKS_GID" in ''|*[!0-9]*) exit 2;; esac
         owner="$$(stat -c %u /sceneworks/credentials)"
         if [ "$$owner" != "$$SCENEWORKS_UID" ]; then
+          if [ "$$owner" != 0 ]; then
+            echo 'credentials bind belongs to another UID; set SCENEWORKS_UID or repair ownership on the host' >&2
+            exit 1
+          fi
           first_entry="$$(find /sceneworks/credentials -mindepth 1 -maxdepth 1 -print -quit)"
           if [ -n "$$first_entry" ]; then
             echo 'credentials bind is not owned by the configured UID and is not empty' >&2
