@@ -364,12 +364,7 @@ fn scan_due(schedule: &InventorySchedule, now: Instant, catalog_hash: [u8; 32]) 
 fn registered_projects(settings: &Settings) -> Vec<sceneworks_core::project_store::ProjectSummary> {
     let store =
         sceneworks_core::project_store::ProjectStore::new(settings.data_dir.clone(), "worker");
-    // ProjectStore::list_projects initializes models/loras/cache. Inventory is a read-only
-    // heartbeat path, so skip that initializer when there is no project registry to read.
-    if !store.registry_path().is_file() {
-        return Vec::new();
-    }
-    store.list_projects().unwrap_or_default()
+    store.list_projects_read_only().unwrap_or_default()
 }
 
 fn catalog_hash(settings: &Settings) -> [u8; 32] {
@@ -1641,6 +1636,18 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let settings = Settings::for_test(temp.path().join("worker-data"));
         assert!(!settings.data_dir.join("loras").exists());
+        let _ = catalog_hash(&settings);
+        assert!(!settings.data_dir.join("loras").exists());
+    }
+
+    #[test]
+    fn catalog_hash_preserves_registered_projects_without_initializing_training_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = Settings::for_test(temp.path().join("worker-data"));
+        let store = sceneworks_core::project_store::ProjectStore::new(&settings.data_dir, "worker");
+        let created = store.create_project("Existing").unwrap();
+        std::fs::remove_dir(settings.data_dir.join("loras")).unwrap();
+        assert_eq!(registered_projects(&settings), vec![created]);
         let _ = catalog_hash(&settings);
         assert!(!settings.data_dir.join("loras").exists());
     }
