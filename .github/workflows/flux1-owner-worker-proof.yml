@@ -68,7 +68,7 @@ jobs:
         run: node scripts/flux1-owner-worker-proof.mjs --verify-artifact
       - name: Retain redacted receipt and generated PNGs only
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1f2987 # v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: flux1-owner-worker-proof-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.FLUX1_OWNER_OUTPUT }}/evidence/
