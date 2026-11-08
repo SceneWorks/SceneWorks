@@ -1021,6 +1021,12 @@ fn entries_support_route(
             && *job_type != JobType::CatalogAnalysis
             && slot != "modelManifestEntry"
             && slot != "baseModelManifestEntry"
+            // Prompt refinement resolves its selected TextLlm as the first server-owned
+            // auxiliary carrier. This role is executable; other utility array entries remain
+            // components and cannot authorize a route for an unrelated job.
+            && !(*job_type == JobType::PromptRefine
+                && slot == "modelManifestEntries/0"
+                && entry.get("adapter").and_then(Value::as_str) == Some("prompt-refine"))
         {
             return false;
         }
@@ -1546,6 +1552,42 @@ mod tests {
             &entries,
             "candle",
             "linux"
+        ));
+    }
+
+    #[test]
+    fn prompt_refine_array_carrier_accepts_only_the_selected_text_llm_role() {
+        let download = json!({"provider":"huggingface","repo":"example/model",
+            "revision":"0123456789012345678901234567890123456789","files":["model.safetensors"]});
+        let selected = json!({"id":"prompt_refine_anubis_8b","type":"utility",
+            "adapter":"prompt-refine","downloads":[download]});
+        assert!(entries_support_route(
+            &JobType::PromptRefine,
+            &[("modelManifestEntries/0".to_owned(), &selected)],
+            "mlx",
+            "macos"
+        ));
+        assert!(!entries_support_route(
+            &JobType::PromptRefine,
+            &[("modelManifestEntries/1".to_owned(), &selected)],
+            "mlx",
+            "macos"
+        ));
+        assert!(!entries_support_route(
+            &JobType::ImageGenerate,
+            &[("modelManifestEntries/0".to_owned(), &selected)],
+            "mlx",
+            "macos"
+        ));
+        let foreign = json!({"id":"person_detector","type":"utility",
+            "adapter":"person-detect","downloads":[{"provider":"huggingface",
+                "repo":"example/person","revision":"0123456789012345678901234567890123456789",
+                "files":["model.onnx"]}]});
+        assert!(!entries_support_route(
+            &JobType::PromptRefine,
+            &[("modelManifestEntries/0".to_owned(), &foreign)],
+            "mlx",
+            "macos"
         ));
     }
 
