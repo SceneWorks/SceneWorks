@@ -1480,12 +1480,12 @@ const KREA_CONVROT_DIT_FILE: &str = "krea2_turbo_int8_convrot.safetensors";
 /// never fires on the MLX path even if a stray flag arrives. Confined to `krea_2_turbo`.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn wants_krea_convrot(request: &ImageRequest) -> bool {
-    request.model == "krea_2_turbo"
-        && request
-            .advanced
-            .get("convRot")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
+    sceneworks_core::portable_sources::krea_convrot_requested(
+        &request.model,
+        "candle",
+        std::env::consts::OS,
+        request.advanced.get("convRot"),
+    )
 }
 
 /// Resolve the INT8-ConvRot LoadSpec inputs for a Krea 2 request (sc-9300): the canonical bf16 Krea 2

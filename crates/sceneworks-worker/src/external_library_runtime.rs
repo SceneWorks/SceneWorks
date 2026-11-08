@@ -351,6 +351,7 @@ impl RuntimeSourceGuard {
             // never the API host's platform, never a sibling variant's receipts.
             let selected = selected_portable_requirements_for_model(
                 entry,
+                crate::portable_runtime_backend(settings),
                 std::env::consts::OS,
                 requested_variant.as_deref(),
                 payload,
@@ -2103,6 +2104,7 @@ fn verify_portable_binding(
     let requested_variant = selected_runtime_variant(job_type, payload, &binding.model_id)?;
     let selected_manifest = selected_portable_model_artifact_closure(
         entry,
+        binding.backend.as_str(),
         std::env::consts::OS,
         requested_variant.as_deref(),
         payload,
@@ -2228,6 +2230,7 @@ fn verify_portable_binding(
         .expect("portable binding validates exactly one primary");
     let selected = selected_portable_requirements_for_model(
         entry,
+        binding.backend.as_str(),
         std::env::consts::OS,
         requested_variant.as_deref(),
         payload,

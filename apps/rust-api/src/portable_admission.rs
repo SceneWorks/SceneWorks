@@ -995,6 +995,7 @@ async fn capture_model_slot(
         .or_else(|| requested_runtime_variant(payload));
     let selected = selected_portable_model_artifact_closure(
         entry,
+        backend,
         platform,
         requested_variant.as_deref(),
         payload,

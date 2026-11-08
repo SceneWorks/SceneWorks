@@ -674,14 +674,64 @@ pub fn selected_model_artifact_closure_with_choices(
     select_model_artifact_closure(model, platform, requested_variant, Some(choices))
 }
 
-/// A queued YuE2 song job opens the decoder named in its canonical `yue2` block. The same
-/// resolved choice must drive API freezing and every worker requirement/closure check.
+/// Select the exact sources a queued job will open, including request-selected companion sources.
 pub fn selected_portable_model_artifact_closure(
     model: &Value,
+    backend: &str,
     platform: &str,
     requested_variant: Option<&str>,
     payload: &Map<String, Value>,
 ) -> Result<Value, String> {
+    let model_id = model.get("id").and_then(Value::as_str);
+    if model_id == payload.get("model").and_then(Value::as_str)
+        && crate::portable_sources::krea_convrot_requested(
+            model_id.unwrap_or_default(),
+            backend,
+            platform,
+            payload
+                .get("advanced")
+                .and_then(Value::as_object)
+                .and_then(|advanced| advanced.get("convRot")),
+        )
+    {
+        let mut available = model.clone();
+        retain_downloads_for_os(&mut available, platform);
+        let base = available
+            .get("downloads")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|row| {
+                row.get("repo").and_then(Value::as_str) == Some("SceneWorks/krea-2-turbo-mlx")
+                    && row.get("variant").and_then(Value::as_str) == Some("bf16")
+                    && row.get("revision").and_then(Value::as_str).is_some()
+                    && row.get("files").and_then(Value::as_array).is_some()
+            })
+            .ok_or("Krea ConvRot has no pinned bf16 base declaration")?;
+        let mut base = base.clone();
+        let fields = base
+            .as_object_mut()
+            .ok_or("Krea ConvRot base declaration is invalid")?;
+        fields.insert("coRequisite".to_owned(), Value::Bool(true));
+        fields.insert(
+            "componentId".to_owned(),
+            Value::String("krea_convrot_base".to_owned()),
+        );
+        let mut selected = selected_model_artifact_closure(model, platform, Some("int8-convrot"));
+        let downloads = selected
+            .get_mut("downloads")
+            .and_then(Value::as_array_mut)
+            .ok_or("Krea ConvRot has no selected downloads")?;
+        if !downloads.iter().any(|row| {
+            row.get("repo").and_then(Value::as_str) == Some("SceneWorks/krea-2-turbo-int8-convrot")
+                && row.get("variant").and_then(Value::as_str) == Some("int8-convrot")
+                && !is_co_requisite_download(row)
+        }) {
+            return Err("Krea ConvRot checkpoint is unavailable on this route".to_owned());
+        }
+        downloads.push(base);
+        return Ok(selected);
+    }
     if model.get("id").and_then(Value::as_str) != Some("yue2") {
         return Ok(selected_model_artifact_closure(
             model,
@@ -715,13 +765,19 @@ pub fn selected_portable_model_artifact_closure(
 
 pub fn selected_portable_requirements_for_model(
     model: &Value,
+    backend: &str,
     platform: &str,
     requested_variant: Option<&str>,
     payload: &Map<String, Value>,
     data_dir: &Path,
 ) -> Result<SelectedRequirements, String> {
-    let selected =
-        selected_portable_model_artifact_closure(model, platform, requested_variant, payload)?;
+    let selected = selected_portable_model_artifact_closure(
+        model,
+        backend,
+        platform,
+        requested_variant,
+        payload,
+    )?;
     Ok(selected_requirements_for_closure(&selected, data_dir))
 }
 
@@ -1653,6 +1709,7 @@ mod tests {
             let payload = json!({"model":"yue2","yue2":{"decoder":decoder}});
             selected_portable_model_artifact_closure(
                 &yue2,
+                "cpu",
                 "macos",
                 Some("bf16"),
                 payload.as_object().unwrap(),
@@ -1670,11 +1727,92 @@ mod tests {
         let invalid = json!({"model":"yue2","yue2":{"decoder":"unknown"}});
         assert!(selected_portable_model_artifact_closure(
             &yue2,
+            "cpu",
             "macos",
             Some("bf16"),
             invalid.as_object().unwrap(),
         )
         .is_err());
+    }
+
+    #[test]
+    fn portable_candle_krea_convrot_freezes_checkpoint_and_dense_base() {
+        let manifest = crate::builtin_manifests::builtin_manifest("builtin.models.jsonc").unwrap();
+        let model = manifest["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["id"] == "krea_2_turbo")
+            .unwrap();
+        let request = json!({"model":"krea_2_turbo","advanced":{"convRot":true}});
+        assert_eq!(
+            requested_runtime_variant(request.as_object().unwrap()),
+            None
+        );
+        let selected = selected_portable_model_artifact_closure(
+            model,
+            "candle",
+            "linux",
+            None,
+            request.as_object().unwrap(),
+        )
+        .unwrap();
+        let rows = selected["downloads"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["repo"], "SceneWorks/krea-2-turbo-int8-convrot");
+        assert_eq!(rows[0]["variant"], "int8-convrot");
+        assert!(!is_co_requisite_download(&rows[0]));
+        assert_eq!(rows[1]["repo"], "SceneWorks/krea-2-turbo-mlx");
+        assert_eq!(rows[1]["variant"], "bf16");
+        assert!(is_co_requisite_download(&rows[1]));
+        assert!(rows[1]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|file| file.as_str().unwrap().starts_with("bf16/")));
+
+        let mut explicit_q4 = request.as_object().unwrap().clone();
+        explicit_q4.insert("variant".to_owned(), json!("q4"));
+        let selected = selected_portable_model_artifact_closure(
+            model,
+            "candle",
+            "windows",
+            Some("q4"),
+            &explicit_q4,
+        )
+        .unwrap();
+        assert_eq!(selected["downloads"][0]["variant"], "int8-convrot");
+
+        let ordinary = json!({"model":"krea_2_turbo","advanced":{"convRot":false}});
+        let selected = selected_portable_model_artifact_closure(
+            model,
+            "candle",
+            "linux",
+            None,
+            ordinary.as_object().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(selected["downloads"][0]["variant"], "q8");
+        assert!(!selected["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["componentId"] == "krea_convrot_base"));
+
+        let selected = selected_portable_model_artifact_closure(
+            model,
+            "mlx",
+            "macos",
+            None,
+            request.as_object().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(selected["downloads"][0]["variant"], "q8");
+        assert!(!selected["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["componentId"] == "krea_convrot_base"));
     }
 
     #[test]

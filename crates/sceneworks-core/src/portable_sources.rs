@@ -20,6 +20,19 @@ pub fn pid_requested(value: Option<&Value>) -> bool {
     })
 }
 
+/// The Candle Krea loader treats this flag as the INT8-ConvRot tier even without a quant field.
+pub fn krea_convrot_requested(
+    model_id: &str,
+    backend: &str,
+    platform: &str,
+    flag: Option<&Value>,
+) -> bool {
+    model_id == "krea_2_turbo"
+        && backend == "candle"
+        && platform != "macos"
+        && flag.and_then(Value::as_bool) == Some(true)
+}
+
 /// Path-free key for a worker's registered local digest source. The API computes the same key
 /// from the frozen route's logical catalog identity before deciding claim eligibility.
 pub fn registered_digest_claim_id(
