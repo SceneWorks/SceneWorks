@@ -3230,8 +3230,7 @@ async fn typed_model_convert_confines_route_id_before_catalog_lookup() {
 #[tokio::test]
 async fn retry_and_duplicate_reject_path_unsafe_merged_generation_model_before_create() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Audio Project").await;
     let project_id = project["id"].as_str().expect("project id");
     let (status, audio_job) = request(
@@ -6339,7 +6338,7 @@ fn write_audio_manifest(config_dir: &std::path::Path) {
                 "maxDurationSecs": 30
               },
               "downloads": [
-                { "provider": "huggingface", "repo": "hexgrad/Kokoro-82M", "files": ["config.json", "kokoro-v1_0.pth", "voices/*"] }
+                { "provider": "huggingface", "repo": "hexgrad/Kokoro-82M", "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987", "files": ["config.json", "kokoro-v1_0.pth", "voices/*"] }
               ],
               "paths": { "model": "${HF_CACHE}/hexgrad/Kokoro-82M" },
               "ui": { "label": "Kokoro 82M" }
@@ -6355,7 +6354,7 @@ fn write_audio_manifest(config_dir: &std::path::Path) {
                 "maxDurationSecs": 30
               },
               "downloads": [
-                { "provider": "huggingface", "repo": "OpenMOSS-Team/MOSS-SoundEffect-v2.0", "files": ["model_index.json"] }
+                { "provider": "huggingface", "repo": "OpenMOSS-Team/MOSS-SoundEffect-v2.0", "revision": "e35df4d82fbe87fcd5d14e5d100e349c0c3c076d", "files": ["model_index.json"] }
               ],
               "paths": { "model": "${HF_CACHE}/OpenMOSS-Team/MOSS-SoundEffect-v2.0" },
               "ui": { "label": "MOSS SoundEffect v2" }
@@ -6373,7 +6372,7 @@ fn write_audio_manifest(config_dir: &std::path::Path) {
                 "conditioning": ["AudioEdit"]
               },
               "downloads": [
-                { "provider": "huggingface", "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers", "files": ["model_index.json"] }
+                { "provider": "huggingface", "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers", "revision": "200ba991ae448051e14b0183157e35c2d27c9fb0", "files": ["model_index.json"] }
               ],
               "paths": { "model": "${HF_CACHE}/ACE-Step/acestep-v15-xl-turbo-diffusers" },
               "ui": { "label": "ACE-Step v1.5 XL Turbo" }
@@ -6388,7 +6387,7 @@ fn write_audio_manifest(config_dir: &std::path::Path) {
                 "conditioning": ["ReferenceAudio"]
               },
               "downloads": [
-                { "provider": "huggingface", "repo": "myshell-ai/OpenVoiceV2", "files": ["converter/config.json", "converter/checkpoint.pth"] }
+                { "provider": "huggingface", "repo": "myshell-ai/OpenVoiceV2", "revision": "f36e7edfe1684461a8343844af60babc2efbb727", "files": ["converter/config.json", "converter/checkpoint.pth"] }
               ],
               "paths": { "model": "${HF_CACHE}/myshell-ai/OpenVoiceV2" },
               "ui": { "label": "OpenVoice V2" }
@@ -6407,7 +6406,7 @@ fn write_audio_manifest(config_dir: &std::path::Path) {
                 "supportsStreaming": false
               },
               "downloads": [
-                { "provider": "huggingface", "repo": "OpenMOSS-Team/MOSS-TTSD-v0.5", "files": ["config.json", "model.safetensors", "tokenizer.json", "tokenizer_config.json"] },
+                { "provider": "huggingface", "repo": "OpenMOSS-Team/MOSS-TTSD-v0.5", "revision": "8527b9136b6afefe2252ae597cecea2e80e7ebeb", "files": ["config.json", "model.safetensors", "tokenizer.json", "tokenizer_config.json"] },
                 { "provider": "huggingface", "repo": "OpenMOSS-Team/XY_Tokenizer_TTSD_V0", "revision": "c83433728e698ed0698e88cb5096bc221fb8f8c5", "coRequisite": true, "files": ["xy_tokenizer.ckpt"] }
               ],
               "paths": { "model": "${HF_CACHE}/OpenMOSS-Team/MOSS-TTSD-v0.5" },
@@ -6423,10 +6422,10 @@ fn write_audio_manifest(config_dir: &std::path::Path) {
                 "supportsSegmentedLyrics": true, "supportsRepetitionPenalty": true
               },
               "downloads": [
-                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-cot-candle", "variant": "q4", "default": true, "files": ["q4/*"] },
-                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-cot-candle", "variant": "q8", "files": ["q8/*"] },
-                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-cot-candle", "variant": "bf16", "files": ["bf16/*"] },
-                { "provider": "huggingface", "repo": "SceneWorks/yue-s2-1b-general-candle", "coRequisite": true, "componentId": "stage2", "variant": "q4", "subdir": "q4", "files": ["q4/*"] }
+                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-cot-candle", "revision": "5842b8bc97d2a6dddc427a444920050dd3860949", "variant": "q4", "default": true, "files": ["q4/*"] },
+                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-cot-candle", "revision": "5842b8bc97d2a6dddc427a444920050dd3860949", "variant": "q8", "files": ["q8/*"] },
+                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-cot-candle", "revision": "5842b8bc97d2a6dddc427a444920050dd3860949", "variant": "bf16", "files": ["bf16/*"] },
+                { "provider": "huggingface", "repo": "SceneWorks/yue-s2-1b-general-candle", "revision": "3d6a71c7f2af1010983fc9da7bcaba528f083da6", "coRequisite": true, "componentId": "stage2", "variant": "q4", "subdir": "q4", "files": ["q4/*"] }
               ],
               "paths": { "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-en-cot-candle" },
               "ui": { "label": "YuE English CoT" }
@@ -6443,9 +6442,9 @@ fn write_audio_manifest(config_dir: &std::path::Path) {
                 "supportsOutputLimiter": true
               },
               "downloads": [
-                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-icl-candle", "variant": "q4", "default": true, "files": ["q4/*"] },
-                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-icl-candle", "variant": "q8", "files": ["q8/*"] },
-                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-icl-candle", "variant": "bf16", "files": ["bf16/*"] }
+                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-icl-candle", "revision": "fc8cb3515e654d419c2831dcdaf931b61a050179", "variant": "q4", "default": true, "files": ["q4/*"] },
+                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-icl-candle", "revision": "fc8cb3515e654d419c2831dcdaf931b61a050179", "variant": "q8", "files": ["q8/*"] },
+                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-icl-candle", "revision": "fc8cb3515e654d419c2831dcdaf931b61a050179", "variant": "bf16", "files": ["bf16/*"] }
               ],
               "paths": { "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-en-icl-candle" },
               "ui": { "label": "YuE English ICL" }
@@ -6474,6 +6473,31 @@ fn write_audio_manifest(config_dir: &std::path::Path) {
     .expect("user models writes");
 }
 
+fn pinned_audio_fixture_metadata(
+    selectors: &[String],
+) -> Vec<sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile> {
+    use sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile;
+    let mut files = selectors
+        .iter()
+        .map(|selector| PortableArtifactFile {
+            relative_path: std::path::PathBuf::from(selector.replace('*', "fixture")),
+            size_bytes: 1,
+            sha256: format!("sha256:{}", "a".repeat(64)),
+        })
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    files.dedup_by(|left, right| left.relative_path == right.relative_path);
+    files
+}
+
+fn audio_fixture_app(temp_dir: &tempfile::TempDir) -> axum::Router {
+    write_audio_manifest(&temp_dir.path().join("config/manifests"));
+    let (app, state) =
+        create_app_with_state(test_settings(temp_dir)).expect("audio fixture app creates");
+    *state.test_hooks.pinned_metadata_override.lock() = Some(pinned_audio_fixture_metadata);
+    app
+}
+
 /// The audio job path (sc-13404): a well-formed `POST /api/v1/audio/jobs` maps the request into an
 /// `audio_generate` job whose payload carries the audio knobs (voice / language / targetDurationSecs
 /// / seed) verbatim and the resolved `type: audio` manifest entry — the audio twin of how the video
@@ -6481,8 +6505,7 @@ fn write_audio_manifest(config_dir: &std::path::Path) {
 #[tokio::test]
 async fn create_audio_job_maps_request_to_audio_generate_payload() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Audio Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
@@ -6528,8 +6551,7 @@ async fn create_audio_job_maps_request_to_audio_generate_payload() {
 #[tokio::test]
 async fn create_audio_job_maps_the_multi_speaker_script() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Dialogue Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -6575,8 +6597,7 @@ async fn create_audio_job_maps_the_multi_speaker_script() {
 #[tokio::test]
 async fn create_audio_job_rejects_empty_prompt_and_empty_script() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Dialogue Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -6615,8 +6636,7 @@ async fn create_audio_job_rejects_empty_prompt_and_empty_script() {
 #[tokio::test]
 async fn create_audio_job_maps_sfx_sampling_knobs() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) = crate::tests::support::create_project(app.clone(), &"SFX Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
@@ -6666,8 +6686,7 @@ async fn create_audio_job_maps_sfx_sampling_knobs() {
 #[tokio::test]
 async fn create_audio_job_injects_base_model_entry_for_voice_clone() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Voice Clone Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -6710,8 +6729,7 @@ async fn create_audio_job_injects_base_model_entry_for_voice_clone() {
 #[tokio::test]
 async fn create_audio_job_omits_base_model_entry_without_a_reference() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Plain Audio Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -6736,8 +6754,7 @@ async fn create_audio_job_omits_base_model_entry_without_a_reference() {
 #[tokio::test]
 async fn create_audio_job_rejects_out_of_range_match_strength() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Bad Strength Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -6764,8 +6781,7 @@ async fn create_audio_job_rejects_out_of_range_match_strength() {
 #[tokio::test]
 async fn create_audio_job_rejects_nonsense_sampling_knobs() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) = crate::tests::support::create_project(app.clone(), &"SFX Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
@@ -6795,8 +6811,7 @@ async fn create_audio_job_rejects_nonsense_sampling_knobs() {
 #[tokio::test]
 async fn create_audio_job_maps_music_and_edit_fields() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Music Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
@@ -6851,8 +6866,7 @@ async fn create_audio_job_maps_music_and_edit_fields() {
 #[tokio::test]
 async fn create_audio_job_rejects_half_specified_edit() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Music Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
@@ -6882,8 +6896,7 @@ async fn create_audio_job_rejects_half_specified_edit() {
 #[tokio::test]
 async fn create_audio_job_rejects_nonsense_music_fields() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Music Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
@@ -6952,8 +6965,7 @@ async fn create_audio_job_rejects_nonsense_music_fields() {
 #[tokio::test]
 async fn create_audio_job_accepts_case_insensitive_edit_mode() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Music Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
@@ -6999,8 +7011,7 @@ async fn create_audio_job_accepts_case_insensitive_edit_mode() {
 #[tokio::test]
 async fn create_audio_job_rejects_non_audio_model() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Audio Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
@@ -7040,8 +7051,7 @@ async fn create_audio_job_rejects_non_audio_model() {
 #[tokio::test]
 async fn create_audio_job_rejects_empty_prompt() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Audio Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
@@ -7066,8 +7076,7 @@ async fn create_audio_job_rejects_empty_prompt() {
 /// YuE job-surface tests (sc-19384).
 async fn yue_audio_app() -> (tempfile::TempDir, axum::Router, String) {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Song Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     (temp_dir, app, project_id)
