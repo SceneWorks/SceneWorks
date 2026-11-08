@@ -284,6 +284,7 @@ impl RuntimeSourceGuard {
         // beside each resolution. Nothing is leased and nothing is served yet: which pairs may be
         // served at all cannot be known until every entry in the job has been resolved.
         let mut plans: Vec<EntryPlan> = Vec::new();
+        let mut converted_co_requirements = Vec::new();
         for (slot, entry) in &model_entries {
             let requested_variant = selected_runtime_variant(
                 job_type,
@@ -335,19 +336,24 @@ impl RuntimeSourceGuard {
             }
             // This worker's OWN platform and the request's selected tier define the closure —
             // never the API host's platform, never a sibling variant's receipts.
-            let mut selected = selected_requirements_for_model(
+            let selected = selected_requirements_for_model(
                 entry,
                 std::env::consts::OS,
                 requested_variant.as_deref(),
                 &settings.data_dir,
             );
             if verified_converted_slots.contains(slot) {
-                selected
-                    .requirements
-                    .retain(|requirement| !requirement.is_primary);
-                if selected.requirements.is_empty() {
-                    continue;
-                }
+                // The converted output replaces the publisher primary. A co-requisite-only
+                // ModelResolution is invalid (the source contract requires one primary), so
+                // keep its exact required files for portable route verification and let the
+                // frozen Revision members provide their own guarded source availability.
+                converted_co_requirements.extend(
+                    selected
+                        .requirements
+                        .into_iter()
+                        .filter(|requirement| !requirement.is_primary),
+                );
+                continue;
             }
             let resolution = resolve_model_availability(
                 &settings.data_dir,
@@ -489,7 +495,14 @@ impl RuntimeSourceGuard {
         let mut portable_scope = None;
         let mut plan_layers = None;
         if let Some(binding) = binding {
-            verify_portable_route(binding, job_type, payload, settings, &plans)?;
+            verify_portable_route(
+                binding,
+                job_type,
+                payload,
+                settings,
+                &plans,
+                &converted_co_requirements,
+            )?;
             let prepared = prepare_portable_snapshot(
                 binding,
                 job_type,
@@ -1846,6 +1859,7 @@ fn verify_portable_route(
     payload: &JsonObject,
     settings: &Settings,
     plans: &[EntryPlan],
+    converted_co_requirements: &[ExternalArtifactRequirement],
 ) -> WorkerResult<()> {
     route
         .validate()
@@ -1942,7 +1956,11 @@ fn verify_portable_route(
     }
     // The complete route must cover each selected HF requirement, including the resident base of
     // an imported checkpoint. A valid primary cannot hide an omitted protected component.
-    for requirement in plans.iter().flat_map(|plan| plan.requirements.iter()) {
+    for requirement in plans
+        .iter()
+        .flat_map(|plan| plan.requirements.iter())
+        .chain(converted_co_requirements)
+    {
         let covered = route
             .models
             .iter()
@@ -3824,6 +3842,144 @@ mod tests {
                 )
                 .is_err(),
                 "missing converted bytes must refuse before loading"
+            );
+        });
+    }
+
+    #[test]
+    fn converted_eros_keeps_both_runtime_co_requisites_bound() {
+        use sceneworks_core::model_artifacts::ArtifactIdentity;
+
+        let temp = TempDir::new().unwrap();
+        let mut settings = settings(temp.path().join("data"));
+        settings.config_dir = temp.path().join("config");
+        settings.gpu_id = "mlx".to_owned();
+        std::fs::create_dir_all(settings.data_dir.join("models")).unwrap();
+        let id = "ltx_2_3_eros";
+        let root = settings.data_dir.join("models/mlx").join(id);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("model_index.json"), b"{}").unwrap();
+        std::fs::write(root.join("model.safetensors"), b"converted weights").unwrap();
+        crate::write_produced_artifact_receipt(&root, "convert-job", "source/repo", id).unwrap();
+        let files = crate::portable_source_claims::capture_registered_files(&root).unwrap();
+        let mut members = vec![PortableArtifactMember {
+            role: ArtifactMemberRole::Primary,
+            component_id: None,
+            source: PortableSourceIdentity::Digest {
+                sha256:
+                    sceneworks_core::model_artifacts::portable_binding::portable_closure_sha256(
+                        &files,
+                    )
+                    .unwrap(),
+            },
+            tier: Some("default".to_owned()),
+            files,
+        }];
+        let entry = sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .unwrap()["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == id)
+            .unwrap()
+            .clone();
+        let selected = selected_model_artifact_closure(&entry, std::env::consts::OS, None);
+        let library = temp.path().join("hf");
+        let mut co_files = Vec::new();
+        for (index, download) in selected["downloads"].as_array().unwrap().iter().enumerate() {
+            if !is_co_requisite_download(download) {
+                continue;
+            }
+            let repo = download["repo"].as_str().unwrap();
+            let revision = download["revision"].as_str().unwrap();
+            let selector = download["files"][0].as_str().unwrap();
+            let file = selector.replace('*', "model.safetensors");
+            seed_snapshot(&library, repo, revision, &file);
+            let path = library
+                .join(format!(
+                    "models--{}",
+                    sceneworks_core::hf_home::safe_repo_dir_name(repo).unwrap()
+                ))
+                .join("snapshots")
+                .join(revision)
+                .join(&file);
+            co_files.push(path);
+            members.push(PortableArtifactMember {
+                role: ArtifactMemberRole::CoRequisite,
+                component_id: Some(format!("modelManifestEntry/downloads/{index}")),
+                source: PortableSourceIdentity::Revision {
+                    identity: ArtifactIdentity::pinned(repo, revision, "default").unwrap(),
+                },
+                tier: Some("default".to_owned()),
+                files: vec![PortableArtifactFile {
+                    relative_path: file.into(),
+                    size_bytes: 7,
+                    sha256: format!("sha256:{:x}", Sha256::digest(b"weights")),
+                }],
+            });
+        }
+        assert_eq!(
+            co_files.len(),
+            2,
+            "Eros must retain both catalog co-requisites"
+        );
+        let route = PortableRouteBinding::new(
+            "mlx",
+            std::env::consts::OS,
+            vec![PortableModelBinding::new(
+                "modelManifestEntry",
+                id,
+                "mlx",
+                "default",
+                Some("default".to_owned()),
+                canonical_authored_options_sha256(&json!({})).unwrap(),
+                members,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let payload = json!({"model":id,"mode":"text_to_video","modelManifestEntry":entry})
+            .as_object()
+            .unwrap()
+            .clone();
+        with_library(&library, || {
+            std::fs::remove_file(&co_files[0]).unwrap();
+            assert!(
+                RuntimeSourceGuard::begin_with_binding(
+                    &JobType::VideoGenerate,
+                    &payload,
+                    &settings,
+                    Some(&route),
+                )
+                .is_err(),
+                "missing Gemma co-requisite must refuse"
+            );
+            std::fs::write(&co_files[0], b"weights").unwrap();
+            std::fs::write(&co_files[1], b"changed").unwrap();
+            assert!(
+                RuntimeSourceGuard::begin_with_binding(
+                    &JobType::VideoGenerate,
+                    &payload,
+                    &settings,
+                    Some(&route),
+                )
+                .is_err(),
+                "substituted distill LoRA must refuse"
+            );
+            std::fs::write(&co_files[1], b"weights").unwrap();
+            let guard = RuntimeSourceGuard::begin_with_binding(
+                &JobType::VideoGenerate,
+                &payload,
+                &settings,
+                Some(&route),
+            )
+            .expect("converted Eros and both frozen co-requisites are available");
+            let selected = guard.dispatch_payload()["modelManifestEntry"]["paths"]["model"]
+                .as_str()
+                .unwrap();
+            assert_eq!(
+                std::fs::read(Path::new(selected).join("model.safetensors")).unwrap(),
+                b"converted weights"
             );
         });
     }
