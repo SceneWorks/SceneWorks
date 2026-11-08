@@ -1211,6 +1211,46 @@ async fn capture_model_slot(
             )));
         }
     }
+    // These utility loaders read the top-level selection, not the manifest entry locator.
+    // A different selected snapshot must therefore replace the manifest's primary identity.
+    if matches!(
+        job_type,
+        JobType::DatasetAnalysis | JobType::TrainingCaption
+    ) && slot == "modelManifestEntries/0"
+    {
+        if let Some(selection) = payload
+            .get("modelNameOrPath")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|selection| !selection.is_empty())
+        {
+            let primary = members
+                .iter_mut()
+                .find(|member| member.role == ArtifactMemberRole::Primary)
+                .ok_or_else(|| incomplete("utility model has no primary source"))?;
+            let publisher_repo = match &primary.source {
+                PortableSourceIdentity::Revision { identity } => Some(identity.repository.as_str()),
+                _ => None,
+            };
+            if publisher_repo != Some(selection) {
+                let selected = selected_utility_model_path(state, selection)?;
+                let mut roots = allowed_local_roots(state);
+                roots.push(
+                    sceneworks_core::hf_home::model_source_library(&state.settings.data_dir)
+                        .root()
+                        .to_path_buf(),
+                );
+                *primary = capture_local_member_offloaded(
+                    &selected,
+                    &roots,
+                    ArtifactMemberRole::Primary,
+                    None,
+                    tier.clone(),
+                )
+                .await?;
+            }
+        }
+    }
     // The first model carrier owns selected request adapters and controls. Other carriers retain
     // their own component closures but never duplicate an adapter under a second logical slot.
     if owns_request_overlays {
@@ -2096,6 +2136,39 @@ fn common_parent(paths: &[&str]) -> Result<PathBuf, ApiError> {
         }
     }
     Ok(parent)
+}
+
+/// Resolve the utility loader's authored model selection under an app-managed root.
+fn selected_utility_model_path(state: &AppState, selection: &str) -> Result<PathBuf, ApiError> {
+    // Match the worker's repository-first resolution. A missing repository snapshot must
+    // never be reinterpreted as a local relative directory.
+    let parts = selection.split('/').collect::<Vec<_>>();
+    let repository = parts.len() == 2
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && *part != "." && *part != ".." && !part.contains('\\'));
+    if repository {
+        let library = sceneworks_core::hf_home::model_source_library(&state.settings.data_dir);
+        let resolver = ModelArtifactResolver::new(library);
+        return resolver
+            .discover_source_snapshot(selection, None)
+            .map(|(_, snapshot)| snapshot)
+            .map_err(|error| {
+                incomplete(format!("selected utility snapshot is unavailable: {error}"))
+            });
+    }
+    let path = PathBuf::from(selection);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        state.settings.data_dir.join(path)
+    };
+    if !path.is_dir() {
+        return Err(incomplete(
+            "selected utility model must be an installed snapshot directory",
+        ));
+    }
+    Ok(path)
 }
 
 /// Loader precedence for a request-owned source override. The chosen path is captured as a

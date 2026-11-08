@@ -1377,6 +1377,17 @@ fn prepare_portable_snapshot(
         }
         let target_root = published.join(relative_root);
         let selected = target_root.join(selected_relative);
+        if matches!(
+            job_type,
+            JobType::DatasetAnalysis | JobType::TrainingCaption
+        ) && slot == "modelManifestEntries/0"
+            && member.role == ArtifactMemberRole::Primary
+        {
+            dispatch_payload.insert(
+                "modelNameOrPath".to_owned(),
+                serde_json::Value::String(selected.to_string_lossy().into_owned()),
+            );
+        }
         if let Some((checkpoint_id, layer_id)) = plan_layer {
             verified_plan_layers.insert(checkpoint_id, layer_id, selected)?;
         } else if *is_selected_aux
@@ -2129,6 +2140,29 @@ fn verify_portable_route(
         ));
     }
     for (model, (_, entry)) in route.models.iter().zip(slots) {
+        if matches!(
+            job_type,
+            JobType::DatasetAnalysis | JobType::TrainingCaption
+        ) && model.slot == "modelManifestEntries/0"
+        {
+            let primary = model
+                .members
+                .iter()
+                .find(|member| member.role == ArtifactMemberRole::Primary)
+                .ok_or_else(|| invalid_binding("utility model has no admitted primary"))?;
+            if let PortableSourceIdentity::Revision { identity } = &primary.source {
+                let selected = payload
+                    .get("modelNameOrPath")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|selection| !selection.is_empty());
+                if selected.is_some_and(|selection| selection != identity.repository) {
+                    return Err(invalid_binding(
+                        "utility model selection differs from the frozen publisher source",
+                    ));
+                }
+            }
+        }
         let selected_encoder = matches!(
             job_type,
             JobType::ImageGenerate | JobType::ImageEdit | JobType::ImageDetail
@@ -2194,6 +2228,23 @@ fn verify_portable_route(
                 .map(|requirement| (requirement, false)),
         )
     {
+        if requirement.is_primary
+            && matches!(
+                job_type,
+                JobType::DatasetAnalysis | JobType::TrainingCaption
+            )
+            && route.models.iter().any(|model| {
+                model.slot == "modelManifestEntries/0"
+                    && model.members.iter().any(|member| {
+                        member.role == ArtifactMemberRole::Primary
+                            && matches!(member.source, PortableSourceIdentity::Digest { .. })
+                    })
+            })
+        {
+            // The caller selected a different complete utility snapshot. Its Digest and
+            // current worker claim replace only the catalog primary, never co-requisites.
+            continue;
+        }
         let covered = route
             .models
             .iter()
@@ -2554,7 +2605,11 @@ fn verify_portable_binding(
         .map_err(|error| invalid_binding(error.to_string()))?;
     let verified_derivative_primary =
         matches!(primary.source, PortableSourceIdentity::Digest { .. })
-            && crate::portable_source_claims::is_converted_builtin_model_id(&binding.model_id);
+            && (crate::portable_source_claims::is_converted_builtin_model_id(&binding.model_id)
+                || matches!(
+                    job_type,
+                    JobType::DatasetAnalysis | JobType::TrainingCaption
+                ) && binding.slot == "modelManifestEntries/0");
     verify_manifest_globs(
         binding,
         &selected_manifest,
@@ -2822,7 +2877,29 @@ fn selected_local_artifact_path(
             .map_err(|error| invalid_binding(error.to_string()))?;
         return Ok(selected);
     }
-    let local_catalog = if member.role == ArtifactMemberRole::Primary {
+    let utility_selected = if member.role == ArtifactMemberRole::Primary
+        && model_slot == "modelManifestEntries/0"
+        && matches!(
+            payload.get("kind").and_then(serde_json::Value::as_str),
+            Some("dataset_analysis" | "training_caption")
+        ) {
+        payload
+            .get("modelNameOrPath")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|selection| {
+                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, selection).or_else(
+                    || {
+                        let path = PathBuf::from(selection);
+                        path.is_dir().then_some(path)
+                    },
+                )
+            })
+    } else {
+        None
+    };
+    let local_catalog = if utility_selected.is_some() {
+        None
+    } else if member.role == ArtifactMemberRole::Primary {
         let id = sceneworks_core::model_artifacts::portable_binding::registered_primary_digest_catalog_id(
             model,
             &serde_json::Value::Object(payload.clone()),
@@ -2905,7 +2982,9 @@ fn selected_local_artifact_path(
             None
         }
     };
-    let raw = if let Some(local) = local_catalog {
+    let raw = if let Some(selected) = utility_selected {
+        Some(selected)
+    } else if let Some(local) = local_catalog {
         Some(local)
     } else if member.role == ArtifactMemberRole::Primary {
         (model_slot == "modelManifestEntry")
@@ -3940,7 +4019,7 @@ mod tests {
     use super::*;
     use sceneworks_core::model_artifacts::external_library::EXTERNAL_LIBRARY_UNAVAILABLE_CODE;
     use sceneworks_core::model_artifacts::portable_binding::{
-        canonical_authored_options_sha256, PortableArtifactMember,
+        canonical_authored_options_sha256, portable_closure_sha256, PortableArtifactMember,
     };
     use sceneworks_core::model_artifacts::ArtifactSourceLibrary;
     use serde_json::{json, Value};
@@ -6408,6 +6487,122 @@ mod tests {
         )
         .unwrap();
         PortableRouteBinding::new("cpu", std::env::consts::OS, vec![model]).unwrap()
+    }
+
+    #[test]
+    fn utility_selection_uses_verified_worker_bytes_and_refuses_substitution() {
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let mut settings = Settings::for_test(data.clone());
+        settings.config_dir = temp.path().join("config");
+        let selected = data.join("models/selected-clip");
+        let substituted = data.join("models/other-clip");
+        std::fs::create_dir_all(&selected).unwrap();
+        std::fs::create_dir_all(&substituted).unwrap();
+        std::fs::write(selected.join("model.safetensors"), b"selected").unwrap();
+        std::fs::write(substituted.join("model.safetensors"), b"other").unwrap();
+        let manifest = settings.config_dir.join("manifests/user.models.jsonc");
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(
+            &manifest,
+            serde_json::to_vec(&json!({"models":[{"id":"clip_vit_l14","modelPath":selected}]}))
+                .unwrap(),
+        )
+        .unwrap();
+        let files = crate::portable_source_claims::capture_registered_files(&selected).unwrap();
+        let digest = portable_closure_sha256(&files).unwrap();
+        let member = PortableArtifactMember {
+            role: ArtifactMemberRole::Primary,
+            component_id: None,
+            source: PortableSourceIdentity::Digest { sha256: digest },
+            tier: Some("default".to_owned()),
+            files,
+        };
+        let model = PortableModelBinding::new(
+            "modelManifestEntries/0",
+            "clip_vit_l14",
+            "cpu",
+            "default",
+            Some("default".to_owned()),
+            canonical_authored_options_sha256(&json!({})).unwrap(),
+            vec![member],
+        )
+        .unwrap();
+        let route = PortableRouteBinding::new("cpu", std::env::consts::OS, vec![model]).unwrap();
+        let mut payload = json!({
+            "kind":"dataset_analysis", "embedder":"clip_vit_l14",
+            "modelNameOrPath":"/api-host/selected-clip",
+            "modelManifestEntries":[{"id":"clip_vit_l14","downloads":[{
+                "provider":"huggingface", "repo":"openai/clip-vit-large-patch14",
+                "revision":REV_A,"files":["model.safetensors"]
+            }]}]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let guard = RuntimeSourceGuard::begin_with_binding(
+            &JobType::DatasetAnalysis,
+            &payload,
+            &settings,
+            Some(&route),
+        )
+        .unwrap();
+        let loaded = guard.dispatch_payload()["modelNameOrPath"]
+            .as_str()
+            .unwrap();
+        assert!(Path::new(loaded).starts_with(data.join("models/portable-attempts")));
+        assert_eq!(
+            std::fs::read(Path::new(loaded).join("model.safetensors")).unwrap(),
+            b"selected"
+        );
+
+        payload.insert("modelNameOrPath".to_owned(), json!(substituted));
+        assert!(RuntimeSourceGuard::begin_with_binding(
+            &JobType::DatasetAnalysis,
+            &payload,
+            &settings,
+            Some(&route),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn caption_revision_rebinds_top_level_locator_and_refuses_changed_selection() {
+        let temp = TempDir::new().unwrap();
+        let (settings, library, mut payload) = installed_model(&temp);
+        let entry = payload.remove("modelManifestEntry").unwrap();
+        payload.insert("kind".to_owned(), json!("training_caption"));
+        payload.insert("modelNameOrPath".to_owned(), json!("guardfx/model"));
+        payload.insert("modelManifestEntries".to_owned(), json!([entry]));
+        let mut route = portable_installed_model_binding();
+        route.models[0].slot = "modelManifestEntries/0".to_owned();
+        with_library(&library, || {
+            let guard = RuntimeSourceGuard::begin_with_binding(
+                &JobType::TrainingCaption,
+                &payload,
+                &settings,
+                Some(&route),
+            )
+            .unwrap();
+            let loaded = guard.dispatch_payload()["modelNameOrPath"]
+                .as_str()
+                .unwrap();
+            assert!(
+                Path::new(loaded).starts_with(settings.data_dir.join("models/portable-attempts"))
+            );
+            assert_eq!(
+                std::fs::read(Path::new(loaded).join("model.safetensors")).unwrap(),
+                b"weights"
+            );
+            payload.insert("modelNameOrPath".to_owned(), json!("guardfx/other"));
+            assert!(RuntimeSourceGuard::begin_with_binding(
+                &JobType::TrainingCaption,
+                &payload,
+                &settings,
+                Some(&route),
+            )
+            .is_err());
+        });
     }
 
     #[test]
