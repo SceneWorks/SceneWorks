@@ -78,12 +78,8 @@ fn private_portable_binding_roundtrips_nested_plan_context_for_claim() {
             role: "model".into(),
             target_path: "weights.safetensors".into(),
             container: CheckpointContainerV1::Safetensors,
-            source: SourceLocatorV1::linked(
-                "approved-root",
-                "weights.safetensors",
-                &"a".repeat(64),
-            )
-            .unwrap(),
+            source: SourceLocatorV1::linked("approved-root", "weights.safetensors", "a".repeat(64))
+                .unwrap(),
         }],
     )
     .unwrap();
