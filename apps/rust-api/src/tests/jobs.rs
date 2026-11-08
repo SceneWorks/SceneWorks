@@ -3474,7 +3474,7 @@ async fn retry_and_duplicate_reauthorize_merged_control_weights_before_create() 
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_style_test_manifests(&temp_dir.path().join("config"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Control Retry Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -3486,7 +3486,7 @@ async fn retry_and_duplicate_reauthorize_merged_control_weights_before_create() 
             "projectId": project_id,
             "mode": "text_to_image",
             "prompt": "a fox",
-            "model": "img-model",
+            "model": "sdxl",
             "count": 1,
             "width": 1024,
             "height": 1024
@@ -12078,14 +12078,14 @@ async fn preset_overridden_image_model_carries_its_own_manifest_entry() {
               "ui": { "label": "Default Img" }
             },
             {
-              "id": "preset-img",
+              "id": "z_image",
               "name": "Preset Img",
-              "family": "flux",
+              "family": "z-image",
               "type": "image",
-              "adapter": "flux",
+              "adapter": "z_image_diffusers",
               "capabilities": ["text_to_image"],
               "downloads": [
-                { "provider": "huggingface", "repo": "owner/preset-img", "files": ["*.safetensors"], "default": true }
+                { "provider": "huggingface", "repo": "owner/z_image", "files": ["*.safetensors"], "default": true }
               ],
               "paths": {},
               "defaults": {},
@@ -12113,7 +12113,7 @@ async fn preset_overridden_image_model_carries_its_own_manifest_entry() {
               "id": "img_override",
               "name": "Img Override",
               "workflow": "text_to_image",
-              "model": "preset-img",
+              "model": "z_image",
               "defaults": {},
               "prompt": { "prefix": "cinematic", "suffix": "smooth" }
             }
@@ -12128,7 +12128,7 @@ async fn preset_overridden_image_model_carries_its_own_manifest_entry() {
     )
     .expect("user recipe presets writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Img Override Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -12147,14 +12147,14 @@ async fn preset_overridden_image_model_carries_its_own_manifest_entry() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(image_job["payload"]["model"], "preset-img");
+    assert_eq!(image_job["payload"]["model"], "z_image");
     let entry = &image_job["payload"]["modelManifestEntry"];
     assert_eq!(
-        entry["id"], "preset-img",
+        entry["id"], "z_image",
         "manifest entry should be resolved from the post-override model"
     );
     assert_eq!(
-        entry["downloads"][0]["repo"], "owner/preset-img",
+        entry["downloads"][0]["repo"], "owner/z_image",
         "wrong repo => the worker fetches the wrong model's weights (loud failure)"
     );
     assert_eq!(
@@ -12165,6 +12165,12 @@ async fn preset_overridden_image_model_carries_its_own_manifest_entry() {
 
 #[tokio::test]
 async fn preset_image_job_builds_each_catalog_once() {
+    use sceneworks_core::jobs_store::RegisterWorker;
+    use sceneworks_core::model_artifacts::portable_binding::{
+        portable_file_ledger_sha256, PortableArtifactFile, PortableSourceClaim,
+        PortableSourceProvenance,
+    };
+
     // sc-8819 (F-017): a preset-backed POST /image/jobs fans out into recipe_preset_catalog,
     // merge_preset_loras_into_payload, and validate_job_lora_compatibility. Before the fix
     // each re-assembled model_catalog/lora_catalog from scratch, re-running the whole
@@ -12182,11 +12188,11 @@ async fn preset_image_job_builds_each_catalog_once() {
           "schemaVersion": 1,
           "models": [
             {
-              "id": "img-model",
+              "id": "z_image_turbo",
               "name": "Img Model",
               "family": "z-image",
               "type": "image",
-              "adapter": "z_image",
+              "adapter": "z_image_diffusers",
               "capabilities": ["text_to_image"],
               "downloads": [
                 { "provider": "huggingface", "repo": "owner/img", "files": ["*.safetensors"], "default": true }
@@ -12241,7 +12247,7 @@ async fn preset_image_job_builds_each_catalog_once() {
               "id": "dream_style",
               "name": "Dream Style",
               "workflow": "text_to_image",
-              "model": "img-model",
+              "model": "z_image_turbo",
               "defaults": { "count": 1, "resolution": "1024x1024", "negativePrompt": "blur" },
               "prompt": { "prefix": "cinematic", "suffix": "high detail" },
               "loras": [{ "id": "style-lora", "weight": 0.5 }]
@@ -12260,7 +12266,42 @@ async fn preset_image_job_builds_each_catalog_once() {
     std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
     write_test_safetensors(&lora_dir.join("style.safetensors"));
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (app, state) =
+        pinned_jobs_fixture_app_with_state(test_settings(&temp_dir)).expect("app creates");
+    let lora_path = lora_dir.join("style.safetensors");
+    let files = vec![PortableArtifactFile {
+        relative_path: "style.safetensors".into(),
+        size_bytes: std::fs::metadata(&lora_path).expect("LoRA metadata").len(),
+        sha256: format!(
+            "sha256:{}",
+            sceneworks_core::hashing::sha256_file(&lora_path).expect("LoRA hash")
+        ),
+    }];
+    let source_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+        "lora",
+        "style-lora",
+        None,
+        &portable_file_ledger_sha256(&files).expect("LoRA ledger"),
+    )
+    .expect("LoRA source ID");
+    let claim =
+        PortableSourceClaim::new(source_id, PortableSourceProvenance::OperatorOverride, files)
+            .expect("LoRA claim");
+    state
+        .jobs_store
+        .register_worker_with_portable_sources(
+            RegisterWorker {
+                worker_id: "preset-lora-worker".into(),
+                gpu_id: "mlx".into(),
+                gpu_name: None,
+                capabilities: vec![WorkerCapability::Gpu, WorkerCapability::ImageGenerate],
+                loaded_models: vec![],
+                utilization: None,
+            },
+            Some("macos"),
+            Some(&[claim]),
+        )
+        .expect("worker registers exact LoRA bytes");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Image Preset Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -12276,7 +12317,7 @@ async fn preset_image_job_builds_each_catalog_once() {
             "projectId": project_id,
             "mode": "text_to_image",
             "prompt": "a fox",
-            "model": "img-model",
+            "model": "z_image_turbo",
             "count": 1,
             "width": 1024,
             "height": 1024,
@@ -12330,11 +12371,11 @@ async fn preset_image_job_skips_server_lora_merge_when_client_resolved() {
           "schemaVersion": 1,
           "models": [
             {
-              "id": "img-model",
+              "id": "z_image_turbo",
               "name": "Img Model",
               "family": "z-image",
               "type": "image",
-              "adapter": "z_image",
+              "adapter": "z_image_diffusers",
               "capabilities": ["text_to_image"],
               "downloads": [
                 { "provider": "huggingface", "repo": "owner/img", "files": ["*.safetensors"], "default": true }
@@ -12389,7 +12430,7 @@ async fn preset_image_job_skips_server_lora_merge_when_client_resolved() {
               "id": "dream_style",
               "name": "Dream Style",
               "workflow": "text_to_image",
-              "model": "img-model",
+              "model": "z_image_turbo",
               "defaults": { "count": 1, "resolution": "1024x1024" },
               "prompt": { "prefix": "cinematic" },
               "loras": [{ "id": "style-lora", "weight": 0.5 }]
@@ -12408,7 +12449,7 @@ async fn preset_image_job_skips_server_lora_merge_when_client_resolved() {
     std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
     write_test_safetensors(&lora_dir.join("style.safetensors"));
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Client Resolved Preset Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -12423,7 +12464,7 @@ async fn preset_image_job_skips_server_lora_merge_when_client_resolved() {
             "projectId": project_id,
             "mode": "text_to_image",
             "prompt": "a fox",
-            "model": "img-model",
+            "model": "z_image_turbo",
             "count": 1,
             "width": 1024,
             "height": 1024,
@@ -12467,11 +12508,11 @@ async fn preset_image_job_skips_server_prompt_fold_when_client_resolved() {
           "schemaVersion": 1,
           "models": [
             {
-              "id": "img-model",
+              "id": "z_image_turbo",
               "name": "Img Model",
               "family": "z-image",
               "type": "image",
-              "adapter": "z_image",
+              "adapter": "z_image_diffusers",
               "capabilities": ["text_to_image"],
               "downloads": [
                 { "provider": "huggingface", "repo": "owner/img", "files": ["*.safetensors"], "default": true }
@@ -12502,7 +12543,7 @@ async fn preset_image_job_skips_server_prompt_fold_when_client_resolved() {
               "id": "dream_style",
               "name": "Dream Style",
               "workflow": "text_to_image",
-              "model": "img-model",
+              "model": "z_image_turbo",
               "defaults": { "count": 1, "resolution": "1024x1024" },
               "prompt": { "prefix": "cinematic" }
             }
@@ -12517,7 +12558,7 @@ async fn preset_image_job_skips_server_prompt_fold_when_client_resolved() {
     )
     .expect("user recipe presets writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Client Prompt Preset Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -12531,7 +12572,7 @@ async fn preset_image_job_skips_server_prompt_fold_when_client_resolved() {
             "projectId": project_id,
             "mode": "text_to_image",
             "prompt": "a fox",
-            "model": "img-model",
+            "model": "z_image_turbo",
             "count": 1,
             "width": 1024,
             "height": 1024,
@@ -12556,7 +12597,7 @@ async fn preset_image_job_skips_server_prompt_fold_when_client_resolved() {
             "projectId": project_id,
             "mode": "text_to_image",
             "prompt": "cinematic, a fox",
-            "model": "img-model",
+            "model": "z_image_turbo",
             "count": 1,
             "width": 1024,
             "height": 1024,
@@ -13473,7 +13514,7 @@ async fn image_steps_under_the_models_hard_floor_is_rejected() {
           "schemaVersion": 1,
           "models": [
             {
-              "id": "unfloored_image",
+              "id": "z_image_turbo",
               "name": "Unfloored",
               "family": "z-image",
               "type": "image",
@@ -13574,7 +13615,7 @@ async fn image_steps_under_the_models_hard_floor_is_rejected() {
         "/api/v1/image/jobs",
         json!({
             "projectId": project_id,
-            "model": "unfloored_image",
+            "model": "z_image_turbo",
             "prompt": "a lighthouse",
             "advanced": { "steps": 1 }
         }),
@@ -13607,11 +13648,11 @@ async fn image_hires_fix_is_forwarded_for_capable_models_and_refused_for_others(
           "schemaVersion": 1,
           "models": [
             {
-              "id": "img2img_image",
+              "id": "krea_2_raw",
               "name": "Img2Img",
               "family": "krea_2",
               "type": "image",
-              "adapter": "z_image_diffusers",
+              "adapter": "mlx_krea",
               "capabilities": ["text_to_image"],
               "downloads": [
                 { "provider": "huggingface", "repo": "owner/img2img", "files": ["*.safetensors"], "default": true }
@@ -13622,7 +13663,7 @@ async fn image_hires_fix_is_forwarded_for_capable_models_and_refused_for_others(
               "ui": { "label": "Img2Img", "img2img": true }
             },
             {
-              "id": "plain_image",
+              "id": "z_image_turbo",
               "name": "Plain",
               "family": "z-image",
               "type": "image",
@@ -13647,7 +13688,7 @@ async fn image_hires_fix_is_forwarded_for_capable_models_and_refused_for_others(
     )
     .expect("user models writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Hires Fix Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -13660,7 +13701,7 @@ async fn image_hires_fix_is_forwarded_for_capable_models_and_refused_for_others(
         "/api/v1/image/jobs",
         json!({
             "projectId": project_id,
-            "model": "img2img_image",
+            "model": "krea_2_raw",
             "prompt": "a lighthouse",
             "hiresFix": {
                 "enabled": true,
@@ -13693,7 +13734,7 @@ async fn image_hires_fix_is_forwarded_for_capable_models_and_refused_for_others(
         "/api/v1/image/jobs",
         json!({
             "projectId": project_id,
-            "model": "plain_image",
+            "model": "z_image_turbo",
             "prompt": "a lighthouse",
             "hiresFix": { "enabled": true }
         }),
@@ -13705,7 +13746,10 @@ async fn image_hires_fix_is_forwarded_for_capable_models_and_refused_for_others(
         "a non-img2img model must refuse Hires.fix at enqueue: {body}"
     );
     let detail = body["detail"].as_str().unwrap_or_default();
-    assert!(detail.contains("plain_image"), "names the model: {detail}");
+    assert!(
+        detail.contains("z_image_turbo"),
+        "names the model: {detail}"
+    );
     assert!(
         detail.contains("img2img-capable"),
         "names the missing capability: {detail}"
@@ -13719,7 +13763,7 @@ async fn image_hires_fix_is_forwarded_for_capable_models_and_refused_for_others(
         "/api/v1/image/jobs",
         json!({
             "projectId": project_id,
-            "model": "plain_image",
+            "model": "z_image_turbo",
             "prompt": "a lighthouse"
         }),
     )
@@ -13748,7 +13792,7 @@ async fn image_sampler_off_the_models_menu_is_rejected() {
           "schemaVersion": 1,
           "models": [
             {
-              "id": "menuless_image",
+              "id": "z_image_turbo",
               "name": "Menuless",
               "family": "z-image",
               "type": "image",
@@ -13835,7 +13879,7 @@ async fn image_sampler_off_the_models_menu_is_rejected() {
         );
     }
 
-    let (status, body) = post("menuless_image", json!({ "sampler": "dpmpp_3m" })).await;
+    let (status, body) = post("z_image_turbo", json!({ "sampler": "dpmpp_3m" })).await;
     assert_eq!(
         status,
         StatusCode::CREATED,
@@ -13866,7 +13910,7 @@ async fn iris_and_plain_app() -> (tempfile::TempDir, axum::Router, String) {
         .expect("iris_3b is shipped")
         .clone();
     let plain = json!({
-        "id": "plain_image",
+        "id": "z_image_turbo",
         "name": "Plain",
         "family": "z-image",
         "type": "image",
@@ -13890,7 +13934,7 @@ async fn iris_and_plain_app() -> (tempfile::TempDir, axum::Router, String) {
         r#"{ "schemaVersion": 1, "models": [] }"#,
     )
     .expect("user models writes");
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Iris Controls Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -13978,11 +14022,11 @@ async fn iris_sampling_controls_are_typed_at_image_enqueue() {
         json!({ "cfgInterval": [0.2, 0.8] }),
         json!({ "captionOverflow": "warn" }),
     ] {
-        let (status, body) = post("plain_image", "", advanced.clone()).await;
+        let (status, body) = post("z_image_turbo", "", advanced.clone()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{advanced}: {body}");
     }
     // The undeclared model keeps its historical behaviour for everything else.
-    let (status, body) = post("plain_image", "blurry", json!({ "guidanceScale": 1.0 })).await;
+    let (status, body) = post("z_image_turbo", "blurry", json!({ "guidanceScale": 1.0 })).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
 }
 
@@ -14083,11 +14127,11 @@ async fn image_reference_count_and_free_size_are_bounded_by_the_models_declared_
           "schemaVersion": 1,
           "models": [
             {
-              "id": "unbounded_image",
+              "id": "qwen_image_2_1_turbo",
               "name": "Unbounded",
-              "family": "z-image",
+              "family": "qwen-image-2-1",
               "type": "image",
-              "adapter": "z_image_diffusers",
+              "adapter": "qwen_image_2_1_turbo",
               "capabilities": ["text_to_image", "image_to_image"],
               "downloads": [
                 { "provider": "huggingface", "repo": "owner/unbounded", "files": ["*.safetensors"], "default": true }
@@ -14242,7 +14286,7 @@ async fn image_reference_count_and_free_size_are_bounded_by_the_models_declared_
         "/api/v1/image/jobs",
         json!({
             "projectId": project_id,
-            "model": "unbounded_image",
+            "model": "qwen_image_2_1_turbo",
             "mode": "edit_image",
             "prompt": "swap the sky",
             "referenceAssetIds": refs(11),
@@ -14324,7 +14368,7 @@ async fn image_reference_count_and_free_size_are_bounded_by_the_models_declared_
         "/api/v1/image/jobs",
         json!({
             "projectId": project_id,
-            "model": "unbounded_image",
+            "model": "qwen_image_2_1_turbo",
             "prompt": "a lighthouse",
             "width": 64,
             "height": 64,
@@ -15582,11 +15626,11 @@ fn write_style_test_manifests(config_dir: &std::path::Path) {
           "schemaVersion": 1,
           "models": [
             {
-              "id": "img-model",
+              "id": "z_image_turbo",
               "name": "Img Model",
               "family": "z-image",
               "type": "image",
-              "adapter": "z_image",
+              "adapter": "z_image_diffusers",
               "capabilities": ["text_to_image"],
               "downloads": [
                 { "provider": "huggingface", "repo": "owner/img", "files": ["*.safetensors"], "default": true }
@@ -15598,11 +15642,26 @@ fn write_style_test_manifests(config_dir: &std::path::Path) {
               "ui": { "label": "Img" }
             },
             {
-              "id": "tag-model",
+              "id": "sdxl",
+              "name": "SDXL",
+              "family": "sdxl",
+              "type": "image",
+              "adapter": "sdxl_diffusers",
+              "capabilities": ["text_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/sdxl", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": {},
+              "limits": {},
+              "ui": { "label": "SDXL" }
+            },
+            {
+              "id": "anima_base",
               "name": "Tag Model",
               "family": "anima",
               "type": "image",
-              "adapter": "anima",
+              "adapter": "mlx_anima",
               "captionStyle": "tags",
               "capabilities": ["text_to_image"],
               "downloads": [
@@ -15660,7 +15719,7 @@ async fn styled_image_job_folds_style_server_side_from_style_id() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_style_test_manifests(&temp_dir.path().join("config"));
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Styled Job Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -15676,7 +15735,7 @@ async fn styled_image_job_folds_style_server_side_from_style_id() {
             "projectId": project_id,
             "mode": "text_to_image",
             "prompt": "a fox\nSetting: snowy field",
-            "model": "img-model",
+            "model": "z_image_turbo",
             "count": 1,
             "width": 1024,
             "height": 1024,
@@ -15704,7 +15763,7 @@ async fn styled_image_job_folds_style_server_side_from_style_id() {
             "projectId": project_id,
             "mode": "text_to_image",
             "prompt": "a fox",
-            "model": "img-model",
+            "model": "z_image_turbo",
             "count": 1,
             "width": 1024,
             "height": 1024,
@@ -15727,7 +15786,7 @@ async fn styled_image_job_folds_style_server_side_from_style_id() {
             "projectId": project_id,
             "mode": "text_to_image",
             "prompt": "a fox",
-            "model": "img-model",
+            "model": "z_image_turbo",
             "count": 1,
             "width": 1024,
             "height": 1024,
@@ -15747,7 +15806,7 @@ async fn styled_image_job_rejects_a_style_on_a_tag_convention_model() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_style_test_manifests(&temp_dir.path().join("config"));
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Tag Model Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -15756,7 +15815,7 @@ async fn styled_image_job_rejects_a_style_on_a_tag_convention_model() {
         "projectId": project_id,
         "mode": "text_to_image",
         "prompt": "1girl, solo, pink hair",
-        "model": "tag-model",
+        "model": "anima_base",
         "count": 1,
         "width": 1024,
         "height": 1024,
@@ -15766,7 +15825,7 @@ async fn styled_image_job_rejects_a_style_on_a_tag_convention_model() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{err:?}");
     let message = err["detail"].as_str().unwrap_or_default().to_owned();
     assert!(
-        message.contains("tag-model") && message.contains("tag-style"),
+        message.contains("anima_base") && message.contains("tag-style"),
         "the rejection must name the model and the reason: {message}"
     );
 
@@ -15786,7 +15845,7 @@ async fn styled_image_job_rejects_a_style_on_a_tag_convention_model() {
             "projectId": project["id"].as_str().expect("project id"),
             "mode": "text_to_image",
             "prompt": "1girl, solo, pink hair",
-            "model": "tag-model",
+            "model": "anima_base",
             "count": 1,
             "width": 1024,
             "height": 1024
@@ -15807,7 +15866,7 @@ async fn styled_image_job_skips_fold_when_prompt_resolved_client_side() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_style_test_manifests(&temp_dir.path().join("config"));
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Client Styled Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -15821,7 +15880,7 @@ async fn styled_image_job_skips_fold_when_prompt_resolved_client_side() {
             "projectId": project_id,
             "mode": "text_to_image",
             "prompt": already_composed,
-            "model": "img-model",
+            "model": "z_image_turbo",
             "count": 1,
             "width": 1024,
             "height": 1024,
