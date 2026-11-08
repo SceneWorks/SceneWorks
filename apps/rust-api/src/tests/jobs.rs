@@ -1151,7 +1151,7 @@ async fn vector_route_resolves_default_seed_once_and_preserves_explicit_and_repl
         &temp_dir.path().join("config/manifests"),
         &["image_to_svg", "text_to_svg"],
     );
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Vector seed persistence").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -1542,7 +1542,7 @@ async fn vector_route_validates_and_stamps_typed_image_to_svg_request() {
         &temp_dir.path().join("config/manifests"),
         &["image_to_svg", "text_to_svg"],
     );
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
 
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Vector Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -1597,13 +1597,11 @@ async fn vector_route_validates_and_stamps_typed_image_to_svg_request() {
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "text-only-vector-worker",
-            "gpuId": "test-gpu-1",
-            "gpuName": "Test GPU",
-            "capabilities": ["gpu", "vector_text_to_svg"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "text-only-vector-worker",
+            &["gpu", "mlx", "vector_text_to_svg"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -1611,7 +1609,7 @@ async fn vector_route_validates_and_stamps_typed_image_to_svg_request() {
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "text-only-vector-worker" }),
+        portable_test_worker_claim("text-only-vector-worker", TestPortableRoute::MlxMacos),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -1624,6 +1622,22 @@ async fn vector_route_validates_and_stamps_typed_image_to_svg_request() {
         TestPortableRoute::MlxMacos,
     )
     .await;
+    // Both fixture workers advertise the same MLX device; release the image claim before
+    // checking that the text-only worker can take a different vector mode.
+    let (status, completed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{}/progress", created["id"].as_str().unwrap()),
+        json!({
+            "workerId":"image-vector-worker",
+            "status":"completed",
+            "stage":"completed",
+            "progress":1.0,
+            "message":"image vector fixture completed"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
 
     let (status, text_created) = request(
         app.clone(),
@@ -1644,7 +1658,7 @@ async fn vector_route_validates_and_stamps_typed_image_to_svg_request() {
         app,
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "text-only-vector-worker" }),
+        portable_test_worker_claim("text-only-vector-worker", TestPortableRoute::MlxMacos),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -1659,7 +1673,7 @@ async fn vector_route_validates_and_stamps_typed_image_to_svg_request() {
 async fn vector_worker_fact_publishes_through_the_api_sidecar_contract() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_vector_test_manifest(&temp_dir.path().join("config/manifests"), &["image_to_svg"]);
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Vector publication").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -8738,7 +8752,7 @@ async fn flux3_owned_reference_jobs_preserve_order_duplicates_and_optional_size_
         br#"{"schemaVersion":1,"models":[]}"#,
     )
     .unwrap();
-    let app = create_app(test_settings(&temp_dir)).unwrap();
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).unwrap();
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"FLUX3 references").await;
     let project_id = project["id"].as_str().unwrap();
