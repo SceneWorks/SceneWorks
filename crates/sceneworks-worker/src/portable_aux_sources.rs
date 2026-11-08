@@ -22,7 +22,7 @@ pub(crate) fn has_bound_aux_paths(advanced: &JsonObject) -> bool {
 
 /// A verified portable attempt must use its leased strict-control copy even when an operator
 /// env override is present. Legacy, unbound jobs retain the operator override behavior.
-#[cfg(any(test, target_os = "macos", feature = "backend-candle"))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn selected_krea_control_override(
     advanced: &JsonObject,
     env_override: Option<&str>,

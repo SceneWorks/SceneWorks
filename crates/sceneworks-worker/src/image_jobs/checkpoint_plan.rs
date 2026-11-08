@@ -149,7 +149,8 @@ mod portable_plan_layer_tests {
                 .insert("linked/root/checkpoint", layer_id, private)
                 .unwrap();
         }
-        let plan = ImportPlanV1::new("plan", "krea_2", layers).unwrap();
+        let plan =
+            ImportPlanV1::new("plan", CHECKPOINT_PLAN_RESIDENT_BASE_TIERS[0].0, layers).unwrap();
         let portable = sceneworks_core::model_artifacts::portable_binding::PortableCheckpointPlan::from_import_plan(&plan, None).unwrap();
         verified
             .add_plan("linked/root/checkpoint", portable.clone())
