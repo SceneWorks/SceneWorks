@@ -441,6 +441,17 @@ pub(crate) fn refresh_background_inventory(settings: Settings) {
     start_background_inventory(settings);
 }
 
+#[cfg(test)]
+pub(crate) async fn wait_for_background_inventory_in_fixture() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while INVENTORY_STARTED.load(Ordering::Acquire) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("fixture source inventory finishes before its private cache root is released");
+}
+
 /// Registration stays fast even when installed source closure spans terabytes. Exactly one
 /// blocking inventory hashes it in the background. Each completed source is published on the
 /// next ordinary heartbeat; unverified sources remain ineligible until their own hash completes.
