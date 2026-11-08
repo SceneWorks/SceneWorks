@@ -305,13 +305,17 @@ async fn historical_import_carrier_requires_original_plan_and_bytes() {
 }
 
 fn register_authority_import_worker(state: &crate::AppState) {
-    let bytes = std::fs::read(
-        state
+    register_authority_import_worker_from(
+        state,
+        &state
             .settings
             .data_dir
             .join("authority-library/model.safetensors"),
-    )
-    .unwrap();
+    );
+}
+
+fn register_authority_import_worker_from(state: &crate::AppState, source: &std::path::Path) {
+    let bytes = std::fs::read(source).unwrap();
     let files = vec![PortableArtifactFile {
         relative_path: "artifact".into(),
         size_bytes: bytes.len() as u64,
@@ -752,7 +756,7 @@ async fn typed_http_admission_freezes_catalog_authority_before_asset_persistence
         .create_project("Typed authority")
         .unwrap();
     let (status, created) = request(
-        app,
+        app.clone(),
         "POST",
         "/api/v1/image/jobs",
         json!({"projectId":project.id,
@@ -772,6 +776,87 @@ async fn typed_http_admission_freezes_catalog_authority_before_asset_persistence
         state.jobs_store.model_provenance(id).unwrap(),
         Some(trusted.clone())
     );
+    let source = state
+        .settings
+        .data_dir
+        .join("authority-library/model.safetensors");
+    let other_root = temp.path().join("other-worker-root");
+    std::fs::create_dir_all(&other_root).unwrap();
+    let copy = other_root.join("model.safetensors");
+    std::fs::copy(&source, &copy).unwrap();
+    let connection = rusqlite::Connection::open(&state.settings.jobs_db_path).unwrap();
+    let original_claims: String = connection
+        .query_row(
+            "select portable_source_claims_json from workers where id = 'authority-mlx-worker'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    register_authority_import_worker_from(&state, &copy);
+    let copied_claims: String = connection
+        .query_row(
+            "select portable_source_claims_json from workers where id = 'authority-mlx-worker'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(original_claims, copied_claims);
+    connection
+        .execute(
+            "update jobs set portable_model_binding_json = null where id = ?1",
+            [id],
+        )
+        .unwrap();
+    let (status, replay) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{id}/duplicate"),
+        json!({"payloadChanges":{}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replay}");
+    assert!(state
+        .jobs_store
+        .portable_model_binding(replay["id"].as_str().unwrap())
+        .unwrap()
+        .is_some());
+    let original_bytes = std::fs::read(&source).unwrap();
+    std::fs::write(&source, vec![b'X'; original_bytes.len()]).unwrap();
+    let (altered_status, altered) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{id}/duplicate"),
+        json!({"payloadChanges":{}}),
+    )
+    .await;
+    assert_eq!(altered_status, StatusCode::CONFLICT, "{altered}");
+    std::fs::remove_file(&source).unwrap();
+    let (missing_status, missing) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{id}/duplicate"),
+        json!({"payloadChanges":{}}),
+    )
+    .await;
+    assert_eq!(missing_status, StatusCode::CONFLICT, "{missing}");
+    std::fs::write(&source, original_bytes).unwrap();
+    let (claim_status, claimed) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        portable_test_worker_claim("authority-mlx-worker", TestPortableRoute::MlxMacos),
+    )
+    .await;
+    assert_eq!(claim_status, StatusCode::OK, "{claimed}");
+    let claimed_id = claimed["job"]["id"]
+        .as_str()
+        .expect("historical source job claimed");
+    assert!(claimed_id == id || claimed_id == replay["id"].as_str().unwrap());
+    assert!(state
+        .jobs_store
+        .portable_model_binding(claimed_id)
+        .unwrap()
+        .is_some());
     // Completion must retain admitted authority even if the source catalog changes/disappears.
     std::fs::remove_file(state.settings.data_dir.join("checkpoints/inventory.json")).unwrap();
     let asset = persist_authority_output(

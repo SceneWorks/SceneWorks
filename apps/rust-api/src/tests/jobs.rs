@@ -3124,6 +3124,44 @@ fn write_imported_image_model_manifests(root: &std::path::Path) {
     }
 }
 
+#[tokio::test]
+async fn historical_path_only_import_fails_before_worker_claim() {
+    let temp = tempfile::tempdir().unwrap();
+    write_imported_image_model_manifests(temp.path());
+    let (app, state) = create_app_with_state(test_settings(&temp)).unwrap();
+    register_imported_krea_worker(&state, true);
+    let job = state
+        .jobs_store
+        .create_job(crate::CreateJob {
+            job_type: crate::JobType::ImageGenerate,
+            project_id: None,
+            project_name: None,
+            payload: json!({"model":"imported_krea", "mode":"text_to_image", "prompt":"old source",
+                "modelManifestEntry":{"id":"imported_krea","type":"image","family":"krea_2",
+                    "paths":{"model":temp.path().join("data/models/imports/imported_krea/model.safetensors")}}})
+                .as_object().unwrap().clone(),
+            requested_gpu: "auto".into(),
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+            initial_status: None,
+        })
+        .unwrap();
+    let (status, claim) = request(
+        app,
+        "POST",
+        "/api/v1/jobs/claim",
+        portable_test_worker_claim("registered-krea-worker", TestPortableRoute::MlxMacos),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{claim}");
+    assert!(claim["job"].is_null(), "{claim}");
+    assert_eq!(
+        state.jobs_store.get_job(&job.id).unwrap().status,
+        crate::JobStatus::Failed
+    );
+}
+
 /// sc-13617 / F-055: raw jobs whose `model` reaches worker-side model path resolution must
 /// reject traversal before a job row exists. This table is the API-side inventory for that key.
 #[tokio::test]

@@ -1319,6 +1319,7 @@ impl JobsStore {
         let facts = ClaimRoutingFacts::from_parts(&current.job_type, canonical_payload);
         let updated = transaction.execute(
             "update jobs set payload_json = ?1, portable_model_binding_json = ?2,
+                    payload_revision = payload_revision + 1,
                     claim_facts_version = ?3, claim_payload_revision = payload_revision + 1,
                     claim_mlx_eligible = ?4, claim_candle_eligible = ?5,
                     claim_candle_pose_reject = ?6, claim_training_mlx_only = ?7,
@@ -1329,7 +1330,7 @@ impl JobsStore {
               where id = ?16 and status = 'queued' and portable_model_binding_json is null",
             params![
                 dumps(canonical_payload)?,
-                dumps(binding)?,
+                serde_json::to_string(binding)?,
                 CLAIM_ROUTING_FACTS_VERSION,
                 i64::from(facts.mlx_eligible),
                 i64::from(facts.candle_eligible),

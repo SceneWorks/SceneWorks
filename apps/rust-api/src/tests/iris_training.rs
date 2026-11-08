@@ -920,12 +920,45 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
     assert_eq!(status, StatusCode::CONFLICT, "{duplicate}");
     // A plain duplicate of the aliased job still re-derives the checkpoint alias.
     let connection = rusqlite::Connection::open(&settings.jobs_db_path).unwrap();
+    let original_claims: String = connection
+        .query_row(
+            "select portable_source_claims_json from workers where id = 'test-iris-source-worker'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     connection
         .execute(
             "update jobs set portable_model_binding_json = null where id = ?1",
             [&generation_id],
         )
         .unwrap();
+    let worker_copy = temp_dir.path().join("other-worker-root/trained-iris");
+    std::fs::create_dir_all(&worker_copy).unwrap();
+    for entry in std::fs::read_dir(&export).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_file() {
+            std::fs::copy(entry.path(), worker_copy.join(entry.file_name())).unwrap();
+        }
+    }
+    super::iris_task_training::advertise_trained_source(
+        &app,
+        &model_id,
+        &worker_copy,
+        "image_generate",
+    )
+    .await;
+    let copied_claims: String = connection
+        .query_row(
+            "select portable_source_claims_json from workers where id = 'test-iris-source-worker'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        original_claims, copied_claims,
+        "worker copy must advertise the exact same portable ledger"
+    );
     let (status, replay) = request(
         app.clone(),
         "POST",
@@ -946,6 +979,42 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
     assert_eq!(
         replay["payload"]["modelManifestEntry"]["trainedCheckpoint"]["modelId"],
         json!(model_id)
+    );
+    let trained_file = export.join("model.safetensors");
+    let original_bytes = std::fs::read(&trained_file).unwrap();
+    std::fs::write(&trained_file, vec![b'X'; original_bytes.len()]).unwrap();
+    let (altered_status, altered) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{generation_id}/duplicate"),
+        json!({"payloadChanges":{}}),
+    )
+    .await;
+    assert_eq!(altered_status, StatusCode::CONFLICT, "{altered}");
+    std::fs::remove_file(&trained_file).unwrap();
+    let (missing_status, missing) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{generation_id}/duplicate"),
+        json!({"payloadChanges":{}}),
+    )
+    .await;
+    assert_eq!(missing_status, StatusCode::BAD_REQUEST, "{missing}");
+    std::fs::write(&trained_file, original_bytes).unwrap();
+    let (claim_status, claimed) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        portable_test_worker_claim("test-iris-source-worker", TestPortableRoute::MlxMacos),
+    )
+    .await;
+    assert_eq!(claim_status, StatusCode::OK, "{claimed}");
+    let claimed_id = claimed["job"]["id"]
+        .as_str()
+        .expect("trained historical claim");
+    assert!(
+        claimed_id == generation_id || claimed_id == replay["id"].as_str().unwrap(),
+        "{claimed}"
     );
 
     // A client-authored `checkpointModelId` naming something that is not a trained checkpoint of

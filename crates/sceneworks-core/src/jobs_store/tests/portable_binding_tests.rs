@@ -78,7 +78,7 @@ fn private_portable_binding_roundtrips_nested_plan_context_for_claim() {
             role: "model".into(),
             target_path: "weights.safetensors".into(),
             container: CheckpointContainerV1::Safetensors,
-            source: SourceLocatorV1::linked("approved-root", "weights.safetensors", &"a".repeat(64))
+            source: SourceLocatorV1::linked("approved-root", "weights.safetensors", "a".repeat(64))
                 .unwrap(),
         }],
     )
@@ -196,6 +196,14 @@ fn historical_binding_install_is_atomic_and_refuses_a_changed_job() {
     );
     assert_eq!(store.get_job(&original.id).unwrap().payload, canonical);
     let connection = store.open_connection().unwrap();
+    let (payload_revision, facts_revision): (i64, i64) = connection
+        .query_row(
+            "select payload_revision, claim_payload_revision from jobs where id = ?1",
+            [&original.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(payload_revision, facts_revision);
     assert!(candidate_matches_portable_worker_sources(
         &connection,
         &original.id,
