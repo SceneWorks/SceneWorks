@@ -1619,6 +1619,14 @@ async fn resolve_dynamic_hf_revision(
     repo: &str,
     reference: &str,
 ) -> Result<String, ApiError> {
+    #[cfg(test)]
+    if let Some(fixture) = *state.test_hooks.dynamic_hf_revision_override.lock() {
+        if let Some(revision) = fixture(repo, reference) {
+            sceneworks_core::model_artifacts::validate_immutable_revision(revision)
+                .map_err(|error| incomplete(error.to_string()))?;
+            return Ok(revision.to_owned());
+        }
+    }
     let base_url = std::env::var("SCENEWORKS_HUGGINGFACE_BASE_URL")
         .unwrap_or_else(|_| "https://huggingface.co".to_owned());
     let token = huggingface_token(state)?;

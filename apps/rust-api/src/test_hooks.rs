@@ -16,6 +16,9 @@ pub(crate) struct TestHooks {
     pub(crate) model_size_estimate_disabled_override: Arc<Mutex<Option<bool>>>,
     pub(crate) video_platform_override: Arc<Mutex<Option<&'static str>>>,
     pub(crate) pinned_metadata_override: Arc<Mutex<Option<PinnedMetadataFixture>>>,
+    /// Freeze synthetic mutable repository refs in route tests without contacting Hugging Face.
+    pub(crate) dynamic_hf_revision_override:
+        Arc<Mutex<Option<fn(&str, &str) -> Option<&'static str>>>>,
     /// Deterministic catalog scheduler seams. Production has no hook fields or
     /// branch overhead.
     pub(crate) catalog_scan_before_driver_start_once: Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,

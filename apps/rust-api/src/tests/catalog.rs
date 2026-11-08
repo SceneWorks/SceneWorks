@@ -1,6 +1,39 @@
 //! rust-api catalog tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
 
+fn catalog_convert_revision(repo: &str, reference: &str) -> Option<&'static str> {
+    assert_eq!(reference, "main");
+    assert!(
+        matches!(
+            repo,
+            "owner/plain" | "MiniMaxAI/MiniMax-H3" | "Lightricks/LTX-Video"
+        ),
+        "unexpected conversion source: {repo}"
+    );
+    Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+}
+
+fn catalog_convert_pinned_files(
+    selectors: &[String],
+) -> Vec<sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile> {
+    use sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile;
+    selectors
+        .iter()
+        .map(|selector| PortableArtifactFile {
+            relative_path: std::path::PathBuf::from(selector.replace('*', "fixture")),
+            size_bytes: 1,
+            sha256: format!("sha256:{}", "b".repeat(64)),
+        })
+        .collect()
+}
+
+fn pin_catalog_convert_metadata(state: &crate::AppState) {
+    // These license and replay tests name synthetic repositories; admission still validates the
+    // immutable revision and file closure returned by these per-app fixtures.
+    *state.test_hooks.dynamic_hf_revision_override.lock() = Some(catalog_convert_revision);
+    *state.test_hooks.pinned_metadata_override.lock() = Some(catalog_convert_pinned_files);
+}
+
 /// Retain this guard across the complete fixture, including awaited catalog mutations.
 fn catalog_fixture_cache_root(
     settings: &Settings,
@@ -8032,7 +8065,8 @@ async fn license_acknowledgment_model_convert_is_refused_for_a_restricted_base_r
 
     let settings = test_settings(&temp_dir);
     let output_dir = settings.data_dir.join("models/mlx/converted-1");
-    let app = create_app(settings).expect("app creates");
+    let (app, state) = create_app_with_state(settings).expect("app creates");
+    pin_catalog_convert_metadata(&state);
 
     let convert_payload = |base_repo: &str, acknowledged: bool| {
         let mut payload = json!({
@@ -8877,7 +8911,8 @@ async fn fetching_job_replays_require_current_receipts_for_every_source_type() {
     let config_dir = temp.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).unwrap();
     write_license_acknowledgment_catalog(&config_dir);
-    let app = create_app(settings.clone()).unwrap();
+    let (app, state) = create_app_with_state(settings.clone()).unwrap();
+    pin_catalog_convert_metadata(&state);
     let ack = "/api/v1/models/minimax_h3/license-acknowledgment";
     let (status, accepted) = request(app.clone(), "PUT", ack, Value::Null).await;
     assert_eq!(status, StatusCode::OK, "{accepted}");
