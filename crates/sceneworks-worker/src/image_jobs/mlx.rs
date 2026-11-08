@@ -125,7 +125,9 @@ use super::stream::drive_gen_items_scored_reported;
 #[cfg(target_os = "macos")]
 use super::stream::drive_native_prompt_batch;
 #[cfg(target_os = "macos")]
-use super::stream::start_cached_gen_stream_with_request_state_using;
+use super::stream::start_cached_gen_stream_with_request_state_using_prepared;
+#[cfg(target_os = "macos")]
+use super::stream::PreparedRenderPlans;
 #[cfg(target_os = "macos")]
 use super::Generator;
 #[cfg(target_os = "macos")]
@@ -984,8 +986,8 @@ pub(super) async fn generate_stream_using(
     // residency, not the artifact/precision identity; reference demand is repriced on every fit.
     let reference_pricing_spec = flux3_references.as_ref().map(|_| spec.clone());
     // MLX's legacy schedule uses MLX arithmetic (linspace/exp/div) whose rounding is observable.
-    // Compile on the very same serialized owner thread that will load and execute this generator,
-    // before submitting the cache access. Only pure base T2I migrates in this item; IP/Control/PuLID
+    // Compile on the very same serialized owner command that will load and execute this generator.
+    // Only pure base T2I migrates in this item; IP/Control/PuLID
     // retain their actual conditioned route until SW-6936.
     let base_flux = request.mode == "text_to_image"
         && matches!(engine_id, "flux1_schnell" | "flux1_dev")
@@ -994,7 +996,7 @@ pub(super) async fn generate_stream_using(
         && ideogram_edit_mask.is_none()
         && flux3_references.is_none()
         && spec.ip_adapter.is_none();
-    let render_plans = if base_flux {
+    let prepare_render_plans: PreparedRenderPlans = if base_flux {
         if hires_fix.is_some() {
             return Err(WorkerError::InvalidPayload(
                 "FLUX.1 base rendering does not support Hires.fix refinement".to_owned(),
@@ -1009,76 +1011,75 @@ pub(super) async fn generate_stream_using(
         let planning_guidance_method = guidance_method.clone();
         let planning_enhance = enhance.clone();
         let planning_batch = native_batch.clone();
-        crate::generator_cache::GeneratorCacheHandle::global()
-            .prepare_on_owner(move || {
-                let planning_cancel = gen_core::CancelFlag::new();
-                let planning_surface = LaneRgbaSurface {
-                    output_channels: rgba_output_channels,
-                    controls: lane_controls,
-                    prompt_batch: planning_batch.as_ref(),
-                    ..Default::default()
-                };
-                let planning_work = if planning_batch.is_some() {
-                    vec![(planning_seeds[0], "")]
-                } else {
-                    planning_seeds
-                        .iter()
-                        .map(|seed| (*seed, planning_prompt.as_str()))
-                        .collect()
-                };
-                planning_work
-                    .into_iter()
-                    .map(|(seed, item_prompt)| {
-                        let candidate = super::render::build_render_request(
-                            item_prompt,
-                            width,
-                            height,
-                            seed,
-                            steps,
-                            guidance,
-                            planning_negative.clone(),
-                            None,
-                            &[],
-                            None,
-                            true_cfg,
-                            planning_sampler.as_deref(),
-                            planning_scheduler.as_deref(),
-                            scheduler_shift,
-                            planning_guidance_method.as_deref(),
-                            use_pid,
-                            text_style_gain,
-                            None,
-                            &planning_enhance,
-                            gen_core::PromptEnhancementSink::default(),
-                            gen_core::PreviewSink::default(),
-                            &planning_surface,
-                            &planning_cancel,
-                        )?;
-                        super::render::compile_render_plan(
-                            crate::inference_runtime::media(),
-                            engine_id,
-                            &planning_spec,
-                            &candidate,
-                        )
-                    })
-                    .collect::<WorkerResult<Vec<_>>>()
-            })
-            .await?
+        Box::new(move |planning_cancel| {
+            let planning_surface = LaneRgbaSurface {
+                output_channels: rgba_output_channels,
+                controls: lane_controls,
+                prompt_batch: planning_batch.as_ref(),
+                ..Default::default()
+            };
+            let planning_work = if planning_batch.is_some() {
+                vec![(planning_seeds[0], "")]
+            } else {
+                planning_seeds
+                    .iter()
+                    .map(|seed| (*seed, planning_prompt.as_str()))
+                    .collect()
+            };
+            planning_work
+                .into_iter()
+                .map(|(seed, item_prompt)| {
+                    let candidate = super::render::build_render_request(
+                        item_prompt,
+                        width,
+                        height,
+                        seed,
+                        steps,
+                        guidance,
+                        planning_negative.clone(),
+                        None,
+                        &[],
+                        None,
+                        true_cfg,
+                        planning_sampler.as_deref(),
+                        planning_scheduler.as_deref(),
+                        scheduler_shift,
+                        planning_guidance_method.as_deref(),
+                        use_pid,
+                        text_style_gain,
+                        None,
+                        &planning_enhance,
+                        gen_core::PromptEnhancementSink::default(),
+                        gen_core::PreviewSink::default(),
+                        &planning_surface,
+                        planning_cancel,
+                    )?;
+                    super::render::compile_render_plan(
+                        crate::inference_runtime::media(),
+                        engine_id,
+                        &planning_spec,
+                        &candidate,
+                    )
+                })
+                .collect::<WorkerResult<Vec<_>>>()
+        })
     } else {
-        Vec::new()
+        Box::new(|_| Ok(Vec::new()))
     };
-    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state_using(
+    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state_using_prepared(
         job.id.clone(),
         engine_id,
         adapter_count,
         spec,
         format!("{engine_id} load failed"),
+        prepare_render_plans,
         load_generator,
         move |generator,
               cache_state,
               loaded_policy,
               warm_policy,
               external_committed_bytes,
+              render_plans,
               tx,
               cancel| {
             // Per-job identity-likeness scorer built ONCE on the generator-worker thread (the `!Send`

@@ -23044,6 +23044,8 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "start_cached_gen_stream_after_cold_admission(",
             "start_cached_gen_stream_with_request_state_using(",
             "start_cached_gen_stream_with_request_state_using_owned(",
+            "start_cached_gen_stream_with_request_state_using_prepared(",
+            "start_cached_gen_stream_with_request_state_using_owned_prepared(",
         ]
         .iter()
         .filter_map(|needle| {
@@ -29012,7 +29014,7 @@ fn candle_receipt_authority_is_family_agnostic_and_compared_after_cache_rebindin
     );
 
     let closure = body
-        .split_once("start_cached_gen_stream_with_request_state_using(")
+        .split_once("start_cached_gen_stream_with_request_state_using_prepared(")
         .expect("generate_candle_stream no longer opens a cached generator closure")
         .1;
     let bind = closure

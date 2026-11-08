@@ -251,6 +251,7 @@ async fn supervisor_restarts_exited_children_with_backoff_state() {
             restart_attempt: 0,
             spawned_at: std::time::Instant::now(),
             next_restart_at: None,
+            pending_panic_report: None,
         },
     )]);
     let spawns = std::cell::Cell::new(0_u32);
@@ -309,6 +310,95 @@ async fn supervisor_restarts_exited_children_with_backoff_state() {
     let _ = child.process.wait().await;
 }
 
+#[tokio::test]
+async fn generator_panic_receipt_waits_for_api_recovery_before_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = probe.local_addr().unwrap();
+    drop(probe);
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.api_url = format!("http://{address}");
+    settings.data_dir = dir.path().join("data");
+    let spec = WorkerSpec { worker_id: "panic-worker".into(), gpu_id: "0".into() };
+    let receipt = crate::supervisor::worker_panic_path(&settings, &spec.worker_id);
+    std::fs::create_dir_all(receipt.parent().unwrap()).unwrap();
+    std::fs::write(&receipt, "first device fault").unwrap();
+
+    let mut command = if cfg!(windows) {
+        let mut command = tokio::process::Command::new("cmd");
+        command.args(["/C", "exit /B 101"]);
+        command
+    } else {
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", "exit 101"]);
+        command
+    };
+    let mut exited = command.spawn().unwrap();
+    exited.wait().await.unwrap();
+    let mut children = HashMap::from([(
+        spec.worker_id.clone(),
+        SupervisedChild {
+            spec,
+            process: exited,
+            restart_attempt: 0,
+            spawned_at: std::time::Instant::now(),
+            next_restart_at: None,
+            pending_panic_report: None,
+        },
+    )]);
+    let spawns = std::cell::Cell::new(0);
+    let mut spawner = |_settings: &Settings, _spec: &WorkerSpec| {
+        spawns.set(spawns.get() + 1);
+        Ok(spawn_sleep_child())
+    };
+    let t0 = std::time::Instant::now();
+    restart_exited_children_at(&settings, &mut children, &mut spawner, t0).await.unwrap();
+    assert!(receipt.exists(), "failed POST retains the durable panic cause");
+    assert!(children["panic-worker"].pending_panic_report.is_some());
+    restart_exited_children_at(&settings, &mut children, &mut spawner, t0 + Duration::from_secs(60)).await.unwrap();
+    assert_eq!(spawns.get(), 0, "API failure blocks replacement claim");
+
+    let reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+    let reports_for_server = reports.clone();
+    let app = axum::Router::new().route(
+        "/api/v1/workers/:worker_id/terminated",
+        axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+            let reports = reports_for_server.clone();
+            async move {
+                reports.lock().unwrap().push(body);
+                axum::Json(serde_json::Value::Null)
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    restart_exited_children_at(&settings, &mut children, &mut spawner, t0 + Duration::from_secs(63)).await.unwrap();
+    assert_eq!(spawns.get(), 1, "replacement starts after terminal POST succeeds");
+    assert!(!receipt.exists());
+    assert!(children["panic-worker"].pending_panic_report.is_none());
+    assert_eq!(reports.lock().unwrap()[0]["panicMessage"], "first device fault");
+    let child = &mut children.get_mut("panic-worker").unwrap().process;
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+
+    // A supervisor restart sees an unconsumed on-disk receipt before it starts
+    // that worker. Replay it through the same API before the replacement spawns.
+    let replay = WorkerSpec { worker_id: "replay-worker".into(), gpu_id: "1".into() };
+    let replay_receipt = crate::supervisor::worker_panic_path(&settings, &replay.worker_id);
+    std::fs::write(&replay_receipt, "recovered supervisor fault").unwrap();
+    let mut pending_starts = vec![replay];
+    crate::supervisor::retry_pending_starts_with_spawner(&settings, &mut children, &mut pending_starts, |_, _| {
+        Ok(spawn_sleep_child())
+    }).await.unwrap();
+    assert!(pending_starts.is_empty());
+    assert!(!replay_receipt.exists());
+    assert_eq!(reports.lock().unwrap()[1]["panicMessage"], "recovered supervisor fault");
+    let child = &mut children.get_mut("replay-worker").unwrap().process;
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+    server.abort();
+}
+
 /// sc-8899 / F-097: one child's restart backoff must not stall the whole
 /// supervision tick. A crash-looping child with a long backoff and a healthy
 /// sibling that just crashed are handled independently — the sibling restarts on
@@ -335,6 +425,7 @@ async fn supervisor_backoff_on_one_child_does_not_stall_another() {
         restart_attempt: 6,
         spawned_at: t0,
         next_restart_at: Some(t0 + Duration::from_secs(30)),
+        pending_panic_report: None,
     };
 
     // A healthy sibling that already crashed and whose short backoff is now due.
@@ -354,6 +445,7 @@ async fn supervisor_backoff_on_one_child_does_not_stall_another() {
         restart_attempt: 1,
         spawned_at: t0,
         next_restart_at: Some(t0 + Duration::from_secs(1)),
+        pending_panic_report: None,
     };
 
     let mut children = HashMap::from([
@@ -428,6 +520,7 @@ async fn supervisor_survives_a_transient_respawn_failure_and_retries() {
             restart_attempt: 0,
             spawned_at: std::time::Instant::now(),
             next_restart_at: None,
+            pending_panic_report: None,
         },
     )]);
 
@@ -528,6 +621,7 @@ async fn stop_children_terminates_and_clears_every_child() {
                 restart_attempt: 0,
                 spawned_at: std::time::Instant::now(),
                 next_restart_at: None,
+                pending_panic_report: None,
             },
         ),
         (
@@ -541,6 +635,7 @@ async fn stop_children_terminates_and_clears_every_child() {
                 restart_attempt: 0,
                 spawned_at: std::time::Instant::now(),
                 next_restart_at: None,
+                pending_panic_report: None,
             },
         ),
     ]);
@@ -583,6 +678,7 @@ async fn supervisor_resets_backoff_after_a_healthy_run() {
                 .checked_sub(Duration::from_secs(360))
                 .expect("monotonic clock backdates 6 minutes"),
             next_restart_at: None,
+            pending_panic_report: None,
         },
     )]);
 

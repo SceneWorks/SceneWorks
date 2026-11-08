@@ -1092,8 +1092,9 @@ pub struct WorkerHeartbeatRequest {
 /// exit code 101). The dying worker can't report its own death, so the supervisor
 /// attributes it here and the server fails the worker's still-active job instead
 /// of waiting for the heartbeat sweep to mark it the generic `interrupted`
-/// (sc-4881 signals; sc-6320 generalized to non-signal exits). Exactly one of
-/// `signal` / `exit_code` is set, matching how the OS reported the child's exit.
+/// (sc-4881 signals; sc-6320 generalized to non-signal exits). Normally exactly
+/// one of `signal` / `exit_code` is set. Both may be absent when a newly started
+/// supervisor replays a durable generator-panic receipt without the old OS status.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkerTerminationRequest {
@@ -1103,6 +1104,9 @@ pub struct WorkerTerminationRequest {
     /// Process exit code when the child exited on its own with a non-zero status
     /// (e.g. 101 for a Rust panic); `None` when it died by signal.
     pub exit_code: Option<i32>,
+    /// Bounded panic text written by the generator owner before aborting, when available.
+    #[serde(default)]
+    pub panic_message: Option<String>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }

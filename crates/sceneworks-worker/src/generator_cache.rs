@@ -12,8 +12,6 @@ use gen_core::{
 #[cfg(any(native_lane, test))]
 use crate::cache_thread::CacheThread;
 use crate::cache_thread::{self, CacheAccess, CacheJob, Fingerprint, SeamMessages};
-#[cfg(any(native_lane, test))]
-use crate::WorkerError;
 use crate::WorkerResult;
 
 /// The generator cache is a single-resident [`crate::cache_thread::CacheThread`] keyed by
@@ -602,48 +600,6 @@ impl GeneratorCacheHandle {
         }
     }
 
-    /// Run a weights-free request compiler on the same serialized owner thread that subsequently
-    /// loads and drives the generator. MLX schedule construction uses MLX arithmetic whose exact
-    /// rounding is part of the existing image path; moving it to a Tokio caller changes both
-    /// thread ownership and class-(a) numerical behavior. This command does not touch the resident
-    /// cache entry and completes before the caller submits the load command.
-    #[cfg(any(native_lane, test))]
-    pub(crate) async fn prepare_on_owner<R>(
-        &self,
-        prepare: impl FnOnce() -> WorkerResult<R> + Send + 'static,
-    ) -> WorkerResult<R>
-    where
-        R: Send + 'static,
-    {
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        let progress_context = crate::load_progress::Context::capture();
-        let job: GeneratorJob = Box::new(move |cache| {
-            if reply_tx.is_closed() {
-                return;
-            }
-            let _progress = progress_context.install();
-            let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(prepare)) {
-                Ok(result) => result,
-                Err(panic) => {
-                    if cache.evict().is_some() {
-                        cache_thread::release_backend_cache_after_evict();
-                    }
-                    Err(WorkerError::Engine(format!(
-                        "{}: {}",
-                        GENERATOR_SEAM_MESSAGES.panic_reset,
-                        cache_thread::panic_message(panic.as_ref())
-                    )))
-                }
-            };
-            let _ = reply_tx.send(result);
-        });
-        self.worker
-            .send(job)
-            .map_err(|_| WorkerError::Engine(GENERATOR_SEAM_MESSAGES.worker_stopped.into()))?;
-        reply_rx
-            .await
-            .map_err(|_| WorkerError::Engine(GENERATOR_SEAM_MESSAGES.worker_dropped.into()))?
-    }
     #[cfg(all(test, native_lane))]
     pub(crate) fn isolated() -> (Self, thread::JoinHandle<()>) {
         let (worker, rx) = mpsc::channel();
@@ -675,20 +631,23 @@ fn generator_worker() -> &'static mpsc::Sender<GeneratorJob> {
 /// Thin wrapper over the generic [`cache_thread::run_cache_worker`]: no evict-before-load
 /// ([`GENERATOR_EVICT_BEFORE_LOAD`]) and the generator-specific idle-eviction log.
 fn run_generator_cache_worker(rx: mpsc::Receiver<GeneratorJob>, idle_timeout: Option<Duration>) {
-    cache_thread::run_cache_worker(
-        rx,
-        idle_timeout,
-        GENERATOR_EVICT_BEFORE_LOAD,
-        |key: &LoadIdentity, idle_seconds| {
-            // Documented event (docs/observability.md): expected idle-timeout eviction, so info
-            // level with the engine + idle window.
-            tracing::info!(
-                event = "generator_cache_idle_evicted",
-                engine = %key.engine_id,
-                idleSeconds = idle_seconds,
-            );
-        },
-    );
+    crate::generator_panic::on_generator_owner(|| {
+        cache_thread::run_cache_worker_with_panic_policy(
+            rx,
+            idle_timeout,
+            GENERATOR_EVICT_BEFORE_LOAD,
+            cfg!(target_os = "macos"),
+            |key: &LoadIdentity, idle_seconds| {
+                // Documented event (docs/observability.md): expected idle-timeout eviction, so info
+                // level with the engine + idle window.
+                tracing::info!(
+                    event = "generator_cache_idle_evicted",
+                    engine = %key.engine_id,
+                    idleSeconds = idle_seconds,
+                );
+            },
+        )
+    });
 }
 
 /// Documented event (docs/observability.md): why a request cold-loads instead of reusing the
@@ -889,7 +848,9 @@ pub(crate) struct RequestGpuMemoryLimitGuard {
 #[cfg(all(target_os = "macos", not(test)))]
 impl Drop for RequestGpuMemoryLimitGuard {
     fn drop(&mut self) {
-        mlx_rs::memory::set_memory_limit(self.previous);
+        if crate::owner_device_cleanup_allowed() {
+            mlx_rs::memory::set_memory_limit(self.previous);
+        }
     }
 }
 
@@ -1504,8 +1465,48 @@ pub(crate) async fn with_cached_generator_for_request_using_cache<R>(
 where
     R: Send + 'static,
 {
+    with_cached_generator_for_request_using_cache_prepared(
+        cache,
+        engine_id,
+        load,
+        load_error_context,
+        || Ok(()),
+        load_generator,
+        move |generator, state, policy, warm, external, resident, ()| {
+            run(generator, state, policy, warm, external, resident)
+        },
+    )
+    .await
+}
+
+/// Owner-local request compilation and its cached load/run share one indivisible queue command.
+pub(crate) async fn with_cached_generator_for_request_using_cache_prepared<P, R>(
+    cache: GeneratorCacheHandle,
+    engine_id: &'static str,
+    load: impl Into<GeneratorRequestLoad> + Send,
+    load_error_context: impl Into<String>,
+    prepare: impl FnOnce() -> WorkerResult<P> + Send + 'static,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+    run: impl FnOnce(
+            &dyn Generator,
+            MemoryCacheState,
+            ExecutionPolicy,
+            crate::execution_planner::WarmPolicyProposal,
+            u64,
+            u64,
+            P,
+        ) -> WorkerResult<R>
+        + Send
+        + 'static,
+) -> WorkerResult<R>
+where
+    P: 'static,
+    R: Send + 'static,
+{
     let GeneratorRequestLoad { spec, prepared_h3 } = load.into();
-    with_cached_generator_for_request_after_cold_admission_using_on_with_h3(
+    with_cached_generator_for_request_after_cold_admission_using_on_with_h3_prepared(
         &cache.worker,
         async {
             if cache.evict_transform {
@@ -1520,6 +1521,7 @@ where
         load_error_context,
         0,
         |_| Ok(()),
+        prepare,
         load_generator,
         run,
     )
@@ -1609,6 +1611,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
 async fn with_cached_generator_for_request_after_cold_admission_using_on_with_h3<R>(
     worker: &mpsc::Sender<GeneratorJob>,
     evict_transform: impl std::future::Future<Output = WorkerResult<bool>> + Send,
@@ -1633,6 +1636,54 @@ async fn with_cached_generator_for_request_after_cold_admission_using_on_with_h3
         + 'static,
 ) -> WorkerResult<R>
 where
+    R: Send + 'static,
+{
+    with_cached_generator_for_request_after_cold_admission_using_on_with_h3_prepared(
+        worker,
+        evict_transform,
+        engine_id,
+        spec,
+        prepared_h3,
+        load_error_context,
+        incoming_reclaimable_weight_bytes,
+        cold_admission,
+        || Ok(()),
+        load_generator,
+        move |generator, state, policy, warm, external, resident, ()| {
+            run(generator, state, policy, warm, external, resident)
+        },
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn with_cached_generator_for_request_after_cold_admission_using_on_with_h3_prepared<P, R>(
+    worker: &mpsc::Sender<GeneratorJob>,
+    evict_transform: impl std::future::Future<Output = WorkerResult<bool>> + Send,
+    engine_id: &'static str,
+    spec: LoadSpec,
+    prepared_h3: Option<PreparedH3CacheContext>,
+    load_error_context: impl Into<String>,
+    incoming_reclaimable_weight_bytes: u64,
+    cold_admission: impl FnOnce(u64) -> WorkerResult<()> + Send + 'static,
+    prepare: impl FnOnce() -> WorkerResult<P> + Send + 'static,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+    run: impl FnOnce(
+            &dyn Generator,
+            MemoryCacheState,
+            ExecutionPolicy,
+            crate::execution_planner::WarmPolicyProposal,
+            u64,
+            u64,
+            P,
+        ) -> WorkerResult<R>
+        + Send
+        + 'static,
+) -> WorkerResult<R>
+where
+    P: 'static,
     R: Send + 'static,
 {
     // One resident engine across the generator and transform caches (sc-25683): a resident
@@ -1687,7 +1738,7 @@ where
             ),
         })
     };
-    let run = move |cached: &CachedGenerator, access| {
+    let run = move |cached: &CachedGenerator, access, prepared| {
         run_spec.validate_prepared_file_pins().map_err(|error| {
             crate::classify_engine_error("Generator run source validation failed", error)
         })?;
@@ -1704,12 +1755,14 @@ where
             warm_policy,
             cached.external_committed_bytes,
             cached.provider_resident_bytes,
+            prepared,
         )
     };
     let incoming_key = key.clone();
-    cache_thread::run_cached_with_access_after_cold_admission(
+    cache_thread::run_cached_with_access_after_cold_admission_prepared(
         worker,
         key,
+        prepare,
         move |resident| {
             log_generator_cache_miss(resident.map(|(key, _)| key), &incoming_key);
             let resident = resident.map(|(_, cached)| cached);
@@ -3442,6 +3495,75 @@ mod tests {
         );
     }
 
+    #[cfg(native_lane)]
+    #[tokio::test]
+    async fn preparation_panic_aborts_before_cache_eviction_or_local_drop() {
+        if let Some(dir) = std::env::var_os("SCENEWORKS_PREPARE_PANIC_CHILD") {
+            let dir = PathBuf::from(dir);
+            crate::generator_panic::install(Some(dir.join("diagnostic")));
+            let (cache, _owner) = GeneratorCacheHandle::isolated();
+            let (seed_tx, seed_rx) = std::sync::mpsc::channel();
+            cache
+                .worker
+                .send(Box::new(move |resident| {
+                    seed_stub_entry(resident);
+                    seed_tx.send(()).unwrap();
+                }))
+                .unwrap();
+            seed_rx.recv().unwrap();
+            struct DropMarker(PathBuf);
+            impl Drop for DropMarker {
+                fn drop(&mut self) {
+                    std::fs::write(&self.0, b"dropped").unwrap();
+                }
+            }
+            let marker = dir.join("dropped");
+            let result = with_cached_generator_for_request_using_cache_prepared(
+                cache,
+                "sc3724_stub",
+                LoadSpec::new(WeightsSource::Dir(PathBuf::from("/models/stub"))),
+                "prepare panic proof",
+                move || -> WorkerResult<()> {
+                    let _local = DropMarker(marker);
+                    panic!("owner preparation fault");
+                },
+                |_engine_id, spec| stub_load(spec),
+                |_generator, _state, _policy, _warm, _external, _resident, ()| Ok(()),
+            )
+            .await;
+            std::fs::write(dir.join("caught"), format!("{result:?}")).unwrap();
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "generator_cache::tests::preparation_panic_aborts_before_cache_eviction_or_local_drop", "--nocapture"])
+            .env("SCENEWORKS_PREPARE_PANIC_CHILD", dir.path())
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            assert_eq!(
+                output.status.signal(),
+                Some(6),
+                "owner preparation must abort"
+            );
+        }
+        assert!(
+            !dir.path().join("caught").exists(),
+            "prepare catch path must not run"
+        );
+        assert!(
+            !dir.path().join("dropped").exists(),
+            "owner locals must not unwind"
+        );
+        assert_eq!(
+            crate::generator_panic::read_diagnostic(&dir.path().join("diagnostic")).as_deref(),
+            Some("owner preparation fault")
+        );
+    }
+
     #[test]
     fn generator_cache_idle_timeout_defaults_parses_and_disables() {
         assert_eq!(
@@ -3566,10 +3688,10 @@ mod tests {
         (tx, capture, worker)
     }
 
-    /// The plan compiler must run on the generator's actual OS owner, ahead of a cold load and
-    /// again ahead of warm reuse. A separate Tokio worker would change MLX schedule arithmetic.
     #[tokio::test]
-    async fn preparation_uses_the_same_owner_before_cold_and_warm_access() {
+    async fn prepared_request_keeps_plan_load_run_and_cancel_on_one_owner_turn() {
+        use std::sync::{Arc, Mutex};
+
         let (tx, _capture, worker) = start_capturing_cache_worker();
         let cache = GeneratorCacheHandle {
             worker: tx.clone(),
@@ -3577,52 +3699,105 @@ mod tests {
         };
         let weights = tempfile::tempdir().expect("weights tempdir");
         let spec = LoadSpec::new(WeightsSource::Dir(weights.path().to_path_buf()));
-        let sequence = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        for expected in 1..=2 {
-            let marker = std::sync::Arc::clone(&sequence);
-            let owner = cache
-                .prepare_on_owner(move || {
-                    marker.store(expected, std::sync::atomic::Ordering::SeqCst);
-                    Ok(thread::current().id())
-                })
-                .await
-                .expect("plan compiled on cache owner");
-            let load_marker = std::sync::Arc::clone(&sequence);
-            let run_marker = std::sync::Arc::clone(&sequence);
-            let state = with_cached_generator_for_request_using_cache(
-                cache.clone(),
+        let trace = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let prepare_trace = Arc::clone(&trace);
+        let load_trace = Arc::clone(&trace);
+        let run_trace = Arc::clone(&trace);
+        let first = tokio::spawn(async move {
+            with_cached_generator_for_request_using_cache_prepared(
+                cache,
                 "sc3724_stub",
-                spec.clone(),
+                spec,
                 "stub load",
+                move || {
+                    prepare_trace.lock().unwrap().push("prepare");
+                    ready_tx
+                        .send(thread::current().id())
+                        .expect("tell caller owner id");
+                    release_rx.recv().expect("release preparation");
+                    Ok(7_u32)
+                },
                 move |_id, spec| {
-                    assert_eq!(thread::current().id(), owner);
-                    assert_eq!(load_marker.load(std::sync::atomic::Ordering::SeqCst), 1);
+                    load_trace.lock().unwrap().push("load");
                     staging_stub_load(spec)
                 },
-                move |_, state, _, warm_policy, _, _| {
-                    assert_eq!(thread::current().id(), owner);
-                    assert_eq!(
-                        run_marker.load(std::sync::atomic::Ordering::SeqCst),
-                        expected
-                    );
-                    warm_policy.decline(
+                move |_, _, _, warm, _, _, plan| {
+                    warm.decline(
                         crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory,
                     );
-                    Ok(state)
+                    assert_eq!(plan, 7);
+                    run_trace.lock().unwrap().push("run");
+                    Ok(())
                 },
             )
             .await
-            .expect("cache access completes");
-            assert_eq!(
-                state,
-                if expected == 1 {
-                    MemoryCacheState::Cold
-                } else {
-                    MemoryCacheState::Warm
-                }
-            );
-        }
-        drop(cache);
+        });
+        let owner_id = ready_rx.await.expect("preparation started");
+        let queued_trace = Arc::clone(&trace);
+        let (other_done_tx, other_done_rx) = tokio::sync::oneshot::channel();
+        tx.send(Box::new(move |_cache| {
+            assert_eq!(thread::current().id(), owner_id);
+            queued_trace.lock().unwrap().push("other job");
+            let _ = other_done_tx.send(());
+        }))
+        .expect("queue competing job");
+        release_tx.send(()).expect("release first request");
+        first.await.expect("first task").expect("first request");
+        other_done_rx.await.expect("competing job completed");
+        assert_eq!(
+            *trace.lock().unwrap(),
+            ["prepare", "load", "run", "other job"]
+        );
+
+        // A cancellation during owner preparation refuses the load while the next queue command
+        // remains behind this request. No backend object is created for the canceled request.
+        let cancel = gen_core::CancelFlag::new();
+        let (cancel_ready_tx, cancel_ready_rx) = tokio::sync::oneshot::channel();
+        let (cancel_release_tx, cancel_release_rx) = mpsc::channel();
+        let cancel_for_prepare = cancel.clone();
+        let canceled_trace = Arc::clone(&trace);
+        let canceled = tokio::spawn(async move {
+            let (request_tx, request_rx) = mpsc::channel::<GeneratorJob>();
+            let owner = thread::spawn(move || run_generator_cache_worker(request_rx, None));
+            let result = with_cached_generator_for_request_using_cache_prepared(
+                GeneratorCacheHandle {
+                    worker: request_tx.clone(),
+                    evict_transform: false,
+                },
+                "sc3724_stub",
+                LoadSpec::new(WeightsSource::Dir(weights.path().to_path_buf())),
+                "stub load",
+                move || {
+                    canceled_trace.lock().unwrap().push("cancel prepare");
+                    cancel_ready_tx.send(()).expect("signal cancellation seam");
+                    cancel_release_rx.recv().expect("release cancellation seam");
+                    if cancel_for_prepare.is_cancelled() {
+                        return Err(WorkerError::Canceled("canceled before load".to_owned()));
+                    }
+                    Ok(())
+                },
+                |_id, _spec| panic!("canceled request must not load"),
+                |_, _, _, _, _, _, ()| -> WorkerResult<()> {
+                    panic!("canceled request must not run")
+                },
+            )
+            .await;
+            drop(request_tx);
+            owner.join().expect("canceled owner exits");
+            result
+        });
+        cancel_ready_rx.await.expect("cancellation seam reached");
+        cancel.cancel();
+        cancel_release_tx
+            .send(())
+            .expect("release canceled request");
+        assert!(matches!(
+            canceled.await.expect("canceled task"),
+            Err(WorkerError::Canceled(_))
+        ));
+        assert_eq!(trace.lock().unwrap().last(), Some(&"cancel prepare"));
         drop(tx);
         worker.join().expect("cache owner exits");
     }
@@ -5247,17 +5422,33 @@ mod tests {
         );
     }
 
-    // sc-6067: a panic inside a job closure (e.g. mlx-rs `.unwrap()`-ing a Metal OOM) must be
-    // CONTAINED — it fails only that job with a clean error AND the single shared cache thread keeps
-    // serving. Without the `catch_unwind` guard the worker thread unwinds and dies, and every later
-    // generation fails with "MLX generator cache worker stopped" until a process restart. (The panic
-    // backtrace this test triggers is printed by the default panic hook — that is expected.)
+    // On macOS a fatal owner panic poisons the process-local cache. Run that case alone in a
+    // child test process so the intentional fault cannot strand unrelated workspace tests.
     #[tokio::test]
-    async fn panicking_job_is_contained_and_worker_keeps_serving() {
+    async fn panicking_job_preserves_platform_cache_fault_contract() {
+        #[cfg(target_os = "macos")]
+        if std::env::var_os("SCENEWORKS_CACHE_PANIC_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "generator_cache::tests::panicking_job_preserves_platform_cache_fault_contract",
+                    "--nocapture",
+                ])
+                .env("SCENEWORKS_CACHE_PANIC_CHILD", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated cache fault test failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         let weights = tempfile::tempdir().expect("weights tempdir");
         let spec = LoadSpec::new(WeightsSource::Dir(weights.path().to_path_buf()));
 
-        // A run closure that panics mid-generation → comes back as a clean Engine error, not a hang.
+        // The error preserves the original fault. macOS also poisons the owner to avoid reusing
+        // potentially invalid Metal state; other platforms contain the panic and keep serving.
         let panicked = with_cached_generator_using(
             "sc3724_stub",
             spec.clone(),
@@ -5268,8 +5459,12 @@ mod tests {
             },
         )
         .await;
-        let Err(WorkerError::Engine(msg)) = &panicked else {
-            panic!("a job-closure panic must map to a clean Engine error, got {panicked:?}");
+        let msg = match &panicked {
+            #[cfg(target_os = "macos")]
+            Err(WorkerError::ProcessPoisoned(msg)) => msg,
+            #[cfg(not(target_os = "macos"))]
+            Err(WorkerError::Engine(msg)) => msg,
+            _ => panic!("a job-closure panic used the wrong fault contract: {panicked:?}"),
         };
         assert!(
             msg.contains("was contained"),
@@ -5280,28 +5475,24 @@ mod tests {
             "the original panic text must surface for diagnostics: {msg}"
         );
 
-        // The shared cache thread must still be alive and serving: a subsequent job succeeds.
+        // A second job cannot reuse a poisoned owner; non-Mac owners remain usable.
         let after = with_cached_generator_using(
             "sc3724_stub",
             spec,
             "stub load",
             |_id, spec| stub_load(spec),
-            move |generator| {
-                let req = gen_core::GenerationRequest {
-                    width: 2,
-                    height: 2,
-                    ..Default::default()
-                };
-                generator
-                    .generate(&req, &mut |_progress| {})
-                    .map(|_| ())
-                    .map_err(|error| WorkerError::Engine(error.to_string()))
-            },
+            move |_generator| Ok(()),
         )
         .await;
+        #[cfg(target_os = "macos")]
+        assert!(
+            matches!(&after, Err(WorkerError::Engine(_))),
+            "a poisoned owner must refuse later work, got {after:?}"
+        );
+        #[cfg(not(target_os = "macos"))]
         assert!(
             after.is_ok(),
-            "worker must keep serving after a contained panic, got {after:?}"
+            "non-Mac owner should keep serving: {after:?}"
         );
     }
 }

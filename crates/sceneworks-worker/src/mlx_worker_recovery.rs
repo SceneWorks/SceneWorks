@@ -1,9 +1,10 @@
-//! Process recovery for the MiniMax-H3 MLX I2V Metal-watchdog failure (sc-21027).
+//! Process recovery for typed native owner faults and MiniMax-H3 MLX I2V Metal watchdog failures.
 //!
-//! The inference provider labels its two FL2VA-only force boundaries with a stable
+//! Typed native owner faults cover MLX and Candle. The H3 inference provider labels its two
+//! FL2VA-only force boundaries with a stable
 //! `MiniMax-H3 MLX I2V` marker. That lets this worker quarantine only the process instance whose
-//! Metal command queue failed, without changing T2V, another model family, Candle, or an ordinary
-//! MLX allocation failure. A poisoned process must not submit again: the worker loop consumes one
+//! Metal command queue failed, without changing T2V, another model family, or an ordinary
+//! allocation failure. A poisoned process must not submit again: the worker loop consumes one
 //! recycle request before its next claim and exits cleanly for the existing auto-worker supervisor
 //! to replace it.
 //!
@@ -42,6 +43,7 @@ fn classify(diagnostic: &str) -> Option<MetalSignal> {
 
 #[derive(Default)]
 struct Inner {
+    process_fault: Option<String>,
     first_timeout: Option<String>,
     first_secondary: Option<String>,
     quarantined: bool,
@@ -59,6 +61,7 @@ impl MlxWorkerRecovery {
     pub(crate) const fn new() -> Self {
         Self {
             inner: Mutex::new(Inner {
+                process_fault: None,
                 first_timeout: None,
                 first_secondary: None,
                 quarantined: false,
@@ -87,6 +90,24 @@ impl MlxWorkerRecovery {
         }
         inner.quarantined = true;
         Some(job_failure(&inner))
+    }
+
+    /// Typed owner-executor failure, already distinguished from request/provider errors at the
+    /// cache boundary. Keep the first error verbatim for terminal accounting and forbid reuse.
+    pub(crate) fn observe_process_fault(&self, detail: &str) -> String {
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        inner.process_fault.get_or_insert_with(|| detail.to_owned());
+        inner.quarantined = true;
+        job_failure(&inner)
+    }
+
+    #[cfg(any(native_lane, not(test)))]
+    pub(crate) fn process_fault_detail(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .process_fault
+            .clone()
     }
 
     /// Whether this process may enter the next claim. Once false it never becomes true again; only
@@ -126,6 +147,7 @@ impl MlxWorkerRecovery {
         inner.recycle_started = true;
         Some(RecycleRequest {
             reason: status_reason(&inner),
+            process_fault: inner.process_fault.clone(),
             first_timeout: inner.first_timeout.clone(),
             saw_submissions_ignored: inner.first_secondary.is_some(),
         })
@@ -133,6 +155,9 @@ impl MlxWorkerRecovery {
 }
 
 fn job_failure(inner: &Inner) -> String {
+    if let Some(detail) = &inner.process_fault {
+        return detail.clone();
+    }
     match (&inner.first_timeout, &inner.first_secondary) {
         (Some(timeout), Some(_)) => format!(
             "{timeout} This first Metal watchdog timeout poisoned the MLX worker process. A later \
@@ -155,6 +180,9 @@ fn job_failure(inner: &Inner) -> String {
 }
 
 fn status_reason(inner: &Inner) -> String {
+    if let Some(detail) = &inner.process_fault {
+        return format!("The MLX owner executor is quarantined and will recycle before another claim. Original failure: {detail}");
+    }
     match &inner.first_timeout {
         Some(timeout) => format!(
             "The MLX process is quarantined after the first MiniMax-H3 I2V Metal watchdog timeout \
@@ -169,6 +197,7 @@ fn status_reason(inner: &Inner) -> String {
 
 pub(crate) struct RecycleRequest {
     pub(crate) reason: String,
+    pub(crate) process_fault: Option<String>,
     pub(crate) first_timeout: Option<String>,
     pub(crate) saw_submissions_ignored: bool,
 }
@@ -389,6 +418,41 @@ mod tests {
             assert_eq!(state.observe(diagnostic), None, "{diagnostic}");
         }
         assert!(state.can_claim());
+        assert!(state.begin_recycle().is_none());
+    }
+
+    #[tokio::test]
+    async fn typed_candle_fault_keeps_first_error_and_recycles_only_after_terminal_write() {
+        use std::cell::Cell;
+
+        let state = MlxWorkerRecovery::new();
+        assert_eq!(
+            state.observe_process_fault("Candle device lost"),
+            "Candle device lost"
+        );
+        assert_eq!(
+            state.observe_process_fault("later fallout"),
+            "Candle device lost"
+        );
+        assert!(!state.can_claim());
+        assert!(state.begin_recycle().is_none());
+        let attempts = Cell::new(0);
+        assert!(
+            persist_terminal_failure_with(&state, || {
+                attempts.set(attempts.get() + 1);
+                if attempts.get() == 1 {
+                    assert!(state.begin_recycle().is_none());
+                    std::future::ready(TerminalPersistenceAttempt::Retry)
+                } else {
+                    assert!(!state.can_claim());
+                    std::future::ready(TerminalPersistenceAttempt::Persisted)
+                }
+            })
+            .await
+        );
+        let recycle = state.begin_recycle().expect("one replacement");
+        assert_eq!(recycle.process_fault.as_deref(), Some("Candle device lost"));
+        assert!(recycle.reason.contains("Candle device lost"));
         assert!(state.begin_recycle().is_none());
     }
 }

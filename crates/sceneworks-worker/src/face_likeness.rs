@@ -382,7 +382,7 @@ impl FaceBackend {
 /// call [`score`](Self::score) for each generated image. The source is never re-embedded.
 #[cfg(native_lane)]
 pub(crate) struct FaceLikenessScorer {
-    backend: FaceBackend,
+    backend: Option<FaceBackend>,
     /// The cached, L2-normalized source embedding. `None` ⇒ no detectable source face: every `score`
     /// call short-circuits to an N/A result (`NoSourceFace`) — the whole job is N/A, but never an error.
     source_normalized: Option<Vec<f32>>,
@@ -390,6 +390,18 @@ pub(crate) struct FaceLikenessScorer {
     /// embedded exactly once across N `score` calls — the explicit caching acceptance criterion.
     #[cfg(test)]
     source_embed_count: usize,
+}
+
+#[cfg(native_lane)]
+impl Drop for FaceLikenessScorer {
+    fn drop(&mut self) {
+        if !crate::owner_device_cleanup_allowed() {
+            // MLX and Candle face weights may free device allocations in Drop. The owner
+            // retires this process after a typed fatal fault, so leave those allocations
+            // to process teardown instead of contacting the failed device.
+            std::mem::forget(self.backend.take());
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -435,7 +447,7 @@ impl FaceLikenessScorer {
         #[cfg(not(test))]
         let _ = source_embed_count;
         Ok(Self {
-            backend,
+            backend: Some(backend),
             source_normalized,
             #[cfg(test)]
             source_embed_count,
@@ -451,7 +463,11 @@ impl FaceLikenessScorer {
         let Some(source_normalized) = self.source_normalized.as_deref() else {
             return Ok(LikenessResult::na(NoScoreReason::NoSourceFace));
         };
-        let largest = self.backend.largest_face(generated)?;
+        let largest = self
+            .backend
+            .as_ref()
+            .expect("live face backend")
+            .largest_face(generated)?;
         let generated = largest
             .as_ref()
             .map(|(det_score, raw)| (*det_score, raw.as_slice()));
@@ -815,6 +831,31 @@ mod tests {
     mod angle_set_wiring {
         use super::*;
         use std::sync::atomic::Ordering;
+
+        #[test]
+        fn typed_process_fault_leaves_face_backend_for_process_teardown() {
+            let (scorer, calls) = FaceLikenessScorer::with_stub_source(&image(200));
+            assert_eq!(std::sync::Arc::strong_count(&calls), 2);
+            drop(scorer);
+            assert_eq!(std::sync::Arc::strong_count(&calls), 1);
+
+            let (scorer, calls) = FaceLikenessScorer::with_stub_source(&image(200));
+            let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _scorer = scorer;
+                panic!("owner panic");
+            }));
+            assert!(panic_result.is_err());
+            assert_eq!(std::sync::Arc::strong_count(&calls), 2);
+
+            let (scorer, calls) = FaceLikenessScorer::with_stub_source(&image(200));
+            let fatal = crate::classify_engine_error(
+                "generation failed",
+                gen_core::Error::ProcessPoisoned("device lost".into()),
+            );
+            assert!(matches!(fatal, WorkerError::ProcessPoisoned(_)));
+            drop(scorer);
+            assert_eq!(std::sync::Arc::strong_count(&calls), 2);
+        }
 
         /// A synthetic image whose first pixel byte selects the stub detection (see `StubFaceBackend`):
         /// `0` ⇒ no face; `>=77` ⇒ a reliable face; `1..=76` ⇒ a low-confidence face.

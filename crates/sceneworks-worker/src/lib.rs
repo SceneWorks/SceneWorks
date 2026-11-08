@@ -258,6 +258,7 @@ mod resolved_cache_promotion;
 // the production caller is cfg'd out, so allow dead_code there (the engines.rs precedent).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod generator_cache;
+mod generator_panic;
 // Resident-model cache for image→image `gen_core::Transform`s (the Iris-3B restorer, sc-25683): the
 // third thin wrapper over `cache_thread`, sharing one resident engine with the generator cache.
 #[cfg_attr(not(native_lane), allow(dead_code))]

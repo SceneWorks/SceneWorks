@@ -1632,6 +1632,7 @@ fn trainer_validate_error(engine_id: &str, error: gen_core::Error) -> WorkerErro
         | gen_core::Error::Io(_) => {
             WorkerError::Engine(format!("{engine_id} trainer load failed: {error}"))
         }
+        gen_core::Error::ProcessPoisoned(detail) => WorkerError::ProcessPoisoned(detail),
         gen_core::Error::Canceled => WorkerError::Engine(format!("training failed: {error}")),
     }
 }
@@ -3614,7 +3615,12 @@ pub(crate) async fn run_training_execution_drive_observing_cancel(
                 };
                 trainer
                     .train(&request, &mut on_progress)
-                    .map_err(|error| WorkerError::Engine(format!("training failed: {error}")))
+                    .map_err(|error| match error {
+                        gen_core::Error::ProcessPoisoned(detail) => {
+                            WorkerError::ProcessPoisoned(detail)
+                        }
+                        other => WorkerError::Engine(format!("training failed: {other}")),
+                    })
             })();
             // The operation closure owns and drops the trainer on success, validation failure,
             // load failure, training failure, or cancellation. Drop the request next, then release
