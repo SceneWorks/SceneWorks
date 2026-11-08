@@ -20,6 +20,7 @@ use crate::{Settings, WorkerError, WorkerResult};
 
 const STATIC_SOURCE_IDS: &[&str] = &[
     "ltx_amoral_gemma_3_12b",
+    "ltx_training_gemma_override",
     "flux_ip_adapter",
     "flux_ip_encoder",
     "sdxl_ip_adapter",
@@ -1056,6 +1057,46 @@ fn capture_one(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(native_lane)]
+    #[test]
+    fn complete_ltx_training_gemma_override_is_advertised() {
+        let temp = tempfile::tempdir().unwrap();
+        let gemma = temp.path().join("gemma");
+        std::fs::create_dir(&gemma).unwrap();
+        std::fs::write(
+            gemma.join("config.json"),
+            br#"{"model_type":"gemma3_text"}"#,
+        )
+        .unwrap();
+        std::fs::write(gemma.join("tokenizer.json"), br#"{"model":{"type":"BPE"}}"#).unwrap();
+        let header = br#"{"weight":{"dtype":"U8","shape":[1],"data_offsets":[0,1]}}"#;
+        let mut weights = (header.len() as u64).to_le_bytes().to_vec();
+        weights.extend_from_slice(header);
+        weights.push(7);
+        std::fs::write(gemma.join("model.safetensors"), weights).unwrap();
+        let settings = Settings::for_test(temp.path().join("data"));
+
+        let hub = temp.path().join("hub");
+        std::fs::create_dir(&hub).unwrap();
+        crate::test_env::temp_env_vars(
+            &[
+                ("LTX_GEMMA_DIR", gemma.to_str().unwrap()),
+                ("HF_HUB_CACHE", hub.to_str().unwrap()),
+            ],
+            || {
+                let advertised = static_source_claims(&settings)
+                    .into_iter()
+                    .find(|claim| claim.source_id == "ltx_training_gemma_override")
+                    .expect("complete operator Gemma must be advertised for portable training");
+                assert_eq!(
+                    advertised.provenance,
+                    PortableSourceProvenance::OperatorOverride
+                );
+                assert_eq!(advertised.files.len(), 3);
+            },
+        );
+    }
 
     #[test]
     fn default_detail_tile_source_is_advertised_for_exact_worker_claim() {
