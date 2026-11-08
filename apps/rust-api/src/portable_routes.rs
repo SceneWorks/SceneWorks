@@ -981,7 +981,7 @@ pub(crate) fn eligible_portable_routes(
             platforms
                 .iter()
                 .filter(|platform| {
-                    entries_support_route(job_type, entries, backend, platform)
+                    entries_support_route(job_type, payload, entries, backend, platform)
                         && selected_decoder_available_on_route(job_type, payload, entries, backend)
                 })
                 .map(|platform| (backend.to_owned(), (*platform).to_owned())),
@@ -1036,6 +1036,7 @@ fn selected_decoder_available_on_route(
 
 fn entries_support_route(
     job_type: &JobType,
+    payload: &JsonObject,
     entries: &[(String, &Value)],
     backend: &str,
     platform: &str,
@@ -1074,6 +1075,8 @@ fn entries_support_route(
             && !(*job_type == JobType::PromptRefine
                 && slot == "modelManifestEntries/0"
                 && entry.get("adapter").and_then(Value::as_str) == Some("prompt-refine"))
+            && !(*job_type != JobType::PromptRefine
+                && crate::model_sources::fixed_runtime_model_ids(job_type, payload).contains(&id))
         {
             return false;
         }
@@ -1612,12 +1615,14 @@ mod tests {
         let entries = [("modelManifestEntries/0".to_owned(), &entry)];
         assert!(entries_support_route(
             &JobType::CatalogAnalysis,
+            &JsonObject::new(),
             &entries,
             "candle",
             "linux"
         ));
         assert!(!entries_support_route(
             &JobType::CatalogAnalysis,
+            &JsonObject::new(),
             &entries,
             "mlx",
             "macos"
@@ -1626,15 +1631,53 @@ mod tests {
         let entries = [("modelManifestEntries/0".to_owned(), &non_component)];
         assert!(entries_support_route(
             &JobType::CatalogAnalysis,
+            &JsonObject::new(),
             &entries,
             "candle",
             "linux"
         ));
         assert!(!entries_support_route(
             &JobType::ImageGenerate,
+            &JsonObject::new(),
             &entries,
             "candle",
             "linux"
+        ));
+    }
+
+    #[test]
+    fn fixed_runtime_array_utility_must_match_the_request_selected_source() {
+        let fixed = Value::Object(
+            sceneworks_core::builtin_manifests::builtin_model_entry("real_esrgan")
+                .expect("the selected fixed source is shipped in the catalog")
+                .clone(),
+        );
+        let foreign = json!({"id":"person_detector","type":"utility",
+            "downloads":[{"provider":"huggingface","repo":"example/foreign",
+                "revision":"0123456789012345678901234567890123456789",
+                "files":["model.onnx"]}]});
+        let default_upscale = JsonObject::new();
+        assert!(entries_support_route(
+            &JobType::ImageUpscale,
+            &default_upscale,
+            &[("modelManifestEntries/0".to_owned(), &fixed)],
+            "mlx",
+            "macos"
+        ));
+        assert!(!entries_support_route(
+            &JobType::ImageUpscale,
+            &default_upscale,
+            &[("modelManifestEntries/0".to_owned(), &foreign)],
+            "mlx",
+            "macos"
+        ));
+        let seedvr2 = json!({"engine":"seedvr2"}).as_object().unwrap().clone();
+        assert!(!entries_support_route(
+            &JobType::ImageUpscale,
+            &seedvr2,
+            &[("modelManifestEntries/0".to_owned(), &fixed)],
+            "mlx",
+            "macos"
         ));
     }
 
@@ -1646,18 +1689,21 @@ mod tests {
             "adapter":"prompt-refine","downloads":[download]});
         assert!(entries_support_route(
             &JobType::PromptRefine,
+            &JsonObject::new(),
             &[("modelManifestEntries/0".to_owned(), &selected)],
             "mlx",
             "macos"
         ));
         assert!(!entries_support_route(
             &JobType::PromptRefine,
+            &JsonObject::new(),
             &[("modelManifestEntries/1".to_owned(), &selected)],
             "mlx",
             "macos"
         ));
         assert!(!entries_support_route(
             &JobType::ImageGenerate,
+            &JsonObject::new(),
             &[("modelManifestEntries/0".to_owned(), &selected)],
             "mlx",
             "macos"
@@ -1668,6 +1714,7 @@ mod tests {
                 "files":["model.onnx"]}]});
         assert!(!entries_support_route(
             &JobType::PromptRefine,
+            &JsonObject::new(),
             &[("modelManifestEntries/0".to_owned(), &foreign)],
             "mlx",
             "macos"

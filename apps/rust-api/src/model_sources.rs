@@ -69,7 +69,10 @@ pub(crate) fn canonical_utility_model_carrier(job_type: &JobType) -> bool {
 /// DATA TABLE: job types that always load a fixed utility model, keyed on the job type and the
 /// request's own data (engine/flags) — never on a model name. Referenced ids are ordinary catalog
 /// manifest entries; adding a model or utility changes manifest data, not this seam.
-fn fixed_runtime_model_ids(job_type: &JobType, payload: &JsonObject) -> Vec<&'static str> {
+pub(crate) fn fixed_runtime_model_ids(
+    job_type: &JobType,
+    payload: &JsonObject,
+) -> Vec<&'static str> {
     let payload_flag = |key: &str| payload.get(key).and_then(Value::as_bool).unwrap_or(false);
     // A trained Iris task model never loads the release task export, so the release entry is never
     // attached for it — a disconnected library holding the release copy must not refuse a run that
@@ -203,6 +206,30 @@ fn payload_has_model_entry(payload: &JsonObject, model_id: &str) -> bool {
         .any(|entry| entry.get("id").and_then(Value::as_str) == Some(model_id))
 }
 
+fn discard_client_fixed_source_carriers(payload: &mut JsonObject, fixed_ids: &[&str]) {
+    for key in ["modelManifestEntry", "baseModelManifestEntry"] {
+        if payload
+            .get(key)
+            .and_then(|entry| entry.get("id"))
+            .and_then(Value::as_str)
+            .is_some_and(|id| fixed_ids.contains(&id))
+        {
+            payload.remove(key);
+        }
+    }
+    if let Some(entries) = payload
+        .get_mut("modelManifestEntries")
+        .and_then(Value::as_array_mut)
+    {
+        entries.retain(|entry| {
+            !entry
+                .get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| fixed_ids.contains(&id))
+        });
+    }
+}
+
 fn payload_model_entries(payload: &JsonObject) -> Vec<&Value> {
     ["modelManifestEntry", "baseModelManifestEntry"]
         .into_iter()
@@ -290,6 +317,9 @@ pub(crate) async fn ensure_runtime_model_sources(
         }
     }
     let fixed_ids = fixed_runtime_model_ids(job_type, payload);
+    // Fixed runtime sources belong to the server's catalog. A request may carry a same-id
+    // manifest from an older client, but its source metadata must never replace that catalog row.
+    discard_client_fixed_source_carriers(payload, &fixed_ids);
     let primary_id = if canonical_primary {
         fixed_ids.first().map(|id| (*id).to_owned()).or_else(|| {
             payload_reference_spec(job_type)
@@ -731,6 +761,26 @@ mod tests {
     use std::path::PathBuf;
 
     const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    #[test]
+    fn fixed_runtime_sources_discard_same_id_client_carriers_before_catalog_resolution() {
+        let mut payload = json!({
+            "modelManifestEntry": {"id": "sam3_person_segment", "downloads": [{"repo": "client/primary"}]},
+            "modelManifestEntries": [
+                {"id": "sam3_person_segment", "downloads": [{"repo": "client/array"}]},
+                {"id": "unrelated_model", "downloads": [{"repo": "client/other"}]}
+            ]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        discard_client_fixed_source_carriers(&mut payload, &["sam3_person_segment"]);
+        assert!(!payload.contains_key("modelManifestEntry"));
+        assert_eq!(
+            payload["modelManifestEntries"],
+            json!([{"id": "unrelated_model", "downloads": [{"repo": "client/other"}]}])
+        );
+    }
 
     #[test]
     fn uncataloged_ltx_conversion_carries_pinned_gemma_into_selected_closure() {
