@@ -947,18 +947,18 @@ fn discover_frozen_member_snapshot(
     files: &[PortableArtifactFile],
 ) -> WorkerResult<PathBuf> {
     let preferred = sceneworks_core::hf_home::model_source_library(&settings.data_dir);
-    let selected = preferred
-        .discover_snapshot(&identity.repository, Some(&identity.revision))
-        .map_err(|_| invalid_binding("frozen source snapshot is unavailable"))?
-        .1;
-    let selected_complete = files
-        .iter()
-        .all(|file| selected.join(&file.relative_path).is_file());
-    if selected_complete
-        && (selected.starts_with(preferred.root())
-            || snapshot_matches_frozen_files(&selected, files))
+    if let Ok((_, selected)) =
+        preferred.discover_snapshot(&identity.repository, Some(&identity.revision))
     {
-        return Ok(selected);
+        let selected_complete = files
+            .iter()
+            .all(|file| selected.join(&file.relative_path).is_file());
+        if selected_complete
+            && (selected.starts_with(preferred.root())
+                || snapshot_matches_frozen_files(&selected, files))
+        {
+            return Ok(selected);
+        }
     }
     let source = ArtifactSourceLibrary::new(preferred.root())
         .map_err(|error| invalid_binding(error.to_string()))?;
@@ -975,6 +975,39 @@ fn discover_frozen_member_snapshot(
         ));
     }
     Ok(source_snapshot)
+}
+
+/// Wildcard checks must inspect the same complete source tier that member verification and
+/// preparation select. Another in-process job may currently overlay this repository with only
+/// its own files, so a direct preferring-library lookup can see the wrong partial snapshot.
+fn discover_frozen_selector_snapshot<'a>(
+    settings: &Settings,
+    members: impl Iterator<Item = &'a PortableArtifactMember>,
+    repository: &str,
+    revision: &str,
+    variant: &str,
+    primary: bool,
+) -> WorkerResult<PathBuf> {
+    let selected = members
+        .filter(|member| {
+            matches!(&member.source, PortableSourceIdentity::Revision { identity }
+                if identity.repository == repository && identity.revision == revision
+                    && identity.variant == variant)
+                && (member.role == ArtifactMemberRole::Primary) == primary
+        })
+        .collect::<Vec<_>>();
+    let identity = selected
+        .first()
+        .and_then(|member| match &member.source {
+            PortableSourceIdentity::Revision { identity } => Some(identity),
+            _ => None,
+        })
+        .ok_or_else(|| invalid_binding("wildcard source has no frozen member"))?;
+    let files = selected
+        .iter()
+        .flat_map(|member| member.files.iter().cloned())
+        .collect::<Vec<_>>();
+    discover_frozen_member_snapshot(settings, identity, &files)
 }
 
 fn snapshot_matches_frozen_files(snapshot: &Path, files: &[PortableArtifactFile]) -> bool {
@@ -2102,10 +2135,14 @@ fn verify_portable_route(
             let revision = requirement.revision.as_deref().ok_or_else(|| {
                 invalid_binding("a wildcard model source has no immutable revision")
             })?;
-            let source_library = sceneworks_core::hf_home::model_source_library(&settings.data_dir);
-            let (_, snapshot) = source_library
-                .discover_snapshot(&requirement.repository, Some(revision))
-                .map_err(|error| invalid_binding(error.to_string()))?;
+            let snapshot = discover_frozen_selector_snapshot(
+                settings,
+                route.models.iter().flat_map(|model| &model.members),
+                &requirement.repository,
+                revision,
+                &requirement.variant,
+                requirement.is_primary,
+            )?;
             let mut local_files = recursive_snapshot_matches(&snapshot, selector_text)?;
             let matcher = glob::Pattern::new(selector_text)
                 .map_err(|error| invalid_binding(error.to_string()))?;
@@ -2208,7 +2245,6 @@ fn verify_portable_binding(
                 );
         }
     }
-    let source_library = sceneworks_core::hf_home::model_source_library(&settings.data_dir);
     // Raw ModelConvert admission can freeze the immutable source privately while the synthetic
     // public manifest entry only carries repo/file hints. The binding is the source authority;
     // require its primary repo to agree with the converter's actual sourceRepo before using it.
@@ -2275,9 +2311,7 @@ fn verify_portable_binding(
                         "the claimed artifact revision or file closure differs from the selected model",
                     ));
                 }
-                let (_, snapshot) = source_library
-                    .discover_snapshot(&identity.repository, Some(&identity.revision))
-                    .map_err(|error| invalid_binding(error.to_string()))?;
+                let snapshot = discover_frozen_member_snapshot(settings, identity, &member.files)?;
                 member
                     .files
                     .iter()
@@ -2563,10 +2597,14 @@ fn verify_manifest_globs(
                 .collect()
         };
         for selector in selectors {
-            let snapshot = sceneworks_core::hf_home::model_source_library(&settings.data_dir)
-                .discover_snapshot(repo, Some(revision))
-                .map_err(|error| invalid_binding(error.to_string()))?
-                .1;
+            let snapshot = discover_frozen_selector_snapshot(
+                settings,
+                binding.members.iter(),
+                repo,
+                revision,
+                variant,
+                primary,
+            )?;
             let mut actual = recursive_snapshot_matches(&snapshot, selector)?;
             let mut frozen = binding.members.iter()
                 .filter(|member| {
@@ -5565,6 +5603,104 @@ mod tests {
             )
             .unwrap_err();
             assert!(error.to_string().contains("file set differs"), "{error}");
+        });
+    }
+
+    /// A running utility conversion may overlay only its own files from a shared revision.
+    /// Another conversion must verify its different wildcard closure from the complete source
+    /// before it queues for the first job's portable overlay.
+    #[test]
+    fn concurrent_portable_revision_verifies_before_waiting_on_partial_overlay() {
+        use sceneworks_core::model_artifacts::ArtifactIdentity;
+
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let library = temp.path().join("external-hf");
+        let repo = "guardfx/shared-conversion";
+        let first_file = "base/model.safetensors";
+        let second_file = "turbo/model.safetensors";
+        std::fs::create_dir_all(data.join("models")).unwrap();
+        seed_snapshot(&library, repo, REV_A, first_file);
+        seed_snapshot(&library, repo, REV_A, second_file);
+        let partial = temp.path().join("first-private-snapshot");
+        std::fs::create_dir_all(partial.join("base")).unwrap();
+        std::fs::write(partial.join(first_file), b"weights").unwrap();
+        let second_member = PortableArtifactMember {
+            role: ArtifactMemberRole::Primary,
+            component_id: None,
+            source: PortableSourceIdentity::Revision {
+                identity: ArtifactIdentity::pinned(repo, REV_A, "default").unwrap(),
+            },
+            tier: Some("default".to_owned()),
+            files: vec![PortableArtifactFile {
+                relative_path: second_file.into(),
+                size_bytes: 7,
+                sha256: format!("sha256:{:x}", Sha256::digest(b"weights")),
+            }],
+        };
+        let route = PortableRouteBinding::new(
+            "cpu",
+            std::env::consts::OS,
+            vec![PortableModelBinding::new(
+                "modelManifestEntry",
+                "turbo",
+                "cpu",
+                "default",
+                Some("default".to_owned()),
+                canonical_authored_options_sha256(&json!({})).unwrap(),
+                vec![second_member],
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let payload = json!({"model":"turbo","modelManifestEntry":{
+            "id":"turbo","downloads":[{"provider":"huggingface","repo":repo,
+                "revision":REV_A,"variant":"default","default":true,"files":["turbo/*"]}]
+        }})
+        .as_object()
+        .unwrap()
+        .clone();
+        with_library(&library, || {
+            let first = prefer_portable_snapshots(vec![LocalArtifactOverlayEntry {
+                repository: repo.to_owned(),
+                revision: REV_A.to_owned(),
+                snapshot_root: partial.clone(),
+                files: vec![first_file.into()],
+            }])
+            .unwrap();
+            assert!(!partial.join(second_file).exists());
+            let worker_settings = settings(data.clone());
+            verify_portable_route(
+                &route,
+                &JobType::ImageGenerate,
+                &payload,
+                &worker_settings,
+                &[],
+                &[],
+            )
+            .expect("verification must use the complete source while a partial overlay is active");
+
+            let (result_tx, result_rx) = std::sync::mpsc::channel();
+            let waiter = std::thread::spawn(move || {
+                result_tx
+                    .send(RuntimeSourceGuard::begin_with_binding_cancelable(
+                        &JobType::ImageGenerate,
+                        &payload,
+                        &worker_settings,
+                        Some(&route),
+                        Some(&PortableOverlayWaitCancellation::default()),
+                    ))
+                    .unwrap();
+            });
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            assert!(result_rx.try_recv().is_err());
+            drop(first);
+            let second = result_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            drop(second);
+            waiter.join().unwrap();
         });
     }
 
