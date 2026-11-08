@@ -1095,7 +1095,7 @@ fn prepare_portable_snapshot(
                             snapshot.join(&member.files[0].relative_path)
                         }
                         PortableAuxSourceShape::Directory => {
-                            snapshot.join(common_file_parent(&member.files)?)
+                            selected_revision_aux_directory(snapshot, &member.files, id)?
                         }
                     }
                 }
@@ -1372,6 +1372,20 @@ fn common_file_parent(
         }
     }
     Ok(parent)
+}
+
+fn selected_revision_aux_directory(
+    snapshot: &Path,
+    files: &[sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile],
+    source_id: &str,
+) -> WorkerResult<PathBuf> {
+    if source_id == "ltx_convert_upscaler" {
+        // The converter joins the authored repository-relative filename to this directory.
+        // Rebase at the snapshot root even when that filename has nested parents.
+        Ok(snapshot.to_path_buf())
+    } else {
+        Ok(snapshot.join(common_file_parent(files)?))
+    }
 }
 
 fn portable_cache_route_digest(route: &PortableRouteBinding) -> WorkerResult<String> {
@@ -3640,6 +3654,25 @@ mod tests {
 
     fn settings(data_dir: PathBuf) -> Settings {
         Settings::for_test(data_dir)
+    }
+
+    #[test]
+    fn ltx_convert_upscaler_keeps_repository_relative_filename_under_snapshot_root() {
+        let snapshot = Path::new("/snapshot");
+        for name in [
+            "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+            "weights/upscaler.safetensors",
+        ] {
+            let files = vec![PortableArtifactFile {
+                relative_path: name.into(),
+                size_bytes: 1,
+                sha256: format!("sha256:{}", "a".repeat(64)),
+            }];
+            let selected =
+                selected_revision_aux_directory(snapshot, &files, "ltx_convert_upscaler").unwrap();
+            assert_eq!(selected, snapshot);
+            assert_eq!(selected.join(name), snapshot.join(name));
+        }
     }
 
     #[test]

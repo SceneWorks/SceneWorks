@@ -213,17 +213,53 @@ fn resolve_flux2_klein_base_dir(snapshot: &Path, subdir: Option<&str>) -> Option
 /// the split MLX dir. `bits` is the reference `python -m mlx_video.convert --quantize --q-bits <bits>`
 /// recipe (audio-inclusive). Runs MLX, so macOS-only.
 #[cfg(target_os = "macos")]
+fn selected_ltx_converter_upscaler_dir(
+    upscaler_dir: &Path,
+    upscaler_file: &Path,
+    out_dir: &Path,
+) -> Result<(PathBuf, Option<tempfile::TempDir>), String> {
+    if upscaler_file
+        .components()
+        .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err("LTX spatial upscaler filename is not repository-relative".to_owned());
+    }
+    let selected = upscaler_dir.join(upscaler_file);
+    let default_name = Path::new(LTX_SPATIAL_UPSCALER_FILE);
+    if !selected.is_file() {
+        return Err("selected LTX spatial upscaler is unavailable".to_owned());
+    }
+    if upscaler_file.file_name() == default_name.file_name() {
+        Ok((selected.parent().unwrap_or(upscaler_dir).to_path_buf(), None))
+    } else {
+        // mlx-gen-ltx reads the spatial upscaler by its canonical basename. The admitted
+        // repository filename may be nested or renamed, so expose only that selected file
+        // under the expected name for this conversion attempt.
+        let alias = tempfile::tempdir_in(out_dir.parent().unwrap_or(out_dir))
+            .map_err(|error| error.to_string())?;
+        let target = alias.path().join(default_name);
+        std::fs::hard_link(&selected, &target)
+            .or_else(|_| std::fs::copy(&selected, &target).map(|_| ()))
+            .map_err(|error| error.to_string())?;
+        Ok((alias.path().to_path_buf(), Some(alias)))
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn convert_ltx_native(
     source_file: &Path,
     upscaler_dir: &Path,
+    upscaler_file: &Path,
     out_dir: &Path,
     bits: i32,
 ) -> Result<(), String> {
+    let (converter_dir, _alias) =
+        selected_ltx_converter_upscaler_dir(upscaler_dir, upscaler_file, out_dir)?;
     // CARVE-OUT(epic 3720): backend-specific weight converter; not a registry contract.
     let opts = runtime_macos::providers::ltx::LtxConvertOpts::audio_quant(bits);
     runtime_macos::providers::ltx::convert_and_assemble(
         source_file,
-        Some(upscaler_dir),
+        Some(&converter_dir),
         out_dir,
         &opts,
     )
@@ -235,6 +271,7 @@ fn convert_ltx_native(
 fn convert_ltx_native(
     _source_file: &Path,
     _upscaler_dir: &Path,
+    _upscaler_file: &Path,
     _out_dir: &Path,
     _bits: i32,
 ) -> Result<(), String> {
@@ -625,6 +662,7 @@ enum ConvertPlan {
     Ltx {
         source_file: PathBuf,
         upscaler_dir: PathBuf,
+        upscaler_file: PathBuf,
         bits: i32,
     },
     /// FLUX.2-dev gated diffusers snapshot → packed Q`bits` dir (sc-5921): pre-quantize the DiT +
@@ -826,6 +864,7 @@ async fn resolve_convert_plan(
             ConvertPlan::Ltx {
                 source_file,
                 upscaler_dir,
+                upscaler_file: PathBuf::from(upscaler_file),
                 bits,
             }
         }
@@ -994,6 +1033,34 @@ async fn resolve_convert_plan(
 #[cfg(test)]
 mod portable_conversion_source_tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ltx_converter_receives_default_and_nested_selected_upscaler() {
+        let root = tempfile::tempdir().unwrap();
+        let snapshot = root.path().join("snapshot");
+        let output = root.path().join("output");
+        std::fs::create_dir_all(snapshot.join("weights")).unwrap();
+        std::fs::create_dir(&output).unwrap();
+        std::fs::write(snapshot.join(LTX_SPATIAL_UPSCALER_FILE), b"default").unwrap();
+        std::fs::write(snapshot.join("weights/upscaler.safetensors"), b"nested").unwrap();
+        let (default_dir, default_alias) = selected_ltx_converter_upscaler_dir(
+            &snapshot,
+            Path::new(LTX_SPATIAL_UPSCALER_FILE),
+            &output,
+        )
+        .unwrap();
+        assert!(default_alias.is_none());
+        assert_eq!(default_dir, snapshot);
+        let (nested_dir, _nested_alias) = selected_ltx_converter_upscaler_dir(
+            &snapshot,
+            Path::new("weights/upscaler.safetensors"),
+            &output,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(nested_dir.join(LTX_SPATIAL_UPSCALER_FILE)).unwrap(), b"nested");
+        assert_ne!(nested_dir, snapshot);
+    }
 
     #[test]
     fn bound_converter_source_refuses_omission_without_legacy_fallback() {
@@ -1237,11 +1304,12 @@ pub(crate) async fn run_model_convert_job(
         ConvertPlan::Ltx {
             source_file,
             upscaler_dir,
+            upscaler_file,
             bits,
         } => {
             let backend = backend.clone();
             crate::load_progress::spawn_blocking(move || {
-                convert_ltx_native(&source_file, &upscaler_dir, &temp, bits).map_err(|detail| {
+                convert_ltx_native(&source_file, &upscaler_dir, &upscaler_file, &temp, bits).map_err(|detail| {
                     WorkerError::Engine(format!("{backend} conversion failed. {detail}"))
                 })
             })
