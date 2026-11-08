@@ -511,8 +511,10 @@ jobs:
             npm --prefix apps/desktop run check:linux-drivers -- --appimage "$appimage"
           done
 
+      # The 0.11.0 native CUDA API is 1,189,780,296 B inside the deb's data.tar.gz.
+      # Allow a bounded 1.5 GiB entry; retain compressed/total/count/depth guards.
       - name: Guard against NC model weights in the desktop bundle (sc-10526, sc-10551)
-        run: node scripts/check-no-nc-weights.mjs --dir target/release/bundle --scan-archives --skip-uninspectable
+        run: node scripts/check-no-nc-weights.mjs --dir target/release/bundle --scan-archives --skip-uninspectable --max-entry-bytes 1610612736
 
       - name: Pack signed Linux packages
         run: |
