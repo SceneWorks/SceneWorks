@@ -33,6 +33,18 @@ const MAX_PINNED_METADATA_CACHE_ENTRIES: usize = 256;
 static PINNED_METADATA_CACHE: OnceLock<Mutex<BTreeMap<String, Vec<PortableArtifactFile>>>> =
     OnceLock::new();
 
+/// File-content verification can read several GiB. Keep it off Tokio's request-polling threads
+/// without memoizing mutable local bytes between admissions.
+async fn blocking_source_capture<T: Send + 'static>(
+    capture: impl FnOnce() -> Result<T, ApiError> + Send + 'static,
+) -> Result<T, ApiError> {
+    tokio::task::spawn_blocking(capture)
+        .await
+        .map_err(|error| {
+            ApiError::internal(format!("Model source verification task failed: {error}"))
+        })?
+}
+
 /// The entry slots are part of the private worker payload, not the public catalog. Preserve the
 /// exact slot, including an array index, so duplicate model ids cannot swap components on retry.
 fn payload_model_entries(payload: &JsonObject) -> Result<Vec<(String, &Value)>, ApiError> {
@@ -959,7 +971,7 @@ async fn verify_training_primary_path(
     let prefix = selected
         .strip_prefix(&snapshot)
         .map_err(|_| incomplete("training base path is outside its pinned publisher snapshot"))?;
-    let actual = capture_local_source_files(&selected, &allowed)?;
+    let actual = capture_local_source_files_offloaded(&selected, &allowed).await?;
     let remote = members
         .iter()
         .find(|member| member.role == ArtifactMemberRole::Primary)
@@ -1063,9 +1075,11 @@ async fn capture_model_slot(
                 )));
             }
         }
-        let mut local = capture_local_model_entry(state, entry, slot)?;
+        let mut local = capture_local_model_entry_offloaded(state, entry, slot).await?;
         if let Some(training) = &training {
-            let selected = capture_local_source_files(&training.path, &allowed_local_roots(state))?;
+            let selected =
+                capture_local_source_files_offloaded(&training.path, &allowed_local_roots(state))
+                    .await?;
             if local
                 .iter()
                 .find(|member| member.role == ArtifactMemberRole::Primary)
@@ -1124,7 +1138,8 @@ async fn capture_model_slot(
             )
         });
         if produced_training {
-            verify_produced_local_source(state, entry, &training.as_ref().unwrap().path)?;
+            verify_produced_local_source_offloaded(state, entry, &training.as_ref().unwrap().path)
+                .await?;
         }
         for (index, download) in downloads.iter().enumerate() {
             let role = if is_co_requisite_download(download) {
@@ -1136,13 +1151,14 @@ async fn capture_model_slot(
                 (role != ArtifactMemberRole::Primary).then(|| format!("{slot}/downloads/{index}"));
             members.push(
                 if role == ArtifactMemberRole::Primary && produced_training {
-                    capture_local_member(
+                    capture_local_member_offloaded(
                         &training.as_ref().unwrap().path,
                         &allowed_local_roots(state),
                         role,
                         component_id,
                         tier.clone(),
-                    )?
+                    )
+                    .await?
                 } else if role == ArtifactMemberRole::Primary
                     && *job_type == JobType::ModelConvert
                     && download.get("revision").is_none()
@@ -1163,7 +1179,8 @@ async fn capture_model_slot(
     if let Some(path) =
         selected_primary_override(payload, entry, owns_request_overlays, training.is_some())
     {
-        let files = capture_local_source_files(&path, &allowed_local_roots(state))?;
+        let files =
+            capture_local_source_files_offloaded(&path, &allowed_local_roots(state)).await?;
         let primary = members
             .iter_mut()
             .find(|member| member.role == ArtifactMemberRole::Primary)
@@ -1179,14 +1196,15 @@ async fn capture_model_slot(
         .join(".sceneworks-produced-artifact.json")
         .is_file()
         {
-            verify_produced_local_source(state, entry, &path)?;
-            *primary = capture_local_member(
+            verify_produced_local_source_offloaded(state, entry, &path).await?;
+            *primary = capture_local_member_offloaded(
                 &path,
                 &allowed_local_roots(state),
                 ArtifactMemberRole::Primary,
                 None,
                 tier.clone(),
-            )?;
+            )
+            .await?;
         } else {
             return Err(incomplete(format!(
                 "{slot} override is neither pinned publisher bytes nor a verified produced source"
@@ -1196,7 +1214,7 @@ async fn capture_model_slot(
     // The first model carrier owns selected request adapters and controls. Other carriers retain
     // their own component closures but never duplicate an adapter under a second logical slot.
     if owns_request_overlays {
-        members.extend(capture_selected_request_overlays(state, payload)?);
+        members.extend(capture_selected_request_overlays_offloaded(state, payload).await?);
     }
     for source in selected_sources
         .iter()
@@ -1212,15 +1230,18 @@ async fn capture_model_slot(
                 )
                 .await?
             }
-            SelectedSourceLocation::LocalPath(path) => capture_local_member(
-                Path::new(path),
-                &allowed_local_roots(state),
-                source.role.clone(),
-                Some(source.component_id.clone()),
-                source.selected_tier.clone(),
-            )?,
+            SelectedSourceLocation::LocalPath(path) => {
+                capture_local_member_offloaded(
+                    Path::new(path),
+                    &allowed_local_roots(state),
+                    source.role.clone(),
+                    Some(source.component_id.clone()),
+                    source.selected_tier.clone(),
+                )
+                .await?
+            }
             SelectedSourceLocation::SelectedTextEncoder { path, source_kind } => {
-                capture_selected_text_encoder_member(state, path, source_kind)?
+                capture_selected_text_encoder_member_offloaded(state, path, source_kind).await?
             }
             SelectedSourceLocation::OperatorCachedRepo(source_id) => {
                 let claims = frozen_worker_claims(
@@ -1745,6 +1766,21 @@ fn capture_local_member(
     Ok(member)
 }
 
+async fn capture_local_member_offloaded(
+    path: &Path,
+    allowed_roots: &[PathBuf],
+    role: ArtifactMemberRole,
+    component_id: Option<String>,
+    tier: Option<String>,
+) -> Result<PortableArtifactMember, ApiError> {
+    let path = path.to_path_buf();
+    let allowed_roots = allowed_roots.to_vec();
+    blocking_source_capture(move || {
+        capture_local_member(&path, &allowed_roots, role, component_id, tier)
+    })
+    .await
+}
+
 fn capture_selected_text_encoder_member(
     state: &AppState,
     path: &str,
@@ -1781,6 +1817,20 @@ fn capture_selected_text_encoder_member(
         .validate()
         .map_err(|error| incomplete(error.to_string()))?;
     Ok(member)
+}
+
+async fn capture_selected_text_encoder_member_offloaded(
+    state: &AppState,
+    path: &str,
+    source_kind: &str,
+) -> Result<PortableArtifactMember, ApiError> {
+    let state = state.clone();
+    let path = path.to_owned();
+    let source_kind = source_kind.to_owned();
+    blocking_source_capture(move || {
+        capture_selected_text_encoder_member(&state, &path, &source_kind)
+    })
+    .await
 }
 
 async fn capture_worker_source_member(
@@ -2148,8 +2198,18 @@ async fn capture_download_member(
         selectors.push("*".to_owned());
     }
     let files = resolve_trusted_pinned_files(state, repo, revision, &selectors).await?;
-    if let Some(local) = capture_receipted_local_files(state, repo, revision, variant, &selectors)?
-    {
+    let local = {
+        let state = state.clone();
+        let repo = repo.to_owned();
+        let revision = revision.to_owned();
+        let variant = variant.to_owned();
+        let selectors = selectors.clone();
+        blocking_source_capture(move || {
+            capture_receipted_local_files(&state, &repo, &revision, &variant, &selectors)
+        })
+        .await?
+    };
+    if let Some(local) = local {
         if local != files {
             return Err(incomplete(format!(
                 "installed {repo}@{revision} files differ from the pinned source"
@@ -2459,6 +2519,17 @@ pub(crate) fn capture_local_model_entry(
     Ok(members)
 }
 
+async fn capture_local_model_entry_offloaded(
+    state: &AppState,
+    entry: &Value,
+    slot: &str,
+) -> Result<Vec<PortableArtifactMember>, ApiError> {
+    let state = state.clone();
+    let entry = entry.clone();
+    let slot = slot.to_owned();
+    blocking_source_capture(move || capture_local_model_entry(&state, &entry, &slot)).await
+}
+
 /// Conversion and trained full-base roots become portable only after the producer has written a
 /// strong receipt and the API can tie its IDs and output path to a completed source job.
 fn verify_produced_local_source(
@@ -2573,6 +2644,17 @@ fn verify_produced_local_source(
     Ok(())
 }
 
+async fn verify_produced_local_source_offloaded(
+    state: &AppState,
+    entry: &Value,
+    source: &Path,
+) -> Result<(), ApiError> {
+    let state = state.clone();
+    let entry = entry.clone();
+    let source = source.to_path_buf();
+    blocking_source_capture(move || verify_produced_local_source(&state, &entry, &source)).await
+}
+
 fn allowed_local_roots(state: &AppState) -> Vec<PathBuf> {
     std::iter::once(state.settings.data_dir.clone())
         .chain(state.settings.external_model_roots.iter().cloned())
@@ -2594,6 +2676,15 @@ fn capture_local_source_files(
     }
     selected.sort();
     Ok(selected)
+}
+
+async fn capture_local_source_files_offloaded(
+    source: &Path,
+    allowed_roots: &[PathBuf],
+) -> Result<Vec<PortableArtifactFile>, ApiError> {
+    let source = source.to_path_buf();
+    let allowed_roots = allowed_roots.to_vec();
+    blocking_source_capture(move || capture_local_source_files(&source, &allowed_roots)).await
 }
 
 fn collect_source_files(
@@ -2728,10 +2819,108 @@ fn capture_selected_request_overlays(
     Ok(members)
 }
 
+async fn capture_selected_request_overlays_offloaded(
+    state: &AppState,
+    payload: &JsonObject,
+) -> Result<Vec<PortableArtifactMember>, ApiError> {
+    let state = state.clone();
+    let payload = payload.clone();
+    blocking_source_capture(move || capture_selected_request_overlays(&state, &payload)).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn installed_hash_does_not_block_unrelated_request_task() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("model.safetensors");
+        std::fs::write(&file, b"weights").unwrap();
+        let expected = sceneworks_core::hashing::sha256_file(&file).unwrap();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (progress_tx, progress_rx) = std::sync::mpsc::channel();
+        // The watchdog releases the hash even if someone accidentally moves it back onto the
+        // current-thread scheduler. That regression then fails without hanging the test suite.
+        let release = std::thread::spawn(move || {
+            let progressed = progress_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_ok();
+            let _ = release_tx.send(());
+            progressed
+        });
+        let hash = tokio::spawn(async move {
+            blocking_source_capture(move || {
+                let _ = entered_tx.send(());
+                release_rx.recv().unwrap();
+                sceneworks_core::hashing::sha256_file(&file)
+                    .map_err(|error| ApiError::internal(error.to_string()))
+            })
+            .await
+        });
+        entered_rx.await.unwrap();
+        tokio::spawn(async move { progress_tx.send(()).unwrap() })
+            .await
+            .unwrap();
+        assert_eq!(hash.await.unwrap().unwrap(), expected);
+        assert!(
+            release.join().unwrap(),
+            "a blocking content hash stalled the Tokio request task"
+        );
+    }
+
+    #[tokio::test]
+    async fn receipted_pinned_file_is_rehashed_after_substitution() {
+        let _hf_cache = crate::tests::support::isolate_hf_cache();
+        let root = tempfile::tempdir().unwrap();
+        let (_, state) = crate::create_app_with_state(crate::tests::support::test_settings(&root))
+            .expect("test API state");
+        let repo = "owner/receipt-fixture";
+        let revision = "a".repeat(40);
+        let relative = "model.safetensors";
+        let snapshot =
+            sceneworks_core::hf_home::huggingface_repo_cache_path(&state.settings.data_dir, repo)
+                .unwrap()
+                .join("snapshots")
+                .join(&revision);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        let path = snapshot.join(relative);
+        std::fs::write(&path, b"trusted").unwrap();
+        let receipt_dir = state
+            .settings
+            .data_dir
+            .join("models")
+            .join(safe_download_dir(repo));
+        std::fs::create_dir_all(&receipt_dir).unwrap();
+        std::fs::write(
+            receipt_dir.join(".sceneworks-download-complete.json"),
+            json!({"repo":repo,"snapshotRevision":revision,"variant":"default",
+                "resolvedFiles":[relative]})
+            .to_string(),
+        )
+        .unwrap();
+        let trusted = PortableArtifactFile {
+            relative_path: relative.into(),
+            size_bytes: 7,
+            sha256: format!(
+                "sha256:{}",
+                sceneworks_core::hashing::sha256_bytes(b"trusted")
+            ),
+        };
+        *state.test_hooks.pinned_metadata_override.lock() =
+            Some(std::sync::Arc::new(move |_, _, _| vec![trusted.clone()]));
+        let download = json!({"repo":repo,"revision":revision,"files":[relative]});
+        capture_download_member(&state, &download, ArtifactMemberRole::Primary, None)
+            .await
+            .expect("original installed bytes match the pinned source");
+        std::fs::write(&path, b"changed").unwrap();
+        let error = capture_download_member(&state, &download, ArtifactMemberRole::Primary, None)
+            .await
+            .expect_err("same-size substituted installed bytes are refused");
+        assert!(error.detail.contains("files differ from the pinned source"));
+    }
 
     #[test]
     fn vector_child_auto_keeps_only_parent_frozen_worker_routes() {
