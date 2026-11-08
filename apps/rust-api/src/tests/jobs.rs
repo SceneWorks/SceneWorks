@@ -114,6 +114,12 @@ fn pinned_jobs_fixture_app_with_state(
     settings: Settings,
 ) -> Result<(axum::Router, crate::AppState), sceneworks_core::jobs_store::JobsStoreError> {
     pin_handwritten_jobs_manifest(&settings);
+    jobs_fixture_app_with_pinned_metadata(settings)
+}
+
+fn jobs_fixture_app_with_pinned_metadata(
+    settings: Settings,
+) -> Result<(axum::Router, crate::AppState), sceneworks_core::jobs_store::JobsStoreError> {
     let (app, state) = create_app_with_state(settings)?;
     *state
         .test_hooks
@@ -3578,8 +3584,8 @@ async fn retry_and_duplicate_reauthorize_merged_control_weights_before_create() 
         }
     }
 
-    // The one shipped SDXL OpenPose tuple is accepted at every alternate create boundary, while
-    // caller-forged authorization/revision fields are removed and never persisted.
+    // A retry retains the original frozen source, even for a valid new control choice. A
+    // duplicate may instead make a fresh admission after the control tuple is canonicalized.
     for operation in ["retry", "duplicate"] {
         let (status, body) = request(
             app.clone(),
@@ -3599,6 +3605,12 @@ async fn retry_and_duplicate_reauthorize_merged_control_weights_before_create() 
             }),
         )
         .await;
+        if operation == "retry" {
+            assert_eq!(status, StatusCode::CONFLICT, "{operation}: {body}");
+            assert!(body["detail"].as_str().is_some_and(|detail| detail
+                .contains("replay source-affecting choices differ from frozen admission")));
+            continue;
+        }
         assert_eq!(status, StatusCode::CREATED, "{operation}: {body}");
         let weights = body["payload"]["advanced"]["controlWeights"]
             .as_object()
@@ -3635,8 +3647,8 @@ async fn retry_and_duplicate_reauthorize_merged_control_weights_before_create() 
     let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
     assert_eq!(
         jobs.as_array().expect("jobs array").len(),
-        5,
-        "only the original, two shipped-control operations, and two clean operations may persist"
+        4,
+        "only the original, freshly authorized duplicate, and two clean operations may persist"
     );
 }
 
@@ -5627,32 +5639,49 @@ async fn advertise_fixture_lora_source(
     path: &std::path::Path,
     capability: &str,
 ) {
+    advertise_fixture_lora_sources(app, &[(lora_id, path)], capability).await;
+}
+
+async fn advertise_fixture_lora_sources(
+    app: &axum::Router,
+    sources: &[(&str, &std::path::Path)],
+    capability: &str,
+) {
     use sceneworks_core::model_artifacts::portable_binding::{
         portable_file_ledger_sha256, PortableArtifactFile, PortableSourceClaim,
         PortableSourceProvenance,
     };
-    let files = vec![PortableArtifactFile {
-        relative_path: path.file_name().expect("LoRA file name").into(),
-        size_bytes: std::fs::metadata(path).expect("LoRA file metadata").len(),
-        sha256: format!(
-            "sha256:{}",
-            sceneworks_core::hashing::sha256_file(path).expect("LoRA file hash")
-        ),
-    }];
-    let ledger = portable_file_ledger_sha256(&files).expect("LoRA file ledger");
-    let source_id = sceneworks_core::portable_sources::registered_digest_claim_id(
-        "lora", lora_id, None, &ledger,
-    )
-    .expect("registered LoRA source id");
-    let claim =
-        PortableSourceClaim::new(source_id, PortableSourceProvenance::OperatorOverride, files)
+    let claims = sources
+        .iter()
+        .map(|(lora_id, path)| {
+            let files = vec![PortableArtifactFile {
+                relative_path: path.file_name().expect("LoRA file name").into(),
+                size_bytes: std::fs::metadata(path).expect("LoRA file metadata").len(),
+                sha256: format!(
+                    "sha256:{}",
+                    sceneworks_core::hashing::sha256_file(path).expect("LoRA file hash")
+                ),
+            }];
+            let ledger = portable_file_ledger_sha256(&files).expect("LoRA file ledger");
+            let source_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+                "lora", lora_id, None, &ledger,
+            )
+            .expect("registered LoRA source id");
+            let claim = PortableSourceClaim::new(
+                source_id,
+                PortableSourceProvenance::OperatorOverride,
+                files,
+            )
             .expect("LoRA source claim");
+            claim
+        })
+        .collect::<Vec<_>>();
     let mut registration = portable_test_worker_registration(
         "test-lora-source-worker",
         &["gpu", "mlx", capability],
         TestPortableRoute::MlxMacos,
     );
-    registration["portableSourceClaims"] = serde_json::to_value(vec![claim]).unwrap();
+    registration["portableSourceClaims"] = serde_json::to_value(claims).unwrap();
     let (status, body) = request(
         app.clone(),
         "POST",
@@ -5835,7 +5864,16 @@ async fn retry_honours_character_inline_lora_provenance_without_letting_others_b
     let linked_lora_id = attached["loras"][0]["id"]
         .as_str()
         .expect("attached character LoRA id");
-    advertise_fixture_lora_source(&app, linked_lora_id, &source, "image_generate").await;
+    let good_style_path = temp_dir.path().join("data/loras/good.safetensors");
+    advertise_fixture_lora_sources(
+        &app,
+        &[
+            (linked_lora_id, source.as_path()),
+            ("good_style", good_style_path.as_path()),
+        ],
+        "image_generate",
+    )
+    .await;
 
     let (status, character_job) = request(
         app.clone(),
@@ -11065,6 +11103,7 @@ fn write_scail2_reference_test_manifest(config_dir: &std::path::Path, multi_refe
                 "family": "scail2",
                 "type": "video",
                 "capabilities": ["image_to_video"],
+                "downloads": [],
                 "ui": { "scail2MultiReference": multi_reference }
             }]
         }))
@@ -11072,6 +11111,7 @@ fn write_scail2_reference_test_manifest(config_dir: &std::path::Path, multi_refe
     )
     .expect("multi-reference manifest writes");
     write_empty_sibling_manifests(config_dir);
+    use_shipped_default_download(config_dir, "scail2_14b");
 }
 
 /// The paired SCAIL-2 provider has six source-position slots: the first character plus five
@@ -11235,7 +11275,8 @@ async fn scail2_animate_character_preserves_ordered_multi_references_and_rejects
 #[tokio::test]
 async fn retry_and_duplicate_strictly_validate_scail2_multi_reference_replay() {
     let current_temp_dir = tempfile::tempdir().expect("current temp dir creates");
-    let current_app = create_app(test_settings(&current_temp_dir)).expect("current app creates");
+    let (current_app, _) = jobs_fixture_app_with_pinned_metadata(test_settings(&current_temp_dir))
+        .expect("current app creates");
     crate::tests::support::create_project(
         current_app.clone(),
         &"SCAIL-2 current descriptor replay",
@@ -11386,7 +11427,8 @@ async fn retry_and_duplicate_strictly_validate_scail2_multi_reference_replay() {
 
     let enabled_temp_dir = tempfile::tempdir().expect("enabled temp dir creates");
     write_scail2_reference_test_manifest(&enabled_temp_dir.path().join("config/manifests"), true);
-    let enabled_app = create_app(test_settings(&enabled_temp_dir)).expect("enabled app creates");
+    let enabled_app =
+        pinned_jobs_fixture_app(test_settings(&enabled_temp_dir)).expect("enabled app creates");
     crate::tests::support::create_project(
         enabled_app.clone(),
         &"SCAIL-2 enabled descriptor replay",
