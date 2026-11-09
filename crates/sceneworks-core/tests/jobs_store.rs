@@ -968,11 +968,7 @@ fn generation_metrics_history_upgrade_case(label: &str, with_image_count: bool) 
     let statement = connection
         .prepare("select * from generation_metrics_history")
         .expect("history is queryable");
-    let columns: Vec<String> = statement
-        .column_names()
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
+    let columns: Vec<String> = statement.column_names().map(str::to_owned).collect();
     drop(statement);
     let index = |name: &str| {
         columns
