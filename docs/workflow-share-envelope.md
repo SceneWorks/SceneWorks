@@ -470,6 +470,7 @@ Classified and deliberately dropped. A key here is a decision someone wrote down
 | `mlxQuantizeExplicit` | Marks a deliberate tier pick on this install. |
 | `convRot` | The INT8-ConvRot tier selector. |
 | `quantTier` | Install-specific and fingerprinting. |
+| `imageReference` | Local reference diagnostics: image name, project and asset ids, and media path. The need for a reference image rides in `inputs` instead. |
 | `controlImage` | A local asset id. The *need* for a control image rides in `inputs` instead. |
 | `controlWeights` | A trained-overlay id plus the resolved weights path stamped onto it. |
 | `recipePresetId` | A local preset id stamped by the API. |

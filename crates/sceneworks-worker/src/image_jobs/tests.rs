@@ -1,3 +1,38 @@
+#[test]
+fn image_reference_errors_name_the_missing_image_and_recovery() {
+    let payload = serde_json::json!({
+        "mode": "text_to_image", "referenceAssetId": "asset-ref",
+        "advanced": { "imageReference": {
+            "assetId": "asset-ref", "name": "Portrait reference",
+            "filePath": "assets/uploads/portrait.jpg"
+        }}
+    });
+    let error =
+        || crate::WorkerError::InvalidPayload("reference asset asset-ref: Asset not found".into());
+    let explained =
+        super::explain_image_reference_error(payload.as_object().unwrap(), error()).to_string();
+    assert!(explained.contains("Image reference is on"));
+    assert!(explained.contains("Portrait reference"));
+    assert!(explained.contains("assets/uploads/portrait.jpg"));
+    assert!(explained.contains("Remove it or select another image"));
+    assert!(explained.contains("asset-ref: Asset not found"));
+
+    let mut legacy = payload.as_object().unwrap().clone();
+    legacy.remove("advanced");
+    let explained = super::explain_image_reference_error(&legacy, error()).to_string();
+    assert!(explained.contains("previously selected image"));
+    assert!(explained.contains("image-to-image generation"));
+
+    let unrelated = super::explain_image_reference_error(
+        payload.as_object().unwrap(),
+        crate::WorkerError::InvalidPayload("reference asset other-ref: Asset not found".into()),
+    );
+    assert_eq!(
+        unrelated.to_string(),
+        "reference asset other-ref: Asset not found"
+    );
+}
+
 #[cfg(target_os = "macos")]
 use super::adapter_id;
 #[cfg(native_lane)]

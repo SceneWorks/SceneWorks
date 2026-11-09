@@ -1265,6 +1265,34 @@ async fn cors_preflight_allows_frontend_origin_and_token_header() {
 }
 
 #[tokio::test]
+async fn cors_preflight_allows_media_head_probes() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, headers, _) = request_raw(
+        app,
+        "OPTIONS",
+        "/api/v1/projects/project-test/files/assets/images/reference.png",
+        Body::empty(),
+        &[
+            ("host", "localhost:8000"),
+            ("origin", "http://localhost:5173"),
+            ("access-control-request-method", "HEAD"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers["access-control-allow-origin"],
+        "http://localhost:5173"
+    );
+    assert!(headers["access-control-allow-methods"]
+        .to_str()
+        .unwrap()
+        .split(',')
+        .any(|method| method.trim() == "HEAD"));
+}
+
+#[tokio::test]
 async fn credentials_routes_store_redact_and_delete() {
     let temp = tempfile::tempdir().expect("tempdir");
     let settings = test_settings(&temp);

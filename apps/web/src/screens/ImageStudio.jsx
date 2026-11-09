@@ -124,6 +124,7 @@ import { resolveCfgInterval } from "./imageStudio/samplingControls.js";
 import { usePidState, useStrictControlState } from "./imageStudio/useImageControlState.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { imageBatchValidation, imageGenerateValidation } from "../imageStudioValidation.js";
+import { useImageReferenceStatus } from "../hooks/useImageReferenceStatus.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
 import {
@@ -1953,6 +1954,12 @@ export function ImageStudio() {
   const jobReferences = imageJobReferences({ model, mode, multiReference, orderedCharacterReferences, sourceWithMultiReference,
     editSecondPair, sourceAssetId, controlPreprocessSourceId, referenceAssetIds, referenceAssetId,
     supportsImg2img, img2imgReferenceAssetId });
+  const imageReference = useImageReferenceStatus({
+    enabled: mode === "text_to_image" && supportsImg2img,
+    assetId: img2imgReferenceAssetId,
+    projectId: activeProject?.id,
+    assets,
+  });
   const flux3LayoutAvailable = isFlux3LayoutModel(selectedModel);
   const layoutAssetIds = orderedLayoutAssetIds(jobReferences);
   const layoutReferences = flux3LayoutAvailable
@@ -2503,6 +2510,7 @@ export function ImageStudio() {
       referenceAssetId: mossEdit ? undefined : referenceAssetId,
       supportsImg2img,
       img2imgReferenceAssetId,
+      imageReferenceDetails: imageReference.details,
       loras: buildLorasPayload(),
       upscaleEnabled,
       upscaleFactor,
@@ -2652,6 +2660,8 @@ export function ImageStudio() {
   const batchDraft = useMemo(
     () => ({
       activeProject,
+      imageReferenceError: imageReference.error,
+      imageReferencePending: imageReference.pending,
       batchStructuredExpandBlocked,
       batchTotal,
       missingKeys: batchMissingKeys,
@@ -2666,6 +2676,8 @@ export function ImageStudio() {
     }),
     [
       activeProject,
+      imageReference.error,
+      imageReference.pending,
       batchStructuredExpandBlocked,
       batchTotal,
       batchMissingKeys,
@@ -2698,6 +2710,8 @@ export function ImageStudio() {
   const generateDraft = useMemo(
     () => ({
       activeProject,
+      imageReferenceError: imageReference.error,
+      imageReferencePending: imageReference.pending,
       structuredActive,
       captionHasContent,
       tensorConditioning: mossEdit && Boolean(mossImageAdvanced.positive),
@@ -2732,6 +2746,8 @@ export function ImageStudio() {
     }),
     [
       activeProject,
+      imageReference.error,
+      imageReference.pending,
       structuredActive,
       captionHasContent,
       mossEdit, mossImageAdvanced,
@@ -2900,6 +2916,7 @@ export function ImageStudio() {
             promptTool={promptTool}
             togglePromptTool={togglePromptTool}
             img2imgReferenceAssetId={img2imgReferenceAssetId}
+            imageReference={imageReference}
             changeImg2imgReferenceAssetId={changeImg2imgReferenceAssetId}
             img2imgStrengthConfig={img2imgStrengthConfig}
             setImg2imgStrength={setImg2imgStrength}

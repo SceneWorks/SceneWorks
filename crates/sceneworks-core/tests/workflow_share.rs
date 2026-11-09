@@ -98,6 +98,40 @@ fn golden_asset() -> Asset {
 }
 
 #[test]
+fn image_reference_diagnostic_context_stays_local_when_sharing() {
+    let payload = json!({
+        "model": "krea_2_turbo", "mode": "text_to_image",
+        "referenceAssetId": "asset-private-reference",
+        "advanced": {
+            "strength": 0.4,
+            "imageReference": {
+                "assetId": "asset-private-reference",
+                "projectId": "project-private",
+                "name": "Private reference name",
+                "filePath": "assets/uploads/private-reference.png"
+            }
+        }
+    });
+    let share = build_workflow_share(&golden_asset(), payload.as_object().unwrap());
+    let exported = serde_json::to_value(&share).unwrap();
+    assert_eq!(exported["advanced"]["strength"], json!(0.4));
+    assert!(exported["advanced"].get("imageReference").is_none());
+    let serialized = serde_json::to_string(&share).unwrap();
+    for local_detail in [
+        "asset-private-reference",
+        "project-private",
+        "Private reference name",
+        "assets/uploads/private-reference.png",
+    ] {
+        assert!(!serialized.contains(local_detail), "{serialized}");
+    }
+    assert!(share
+        .inputs
+        .iter()
+        .any(|input| input.kind == "reference" && input.count == 1));
+}
+
+#[test]
 fn moss_edit_export_counts_semantic_slots_and_never_deduplicates_the_vector() {
     use sceneworks_core::workflow_resolution::{
         build_resolution_report, CatalogEntry, StaticCatalogs,
