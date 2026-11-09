@@ -4003,6 +4003,86 @@ async fn post_preset_prompt_enhancement_uses_the_resolved_candle_route() {
 }
 
 #[tokio::test]
+async fn image_pose_settings_accept_whole_body_batches_and_preserve_coordinates() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    // Saved DWPose records include hands/face and full-precision coordinates; the bundled
+    // body-only poses alone are too small to reproduce the reported 64 KiB rejection.
+    let points =
+        |count| vec![json!([0.1234567890123456, 0.9876543210987654, 0.9876543210987654]); count];
+    let poses: Vec<Value> = (0..sceneworks_core::image_request::MAX_JOB_POSES)
+        .map(|index| {
+            json!({
+                "id": format!("saved-pose-{index}"),
+                "keypoints": points(18),
+                "hands": [points(21), points(21)],
+                "face": points(68),
+            })
+        })
+        .collect();
+    for count in [9, sceneworks_core::image_request::MAX_JOB_POSES] {
+        let advanced = json!({ "poses": poses[..count], "faceRestore": false, "steps": 9 });
+        assert!(serde_json::to_vec(&advanced).unwrap().len() > crate::MAX_ADVANCED_JSON_BYTES);
+        let (status, job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": "project-1",
+                "mode": "character_image",
+                "prompt": "a character in a pose",
+                "count": 1,
+                "advanced": advanced,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{job}");
+        assert_eq!(job["payload"]["advanced"]["poses"], advanced["poses"]);
+
+        let (status, duplicate) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{}/duplicate", job["id"].as_str().unwrap()),
+            json!({ "payloadChanges": {} }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{duplicate}");
+        assert_eq!(duplicate["payload"]["advanced"]["poses"], advanced["poses"]);
+    }
+}
+
+#[test]
+fn image_pose_settings_keep_settings_and_pose_data_independently_bounded() {
+    let refusal = |advanced: Value| {
+        crate::validate_image_prompt_extras("", advanced.as_object().unwrap())
+            .unwrap_err()
+            .detail
+    };
+    assert_eq!(
+        refusal(json!({ "poses": [], "blob": "a".repeat(64 * 1024) })),
+        "advanced settings must serialize to at most 65536 bytes"
+    );
+    // A non-array does not get a pose-data allowance.
+    assert_eq!(
+        refusal(json!({ "poses": "a".repeat(64 * 1024) })),
+        "advanced settings must serialize to at most 65536 bytes"
+    );
+    assert_eq!(
+        refusal(json!({ "poses": [{ "keypoints": [], "id": "a".repeat(1024 * 1024) }] })),
+        "pose data must serialize to at most 1048576 bytes; select fewer poses"
+    );
+    let over_count =
+        vec![json!({ "keypoints": [] }); sceneworks_core::image_request::MAX_JOB_POSES + 1];
+    assert_eq!(
+        refusal(json!({ "poses": over_count })),
+        "advanced.poses must contain at most 64 entries; each pose renders one image"
+    );
+    // Other generation types retain their existing total settings budget.
+    let oversized = json!({ "poses": [{ "keypoints": [], "id": "a".repeat(64 * 1024) }] });
+    assert!(crate::validate_prompt_extras("", oversized.as_object().unwrap()).is_err());
+}
+
+#[tokio::test]
 async fn create_image_job_enforces_the_pose_output_ceiling() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
