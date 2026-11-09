@@ -613,7 +613,7 @@ measurement found a new way to spend what they left.
 | `WORKFLOW_SHARE_MAX_BYTES` | 163,840 | The whole serialized envelope, in bytes. | The **entire** envelope is refused — no chunk is written, and a file over it reads as an error rather than as a partial recipe. |
 | `PROSE_MAX_BYTES` | 16,384 | Each authored prose field, in bytes. | Truncated at a whole character. Prose still means what it said after its tail is cut. |
 | `LABEL_MAX_CHARS` | 200 | Each non-prose label (model slug, style id, LoRA name, producer block), in characters. | **Dropped**, not truncated — a slug's spelling is its identity. |
-| `MAX_SHARE_LORAS` | 5 | Entries in `loras`. | The list is dropped whole and `omitted` gains `loras`. |
+| `MAX_SHARE_LORAS` | 10 | Entries in `loras`. | The list is dropped whole and `omitted` gains `loras`. |
 | `MAX_SHARE_INPUTS` | 7 | Entries in `inputs` — one per kind, and the kinds are closed. | The list is dropped whole and `omitted` gains `inputs`. |
 | `MAX_SHARE_PHASES` | 8 | Entries in `advanced.phases`. | The key is dropped and `omitted` gains `advanced.phases`. |
 | `MAX_SHARE_POSES` | 64 | Entries in `advanced.poses`. | The key is dropped and `omitted` gains `advanced.poses`. |
@@ -624,7 +624,7 @@ measurement found a new way to spend what they left.
 <!-- END PINNED: ceilings -->
 
 No request this app accepted can exceed a per-collection cap, because each cap **is** the limit the
-generation path already enforces: five LoRAs is the hard per-job total, eight phases is the
+generation path already enforces: ten LoRAs is the hard per-job total, eight phases is the
 multi-phase validator's own number. A run that declared more could not have happened here. The pose
 cap is the exception — nothing upstream clamps how many poses a user may select, so this one can
 fire on our own write side, which is why `omitted` is emitted in that direction too.

@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VideoStudio } from "./screens/VideoStudio.jsx";
 import { withAppContext, withImageStudioContext, FakeEventSource, response, settle, field, changeField } from "./main.testSupport.jsx";
+import { MAX_USER_JOB_LORAS } from "./presetUtils.js";
 import { EDIT_PROMPT_TEMPLATES } from "./data/editPromptTemplates.js";
 
 describe("SceneWorks app shell", () => {
@@ -659,7 +660,7 @@ describe("SceneWorks app shell", () => {
     expect(document.body.querySelector(".worker-progress-card.completed")).toBeNull();
   });
 
-  it("submits compatible image LoRAs while capping simple user selections at four", async () => {
+  it("submits compatible image LoRAs while capping simple user selections at nine", async () => {
     const createImageJob = vi.fn();
     root = createRoot(container);
     await act(async () => {
@@ -679,7 +680,9 @@ describe("SceneWorks app shell", () => {
             { id: "project_mira", name: "Project Mira", family: "z-image", scope: "project", files: ["mira.safetensors"] },
             { id: "third_user", name: "Third User", family: "z-image", scope: "global" },
             { id: "fourth_user", name: "Fourth User", family: "z-image", scope: "global" },
-            { id: "fifth_user", name: "Fifth User", family: "z-image", scope: "global" },
+            ...Array.from({ length: MAX_USER_JOB_LORAS - 3 }, (_, index) => ({
+              id: `extra_user_${index}`, name: `Extra User ${index}`, family: "z-image", scope: "global",
+            })),
             { id: "qwen_only", name: "Qwen Only", family: "qwen-image", scope: "global" },
             { id: "missing_lora", name: "Missing LoRA", family: "z-image", scope: "global", installState: "missing" },
           ],
@@ -704,7 +707,7 @@ describe("SceneWorks app shell", () => {
 
     // Add-on-demand LoRA picker (UI-refinement 3b): open the "Add LoRA" dropdown and click a
     // compatible row to add each LoRA. built_in (scope "builtin") doesn't count toward the
-    // four-user cap, so we can add it plus four user LoRAs.
+    // user cap, so we can add it plus nine user LoRAs.
     const addLora = async (name) => {
       await act(async () => {
         [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add LoRA").click();
@@ -720,17 +723,20 @@ describe("SceneWorks app shell", () => {
     await addLora("Project Mira");
     await addLora("Third User");
     await addLora("Fourth User");
+    for (let index = 0; index < MAX_USER_JOB_LORAS - 4; index += 1) {
+      await addLora(`Extra User ${index}`);
+    }
 
     expect(container.textContent).toContain("Built In");
 
-    // At the four-user cap, the fifth user LoRA's Add row is disabled in the dropdown.
+    // At the user cap, the next user LoRA's Add row is disabled in the dropdown.
     await act(async () => {
       [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add LoRA").click();
     });
-    const fifthRow = [...document.body.querySelectorAll(".lora-pick-row")].find((button) =>
-      button.textContent.includes("Fifth User"),
+    const nextRow = [...document.body.querySelectorAll(".lora-pick-row")].find((button) =>
+      button.textContent.includes(`Extra User ${MAX_USER_JOB_LORAS - 4}`),
     );
-    expect(fifthRow.disabled).toBe(true);
+    expect(nextRow.disabled).toBe(true);
 
     // Incompatible and missing LoRAs stay out of the picker; there is no escape-hatch checkbox.
     expect(document.body.querySelector('.lora-picker .checkline input[type="checkbox"]')).toBeNull();
@@ -753,6 +759,8 @@ describe("SceneWorks app shell", () => {
           expect.objectContaining({ id: "project_mira", scope: "project", files: ["mira.safetensors"] }),
           expect.objectContaining({ id: "third_user", scope: "global" }),
           expect.objectContaining({ id: "fourth_user", scope: "global" }),
+          ...Array.from({ length: MAX_USER_JOB_LORAS - 4 }, (_, index) =>
+            expect.objectContaining({ id: `extra_user_${index}`, scope: "global" })),
         ],
       }),
     );

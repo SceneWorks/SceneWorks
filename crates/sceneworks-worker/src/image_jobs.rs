@@ -205,7 +205,7 @@ const CANDLE_ADAPTER: &str = "candle_sdxl";
 // The web pickers enforce a lower user-selectable cap (presetUtils.MAX_USER_JOB_LORAS) that leaves
 // headroom for an auto-applied builtin within this total (sc-8936).
 #[cfg(native_lane)]
-const MAX_JOB_LORAS: usize = 5;
+const MAX_JOB_LORAS: usize = sceneworks_core::lora_family::MAX_JOB_LORAS;
 
 // The engine dispatch table + its `ModelRow`/`mlx_model` join moved to the all-targets
 // `engines` module (sc-3723); the two descriptor-duplicating flags it used to carry

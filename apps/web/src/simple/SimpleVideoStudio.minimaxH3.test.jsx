@@ -268,7 +268,7 @@ describe("SimpleVideoStudio with MiniMax-H3 (sc-17161)", () => {
     const payload = context.createVideoJob.mock.calls[0][0];
     expect((payload.loras ?? []).map((lora) => lora.id)).toContain(turbo.id);
     // …and it is not counted against the user's own LoRA budget: it is a builtin, which is the one
-    // slot of headroom MAX_USER_JOB_LORAS (4) leaves inside MAX_JOB_LORAS_TOTAL (5).
+    // slot of headroom MAX_USER_JOB_LORAS (9) leaves inside MAX_JOB_LORAS_TOTAL (10).
     expect(payload.loras.find((lora) => lora.id === turbo.id).scope).toBe("builtin");
   });
 
