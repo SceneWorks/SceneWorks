@@ -921,6 +921,11 @@ pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
         "Named out explicitly by sc-15946: install-specific and fingerprinting.",
     ),
     deny(
+        "imageReference",
+        "Diagnostic context for a local image reference: project/asset ids, display name and \
+         media path. Reference requirements travel in inputs, not this machine's labels or paths.",
+    ),
+    deny(
         "controlImage",
         "A local asset id. The fact that a control image is needed rides in `inputs` instead.",
     ),

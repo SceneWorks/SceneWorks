@@ -555,9 +555,8 @@ pub(crate) async fn run_image_generate_job(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
-    let result = run_image_generate_job_unexplained(api, settings, job)
-        .await
-        .map_err(|error| explain_image_reference_error(&job.payload, error));
+    let result = run_image_generate_job_unexplained(api, settings, job).await;
+    let result = result.map_err(|error| explain_image_reference_error(&job.payload, error));
     crate::converted_install::explain_job_result(settings, &job.payload, result).await
 }
 
