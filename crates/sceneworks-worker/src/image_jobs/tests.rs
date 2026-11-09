@@ -416,8 +416,6 @@ use super::krea_imported::krea_imported_available;
 use super::krea_imported::krea_imported_base_tier_complete;
 #[cfg(native_lane)]
 use super::krea_imported::krea_imported_conditioning;
-#[cfg(target_os = "macos")]
-use super::krea_imported::krea_imported_control_available;
 #[cfg(native_lane)]
 use super::krea_imported::krea_imported_img2img_requested;
 #[cfg(target_os = "macos")]
