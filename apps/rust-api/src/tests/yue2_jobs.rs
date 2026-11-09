@@ -1730,7 +1730,7 @@ async fn mcp_agent_renders_a_score_version_only_after_the_user_accepts_the_licen
     assert_eq!(status, StatusCode::CREATED, "{version}");
     let version_id = version["id"].as_str().unwrap().to_owned();
 
-    let client = rmcp::model::ClientInfo::default()
+    let client = rmcp::model::ClientConfig::default()
         .serve(StreamableHttpClientTransport::from_config(
             StreamableHttpClientTransportConfig::with_uri(format!("http://{addr}/mcp")),
         ))
