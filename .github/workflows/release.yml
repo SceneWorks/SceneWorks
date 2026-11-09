@@ -1,18 +1,19 @@
 name: Release (desktop)
 
 # Builds, signs, notarizes, staples, and publishes a DRAFT GitHub Release of the
-# desktop app when a `v*` tag is pushed (or via manual dispatch). Three jobs attach to
-# the SAME draft release:
+# desktop app when a `v*` tag is pushed (or via manual dispatch). Platform
+# builds run concurrently; the final job serializes release asset publication:
 #   macos   — signs + notarizes the .app via the APPLE_* env (from repo secrets),
 #             then staple-dmg.mjs staples the DMG; CREATES the draft release.
-#   windows — builds the candle/CUDA NSIS + MSI installers, Authenticode-signs them
+#   windows — packages the prepared candle/CUDA sidecar into NSIS + MSI installers, Authenticode-signs them
 #             through Azure Artifact Signing when the AZURE_* secrets are set
-#             (sc-1357; see RELEASING.md), and UPLOADS them to the release the macos
-#             job created (needs: macos). Mirrors the build steps in
-#             desktop-windows.yml; keep the two in sync when either changes.
-#   linux   — builds the candle/CUDA AppImage + deb and UPLOADS them to that draft
-#             (needs: windows, which also serializes latest.json platform merges).
-#             Mirrors desktop-linux.yml; keep the two in sync when either changes.
+#             (sc-1357; see RELEASING.md), and stores the signed installers as
+#             a workflow artifact. Its sidecar is built by release-sidecars.yml.
+#   linux   — packages the prepared candle/CUDA sidecar into AppImage + deb and
+#             stores them as a workflow artifact. Its sidecar is built by
+#             release-sidecars.yml.
+#   publish-desktop — attaches Windows and Linux assets to the macOS draft and
+#             merges latest.json entries in order after all three builds succeed.
 # Mirrors the local mac flow (`npm run release:mac`): `tauri build` signs + notarizes
 # the .app, then staple-dmg.mjs staples the DMG.
 #
@@ -48,6 +49,7 @@ on:
 
 permissions:
   contents: write # create releases + upload assets
+  actions: read # fetch exact-commit sidecars from the pre-tag preparation run
 
 concurrency:
   group: release-${{ github.ref }}
@@ -219,7 +221,7 @@ jobs:
 
           # Seed latest.json with the darwin-aarch64 entry. The URL is the canonical
           # tag asset URL (valid once the draft is published); the signature is the
-          # .sig contents. The Windows job merges its entry in afterward.
+          # .sig contents. The publication job merges the remaining entries.
           tarball_name="$(basename "${tarballs[0]}")"
           node apps/desktop/scripts/build-update-manifest.mjs \
             --target darwin-aarch64 \
@@ -231,12 +233,8 @@ jobs:
           gh release upload "$TAG" --clobber latest.json
 
   windows:
-    # Attach the Windows installers to the draft release the macos job created.
-    # needs: macos so the release exists before we upload (upload --clobber is
-    # idempotent on re-runs). Build steps mirror desktop-windows.yml's
-    # build-windows job — keep them in sync. This is the heavy candle CUDA release
-    # build (the SHIPPED artifacts), so it needs the CUDA Toolkit + MSVC toolset.
-    needs: macos
+    # Package and sign the exact CUDA sidecar built from this commit by
+    # release-sidecars.yml. The hosted signing runner never compiles CUDA.
     if: ${{ github.repository == 'SceneWorks/SceneWorks' && startsWith(github.ref, 'refs/tags/v') }}
     runs-on: windows-2022
     env:
@@ -246,36 +244,38 @@ jobs:
       # signing key is scoped to the bundle step below, not here (sc-8864).
       CUDA_COMPUTE_CAP: "80"
       CARGO_NET_OFFLINE: "true"
-    # Guardrail so a wedged step fails fast instead of riding GitHub's 6-hour
-    # default (sc-10420, sc-13603). Hosted runner with no warm cache: a cold CUDA
-    # toolkit install + full candle/CUDA build + NSIS/MSI packaging is the healthy
-    # ~42-49 min, so this sits ~2x above that worst-case release build.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "20"
+      - name: Find exact-commit Windows CUDA sidecar
+        id: sidecar
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/release-sidecar-artifact.mjs find windows
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-sidecar-windows
+          run-id: ${{ steps.sidecar.outputs.run-id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/release-sidecar-windows
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
           toolchain: "1.98.0"
+      - name: Verify exact-commit Windows CUDA sidecar
+        env:
+          CUDA_COMPUTE_CAP: "80"
+          SCENEWORKS_RELEASE_SIDECAR_RUN_ID: ${{ steps.sidecar.outputs.run-id }}
+        run: node scripts/release-sidecar-artifact.mjs verify windows "${{ runner.temp }}/release-sidecar-windows"
       - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"
         run: cargo fetch --locked
-      # Put the VS2022 MSVC toolchain (cl.exe) on PATH so nvcc finds the host
-      # compiler when candle-kernels' build script compiles the CUDA kernels.
+      # Tauri's Windows shell still compiles and links with MSVC.
       - name: Set up MSVC developer environment
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
-      # Install the CUDA 12.9 Toolkit (nvcc + cudart/cublas/curand/nvrtc dev libs)
-      # the candle `cuda` feature links against. Sets CUDA_PATH for the build +
-      # the redist staging in build-sidecar.mjs. (Pin kept in lockstep with
-      # desktop-windows.yml / server-candle-linux.yml.)
-      - name: Install CUDA Toolkit 12.9
-        uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d # v0.2.36
-        with:
-          cuda: "12.9.1"
-          method: "network"
       # The candle-gen single-rev invariant the default skew gate is blind to: with
       # `--features backend-candle` a candle-gen pin resolving a different gen-core
       # rev would split contract types from the explicit runtime catalog
@@ -295,9 +295,8 @@ jobs:
         run: npm ci --prefix apps/web --ignore-scripts
       - name: Install desktop dependencies
         run: npm ci --prefix apps/desktop --ignore-scripts
-      # `tauri build` runs build-sidecar.mjs, which on Windows builds the candle
-      # sidecar by default (nvcc compiles every provider's CUDA kernels) and stages
-      # the ffmpeg resource, then packages both installers. The ~2.7 GB CUDA/cuDNN/
+      # `tauri build` verifies and stages the prebuilt Candle sidecar and ffmpeg
+      # resource, then packages both installers. The ~2.7 GB CUDA/cuDNN/
       # onnxruntime runtime is downloaded on first run (cuda_provision.rs), so the
       # installers stay small. `--config updater.release.conf.json` also signs the
       # NSIS `-setup.exe` updater payload (+ `.sig`) for the in-app updater (sc-1355).
@@ -358,7 +357,10 @@ jobs:
           "ARTIFACT_SIGNING_LOG=$(Join-Path $dir 'sign.log')" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           "config=--config windows-signing.release.conf.json" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
       - name: Build Windows candle installers (NSIS + MSI)
+        shell: pwsh
         env:
+          SCENEWORKS_RELEASE_SIDECAR_ROOT: ${{ runner.temp }}/release-sidecar-windows
+          SCENEWORKS_RELEASE_SIDECAR_RUN_ID: ${{ steps.sidecar.outputs.run-id }}
           # Same minisign keypair as the macos job — signs the NSIS updater
           # payload so the shipped app verifies it against plugins.updater.pubkey
           # (sc-1355). Scoped to this step so `npm ci` / build.rs never see it
@@ -370,7 +372,15 @@ jobs:
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-        run: npm --prefix apps/desktop run build -- --bundles nsis,msi --config updater.release.conf.json ${{ steps.signing.outputs.config }}
+        run: |
+          $monitor = Start-Process pwsh -NoNewWindow -PassThru -ArgumentList @('-NoProfile', '-File', 'scripts/release-compile-telemetry.ps1')
+          try {
+            npm --prefix apps/desktop run build -- --bundles nsis,msi --config updater.release.conf.json ${{ steps.signing.outputs.config }}
+            $buildExit = $LASTEXITCODE
+          } finally {
+            Stop-Process -Id $monitor.Id -ErrorAction SilentlyContinue
+          }
+          exit $buildExit
       # Tauri hides a sign command's output unless --verbose, so a failed signature
       # surfaces only as "failed to run node"; print sign-windows.mjs's transcript.
       - name: Show Authenticode signing transcript
@@ -393,13 +403,175 @@ jobs:
       - name: Guard against NC model weights in the desktop bundle (sc-10526, sc-10551)
         shell: bash
         run: node scripts/check-no-nc-weights.mjs --dir target/release/bundle --scan-archives --skip-uninspectable
-      # Upload to the draft release the macos job created. The user ships the MSI
-      # (per desktop-windows.yml); the NSIS .exe is attached too as an alternative.
-      # --clobber so re-running the job replaces rather than 409s. Then merge the
-      # windows-x86_64 entry into the latest.json the macos job seeded (sc-1355): the
-      # NSIS `-setup.exe` is the updater payload; its `.sig` contents go in the
-      # manifest. The artifact the `.sig` signs is derived from the .sig path, so this
-      # stays correct whether Tauri emits a `-setup.exe` or a `.nsis.zip`.
+      # Preserve the signed installers and updater signature for the publication
+      # job, which runs only after all platform builds have succeeded.
+      - name: Pack signed Windows installers
+        shell: bash
+        run: |
+          test -d target/release/bundle/msi
+          test -d target/release/bundle/nsis
+          tar -cf release-windows.tar -C target/release/bundle msi nsis
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-windows
+          path: release-windows.tar
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 2
+
+  linux:
+    # Build steps mirror desktop-linux.yml. The publication job serializes
+    # latest.json updates after all platform builds succeed.
+    if: ${{ github.repository == 'SceneWorks/SceneWorks' && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-22.04
+    env:
+      # Build-side constant, not a secret. Keep this and the CUDA pin aligned
+      # with desktop-linux.yml, server-candle-linux.yml, and Windows.
+      CUDA_COMPUTE_CAP: "80"
+      CARGO_NET_OFFLINE: "true"
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: |
+            apps/web/package-lock.json
+            apps/desktop/package-lock.json
+      - name: Find exact-commit Linux CUDA sidecar
+        id: sidecar
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/release-sidecar-artifact.mjs find linux
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-sidecar-linux
+          run-id: ${{ steps.sidecar.outputs.run-id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/release-sidecar-linux
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: "1.98.0"
+      - name: Verify exact-commit Linux CUDA sidecar
+        env:
+          SCENEWORKS_RELEASE_SIDECAR_RUN_ID: ${{ steps.sidecar.outputs.run-id }}
+        run: node scripts/release-sidecar-artifact.mjs verify linux "$RUNNER_TEMP/release-sidecar-linux"
+      # Save only on `main` — see the note on the `parity-rust` cache step in check.yml. This lane
+      # runs on `refs/tags/v*`, and a tag-scoped cache is readable from no other ref at all, so
+      # saving here only ever consumed budget that the PR lanes needed.
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2 (v2.9.1+1)
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Match the manual Linux packaging lane. gstreamer1.0-libav supplies H.264
+      # decoding for WebKitGTK media playback on stock Ubuntu.
+      - name: Install GTK, WebKitGTK, and media dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential \
+            curl \
+            file \
+            gstreamer1.0-libav \
+            libayatana-appindicator3-dev \
+            libfuse2 \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            squashfs-tools \
+            wget
+
+      - name: Fetch the pinned inference release
+        env:
+          CARGO_NET_OFFLINE: "false"
+        run: cargo fetch --locked
+
+      # Packaging may need the same CUDA shared libraries available to linuxdeploy
+      # as the previous release lane, although it never invokes nvcc here.
+      - name: Install CUDA Toolkit 12.9
+        uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d # v0.2.36
+        with:
+          cuda: "12.9.1"
+          method: "network"
+          linux-local-args: '["--toolkit"]'
+
+      - name: Guard against gen-core version skew (candle)
+        run: |
+          bash scripts/check-gen-core-skew.sh --self-test
+          bash scripts/check-gen-core-skew.sh sceneworks-worker --features backend-candle
+          bash scripts/check-gen-core-skew.sh sceneworks-rust-api --features embed-web,backend-candle
+
+      # Keep install-time lifecycle scripts disabled on the signing lane. The
+      # updater private key is absent here and scoped only to the bundle step.
+      - name: Install web and desktop dependencies
+        run: |
+          npm ci --prefix apps/web --ignore-scripts
+          npm ci --prefix apps/desktop --ignore-scripts
+
+      - name: Validate desktop bundle configuration
+        run: npm --prefix apps/desktop test
+
+      # createUpdaterArtifacts emits the signed AppImage update payload beside
+      # the normal AppImage and deb. Only this step receives the minisign key.
+      - name: Build Linux candle packages + signed AppImage updater
+        env:
+          SCENEWORKS_RELEASE_SIDECAR_ROOT: ${{ runner.temp }}/release-sidecar-linux
+          SCENEWORKS_RELEASE_SIDECAR_RUN_ID: ${{ steps.sidecar.outputs.run-id }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm --prefix apps/desktop run build -- --bundles appimage,deb --config updater.release.conf.json
+
+      - name: Reject host NVIDIA drivers in finished AppImages
+        run: |
+          for appimage in "$GITHUB_WORKSPACE"/target/release/bundle/appimage/*.AppImage; do
+            npm --prefix apps/desktop run check:linux-drivers -- --appimage "$appimage"
+          done
+
+      # The 0.11.0 native CUDA API is 1,189,780,296 B inside the deb's data.tar.gz.
+      # Allow a bounded 1.5 GiB entry; retain compressed/total/count/depth guards.
+      - name: Guard against NC model weights in the desktop bundle (sc-10526, sc-10551)
+        run: node scripts/check-no-nc-weights.mjs --dir target/release/bundle --scan-archives --skip-uninspectable --max-entry-bytes 1610612736
+
+      - name: Pack signed Linux packages
+        run: |
+          test -d target/release/bundle/appimage
+          test -d target/release/bundle/deb
+          tar -cf release-linux.tar -C target/release/bundle appimage deb
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-linux
+          path: release-linux.tar
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 2
+
+  publish-desktop:
+    needs: [macos, windows, linux]
+    if: ${{ github.repository == 'SceneWorks/SceneWorks' && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-windows
+          path: release-artifacts/windows
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-linux
+          path: release-artifacts/linux
+      - name: Unpack signed desktop assets
+        run: |
+          mkdir -p target/release/bundle
+          tar -xf release-artifacts/windows/release-windows.tar -C target/release/bundle
+          tar -xf release-artifacts/linux/release-linux.tar -C target/release/bundle
       - name: Attach Windows installers + merge updater manifest
         shell: bash
         env:
@@ -443,104 +615,6 @@ jobs:
             --out latest.json
           gh release upload "$TAG" --clobber latest.json
 
-  linux:
-    # Attach the Linux packages after Windows has merged its updater entry.
-    # Serializing the latest.json read/modify/write prevents platform entries
-    # from clobbering one another. Build steps mirror desktop-linux.yml.
-    needs: windows
-    if: ${{ github.repository == 'SceneWorks/SceneWorks' && startsWith(github.ref, 'refs/tags/v') }}
-    runs-on: ubuntu-22.04
-    env:
-      # Build-side constant, not a secret. Keep this and the CUDA pin aligned
-      # with desktop-linux.yml, server-candle-linux.yml, and Windows.
-      CUDA_COMPUTE_CAP: "80"
-      CARGO_NET_OFFLINE: "true"
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "20"
-          cache: "npm"
-          cache-dependency-path: |
-            apps/web/package-lock.json
-            apps/desktop/package-lock.json
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
-        with:
-          toolchain: "1.98.0"
-      # Save only on `main` — see the note on the `parity-rust` cache step in check.yml. This lane
-      # runs on `refs/tags/v*`, and a tag-scoped cache is readable from no other ref at all, so
-      # saving here only ever consumed budget that the PR lanes needed.
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2 (v2.9.1+1)
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      # Match the manual Linux packaging lane. gstreamer1.0-libav supplies H.264
-      # decoding for WebKitGTK media playback on stock Ubuntu.
-      - name: Install GTK, WebKitGTK, and media dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y \
-            build-essential \
-            curl \
-            file \
-            gstreamer1.0-libav \
-            libayatana-appindicator3-dev \
-            libfuse2 \
-            libgtk-3-dev \
-            librsvg2-dev \
-            libssl-dev \
-            libwebkit2gtk-4.1-dev \
-            libxdo-dev \
-            patchelf \
-            squashfs-tools \
-            wget
-
-      - name: Fetch the pinned inference release
-        env:
-          CARGO_NET_OFFLINE: "false"
-        run: cargo fetch --locked
-
-      - name: Install CUDA Toolkit 12.9
-        uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d # v0.2.36
-        with:
-          cuda: "12.9.1"
-          method: "network"
-          linux-local-args: '["--toolkit"]'
-
-      - name: Guard against gen-core version skew (candle)
-        run: |
-          bash scripts/check-gen-core-skew.sh --self-test
-          bash scripts/check-gen-core-skew.sh sceneworks-worker --features backend-candle
-          bash scripts/check-gen-core-skew.sh sceneworks-rust-api --features embed-web,backend-candle
-
-      # Keep install-time lifecycle scripts disabled on the signing lane. The
-      # updater private key is absent here and scoped only to the bundle step.
-      - name: Install web and desktop dependencies
-        run: |
-          npm ci --prefix apps/web --ignore-scripts
-          npm ci --prefix apps/desktop --ignore-scripts
-
-      - name: Validate desktop bundle configuration
-        run: npm --prefix apps/desktop test
-
-      # createUpdaterArtifacts emits the signed AppImage update payload beside
-      # the normal AppImage and deb. Only this step receives the minisign key.
-      - name: Build Linux candle packages + signed AppImage updater
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm --prefix apps/desktop run build -- --bundles appimage,deb --config updater.release.conf.json
-
-      - name: Reject host NVIDIA drivers in finished AppImages
-        run: |
-          for appimage in "$GITHUB_WORKSPACE"/target/release/bundle/appimage/*.AppImage; do
-            npm --prefix apps/desktop run check:linux-drivers -- --appimage "$appimage"
-          done
-
-      - name: Guard against NC model weights in the desktop bundle (sc-10526, sc-10551)
-        run: node scripts/check-no-nc-weights.mjs --dir target/release/bundle --scan-archives --skip-uninspectable
-
       - name: Attach Linux packages + merge updater manifest
         shell: bash
         env:
@@ -574,7 +648,7 @@ jobs:
             *) gh release upload "$TAG" --clobber "$payload" ;;
           esac
 
-          # Windows already merged its entry; add Linux last so the published
+          # Windows merged its entry in the preceding step; add Linux last so the published
           # manifest contains all three supported desktop targets.
           gh release download "$TAG" -p latest.json --clobber
           node apps/desktop/scripts/build-update-manifest.mjs \

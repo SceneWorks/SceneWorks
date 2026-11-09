@@ -87,6 +87,19 @@ test("staged artifact is immutable, source-bound, and contains the source helper
   }), /immutable digest/);
 });
 
+test("staged identity accepts implicit and explicit root and rejects unprivileged identities", () => {
+  const validateUser = (User) => validateStagedImage({
+    image: `${repository}@sha256:${"a".repeat(64)}`,
+    revision,
+    inspectJson: { ...inspectJson, Config: { ...inspectJson.Config, User } },
+    installedHashes,
+    sourceHashes,
+  });
+  for (const user of [undefined, "", "root"]) assert.equal(validateUser(user), true);
+  for (const user of ["1000", "1000:1000", "sceneworks", "root:1000"]) {
+    assert.throws(() => validateUser(user), /root-only initialization/);
+  }
+});
 test("promotion uses one staged digest and verifies every promoted AMD64 manifest", async () => {
   const fixture = fixtureManifests();
   const calls = [];
