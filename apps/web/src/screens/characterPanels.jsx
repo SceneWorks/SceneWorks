@@ -8,6 +8,7 @@ import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { terminalStatuses } from "../jobTypes.js";
 import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
 import { LoraPickerField, useLoraSelection } from "../components/LoraPickerField.jsx";
+import { LoraPickerList } from "../components/LoraPickerList.jsx";
 import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../components/StudioUpdateNotice.jsx";
 import { CharacterAdvancedOptions, useCharacterAdvancedOptions } from "../components/CharacterAdvancedOptions.jsx";
 import { KeypointCollectionField } from "../components/KeypointCollectionField.jsx";
@@ -268,6 +269,7 @@ export function CharacterLoras({
   submitLora,
   createLoraDownloadJob,
 }) {
+  const [pickerOpen, setPickerOpen] = React.useState(false);
   const selectedCatalogLora = loras.find((item) => item.id === loraId) ?? null;
   return (
     <section className="character-section">
@@ -276,20 +278,28 @@ export function CharacterLoras({
         <h2>Character adapters</h2>
       </div>
       <form className="inline-create" onSubmit={submitLora}>
-        <select onChange={(event) => setLoraId(event.target.value)} value={loraId}>
-          <option value="">Attach imported LoRA</option>
-          {loras.map((lora) => (
-            <option key={lora.id} value={lora.id}>
-              {updateOptionLabel(lora)}
-            </option>
-          ))}
-        </select>
+        <button aria-expanded={pickerOpen} onClick={() => setPickerOpen((open) => !open)} type="button">
+          {selectedCatalogLora?.name ?? selectedCatalogLora?.id ?? "Attach imported LoRA"}
+        </button>
         <StudioUpdateBadge item={selectedCatalogLora} />
         <StudioUpdateNotice item={selectedCatalogLora} kind="LoRA" onUpdate={createLoraDownloadJob} />
         <button disabled={!loraId} type="submit">
           Attach
         </button>
       </form>
+      {pickerOpen ? (
+        <div className="lora-picker-panel">
+          <LoraPickerList
+            loras={loras}
+            onAdd={(lora) => {
+              setLoraId(lora.id);
+              setPickerOpen(false);
+            }}
+            actionLabel="Select"
+            emptyMessage="No imported LoRAs in the library."
+          />
+        </div>
+      ) : null}
       <div className="lora-editor-list">
         {(selectedCharacter.loras ?? []).map((link) => {
           const edit = loraEdits[link.id] ?? editableLora(link);

@@ -1,10 +1,6 @@
 import React from "react";
-import { LoraKeywordSummary } from "./LoraKeywordSummary.jsx";
-import { StudioUpdateBadge, StudioUpdateNotice } from "./StudioUpdateNotice.jsx";
+import { LoraPickerSection } from "./LoraPickerSection.jsx";
 import {
-  LORA_WEIGHT_MAX,
-  LORA_WEIGHT_MIN,
-  LORA_WEIGHT_STEP,
   MAX_JOB_LORAS_TOTAL,
   loraMatchesModel,
   loraWeight,
@@ -22,7 +18,7 @@ import {
 // character_image payload carries top-level.
 export function useLoraSelection(loras, model) {
   const compatibleLoras = React.useMemo(
-    () => (Array.isArray(loras) ? loras.filter((lora) => loraMatchesModel(lora, model)) : []),
+    () => (Array.isArray(loras) ? loras.filter((lora) => !lora.presetManaged && lora.installState !== "missing" && loraMatchesModel(lora, model)) : []),
     [loras, model],
   );
   const compatibleKey = compatibleLoras.map((lora) => lora.id).join("|");
@@ -69,58 +65,29 @@ export function useLoraSelection(loras, model) {
     [selectedLoraIds, compatibleLoras, weightFor],
   );
 
-  return { compatibleLoras, selectedLoraIds, toggleLora, weightFor, setWeight, serializedLoras };
+  return { model, compatibleLoras, selectedLoraIds, toggleLora, weightFor, setWeight, serializedLoras };
 }
 
-// Presentational picker driven by a useLoraSelection() result. Renders nothing when
-// the active backbone has no compatible LoRAs (the feature is optional — no clutter).
+// Adapt Character/editor selection state to the same picker Image Studio uses.
 export function LoraPickerField({ selection, label = "Style LoRAs (optional)", onUpdateLora }) {
-  const { compatibleLoras, selectedLoraIds, toggleLora, weightFor, setWeight } = selection;
-  if (!compatibleLoras.length) {
-    return null;
-  }
-  // Mirrors the ImageStudio picker markup so it reuses the existing LoRA-choice styles.
+  const { model, compatibleLoras, selectedLoraIds, toggleLora, weightFor, setWeight } = selection;
+  const selectedLoras = selectedLoraIds.map((id) => compatibleLoras.find((lora) => lora.id === id)).filter(Boolean);
   return (
     <div className="character-lora-picker">
-      <p className="eyebrow">{label}</p>
-      <div className="lora-choice-list">
-        {compatibleLoras.map((lora) => {
-          const checked = selectedLoraIds.includes(lora.id);
-          const weight = weightFor(lora);
-          return (
-            <div className="lora-choice-item" key={lora.id}>
-              <label className={checked ? "lora-choice active" : "lora-choice"}>
-                <input checked={checked} onChange={() => toggleLora(lora)} type="checkbox" />
-                <span>
-                  <strong>{lora.name ?? lora.id}<StudioUpdateBadge item={lora} /></strong>
-                  <small>
-                    {lora.scope ?? "global"} {lora.family ? `| ${lora.family}` : ""}
-                  </small>
-                </span>
-              </label>
-              <LoraKeywordSummary lora={lora} />
-              {checked ? (
-                <StudioUpdateNotice item={lora} kind="LoRA" onUpdate={onUpdateLora} />
-              ) : null}
-              {checked ? (
-                <div className="lora-weight-row">
-                  <span>Weight</span>
-                  <input
-                    aria-label={`${lora.name ?? lora.id} weight`}
-                    max={LORA_WEIGHT_MAX}
-                    min={LORA_WEIGHT_MIN}
-                    onChange={(event) => setWeight(lora.id, Number(event.target.value))}
-                    step={LORA_WEIGHT_STEP}
-                    type="range"
-                    value={weight}
-                  />
-                  <span className="lora-weight-value">{weight.toFixed(2)}</span>
-                </div>
-              ) : null}
-            </div>
-          );
-        })}
-      </div>
+      <LoraPickerSection
+        label={label}
+        selectedModel={model}
+        selectedLoras={selectedLoras}
+        selectedLoraIds={selectedLoraIds}
+        compatibleLoras={compatibleLoras}
+        userSelectedLoraCount={selectedLoras.filter((lora) => lora.scope !== "builtin").length}
+        isLoraDisabled={() => selectedLoraIds.length >= MAX_JOB_LORAS_TOTAL}
+        toggleLora={toggleLora}
+        effectiveLoraWeight={weightFor}
+        setLoraWeight={setWeight}
+        loraEmptyMessage={model ? `No installed LoRAs match ${model.name ?? model.id}.` : "No model selected"}
+        onUpdateLora={onUpdateLora}
+      />
     </div>
   );
 }
