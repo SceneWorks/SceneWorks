@@ -9,14 +9,14 @@ export const noPresetId = "__no_preset__";
 // done once, 3 -> 4/5) meant hunting scattered magic numbers and left stale "/3" badges.
 //
 // These MUST stay in sync with the worker guards (single source of truth on that side):
-//   - MAX_JOB_LORAS_TOTAL == crates/sceneworks-worker/src/image_jobs.rs::MAX_JOB_LORAS (5):
+//   - MAX_JOB_LORAS_TOTAL == crates/sceneworks-core/src/lora_family.rs::MAX_JOB_LORAS (10):
 //     the hard per-job total the generation path rejects above (builtin + user combined).
-//   - MAX_USER_JOB_LORAS (4): the user-selectable cap the studio pickers enforce, leaving
-//     headroom for one auto-applied builtin LoRA within the total (pick 4 -> total 5).
-//   - MAX_PRESET_LORAS == the recipe-preset normalizer's cap (5): LoRAs a saved preset holds.
-export const MAX_JOB_LORAS_TOTAL = 5;
-export const MAX_USER_JOB_LORAS = 4;
-export const MAX_PRESET_LORAS = 5;
+//   - MAX_USER_JOB_LORAS (9): the user-selectable cap the studio pickers enforce, leaving
+//     headroom for one auto-applied builtin LoRA within the total (pick 9 -> total 10).
+//   - MAX_PRESET_LORAS == the recipe-preset normalizer's cap (10): LoRAs a saved preset holds.
+export const MAX_JOB_LORAS_TOTAL = 10;
+export const MAX_USER_JOB_LORAS = MAX_JOB_LORAS_TOTAL - 1;
+export const MAX_PRESET_LORAS = MAX_JOB_LORAS_TOTAL;
 
 // LoRA apply-weight slider bounds. Single source of truth so the range can't drift
 // between surfaces — it used to: the studios' pickers were 0..2 while the Preset

@@ -347,7 +347,7 @@ pub const OMITTED_PHASE_LORAS: &str = "advanced.phases[].loras";
 /// The marker exists because the drop-vs-truncate doctrine [`over_cap`] documents rested
 /// on a premise that is empirically false. It argued a reader "cannot tell a plausible subset from
 /// the real thing but can tell an absence" — and an absence is exactly what it cannot tell:
-/// `loras` carries `skip_serializing_if = "Vec::is_empty"`, so a 6-LoRA envelope whose LoRAs were
+/// `loras` carries `skip_serializing_if = "Vec::is_empty"`, so an over-cap LoRA envelope whose LoRAs were
 /// dropped over the cap and a genuinely LoRA-free one serialize BYTE-IDENTICALLY. Same for
 /// `advanced.poses` and `advanced.phases`, which are simply absent keys. sc-15952 would render "no
 /// LoRAs" and offer one-click "Use this recipe" for a recipe that had five.
@@ -1979,7 +1979,7 @@ pub const INPUT_KINDS: &[&str] = &[
 ///
 /// Not a chosen number: it is the hard per-job total the generation path REJECTS above
 /// (`apps/rust-api/src/lib.rs`, the worker's `image_jobs` guard) and the recipe-preset
-/// normalizer's own cap ("Recipe presets can include at most 5 LoRAs"). A run that applied more
+/// normalizer's own cap ("Recipe presets can include at most 10 LoRAs"). A run that applied more
 /// than this could not have happened here, so an envelope claiming it did not come from us.
 const MAX_SHARE_LORAS: usize = crate::lora_family::MAX_JOB_LORAS;
 
@@ -2046,11 +2046,11 @@ const MAX_SHARE_POSE_SLOTS: usize = 16 * (18 + 42 + 68) * 3;
 /// |------|-------|---------------------|
 /// | `prompt` + `negativePrompt` | 32,000 | `MAX_PROMPT_CHARS` (4,000) x 4 bytes, twice |
 /// | `advanced` | 65,536 | `MAX_ADVANCED_JSON_BYTES`, the API's ceiling on the serialized map |
-/// | `loras` | 8,250 | [`MAX_SHARE_LORAS`] x (name + repo at [`LABEL_MAX_CHARS`] x 4 + weight) |
+/// | `loras` | 16,500 | [`MAX_SHARE_LORAS`] x (name + repo at [`LABEL_MAX_CHARS`] x 4 + weight) |
 /// | labels + `upscale` + `producer` + scalars | ~15,000 | [`LABEL_MAX_CHARS`] x 4, per field |
-/// | | **~113,900** | |
+/// | | **~122,200** | |
 ///
-/// 160 KiB leaves 44% headroom over that, which the measured real cases make look enormous: the
+/// 160 KiB leaves 34% headroom over that, which the measured real cases make look enormous: the
 /// golden fixture is 1,239 bytes, a Krea multi-phase recipe at the validators' own ceiling is
 /// ~2 kB, and a long CJK prompt is ~2 kB — all two orders of magnitude under. What the ceiling
 /// refuses is the composition the caps could not: the sanitizer's own per-field bounds still admit
@@ -3944,7 +3944,7 @@ mod tests {
     #[test]
     fn every_collection_cap_is_the_contract_it_came_from() {
         assert_eq!(MAX_SHARE_LORAS, crate::lora_family::MAX_JOB_LORAS);
-        assert_eq!(MAX_SHARE_LORAS, 5);
+        assert_eq!(MAX_SHARE_LORAS, 10);
         assert_eq!(MAX_SHARE_INPUTS, INPUT_KINDS.len());
         // Four image kinds, the video lane's two clip kinds (sc-15956), and the audio reference
         // (sc-17160).
@@ -4366,7 +4366,7 @@ mod tests {
     /// A dropped collection says so, in both directions.
     ///
     /// The premise the drop doctrine rested on — "a reader can tell an absence" — is false: `loras`
-    /// carries `skip_serializing_if = "Vec::is_empty"`, so this test starts by proving that a 6-LoRA
+    /// carries `skip_serializing_if = "Vec::is_empty"`, so this test starts by proving that an over-cap LoRA
     /// envelope whose LoRAs were dropped and a genuinely LoRA-free one would otherwise be BYTE
     /// IDENTICAL, and then that the marker is what tells them apart.
     #[test]
@@ -4378,7 +4378,7 @@ mod tests {
             "mode": "text_to_image",
             "model": "z_image_turbo",
             "prompt": "a lighthouse",
-            "loras": (0..6).map(|index| json!({ "name": format!("Lora {index}"), "weight": 0.5 })).collect::<Vec<Value>>(),
+            "loras": (0..MAX_SHARE_LORAS + 1).map(|index| json!({ "name": format!("Lora {index}"), "weight": 0.5 })).collect::<Vec<Value>>(),
         });
         let mut without_loras = with_loras.clone();
         without_loras
@@ -4483,7 +4483,7 @@ mod tests {
     fn an_over_cap_phase_lora_schedule_is_omitted_not_emptied() {
         let advanced = json!({
             "phases": [
-                { "steps": 4, "loras": (0..6).map(|index| json!({ "index": index, "weight": 0.5 })).collect::<Vec<Value>>() },
+                { "steps": 4, "loras": (0..MAX_SHARE_LORAS + 1).map(|index| json!({ "index": index, "weight": 0.5 })).collect::<Vec<Value>>() },
                 { "steps": 6, "loras": [{ "index": 0, "weight": 0.4 }] },
             ]
         })

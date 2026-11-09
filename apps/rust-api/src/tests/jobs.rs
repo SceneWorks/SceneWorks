@@ -3,6 +3,43 @@ use super::support::*;
 use crate::{validate_prompt_enhancement_fields, validate_prompt_enhancement_payload};
 
 #[test]
+fn image_and_video_jobs_accept_ten_loras_and_reject_eleven() {
+    for count in [10, 11] {
+        let loras: Vec<Value> = (0..count)
+            .map(|index| json!({ "id": format!("style_{index}"), "weight": 1.0 }))
+            .collect();
+        let image = serde_json::from_value(json!({
+            "projectId": "project-1",
+            "model": "z_image_turbo",
+            "mode": "text_to_image",
+            "prompt": "a lighthouse",
+            "loras": loras,
+        }))
+        .expect("image request parses");
+        let video = serde_json::from_value(json!({
+            "projectId": "project-1",
+            "model": "minimax_h3",
+            "mode": "text_to_video",
+            "prompt": "a lighthouse",
+            "loras": loras,
+        }))
+        .expect("video request parses");
+        for result in [
+            crate::validate_image_job(&image),
+            crate::validate_video_job(&video),
+        ] {
+            if count == 10 {
+                result.expect("ten LoRAs are accepted");
+            } else {
+                let error = result.expect_err("eleven LoRAs exceed the cap");
+                assert_eq!(error.status, StatusCode::BAD_REQUEST);
+                assert_eq!(error.detail, "loras must contain at most 10 entries");
+            }
+        }
+    }
+}
+
+#[test]
 fn vector_detail_default_allows_five_minutes_per_svg() {
     assert_eq!(
         crate::dto::VectorDetailBudget::default().max_wall_time_ms,

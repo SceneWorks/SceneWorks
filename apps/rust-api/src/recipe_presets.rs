@@ -982,10 +982,11 @@ pub(crate) fn normalize_recipe_preset_loras(object: &mut JsonObject) -> Result<(
     let items = loras
         .as_array_mut()
         .ok_or_else(|| ApiError::bad_request("Recipe preset loras must be an array"))?;
-    if items.len() > 5 {
-        return Err(ApiError::bad_request(
-            "Recipe presets can include at most 5 LoRAs",
-        ));
+    if items.len() > sceneworks_core::lora_family::MAX_JOB_LORAS {
+        return Err(ApiError::bad_request(format!(
+            "Recipe presets can include at most {} LoRAs",
+            sceneworks_core::lora_family::MAX_JOB_LORAS
+        )));
     }
     for item in items {
         if let Some(id) = item.as_str().map(str::to_owned) {
