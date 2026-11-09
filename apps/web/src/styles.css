@@ -8704,6 +8704,23 @@ input.dataset-name-input.boxed:focus {
   gap: 6px;
 }
 
+.lora-search-list {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.lora-search-input {
+  width: 100%;
+  min-width: 0;
+}
+
+.lora-search-list > .lora-picker-list,
+.lora-search-list > .su-lora-pick-list {
+  max-height: 280px;
+  overflow-y: auto;
+}
+
 .lora-pick-row {
   display: flex;
   justify-content: space-between;

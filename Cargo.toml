@@ -31,7 +31,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.10.4"
+version = "0.11.1"
 edition = "2021"
 rust-version = "1.89"
 license-file = "LICENSE"
@@ -64,7 +64,7 @@ parking_lot = { version = "0.12" }
 mime_guess = { version = "2.0" }
 subtle = { version = "2.6" }
 tower = { version = "0.5", features = ["util"] }
-# Preserve the stores' checked u64/usize bindings with the patched bundled SQLite.
+# Keep checked u64/usize SQL conversions used by the stores on the patched SQLite line.
 rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
 parquet = { version = "60.0", default-features = false, features = ["snap"] }
 rmcp = { version = "=3.9.0" }

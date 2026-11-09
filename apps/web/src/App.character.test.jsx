@@ -1149,10 +1149,14 @@ describe("SceneWorks app shell", () => {
       root.render(withAppContext(baseContext, <CharacterStudio />));
     });
 
-    const loraCheckbox = document.body.querySelector(".character-lora-picker input[type='checkbox']");
-    expect(loraCheckbox).toBeTruthy();
     await act(async () => {
-      loraCheckbox.click();
+      document.body.querySelector(".character-lora-picker .lora-add").click();
+    });
+    expect(document.body.querySelector(".character-lora-picker input[type='search']")).toBeTruthy();
+    const loraRow = document.body.querySelector(".character-lora-picker .lora-pick-row");
+    expect(loraRow.textContent).toContain("Kelsie");
+    await act(async () => {
+      loraRow.click();
     });
 
     const generateButton = [...document.body.querySelectorAll("button")].find((button) =>
@@ -1225,10 +1229,14 @@ describe("SceneWorks app shell", () => {
     await act(async () => {
       poseButton.click();
     });
-    const loraCheckbox = document.body.querySelector(".character-lora-picker input[type='checkbox']");
-    expect(loraCheckbox).toBeTruthy();
     await act(async () => {
-      loraCheckbox.click();
+      document.body.querySelector(".character-lora-picker .lora-add").click();
+    });
+    expect(document.body.querySelector(".character-lora-picker input[type='search']")).toBeTruthy();
+    const loraRow = document.body.querySelector(".character-lora-picker .lora-pick-row");
+    expect(loraRow.textContent).toContain("Kelsie");
+    await act(async () => {
+      loraRow.click();
     });
 
     const generateButton = [...document.body.querySelectorAll("button")].find((button) =>

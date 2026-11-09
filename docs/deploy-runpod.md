@@ -509,15 +509,51 @@ gh workflow run publish-runpod.yml --ref "$candidate_ref" -f "image_tag=$candida
 docker buildx imagetools inspect "ghcr.io/sceneworks/sceneworks-runpod:$candidate_tag"
 ```
 
-The workflow builds and loads both the `linux/amd64` RunPod candidate and exact
-`rust-worker-candle` stage into the hosted runner. One Buildx builder shares the
-compiled CUDA dependency stages. Before any publication, the real API and
-standalone worker pass CPU-only registration, bind-write, and clean-shutdown
-checks for both the image default identity and an explicit UID/GID override.
-The final RunPod publication reuses those cached stages; manual runs leave
-release/latest tags unchanged. The workflow has no nonpublishing mode. These
-hosted checks make no GPU claim; actual CUDA/provider acceptance still requires
-the run below.
+The workflow reads the digest-pinned prebuilt Candle worker's OCI configuration
+from the registry with Buildx, without a local Docker daemon or layer downloads,
+and checks its exact source revision against the current worker inputs before
+building. The combined `linux/amd64`
+RunPod candidate reuses that worker and rebuilds the API/web layer. Before any
+publication, the prebuilt worker and the staged combined image pass CPU-only
+registration, bind-write, and clean-shutdown checks for both the image default
+identity and an explicit UID/GID override. A changed worker input requires a
+fresh validated prebuilt image and Dockerfile digest; the workflow fails closed
+until then. Manual runs leave release/latest tags unchanged. The workflow has
+no nonpublishing mode. These hosted checks make no GPU claim; actual CUDA/provider
+acceptance still requires the run below.
+
+The historical first pinned base was
+`ghcr.io/sceneworks/sceneworks-runpod:candle-prebuilt-6435067` at digest
+`sha256:2ff487bd5aefdf294443ece9ea25e6b55c1cb8c349964af5db4d11990e492fe8`
+(the linux/amd64 image manifest within index
+`sha256:c9218ef4252ecdeffeef2608c1ed94a849fc91746902ad3d6cb62b9a0f53cf81`).
+It retains the exact worker from source `6435067bd5c57aab4e7f0e8722bd53ea6c39ba92`;
+the original Docker build checked its sm_80/sm_90/sm_120 cubins and sm_120 PTX
+before producing the staged image.
+
+The current `0.11.1` base was built by
+[Actions run 42498547124](https://github.com/SceneWorks/SceneWorks/actions/runs/42498547124)
+from source `703d8d884056de9752a2d415d408cc5209483ce9`, after the version bump.
+Its full source tag is
+`ghcr.io/sceneworks/sceneworks-runpod:candle-prebuilt-703d8d884056de9752a2d415d408cc5209483ce9`.
+The Dockerfile pins its `linux/amd64` image manifest
+`sha256:36e0a3fc5bf6a25eb4eaead33e3d07cfb3c10c1db969ecf5955be9737d664d44`
+within OCI index
+`sha256:70a68a018893e8d91ef1c45a61921ef97f49af19e9e68ef863b8fc456aea69ff`.
+The build passed the same sm_80/sm_90/sm_120 cubin and sm_120 PTX checks. The
+source guard includes version metadata, so a version bump also requires a fresh
+worker when it changes those inputs. Moving a human-readable registry tag cannot
+change the digest-pinned release build. Registry metadata inspection does not
+replace the publication workflow's image pulls and CPU startup checks.
+
+When worker inputs change, first merge the reviewed source to `release/next`,
+then dispatch `build-runpod-candle-base.yml` on that ref. Its source build runs
+the same embedded CUDA architecture check and publishes a worker image tagged
+with the full source SHA. Read the resulting immutable `linux/amd64` image
+manifest digest (rather than an attestation-bearing index), update
+`RUNPOD_PREBUILT_CANDLE_IMAGE` in `docker/rust.Dockerfile` through a reviewed PR,
+and run `node scripts/check-runpod-prebuilt-inputs.mjs`. The release publication
+workflow runs that check again against the exact tag and refuses a stale base.
 
 Record the source revision and registry digest and deploy that exact candidate
 with the normal token secret, `/workspace` network mount, and port `8010/http`.

@@ -6,7 +6,7 @@ import {
   loraMatchesModel,
   normalizeLoraFamily,
 } from "../presetUtils.js";
-import { loraMeta } from "./useSimpleLoras.js";
+import { LoraPickerList } from "../components/LoraPickerList.jsx";
 
 // The Add LoRA sheet body (epic 15404): the picker list plus a collapsed inline import,
 // rendered inside Simple's ONE sheet chrome (`SimpleSheet`).
@@ -61,32 +61,13 @@ export function SimpleLoraSheet({ selectedModel, excludeIds = [], atLimit, onAdd
 
   return (
     <>
-      {availableLoras.length ? (
-        <div className="su-lora-pick-list">
-          {availableLoras.map((lora) => {
-            // Builtins don't count against the user cap (they're auto-applied), so they stay
-            // pickable at the limit — the same rule the advanced picker's rows use.
-            const disabled = lora.scope !== "builtin" && atLimit;
-            return (
-              <button
-                className="su-lora-pick-row"
-                disabled={disabled}
-                key={lora.id}
-                onClick={() => onAdd(lora)}
-                type="button"
-              >
-                <span className="su-lora-pick-meta">
-                  <strong>{lora.name ?? lora.id}</strong>
-                  <small>{loraMeta(lora)}</small>
-                </span>
-                <span className="su-lora-pick-add">{disabled ? "Limit reached" : "Add"}</span>
-              </button>
-            );
-          })}
-        </div>
-      ) : (
-        <p className="su-lora-pick-empty">{emptyMessage}</p>
-      )}
+      <LoraPickerList
+        loras={availableLoras}
+        onAdd={onAdd}
+        isDisabled={(lora) => lora.scope !== "builtin" && atLimit}
+        emptyMessage={emptyMessage}
+        variant="simple"
+      />
 
       <LoraImportSection
         activeProject={activeProject}
