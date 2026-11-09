@@ -15,11 +15,11 @@ model-inference-proof = []
 [dependencies]
 reqwest = { workspace = true, features = ["rustls-tls", "json", "stream"] }
 tokio = { workspace = true, features = ["rt", "time", "process", "io-util", "macros"] }
-sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "0bf16fd500d0052f1e18970316fda5de62516765" }
-sceneworks-gen-core-checkpoint = { git = "https://github.com/SceneWorks/inference", rev = "0bf16fd500d0052f1e18970316fda5de62516765" }
-sceneworks-gen-core-moss-image = { git = "https://github.com/SceneWorks/inference", rev = "0bf16fd500d0052f1e18970316fda5de62516765" }
+sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "2be1ecfe4a3efb3883760e25cb3872b024efcc73" }
+sceneworks-gen-core-checkpoint = { git = "https://github.com/SceneWorks/inference", rev = "2be1ecfe4a3efb3883760e25cb3872b024efcc73" }
+sceneworks-gen-core-moss-image = { git = "https://github.com/SceneWorks/inference", rev = "2be1ecfe4a3efb3883760e25cb3872b024efcc73" }
 # The H3 finetune-import codec (minimax_h3_codec) reads the pruned-AdaLN table contract.
-sceneworks-gen-core-h3 = { git = "https://github.com/SceneWorks/inference", rev = "0bf16fd500d0052f1e18970316fda5de62516765" }
+sceneworks-gen-core-h3 = { git = "https://github.com/SceneWorks/inference", rev = "2be1ecfe4a3efb3883760e25cb3872b024efcc73" }
 directories = "5"
 fs2 = { workspace = true }
 # sc-19708: exact-file requirement selection matches receipt files against the manifest's

@@ -20847,6 +20847,36 @@ fn resolve_candle_image_route_sends_imported_single_file_krea_to_the_bespoke_lan
         Some(CandleImageRoute::KreaImportedControl),
         "native NVFP4 fine-tunes retain the Character Studio pose route"
     );
+    let control = dir.path().join("control.safetensors");
+    let spec = super::krea_imported::imported_candle_control_load_spec(
+        &native_pose,
+        &file,
+        dir.path(),
+        &control,
+        Vec::new(),
+    )
+    .expect("native pose spec");
+    assert_eq!(
+        spec.quantize, None,
+        "native packing is detected from the source"
+    );
+    for (tier, expected) in [("q4", Quant::Q4), ("q8", Quant::Q8)] {
+        let mut dense_pose = strict_pose.clone();
+        dense_pose.advanced.insert("quantTier".into(), json!(tier));
+        let spec = super::krea_imported::imported_candle_control_load_spec(
+            &dense_pose,
+            &file,
+            dir.path(),
+            &control,
+            Vec::new(),
+        )
+        .expect("dense pose spec");
+        assert_eq!(
+            spec.quantize,
+            Some(expected),
+            "{tier} must reach the loader"
+        );
+    }
 }
 
 /// The imported Krea 2 lane accepts a plain txt2img job AND an img2img `referenceAssetId` (mode NOT

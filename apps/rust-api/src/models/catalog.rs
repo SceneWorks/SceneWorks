@@ -2295,6 +2295,9 @@ pub(crate) async fn resolve_model_manifest_entry(
     }
     inject_converted_model_path(&mut entry, &state.settings.data_dir);
     if let Some(object) = entry.as_object_mut() {
+        // Job admission and overlay authorization consume this server-owned entry too.
+        // Reapply the same provider surface the catalog exposes instead of trusting client UI data.
+        apply_imported_provider_surface(object);
         // The worker receives the same descriptor-derived selection table and local pinned-file
         // availability as the catalog UI. This keeps enqueue validation and execution on one fact set.
         sceneworks_core::decoder_support::apply_to_model_entry(object);

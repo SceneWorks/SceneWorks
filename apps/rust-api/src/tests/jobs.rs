@@ -4108,7 +4108,6 @@ async fn candle_required_rejects_unsupported_import_before_creating_a_job() {
     let app = create_app(settings).expect("app creates");
 
     for advanced in [
-        json!({ "poses": [{ "id": "pose-1", "keypoints": [] }] }),
         json!({ "controlImage": "control-1" }),
         json!({ "controlMode": "pose" }),
         json!({
@@ -5027,8 +5026,7 @@ async fn retry_and_duplicate_gate_a_merged_imported_shape_the_create_path_refuse
     )
     .expect("user manifest writes");
     let mut settings = test_settings(&temp_dir);
-    // Candle declares krea_2/transformer_file for `generate` but NOT for `pose`, so the plain
-    // request is admitted and the pose replay is the shape with no route.
+    // Candle serves imported pose jobs, while canny and incomplete control intent remain unsupported.
     settings.candle_required = true;
     let app = create_app(settings).expect("app creates");
 
@@ -5056,7 +5054,7 @@ async fn retry_and_duplicate_gate_a_merged_imported_shape_the_create_path_refuse
     let before = before.as_array().expect("jobs array").len();
 
     for advanced in [
-        json!({ "poses": [{ "id": "pose-1", "keypoints": [] }] }),
+        json!({ "poses": [{ "id": "pose-1", "keypoints": [] }], "controlMode": "canny" }),
         json!({ "controlImage": "control-1" }),
         json!({ "controlMode": "pose" }),
     ] {
@@ -5085,16 +5083,83 @@ async fn retry_and_duplicate_gate_a_merged_imported_shape_the_create_path_refuse
         "a refused retry/duplicate must not persist a job"
     );
 
-    // The gate must still pass a merged shape the create path accepts — a prompt-only replay keeps
-    // the admitted generate operation.
+    // A supported pose replay must pass the same admission as a newly created pose job.
     let (status, replayed) = request(
         app,
         "POST",
         &format!("/api/v1/jobs/{job_id}/duplicate"),
-        json!({ "payloadChanges": { "prompt": "fog over hills" } }),
+        json!({ "payloadChanges": { "prompt": "fog over hills", "advanced": {
+            "poses": [{ "id": "pose-1", "keypoints": [] }], "controlMode": "pose"
+        } } }),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{replayed}");
+}
+
+#[tokio::test]
+async fn imported_pose_overlay_uses_the_server_projected_base() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    write_empty_sibling_manifests(&manifest_dir);
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        r#"{"schemaVersion":1,"models":[]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        manifest_dir.join("user.models.jsonc"),
+        r#"{"schemaVersion":1,"models":[{"id":"user_krea","name":"User Krea",
+        "type":"image","family":"krea_2","importSourceShape":"transformer_file",
+        "paths":{"model":"/probe/user-krea.safetensors"}}]}"#,
+    )
+    .unwrap();
+    let overlays: Vec<Value> = [("krea-pose", "krea_2_turbo"), ("foreign-pose", "flux2_dev")]
+        .into_iter()
+        .map(|(id, base)| {
+            json!({
+                "id": id, "name": id, "baseModel": base,
+                "source": {"provider":"huggingface", "repo":"SceneWorks/krea2-pose-controlnet-beta",
+                    "revision":"cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac",
+                    "file":"control_step5000.safetensors"},
+                "files":["control_step5000.safetensors"]
+            })
+        })
+        .collect();
+    std::fs::write(
+        manifest_dir.join("builtin.control_overlays.jsonc"),
+        serde_json::to_vec(&json!({"schemaVersion":1,"controlOverlays":overlays})).unwrap(),
+    )
+    .unwrap();
+    let mut settings = test_settings(&temp_dir);
+    settings.candle_required = cfg!(not(target_os = "macos"));
+    let app = create_app(settings).expect("app creates");
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Fine-tune poses").await;
+    let project_id = project["id"].as_str().expect("project id");
+    for (overlay_id, expected) in [
+        ("krea-pose", StatusCode::CREATED),
+        ("foreign-pose", StatusCode::BAD_REQUEST),
+    ] {
+        let (status, response) = request(app.clone(), "POST", "/api/v1/image/jobs", json!({
+            "projectId":project_id, "model":"user_krea", "prompt":"a person", "count":1,
+            "modelManifestEntry":{"id":"user_krea", "ui":{"controlOverlayBaseModel":"flux2_dev"}},
+            "advanced":{"poses":[{"id":"pose-1","keypoints":[]}],
+                "controlWeights":{"overlayId":overlay_id}}
+        })).await;
+        assert_eq!(status, expected, "{overlay_id}: {response}");
+        if status == StatusCode::CREATED {
+            assert_eq!(
+                response["payload"]["modelManifestEntry"]["ui"]["controlOverlayBaseModel"],
+                "krea_2_turbo",
+                "{response}"
+            );
+            assert_eq!(
+                response["payload"]["advanced"]["controlWeights"]["revision"],
+                "cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac",
+                "{response}"
+            );
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]

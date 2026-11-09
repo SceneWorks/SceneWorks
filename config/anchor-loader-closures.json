@@ -1,7 +1,7 @@
 {
   "_comment": "Per-model loader-closure digests: the memory anchor currency key (sc-22511). An anchor is CURRENT while the digest it recorded still equals the digest here for its (model, backend lane). The unit is the source files the model's loader reaches, and nothing else — not the pin, not sibling models, not shared crates the loader never reaches. Regenerate when the pinned inference revision changes: node scripts/anchor-loader-closure.mjs --repo <inference> --write. A regeneration that leaves the digests unchanged is the expected case. A catalog alias (a model id the inference tree never names, such as z_image_edit) declares the engine id it resolves to as engineId; the alias is part of its hashed closure text.",
   "digestVersion": "anchor-loader-closure v2",
-  "inferenceRevision": "0bf16fd500d0052f1e18970316fda5de62516765",
+  "inferenceRevision": "2be1ecfe4a3efb3883760e25cb3872b024efcc73",
   "models": {
     "bernini:candle": {
       "entryPoints": [
@@ -17840,7 +17840,7 @@
       "entryPoints": [
         "crates/media/candle-gen/candle-gen-krea/src/lib.rs"
       ],
-      "digest": "f6c0beaec37714aea50bd5ba3b57a197708d568e77ef314d2c4ef34667fc34a5",
+      "digest": "1bc043a51881a6ee060fe9f217950f634f05f05dd785a554c3751aa0bd7e3a6d",
       "closureFileCount": 417,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -18804,7 +18804,7 @@
       "entryPoints": [
         "crates/media/candle-gen/candle-gen-krea/src/lib.rs"
       ],
-      "digest": "a40ef036ab295f19380768efb9967a8829584fabfbb287284ddae6f236a9aef8",
+      "digest": "4c9425d9ef72c336a74dc25629b620743f28a7c724f786c8576dd61d132020d5",
       "closureFileCount": 417,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
