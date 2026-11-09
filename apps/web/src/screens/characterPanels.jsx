@@ -7,6 +7,8 @@ import { LikenessBadge } from "../components/LikenessBadge.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { terminalStatuses } from "../jobTypes.js";
 import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
+import { ControlOverlayPicker } from "../components/ControlOverlayPicker.jsx";
+import { controlOverlayBaseModelFor } from "../modelEligibility.js";
 import { LoraPickerField, useLoraSelection } from "../components/LoraPickerField.jsx";
 import { LoraPickerList } from "../components/LoraPickerList.jsx";
 import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../components/StudioUpdateNotice.jsx";
@@ -1272,11 +1274,17 @@ function usePoseController({ activeModel, loraSelection, createLoraDownloadJob }
   const { byId } = usePoseLibrary({ loadUserPoses });
   const [selectedPoseIds, setSelectedPoseIds] = React.useState([]);
   const [faceRestore, setFaceRestore] = React.useState(false);
-  // Strict ControlNet pose-lock strength (sc-2257). Only the strict tier
-  // (ui.poseControlScale) honours advanced.controlScale; default 0.9 matches the
-  // reference pipeline, 0.65–1.0 is the model-card range, >~1.2 degrades quality.
-  const [controlScale, setControlScale] = React.useState(0.9);
+  // Strict ControlNet strength follows the selected provider's range and default. Legacy
+  // pose models without a descriptor retain their existing 0.9 default.
+  const scaleConfig = activeModel?.ui?.controlScale;
+  const [controlScale, setControlScale] = React.useState(scaleConfig?.default ?? 0.9);
+  React.useEffect(() => {
+    setControlScale(scaleConfig?.default ?? 0.9);
+  }, [activeModel?.id, scaleConfig?.default]);
   const supportsControlScale = Boolean(activeModel?.ui?.poseControlScale);
+  const overlayBaseModel = controlOverlayBaseModelFor(activeModel);
+  const [overlayId, setOverlayId] = React.useState(null);
+  React.useEffect(() => { setOverlayId(null); }, [overlayBaseModel]);
 
   function togglePose(id) {
     setSelectedPoseIds((ids) => (ids.includes(id) ? ids.filter((value) => value !== id) : [...ids, id]));
@@ -1294,6 +1302,9 @@ function usePoseController({ activeModel, loraSelection, createLoraDownloadJob }
   return {
     controls: (
       <>
+        {overlayBaseModel ? (
+          <ControlOverlayPicker baseModel={overlayBaseModel} selectedOverlayId={overlayId} onOverlayChange={setOverlayId} />
+        ) : null}
         <PoseLibraryPicker
           categoryFilter
           loadUserPoses={loadUserPoses}
@@ -1311,19 +1322,18 @@ function usePoseController({ activeModel, loraSelection, createLoraDownloadJob }
               <span>Pose lock strength</span>
               <input
                 aria-label="Pose lock strength"
-                max="1.5"
-                min="0.5"
+                max={scaleConfig?.max ?? 1.5}
+                min={scaleConfig?.min ?? 0.5}
                 onChange={(event) => setControlScale(Number(event.target.value))}
-                step="0.05"
+                step={scaleConfig?.step ?? 0.05}
                 type="range"
                 value={controlScale}
               />
               <span className="lora-weight-value">{controlScale.toFixed(2)}</span>
             </div>
             <p className="field-hint">
-              How hard the ControlNet locks the pose. 0.9 (the reference default) is a clean lock; lower
-              (toward 0.65) loosens it for more natural variation, higher (&gt;1.2) over-constrains and can
-              degrade quality.
+              How strongly the ControlNet locks the pose. Lower values allow more variation;
+              higher values follow the pose more closely.
             </p>
           </div>
         ) : null}
@@ -1334,6 +1344,7 @@ function usePoseController({ activeModel, loraSelection, createLoraDownloadJob }
       poses,
       faceRestore,
       ...(supportsControlScale ? { controlScale } : {}),
+      ...(overlayBaseModel && overlayId ? { controlWeights: { overlayId } } : {}),
     },
     isReady: selectedPoseIds.length > 0,
     canSubmit: poses.length > 0,

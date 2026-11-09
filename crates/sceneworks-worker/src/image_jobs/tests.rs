@@ -20817,24 +20817,35 @@ fn resolve_candle_image_route_sends_imported_single_file_krea_to_the_bespoke_lan
     let strict_pose = request(json!({
         "projectId": "p",
         "model": "kreamania_variant4",
+        "mode": "character_image",
+        "characterId": "character_1",
+        "referenceAssetId": "reference_1",
         "advanced": { "poses": [{ "id": "pose-1" }] },
         "modelManifestEntry": {
             "family": "krea_2",
             "modelPath": file.to_str().unwrap()
         }
     }));
-    // No candle route, and that is the truthful answer rather than a gap. `candle-gen-krea`
-    // registers exactly three imported `krea_2` TransformerFile operations — Generate, Edit and
-    // MultiPhase — and no Pose, so the descriptor probe behind `krea_imported_control_available`
-    // finds nothing and the ladder declines. The retired `KREA_IMPORTED_SUPPORTS_POSE_CONTROL`
-    // boolean used to answer `true` here without the engine backing it; declaring a lane is not the
-    // same as reaching one. The scheduler's imported-family mirror refuses the same shape, so a
-    // candle host never claims the job rather than stranding it. MLX, which does register the Pose
-    // provider, keeps its own coverage in the macOS route tests.
     assert_eq!(
         resolve_candle_image_route(&strict_pose, &settings),
-        None,
-        "candle registers no imported Krea pose provider, so the ladder must decline it"
+        Some(CandleImageRoute::KreaImportedControl),
+        "Character Studio's fine-tune pose job reaches the native control loader"
+    );
+    let mut native_pose = strict_pose.clone();
+    native_pose
+        .model_manifest_entry
+        .insert("importQuantFormat".into(), json!("nvfp4"));
+    native_pose
+        .advanced
+        .insert("quantTier".into(), json!("nvfp4"));
+    assert!(super::krea_imported::krea_imported_control_available(
+        &native_pose,
+        &settings
+    ));
+    assert_eq!(
+        resolve_candle_image_route(&native_pose, &settings),
+        Some(CandleImageRoute::KreaImportedControl),
+        "native NVFP4 fine-tunes retain the Character Studio pose route"
     );
 }
 

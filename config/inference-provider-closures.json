@@ -1,7 +1,7 @@
 {
   "_comment": "Per-provider inference compile-closure digests (sc-17774). Calibration currency compares a record's captured closureDigest against the entry here for the SAME provider, so a change to one model's code path can no longer demote another's. Regenerate on every inference pin bump: node scripts/inference-closure-digest.mjs --repo <inference> --write. Derivation, and what this unit deliberately does NOT see, are documented in scripts/inference-closure-digest.mjs.",
   "digestVersion": "inference-closure-digest v4",
-  "inferenceRevision": "c6c0393c59382a1956577f7073676a48db68ab03",
+  "inferenceRevision": "0bf16fd500d0052f1e18970316fda5de62516765",
   "providers": {
     "candle:bernini": {
       "crate": "crates/media/candle-gen/candle-gen-bernini",
@@ -649,7 +649,7 @@
     },
     "candle:krea_2_raw": {
       "crate": "crates/media/candle-gen/candle-gen-krea",
-      "digest": "a6d2b8710fb4cfa86430cd42132a081c3c03540c3df70e7b3e3e0ca72b997130",
+      "digest": "8cd900fbdc28abb07743ee631f4594086dae30a252f8e82d5908231ad959610a",
       "sharedContractDigest": "30c0132d80b89aa1bf55d9bdf233799f26a7cd929f9da73fa78b88e25a6fe262",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -686,13 +686,13 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 648,
+      "sourceFileCount": 649,
       "sharedContractFileCount": 177,
       "lockedPackageCount": 265
     },
     "candle:krea_2_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-krea",
-      "digest": "9c0551c232db0029bf90f7a0199e7b3ec7154bb2725cd33bf203ed4c243e564a",
+      "digest": "37624b74f6e9a4c8477203baf8f99324f6ae66c75f2a74a46409efea9f3bdc4a",
       "sharedContractDigest": "30c0132d80b89aa1bf55d9bdf233799f26a7cd929f9da73fa78b88e25a6fe262",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -729,13 +729,13 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 648,
+      "sourceFileCount": 649,
       "sharedContractFileCount": 177,
       "lockedPackageCount": 265
     },
     "candle:krea_2_turbo_control": {
       "crate": "crates/media/candle-gen/candle-gen-krea",
-      "digest": "a45ce1f3fc6a1967c683d742506c4c9788f3b797873ff1253fcda9a3512f387f",
+      "digest": "1918bdf326fba8dfe0da1ab9ae8d4ac274234eca69b1ccc3b3dc59cfafd3c563",
       "sharedContractDigest": "30c0132d80b89aa1bf55d9bdf233799f26a7cd929f9da73fa78b88e25a6fe262",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -772,7 +772,7 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 648,
+      "sourceFileCount": 649,
       "sharedContractFileCount": 177,
       "lockedPackageCount": 265
     },

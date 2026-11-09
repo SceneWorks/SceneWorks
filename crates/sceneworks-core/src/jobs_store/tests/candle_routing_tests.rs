@@ -968,6 +968,9 @@ fn imported_krea_family_plain_single_file_job_is_candle_eligible() {
         json!({ "mode": "edit_image", "sourceAssetId": "source_1" }),
         json!({ "mode": "edit_image", "referenceAssetIds": ["scene_1", "person_1"] }),
         json!({ "loras": [{ "id": "adapter_1" }] }),
+        json!({ "advanced": { "poses": [{ "id": "pose_1" }] } }),
+        json!({ "mode": "character_image", "characterId": "character_1",
+            "referenceAssetId": "reference_1", "advanced": { "poses": [{ "id": "pose_1" }] } }),
         json!({
             "mode": "edit_image",
             "sourceAssetId": "source_1",
@@ -990,10 +993,7 @@ fn imported_krea_family_plain_single_file_job_is_candle_eligible() {
         );
     }
 
-    // Real structural gaps remain fail-closed: a plural reference outside edit, mask/character,
-    // strict pose (the checked-in candle facts register no `pose` import route), an explicit
-    // control map, and a bare non-edit source are not consumed by this lane and must never be
-    // silently flattened to txt2img.
+    // Unsupported conditioning combinations remain fail-closed rather than dropping inputs.
     let mut unsupported_shapes = Vec::new();
     for extra in [
         json!({ "mode": "edit_image" }),
@@ -1002,7 +1002,7 @@ fn imported_krea_family_plain_single_file_job_is_candle_eligible() {
         json!({ "sourceAssetId": "source_1" }),
         json!({ "maskAssetId": "mask_1" }),
         json!({ "characterId": "character_1" }),
-        json!({ "advanced": { "poses": [{ "id": "pose_1" }] } }),
+        json!({ "advanced": { "poses": [{ "id": "pose_1" }], "controlMode": "canny" } }),
         json!({
             "sourceAssetId": "source_1",
             "advanced": { "poses": [{ "id": "pose_1" }] }
@@ -1049,25 +1049,17 @@ fn imported_krea_family_plain_single_file_job_is_candle_eligible() {
     }))));
 }
 
-/// A strict-pose set on an imported Krea 2 checkpoint is served on MLX (the pose control branch
-/// folds onto the file-loaded DiT) but NOT on candle: the checked-in candle provider facts register
-/// no `pose` import route for `krea_2`, and none of its routes advertise `control` conditioning, so
-/// the exact provider lookup refuses. This pins the shape of that asymmetry so the candle refusal
-/// stays a LOUD, terminal, named gap rather than a job that silently never routes:
-///   * `image_job_is_candle_eligible` is false, so no candle worker ever claims it — the claim gate
-///     and the resolved imported-provider registration agree;
-///   * `candle_supported` returns `Err(reason)`, which is what makes the enforce sweep
-///     (`fail_unsupported_candle_jobs`) fail it terminally with a named feature instead of routing
-///     it to the grace-window "no candle worker yet" sweep, where it would sit queued forever.
-///
-/// The MLX half of the same payload is asserted alongside it, so a future change that quietly drops
-/// the imported pose surface on BOTH backends cannot pass this test by making the candle half green.
+/// Character Studio's Krea fine-tune pose job must be claimable on both native backends.
+/// The pose branch consumes the imported transformer; the character id retains result association.
 #[test]
-fn imported_krea_pose_is_mlx_only_and_candle_refuses_it_terminally() {
+fn imported_krea_character_pose_is_claimable_on_both_native_backends() {
     let pose = json!({
         "projectId": "project_1",
         "model": "kreamania_variant4",
         "prompt": "a woman in a red jacket",
+        "mode": "character_image",
+        "characterId": "character_1",
+        "referenceAssetId": "reference_1",
         "advanced": { "poses": [{ "id": "pose_1" }] },
         "modelManifestEntry": {
             "family": "krea_2",
@@ -1082,16 +1074,11 @@ fn imported_krea_pose_is_mlx_only_and_candle_refuses_it_terminally() {
         "MLX serves the imported pose set through the native control entrypoint"
     );
     assert!(
-        !image_job_is_candle_eligible(&job),
-        "no candle krea_2 pose import route is registered, so it must not claim the job"
+        image_job_is_candle_eligible(&job),
+        "Candle serves the imported character pose through its native control entrypoint"
     );
 
-    let reason = candle_supported(&job)
-        .expect_err("an imported pose set must be a NAMED candle gap, not a silent never-route");
-    assert!(
-        !reason.feature.trim().is_empty() && !reason.detail.trim().is_empty(),
-        "the terminal failure must name the feature and explain it: {reason:?}"
-    );
+    assert!(candle_supported(&job).is_ok());
 }
 
 #[test]

@@ -452,7 +452,10 @@ pub(super) fn krea_imported_request_shape_available(request: &ImageRequest) -> b
         }
         #[cfg(not(target_os = "macos"))]
         {
-            if operation != gen_core::ImportedModelOperation::Generate {
+            if !matches!(
+                operation,
+                gen_core::ImportedModelOperation::Generate | gen_core::ImportedModelOperation::Pose
+            ) {
                 return false;
             }
         }
@@ -474,9 +477,10 @@ pub(super) fn krea_imported_request_shape_available(request: &ImageRequest) -> b
     if imported_model_quant(request, &descriptor, "Imported Krea 2").is_err() {
         return false;
     }
-    // These identities need asset-resolution paths the imported handler does not own.
+    // A strict-pose character id associates the output with Character Studio, as on the builtin
+    // control lane. Other character/look shapes need identity components this loader does not own.
     if request.mask_asset_id.is_some()
-        || request.character_id.is_some()
+        || (request.character_id.is_some() && operation != gen_core::ImportedModelOperation::Pose)
         || request.character_look_id.is_some()
     {
         return false;
@@ -1351,7 +1355,7 @@ pub(super) fn imported_model_quant(
     let selected = if krea_imported_native_nvfp4(request) {
         // Whether NVFP4 rides the LoadSpec at all is the PROVIDER's vocabulary, not the entry's:
         // a provider advertising `Quant::Nvfp4` (the Krea single-file lane) takes the explicit
-        // instruction, while one that does not (the FLUX.2 Klein single-file lane, sc-21485)
+        // instruction, while one that does not (the Krea pose or FLUX.2 Klein single-file lane)
         // derives the packing from the file's compiled plan and takes no quant on its spec — its
         // `supported_quants` lists only the quantize-on-load tiers q4/q8. Either way the request
         // tier is vetted here: anything other than "nvfp4" or nothing must never reach the
