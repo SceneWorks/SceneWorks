@@ -33,7 +33,7 @@ default-members = [
 [workspace.package]
 version = "0.10.4"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.89"
 license-file = "LICENSE"
 
 # Shared logging backbone (observability foundations). `tracing` is the single
