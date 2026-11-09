@@ -32,7 +32,7 @@ use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
         CallToolResult, ContentBlock, Extensions, ProgressNotificationParam, ProgressToken,
-        Resource, ServerCapabilities, ServerInfo,
+        Resource, ServerCapabilities, ServerConfig,
     },
     schemars,
     service::{RequestContext, RoleServer},
@@ -1402,8 +1402,8 @@ impl ProgressReporter {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for SceneWorksMcp {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "SceneWorks local generation studio. Use list_projects for project ids, \
              list_models for the generation model catalog (model ids + job defaults), and \
              list_loras for LoRA adapters compatible with a model family. generate_image \

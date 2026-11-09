@@ -64,9 +64,10 @@ parking_lot = { version = "0.12" }
 mime_guess = { version = "2.0" }
 subtle = { version = "2.6" }
 tower = { version = "0.5", features = ["util"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+# Preserve the stores' checked u64/usize bindings with the patched bundled SQLite.
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
 parquet = { version = "60.0", default-features = false, features = ["snap"] }
-rmcp = { version = "=2.2.0" }
+rmcp = { version = "=3.9.0" }
 imageproc = { version = "0.25", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
