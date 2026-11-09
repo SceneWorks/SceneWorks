@@ -1135,7 +1135,13 @@ async fn validate_and_canonicalize_merged_generation_payload(
     }
     if matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
         if let Some(advanced) = merged.get("advanced").and_then(Value::as_object) {
-            validate_image_pose_count(advanced)?;
+            validate_image_prompt_extras(
+                merged
+                    .get("negativePrompt")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                advanced,
+            )?;
         }
         // PRECEDENCE DIVERGENCE, deliberate: `create_image_job` resolves the control overlay AFTER
         // its LoRA gate, this boundary resolves it BEFORE. Acceptance is equivalent — the two read
