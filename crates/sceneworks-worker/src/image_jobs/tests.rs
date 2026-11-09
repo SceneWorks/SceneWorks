@@ -20879,13 +20879,10 @@ fn resolve_candle_image_route_sends_imported_single_file_krea_to_the_bespoke_lan
     }
 }
 
-/// The imported Krea 2 lane accepts a plain txt2img job AND an img2img `referenceAssetId` (mode NOT
-/// `edit_image`, sc-14071 — reference-guided latent-init), while STILL rejecting every shape that needs
-/// t2i, img2img, adapters, edit, hires, and multi-phase follow the exact live provider registration
-/// on each backend. Pose is claimed by the plain imported predicate only on MLX — Candle registers
-/// no imported Pose operation on `krea_imported_available` and routes it through
-/// `krea_imported_control_available` instead. Base-tier-only shapes (mask, character, a non-edit
-/// reference set, a bare non-edit source) stay rejected on every backend.
+/// Imported Krea generation, reference-guided img2img, adapters, edit, hires, and multi-phase follow
+/// the exact live provider registration on each backend. Both native providers advertise Pose,
+/// dispatched through the more specific `krea_imported_control_available` route. Base-tier-only
+/// shapes (mask, character, a non-edit reference set, a bare non-edit source) remain rejected.
 #[cfg(native_lane)]
 #[test]
 fn krea_imported_available_backend_gates_loras_and_edit() {
@@ -20991,7 +20988,6 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
         "advanced": { "poses": [{ "id": "a" }] },
         "modelManifestEntry": base.clone()
     }));
-    #[cfg(target_os = "macos")]
     {
         assert!(
             krea_imported_available(&pose, &settings),
@@ -21022,18 +21018,9 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
             !krea_imported_available(&unsupported_kind, &settings),
             "Krea Pose supports only the shared strict-control kinds registered for that engine"
         );
-        // `krea_imported_control_available` (the route-claim predicate) is already inside this
-        // macOS-only block, so it resolves without a second cfg attribute.
         assert!(
-            krea_imported_control_available(&pose, &settings),
+            super::krea_imported::krea_imported_control_available(&pose, &settings),
             "...and it is claimed by the pose-control route, not the plain per-image one"
-        );
-    }
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    {
-        assert!(
-            !krea_imported_available(&pose, &settings),
-            "a pose set is rejected on a backend without pose-control support"
         );
     }
 
