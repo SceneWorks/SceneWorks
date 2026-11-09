@@ -477,7 +477,8 @@ const STALE_UPLOAD_SECONDS: u64 = 24 * 60 * 60;
 pub(crate) use sceneworks_core::MAX_PROMPT_CHARS;
 // sc-8884 (F-082): serialized-size ceiling for the free-form `advanced` object. It is a
 // pass-through bag threaded to the worker, so it has no per-key schema — bound its total
-// serialized size instead. 64 KiB is generous for legitimate advanced settings.
+// serialized size instead. Image pose coordinates have a separate bounded data budget in
+// `validate_image_prompt_extras`; the remaining settings still obey this ceiling.
 const MAX_ADVANCED_JSON_BYTES: usize = 64 * 1024;
 
 struct ApiJson<T>(T);
