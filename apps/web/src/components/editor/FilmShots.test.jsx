@@ -76,6 +76,23 @@ async function render(props = {}) {
 }
 
 describe("FilmShots", () => {
+  it("searches the shared LoRA list and adds a compatible adapter to the custom plan", async () => {
+    await render();
+    await act(async () => [...container.querySelectorAll("details summary")].find((node) => node.textContent.startsWith("Advanced video and budget settings")).click());
+    const addButton = () => [...container.querySelectorAll("button")].find((node) => node.textContent === "Add LoRA");
+    await act(async () => addButton().click());
+    const search = container.querySelector("input[type='search']");
+    expect(search).toBeTruthy();
+    await act(async () => change(search, "TURBO"));
+    expect(container.querySelector(".lora-pick-row").textContent).toContain("Turbo");
+    await act(async () => container.querySelector(".lora-pick-row").click());
+    expect(latest.draft.productionPlan.model.loras).toEqual(["turbo"]);
+    expect(latest.draft.renderRegime).toBe("custom");
+    expect(container.querySelector("input[type='search']")).toBeNull();
+    await act(async () => addButton().click());
+    expect(container.querySelector(".lora-pick-row")).toBeNull();
+  });
+
   it("edits conditioning, intent, dialogue placement and dependencies while reordering a subset", async () => {
     await render();
     const second = [...container.querySelectorAll(".ve-film-shot-list button")].find((button) => button.textContent.includes("SH020"));
