@@ -1,5 +1,3 @@
-#[cfg(not(target_os = "macos"))]
-use super::adapters::resolve_adapters;
 use super::adapters::resolve_prepared_adapters;
 use super::adapters::PreparedAdapters;
 #[cfg(not(target_os = "macos"))]
@@ -124,7 +122,7 @@ use serde_json::json;
 // conditioning through the pinned runtime's file-loaded entrypoints. Descriptor contents and per-row
 // scale shapes are validated by the inference loader before dequantization; ConvRot descriptors remain
 // on their separate loader arm. Native NVFP4 is deliberately narrower: Candle/NVIDIA t2i + img2img,
-// without adapters, edit, pose, or multi-phase assembly.
+// without adapters, edit, or multi-phase assembly. Pose uses the native control provider.
 
 /// The adapter/engine id recorded on imported-Krea assets + telemetry (distinct from the registry
 /// `krea_2_turbo` / `krea_2_raw` builtins and their bespoke edit/control/multi-phase lanes).
@@ -452,7 +450,10 @@ pub(super) fn krea_imported_request_shape_available(request: &ImageRequest) -> b
         }
         #[cfg(not(target_os = "macos"))]
         {
-            if operation != gen_core::ImportedModelOperation::Generate {
+            if !matches!(
+                operation,
+                gen_core::ImportedModelOperation::Generate | gen_core::ImportedModelOperation::Pose
+            ) {
                 return false;
             }
         }
@@ -474,9 +475,10 @@ pub(super) fn krea_imported_request_shape_available(request: &ImageRequest) -> b
     if imported_model_quant(request, &descriptor, "Imported Krea 2").is_err() {
         return false;
     }
-    // These identities need asset-resolution paths the imported handler does not own.
+    // A strict-pose character id associates the output with Character Studio, as on the builtin
+    // control lane. Other character/look shapes need identity components this loader does not own.
     if request.mask_asset_id.is_some()
-        || request.character_id.is_some()
+        || (request.character_id.is_some() && operation != gen_core::ImportedModelOperation::Pose)
         || request.character_look_id.is_some()
     {
         return false;
@@ -1112,10 +1114,35 @@ pub(super) async fn generate_krea_imported_control_stream(
     .await
 }
 
-/// Candle twin of the imported strict-pose lane. It stays on the UNcached bespoke assembly
-/// (`runtime_cuda::providers::krea::load_control_from_native_dit_file`) rather than the prepared
-/// `LoadSpec` + cached-generator seam the MLX lane above moved to: the candle single-file control
-/// entrypoint takes plain paths, so there is nothing to key a registry cache on here yet.
+/// Build the Candle control spec through the provider's quantization contract. Native NVFP4
+/// remains a stored format; Q4/Q8 are explicit quantize-on-load instructions for dense imports.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn imported_candle_control_load_spec(
+    request: &ImageRequest,
+    dit: &Path,
+    base: &Path,
+    control: &Path,
+    adapters: Vec<gen_core::AdapterSpec>,
+) -> WorkerResult<LoadSpec> {
+    let descriptor = krea_imported_descriptor(request).ok_or_else(|| {
+        WorkerError::Engine("Krea pose control provider is not registered".to_owned())
+    })?;
+    let (quant, _) = imported_model_quant(request, &descriptor, "Krea 2 imported pose")?;
+    let mut spec = LoadSpec::new(WeightsSource::File(dit.to_path_buf()))
+        .with_component(
+            gen_core::BASE_SNAPSHOT_COMPONENT,
+            WeightsSource::Dir(base.to_path_buf()),
+        )
+        .with_control(WeightsSource::File(control.to_path_buf()))
+        .with_adapters(adapters);
+    if let Some(quant) = quant {
+        spec = spec.with_quant(quant);
+    }
+    Ok(spec)
+}
+
+/// Candle twin of the imported strict-pose lane. Its uncached assembly consumes a prepared
+/// `LoadSpec`, preserving the selected quant tier and the admitted source identities.
 ///
 /// Because it is diverted around the generator cache it gates itself, exactly like the other bespoke
 /// candle routes: [`admit_conditioning_paths`] prices the resolved dense base tier as the footprint
@@ -1132,15 +1159,13 @@ pub(super) async fn generate_krea_imported_control_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
-    let dit = resolve_imported_krea_dit_pin(request, settings)?
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(
-                "Imported Krea 2 checkpoint could not be resolved (family/modelPath/single-file)"
-                    .to_owned(),
-            )
-        })?
-        .loader_path()
-        .to_path_buf();
+    let dit_pin = resolve_imported_krea_dit_pin(request, settings)?.ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "Imported Krea 2 checkpoint could not be resolved (family/modelPath/single-file)"
+                .to_owned(),
+        )
+    })?;
+    let dit = dit_pin.loader_path().to_path_buf();
     // Require the resident base tier before any compute — a clear "install the Krea 2 base first"
     // error (the shared TE/VAE/tokenizer + arch config the control assembly pairs the DiT with).
     let base_dir = resolve_krea_imported_base_tier(settings)?;
@@ -1149,7 +1174,12 @@ pub(super) async fn generate_krea_imported_control_stream(
     let control_weights = resolve_krea_imported_control_overlay(settings, request)?;
     // Job LoRA/LoKr adapters ride additively on the imported DiT (path-confined by the shared
     // helper); the pose control branch is never adapted.
-    let adapters = resolve_adapters(request, settings)?;
+    let PreparedAdapters {
+        specs: adapters,
+        pins: adapter_pins,
+    } = resolve_prepared_adapters(request, settings)?;
+    let control_pin = gen_core::PinnedWeightsFile::pin(&control_weights)
+        .map_err(|error| WorkerError::Engine(format!("Krea pose overlay pin failed: {error}")))?;
 
     // Conditioning-overlay admission (sc-16069) — the dense Krea trunk, the pose-control branch, and
     // every job adapter are held co-resident by this bespoke assembly.
@@ -1211,6 +1241,19 @@ pub(super) async fn generate_krea_imported_control_stream(
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     let adapter_count = adapters.len();
 
+    let spec =
+        imported_candle_control_load_spec(request, &dit, &base_dir, &control_weights, adapters)?;
+    let spec = prepare_manifest_text_encoder_with_file_pins(
+        spec,
+        KREA_IMPORTED_CONTROL_ENGINE_ID,
+        request,
+        settings,
+        std::iter::once(dit_pin)
+            .chain(std::iter::once(control_pin))
+            .chain(adapter_pins),
+        "Krea 2 imported pose source preparation failed",
+    )?;
+
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
         KREA_IMPORTED_ENGINE,
@@ -1221,17 +1264,23 @@ pub(super) async fn generate_krea_imported_control_stream(
             // installs the job adapters, sources the shared TE/VAE/tokenizer from the base tier, and
             // folds the pose control branch onto the file-loaded DiT — the builtin assembly with
             // only the DiT swapped.
-            runtime_cuda::providers::krea::load_control_from_native_dit_file(
-                &dit,
-                &base_dir,
-                &control_weights,
-                &adapters,
+            let paths = runtime_cuda::providers::krea::Krea2ControlPaths {
+                root: base_dir,
+                native_dit: Some(dit),
+                convrot_dit: None,
+                control: control_weights,
+                adapters: spec.adapters.clone(),
+                branch_tier: gen_core::tier_integrity::control_branch_tier(spec.quantize),
+                chunk_attention: false,
+                offload_policy: gen_core::OffloadPolicy::Resident,
+            };
+            runtime_cuda::providers::krea::Krea2Control::load_with_spec(&paths, &spec).map_err(
+                |error| {
+                    WorkerError::Engine(format!(
+                        "Krea 2 imported checkpoint pose-control load failed: {error}"
+                    ))
+                },
             )
-            .map_err(|error| {
-                WorkerError::Engine(format!(
-                    "Krea 2 imported checkpoint pose-control load failed: {error}"
-                ))
-            })
         },
         move |model, tx, cancel| {
             let user_control = user_control.as_ref();
@@ -1351,7 +1400,7 @@ pub(super) fn imported_model_quant(
     let selected = if krea_imported_native_nvfp4(request) {
         // Whether NVFP4 rides the LoadSpec at all is the PROVIDER's vocabulary, not the entry's:
         // a provider advertising `Quant::Nvfp4` (the Krea single-file lane) takes the explicit
-        // instruction, while one that does not (the FLUX.2 Klein single-file lane, sc-21485)
+        // instruction, while one that does not (the Krea pose or FLUX.2 Klein single-file lane)
         // derives the packing from the file's compiled plan and takes no quant on its spec — its
         // `supported_quants` lists only the quantize-on-load tiers q4/q8. Either way the request
         // tier is vetted here: anything other than "nvfp4" or nothing must never reach the

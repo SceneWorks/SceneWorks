@@ -131,6 +131,7 @@ import {
   downloadOffersFor,
   imageModelUsable,
   supportedControlModes,
+  controlOverlayBaseModelFor,
   visionCaptionModelUsable,
 } from "../modelEligibility.js";
 import { ControlPanel } from "../components/ControlPanel.jsx";
@@ -972,7 +973,7 @@ export function ImageStudio() {
   const controlScaleConfig = selectedModel?.ui?.controlScale ?? null;
   // Backbones whose pose control rides a registered trained overlay (sc-10165 B4) advertise
   // `ui.controlOverlay` (Krea 2 Turbo); the ControlPanel then shows a self-fetching overlay picker.
-  const controlOverlayBaseModel = selectedModel?.ui?.controlOverlay ? selectedModel.id : null;
+  const controlOverlayBaseModel = controlOverlayBaseModelFor(selectedModel);
   // The control type actually in effect: the user's pick when the backbone still supports it, else the
   // first supported mode. Decouples the gating (derived) from the raw state so a backbone switch that
   // strands an unsupported pick degrades gracefully even before the reset effect runs.
