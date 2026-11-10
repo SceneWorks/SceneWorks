@@ -28,7 +28,15 @@
 //! **Failure and cancel.** An image whose output cannot be produced (unreadable image, generation
 //! error, reply that is not the six-field object) is returned flagged `failed` with its error rather
 //! than dropped, and the job still completes. A model that cannot load fails the whole job. On cancel
-//! the job ends `canceled` and its result carries every image already processed.
+//! the job ends `canceled` and every image already processed stays readable.
+//!
+//! **Where the items go.** Each finished image is appended, as it finishes, to the job's per-item
+//! results (`POST /api/v1/jobs/:job_id/result-items`, stored beside the job row); the progress and
+//! terminal posts carry only counts. A cumulative item list in the progress result would grow on
+//! every post until a large dataset exceeded the API's JSON body limit (and every `job.updated`
+//! event would carry it). One item is bounded too: each field is capped at
+//! [`MAX_DESCRIBE_FIELD_CHARS`], and an item whose JSON still exceeded the store's
+//! `MAX_JOB_RESULT_ITEM_BYTES` would be replaced by a flagged item without its text.
 
 use super::*;
 
@@ -68,6 +76,13 @@ pub(crate) const JOYCAPTION_PARSE_RETRIES: usize = 2;
 /// Longest error kept on a failed item (an engine error can embed a long backtrace).
 #[cfg(native_lane)]
 const MAX_ITEM_ERROR_CHARS: usize = 1_000;
+
+/// Longest text kept in one description field. The reply budgets (4,096 tokens for the Vision
+/// Captioner, 1,024 for JoyCaption) already bound a parsed reply far below this in practice; the cap
+/// makes the bound independent of the tokenizer, so six fields, each JSON-escaped at worst six
+/// bytes per character, stay well under the store's per-item limit (`MAX_JOB_RESULT_ITEM_BYTES`).
+#[cfg(native_lane)]
+pub(crate) const MAX_DESCRIBE_FIELD_CHARS: usize = 16_000;
 
 /// Which describer the job's `model` field selects.
 #[cfg(native_lane)]
@@ -218,7 +233,7 @@ fn described_fields_from<'a>(
     for (slot, name) in fields.iter_mut().zip(DESCRIBE_FIELDS) {
         *slot = match field(name) {
             None | Some(Value::Null) => String::new(),
-            Some(Value::String(text)) => text.trim().to_owned(),
+            Some(Value::String(text)) => bounded_text(text.trim(), MAX_DESCRIBE_FIELD_CHARS),
             Some(other) => {
                 return Err(format!(
                     "The describer reply's {name:?} field is not a string ({other})."
@@ -578,12 +593,59 @@ impl DescribedItem {
 
 #[cfg(native_lane)]
 fn bounded_error(error: &str) -> String {
-    if error.chars().count() <= MAX_ITEM_ERROR_CHARS {
-        return error.to_owned();
+    bounded_text(error, MAX_ITEM_ERROR_CHARS)
+}
+
+/// `text` cut to at most `max` characters, with an ellipsis marking a cut.
+#[cfg(native_lane)]
+fn bounded_text(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
     }
-    let mut cut: String = error.chars().take(MAX_ITEM_ERROR_CHARS).collect();
+    let mut cut: String = text.chars().take(max).collect();
     cut.push('…');
     cut
+}
+
+/// The item object appended to the job's per-item results: `item`'s JSON, or, if that would exceed
+/// the store's per-item limit (not reachable with the field caps; kept so the append can never be
+/// refused for size), a flagged item that keeps the id and size but no text.
+#[cfg(native_lane)]
+fn stored_item_json(item: &DescribedItem) -> Value {
+    let value = item.to_json();
+    if value.to_string().len() <= sceneworks_core::jobs_store::MAX_JOB_RESULT_ITEM_BYTES {
+        return value;
+    }
+    DescribedItem {
+        item: DescribeItem {
+            relative_path: String::new(),
+            ..item.item.clone()
+        },
+        size: item.size,
+        outcome: Err("The description was too large to store.".to_owned()),
+    }
+    .to_json()
+}
+
+/// Append one finished image to the job's per-item results, as the worker that owns the job. A 409
+/// (the job was canceled, swept or reclaimed) propagates like a rejected progress post.
+#[cfg(native_lane)]
+async fn append_result_item(
+    api: &ApiClient,
+    job_id: &str,
+    position: usize,
+    item: &DescribedItem,
+) -> WorkerResult<()> {
+    let _: Value = api
+        .post_json(
+            &format!("/api/v1/jobs/{job_id}/result-items"),
+            &json!({
+                "workerId": api.worker_id,
+                "items": [{ "position": position, "item": stored_item_json(item) }],
+            }),
+        )
+        .await?;
+    Ok(())
 }
 
 /// The validated job request.
@@ -658,7 +720,8 @@ fn parse_batch_describe_request(
     })
 }
 
-/// The job result: the request echo plus every processed item in dataset order.
+/// The job result: the request echo plus counts. The items themselves are the job's per-item
+/// results (`/result-items`), never this object, so every post that carries it stays small.
 #[cfg(native_lane)]
 fn batch_describe_result(
     request: &BatchDescribeRequest,
@@ -687,10 +750,6 @@ fn batch_describe_result(
     result.insert("describedCount".to_owned(), json!(described.len() - failed));
     result.insert("failedCount".to_owned(), json!(failed));
     result.insert("canceled".to_owned(), json!(canceled));
-    result.insert(
-        "items".to_owned(),
-        Value::Array(described.iter().map(DescribedItem::to_json).collect()),
-    );
     result
 }
 
@@ -812,6 +871,9 @@ async fn run_batch_describe(
                 }
             }
         };
+        // Store the item before the post that counts it, so a reader that sees `processedCount`
+        // reach N can always read N items.
+        append_result_item(api, &job.id, described.len(), &outcome).await?;
         described.push(outcome);
         let done = described.len();
         update_job(

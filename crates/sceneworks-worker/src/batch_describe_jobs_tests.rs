@@ -299,10 +299,12 @@ fn test_settings(data_dir: &Path) -> Settings {
     }
 }
 
-/// What the stub API saw, and the cancel flag it reports.
+/// What the stub API saw (progress posts and `/result-items` appends), and the cancel flag it
+/// reports.
 #[derive(Clone, Default)]
 struct StubApi {
     progress: Arc<Mutex<Vec<Value>>>,
+    appends: Arc<Mutex<Vec<Value>>>,
     cancel: Arc<AtomicBool>,
 }
 
@@ -326,8 +328,35 @@ async fn spawn_stub_api() -> (String, StubApi) {
         |state, _, body| state.progress.lock().expect("progress lock").push(body),
         |_, _| json!({}),
     )
+    .route(
+        "/api/v1/jobs/:job_id/result-items",
+        axum::routing::post(
+            |axum::extract::State(state): axum::extract::State<StubApi>,
+             axum::Json(body): axum::Json<Value>| async move {
+                let mut appends = state.appends.lock().expect("appends lock");
+                appends.push(body);
+                axum::Json(json!({ "total": appends.len() }))
+            },
+        ),
+    )
     .with_state(state.clone());
     (crate::test_api_stub::serve(app).await, state)
+}
+
+/// The items the job appended to `/result-items`, in position order (a re-append of a position
+/// replaces it, as the store does by item id).
+fn stored_items(api: &StubApi) -> Vec<Value> {
+    let mut by_position = std::collections::BTreeMap::new();
+    for body in api.appends.lock().expect("appends lock").iter() {
+        assert_eq!(body["workerId"], "test-worker", "appends name their worker");
+        for entry in body["items"].as_array().expect("append items") {
+            by_position.insert(
+                entry["position"].as_u64().expect("position"),
+                entry["item"].clone(),
+            );
+        }
+    }
+    by_position.into_values().collect()
 }
 
 /// One recorded describe call: (system message, user message, image size).
@@ -521,7 +550,11 @@ async fn every_image_is_returned_in_order_with_size_fields_or_its_failure() {
     assert_eq!(result["describedCount"], 1);
     assert_eq!(result["failedCount"], 2);
     assert_eq!(result["canceled"], false);
-    let items = result["items"].as_array().expect("items");
+    assert!(
+        result.get("items").is_none(),
+        "the items are stored per item, never in the progress result"
+    );
+    let items = stored_items(&api);
     let ids: Vec<_> = items.iter().map(|item| item["itemId"].clone()).collect();
     assert_eq!(ids, vec![json!("item_1"), json!("item_2"), json!("item_3")]);
 
@@ -585,12 +618,24 @@ async fn every_image_is_returned_in_order_with_size_fields_or_its_failure() {
     let running_counts: Vec<_> = posts(&api)
         .iter()
         .filter(|body| body["status"] == "running" && body["result"].is_object())
-        .map(|body| body["result"]["items"].as_array().unwrap().len())
+        .map(|body| body["result"]["processedCount"].clone())
         .collect();
     assert_eq!(
         running_counts,
-        vec![1, 2, 3],
-        "results stream in as images finish"
+        vec![json!(1), json!(2), json!(3)],
+        "counts stream in as images finish"
+    );
+    let appended: Vec<_> = api
+        .appends
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|body| body["items"][0]["position"].clone())
+        .collect();
+    assert_eq!(
+        appended,
+        vec![json!(0), json!(1), json!(2)],
+        "one append per finished image"
     );
 }
 
@@ -615,7 +660,7 @@ async fn a_custom_prompt_and_a_generation_error_are_honoured_per_image() {
     let result = terminal(&api, "completed")["result"].clone();
     assert_eq!(result["promptSource"], "custom");
     assert_eq!(result["prompt"], "Describe only the clothing.");
-    let items = result["items"].as_array().unwrap();
+    let items = stored_items(&api);
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["itemId"], "item_3");
     assert_eq!(items[0]["failed"], true);
@@ -646,8 +691,12 @@ async fn cancelling_mid_run_returns_the_images_already_described() {
     assert_eq!(result["canceled"], true);
     assert_eq!(result["itemCount"], 3);
     assert_eq!(result["processedCount"], 1);
-    let items = result["items"].as_array().unwrap();
-    assert_eq!(items.len(), 1);
+    let items = stored_items(&api);
+    assert_eq!(
+        items.len(),
+        1,
+        "the canceled job keeps the image it finished"
+    );
     assert_eq!(items[0]["itemId"], "item_1");
     assert_eq!(items[0]["failed"], false);
     assert_eq!(items[0]["description"], "first description");
@@ -740,7 +789,7 @@ async fn a_malformed_reply_is_described_again_until_it_parses() {
     assert_eq!(describer.calls.lock().unwrap().len(), 2, "one retry");
     let completed = terminal(&api, "completed");
     assert_eq!(completed["message"], "Described 1 image(s).");
-    let item = &completed["result"]["items"][0];
+    let item = &stored_items(&api)[0];
     assert_eq!(item["failed"], false);
     assert_eq!(item["description"], "retry description");
     assert_eq!(completed["result"]["model"], JOYCAPTION_REPO);
@@ -778,7 +827,7 @@ async fn an_image_whose_replies_never_parse_is_flagged_after_the_last_retry() {
     let completed = terminal(&api, "completed");
     let result = &completed["result"];
     assert_eq!(result["failedCount"], 1);
-    let items = result["items"].as_array().unwrap();
+    let items = stored_items(&api);
     assert_eq!(items.len(), 1, "the failed image is returned, not dropped");
     assert_eq!(items[0]["itemId"], "item_1");
     assert_eq!(items[0]["failed"], true);
@@ -806,7 +855,8 @@ async fn a_generation_error_is_flagged_without_a_retry() {
     .await
     .expect("completes");
     assert_eq!(describer.calls.lock().unwrap().len(), 1);
-    let item = &terminal(&api, "completed")["result"]["items"][0];
+    assert_eq!(terminal(&api, "completed")["result"]["failedCount"], 1);
+    let item = &stored_items(&api)[0];
     assert_eq!(item["failed"], true);
     assert_eq!(item["error"], "JoyCaption MLX generation failed: boom");
 }
@@ -1003,7 +1053,7 @@ async fn joycaption_describes_every_image_with_one_loaded_captioner_and_its_one_
         result["prompt"],
         default_describe_instruction(DescribeModel::JoyCaption)
     );
-    let items = result["items"].as_array().unwrap();
+    let items = stored_items(&api);
     assert_eq!(items.len(), 3);
     for field in DESCRIBE_FIELDS {
         assert_eq!(items[0][field], format!("first {field}"));
@@ -1064,4 +1114,161 @@ async fn the_job_cancel_reaches_the_captioner_before_and_during_a_call() {
         call.canceled_after_progress,
         "the progress callback bridges the cancel"
     );
+}
+
+// ── Bounded posts (SW-7082 review) ────────────────────────────────────────────────────────────
+
+/// A large dataset of long descriptions: every progress and terminal post stays the same small
+/// size however many images are done, each append carries one bounded item, and the stored items
+/// come back complete and in dataset order.
+#[tokio::test]
+async fn posts_stay_bounded_for_a_large_dataset_and_every_item_is_stored_in_order() {
+    const IMAGES: usize = 150;
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let image_path = stage.dataset_root.join("images/item_1.png");
+    let mut job_payload = payload(&stage, None);
+    job_payload["items"] = Value::Array(
+        (0..IMAGES)
+            .map(|index| {
+                json!({
+                    "itemId": format!("item_{index}"),
+                    "imagePath": image_path.display().to_string(),
+                    "relativePath": format!("images/item_{index}.png"),
+                    "assetId": Value::Null,
+                })
+            })
+            .collect(),
+    );
+    // ~6 KB of text per image: 150 images would be ~900 KB in a cumulative result.
+    let long = "word ".repeat(200);
+    let describer = StubDescriber::new(
+        (0..IMAGES)
+            .map(|index| {
+                Ok(Ok(reply(
+                    &DESCRIBE_FIELDS
+                        .iter()
+                        .map(|field| (*field, json!(format!("{index} {field} {long}"))))
+                        .collect::<Vec<_>>(),
+                )))
+            })
+            .collect(),
+    );
+    run_job(&stage, job_payload, &describer)
+        .await
+        .expect("completes");
+
+    // Every post that carries a result carries the same echo (the instruction text included) and
+    // counts, so its size is flat across the run instead of growing ~6 KB per image.
+    let sizes: Vec<usize> = posts(&api)
+        .iter()
+        .filter(|body| body["result"].is_object())
+        .map(|body| body.to_string().len())
+        .collect();
+    assert_eq!(
+        sizes.len(),
+        IMAGES + 1,
+        "a running post per image and the terminal post"
+    );
+    let (smallest, largest) = (*sizes.iter().min().unwrap(), *sizes.iter().max().unwrap());
+    assert!(
+        largest - smallest < 256,
+        "result posts range {smallest}..{largest} bytes; they must not grow with the dataset"
+    );
+    assert!(largest < 16 * 1024, "{largest} bytes");
+    let completed = terminal(&api, "completed");
+    assert_eq!(completed["result"]["processedCount"], IMAGES);
+    assert!(completed["result"].get("items").is_none());
+
+    let appends = api.appends.lock().unwrap().clone();
+    assert_eq!(appends.len(), IMAGES, "one append per image");
+    for body in &appends {
+        assert_eq!(body["items"].as_array().unwrap().len(), 1);
+        assert!(
+            body.to_string().len() <= sceneworks_core::jobs_store::MAX_JOB_RESULT_ITEM_BYTES,
+            "an append carries one bounded item"
+        );
+    }
+    let items = stored_items(&api);
+    let ids: Vec<String> = items
+        .iter()
+        .map(|item| item["itemId"].as_str().unwrap().to_owned())
+        .collect();
+    let expected: Vec<String> = (0..IMAGES).map(|index| format!("item_{index}")).collect();
+    assert_eq!(ids, expected);
+    assert!(items[IMAGES - 1]["description"]
+        .as_str()
+        .unwrap()
+        .starts_with(&format!("{} description word", IMAGES - 1)));
+}
+
+/// The worst case one image can produce — every field at its cap, every character one that JSON
+/// escapes to six bytes, the longest error — still fits the store's per-item limit, and a field
+/// past the cap is cut.
+#[test]
+fn one_image_can_never_exceed_the_per_item_limit() {
+    let escaped = "\u{1}".repeat(MAX_DESCRIBE_FIELD_CHARS * 2);
+    let raw = reply(
+        &DESCRIBE_FIELDS
+            .iter()
+            .map(|field| (*field, json!(escaped)))
+            .collect::<Vec<_>>(),
+    );
+    let parsed = parse_described_fields(&raw).expect("parses");
+    for field in &parsed.fields {
+        assert_eq!(
+            field.chars().count(),
+            MAX_DESCRIBE_FIELD_CHARS + 1,
+            "cut, with an ellipsis"
+        );
+    }
+    let item = DescribeItem {
+        item_id: "item_1".to_owned(),
+        image_path: PathBuf::from("/data/images/item_1.png"),
+        relative_path: "images/item_1.png".to_owned(),
+        asset_id: Some("asset-1".to_owned()),
+    };
+    let described = DescribedItem {
+        item: item.clone(),
+        size: Some((4096, 4096)),
+        outcome: Ok(parsed),
+    };
+    let encoded = stored_item_json(&described).to_string().len();
+    assert!(
+        encoded <= sceneworks_core::jobs_store::MAX_JOB_RESULT_ITEM_BYTES,
+        "{encoded} bytes"
+    );
+    let failed = DescribedItem {
+        item,
+        size: None,
+        outcome: Err("\u{1}".repeat(50_000)),
+    };
+    assert!(
+        stored_item_json(&failed).to_string().len()
+            <= sceneworks_core::jobs_store::MAX_JOB_RESULT_ITEM_BYTES
+    );
+}
+
+/// Should an item still exceed the limit (here through an absurd path), it is stored flagged and
+/// without its text rather than refused, so the job never fails on the append.
+#[test]
+fn an_item_over_the_limit_is_stored_flagged_without_its_text() {
+    let described = DescribedItem {
+        item: DescribeItem {
+            item_id: "item_1".to_owned(),
+            image_path: PathBuf::from("/data/x.png"),
+            relative_path: "\u{1}".repeat(sceneworks_core::jobs_store::MAX_JOB_RESULT_ITEM_BYTES),
+            asset_id: None,
+        },
+        size: Some((10, 20)),
+        outcome: Ok(DescribedFields {
+            fields: std::array::from_fn(|_| "text".to_owned()),
+        }),
+    };
+    let stored = stored_item_json(&described);
+    assert!(stored.to_string().len() <= sceneworks_core::jobs_store::MAX_JOB_RESULT_ITEM_BYTES);
+    assert_eq!(stored["itemId"], "item_1");
+    assert_eq!(stored["failed"], true);
+    assert_eq!(stored["width"], 10);
+    assert_eq!(stored["description"], "");
 }

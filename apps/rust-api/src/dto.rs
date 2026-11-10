@@ -32,6 +32,31 @@ pub(crate) struct MetricsQuery {
     pub(crate) limit: Option<u32>,
 }
 
+/// Paging of a job's per-item results (SW-7082, `GET /api/v1/jobs/:job_id/result-items`).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JobResultItemsQuery {
+    pub(crate) offset: Option<usize>,
+    pub(crate) limit: Option<usize>,
+}
+
+/// One per-item result a worker appends: its order among the job's items, and the item object
+/// (which carries its own `itemId`).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JobResultItemBody {
+    pub(crate) position: u64,
+    pub(crate) item: serde_json::Map<String, Value>,
+}
+
+/// Worker → API append of per-item results (SW-7082, `POST /api/v1/jobs/:job_id/result-items`).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JobResultItemsAppend {
+    pub(crate) worker_id: Option<String>,
+    pub(crate) items: Vec<JobResultItemBody>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PromptRefineRequest {

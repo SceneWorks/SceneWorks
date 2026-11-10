@@ -19,7 +19,13 @@ use crate::contracts::{
 use crate::store_util::{ensure_column, parse_string_enum, random_hex};
 use crate::time::{format_unix_seconds, now_unix_seconds, parse_utc_seconds, utc_now};
 
+mod result_items;
 mod routing;
+
+pub use result_items::{
+    JobResultItemWrite, JobResultItemsPage, JOB_RESULT_ITEMS_PAGE_BYTES,
+    MAX_JOB_RESULT_ITEMS_PAGE_LIMIT, MAX_JOB_RESULT_ITEMS_PER_APPEND, MAX_JOB_RESULT_ITEM_BYTES,
+};
 
 // Re-export the moved routing/gating surface so the store's remaining SQL-coupled dispatch,
 // the `super::*` test modules below, and external consumers keep resolving these names through
@@ -259,6 +265,8 @@ pub enum JobsStoreError {
     /// legal pre-worker statuses (`queued` / `pending_caption`), e.g. a
     /// mid-lifecycle or terminal status. A programmer error, not user input.
     InvalidInitialStatus(String),
+    /// A job result item a worker tried to store is malformed or over its size limit (SW-7082).
+    InvalidResultItem(String),
 }
 
 /// Permit the existing retry freshness control while keeping the authorized source immutable.
@@ -322,6 +330,7 @@ impl std::fmt::Display for JobsStoreError {
                 formatter,
                 "A job can only be created in 'queued', 'pending_caption', or 'pending_workflow' status, not '{status}'."
             ),
+            Self::InvalidResultItem(detail) => write!(formatter, "{detail}"),
         }
     }
 }
@@ -964,6 +973,8 @@ impl JobsStore {
             "veda_execution_json",
             "text",
         )?;
+        // Per-item job results (SW-7082), kept out of the replaced-per-POST `result_json`.
+        transaction.execute_batch(result_items::RESULT_ITEMS_SCHEMA)?;
         backfill_claim_routing_facts(&transaction)?;
         transaction.commit()?;
         Ok(())
@@ -1046,6 +1057,14 @@ impl JobsStore {
             "delete from generation_metrics
               where not exists (select 1 from jobs where jobs.id = generation_metrics.job_id)",
             [],
+        )?;
+        // Per-item results are queue history owned by their job: they go with it.
+        transaction.execute(
+            &format!(
+                "delete from job_result_items where job_id in \
+                 (select id from jobs where {predicate})"
+            ),
+            params![cutoff],
         )?;
         let deleted = transaction.execute(
             &format!("delete from jobs where {predicate}"),

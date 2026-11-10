@@ -227,3 +227,101 @@ async fn batch_describe_accepts_joycaption_with_its_own_prompt_limit() {
         MAX_JOYCAPTION_DESCRIBE_PROMPT_CHARS
     );
 }
+
+/// SW-7082: the describe worker appends each finished image to `/result-items` (its progress
+/// result carries only counts), and the dialog pages them back in dataset order. Only the owning
+/// worker may append, and a canceled job still serves the images it finished.
+#[tokio::test]
+async fn batch_describe_items_are_appended_by_the_owner_and_paged_back_in_order() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id, dataset_id, item_ids, _) = dataset_fixture(&temp_dir).await;
+    let route =
+        format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
+    let (status, job) = request(app.clone(), "POST", &route, json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let job_id = job["id"].as_str().expect("job id").to_owned();
+    const WORKER: &str = "test-describe-worker";
+    claim_job_as_worker(&app, &job_id, WORKER, &["gpu", "prompt_refine"]).await;
+
+    let items_route = format!("/api/v1/jobs/{job_id}/result-items");
+    let item = |index: usize| {
+        json!({
+            "position": index,
+            "item": { "itemId": item_ids[index], "description": format!("image {index}") },
+        })
+    };
+    // Appended out of order; read back by position.
+    for index in [1, 0] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            &items_route,
+            json!({ "workerId": WORKER, "items": [item(index)] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        &items_route,
+        json!({ "workerId": "someone-else", "items": [item(2)] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        &items_route,
+        json!({ "workerId": WORKER, "items": [{ "position": 2, "item": { "description": "x" } }] }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an item needs an id: {body}"
+    );
+
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "workerId": WORKER, "status": "canceled", "stage": "canceled", "progress": 1.0,
+            "message": "canceled", "result": { "processedCount": 2, "itemCount": 3 },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, page) = request(
+        app.clone(),
+        "GET",
+        &format!("{items_route}?offset=0&limit=1"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["total"], 2);
+    assert_eq!(page["nextOffset"], 1);
+    assert_eq!(page["items"][0]["itemId"], item_ids[0].as_str());
+    let (_, page) = request(
+        app.clone(),
+        "GET",
+        &format!("{items_route}?offset=1"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(page["items"][0]["itemId"], item_ids[1].as_str());
+    assert_eq!(page["items"][0]["description"], "image 1");
+    assert_eq!(page["nextOffset"], Value::Null);
+
+    let (status, _) = request(
+        app.clone(),
+        "GET",
+        "/api/v1/jobs/missing-job/result-items",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

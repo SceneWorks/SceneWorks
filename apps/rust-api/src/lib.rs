@@ -39,9 +39,9 @@ use sceneworks_core::image_request::{
 use sceneworks_core::jobs_store::{
     candle_supported, mac_capabilities, mac_rust_supported, model_candle_support,
     model_mac_support, video_job_type_for_mode, video_request_is_claimable_by_any_lane, CreateJob,
-    DuplicateJob, JobsStore, JobsStoreError, MacCapabilities, ProgressUpdate, RegisterWorker,
-    RetryJob, RouteDecision, StaleSweep, UnsupportedReason, WorkerHeartbeat, JOB_STATUSES,
-    MAX_LISTED_JOBS,
+    DuplicateJob, JobResultItemWrite, JobResultItemsPage, JobsStore, JobsStoreError,
+    MacCapabilities, ProgressUpdate, RegisterWorker, RetryJob, RouteDecision, StaleSweep,
+    UnsupportedReason, WorkerHeartbeat, JOB_STATUSES, MAX_LISTED_JOBS,
 };
 use sceneworks_core::limits::{requested_steps, steps_limit_error};
 use sceneworks_core::lora_family::{
@@ -197,8 +197,9 @@ use generation::{validate_interleave_job, validate_vqa_job};
 mod ideogram;
 mod jobs;
 use jobs::{
-    cancel_job, cancel_pending_jobs, claim_job, clear_job, clear_jobs, create_job, duplicate_job,
-    get_job, get_job_metrics, invalidate_model_catalog_for_terminal_jobs, list_jobs, list_metrics,
+    append_job_result_items, cancel_job, cancel_pending_jobs, claim_job, clear_job, clear_jobs,
+    create_job, duplicate_job, get_job, get_job_metrics,
+    invalidate_model_catalog_for_terminal_jobs, list_job_result_items, list_jobs, list_metrics,
     prioritize_jobs, retry_job, update_job_progress, upsert_job_metrics,
 };
 mod workers;
@@ -224,14 +225,15 @@ use dto::{
     DatasetRepointBody, DatasetSubjectMaskJobRequest, DatasetSubjectMasksBody,
     DatasetUpscaleJobRequest, DescribePromptQuery, DirectoriesResponse, EventsQuery,
     FaceLikenessCompareRequest, FrameExtractRequest, HealthResponse, HostCapabilitiesResponse,
-    ImageJobRequest, InterleaveJobRequest, JobsQuery, LoraCatalogItemQuery, LoraImportRequest,
-    LoraUpdateRequest, LorasQuery, MetricsQuery, ModelConvertRequest, ModelDownloadRequest,
-    ModelImportRequest, ModelImportSourceV1, OwnershipModeV1, PersonDetectionJobRequest,
-    PersonTrackCorrectionsRequest, PersonTrackJobRequest, ProjectCreateRequest, PromptBatchesQuery,
-    PromptRefineRequest, QualityAckBody, ReadinessQuery, RecipePresetsQuery,
-    SavedVoiceCreateRequest, StartupReadinessResponse, TimelineCreateRequest,
-    TimelineExportRequest, TimelineSaveRequest, TrainingCaptionJobRequest, VectorMode,
-    VectorPromptWorkflowRequest, VectorRequest, VerifyResponse, VideoJobRequest, VqaJobRequest,
+    ImageJobRequest, InterleaveJobRequest, JobResultItemsAppend, JobResultItemsQuery, JobsQuery,
+    LoraCatalogItemQuery, LoraImportRequest, LoraUpdateRequest, LorasQuery, MetricsQuery,
+    ModelConvertRequest, ModelDownloadRequest, ModelImportRequest, ModelImportSourceV1,
+    OwnershipModeV1, PersonDetectionJobRequest, PersonTrackCorrectionsRequest,
+    PersonTrackJobRequest, ProjectCreateRequest, PromptBatchesQuery, PromptRefineRequest,
+    QualityAckBody, ReadinessQuery, RecipePresetsQuery, SavedVoiceCreateRequest,
+    StartupReadinessResponse, TimelineCreateRequest, TimelineExportRequest, TimelineSaveRequest,
+    TrainingCaptionJobRequest, VectorMode, VectorPromptWorkflowRequest, VectorRequest,
+    VerifyResponse, VideoJobRequest, VqaJobRequest,
 };
 mod manifest;
 // The linked-library lifecycle seam (epic 20398, sc-20635): approve, rename, relink, scan, rescan

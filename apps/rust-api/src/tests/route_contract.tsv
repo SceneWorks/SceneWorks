@@ -331,6 +331,9 @@ POST	/api/v1/jobs/:job_id/progress	token
 GET	/api/v1/jobs/:job_id/metrics	token
 HEAD	/api/v1/jobs/:job_id/metrics	token
 POST	/api/v1/jobs/:job_id/metrics	token
+GET	/api/v1/jobs/:job_id/result-items	token
+HEAD	/api/v1/jobs/:job_id/result-items	token
+POST	/api/v1/jobs/:job_id/result-items	token
 GET	/api/v1/metrics	token
 HEAD	/api/v1/metrics	token
 GET	/api/v1/queue	token
