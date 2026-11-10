@@ -15,6 +15,7 @@ import { formatPromptBatch, snapRatio } from "../promptBatchDescribe.js";
 import { extractKeys } from "../promptBatch.js";
 import { serializePromptBatchExport } from "../promptBatchIO.js";
 import { saveExportFile } from "../saveExportFile.js";
+import { appConfirm } from "../appConfirm.jsx";
 
 // "Create Prompt Batch from Dataset" (SW-7085, feature SW-F362). A vision model describes each
 // dataset image as six fields; the review table lets the user edit them, re-run one image, and save
@@ -192,7 +193,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
         signal: controller.signal,
       });
       if (!itemIds) setRows([]);
-      setRerunItemId(itemIds ? itemIds[0] : null);
+      setRerunItemId(itemIds?.length === 1 ? itemIds[0] : null);
       setJob(created);
       const finished = await pollJob(created.id, controller.signal);
       if (finished.status === "canceled") {
@@ -226,8 +227,28 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   function updateField(itemId, key, value) {
     setSavedBatch(null);
     setRows((current) =>
-      current.map((row) => (row.itemId === itemId ? { ...row, fields: { ...row.fields, [key]: value } } : row)),
+      current.map((row) => (row.itemId === itemId ? { ...row, edited: true, fields: { ...row.fields, [key]: value } } : row)),
     );
+  }
+
+  // Images with no successful result yet: never described (e.g. after a cancel) or flagged.
+  const remainingIds = useMemo(() => {
+    const described = new Set(rows.filter((row) => !row.failed).map((row) => row.itemId));
+    return datasetOrder.filter((id) => !described.has(id));
+  }, [rows, datasetOrder]);
+
+  async function describeAll() {
+    if (rows.some((row) => row.edited)) {
+      const proceed = await appConfirm({
+        title: "Describe every image again?",
+        message: "This replaces the whole table, including the fields you edited. Use “Describe remaining” to describe only images without a result.",
+        confirmLabel: "Describe all again",
+        cancelLabel: "Keep my edits",
+        tone: "danger",
+      });
+      if (!proceed) return;
+    }
+    await submit();
   }
 
   const payload = () => promptBatchPayload({ rows, name: batchName, dataset, model: model.repo });
@@ -453,7 +474,12 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
               {saving ? "Saving…" : "Save prompt batch"}
             </button>
           )}
-          <button className="primary-action" disabled={runBlocked} onClick={() => submit()} type="button">
+          {rows.length && remainingIds.length ? (
+            <button className="secondary-action" disabled={runBlocked} onClick={() => submit(remainingIds)} type="button">
+              Describe remaining ({remainingIds.length})
+            </button>
+          ) : null}
+          <button className="primary-action" disabled={runBlocked} onClick={describeAll} type="button">
             {running && !rerunItemId ? "Describing…" : rows.length ? "Describe all again" : "Describe images"}
           </button>
         </span>

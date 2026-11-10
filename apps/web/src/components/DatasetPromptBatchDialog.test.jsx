@@ -15,10 +15,12 @@ vi.mock("../api/trainingResources.js", () => ({
 vi.mock("../api/jobsResources.js", () => ({ jobsApi: { item: vi.fn(), cancel: vi.fn() } }));
 vi.mock("../pollJob.js", () => ({ abortableDelay: vi.fn(() => Promise.resolve()) }));
 vi.mock("../saveExportFile.js", () => ({ saveExportFile: vi.fn(async () => null) }));
+vi.mock("../appConfirm.jsx", () => ({ appConfirm: vi.fn(async () => true) }));
 
 const { trainingApi } = await import("../api/trainingResources.js");
 const { jobsApi } = await import("../api/jobsResources.js");
 const { saveExportFile } = await import("../saveExportFile.js");
+const { appConfirm } = await import("../appConfirm.jsx");
 const { DatasetPromptBatchDialog } = await import("./DatasetPromptBatchDialog.jsx");
 
 const DEFAULT_PROMPT = "You are a meticulous scene describer.\n## LABELS";
@@ -119,6 +121,7 @@ describe("DatasetPromptBatchDialog", () => {
     jobsApi.item.mockReset().mockImplementation(() => new Promise((resolve) => polls.push(resolve)));
     jobsApi.cancel.mockReset().mockResolvedValue({});
     saveExportFile.mockClear();
+    appConfirm.mockReset().mockResolvedValue(true);
     context = {
       token: "t",
       activeProject: { id: "proj_1" },
@@ -342,6 +345,56 @@ describe("DatasetPromptBatchDialog", () => {
     await click(button("Save prompt"));
     await settle();
     expect(document.body.textContent).toContain("cannot be changed or deleted");
+  });
+
+  it("describes only the remaining images after a cancel and keeps edited rows", async () => {
+    await render();
+    await runWith(
+      [described("item_a", 300, 400), described("item_b", null, null, { failed: true, error: "Unreadable image." })],
+      "canceled",
+    );
+    const rowA = () => document.body.querySelector('[data-item-id="item_a"] textarea');
+    await act(async () => setText(rowA(), "A girl, girl_1, waves."));
+    await click(button("Describe remaining (2)"));
+    await settle();
+    expect(appConfirm).not.toHaveBeenCalled();
+    expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls[1][3].body).itemIds).toEqual(["item_b", "item_c"]);
+    await act(async () =>
+      nextPoll(snapshot("completed", [described("item_b", 400, 300), described("item_c", 300, 300)], { itemCount: 2 })),
+    );
+    await settle();
+    const rows = document.body.querySelectorAll(".dataset-prompt-batch-row");
+    expect([...rows].map((row) => row.dataset.itemId)).toEqual(["item_a", "item_b", "item_c"]);
+    expect(rowA().value).toBe("A girl, girl_1, waves.");
+    expect(document.body.querySelector('[data-item-id="item_b"]').classList.contains("failed")).toBe(false);
+    expect(button("Describe remaining (0)")).toBeUndefined();
+    expect([...document.body.querySelectorAll("button")].some((node) => node.textContent.startsWith("Describe remaining"))).toBe(false);
+  });
+
+  it("asks before Describe all again discards edited fields", async () => {
+    await render();
+    await runWith([described("item_a", 300, 400)]);
+    // No edits: no confirmation.
+    await click(button("Describe all again"));
+    await settle();
+    expect(appConfirm).not.toHaveBeenCalled();
+    expect(trainingApi.batchDescribeJobs).toHaveBeenCalledTimes(2);
+    await act(async () => nextPoll(snapshot("completed", [described("item_a", 300, 400)], { progress: 1 })));
+    await settle();
+
+    await act(async () => setText(document.body.querySelector('[data-item-id="item_a"] textarea'), "Edited."));
+    appConfirm.mockResolvedValueOnce(false);
+    await click(button("Describe all again"));
+    await settle();
+    expect(appConfirm).toHaveBeenCalledTimes(1);
+    expect(trainingApi.batchDescribeJobs).toHaveBeenCalledTimes(2);
+    expect(document.body.querySelector('[data-item-id="item_a"] textarea').value).toBe("Edited.");
+
+    await click(button("Describe all again"));
+    await settle();
+    expect(appConfirm).toHaveBeenCalledTimes(2);
+    expect(trainingApi.batchDescribeJobs).toHaveBeenCalledTimes(3);
+    expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls[2][3].body)).not.toHaveProperty("itemIds");
   });
 
   it("blocks a run while the dataset has unsaved changes", async () => {
