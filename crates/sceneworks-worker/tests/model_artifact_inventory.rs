@@ -154,6 +154,8 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
         source_files: &[
             "crates/sceneworks-worker/src/prompt_refine_jobs.rs",
             "crates/sceneworks-worker/src/prompt_refine_parse.rs",
+            // SW-7082/SW-7083: the dataset batch describer (Vision Captioner or JoyCaption).
+            "crates/sceneworks-worker/src/batch_describe_jobs.rs",
         ],
         categories: &[Category::CaptioningUtility, Category::Primary],
         resolution: Resolution::SharedContract {

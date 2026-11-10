@@ -3551,6 +3551,37 @@ fn gpu_job_rows(
         category: "utility".to_owned(),
         requests: upscale_requests,
     });
+    // The dataset batch describer routes by the capability of its `model` (SW-7083): the Vision
+    // Captioner by `prompt_refine`, JoyCaption (keyed on its repository, as the API sends it) by
+    // `training_caption`.
+    let mut describe_requests = Vec::new();
+    for (capability, model) in [
+        ("model:vision_captioner", "vision_caption_qwen3vl_8b"),
+        (
+            "model:joycaption",
+            crate::dataset_batch_describe::JOYCAPTION_REPO,
+        ),
+    ] {
+        let job = probe_job(
+            JobType::DatasetBatchDescribe,
+            model,
+            json!({ "datasetId": "probe" }),
+        )?;
+        describe_requests.push(routed_cell(
+            capability,
+            model,
+            "utility",
+            &job,
+            mlx_facts,
+            candle_facts,
+            false,
+        )?);
+    }
+    rows.push(JobCapabilityRow {
+        job_type: "dataset_batch_describe".to_owned(),
+        category: "utility".to_owned(),
+        requests: describe_requests,
+    });
     rows.sort_by(|left, right| left.job_type.cmp(&right.job_type));
     Ok(rows)
 }

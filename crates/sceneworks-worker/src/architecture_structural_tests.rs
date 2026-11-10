@@ -272,6 +272,7 @@ fn capability_errors(contracts: &str, jobs_store: &str) -> Vec<String> {
     for (job, capability) in [
         ("ControlTraining", "LoraTrain"),
         ("DatasetSubjectMask", "ImageSegment"),
+        ("DatasetBatchDescribe", "PromptRefine"),
     ] {
         let arm = matched.arms.iter().find(|arm| {
             let mut variants = BTreeSet::new();
@@ -283,8 +284,28 @@ fn capability_errors(contracts: &str, jobs_store: &str) -> Vec<String> {
             errors.push(format!("{job} must explicitly require {capability}"));
         }
     }
+    // SW-7083: a JoyCaption describe job (the guarded arm) requires the JoyCaption captioner.
+    let joycaption_describe = matched.arms.iter().find(|arm| {
+        let mut variants = BTreeSet::new();
+        pattern_variants(&arm.pat, "JobType", &mut variants);
+        arm.guard.is_some() && variants.contains("DatasetBatchDescribe")
+    });
+    if !joycaption_describe.is_some_and(|arm| {
+        arm.body
+            .to_token_stream()
+            .to_string()
+            .contains("WorkerCapability :: TrainingCaption . as_str ()")
+    }) {
+        errors.push("a JoyCaption DatasetBatchDescribe must require TrainingCaption".to_owned());
+    }
     for (job, wire) in &jobs {
-        if !["ControlTraining", "DatasetSubjectMask", "VectorGenerate"].contains(&job.as_str())
+        if ![
+            "ControlTraining",
+            "DatasetSubjectMask",
+            "DatasetBatchDescribe",
+            "VectorGenerate",
+        ]
+        .contains(&job.as_str())
             && !wires.contains(wire)
         {
             errors.push(format!(

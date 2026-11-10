@@ -1460,6 +1460,169 @@ pub(crate) async fn create_training_dataset_subject_mask_job(
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
+/// Enqueue a dataset prompt-batch describe (SW-7082): the Vision Captioner or JoyCaption (SW-7083)
+/// describes each image of the dataset (or of `itemIds`, in dataset order) as six JSON fields plus
+/// its pixel size. The job routes by the capability of its model (`prompt_refine` for the Vision
+/// Captioner, `training_caption` for JoyCaption). The worker
+/// appends the fixed JSON output contract to the describing instruction, so `prompt` carries only
+/// the user's instruction.
+pub(crate) async fn create_training_dataset_batch_describe_job(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<DatasetBatchDescribeJobRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    let (model, prompt) = validate_batch_describe_request(&payload)?;
+    let (dataset, dataset_root, project_name) = project_call(state.clone(), {
+        let project_id = project_id.clone();
+        let dataset_id = dataset_id.clone();
+        move |store| store.training_dataset_for_plan(&project_id, &dataset_id)
+    })
+    .await?;
+    let items = batch_describe_items(&dataset, &dataset_root, payload.item_ids.as_deref())?;
+    let mut job_payload = match json!({
+        "provider": "training",
+        "kind": "dataset_batch_describe",
+        "model": model,
+        "projectId": project_id.clone(),
+        "datasetId": dataset.id,
+        "datasetName": dataset.name,
+        "datasetVersion": dataset.version,
+        "datasetRoot": dataset_root.display().to_string(),
+        "items": items,
+    }) {
+        Value::Object(map) => map,
+        _ => {
+            return Err(ApiError::internal(
+                "dataset batch describe job payload must be an object",
+            ))
+        }
+    };
+    if let Some(prompt) = prompt {
+        job_payload.insert("prompt".to_owned(), json!(prompt));
+    }
+    crate::model_sources::ensure_runtime_model_sources(
+        &state,
+        &JobType::DatasetBatchDescribe,
+        &mut job_payload,
+    )
+    .await?;
+    let requested_gpu = payload.requested_gpu;
+    let job = store_call(state.clone(), move |store, _timeout| {
+        store.create_job(CreateJob {
+            job_type: JobType::DatasetBatchDescribe,
+            project_id: Some(project_id),
+            project_name: Some(project_name),
+            payload: job_payload,
+            requested_gpu,
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+            initial_status: None,
+        })
+    })
+    .await?;
+    publish(&state, "job.updated", &job);
+    publish_queue(&state).await?;
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
+}
+
+/// Validate a batch describe request: the model (absent means the Vision Captioner; JoyCaption is
+/// the other accepted describer) and the instruction length, which depends on the model (JoyCaption
+/// takes one prompt of at most 4,000 characters, so its instruction is capped lower). Returns the
+/// model repo and the trimmed instruction, `None` when the worker's default instruction applies.
+pub(crate) fn validate_batch_describe_request(
+    payload: &DatasetBatchDescribeJobRequest,
+) -> Result<(&'static str, Option<String>), ApiError> {
+    use sceneworks_core::dataset_batch_describe::max_describe_prompt_chars;
+    let model = resolve_describe_model(payload.model.as_deref())?;
+    let prompt = payload
+        .prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty());
+    let limit = max_describe_prompt_chars(Some(model));
+    if prompt.is_some_and(|prompt| prompt.chars().count() > limit) {
+        return Err(training_field_error(
+            "prompt",
+            format!("The describing prompt must be at most {limit} characters for this model."),
+        ));
+    }
+    Ok((model, prompt.map(str::to_owned)))
+}
+
+/// The describe model a request names: absent or blank is the Vision Captioner, JoyCaption is the
+/// other accepted describer, anything else is refused. Shared by the describe job and the default
+/// describing prompt route so both accept exactly the same `model` values.
+pub(crate) fn resolve_describe_model(model: Option<&str>) -> Result<&'static str, ApiError> {
+    use sceneworks_core::dataset_batch_describe::{JOYCAPTION_REPO, VISION_CAPTIONER_REPO};
+    match model.map(str::trim) {
+        None | Some("") | Some(VISION_CAPTIONER_REPO) => Ok(VISION_CAPTIONER_REPO),
+        Some(JOYCAPTION_REPO) => Ok(JOYCAPTION_REPO),
+        Some(other) => Err(training_field_error(
+            "model",
+            format!(
+                "Unsupported describe model {other:?}. Use the Vision Captioner \
+                 ({VISION_CAPTIONER_REPO}) or JoyCaption ({JOYCAPTION_REPO})."
+            ),
+        )),
+    }
+}
+
+/// The worker items of a batch describe job, in dataset order: every item, or exactly the requested
+/// `item_ids` (an unknown id is refused rather than silently skipped).
+fn batch_describe_items(
+    dataset: &sceneworks_core::training::TrainingDataset,
+    dataset_root: &std::path::Path,
+    item_ids: Option<&[String]>,
+) -> Result<Vec<Value>, ApiError> {
+    if let Some(ids) = item_ids {
+        if ids.is_empty() {
+            return Err(training_field_error(
+                "itemIds",
+                "itemIds must name at least one dataset item.",
+            ));
+        }
+        let known: std::collections::HashSet<&str> =
+            dataset.items.iter().map(|item| item.id.as_str()).collect();
+        let unknown: Vec<&str> = ids
+            .iter()
+            .map(String::as_str)
+            .filter(|id| !known.contains(id))
+            .collect();
+        if !unknown.is_empty() {
+            return Err(training_field_error(
+                "itemIds",
+                format!("Unknown dataset item id(s): {}.", unknown.join(", ")),
+            ));
+        }
+    }
+    let wanted: Option<std::collections::HashSet<&str>> =
+        item_ids.map(|ids| ids.iter().map(String::as_str).collect());
+    let items: Vec<Value> = dataset
+        .items
+        .iter()
+        .filter(|item| {
+            wanted
+                .as_ref()
+                .is_none_or(|ids| ids.contains(item.id.as_str()))
+        })
+        .map(|item| {
+            json!({
+                "itemId": item.id,
+                "imagePath": dataset_root.join(&item.path).display().to_string(),
+                "relativePath": item.path,
+                "assetId": item.asset_id,
+            })
+        })
+        .collect();
+    if items.is_empty() {
+        return Err(ApiError::bad_request(
+            "Training dataset has no images to describe.",
+        ));
+    }
+    Ok(items)
+}
+
 /// Persist the worker's generated subject masks (sc-2126). Each base64 PNG is validated and
 /// normalized against its image by the store; the response is the dataset's coverage report plus the
 /// count stored. A metadata write: the dataset version does not change.

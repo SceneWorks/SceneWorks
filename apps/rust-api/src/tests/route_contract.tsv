@@ -8,6 +8,13 @@ GET	/api/v1/training/targets	token
 HEAD	/api/v1/training/targets	token
 GET	/api/v1/training/presets	token
 HEAD	/api/v1/training/presets	token
+GET	/api/v1/training/describe-prompt/default	token
+HEAD	/api/v1/training/describe-prompt/default	token
+GET	/api/v1/training/describe-prompt/presets	token
+HEAD	/api/v1/training/describe-prompt/presets	token
+POST	/api/v1/training/describe-prompt/presets	token
+DELETE	/api/v1/training/describe-prompt/presets/:preset_id	token
+PATCH	/api/v1/training/describe-prompt/presets/:preset_id	token
 GET	/api/v1/training/data-walk	token
 HEAD	/api/v1/training/data-walk	token
 GET	/api/v1/training/iris/stage-presets	token
@@ -84,6 +91,7 @@ POST	/api/v1/projects/:project_id/training/datasets/:dataset_id/parquet-import-j
 POST	/api/v1/projects/:project_id/training/datasets/:dataset_id/parquet-import-finalize	token
 POST	/api/v1/projects/:project_id/training/datasets/:dataset_id/analysis-jobs	token
 POST	/api/v1/projects/:project_id/training/datasets/:dataset_id/face-analysis-jobs	token
+POST	/api/v1/projects/:project_id/training/datasets/:dataset_id/batch-describe-jobs	token
 POST	/api/v1/projects/:project_id/training/datasets/:dataset_id/subject-mask-jobs	token
 GET	/api/v1/projects/:project_id/training/datasets/:dataset_id/subject-masks	token
 HEAD	/api/v1/projects/:project_id/training/datasets/:dataset_id/subject-masks	token
@@ -323,6 +331,9 @@ POST	/api/v1/jobs/:job_id/progress	token
 GET	/api/v1/jobs/:job_id/metrics	token
 HEAD	/api/v1/jobs/:job_id/metrics	token
 POST	/api/v1/jobs/:job_id/metrics	token
+GET	/api/v1/jobs/:job_id/result-items	token
+HEAD	/api/v1/jobs/:job_id/result-items	token
+POST	/api/v1/jobs/:job_id/result-items	token
 GET	/api/v1/metrics	token
 HEAD	/api/v1/metrics	token
 GET	/api/v1/queue	token

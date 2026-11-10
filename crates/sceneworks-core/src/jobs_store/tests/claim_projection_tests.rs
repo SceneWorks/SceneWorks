@@ -205,3 +205,48 @@ fn startup_reprojects_pre_flux3_tier_claim_facts() {
     assert_eq!(capability, "fp8r");
     assert!(!mlx && candle);
 }
+
+/// SW-7083: the dataset batch describe job's capability follows its model. A JoyCaption job needs
+/// the worker that links the JoyCaption captioner (`training_caption`); the Vision Captioner job
+/// (absent model included) needs `prompt_refine`. The persisted claim header agrees.
+#[test]
+fn batch_describe_routes_by_the_capability_of_its_model() {
+    use crate::dataset_batch_describe::{JOYCAPTION_REPO, VISION_CAPTIONER_REPO};
+    let directory = tempfile::tempdir().expect("temp directory");
+    let db_path = directory.path().join("jobs.db");
+    let store = JobsStore::new(&db_path);
+    store.initialize().expect("store initializes");
+    let refiner = worker("mlx", &["prompt_refine"], &[]);
+    let captioner = worker("mlx", &["training_caption"], &[]);
+    let connection = Connection::open(&db_path).expect("db opens");
+    for (model, capability, served_by_refiner) in [
+        (Some(VISION_CAPTIONER_REPO), "prompt_refine", true),
+        (None, "prompt_refine", true),
+        (Some(JOYCAPTION_REPO), "training_caption", false),
+    ] {
+        let mut payload = json!({ "datasetId": "ds-1" });
+        if let Some(model) = model {
+            payload["model"] = json!(model);
+        }
+        let job = create_job(&store, JobType::DatasetBatchDescribe, payload);
+        assert_eq!(required_capability(&job), capability, "{model:?}");
+        let persisted: String = connection
+            .query_row(
+                "select claim_required_capability from jobs where id = ?1",
+                params![job.id],
+                |row| row.get(0),
+            )
+            .expect("persisted capability reads");
+        assert_eq!(persisted, capability, "{model:?}");
+        assert_eq!(
+            worker_supports_job(&refiner, &job),
+            served_by_refiner,
+            "{model:?}"
+        );
+        assert_eq!(
+            worker_supports_job(&captioner, &job),
+            !served_by_refiner,
+            "{model:?}"
+        );
+    }
+}

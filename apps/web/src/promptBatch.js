@@ -179,6 +179,17 @@ export function splitPromptLines(text) {
   return blocks.filter((block) => block !== "");
 }
 
+// The inverse of splitPromptLines: the authoring text for a prompt list. Single-line prompts are
+// one per line. Once any prompt spans lines the text is in block mode (prompts separated by `---`
+// lines), and a lone multi-line prompt gets a trailing `---` line: without one the text has no
+// delimiter, so splitPromptLines would read each of its lines back as a separate prompt.
+export function joinPromptLines(prompts) {
+  const list = (Array.isArray(prompts) ? prompts : []).filter((prompt) => typeof prompt === "string");
+  if (!list.some((prompt) => prompt.includes("\n"))) return list.join("\n");
+  const text = list.join("\n---\n");
+  return list.length === 1 ? `${text}\n---` : text;
+}
+
 // Unique NAMED `{{key}}` names referenced across the prompts, in first-seen order. Inline
 // (`{{a|b}}`) and linked (`{{p:a|b}}`) placeholders are NOT keys — they carry their own
 // values inline — so they never surface a chip editor.

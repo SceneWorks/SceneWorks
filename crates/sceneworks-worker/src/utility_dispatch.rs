@@ -257,6 +257,12 @@ async fn dispatch_utility_job(
         JobType::PromptRefine => run_prompt_refine_job(api, settings, job)
             .await
             .map_err(|error| ("Prompt refinement failed.", error)),
+        // SW-7082: the dataset prompt-batch describe job runs the Vision Captioner over a training
+        // dataset's images through the same native `core_llm::TextLlm` provider as `prompt_refine`,
+        // and routes by that capability.
+        JobType::DatasetBatchDescribe => run_dataset_batch_describe_job(api, settings, job)
+            .await
+            .map_err(|error| ("Dataset batch describe failed.", error)),
         JobType::ModelDownload => run_model_download_job(api, settings, http_client, job)
             .await
             .map_err(|error| ("Model download failed.", error)),
