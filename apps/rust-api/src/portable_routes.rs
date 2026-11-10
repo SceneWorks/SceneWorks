@@ -454,6 +454,53 @@ pub(crate) fn selected_route_source_rows(
             }
         }
     }
+    // `advanced.decoder` selects a component of the OWNING generation-model carrier, never of
+    // every auxiliary entry riding the same job. The enqueue gate
+    // (`validate_selected_decoder_for_manifest`) already judged the selection against the same
+    // server-owned `modelManifestEntry`; an auxiliary carrier attached by
+    // `ensure_runtime_model_sources` (e.g. an Iris upscale task) carries no decoder of its own,
+    // so the previous per-entry capture made such an auxiliary fail the whole route with
+    // "cannot use decoder" and the all-carrier predicate below refused it as unavailable.
+    if matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
+        if let Some(decoder) = advanced
+            .and_then(|value| value.get("decoder"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty() && *value != "native")
+        {
+            let (slot, entry) = owning_decoder_carrier(entries)
+                .ok_or("selected decoder has no owning generation-model carrier")?;
+            let id = entry
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("selected model");
+            let option = entry
+                .pointer(&format!("/decoders/byBackend/{backend}"))
+                .and_then(Value::as_array)
+                .and_then(|options| {
+                    options
+                        .iter()
+                        .find(|option| option.get("id").and_then(Value::as_str) == Some(decoder))
+                })
+                .ok_or_else(|| format!("{id} cannot use decoder {decoder} on {backend}"))?;
+            let component = option
+                .get("componentId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("decoder {decoder} has no component"))?;
+            let download = ["downloads", "conditionalComponents"]
+                .into_iter()
+                .filter_map(|field| entry.get(field).and_then(Value::as_array))
+                .flatten()
+                .find(|row| row.get("componentId").and_then(Value::as_str) == Some(component))
+                .ok_or_else(|| format!("{id} lacks selected component {component}"))?;
+            rows.push(SelectedRouteSource {
+                model_slot: slot.to_owned(),
+                component_id: component.to_owned(),
+                role: ArtifactMemberRole::OptionalComponent,
+                source: SelectedSourceLocation::ManifestDownload(download.clone()),
+                selected_tier: None,
+            });
+        }
+    }
     for (slot, entry) in entries {
         let id = entry
             .get("id")
@@ -701,26 +748,6 @@ pub(crate) fn selected_route_source_rows(
             {
                 push_operator_source(&mut rows, slot, "sdxl_ip_adapter");
                 push_operator_source(&mut rows, slot, "sdxl_ip_encoder");
-            }
-            if let Some(decoder) = advanced
-                .and_then(|value| value.get("decoder"))
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty() && *value != "native")
-            {
-                let option = entry
-                    .pointer(&format!("/decoders/byBackend/{backend}"))
-                    .and_then(Value::as_array)
-                    .and_then(|options| {
-                        options.iter().find(|option| {
-                            option.get("id").and_then(Value::as_str) == Some(decoder)
-                        })
-                    })
-                    .ok_or_else(|| format!("{id} cannot use decoder {decoder} on {backend}"))?;
-                let component = option
-                    .get("componentId")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| format!("decoder {decoder} has no component"))?;
-                add_component(&mut rows, component, ArtifactMemberRole::OptionalComponent)?;
             }
             if matches!(id, "flux3_klein" | "flux3_klein_base")
                 && advanced
@@ -995,6 +1022,19 @@ pub(crate) fn eligible_portable_routes(
     Ok(routes)
 }
 
+/// The carrier slot that owns `advanced.decoder` compatibility and source capture: the selected
+/// generation model itself (`modelManifestEntry`, injected by the typed image route), never an
+/// auxiliary carrier riding the same job — one added by `ensure_runtime_model_sources` (e.g. an
+/// Iris upscale task) advertises no generation decoder. A decoder selection with no owning
+/// carrier cannot be proven compatible, so both the route predicate and source capture fail
+/// closed on the missing slot instead of surveying unrelated entries.
+fn owning_decoder_carrier<'a>(entries: &'a [(String, &'a Value)]) -> Option<(&'a str, &'a Value)> {
+    entries
+        .iter()
+        .find(|(slot, _)| slot == "modelManifestEntry")
+        .map(|(slot, entry)| (slot.as_str(), *entry))
+}
+
 fn selected_decoder_available_on_route(
     job_type: &JobType,
     payload: &JsonObject,
@@ -1013,7 +1053,10 @@ fn selected_decoder_available_on_route(
     else {
         return true;
     };
-    entries.iter().all(|(_, entry)| {
+    // Decoder compatibility is a property of the owning generation-model carrier alone. The
+    // previous all-carrier predicate made every auxiliary carrier advertise the generation
+    // model's decoder, refusing routes whose auxiliaries legitimately carry none of their own.
+    owning_decoder_carrier(entries).is_some_and(|(_, entry)| {
         let component = entry
             .pointer(&format!("/decoders/byBackend/{backend}"))
             .and_then(Value::as_array)
@@ -1667,6 +1710,61 @@ mod tests {
             "macos"
         )
         .is_ok());
+    }
+
+    #[test]
+    fn decoder_compatibility_belongs_to_the_owning_generation_slot() {
+        let entry = json!({
+            "id":"qwen_image",
+            "decoders":{"byBackend":{"mlx":[{"id":"wan_2_1_vae","componentId":"vae"}]}},
+            "downloads":[{"componentId":"vae","required":"soft","repo":"donor/vae",
+                "revision":"0123456789012345678901234567890123456789","files":["vae.safetensors"]}]
+        });
+        // An auxiliary carrier attached by ensure_runtime_model_sources (an Iris upscale task)
+        // carries no decoder of its own and must neither veto the route nor fail source capture.
+        let iris = json!({"id":"iris_3b_restore","type":"utility",
+            "downloads":[{"provider":"huggingface","repo":"speridlabs/iris-3b",
+                "revision":"7445443349bc9abe3c96f01ff793e2098ca012b3",
+                "files":["upscaler/model.safetensors"]}]});
+        let entries = vec![
+            ("modelManifestEntry".to_owned(), &entry),
+            ("modelManifestEntries/0".to_owned(), &iris),
+        ];
+        // The upscale block is what attaches the auxiliary carrier in the real seam
+        // (`fixed_runtime_model_ids` names iris_3b_restore for an enabled Iris pass).
+        let payload = json!({"model":"qwen_image","advanced":{"decoder":"wan_2_1_vae"},
+            "upscale":{"enabled":true,"engine":"iris"}});
+        let payload = payload.as_object().unwrap();
+        assert_eq!(
+            eligible_portable_routes(&JobType::ImageGenerate, payload, &entries, "auto").unwrap(),
+            vec![("mlx".to_owned(), "macos".to_owned())]
+        );
+        let rows =
+            selected_route_source_rows(&JobType::ImageGenerate, payload, &entries, "mlx", "macos")
+                .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].model_slot, "modelManifestEntry");
+        assert_eq!(rows[0].component_id, "vae");
+        // A decoder selection with no owning generation-model carrier fails closed instead of
+        // surveying unrelated auxiliary entries.
+        let auxiliary_only = [("modelManifestEntries/0".to_owned(), &iris)];
+        assert!(!selected_decoder_available_on_route(
+            &JobType::ImageGenerate,
+            payload,
+            &auxiliary_only,
+            "mlx",
+        ));
+        assert_eq!(
+            selected_route_source_rows(
+                &JobType::ImageGenerate,
+                payload,
+                &auxiliary_only,
+                "mlx",
+                "macos",
+            )
+            .unwrap_err(),
+            "selected decoder has no owning generation-model carrier"
+        );
     }
 
     #[test]

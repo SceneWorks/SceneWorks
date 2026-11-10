@@ -2986,21 +2986,31 @@ fn collect_source_files(
             "local model source exceeds portable closure bounds",
         ));
     }
-    let path = confine_artifact_path(path, allowed_roots)
+    // Confinement, directory reads and hashing resolve through the CANONICAL target; the
+    // loader-visible relative name follows the link itself. Replacing `path` with its canonical
+    // symlink target (the previous behavior) rebased each linked child onto the target's root,
+    // so `strip_prefix(root)` rejected a valid linked file — a converted install's borrowed
+    // text-encoder/VAE absolute symlinks — as "escaping its selected source". The two concerns
+    // stay separate: a link must still confine to a managed root (a target outside every allowed
+    // root is refused below), but its in-source name is what the loader opens, including inside
+    // linked directories.
+    let canonical = confine_artifact_path(path, allowed_roots)
         .map_err(|error| incomplete(error.to_string()))?;
-    if path.is_dir() {
-        let mut children = std::fs::read_dir(&path)
+    let metadata = std::fs::metadata(&canonical)
+        .map_err(|error| incomplete(format!("local model source is unavailable: {error}")))?;
+    if metadata.is_dir() {
+        let mut children = std::fs::read_dir(&canonical)
             .map_err(|error| incomplete(format!("local model directory is unreadable: {error}")))?
-            .map(|entry| entry.map(|entry| entry.path()))
+            .map(|entry| entry.map(|entry| entry.file_name()))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| incomplete(format!("local model directory is unreadable: {error}")))?;
         children.sort();
         for child in children {
-            collect_source_files(root, &child, allowed_roots, selected, depth + 1)?;
+            collect_source_files(root, &path.join(child), allowed_roots, selected, depth + 1)?;
         }
         return Ok(());
     }
-    if !path.is_file() {
+    if !metadata.is_file() {
         return Err(incomplete(
             "selected local model source is not a regular file",
         ));
@@ -3028,10 +3038,8 @@ fn collect_source_files(
         // markers. Keep the portable byte ledger identical to that content scope.
         return Ok(());
     }
-    let size_bytes = std::fs::metadata(&path)
-        .map_err(|error| incomplete(format!("local model file is unavailable: {error}")))?
-        .len();
-    let sha256 = sceneworks_core::hashing::sha256_file(&path)
+    let size_bytes = metadata.len();
+    let sha256 = sceneworks_core::hashing::sha256_file(&canonical)
         .map_err(|error| incomplete(format!("local model file cannot be hashed: {error}")))?;
     selected.push(PortableArtifactFile {
         relative_path,
@@ -3469,6 +3477,87 @@ mod tests {
         let files = capture_local_source_files(root.path(), &[root.path().to_path_buf()]).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].relative_path, PathBuf::from("weights.safetensors"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_local_sources_keep_loader_names_and_stay_confined() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let install = root.path().join("models/mlx/anima_base/bf16");
+        std::fs::create_dir_all(install.join("vae")).unwrap();
+        std::fs::write(install.join("dit.safetensors"), b"packed dit").unwrap();
+        // A converted install borrows its dense VAE and text encoder as absolute symlinks into a
+        // managed root OUTSIDE the selected source (the HF cache under the same data dir).
+        let borrowed = root.path().join("models/hf-cache/borrowed");
+        std::fs::create_dir_all(borrowed.join("text_encoder")).unwrap();
+        std::fs::write(borrowed.join("vae.safetensors"), b"borrowed vae").unwrap();
+        std::fs::write(
+            borrowed.join("text_encoder/model.safetensors"),
+            b"borrowed text encoder",
+        )
+        .unwrap();
+        symlink(
+            borrowed.join("vae.safetensors"),
+            install.join("vae/qwen_image_vae.safetensors"),
+        )
+        .unwrap();
+        symlink(borrowed.join("text_encoder"), install.join("text_encoder")).unwrap();
+
+        let digest = |path: std::path::PathBuf| {
+            format!(
+                "sha256:{}",
+                sceneworks_core::hashing::sha256_file(&path).unwrap()
+            )
+        };
+        // Linked files — and the contents of a linked directory — keep their loader-visible
+        // in-source names, hashed through the link target's bytes.
+        let expected = [
+            (
+                PathBuf::from("dit.safetensors"),
+                std::fs::metadata(install.join("dit.safetensors"))
+                    .unwrap()
+                    .len(),
+                digest(install.join("dit.safetensors")),
+            ),
+            (
+                PathBuf::from("text_encoder/model.safetensors"),
+                std::fs::metadata(borrowed.join("text_encoder/model.safetensors"))
+                    .unwrap()
+                    .len(),
+                digest(borrowed.join("text_encoder/model.safetensors")),
+            ),
+            (
+                PathBuf::from("vae/qwen_image_vae.safetensors"),
+                std::fs::metadata(borrowed.join("vae.safetensors"))
+                    .unwrap()
+                    .len(),
+                digest(borrowed.join("vae.safetensors")),
+            ),
+        ];
+        let actual = capture_local_source_files(&install, &[root.path().to_path_buf()])
+            .unwrap()
+            .into_iter()
+            .map(|file| (file.relative_path, file.size_bytes, file.sha256))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+
+        // A link whose target escapes every managed root stays refused before any read.
+        let escape = tempfile::tempdir().unwrap();
+        std::fs::write(escape.path().join("escape.safetensors"), b"outside").unwrap();
+        symlink(
+            escape.path().join("escape.safetensors"),
+            install.join("escaped.safetensors"),
+        )
+        .unwrap();
+        let error = capture_local_source_files(&install, &[root.path().to_path_buf()])
+            .unwrap_err()
+            .detail;
+        assert!(
+            error.contains("outside every managed root"),
+            "escaping link must stay refused: {error}"
+        );
     }
 
     #[test]
