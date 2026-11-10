@@ -6609,7 +6609,9 @@ fn resolve_base_model_path_prefers_converted_mlx_dir_for_conversion_models() {
 ///   4. a second completion of the same job does not duplicate the catalog entry.
 #[tokio::test]
 async fn completed_full_finetune_registers_a_selectable_model_not_a_lora() {
-    let _env = isolate_hf_cache();
+    // `training_env("64")`: the staged-fixture bytes give the full-tune memory gate a real
+    // signal, so pin a deterministic budget instead of the live host probe (see the helper).
+    let _env = crate::tests::support::training_env("64");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings.clone()).expect("app creates");
@@ -6856,7 +6858,8 @@ async fn completed_full_finetune_registers_a_selectable_model_not_a_lora() {
 /// files exists.
 #[tokio::test]
 async fn a_torn_full_finetune_checkpoint_is_refused_with_a_reason() {
-    let _env = isolate_hf_cache();
+    // Same deterministic budget as the registration twin above (`training_env`).
+    let _env = crate::tests::support::training_env("64");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings.clone()).expect("app creates");

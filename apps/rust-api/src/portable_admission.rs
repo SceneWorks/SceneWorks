@@ -434,7 +434,13 @@ pub(crate) async fn validate_frozen_replay_binding(
     // The private persisted ledger was authenticated at original admission. Replay checks the
     // current source policy and exact local/worker availability without contacting mutable HEAD
     // or requiring a second publisher metadata lookup during an API network outage.
-    let candidate = replay_from_frozen_policy(job_type, payload, requested_gpu, frozen)?;
+    let candidate = replay_from_frozen_policy(
+        &state.settings.data_dir,
+        job_type,
+        payload,
+        requested_gpu,
+        frozen,
+    )?;
     for (key, route) in &candidate.routes {
         if frozen.routes.get(key) != Some(route) {
             return Err(incomplete(format!(
@@ -447,6 +453,7 @@ pub(crate) async fn validate_frozen_replay_binding(
 }
 
 fn replay_from_frozen_policy(
+    data_dir: &Path,
     job_type: &JobType,
     payload: &JsonObject,
     requested_gpu: &str,
@@ -476,6 +483,7 @@ fn replay_from_frozen_policy(
         payload,
         &entries,
         requested_gpu,
+        data_dir,
     )? {
         let key = format!("{backend}:{platform}");
         let Some(route) = frozen.routes.get(&key) else {
@@ -658,6 +666,7 @@ pub(crate) async fn derive_vector_raster_child_binding(
         child_payload,
         &entries,
         requested_gpu,
+        &state.settings.data_dir,
     )? {
         let key = format!("{backend}:{platform}");
         let Some(parent_route) =
@@ -815,6 +824,7 @@ async fn capture_portable_model_binding_inner(
         payload,
         &entries,
         requested_gpu,
+        &state.settings.data_dir,
     )? {
         let frozen_route = frozen
             .map(|frozen| {
@@ -1063,6 +1073,18 @@ fn model_free_job(job_type: &JobType, payload: &JsonObject) -> bool {
         && payload.get("dryRun").and_then(Value::as_bool) == Some(true)
         || matches!(job_type, JobType::TrainingCaption)
             && payload.get("mode").and_then(Value::as_str) == Some("triggerOnly")
+        // A procedural person preview (`preview: true`) runs the CPU utility worker's
+        // placeholder path — `media_jobs` loads no model bytes for it (the detector and
+        // segmenter are the real, non-preview run). The request still CARRIES the utility
+        // catalog entries, so freezing their revision closure would bind a job whose
+        // frozen sources the worker's binding-aware guard then dutifully downloads
+        // (multi-GB) before running a handler that never opens them. Mirrors the
+        // worker-side split (`person_job_is_preview` / `required_capability`): a preview
+        // job freezes no binding at all, and the worker guard resolves its carried
+        // entries exactly as an unbound job does (a missing model stays an on-demand
+        // install, never a preview blocker).
+        || matches!(job_type, JobType::PersonDetect | JobType::PersonTrack)
+            && payload.get("preview").and_then(Value::as_bool) == Some(true)
         || matches!(job_type, JobType::CatalogAnalysis)
             && [
                 "structuredAnalysisEnabled",
@@ -3816,6 +3838,32 @@ mod tests {
         assert!(model_free_job(
             &JobType::CatalogAnalysis,
             no_models.as_object().unwrap()
+        ));
+    }
+
+    #[test]
+    fn preview_person_jobs_are_model_free_while_real_runs_freeze_bindings() {
+        // A procedural preview (`preview: true`) runs the CPU utility placeholder and
+        // loads no model bytes, so admission freezes no binding for it — even though the
+        // request still carries the detector/segmenter catalog entries. The real run
+        // keeps its binding.
+        let preview = json!({"sourceAssetId":"asset", "preview":true});
+        assert!(model_free_job(
+            &JobType::PersonDetect,
+            preview.as_object().unwrap()
+        ));
+        assert!(model_free_job(
+            &JobType::PersonTrack,
+            preview.as_object().unwrap()
+        ));
+        let real = json!({"sourceAssetId":"asset", "preview":false});
+        assert!(!model_free_job(
+            &JobType::PersonDetect,
+            real.as_object().unwrap()
+        ));
+        assert!(!model_free_job(
+            &JobType::PersonTrack,
+            real.as_object().unwrap()
         ));
     }
 

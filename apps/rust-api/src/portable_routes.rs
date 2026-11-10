@@ -898,6 +898,7 @@ pub(crate) fn eligible_portable_routes(
     payload: &JsonObject,
     entries: &[(String, &Value)],
     requested_gpu: &str,
+    data_dir: &std::path::Path,
 ) -> Result<Vec<(String, String)>, ApiError> {
     if entries.is_empty() {
         return Ok(Vec::new());
@@ -1008,7 +1009,7 @@ pub(crate) fn eligible_portable_routes(
             platforms
                 .iter()
                 .filter(|platform| {
-                    entries_support_route(job_type, payload, entries, backend, platform)
+                    entries_support_route(job_type, payload, entries, backend, platform, data_dir)
                         && selected_decoder_available_on_route(job_type, payload, entries, backend)
                 })
                 .map(|platform| (backend.to_owned(), (*platform).to_owned())),
@@ -1083,6 +1084,7 @@ fn entries_support_route(
     entries: &[(String, &Value)],
     backend: &str,
     platform: &str,
+    data_dir: &std::path::Path,
 ) -> bool {
     entries.iter().all(|(slot, entry)| {
         let Some(id) = entry.get("id").and_then(Value::as_str) else {
@@ -1119,7 +1121,16 @@ fn entries_support_route(
                 && slot == "modelManifestEntries/0"
                 && entry.get("adapter").and_then(Value::as_str) == Some("prompt-refine"))
             // Dataset captioning selects JoyCaption by its authored repository. That selected
-            // executable utility is also carried in the first auxiliary slot.
+            // executable utility is also carried in the first auxiliary slot. A LOCAL
+            // selection keeps the same local-versus-repository classification source
+            // resolution (`ensure_runtime_model_sources`) established: a selection that
+            // exists as an app-managed directory is local even when it is repo-shaped
+            // (`models/my-joycaption` has two components and differs from the publisher
+            // repository), so `app_managed_utility_path_exists` accepts it exactly as
+            // `model_sources` did before the entry was attached. Rejecting every repo-shaped
+            // string here stranded that valid local selection with no admissible route at
+            // all — "No native route can claim this model request" — before worker proof
+            // could run.
             && !(*job_type == JobType::TrainingCaption
                 && slot == "modelManifestEntries/0"
                 && payload.get("captioner").and_then(Value::as_str) == Some("joy_caption")
@@ -1132,6 +1143,10 @@ fn entries_support_route(
                         .and_then(Value::as_str)
                         .is_some_and(|selection| {
                             !crate::model_sources::looks_like_huggingface_repository(selection)
+                                || crate::model_sources::app_managed_utility_path_exists(
+                                    data_dir,
+                                    selection,
+                                )
                         }))))
             // Dataset Doctor's selected CLIP embedder is likewise an executable utility in
             // the first auxiliary slot, selected by its catalog id rather than a repo string.
@@ -1199,9 +1214,14 @@ mod tests {
         .as_object()
         .unwrap()
         .clone();
-        let routes =
-            eligible_portable_routes(&JobType::TrainingCaption, &payload, &entries, "auto")
-                .expect("selected JoyCaption repository is executable");
+        let routes = eligible_portable_routes(
+            &JobType::TrainingCaption,
+            &payload,
+            &entries,
+            "auto",
+            std::path::Path::new(""),
+        )
+        .expect("selected JoyCaption repository is executable");
         assert!(routes.contains(&("mlx".to_owned(), "macos".to_owned())));
         assert!(routes.contains(&("candle".to_owned(), "windows".to_owned())));
 
@@ -1210,24 +1230,63 @@ mod tests {
             "modelNameOrPath".to_owned(),
             serde_json::json!("/managed/captioner"),
         );
-        let local_routes =
-            eligible_portable_routes(&JobType::TrainingCaption, &local, &entries, "auto")
-                .expect("app-managed JoyCaption selection retains the native route");
+        let local_routes = eligible_portable_routes(
+            &JobType::TrainingCaption,
+            &local,
+            &entries,
+            "auto",
+            std::path::Path::new(""),
+        )
+        .expect("app-managed JoyCaption selection retains the native route");
         assert!(local_routes.contains(&("mlx".to_owned(), "macos".to_owned())));
 
+        // PR #3347 review 4527337951: a repo-shaped RELATIVE selection that exists as an
+        // app-managed directory is LOCAL, exactly as `ensure_runtime_model_sources`
+        // classified it before attaching this entry (`!looks_like_repo ||
+        // app_managed_utility_path_exists`). The route predicate must preserve that
+        // classification: rejecting every two-component string stranded the valid local
+        // selection with no admissible route at all.
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(temp.path().join("models/my-joycaption"))
+            .expect("app-managed local dir");
+        let mut repo_shaped_local = payload.clone();
+        repo_shaped_local.insert(
+            "modelNameOrPath".to_owned(),
+            serde_json::json!("models/my-joycaption"),
+        );
+        let repo_shaped_routes = eligible_portable_routes(
+            &JobType::TrainingCaption,
+            &repo_shaped_local,
+            &entries,
+            "auto",
+            temp.path(),
+        )
+        .expect("a repo-shaped app-managed local dir retains the native route");
+        assert!(repo_shaped_routes.contains(&("mlx".to_owned(), "macos".to_owned())));
+        assert!(repo_shaped_routes.contains(&("candle".to_owned(), "windows".to_owned())));
+        // The same repo-shaped selection with NO app-managed directory behind it stays a
+        // repository string, and a non-matching one still fails closed.
         let mut wrong_repo = payload.clone();
         wrong_repo.insert(
             "modelNameOrPath".to_owned(),
             serde_json::json!("other/model"),
         );
-        assert!(
-            eligible_portable_routes(&JobType::TrainingCaption, &wrong_repo, &entries, "auto")
-                .is_err()
-        );
-        assert!(
-            eligible_portable_routes(&JobType::DatasetAnalysis, &payload, &entries, "auto")
-                .is_err()
-        );
+        assert!(eligible_portable_routes(
+            &JobType::TrainingCaption,
+            &wrong_repo,
+            &entries,
+            "auto",
+            temp.path(),
+        )
+        .is_err());
+        assert!(eligible_portable_routes(
+            &JobType::DatasetAnalysis,
+            &payload,
+            &entries,
+            "auto",
+            std::path::Path::new(""),
+        )
+        .is_err());
     }
 
     #[test]
@@ -1242,16 +1301,26 @@ mod tests {
             .as_object()
             .unwrap()
             .clone();
-        let routes =
-            eligible_portable_routes(&JobType::DatasetAnalysis, &payload, &entries, "auto")
-                .expect("selected CLIP embedder is executable");
+        let routes = eligible_portable_routes(
+            &JobType::DatasetAnalysis,
+            &payload,
+            &entries,
+            "auto",
+            std::path::Path::new(""),
+        )
+        .expect("selected CLIP embedder is executable");
         assert!(routes.contains(&("mlx".to_owned(), "macos".to_owned())));
         assert!(routes.contains(&("candle".to_owned(), "windows".to_owned())));
         let mut wrong = payload.clone();
         wrong.insert("embedder".to_owned(), serde_json::json!("other"));
-        assert!(
-            eligible_portable_routes(&JobType::DatasetAnalysis, &wrong, &entries, "auto").is_err()
-        );
+        assert!(eligible_portable_routes(
+            &JobType::DatasetAnalysis,
+            &wrong,
+            &entries,
+            "auto",
+            std::path::Path::new(""),
+        )
+        .is_err());
     }
 
     #[test]
@@ -1345,6 +1414,7 @@ mod tests {
                 klein.as_object().unwrap(),
                 &entries,
                 "auto",
+                std::path::Path::new("")
             )
             .unwrap(),
             [
@@ -1358,6 +1428,7 @@ mod tests {
             klein.as_object().unwrap(),
             &entries,
             "mlx",
+            std::path::Path::new("")
         )
         .is_err());
         let rows = selected_route_source_rows(
@@ -1386,6 +1457,7 @@ mod tests {
                 ltx.as_object().unwrap(),
                 &entries,
                 "auto",
+                std::path::Path::new("")
             )
             .unwrap(),
             [("cpu".to_owned(), "macos".to_owned())],
@@ -1534,6 +1606,7 @@ mod tests {
             payload.as_object().expect("payload object"),
             &entry_ref,
             "auto",
+            std::path::Path::new(""),
         )
         .expect("routable job")
     }
@@ -1566,6 +1639,7 @@ mod tests {
             payload.as_object().unwrap(),
             &entry_ref,
             "auto",
+            std::path::Path::new("")
         )
         .is_err());
     }
@@ -1580,6 +1654,7 @@ mod tests {
             payload.as_object().unwrap(),
             &entry_ref,
             "cpu",
+            std::path::Path::new("")
         )
         .is_err());
     }
@@ -1591,11 +1666,25 @@ mod tests {
         let payload = json!({"model":"flux_schnell"});
         let payload = payload.as_object().unwrap();
         assert_eq!(
-            eligible_portable_routes(&JobType::ImageGenerate, payload, &entry_ref, "mlx").unwrap(),
+            eligible_portable_routes(
+                &JobType::ImageGenerate,
+                payload,
+                &entry_ref,
+                "mlx",
+                std::path::Path::new("")
+            )
+            .unwrap(),
             vec![("mlx".to_owned(), "macos".to_owned())]
         );
         assert_eq!(
-            eligible_portable_routes(&JobType::ImageGenerate, payload, &entry_ref, "0").unwrap(),
+            eligible_portable_routes(
+                &JobType::ImageGenerate,
+                payload,
+                &entry_ref,
+                "0",
+                std::path::Path::new("")
+            )
+            .unwrap(),
             vec![
                 ("candle".to_owned(), "linux".to_owned()),
                 ("candle".to_owned(), "windows".to_owned())
@@ -1698,10 +1787,24 @@ mod tests {
         let payload = json!({"model":"qwen_image","advanced":{"decoder":"wan_2_1_vae"}});
         let payload = payload.as_object().unwrap();
         assert_eq!(
-            eligible_portable_routes(&JobType::ImageGenerate, payload, &entries, "auto").unwrap(),
+            eligible_portable_routes(
+                &JobType::ImageGenerate,
+                payload,
+                &entries,
+                "auto",
+                std::path::Path::new("")
+            )
+            .unwrap(),
             vec![("mlx".to_owned(), "macos".to_owned())]
         );
-        assert!(eligible_portable_routes(&JobType::ImageGenerate, payload, &entries, "0").is_err());
+        assert!(eligible_portable_routes(
+            &JobType::ImageGenerate,
+            payload,
+            &entries,
+            "0",
+            std::path::Path::new("")
+        )
+        .is_err());
         assert!(selected_route_source_rows(
             &JobType::ImageGenerate,
             payload,
@@ -1736,7 +1839,14 @@ mod tests {
             "upscale":{"enabled":true,"engine":"iris"}});
         let payload = payload.as_object().unwrap();
         assert_eq!(
-            eligible_portable_routes(&JobType::ImageGenerate, payload, &entries, "auto").unwrap(),
+            eligible_portable_routes(
+                &JobType::ImageGenerate,
+                payload,
+                &entries,
+                "auto",
+                std::path::Path::new("")
+            )
+            .unwrap(),
             vec![("mlx".to_owned(), "macos".to_owned())]
         );
         let rows =
@@ -1820,14 +1930,16 @@ mod tests {
             &JsonObject::new(),
             &entries,
             "candle",
-            "linux"
+            "linux",
+            std::path::Path::new("")
         ));
         assert!(!entries_support_route(
             &JobType::CatalogAnalysis,
             &JsonObject::new(),
             &entries,
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
         let non_component = json!({"id":"unroutable_utility_source","type":"utility","downloads":[{"provider":"huggingface","repo":"example/person","revision":"0123456789012345678901234567890123456789","files":["model.safetensors"],"platforms":["linux"]}]});
         let entries = [("modelManifestEntries/0".to_owned(), &non_component)];
@@ -1836,14 +1948,16 @@ mod tests {
             &JsonObject::new(),
             &entries,
             "candle",
-            "linux"
+            "linux",
+            std::path::Path::new("")
         ));
         assert!(!entries_support_route(
             &JobType::ImageGenerate,
             &JsonObject::new(),
             &entries,
             "candle",
-            "linux"
+            "linux",
+            std::path::Path::new("")
         ));
     }
 
@@ -1864,14 +1978,16 @@ mod tests {
             &default_upscale,
             &[("modelManifestEntries/0".to_owned(), &fixed)],
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
         assert!(!entries_support_route(
             &JobType::ImageUpscale,
             &default_upscale,
             &[("modelManifestEntries/0".to_owned(), &foreign)],
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
         let seedvr2 = json!({"engine":"seedvr2"}).as_object().unwrap().clone();
         assert!(!entries_support_route(
@@ -1879,7 +1995,8 @@ mod tests {
             &seedvr2,
             &[("modelManifestEntries/0".to_owned(), &fixed)],
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
     }
 
@@ -1903,7 +2020,8 @@ mod tests {
             &selected,
             &entry,
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
         for rejected in [
             json!({"baseModel":"iris_3b_restore","plan":{"target":{"kernel":"iris_train","baseModel":"iris_3b_depth"}}}),
@@ -1915,7 +2033,8 @@ mod tests {
                 rejected.as_object().unwrap(),
                 &entry,
                 "mlx",
-                "macos"
+                "macos",
+                std::path::Path::new("")
             ));
         }
         let foreign = json!({"id":"person_detector","type":"utility",
@@ -1927,7 +2046,8 @@ mod tests {
             &selected,
             &[("modelManifestEntries/0".to_owned(), &foreign)],
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
     }
 
@@ -1947,7 +2067,8 @@ mod tests {
             &depth_request,
             &[("modelManifestEntries/0".to_owned(), &depth)],
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
         let wrong_task = json!({"id":"trained-depth","type":"utility","irisTask":"restoration",
             "trainedCheckpoint":{"task":"restoration","engineModel":"iris_3b_restore"}});
@@ -1956,7 +2077,8 @@ mod tests {
             &depth_request,
             &[("modelManifestEntries/0".to_owned(), &wrong_task)],
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
         let foreign_request = json!({"irisModel":"other-depth"})
             .as_object()
@@ -1967,7 +2089,8 @@ mod tests {
             &foreign_request,
             &[("modelManifestEntries/0".to_owned(), &depth)],
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
         let restoration = json!({"id":"trained-restore","type":"utility",
             "irisTask":"restoration","trainedCheckpoint":{"task":"restoration",
@@ -1981,7 +2104,8 @@ mod tests {
             &restore_request,
             &[("modelManifestEntries/0".to_owned(), &restoration)],
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
         let wrong_engine = json!({"engine":"real-esrgan","irisModel":"trained-restore"})
             .as_object()
@@ -1992,7 +2116,8 @@ mod tests {
             &wrong_engine,
             &[("modelManifestEntries/0".to_owned(), &restoration)],
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
     }
 
@@ -2007,21 +2132,24 @@ mod tests {
             &JsonObject::new(),
             &[("modelManifestEntries/0".to_owned(), &selected)],
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
         assert!(!entries_support_route(
             &JobType::PromptRefine,
             &JsonObject::new(),
             &[("modelManifestEntries/1".to_owned(), &selected)],
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
         assert!(!entries_support_route(
             &JobType::ImageGenerate,
             &JsonObject::new(),
             &[("modelManifestEntries/0".to_owned(), &selected)],
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
         let foreign = json!({"id":"person_detector","type":"utility",
             "adapter":"person-detect","downloads":[{"provider":"huggingface",
@@ -2032,7 +2160,8 @@ mod tests {
             &JsonObject::new(),
             &[("modelManifestEntries/0".to_owned(), &foreign)],
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
     }
 
@@ -2052,6 +2181,7 @@ mod tests {
             payload.as_object().unwrap(),
             &entries,
             "auto",
+            std::path::Path::new(""),
         )
         .unwrap();
         assert_eq!(routes.len(), 3);
