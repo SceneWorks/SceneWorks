@@ -62,4 +62,11 @@ describe("formatPromptBatch", () => {
     );
     expect(extractKeys(prompts)).toEqual(["man_1", "woman_1", "girl_1", "cat_1"]);
   });
+
+  it("skips a row whose fields are all empty instead of emitting a ratio-only prompt", () => {
+    const empty = { itemId: "d", width: 1000, height: 1000, fields: fields({ description: "", style: " ", lighting: "", environment: "" }) };
+    const { text, skipped } = formatPromptBatch([empty, results[0]]);
+    expect(skipped).toEqual([empty]);
+    expect(text).toBe(formatPromptBatch([results[0]]).text);
+  });
 });

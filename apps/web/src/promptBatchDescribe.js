@@ -49,8 +49,9 @@ export function wrapLabels(text) {
     .join("");
 }
 
-// Returns { text, skipped }. Failed results (or ones without usable dimensions) emit no
-// block and are listed in `skipped` (original objects, input order) for the review UI.
+// Returns { text, skipped }. Failed results, ones without usable dimensions, and ones whose
+// six fields are all empty (a ratio with no prompt text) emit no block and are listed in
+// `skipped` (original objects, input order) for the review UI.
 export function formatPromptBatch(results) {
   const blocks = [];
   const skipped = [];
@@ -66,6 +67,10 @@ export function formatPromptBatch(results) {
       // Newlines collapse so a field can never produce a `---` delimiter line.
       const flat = typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
       if (flat) lines.push(`${label}: ${wrapLabels(flat)}`);
+    }
+    if (lines.length === 1) {
+      skipped.push(result);
+      continue;
     }
     blocks.push(lines.join("\n"));
   }
