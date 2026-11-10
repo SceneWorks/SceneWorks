@@ -1533,22 +1533,8 @@ pub(crate) async fn create_training_dataset_batch_describe_job(
 pub(crate) fn validate_batch_describe_request(
     payload: &DatasetBatchDescribeJobRequest,
 ) -> Result<(&'static str, Option<String>), ApiError> {
-    use sceneworks_core::dataset_batch_describe::{
-        max_describe_prompt_chars, JOYCAPTION_REPO, VISION_CAPTIONER_REPO,
-    };
-    let model = match payload.model.as_deref().map(str::trim) {
-        None | Some("") | Some(VISION_CAPTIONER_REPO) => VISION_CAPTIONER_REPO,
-        Some(JOYCAPTION_REPO) => JOYCAPTION_REPO,
-        Some(other) => {
-            return Err(training_field_error(
-                "model",
-                format!(
-                    "Unsupported describe model {other:?}. Use the Vision Captioner \
-                     ({VISION_CAPTIONER_REPO}) or JoyCaption ({JOYCAPTION_REPO})."
-                ),
-            ))
-        }
-    };
+    use sceneworks_core::dataset_batch_describe::max_describe_prompt_chars;
+    let model = resolve_describe_model(payload.model.as_deref())?;
     let prompt = payload
         .prompt
         .as_deref()
@@ -1562,6 +1548,24 @@ pub(crate) fn validate_batch_describe_request(
         ));
     }
     Ok((model, prompt.map(str::to_owned)))
+}
+
+/// The describe model a request names: absent or blank is the Vision Captioner, JoyCaption is the
+/// other accepted describer, anything else is refused. Shared by the describe job and the default
+/// describing prompt route so both accept exactly the same `model` values.
+pub(crate) fn resolve_describe_model(model: Option<&str>) -> Result<&'static str, ApiError> {
+    use sceneworks_core::dataset_batch_describe::{JOYCAPTION_REPO, VISION_CAPTIONER_REPO};
+    match model.map(str::trim) {
+        None | Some("") | Some(VISION_CAPTIONER_REPO) => Ok(VISION_CAPTIONER_REPO),
+        Some(JOYCAPTION_REPO) => Ok(JOYCAPTION_REPO),
+        Some(other) => Err(training_field_error(
+            "model",
+            format!(
+                "Unsupported describe model {other:?}. Use the Vision Captioner \
+                 ({VISION_CAPTIONER_REPO}) or JoyCaption ({JOYCAPTION_REPO})."
+            ),
+        )),
+    }
 }
 
 /// The worker items of a batch describe job, in dataset order: every item, or exactly the requested

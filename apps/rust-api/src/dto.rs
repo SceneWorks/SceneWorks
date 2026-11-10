@@ -595,9 +595,9 @@ pub(crate) struct DatasetFaceAnalysisJobRequest {
 }
 
 /// Request to describe a training dataset's images for a prompt batch (SW-7082). Every field is
-/// optional: `model` defaults to the Vision Captioner (the only accepted value today), an absent or
-/// blank `prompt` uses the worker's default describing instruction, and `itemIds` restricts the run
-/// to those items (e.g. re-describing one image).
+/// optional: `model` defaults to the Vision Captioner (JoyCaption is the other accepted value,
+/// SW-7083), an absent or blank `prompt` uses that model's default describing instruction, and
+/// `itemIds` restricts the run to those items (e.g. re-describing one image).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DatasetBatchDescribeJobRequest {
@@ -611,6 +611,14 @@ pub(crate) struct DatasetBatchDescribeJobRequest {
     pub(crate) item_ids: Option<Vec<String>>,
     #[serde(default = "default_requested_gpu")]
     pub(crate) requested_gpu: String,
+}
+
+/// `?model=<repo>` on the describing-prompt routes (SW-7085, SW-7086): which describer's default
+/// instruction and limit to serve. Absent means the Vision Captioner.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct DescribePromptQuery {
+    #[serde(default)]
+    pub(crate) model: Option<String>,
 }
 
 /// Request to generate SAM3 subject masks over a training dataset (sc-2126). The segmenter is fixed

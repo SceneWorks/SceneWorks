@@ -4,10 +4,11 @@ import { isAbortError } from "../api.js";
 import { errorMessage } from "../errorMessage.js";
 
 // Named describing-prompt presets (SW-7086) for the "Create Prompt Batch from Dataset" dialog. The
-// server lists the built-in default first (built from the worker's prompt asset; it cannot be
-// changed or deleted), then the user's saved presets. Selecting one hands its exact text to the
-// dialog's prompt editor; "Save as preset" stores the editor's current text under a name.
-export function DescribePromptPresets({ token, prompt, disabled = false, onSelect }) {
+// server lists the built-in default first (the selected model's default instruction, built from the
+// worker's prompt asset; it cannot be changed or deleted), then the user's saved presets. Selecting
+// one hands its exact text to the dialog's prompt editor (the built-in flagged, so the editor follows
+// the selected model's default); "Save as preset" stores the editor's current text under a name.
+export function DescribePromptPresets({ token, model = "", prompt, disabled = false, onSelect }) {
   const [presets, setPresets] = useState([]);
   const [selectedId, setSelectedId] = useState("default");
   const [name, setName] = useState("");
@@ -15,10 +16,10 @@ export function DescribePromptPresets({ token, prompt, disabled = false, onSelec
   const [error, setError] = useState("");
 
   const load = useCallback(async (signal) => {
-    const list = await trainingApi.describePromptPresets(token, { signal });
+    const list = await trainingApi.describePromptPresets(token, { signal }, model);
     setPresets(Array.isArray(list) ? list : []);
     return list;
-  }, [token]);
+  }, [model, token]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -34,7 +35,7 @@ export function DescribePromptPresets({ token, prompt, disabled = false, onSelec
     setSelectedId(id);
     setError("");
     const preset = presets.find((entry) => entry.id === id);
-    if (preset && typeof preset.prompt === "string") onSelect(preset.prompt);
+    if (preset && typeof preset.prompt === "string") onSelect(preset.prompt, { builtin: Boolean(preset.builtin) });
   }
 
   async function save() {

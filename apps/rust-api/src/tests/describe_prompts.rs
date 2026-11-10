@@ -1,19 +1,27 @@
 //! rust-api describing-prompt tests (SW-7085): the default describing instruction route, and the
 //! prompt-batch metadata the dataset prompt-batch dialog saves.
 use super::support::*;
-use sceneworks_core::dataset_batch_describe::MAX_DESCRIBE_PROMPT_CHARS;
+use sceneworks_core::dataset_batch_describe::{
+    JOYCAPTION_REPO, MAX_DESCRIBE_PROMPT_CHARS, MAX_JOYCAPTION_DESCRIBE_PROMPT_CHARS,
+    VISION_CAPTIONER_REPO,
+};
 
 const WORKER_ASSET: &str =
     include_str!("../../../../crates/sceneworks-worker/src/image_batch_describe_v1.txt");
 
-/// The asset's `[SYSTEM]` section, read independently of the API's section parser.
-fn asset_system_section() -> &'static str {
+/// The asset's `[NAME]` section, read independently of the shared section parser: the text after
+/// the marker line up to the next marker line (no section body line starts with `[`).
+fn asset_section(name: &str) -> &'static str {
     WORKER_ASSET
-        .split("\n[SYSTEM]\n")
+        .split(&format!("\n[{name}]\n"))
         .nth(1)
-        .and_then(|rest| rest.split("\n[OUTPUT]\n").next())
-        .expect("asset has a SYSTEM section before OUTPUT")
+        .and_then(|rest| rest.split("\n[").next())
+        .unwrap_or_else(|| panic!("asset has a {name} section"))
         .trim()
+}
+
+fn asset_system_section() -> &'static str {
+    asset_section("SYSTEM")
 }
 
 #[tokio::test]
@@ -29,7 +37,68 @@ async fn default_describe_prompt_route_serves_the_worker_assets_system_section()
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["prompt"], asset_system_section());
+    assert!(
+        !body["prompt"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("about 500 words"),
+        "the Vision default never swallows the [JOYCAPTION_SYSTEM] section"
+    );
     assert_eq!(body["maxChars"], MAX_DESCRIBE_PROMPT_CHARS);
+    assert_eq!(body["model"], VISION_CAPTIONER_REPO);
+}
+
+#[tokio::test]
+async fn default_describe_prompt_route_serves_each_models_default_and_limit() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, joy) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/training/describe-prompt/default?model={JOYCAPTION_REPO}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{joy}");
+    assert_eq!(joy["prompt"], asset_section("JOYCAPTION_SYSTEM"));
+    assert_eq!(joy["maxChars"], MAX_JOYCAPTION_DESCRIBE_PROMPT_CHARS);
+    assert_eq!(joy["model"], JOYCAPTION_REPO);
+
+    let (status, vision) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/training/describe-prompt/default?model={VISION_CAPTIONER_REPO}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{vision}");
+    assert_eq!(vision["prompt"], asset_system_section());
+    assert_eq!(vision["maxChars"], MAX_DESCRIBE_PROMPT_CHARS);
+
+    let (status, refused) = request(
+        app,
+        "GET",
+        "/api/v1/training/describe-prompt/default?model=someone/other-model",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+}
+
+#[tokio::test]
+async fn the_builtin_default_preset_follows_the_selected_model() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, list) = request(
+        app,
+        "GET",
+        &format!("{PRESETS}?model={JOYCAPTION_REPO}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(list[0]["id"], "default");
+    assert_eq!(list[0]["prompt"], asset_section("JOYCAPTION_SYSTEM"));
 }
 
 #[tokio::test]

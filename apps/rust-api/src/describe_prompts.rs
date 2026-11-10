@@ -1,57 +1,43 @@
 // The describing prompt for the dataset prompt-batch describe job (SW-7085, feature SW-F362).
 //
 // Training Studio's "Create Prompt Batch from Dataset" dialog prefills its editable prompt with the
-// worker's default instruction before the first run, so the API serves that text. ONE source of
-// truth: the text is the `[SYSTEM]` section of the worker's own prompt asset, embedded here with
-// `include_str!` from the worker crate's source tree, so the default the dialog shows and the
-// default the worker describes with are the same bytes. The asset stays where the worker owns it;
-// the API only reads it. The `[OUTPUT]` JSON contract is never served: the worker always appends
-// it, and the user never edits it.
+// selected model's default instruction before the first run, so the API serves that text. ONE
+// source of truth: the text is a section of the worker's own prompt asset (`[SYSTEM]` for the
+// Vision Captioner, `[JOYCAPTION_SYSTEM]` for JoyCaption), embedded here with `include_str!` from
+// the worker crate's source tree and read with the same core parser and section choice the worker
+// uses, so the default the dialog shows and the default the worker describes with are the same
+// bytes. The limit is core's `max_describe_prompt_chars`, the one the job validation applies. The
+// `[OUTPUT]` JSON contract is never served: the worker always appends it, and the user never
+// edits it.
 
 use super::*;
-use sceneworks_core::dataset_batch_describe::MAX_DESCRIBE_PROMPT_CHARS;
+use sceneworks_core::dataset_batch_describe::{
+    max_describe_prompt_chars, MAX_DESCRIBE_PROMPT_CHARS,
+};
 
 const IMAGE_BATCH_DESCRIBE_ASSET: &str =
     include_str!("../../../crates/sceneworks-worker/src/image_batch_describe_v1.txt");
 
-/// One `[NAME]` section of a prompt asset, trimmed. Same marker rule as the worker's
-/// `magic_section_from`: a marker is a whole line `[WORD]` with no spaces, and a section runs to the
-/// next marker.
-fn asset_section(source: &str, name: &str) -> String {
-    let mut capturing = false;
-    let mut body: Vec<&str> = Vec::new();
-    for line in source.lines() {
-        let trimmed = line.trim();
-        let is_marker = trimmed.len() >= 2
-            && trimmed.starts_with('[')
-            && trimmed.ends_with(']')
-            && !trimmed.contains(' ');
-        if is_marker {
-            if capturing {
-                break;
-            }
-            capturing = trimmed[1..trimmed.len() - 1].eq_ignore_ascii_case(name);
-            continue;
-        }
-        if capturing {
-            body.push(line);
-        }
-    }
-    body.join("\n").trim().to_owned()
+/// `model`'s default editable describing instruction (`model` is a resolved describer repo).
+pub(crate) fn default_describe_instruction(model: &str) -> String {
+    sceneworks_core::dataset_batch_describe::default_describe_instruction(
+        IMAGE_BATCH_DESCRIBE_ASSET,
+        Some(model),
+    )
 }
 
-/// The default editable describing instruction (the asset's `[SYSTEM]` section).
-pub(crate) fn default_describe_instruction() -> String {
-    asset_section(IMAGE_BATCH_DESCRIBE_ASSET, "SYSTEM")
-}
-
-/// `GET /api/v1/training/describe-prompt/default`: the default describing instruction and the
-/// longest instruction a describe job accepts.
-pub(crate) async fn get_default_describe_prompt() -> Json<Value> {
-    Json(json!({
-        "prompt": default_describe_instruction(),
-        "maxChars": MAX_DESCRIBE_PROMPT_CHARS,
-    }))
+/// `GET /api/v1/training/describe-prompt/default?model=<repo>`: the model's default describing
+/// instruction and the longest instruction a describe job for that model accepts. Absent `model`
+/// is the Vision Captioner; an unknown model is refused like the describe job refuses it.
+pub(crate) async fn get_default_describe_prompt(
+    Query(query): Query<DescribePromptQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let model = super::training::resolve_describe_model(query.model.as_deref())?;
+    Ok(Json(json!({
+        "model": model,
+        "prompt": default_describe_instruction(model),
+        "maxChars": max_describe_prompt_chars(Some(model)),
+    })))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -76,11 +62,12 @@ fn describe_preset_manifest_path(state: &AppState) -> PathBuf {
         .join(PRESET_MANIFEST_FILE)
 }
 
-fn builtin_describe_preset() -> Value {
+/// The built-in default preset for `model`: its prompt is that model's default instruction.
+fn builtin_describe_preset(model: &str) -> Value {
     json!({
         "id": BUILTIN_DESCRIBE_PRESET_ID,
         "name": "Default",
-        "prompt": default_describe_instruction(),
+        "prompt": default_describe_instruction(model),
         "scope": "builtin",
         "builtin": true,
     })
@@ -172,11 +159,15 @@ fn normalize_describe_preset_for_write(
     Ok(preset)
 }
 
-/// `GET /api/v1/training/describe-prompt/presets`: the built-in default first, then the stored
-/// presets (not archived) by name.
+/// `GET /api/v1/training/describe-prompt/presets?model=<repo>`: the built-in default first (the
+/// prompt of `model`, absent meaning the Vision Captioner), then the stored presets (not archived)
+/// by name. A stored preset is model-independent; its length is checked against the selected
+/// model's limit when a job is submitted.
 pub(crate) async fn list_describe_prompt_presets(
     State(state): State<AppState>,
+    Query(query): Query<DescribePromptQuery>,
 ) -> Result<Json<Vec<Value>>, ApiError> {
+    let model = super::training::resolve_describe_model(query.model.as_deref())?;
     let manifest_path = describe_preset_manifest_path(&state);
     let mut stored = load_manifest_entries(&state, &manifest_path, PRESET_MANIFEST_FIELD)
         .await?
@@ -190,7 +181,7 @@ pub(crate) async fn list_describe_prompt_presets(
             .unwrap_or_default()
             .to_lowercase()
     });
-    let mut presets = vec![builtin_describe_preset()];
+    let mut presets = vec![builtin_describe_preset(model)];
     presets.extend(stored);
     Ok(Json(presets))
 }
@@ -307,24 +298,40 @@ pub(crate) async fn delete_describe_prompt_preset(
 #[cfg(test)]
 mod unit_tests {
     use super::*;
+    use sceneworks_core::dataset_batch_describe::{
+        prompt_asset_section, JOYCAPTION_REPO, MAX_JOYCAPTION_DESCRIBE_PROMPT_CHARS,
+        VISION_CAPTIONER_REPO,
+    };
 
     #[test]
-    fn default_instruction_is_the_system_section_without_the_output_contract() {
-        let prompt = default_describe_instruction();
-        assert!(prompt.starts_with("You are a meticulous scene describer."));
-        assert!(prompt.contains("## LIGHTING"));
-        assert!(
-            !prompt.contains("## OUTPUT"),
-            "the JSON contract is never editable"
+    fn each_model_default_is_exactly_its_own_asset_section() {
+        let vision = default_describe_instruction(VISION_CAPTIONER_REPO);
+        let joy = default_describe_instruction(JOYCAPTION_REPO);
+        // The worker's own section text, read from the worker's asset file.
+        assert_eq!(
+            vision,
+            prompt_asset_section(IMAGE_BATCH_DESCRIBE_ASSET, "SYSTEM")
         );
-        assert!(!prompt.contains("[OUTPUT]") && !prompt.contains("[META]"));
-        assert!(prompt.chars().count() <= MAX_DESCRIBE_PROMPT_CHARS);
-    }
-
-    #[test]
-    fn asset_section_stops_at_the_next_marker() {
-        let source = "[A]\none\n[B]\ntwo\n  three  \n[C]\nfour";
-        assert_eq!(asset_section(source, "B"), "two\n  three");
-        assert_eq!(asset_section(source, "missing"), "");
+        assert_eq!(
+            joy,
+            prompt_asset_section(IMAGE_BATCH_DESCRIBE_ASSET, "JOYCAPTION_SYSTEM")
+        );
+        assert!(vision.starts_with("You are a meticulous scene describer."));
+        assert!(vision.contains("## LIGHTING"));
+        assert!(
+            vision.trim_end().ends_with("and where the shadows fall."),
+            "the Vision default stops before [JOYCAPTION_SYSTEM]"
+        );
+        assert!(!vision.contains("JOYCAPTION") && !vision.contains("about 500 words"));
+        for prompt in [&vision, &joy] {
+            assert!(
+                !prompt.contains("## OUTPUT"),
+                "the JSON contract is never editable"
+            );
+            assert!(!prompt.contains("[OUTPUT]") && !prompt.contains("[META]"));
+        }
+        assert!(joy.contains("about 500 words") && !joy.contains("## LABELS"));
+        assert!(vision.chars().count() <= MAX_DESCRIBE_PROMPT_CHARS);
+        assert!(joy.chars().count() <= MAX_JOYCAPTION_DESCRIBE_PROMPT_CHARS);
     }
 }

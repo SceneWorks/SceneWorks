@@ -16,6 +16,8 @@ import { extractKeys } from "../promptBatch.js";
 import { serializePromptBatchExport } from "../promptBatchIO.js";
 import { saveExportFile } from "../saveExportFile.js";
 import { appConfirm } from "../appConfirm.jsx";
+import { issue, summarize } from "../validation/issues.js";
+import { ValidationSummary, invalidProps } from "../validation/Validation.jsx";
 
 // "Create Prompt Batch from Dataset" (SW-7085, feature SW-F362). A vision model describes each
 // dataset image as six fields; the review table lets the user edit them, re-run one image, and save
@@ -41,6 +43,25 @@ export const DESCRIBE_FIELDS = [
 ];
 
 const POLL_MS = 1000;
+
+// Characters as the API and worker count them (Unicode scalar values of the trimmed text).
+function promptChars(text) {
+  return [...(text ?? "").trim()].length;
+}
+
+// The describing prompt's issues for the selected model: a text over that model's limit is an
+// error that blocks Run (the API would refuse it with a 400).
+export function describePromptIssues(prompt, limit, modelLabel) {
+  if (!limit) return [];
+  const count = promptChars(prompt);
+  if (count <= limit) return [];
+  return [
+    issue.error(
+      "prompt",
+      `The describing prompt is ${count.toLocaleString()} characters; ${modelLabel} accepts at most ${limit.toLocaleString()}.`,
+    ),
+  ];
+}
 
 function rowFromResultItem(item) {
   return {
@@ -111,8 +132,12 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   const datasetOrder = useMemo(() => (dataset?.items ?? []).map((item) => item.id), [dataset]);
 
   const [modelId, setModelId] = useState(VISION_CAPTION_MODEL_ID);
-  const [defaultPrompt, setDefaultPrompt] = useState(null);
+  // Each model's default instruction and limit, by repo: `{ prompt, maxChars }`.
+  const [defaults, setDefaults] = useState({});
   const [prompt, setPrompt] = useState("");
+  // Whether the editor shows the selected model's untouched default, so a model switch swaps it
+  // for the other model's default; an edited text stays as typed.
+  const [followDefault, setFollowDefault] = useState(true);
   const [promptError, setPromptError] = useState("");
   const [rows, setRows] = useState([]);
   const [job, setJob] = useState(null);
@@ -125,26 +150,65 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   const [saveError, setSaveError] = useState("");
   const pollAbort = useRef(null);
 
-  // Prefill the editable prompt with the worker's default instruction (served by the API from the
-  // worker's own prompt asset, so the web app holds no second copy).
+  useEffect(() => () => pollAbort.current?.abort(), []);
+
+  const model = DESCRIBE_MODELS.find((entry) => entry.id === modelId) ?? DESCRIBE_MODELS[0];
+  const modelDefault = defaults[model.repo] ?? null;
+  const defaultPrompt = modelDefault ? modelDefault.prompt : null;
+  const loadedDefault = Boolean(modelDefault);
+
+  // Load the selected model's default instruction and limit (served by the API from the worker's
+  // own prompt asset and core's limits, so the web app holds no second copy).
   useEffect(() => {
+    if (loadedDefault) return undefined;
     const controller = new AbortController();
+    const repo = model.repo;
     trainingApi
-      .defaultDescribePrompt(token, { signal: controller.signal })
+      .defaultDescribePrompt(token, { signal: controller.signal }, repo)
       .then((body) => {
         const text = typeof body?.prompt === "string" ? body.prompt : "";
-        setDefaultPrompt(text);
-        setPrompt((current) => (current ? current : text));
+        const maxChars = Number(body?.maxChars) || 0;
+        setPromptError("");
+        setDefaults((current) => ({ ...current, [repo]: { prompt: text, maxChars } }));
       })
       .catch((error) => {
         if (!isAbortError(error)) setPromptError(errorMessage(error, "Could not load the default describing prompt."));
       });
     return () => controller.abort();
-  }, [token]);
+  }, [loadedDefault, model.repo, token]);
 
-  useEffect(() => () => pollAbort.current?.abort(), []);
+  // Show the selected model's default while the text is untouched.
+  useEffect(() => {
+    if (followDefault && defaultPrompt !== null) setPrompt(defaultPrompt);
+  }, [defaultPrompt, followDefault]);
 
-  const model = DESCRIBE_MODELS.find((entry) => entry.id === modelId) ?? DESCRIBE_MODELS[0];
+  function chooseModel(id) {
+    // An untouched text (or one the user typed back to the default) follows the new model's
+    // default; an edited text is kept.
+    if (promptChars(prompt) === 0 || (defaultPrompt !== null && prompt.trim() === defaultPrompt.trim())) {
+      setFollowDefault(true);
+    }
+    setModelId(id);
+  }
+
+  function editPrompt(text) {
+    setFollowDefault(false);
+    setPrompt(text);
+  }
+
+  function selectPreset(text, { builtin = false } = {}) {
+    if (builtin) {
+      setFollowDefault(true);
+      if (defaultPrompt !== null) setPrompt(defaultPrompt);
+    } else {
+      editPrompt(text);
+    }
+  }
+
+  const promptValidation = useMemo(
+    () => summarize(describePromptIssues(prompt, modelDefault?.maxChars, model.label)),
+    [prompt, modelDefault, model.label],
+  );
   const catalogEntry = (id) => models.find((entry) => entry.id === id);
   const modelAvailable = (id) => {
     const entry = catalogEntry(id);
@@ -286,7 +350,8 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
     onClose();
   }
 
-  const runBlocked = running || dirty || !selectedAvailable || defaultPrompt === null || !datasetOrder.length;
+  const runBlocked =
+    running || dirty || !selectedAvailable || defaultPrompt === null || !datasetOrder.length || !promptValidation.ready;
 
   return (
     <Modal className="dataset-caption-modal dataset-prompt-batch-modal" labelledBy="dataset-prompt-batch-title" onClose={onClose}>
@@ -311,7 +376,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
                   checked={modelId === entry.id}
                   disabled={running}
                   name="dataset-prompt-batch-model"
-                  onChange={() => setModelId(entry.id)}
+                  onChange={() => chooseModel(entry.id)}
                   type="radio"
                   value={entry.id}
                 />
@@ -342,7 +407,8 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
 
         <DescribePromptPresets
           disabled={running || defaultPrompt === null}
-          onSelect={setPrompt}
+          model={model.repo}
+          onSelect={selectPreset}
           prompt={prompt}
           token={token}
         />
@@ -351,8 +417,9 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
           <textarea
             aria-describedby="dataset-prompt-batch-prompt-hint"
             disabled={running || defaultPrompt === null}
-            onChange={(event) => setPrompt(event.target.value)}
+            onChange={(event) => editPrompt(event.target.value)}
             rows={8}
+            {...invalidProps(promptValidation, "prompt")}
             value={prompt}
           />
           <span className="dataset-caption-field-hint" id="dataset-prompt-batch-prompt-hint">
@@ -363,13 +430,14 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
           <button
             className="secondary-action"
             disabled={running || defaultPrompt === null || prompt === defaultPrompt}
-            onClick={() => setPrompt(defaultPrompt ?? "")}
+            onClick={() => selectPreset(defaultPrompt ?? "", { builtin: true })}
             type="button"
           >
             Reset to default
           </button>
         </div>
         {promptError ? <p className="inline-warning" role="alert">{promptError}</p> : null}
+        <ValidationSummary issues={promptValidation.surfaced} label="Describing prompt errors" />
         {dirty ? (
           <p className="inline-warning" role="status">Save the dataset first so the describer sees its current images.</p>
         ) : null}

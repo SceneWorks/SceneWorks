@@ -52,3 +52,75 @@ pub fn max_describe_prompt_chars(model: Option<&str>) -> usize {
         MAX_DESCRIBE_PROMPT_CHARS
     }
 }
+
+/// The section of the describe prompt asset (`image_batch_describe_v1.txt`, owned by the worker)
+/// that holds `model`'s default editable instruction: `[SYSTEM]` for the Vision Captioner,
+/// `[JOYCAPTION_SYSTEM]` (the same rules condensed to JoyCaption's prompt limit) for JoyCaption.
+pub fn default_instruction_section(model: Option<&str>) -> &'static str {
+    if is_joycaption_model(model) {
+        "JOYCAPTION_SYSTEM"
+    } else {
+        "SYSTEM"
+    }
+}
+
+/// Body of one `[NAME]` section of a bracketed-marker prompt asset, trimmed; empty when the
+/// section is absent. A marker is a bracketed single word alone on a line, and a section runs to
+/// the next marker. The one parser the worker (every prompt asset) and the API (the describing
+/// prompt it serves) share, so the default the dialog shows is the text the worker describes with.
+pub fn prompt_asset_section(source: &str, name: &str) -> String {
+    let mut capturing = false;
+    let mut body: Vec<&str> = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim();
+        let is_marker = trimmed.len() >= 2
+            && trimmed.starts_with('[')
+            && trimmed.ends_with(']')
+            && !trimmed.contains(' ');
+        if is_marker {
+            if capturing {
+                break;
+            }
+            capturing = trimmed[1..trimmed.len() - 1].eq_ignore_ascii_case(name);
+            continue;
+        }
+        if capturing {
+            body.push(line);
+        }
+    }
+    body.join("\n").trim().to_owned()
+}
+
+/// `model`'s default editable describing instruction, read from the describe prompt asset text.
+pub fn default_describe_instruction(asset: &str, model: Option<&str>) -> String {
+    prompt_asset_section(asset, default_instruction_section(model))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_section_stops_at_the_next_marker() {
+        let source = "[A]\none\n[B]\ntwo\n  three  \n[C]\nfour";
+        assert_eq!(prompt_asset_section(source, "B"), "two\n  three");
+        assert_eq!(prompt_asset_section(source, "b"), "two\n  three");
+        assert_eq!(prompt_asset_section(source, "missing"), "");
+    }
+
+    #[test]
+    fn each_model_reads_its_own_default_section() {
+        let asset = "[SYSTEM]\nvision rules\n[JOYCAPTION_SYSTEM]\njoy rules\n[OUTPUT]\n{}";
+        assert_eq!(default_describe_instruction(asset, None), "vision rules");
+        assert_eq!(
+            default_describe_instruction(asset, Some(VISION_CAPTIONER_REPO)),
+            "vision rules"
+        );
+        assert_eq!(
+            default_describe_instruction(asset, Some(JOYCAPTION_REPO)),
+            "joy rules"
+        );
+        assert_eq!(max_describe_prompt_chars(Some(JOYCAPTION_REPO)), 3_000);
+        assert_eq!(max_describe_prompt_chars(None), 32_000);
+    }
+}

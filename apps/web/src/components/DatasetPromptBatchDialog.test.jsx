@@ -24,6 +24,12 @@ const { appConfirm } = await import("../appConfirm.jsx");
 const { DatasetPromptBatchDialog } = await import("./DatasetPromptBatchDialog.jsx");
 
 const DEFAULT_PROMPT = "You are a meticulous scene describer.\n## LABELS";
+const JOY_REPO = "fancyfeast/llama-joycaption-beta-one-hf-llava";
+const JOY_DEFAULT_PROMPT = "You are a meticulous scene describer. Describe only what is visible.\nLABELS: ...";
+const DEFAULTS = {
+  [VISION_CAPTION_MODEL_REPO]: { prompt: DEFAULT_PROMPT, maxChars: 32000 },
+  [JOY_REPO]: { prompt: JOY_DEFAULT_PROMPT, maxChars: 3000 },
+};
 const dataset = {
   id: "ds_1",
   name: "Film prints",
@@ -101,18 +107,23 @@ describe("DatasetPromptBatchDialog", () => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     ({ container, root } = mountRoot());
     polls = [];
-    trainingApi.defaultDescribePrompt.mockReset().mockResolvedValue({ prompt: DEFAULT_PROMPT, maxChars: 32000 });
+    trainingApi.defaultDescribePrompt
+      .mockReset()
+      .mockImplementation(async (_token, _options, model) => ({ model, ...DEFAULTS[model || VISION_CAPTION_MODEL_REPO] }));
     trainingApi.batchDescribeJobs.mockReset().mockResolvedValue({ id: "job_1", status: "queued", progress: 0 });
     // A tiny in-memory preset store standing in for the server catalog.
     presetStore = [{ id: "default", name: "Default", prompt: DEFAULT_PROMPT, scope: "builtin", builtin: true }];
-    trainingApi.describePromptPresets.mockReset().mockImplementation(async (_token, options = {}) => {
+    trainingApi.describePromptPresets.mockReset().mockImplementation(async (_token, options = {}, model = "") => {
       if (options.method === "POST") {
         const body = JSON.parse(options.body);
         const created = { id: body.name.toLowerCase().replace(/[^a-z0-9]+/g, "_"), scope: "global", ...body };
         presetStore = [...presetStore, created];
         return created;
       }
-      return presetStore;
+      // The server's built-in default is the selected model's default instruction.
+      return presetStore.map((preset) =>
+        preset.builtin ? { ...preset, prompt: DEFAULTS[model || VISION_CAPTION_MODEL_REPO].prompt } : preset,
+      );
     });
     trainingApi.describePromptPreset.mockReset().mockImplementation(async (id) => {
       presetStore = presetStore.filter((preset) => preset.id !== id);
@@ -395,6 +406,81 @@ describe("DatasetPromptBatchDialog", () => {
     expect(appConfirm).toHaveBeenCalledTimes(2);
     expect(trainingApi.batchDescribeJobs).toHaveBeenCalledTimes(3);
     expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls[2][3].body)).not.toHaveProperty("itemIds");
+  });
+
+  function joyInstalled() {
+    context.models = [
+      installed("vision_caption_qwen3vl_8b", "Vision Captioner (Qwen3-VL-8B)"),
+      installed("joycaption_beta_one", "JoyCaption (beta one)"),
+    ];
+  }
+  const chooseModel = (id) => click(document.body.querySelector(`input[value="${id}"]`));
+
+  it("prefills JoyCaption's own default and sends no prompt for it", async () => {
+    joyInstalled();
+    await render();
+    await chooseModel("joycaption_beta_one");
+    await settle();
+    expect(trainingApi.defaultDescribePrompt).toHaveBeenLastCalledWith("t", expect.anything(), JOY_REPO);
+    expect(textarea("Describing prompt").value).toBe(JOY_DEFAULT_PROMPT);
+    await runWith([described("item_a", 300, 400)]);
+    expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls[0][3].body)).toEqual({ model: JOY_REPO, requestedGpu: "auto" });
+
+    // Back to the Vision Captioner: the untouched default swaps back.
+    await chooseModel("vision_caption_qwen3vl_8b");
+    await settle();
+    expect(textarea("Describing prompt").value).toBe(DEFAULT_PROMPT);
+  });
+
+  it("keeps an edited prompt when the model changes", async () => {
+    joyInstalled();
+    await render();
+    await act(async () => setText(textarea("Describing prompt"), "Describe only the clothing."));
+    await chooseModel("joycaption_beta_one");
+    await settle();
+    expect(textarea("Describing prompt").value).toBe("Describe only the clothing.");
+    await runWith([described("item_a", 300, 400)]);
+    expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls[0][3].body)).toMatchObject({
+      model: JOY_REPO,
+      prompt: "Describe only the clothing.",
+    });
+  });
+
+  it("blocks a prompt over the selected model's limit with a validation error before the API", async () => {
+    joyInstalled();
+    await render();
+    const long = "x".repeat(3001);
+    await act(async () => setText(textarea("Describing prompt"), long));
+    // Within the Vision Captioner's limit.
+    expect(document.body.querySelector(".validation-chip")).toBeNull();
+    expect(button("Describe images").disabled).toBe(false);
+
+    await chooseModel("joycaption_beta_one");
+    await settle();
+    expect(textarea("Describing prompt").value).toBe(long);
+    const chip = document.body.querySelector(".validation-chip.tone-error");
+    expect(chip.textContent).toContain("at most 3,000");
+    expect(textarea("Describing prompt").getAttribute("aria-invalid")).toBe("true");
+    expect(button("Describe images").disabled).toBe(true);
+    await click(button("Describe images"));
+    expect(trainingApi.batchDescribeJobs).not.toHaveBeenCalled();
+  });
+
+  it("resolves the built-in preset to the selected model's default and flags a too-long preset (SW-7086)", async () => {
+    joyInstalled();
+    presetStore.push({ id: "long", name: "Long", prompt: "y".repeat(3500), scope: "global" });
+    await render();
+    await chooseModel("joycaption_beta_one");
+    await settle();
+    await choosePreset("long");
+    expect(document.body.querySelector(".validation-chip.tone-error").textContent).toContain("at most 3,000");
+    expect(button("Describe images").disabled).toBe(true);
+
+    await choosePreset("default");
+    expect(textarea("Describing prompt").value).toBe(JOY_DEFAULT_PROMPT);
+    expect(document.body.querySelector(".validation-chip")).toBeNull();
+    await runWith([described("item_a", 300, 400)]);
+    expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls[0][3].body)).not.toHaveProperty("prompt");
   });
 
   it("blocks a run while the dataset has unsaved changes", async () => {

@@ -151,11 +151,10 @@ impl DescribePrompt {
 /// contract — that is the separate `[OUTPUT]` block).
 #[cfg(native_lane)]
 pub(crate) fn default_describe_instruction(model: DescribeModel) -> String {
-    let section = match model {
-        DescribeModel::VisionCaptioner => "SYSTEM",
-        DescribeModel::JoyCaption => "JOYCAPTION_SYSTEM",
-    };
-    crate::prompt_refine_jobs::magic_section_from(IMAGE_BATCH_DESCRIBE_V1, section)
+    sceneworks_core::dataset_batch_describe::default_describe_instruction(
+        IMAGE_BATCH_DESCRIBE_V1,
+        Some(model.repo()),
+    )
 }
 
 /// The six parsed fields of one described image (each may be empty).

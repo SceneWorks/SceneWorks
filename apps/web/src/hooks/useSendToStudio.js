@@ -248,7 +248,7 @@ export function useSendToStudio({
     setActiveView("Image");
   }, [setActiveView, setStudioLaunch]);
 
-  const sendAssetToVideo =useCallback((asset, mode = null) => {
+  const sendAssetToVideo = useCallback((asset, mode = null) => {
     if (!asset) {
       return;
     }

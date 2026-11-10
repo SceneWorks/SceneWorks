@@ -641,26 +641,7 @@ fn magic_section(name: &str) -> String {
 /// the same parser.
 #[cfg(any(test, native_lane))]
 pub(crate) fn magic_section_from(source: &str, name: &str) -> String {
-    let mut capturing = false;
-    let mut body: Vec<&str> = Vec::new();
-    for line in source.lines() {
-        let trimmed = line.trim();
-        let is_marker = trimmed.len() >= 2
-            && trimmed.starts_with('[')
-            && trimmed.ends_with(']')
-            && !trimmed.contains(' ');
-        if is_marker {
-            if capturing {
-                break;
-            }
-            capturing = trimmed[1..trimmed.len() - 1].eq_ignore_ascii_case(name);
-            continue;
-        }
-        if capturing {
-            body.push(line);
-        }
-    }
-    body.join("\n").trim().to_owned()
+    sceneworks_core::dataset_batch_describe::prompt_asset_section(source, name)
 }
 
 /// The `(system, user)` chat messages for a magic-prompt expansion: the `[SYSTEM]` block, and the

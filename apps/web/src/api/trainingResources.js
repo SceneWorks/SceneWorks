@@ -33,10 +33,12 @@ export const trainingApi = {
     apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}/training/datasets/${encodeURIComponent(datasetId)}/analysis-jobs`, token, options),
   batchDescribeJobs: (projectId, datasetId, token, options = {}) =>
     apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}/training/datasets/${encodeURIComponent(datasetId)}/batch-describe-jobs`, token, options),
-  defaultDescribePrompt: (token, options = {}) =>
-    apiFetch(`/api/v1/training/describe-prompt/default`, token, options),
-  describePromptPresets: (token, options = {}) =>
-    apiFetch(`/api/v1/training/describe-prompt/presets`, token, options),
+  // `model` (a describer repo) selects that model's default instruction and limit.
+  defaultDescribePrompt: (token, options = {}, model = "") =>
+    apiFetch(`/api/v1/training/describe-prompt/default${model ? `?model=${encodeURIComponent(model)}` : ""}`, token, options),
+  // On a list, `model` makes the built-in default preset that model's default instruction.
+  describePromptPresets: (token, options = {}, model = "") =>
+    apiFetch(`/api/v1/training/describe-prompt/presets${model ? `?model=${encodeURIComponent(model)}` : ""}`, token, options),
   describePromptPreset: (presetId, token, options = {}) =>
     apiFetch(`/api/v1/training/describe-prompt/presets/${encodeURIComponent(presetId)}`, token, options),
   faceAnalysisJobs: (projectId, datasetId, token, options = {}) =>
