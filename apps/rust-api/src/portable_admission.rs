@@ -318,6 +318,11 @@ fn is_source_choice_container(key: &str) -> bool {
             | "veda"
             | "source"
             | "upscale"
+            // The YuE2 block's `decoder` names the VAE snapshot the worker's
+            // `selected_portable_model_artifact_closure` selects (the generic `decoder` leaf only
+            // projects under keys that are already containers), so a duplicate that changes it
+            // must not keep the frozen decoder binding (SW-7030).
+            | "yue2"
     )
 }
 
@@ -3749,6 +3754,38 @@ mod tests {
         assert_ne!(
             source,
             portable_authored_options(convrot.as_object().unwrap())
+        );
+    }
+
+    #[test]
+    fn duplicate_yue2_decoder_change_requires_fresh_source_choice() {
+        let ordinary = json!({
+            "model":"yue2", "prompt":"red kite",
+            "yue2":{"kind":"create","lyrics":"la","computePolicy":"bf16",
+                     "decoder":"legacy","runId":"yue2run_one"}
+        });
+        // A duplicate rewrites the prompt and mints a fresh run id: neither is a source choice.
+        let changed_prompt = json!({
+            "model":"yue2", "prompt":"blue kite",
+            "yue2":{"kind":"create","lyrics":"la","computePolicy":"bf16",
+                     "decoder":"legacy","runId":"yue2run_two"}
+        });
+        let decoder = json!({
+            "model":"yue2", "prompt":"red kite",
+            "yue2":{"kind":"create","lyrics":"la","computePolicy":"bf16",
+                     "decoder":"standard","runId":"yue2run_one"}
+        });
+        let source = portable_authored_options(ordinary.as_object().unwrap());
+        // Only the decoder is source-affecting inside the block (the worker's
+        // `selected_portable_model_artifact_closure` reads it as the VAE choice).
+        assert_eq!(source["yue2"], json!({"decoder":"legacy"}));
+        assert_eq!(
+            source,
+            portable_authored_options(changed_prompt.as_object().unwrap())
+        );
+        assert_ne!(
+            source,
+            portable_authored_options(decoder.as_object().unwrap())
         );
     }
 

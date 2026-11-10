@@ -1193,13 +1193,17 @@ async fn validate_and_canonicalize_merged_generation_payload(
             merged.remove(key);
         }
     }
+    let mut canonical_audio_selection = false;
     if generation_job_model_is_path_backed(&job_type) {
         validate_payload_model(&merged)?;
         // A YuE2 retry/duplicate is held to the contract the worker enforces (sc-22999): the block
         // cannot be injected, removed or pointed at another model, and a block-less replay cannot
         // name a symbolic-song model the generic audio route refuses.
         if matches!(job_type, JobType::AudioGenerate) {
-            crate::yue2_jobs::canonicalize_replayed_audio_payload(
+            // The canonicalizer re-resolves a YuE2 replay's manifest carrier from the live
+            // catalog, so its stamped carrier is server-selected evidence like the video branch's
+            // `canonical_selection = true` stamp below.
+            canonical_audio_selection = crate::yue2_jobs::canonicalize_replayed_audio_payload(
                 state,
                 &persisted,
                 &mut merged,
@@ -1282,7 +1286,7 @@ async fn validate_and_canonicalize_merged_generation_payload(
     let canonical_model_entry =
         canonicalize_image_model_payload(state, &job_type, &mut merged).await?;
     // Local control-flow evidence, never a serialized/caller-supplied trust marker.
-    let mut canonical_selection = canonical_model_entry.is_some();
+    let mut canonical_selection = canonical_model_entry.is_some() || canonical_audio_selection;
     // The store SHALLOW-merges this object over the persisted payload, so a recorded checkpoint
     // alias the canonicalizer dropped (the replay picked another model) must be cleared explicitly
     // or the persisted value would survive the merge.
