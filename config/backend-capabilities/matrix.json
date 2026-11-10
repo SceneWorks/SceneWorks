@@ -4,7 +4,7 @@
   "summary": {
     "modelCount": 143,
     "importedFamilyCount": 4,
-    "cellCount": 1127,
+    "cellCount": 1128,
     "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 86,
     "exceptionCount": 10
@@ -27,9 +27,9 @@
     "modelImportDefaults": "b04a46b2ecf15c3e66a59d1303ff21ff70960e2a3ab2827368bbddaf584ee84c",
     "routerCandle": "ae12c868e7d8f1bcd6c00cd6d2815e6ce4a4555015c86e06a739a08ef757f4a6",
     "routerCatalog": "c7d751446482adc870ba49a674e4e145abb7b7e9a7fb7ff9a103b4900979a02c",
-    "routerGaps": "9fe4dedcbdd842eaaf21b7f3876d334c906042a5d74fbcb20957dfa5c9e72350",
+    "routerGaps": "25883a7ba6c2dc14a718ddb34431831ffde04f8c8dcf9e5266757faff7a097d4",
     "routerMlx": "e6301c20d459f944e8c495586a36eab6375d9058655fdc607a92f5eada93dca8",
-    "scheduler": "d47f54ca144ef3eb7a0f71ea1f379b4c0c78a6f1cc2d300295c0b18add0ba049",
+    "scheduler": "43ed19b0ec525be80b5acba9c37bbeffcfd5b54b05f71fc3aa5e5a4104fe9f9d",
     "trainingCatalog": "d01392a1be814e9c2bcb18c078e76c1ab20123544a27d9c365ca2ec3fd58b209",
     "webAudioStudio": "a93273c2ff57d6ad7ad8230b1ff5d2e83c6d63317b68888f1ef2f23c6967ff06",
     "webImageAdvanced": "90e62e982a79f8cacaeed21e94f638ca8143c6bc462bb26c6a74106d60d12056",
@@ -8393,7 +8393,12 @@
       "category": "utility",
       "requests": [
         {
-          "capability": "representative_request",
+          "capability": "model:vision_captioner",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "model:joycaption",
           "mlx": true,
           "candle": true
         }

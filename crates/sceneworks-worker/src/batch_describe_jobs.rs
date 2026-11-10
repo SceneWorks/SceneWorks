@@ -11,12 +11,19 @@
 //! `[OUTPUT]` block) is ALWAYS appended by this job after the instruction, so no edit can remove the
 //! six fields the parser reads.
 //!
-//! **The describer seam.** The model is a payload field (`model`). Today the Vision Captioner
-//! (Qwen3-VL, JSON-constrained decode through the resident refine-model cache) is the only accepted
-//! value; anything else is refused. A second describer (JoyCaption, SW-7083) implements
-//! [`BatchDescriber`] — its own decode and, since it has no constrained decoding, its own
-//! [`BatchDescriber::parse`] — and joins [`DescribeModel`]; the job loop, progress, cancel and result
-//! shape stay as they are.
+//! **The describer seam.** The model is a payload field (`model`): the Vision Captioner (Qwen3-VL,
+//! JSON-constrained decode through the resident refine-model cache, the default) or JoyCaption
+//! (SW-7083, the `training_caption` captioner); anything else is refused. Each implements
+//! [`BatchDescriber`]; the job loop, progress, cancel and result shape are shared.
+//!
+//! **JoyCaption.** JoyCaption (LLaVA) takes ONE user prompt beside the image and has no constrained
+//! decoding, so it gets the instruction, the output contract and the user line concatenated into
+//! that prompt (the contract still follows the instruction, so it stays the last word on shape). Its
+//! providers refuse a prompt over 4,000 characters, so its default instruction is the asset's
+//! condensed `[JOYCAPTION_SYSTEM]` block and a custom instruction is capped at
+//! `MAX_JOYCAPTION_DESCRIBE_PROMPT_CHARS` (sceneworks-core). Its reply is parsed leniently (first JSON object found
+//! anywhere in the reply), and an image whose reply still does not parse is described again, at most
+//! [`JOYCAPTION_PARSE_RETRIES`] more times, before it is flagged.
 //!
 //! **Failure and cancel.** An image whose output cannot be produced (unreadable image, generation
 //! error, reply that is not the six-field object) is returned flagged `failed` with its error rather
@@ -30,7 +37,9 @@ use futures_util::future::BoxFuture;
 #[cfg(native_lane)]
 use gen_core::core_llm::CancelFlag;
 #[cfg(native_lane)]
-pub(crate) use sceneworks_core::dataset_batch_describe::{DESCRIBE_FIELDS, VISION_CAPTIONER_REPO};
+pub(crate) use sceneworks_core::dataset_batch_describe::{
+    DESCRIBE_FIELDS, JOYCAPTION_REPO, VISION_CAPTIONER_REPO,
+};
 
 /// The batch describer prompt asset: `[SYSTEM]` is the default editable instruction, `[OUTPUT]` the
 /// fixed JSON output contract appended after any instruction, `[USER]` the user turn.
@@ -46,27 +55,39 @@ const CANCEL_MESSAGE: &str = "Dataset batch describe canceled by user.";
 #[cfg(native_lane)]
 const DESCRIBE_MAX_NEW_TOKENS: u32 = 4096;
 
+/// JoyCaption's reply budget: the providers' own ceiling (mlx-gen and candle-gen JoyCaption both
+/// advertise `max_new_tokens` 1024). Its default instruction asks for a reply that fits it.
+#[cfg(native_lane)]
+const JOYCAPTION_MAX_NEW_TOKENS: u32 = 1024;
+
+/// How many more times a JoyCaption image is described when its reply does not parse. JoyCaption
+/// samples (temperature 0.6, a fresh seed per call), so a second attempt is a different reply.
+#[cfg(native_lane)]
+pub(crate) const JOYCAPTION_PARSE_RETRIES: usize = 2;
+
 /// Longest error kept on a failed item (an engine error can embed a long backtrace).
 #[cfg(native_lane)]
 const MAX_ITEM_ERROR_CHARS: usize = 1_000;
 
-/// Which describer the job's `model` field selects. One variant today; JoyCaption joins in SW-7083.
+/// Which describer the job's `model` field selects.
 #[cfg(native_lane)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DescribeModel {
     VisionCaptioner,
+    JoyCaption,
 }
 
 #[cfg(native_lane)]
 impl DescribeModel {
-    /// Resolve the payload's `model`. Absent or blank means the Vision Captioner; any other value is
-    /// refused (the API refuses the same request with a 400 before queuing it).
+    /// Resolve the payload's `model`. Absent or blank means the Vision Captioner; a value that is
+    /// neither describer is refused (the API refuses the same request with a 400 before queuing it).
     pub(crate) fn from_payload(model: Option<&str>) -> WorkerResult<Self> {
         match model.map(str::trim).filter(|value| !value.is_empty()) {
             None | Some(VISION_CAPTIONER_REPO) => Ok(Self::VisionCaptioner),
+            Some(JOYCAPTION_REPO) => Ok(Self::JoyCaption),
             Some(other) => Err(WorkerError::InvalidPayload(format!(
                 "Dataset batch describe does not support model {other:?}; use the Vision Captioner \
-                 ({VISION_CAPTIONER_REPO})."
+                 ({VISION_CAPTIONER_REPO}) or JoyCaption ({JOYCAPTION_REPO})."
             ))),
         }
     }
@@ -74,6 +95,7 @@ impl DescribeModel {
     pub(crate) fn repo(self) -> &'static str {
         match self {
             Self::VisionCaptioner => VISION_CAPTIONER_REPO,
+            Self::JoyCaption => JOYCAPTION_REPO,
         }
     }
 }
@@ -92,16 +114,16 @@ pub(crate) struct DescribePrompt {
 
 #[cfg(native_lane)]
 impl DescribePrompt {
-    /// Build the prompt for a job's optional instruction. Returns the prompt and whether the
-    /// default instruction was used.
-    pub(crate) fn for_instruction(instruction: Option<&str>) -> (Self, bool) {
+    /// Build `model`'s prompt for a job's optional instruction. Returns the prompt and whether the
+    /// model's default instruction was used.
+    pub(crate) fn for_instruction(model: DescribeModel, instruction: Option<&str>) -> (Self, bool) {
         let custom = instruction
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_owned);
         let is_default = custom.is_none();
         let prompt = Self {
-            instruction: custom.unwrap_or_else(default_describe_instruction),
+            instruction: custom.unwrap_or_else(|| default_describe_instruction(model)),
             output_contract: crate::prompt_refine_jobs::magic_section_from(
                 IMAGE_BATCH_DESCRIBE_V1,
                 "OUTPUT",
@@ -116,13 +138,24 @@ impl DescribePrompt {
     pub(crate) fn system(&self) -> String {
         format!("{}\n\n{}", self.instruction, self.output_contract)
     }
+
+    /// The one prompt a single-turn describer (JoyCaption) receives: the system text (instruction,
+    /// then contract), then the user line.
+    pub(crate) fn single_turn(&self) -> String {
+        format!("{}\n\n{}", self.system(), self.user)
+    }
 }
 
-/// The default editable describing instruction: the asset's `[SYSTEM]` block (it holds no output
+/// `model`'s default editable describing instruction: the asset's `[SYSTEM]` block for the Vision
+/// Captioner, its condensed `[JOYCAPTION_SYSTEM]` block for JoyCaption (neither holds the output
 /// contract — that is the separate `[OUTPUT]` block).
 #[cfg(native_lane)]
-pub(crate) fn default_describe_instruction() -> String {
-    crate::prompt_refine_jobs::magic_section_from(IMAGE_BATCH_DESCRIBE_V1, "SYSTEM")
+pub(crate) fn default_describe_instruction(model: DescribeModel) -> String {
+    let section = match model {
+        DescribeModel::VisionCaptioner => "SYSTEM",
+        DescribeModel::JoyCaption => "JOYCAPTION_SYSTEM",
+    };
+    crate::prompt_refine_jobs::magic_section_from(IMAGE_BATCH_DESCRIBE_V1, section)
 }
 
 /// The six parsed fields of one described image (each may be empty).
@@ -144,9 +177,47 @@ pub(crate) fn parse_described_fields(raw: &str) -> Result<DescribedFields, Strin
     let Value::Object(object) = value else {
         return Err("The describer reply is not a JSON object.".to_owned());
     };
+    described_fields_from(|name| object.get(name))
+}
+
+/// The lenient parse for a describer without constrained decoding (JoyCaption): reasoning blocks
+/// and code fences stripped, then the FIRST complete JSON object anywhere in the reply (leading
+/// prose, trailing prose, or a second object after it are ignored), with field names matched
+/// ignoring ASCII case. The field rules are the strict parse's: missing or `null` is empty, any
+/// other non-string is an error, all six empty is an error.
+#[cfg(native_lane)]
+pub(crate) fn parse_lenient_described_fields(raw: &str) -> Result<DescribedFields, String> {
+    let text = crate::text_clean::strip_reasoning_and_fence(raw);
+    let object = text
+        .match_indices('{')
+        .find_map(|(start, _)| {
+            match serde_json::Deserializer::from_str(&text[start..])
+                .into_iter::<Value>()
+                .next()
+            {
+                Some(Ok(Value::Object(object))) => Some(object),
+                _ => None,
+            }
+        })
+        .ok_or_else(|| "The describer reply holds no complete JSON object.".to_owned())?;
+    described_fields_from(|name| {
+        object.get(name).or_else(|| {
+            object
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value)
+        })
+    })
+}
+
+/// The six fields of a parsed reply object, each read through `field`.
+#[cfg(native_lane)]
+fn described_fields_from<'a>(
+    field: impl Fn(&str) -> Option<&'a Value>,
+) -> Result<DescribedFields, String> {
     let mut fields: [String; 6] = Default::default();
     for (slot, name) in fields.iter_mut().zip(DESCRIBE_FIELDS) {
-        *slot = match object.get(name) {
+        *slot = match field(name) {
             None | Some(Value::Null) => String::new(),
             Some(Value::String(text)) => text.trim().to_owned(),
             Some(other) => {
@@ -185,6 +256,13 @@ pub(crate) trait BatchDescriber: Send + Sync {
     /// constrained Vision Captioner needs; a describer without constrained decoding overrides it.
     fn parse(&self, raw: &str) -> Result<DescribedFields, String> {
         parse_described_fields(raw)
+    }
+
+    /// How many more times an image is described when its reply does not [`Self::parse`]. A
+    /// generation error is never retried. The constrained Vision Captioner's reply always has the
+    /// object's shape, so it is not retried.
+    fn parse_retries(&self) -> usize {
+        0
     }
 }
 
@@ -286,6 +364,172 @@ impl BatchDescriber for VisionCaptionerDescriber {
     }
 }
 
+/// Loads the JoyCaption captioner: `crate::inference_runtime::load_captioner` in a job, a stub in a
+/// test.
+#[cfg(native_lane)]
+pub(crate) type CaptionerLoader = Box<
+    dyn FnOnce(&str, &gen_core::LoadSpec) -> gen_core::Result<Box<dyn gen_core::Captioner>> + Send,
+>;
+
+/// One image for the JoyCaption thread to describe, with where to send the reply.
+#[cfg(native_lane)]
+struct JoyCaptionCall {
+    image: image::DynamicImage,
+    prompt: String,
+    cancel: CancelFlag,
+    reply: tokio::sync::oneshot::Sender<WorkerResult<Result<String, String>>>,
+}
+
+/// The JoyCaption describer: the existing `training_caption` captioner (mlx-gen-joycaption on macOS,
+/// candle-gen-joycaption off-Mac, loaded through the same `load_captioner` seam). A `Captioner` is
+/// not `Send`, so one blocking thread owns it for the whole job: it loads the model on the first
+/// image, describes every image the job sends it, and drops the model when the job drops this
+/// describer.
+#[cfg(native_lane)]
+pub(crate) struct JoyCaptionDescriber {
+    calls: std::sync::mpsc::Sender<JoyCaptionCall>,
+}
+
+#[cfg(native_lane)]
+impl JoyCaptionDescriber {
+    pub(crate) fn spawn(
+        weights_dir: PathBuf,
+        job_id: String,
+        backend: String,
+        load: CaptionerLoader,
+    ) -> Self {
+        let (calls, receiver) = std::sync::mpsc::channel::<JoyCaptionCall>();
+        // Detached: the thread ends when `calls` is dropped (the job finished with this describer).
+        drop(crate::load_progress::spawn_blocking(move || {
+            joycaption_thread(receiver, weights_dir, job_id, backend, load)
+        }));
+        Self { calls }
+    }
+}
+
+#[cfg(native_lane)]
+fn joycaption_thread(
+    calls: std::sync::mpsc::Receiver<JoyCaptionCall>,
+    weights_dir: PathBuf,
+    job_id: String,
+    backend: String,
+    load: CaptionerLoader,
+) {
+    use gen_core::{
+        CaptionOptions, CaptionRequest, CaptionSampling, Image, LoadSpec, Progress, WeightsSource,
+    };
+    let backend = backend.to_uppercase();
+    let mut load = Some(load);
+    let mut captioner: Option<Box<dyn gen_core::Captioner>> = None;
+    while let Ok(call) = calls.recv() {
+        if let Some(loader) = load.take() {
+            emit_event(
+                "caption_pipeline_load_start",
+                json!({ "jobId": job_id, "engine": JOYCAPTION_REPO }),
+            );
+            match loader(
+                JOYCAPTION_REPO,
+                &LoadSpec::new(WeightsSource::Dir(weights_dir.clone())),
+            ) {
+                Ok(model) => {
+                    emit_event(
+                        "caption_pipeline_load_complete",
+                        json!({ "jobId": job_id, "engine": JOYCAPTION_REPO }),
+                    );
+                    captioner = Some(model);
+                }
+                Err(error) => {
+                    // A model that cannot load fails the whole job; the thread ends with it.
+                    let _ = call.reply.send(Err(WorkerError::Engine(format!(
+                        "JoyCaption {backend} load failed: {error}"
+                    ))));
+                    return;
+                }
+            }
+        }
+        let Some(model) = captioner.as_ref() else {
+            return;
+        };
+        let rgb = call.image.to_rgb8();
+        // The job's cancel is a `core_llm::CancelFlag`; the captioner polls its own gen-core flag.
+        // Bridge them before the call and on every progress event the captioner emits.
+        let caption_cancel = gen_core::CancelFlag::new();
+        if call.cancel.is_cancelled() {
+            caption_cancel.cancel();
+        }
+        let request = CaptionRequest {
+            image: Image {
+                width: rgb.width(),
+                height: rgb.height(),
+                pixels: rgb.into_raw(),
+            },
+            // The gen-core contract: `custom_prompt` is the source of `prompt`.
+            options: CaptionOptions {
+                custom_prompt: call.prompt.clone(),
+                ..CaptionOptions::default()
+            },
+            prompt: call.prompt,
+            // The training caption job's sampling defaults, with the providers' full reply budget.
+            sampling: CaptionSampling {
+                temperature: 0.6,
+                top_p: 0.9,
+                max_new_tokens: JOYCAPTION_MAX_NEW_TOKENS,
+                ..CaptionSampling::default()
+            },
+            cancel: caption_cancel.clone(),
+            ..Default::default()
+        };
+        // sc-24029: bound MLX's process-global freed-buffer cache across the decode.
+        let mut cache_bound = crate::mlx_decode_cache::DecodeCacheBound::mlx();
+        let mut on_progress = |_: Progress| {
+            cache_bound.note_event();
+            if call.cancel.is_cancelled() {
+                caption_cancel.cancel();
+            }
+        };
+        let reply = match model.caption(&request, &mut on_progress) {
+            Ok(output) => Ok(output.text),
+            Err(gen_core::Error::Canceled) => Err("JoyCaption generation canceled.".to_owned()),
+            Err(error) => Err(format!("JoyCaption {backend} generation failed: {error}")),
+        };
+        drop(cache_bound);
+        // The job may have stopped waiting (canceled); nothing to do then.
+        let _ = call.reply.send(Ok(reply));
+    }
+}
+
+#[cfg(native_lane)]
+impl BatchDescriber for JoyCaptionDescriber {
+    fn describe(
+        &self,
+        image: image::DynamicImage,
+        prompt: &DescribePrompt,
+        cancel: CancelFlag,
+    ) -> DescribeFuture {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        let sent = self.calls.send(JoyCaptionCall {
+            image,
+            prompt: prompt.single_turn(),
+            cancel,
+            reply,
+        });
+        Box::pin(async move {
+            let stopped =
+                || WorkerError::Engine("The JoyCaption describer stopped unexpectedly.".to_owned());
+            sent.map_err(|_| stopped())?;
+            answer.await.map_err(|_| stopped())?
+        })
+    }
+
+    fn parse(&self, raw: &str) -> Result<DescribedFields, String> {
+        parse_lenient_described_fields(raw)
+    }
+
+    fn parse_retries(&self) -> usize {
+        JOYCAPTION_PARSE_RETRIES
+    }
+}
+
 /// One dataset image to describe, as the API queued it.
 #[cfg(native_lane)]
 #[derive(Clone, Debug)]
@@ -360,15 +604,13 @@ fn parse_batch_describe_request(
     payload: &JsonObject,
 ) -> WorkerResult<BatchDescribeRequest> {
     let model = DescribeModel::from_payload(payload.get("model").and_then(Value::as_str))?;
+    let limit =
+        sceneworks_core::dataset_batch_describe::max_describe_prompt_chars(Some(model.repo()));
     let instruction = match payload.get("prompt") {
         None | Some(Value::Null) => None,
-        Some(Value::String(text))
-            if text.chars().count()
-                > sceneworks_core::dataset_batch_describe::MAX_DESCRIBE_PROMPT_CHARS =>
-        {
+        Some(Value::String(text)) if text.trim().chars().count() > limit => {
             return Err(WorkerError::InvalidPayload(format!(
-                "Dataset batch describe prompt is longer than {} characters.",
-                sceneworks_core::dataset_batch_describe::MAX_DESCRIBE_PROMPT_CHARS
+                "Dataset batch describe prompt is longer than {limit} characters for this model."
             )))
         }
         Some(Value::String(text)) => Some(text.as_str()),
@@ -378,7 +620,7 @@ fn parse_batch_describe_request(
             )))
         }
     };
-    let (prompt, default_prompt) = DescribePrompt::for_instruction(instruction);
+    let (prompt, default_prompt) = DescribePrompt::for_instruction(model, instruction);
     let items = parse_dataset_items(
         settings,
         payload,
@@ -476,6 +718,12 @@ pub(crate) async fn run_dataset_batch_describe_job(
             )?,
             job_id: job.id.clone(),
         }),
+        DescribeModel::JoyCaption => Box::new(JoyCaptionDescriber::spawn(
+            resolve_app_managed_model_dir(settings, JOYCAPTION_REPO, "JoyCaption model path")?,
+            job.id.clone(),
+            backend_label(&settings.gpu_id).to_owned(),
+            Box::new(crate::inference_runtime::load_captioner),
+        )),
     };
     run_batch_describe(api, settings, job, request, describer.as_ref()).await
 }
@@ -543,25 +791,25 @@ async fn run_batch_describe(
             },
             Ok(image) => {
                 let size = (image.width(), image.height());
-                let cancel = CancelFlag::new();
-                let generation = describer.describe(image, &request.prompt, cancel.clone());
-                let (was_canceled, reply) = StreamSupervisor::new(
-                    cancel,
-                    generation,
-                    progress_report_interval(settings),
-                    None,
+                let described = describe_with_retries(
+                    api,
+                    settings,
+                    job,
+                    describer,
+                    &request.prompt,
+                    image,
+                    (index, total),
                 )
-                .wait(api, settings, &job.id)
                 .await?;
-                if was_canceled {
+                let Some(outcome) = described else {
                     // This image was interrupted mid-description: it has no result to return.
                     canceled = true;
                     break;
-                }
+                };
                 DescribedItem {
                     item: item.clone(),
                     size: Some(size),
-                    outcome: reply?.and_then(|raw| describer.parse(&raw)),
+                    outcome,
                 }
             }
         };
@@ -625,6 +873,80 @@ async fn run_batch_describe(
     )
     .await?;
     Ok(())
+}
+
+/// Describe one image, describing it again (at most [`BatchDescriber::parse_retries`] more times)
+/// while its reply does not parse. A generation error is returned at once, never retried. Returns
+/// `None` when the job was canceled during an attempt or before a retry.
+#[cfg(native_lane)]
+async fn describe_with_retries(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    describer: &dyn BatchDescriber,
+    prompt: &DescribePrompt,
+    image: image::DynamicImage,
+    (index, total): (usize, usize),
+) -> WorkerResult<Option<Result<DescribedFields, String>>> {
+    let retries = describer.parse_retries();
+    let mut image = Some(image);
+    let mut attempt = 0;
+    loop {
+        // Keep a copy only while another attempt may need the image.
+        let input = if attempt < retries {
+            image.clone()
+        } else {
+            image.take()
+        }
+        .expect("the image is kept until the last attempt");
+        let cancel = CancelFlag::new();
+        let generation = describer.describe(input, prompt, cancel.clone());
+        let (was_canceled, reply) =
+            StreamSupervisor::new(cancel, generation, progress_report_interval(settings), None)
+                .wait(api, settings, &job.id)
+                .await?;
+        if was_canceled {
+            return Ok(None);
+        }
+        let raw = match reply? {
+            Ok(raw) => raw,
+            Err(error) => return Ok(Some(Err(error))),
+        };
+        match describer.parse(&raw) {
+            Ok(fields) => return Ok(Some(Ok(fields))),
+            Err(error) if attempt >= retries => {
+                return Ok(Some(Err(if attempt == 0 {
+                    error
+                } else {
+                    format!("{error} (after {} attempts)", attempt + 1)
+                })))
+            }
+            Err(_) => {}
+        }
+        attempt += 1;
+        // Honour a cancel before spending another attempt on this image.
+        if cancel_requested_peek(api, &job.id).await {
+            return Ok(None);
+        }
+        update_job(
+            api,
+            &job.id,
+            progress_payload_for_backend(
+                JobStatus::Running,
+                ProgressStage::Running,
+                image_progress(index, total),
+                &format!(
+                    "Describing image {} of {total} again (attempt {}): the reply was not the \
+                     six-field object.",
+                    index + 1,
+                    attempt + 1
+                ),
+                None,
+                backend_label(&settings.gpu_id),
+            ),
+        )
+        .await?;
+    }
 }
 
 /// Without a native vision provider (neither the macOS MLX worker nor the candle build) the

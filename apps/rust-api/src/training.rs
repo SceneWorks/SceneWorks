@@ -1460,9 +1460,10 @@ pub(crate) async fn create_training_dataset_subject_mask_job(
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
-/// Enqueue a dataset prompt-batch describe (SW-7082): the Vision Captioner describes each image of
-/// the dataset (or of `itemIds`, in dataset order) as six JSON fields plus its pixel size. The job
-/// routes by the `prompt_refine` capability (the same native vision LLM provider). The worker
+/// Enqueue a dataset prompt-batch describe (SW-7082): the Vision Captioner or JoyCaption (SW-7083)
+/// describes each image of the dataset (or of `itemIds`, in dataset order) as six JSON fields plus
+/// its pixel size. The job routes by the capability of its model (`prompt_refine` for the Vision
+/// Captioner, `training_caption` for JoyCaption). The worker
 /// appends the fixed JSON output contract to the describing instruction, so `prompt` carries only
 /// the user's instruction.
 pub(crate) async fn create_training_dataset_batch_describe_job(
@@ -1525,40 +1526,42 @@ pub(crate) async fn create_training_dataset_batch_describe_job(
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
-/// Validate a batch describe request: the model (absent means the Vision Captioner; nothing else is
-/// accepted yet) and the instruction length. Returns the model repo and the trimmed instruction,
-/// `None` when the worker's default instruction applies.
+/// Validate a batch describe request: the model (absent means the Vision Captioner; JoyCaption is
+/// the other accepted describer) and the instruction length, which depends on the model (JoyCaption
+/// takes one prompt of at most 4,000 characters, so its instruction is capped lower). Returns the
+/// model repo and the trimmed instruction, `None` when the worker's default instruction applies.
 pub(crate) fn validate_batch_describe_request(
     payload: &DatasetBatchDescribeJobRequest,
 ) -> Result<(&'static str, Option<String>), ApiError> {
     use sceneworks_core::dataset_batch_describe::{
-        MAX_DESCRIBE_PROMPT_CHARS, VISION_CAPTIONER_REPO,
+        max_describe_prompt_chars, JOYCAPTION_REPO, VISION_CAPTIONER_REPO,
     };
-    match payload.model.as_deref().map(str::trim) {
-        None | Some("") | Some(VISION_CAPTIONER_REPO) => {}
+    let model = match payload.model.as_deref().map(str::trim) {
+        None | Some("") | Some(VISION_CAPTIONER_REPO) => VISION_CAPTIONER_REPO,
+        Some(JOYCAPTION_REPO) => JOYCAPTION_REPO,
         Some(other) => {
             return Err(training_field_error(
                 "model",
                 format!(
-                    "Unsupported describe model {other:?}. Use the Vision Captioner ({VISION_CAPTIONER_REPO})."
+                    "Unsupported describe model {other:?}. Use the Vision Captioner \
+                     ({VISION_CAPTIONER_REPO}) or JoyCaption ({JOYCAPTION_REPO})."
                 ),
             ))
         }
-    }
+    };
     let prompt = payload
         .prompt
         .as_deref()
         .map(str::trim)
         .filter(|prompt| !prompt.is_empty());
-    if prompt.is_some_and(|prompt| prompt.chars().count() > MAX_DESCRIBE_PROMPT_CHARS) {
+    let limit = max_describe_prompt_chars(Some(model));
+    if prompt.is_some_and(|prompt| prompt.chars().count() > limit) {
         return Err(training_field_error(
             "prompt",
-            format!(
-                "The describing prompt must be at most {MAX_DESCRIBE_PROMPT_CHARS} characters."
-            ),
+            format!("The describing prompt must be at most {limit} characters for this model."),
         ));
     }
-    Ok((VISION_CAPTIONER_REPO, prompt.map(str::to_owned)))
+    Ok((model, prompt.map(str::to_owned)))
 }
 
 /// The worker items of a batch describe job, in dataset order: every item, or exactly the requested

@@ -5308,6 +5308,13 @@ fn required_capability(job: &JobSnapshot) -> &str {
         // Dataset subject masks (sc-2126) run the same SAM3 checkpoint as smart-select, so they route
         // to any worker advertising `image_segment` instead of a capability of their own.
         JobType::DatasetSubjectMask => WorkerCapability::ImageSegment.as_str(),
+        // SW-7083: a JoyCaption describe job runs the JoyCaption captioner that serves
+        // `training_caption`, so it needs a worker that links that captioner.
+        JobType::DatasetBatchDescribe
+            if crate::dataset_batch_describe::payload_uses_joycaption(&job.payload) =>
+        {
+            WorkerCapability::TrainingCaption.as_str()
+        }
         // SW-7082: the dataset batch describer runs the Vision Captioner on the native
         // `core_llm::TextLlm` provider that serves `prompt_refine`, so it routes by that capability.
         JobType::DatasetBatchDescribe => WorkerCapability::PromptRefine.as_str(),

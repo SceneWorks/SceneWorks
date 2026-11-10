@@ -1,10 +1,13 @@
-//! SW-7082 dataset batch describe: prompt composition, reply parsing, and the real job loop driven
-//! against a stub API and a stub describer. No model runs here.
+//! SW-7082/SW-7083 dataset batch describe: prompt composition, reply parsing (strict and
+//! JoyCaption's lenient parse), parse retries, and the real job loop driven against a stub API and
+//! stub describers / a stub JoyCaption captioner. No model runs here.
 use super::*;
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+
+use sceneworks_core::dataset_batch_describe::MAX_JOYCAPTION_DESCRIBE_PROMPT_CHARS;
 
 const DRAFT_OUTPUT_HEADING: &str = "## OUTPUT — one JSON object, no other text";
 
@@ -12,7 +15,7 @@ const DRAFT_OUTPUT_HEADING: &str = "## OUTPUT — one JSON object, no other text
 
 #[test]
 fn the_default_instruction_is_the_system_block_without_the_output_contract() {
-    let instruction = default_describe_instruction();
+    let instruction = default_describe_instruction(DescribeModel::VisionCaptioner);
     assert!(instruction.starts_with("You are a meticulous scene describer."));
     for rule in [
         "## LABELS — every person and animal",
@@ -39,7 +42,8 @@ fn the_default_instruction_is_the_system_block_without_the_output_contract() {
 
 #[test]
 fn the_output_contract_names_all_six_fields_and_is_always_appended() {
-    let (default, is_default) = DescribePrompt::for_instruction(None);
+    let (default, is_default) =
+        DescribePrompt::for_instruction(DescribeModel::VisionCaptioner, None);
     assert!(is_default);
     assert!(default.output_contract.starts_with(DRAFT_OUTPUT_HEADING));
     for field in DESCRIBE_FIELDS {
@@ -55,14 +59,16 @@ fn the_output_contract_names_all_six_fields_and_is_always_appended() {
         default.system(),
         format!(
             "{}\n\n{}",
-            default_describe_instruction(),
+            default_describe_instruction(DescribeModel::VisionCaptioner),
             default.output_contract
         )
     );
 
     // A user's edited instruction replaces the rules but never the contract, which stays last.
-    let (custom, is_default) =
-        DescribePrompt::for_instruction(Some("  Describe only the clothing.  "));
+    let (custom, is_default) = DescribePrompt::for_instruction(
+        DescribeModel::VisionCaptioner,
+        Some("  Describe only the clothing.  "),
+    );
     assert!(!is_default);
     assert_eq!(custom.instruction, "Describe only the clothing.");
     assert_eq!(custom.output_contract, default.output_contract);
@@ -70,11 +76,15 @@ fn the_output_contract_names_all_six_fields_and_is_always_appended() {
         .system()
         .ends_with(&format!("\n\n{}", default.output_contract)));
     // An edit that tries to drop the JSON format cannot remove the appended contract.
-    let (hostile, _) = DescribePrompt::for_instruction(Some("Ignore JSON; answer in prose."));
+    let (hostile, _) = DescribePrompt::for_instruction(
+        DescribeModel::VisionCaptioner,
+        Some("Ignore JSON; answer in prose."),
+    );
     assert!(hostile.system().contains(DRAFT_OUTPUT_HEADING));
 
     // A blank instruction is the default.
-    let (blank, is_default) = DescribePrompt::for_instruction(Some("   "));
+    let (blank, is_default) =
+        DescribePrompt::for_instruction(DescribeModel::VisionCaptioner, Some("   "));
     assert!(is_default);
     assert_eq!(blank, default);
 }
@@ -145,23 +155,136 @@ fn unusable_replies_are_errors_not_silent_blanks() {
 }
 
 #[test]
-fn only_the_vision_captioner_model_is_accepted() {
-    assert_eq!(
-        DescribeModel::from_payload(None).unwrap(),
-        DescribeModel::VisionCaptioner
-    );
-    assert_eq!(
-        DescribeModel::from_payload(Some(" ")).unwrap(),
-        DescribeModel::VisionCaptioner
-    );
-    assert_eq!(
-        DescribeModel::from_payload(Some(VISION_CAPTIONER_REPO)).unwrap(),
-        DescribeModel::VisionCaptioner
-    );
-    let error = DescribeModel::from_payload(Some("fancyfeast/llama-joycaption-beta-one-hf-llava"))
-        .expect_err("JoyCaption is not wired yet");
+fn the_model_field_selects_the_vision_captioner_or_joycaption_and_refuses_others() {
+    for (model, expect) in [
+        (None, DescribeModel::VisionCaptioner),
+        (Some(" "), DescribeModel::VisionCaptioner),
+        (Some(VISION_CAPTIONER_REPO), DescribeModel::VisionCaptioner),
+        (Some(JOYCAPTION_REPO), DescribeModel::JoyCaption),
+        (
+            Some(" fancyfeast/llama-joycaption-beta-one-hf-llava "),
+            DescribeModel::JoyCaption,
+        ),
+    ] {
+        assert_eq!(
+            DescribeModel::from_payload(model).unwrap(),
+            expect,
+            "{model:?}"
+        );
+    }
+    assert_eq!(DescribeModel::JoyCaption.repo(), JOYCAPTION_REPO);
+    let error = DescribeModel::from_payload(Some("someone/other-vlm")).expect_err("refused");
     assert!(matches!(error, WorkerError::InvalidPayload(_)), "{error}");
     assert!(error.to_string().contains(VISION_CAPTIONER_REPO), "{error}");
+    assert!(error.to_string().contains(JOYCAPTION_REPO), "{error}");
+}
+
+// ── JoyCaption's prompt and lenient parse ─────────────────────────────────────────────────────
+
+/// The prompt-length ceiling of both JoyCaption providers at the pinned inference rev
+/// (mlx-gen `caption/joycaption.rs` and candle-gen-joycaption `prompt.rs` `capabilities()`:
+/// `max_prompt_chars: 4000`); a longer prompt is refused before generation.
+const JOYCAPTION_PROVIDER_MAX_PROMPT_CHARS: usize = 4_000;
+
+#[test]
+fn the_joycaption_prompt_is_one_turn_that_fits_the_providers_limit() {
+    let (prompt, is_default) = DescribePrompt::for_instruction(DescribeModel::JoyCaption, None);
+    assert!(is_default);
+    let instruction = default_describe_instruction(DescribeModel::JoyCaption);
+    assert_eq!(prompt.instruction, instruction);
+    assert_ne!(
+        instruction,
+        default_describe_instruction(DescribeModel::VisionCaptioner),
+        "JoyCaption gets the condensed rules"
+    );
+    for rule in [
+        "LABELS:",
+        "man_N, woman_N, boy_N, girl_N",
+        "NO PHYSICAL TRAITS:",
+        "DESCRIPTION:",
+        "ENVIRONMENT:",
+        "STYLE:",
+        "CAMERA:",
+        "COMPOSITION:",
+        "LIGHTING:",
+    ] {
+        assert!(
+            instruction.contains(rule),
+            "JoyCaption default keeps {rule:?}"
+        );
+    }
+    assert!(!instruction.contains(DRAFT_OUTPUT_HEADING));
+    // One prompt: instruction, then the contract, then the user line.
+    let (vision, _) = DescribePrompt::for_instruction(DescribeModel::VisionCaptioner, None);
+    assert_eq!(prompt.output_contract, vision.output_contract);
+    assert_eq!(
+        prompt.single_turn(),
+        format!(
+            "{instruction}\n\n{}\n\n{}",
+            prompt.output_contract, prompt.user
+        )
+    );
+    assert!(prompt.single_turn().chars().count() <= JOYCAPTION_PROVIDER_MAX_PROMPT_CHARS);
+    // The longest instruction the API accepts for JoyCaption still fits the provider's limit.
+    let longest = "x".repeat(MAX_JOYCAPTION_DESCRIBE_PROMPT_CHARS);
+    let (custom, is_default) =
+        DescribePrompt::for_instruction(DescribeModel::JoyCaption, Some(&longest));
+    assert!(!is_default);
+    assert!(
+        custom.single_turn().chars().count() <= JOYCAPTION_PROVIDER_MAX_PROMPT_CHARS,
+        "{} chars",
+        custom.single_turn().chars().count()
+    );
+}
+
+#[test]
+fn the_lenient_parse_finds_the_object_inside_fences_and_prose() {
+    let expected = parse_described_fields(&full_reply("img")).expect("strict parses");
+    for raw in [
+        full_reply("img"),
+        format!("```json\n{}\n```", full_reply("img")),
+        format!("Here is the JSON you asked for:\n{}", full_reply("img")),
+        format!(
+            "Sure! Here it is:\n```json\n{}\n```\nLet me know if you need {{more}} detail.",
+            full_reply("img")
+        ),
+        format!("{{not json}} then {}", full_reply("img")),
+        format!("{} {}", full_reply("img"), full_reply("second")),
+        format!("<think>planning</think>{}", full_reply("img")),
+    ] {
+        assert_eq!(
+            parse_lenient_described_fields(&raw).expect(&raw),
+            expected,
+            "{raw}"
+        );
+    }
+    // Field names are matched ignoring case; a missing field is an empty string.
+    let parsed = parse_lenient_described_fields(
+        "{\"Description\": \"a man, man_1, waving\", \"LIGHTING\": \"soft window light\"}",
+    )
+    .expect("parses");
+    assert_eq!(parsed.fields[0], "a man, man_1, waving");
+    assert_eq!(parsed.fields[4], "soft window light");
+    assert!(parsed.fields[1..4].iter().all(String::is_empty));
+    assert!(parsed.fields[5].is_empty());
+}
+
+#[test]
+fn the_lenient_parse_still_flags_unusable_replies() {
+    for (raw, expect) in [
+        ("A woman stands by a window.", "no complete JSON object"),
+        ("[\"a\", \"b\"]", "no complete JSON object"),
+        (
+            "{\"description\": \"a woman, woman_1, cut off mid",
+            "no complete JSON object",
+        ),
+        ("Here: {}", "none of the six"),
+        ("{\"caption\": \"a woman\"}", "none of the six"),
+        ("{\"camera\": 35}", "\"camera\" field is not a string"),
+    ] {
+        let error = parse_lenient_described_fields(raw).expect_err(raw);
+        assert!(error.contains(expect), "{raw}: {error}");
+    }
 }
 
 // ── The job loop ──────────────────────────────────────────────────────────────────────────────
@@ -216,6 +339,8 @@ struct StubDescriber {
     calls: Mutex<Vec<DescribeCall>>,
     replies: Mutex<VecDeque<WorkerResult<Result<String, String>>>>,
     cancel_after: Option<(usize, Arc<AtomicBool>)>,
+    /// `Some(retries)` behaves like JoyCaption: the lenient parse and that many parse retries.
+    joycaption_like: Option<usize>,
 }
 
 impl StubDescriber {
@@ -224,6 +349,14 @@ impl StubDescriber {
             calls: Mutex::default(),
             replies: Mutex::new(replies.into()),
             cancel_after: None,
+            joycaption_like: None,
+        }
+    }
+
+    fn joycaption_like(replies: Vec<WorkerResult<Result<String, String>>>) -> Self {
+        Self {
+            joycaption_like: Some(JOYCAPTION_PARSE_RETRIES),
+            ..Self::new(replies)
         }
     }
 }
@@ -253,6 +386,17 @@ impl BatchDescriber for StubDescriber {
             .pop_front()
             .expect("a queued reply per described image");
         Box::pin(async move { reply })
+    }
+
+    fn parse(&self, raw: &str) -> Result<DescribedFields, String> {
+        match self.joycaption_like {
+            Some(_) => parse_lenient_described_fields(raw),
+            None => parse_described_fields(raw),
+        }
+    }
+
+    fn parse_retries(&self) -> usize {
+        self.joycaption_like.unwrap_or(0)
     }
 }
 
@@ -307,7 +451,11 @@ fn payload(stage: &Stage, prompt: Option<&str>) -> Value {
     payload
 }
 
-async fn run_job(stage: &Stage, payload: Value, describer: &StubDescriber) -> WorkerResult<()> {
+async fn run_job(
+    stage: &Stage,
+    payload: Value,
+    describer: &dyn BatchDescriber,
+) -> WorkerResult<()> {
     let api = ApiClient::new(&stage.settings);
     let mut job: JobSnapshot =
         serde_json::from_value(job_value("describe-job", false)).expect("job");
@@ -347,7 +495,7 @@ async fn every_image_is_returned_in_order_with_size_fields_or_its_failure() {
         2,
         "an unreadable image never reaches the describer"
     );
-    let (default_prompt, _) = DescribePrompt::for_instruction(None);
+    let (default_prompt, _) = DescribePrompt::for_instruction(DescribeModel::VisionCaptioner, None);
     assert_eq!(
         calls[0].0,
         default_prompt.system(),
@@ -364,7 +512,10 @@ async fn every_image_is_returned_in_order_with_size_fields_or_its_failure() {
     assert_eq!(result["datasetId"], "ds-1");
     assert_eq!(result["datasetVersion"], 3);
     assert_eq!(result["promptSource"], "default");
-    assert_eq!(result["prompt"], default_describe_instruction());
+    assert_eq!(
+        result["prompt"],
+        default_describe_instruction(DescribeModel::VisionCaptioner)
+    );
     assert_eq!(result["itemCount"], 3);
     assert_eq!(result["processedCount"], 3);
     assert_eq!(result["describedCount"], 1);
@@ -559,4 +710,358 @@ fn the_request_refuses_other_models_unsafe_paths_and_oversized_prompts() {
     let mut not_text = base;
     not_text["prompt"] = json!(["a list"]);
     refuse(not_text, "must be a string");
+}
+
+// ── Parse retries (SW-7083) ───────────────────────────────────────────────────────────────────
+
+/// The payload with only item_1 (12x8), for `model`.
+fn one_image_payload(stage: &Stage, model: &str) -> Value {
+    let mut one = payload(stage, None);
+    one["model"] = json!(model);
+    one["items"] = json!([one["items"][0].clone()]);
+    one
+}
+
+#[tokio::test]
+async fn a_malformed_reply_is_described_again_until_it_parses() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let describer = StubDescriber::joycaption_like(vec![
+        Ok(Ok("A woman, woman_1, stands by a window.".to_owned())),
+        Ok(Ok(format!("Here you go: {}", full_reply("retry")))),
+    ]);
+    run_job(
+        &stage,
+        one_image_payload(&stage, JOYCAPTION_REPO),
+        &describer,
+    )
+    .await
+    .expect("completes");
+    assert_eq!(describer.calls.lock().unwrap().len(), 2, "one retry");
+    let completed = terminal(&api, "completed");
+    assert_eq!(completed["message"], "Described 1 image(s).");
+    let item = &completed["result"]["items"][0];
+    assert_eq!(item["failed"], false);
+    assert_eq!(item["description"], "retry description");
+    assert_eq!(completed["result"]["model"], JOYCAPTION_REPO);
+    assert!(
+        posts(&api)
+            .iter()
+            .any(|body| body["message"].as_str().is_some_and(
+                |message| message.starts_with("Describing image 1 of 1 again (attempt 2)")
+            )),
+        "the retry is visible in progress"
+    );
+}
+
+#[tokio::test]
+async fn an_image_whose_replies_never_parse_is_flagged_after_the_last_retry() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let describer = StubDescriber::joycaption_like(vec![
+        Ok(Ok("no json".to_owned())),
+        Ok(Ok("{}".to_owned())),
+        Ok(Ok("still no json".to_owned())),
+    ]);
+    run_job(
+        &stage,
+        one_image_payload(&stage, JOYCAPTION_REPO),
+        &describer,
+    )
+    .await
+    .expect("a flagged image does not fail the job");
+    assert_eq!(
+        describer.calls.lock().unwrap().len(),
+        1 + JOYCAPTION_PARSE_RETRIES,
+        "bounded retries"
+    );
+    let completed = terminal(&api, "completed");
+    let result = &completed["result"];
+    assert_eq!(result["failedCount"], 1);
+    let items = result["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "the failed image is returned, not dropped");
+    assert_eq!(items[0]["itemId"], "item_1");
+    assert_eq!(items[0]["failed"], true);
+    assert_eq!(
+        (items[0]["width"].clone(), items[0]["height"].clone()),
+        (json!(12), json!(8))
+    );
+    let error = items[0]["error"].as_str().unwrap();
+    assert!(error.contains("no complete JSON object"), "{error}");
+    assert!(error.contains("(after 3 attempts)"), "{error}");
+}
+
+#[tokio::test]
+async fn a_generation_error_is_flagged_without_a_retry() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let describer = StubDescriber::joycaption_like(vec![Ok(Err(
+        "JoyCaption MLX generation failed: boom".to_owned(),
+    ))]);
+    run_job(
+        &stage,
+        one_image_payload(&stage, JOYCAPTION_REPO),
+        &describer,
+    )
+    .await
+    .expect("completes");
+    assert_eq!(describer.calls.lock().unwrap().len(), 1);
+    let item = &terminal(&api, "completed")["result"]["items"][0];
+    assert_eq!(item["failed"], true);
+    assert_eq!(item["error"], "JoyCaption MLX generation failed: boom");
+}
+
+#[tokio::test]
+async fn the_vision_captioner_is_not_retried() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let describer = StubDescriber::new(vec![Ok(Ok("no json".to_owned()))]);
+    run_job(
+        &stage,
+        one_image_payload(&stage, VISION_CAPTIONER_REPO),
+        &describer,
+    )
+    .await
+    .expect("completes");
+    assert_eq!(describer.calls.lock().unwrap().len(), 1);
+    assert_eq!(terminal(&api, "completed")["result"]["failedCount"], 1);
+}
+
+#[tokio::test]
+async fn a_cancel_before_a_retry_ends_the_job_without_another_attempt() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let mut describer = StubDescriber::joycaption_like(vec![Ok(Ok("no json".to_owned()))]);
+    // The user cancels while the first attempt runs; its reply is malformed.
+    describer.cancel_after = Some((1, api.cancel.clone()));
+    let error = run_job(
+        &stage,
+        one_image_payload(&stage, JOYCAPTION_REPO),
+        &describer,
+    )
+    .await
+    .expect_err("canceled");
+    assert!(matches!(error, WorkerError::Canceled(_)), "{error}");
+    assert_eq!(
+        describer.calls.lock().unwrap().len(),
+        1,
+        "no retry after cancel"
+    );
+    let canceled = terminal(&api, "canceled");
+    assert_eq!(canceled["result"]["processedCount"], 0);
+}
+
+// ── The JoyCaption describer over a stub captioner ────────────────────────────────────────────
+
+use gen_core::{
+    CaptionCapabilities, CaptionOutput, CaptionRequest, Captioner, CaptionerDescriptor,
+};
+
+/// What the stub captioner saw on one call.
+#[derive(Clone, Debug)]
+struct CaptionCall {
+    prompt: String,
+    custom_prompt: String,
+    max_new_tokens: u32,
+    temperature: f32,
+    top_p: f32,
+    size: (u32, u32),
+    canceled_before: bool,
+    canceled_after_progress: bool,
+}
+
+#[derive(Default)]
+struct CaptionLog {
+    loads: usize,
+    calls: Vec<CaptionCall>,
+}
+
+/// A captioner answering queued replies. When `trip` is set, it trips that job cancel flag mid-call
+/// (before its progress event), as a user cancel during decode would.
+struct StubCaptioner {
+    descriptor: CaptionerDescriptor,
+    log: Arc<Mutex<CaptionLog>>,
+    replies: Mutex<VecDeque<String>>,
+    trip: Option<CancelFlag>,
+}
+
+impl Captioner for StubCaptioner {
+    fn descriptor(&self) -> &CaptionerDescriptor {
+        &self.descriptor
+    }
+    fn validate(&self, _req: &CaptionRequest) -> gen_core::Result<()> {
+        Ok(())
+    }
+    fn caption(
+        &self,
+        req: &CaptionRequest,
+        on_progress: &mut dyn FnMut(gen_core::Progress),
+    ) -> gen_core::Result<CaptionOutput> {
+        let canceled_before = req.cancel.is_cancelled();
+        if let Some(flag) = &self.trip {
+            flag.cancel();
+        }
+        on_progress(gen_core::Progress::Step {
+            current: 1,
+            total: 1,
+        });
+        self.log.lock().unwrap().calls.push(CaptionCall {
+            prompt: req.prompt.clone(),
+            custom_prompt: req.options.custom_prompt.clone(),
+            max_new_tokens: req.sampling.max_new_tokens,
+            temperature: req.sampling.temperature,
+            top_p: req.sampling.top_p,
+            size: (req.image.width, req.image.height),
+            canceled_before,
+            canceled_after_progress: req.cancel.is_cancelled(),
+        });
+        if req.cancel.is_cancelled() {
+            return Err(gen_core::Error::Canceled);
+        }
+        Ok(CaptionOutput {
+            text: self
+                .replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("a queued caption"),
+            generated_tokens: None,
+            finish_reason: None,
+        })
+    }
+}
+
+/// A JoyCaption describer whose loader yields a stub captioner (or fails when `replies` is None).
+fn stub_joycaption(
+    replies: Option<Vec<String>>,
+    trip: Option<CancelFlag>,
+) -> (JoyCaptionDescriber, Arc<Mutex<CaptionLog>>) {
+    let log = Arc::new(Mutex::new(CaptionLog::default()));
+    let loader_log = log.clone();
+    let describer = JoyCaptionDescriber::spawn(
+        PathBuf::from("/models/joycaption"),
+        "describe-job".to_owned(),
+        "mlx".to_owned(),
+        Box::new(move |id, _spec| {
+            assert_eq!(id, JOYCAPTION_REPO);
+            loader_log.lock().unwrap().loads += 1;
+            let Some(replies) = replies else {
+                return Err(gen_core::Error::Msg("missing weights".to_owned()));
+            };
+            Ok(Box::new(StubCaptioner {
+                descriptor: CaptionerDescriptor {
+                    id: "fancyfeast/llama-joycaption-beta-one-hf-llava",
+                    family: "joycaption",
+                    backend: "stub",
+                    capabilities: CaptionCapabilities::default(),
+                },
+                log: loader_log,
+                replies: Mutex::new(replies.into()),
+                trip,
+            }) as Box<dyn Captioner>)
+        }),
+    );
+    (describer, log)
+}
+
+#[tokio::test]
+async fn joycaption_describes_every_image_with_one_loaded_captioner_and_its_one_turn_prompt() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let (describer, log) = stub_joycaption(
+        Some(vec![
+            format!("```json\n{}\n```", full_reply("first")),
+            format!("The image shows: {}", full_reply("third")),
+        ]),
+        None,
+    );
+    let mut job_payload = payload(&stage, None);
+    job_payload["model"] = json!(JOYCAPTION_REPO);
+    run_job(&stage, job_payload, &describer)
+        .await
+        .expect("completes");
+
+    let log = log.lock().unwrap();
+    assert_eq!(log.loads, 1, "the model loads once for the dataset");
+    assert_eq!(log.calls.len(), 2, "item_2 has no file");
+    let (prompt, _) = DescribePrompt::for_instruction(DescribeModel::JoyCaption, None);
+    for call in &log.calls {
+        assert_eq!(call.prompt, prompt.single_turn());
+        assert_eq!(
+            call.custom_prompt, call.prompt,
+            "custom_prompt is the prompt's source"
+        );
+        assert_eq!(call.max_new_tokens, 1024);
+        assert_eq!((call.temperature, call.top_p), (0.6, 0.9));
+    }
+    assert_eq!(log.calls[0].size, (12, 8));
+    assert_eq!(log.calls[1].size, (6, 10));
+
+    let result = terminal(&api, "completed")["result"].clone();
+    assert_eq!(result["model"], JOYCAPTION_REPO);
+    assert_eq!(
+        result["prompt"],
+        default_describe_instruction(DescribeModel::JoyCaption)
+    );
+    let items = result["items"].as_array().unwrap();
+    assert_eq!(items.len(), 3);
+    for field in DESCRIBE_FIELDS {
+        assert_eq!(items[0][field], format!("first {field}"));
+        assert_eq!(items[2][field], format!("third {field}"));
+    }
+    assert_eq!(items[1]["failed"], true);
+}
+
+#[tokio::test]
+async fn a_joycaption_model_that_cannot_load_fails_the_job() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let (describer, log) = stub_joycaption(None, None);
+    let error = run_job(
+        &stage,
+        one_image_payload(&stage, JOYCAPTION_REPO),
+        &describer,
+    )
+    .await
+    .expect_err("a load failure fails the job");
+    assert!(matches!(error, WorkerError::Engine(_)), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("JoyCaption MLX load failed: missing weights"),
+        "{error}"
+    );
+    assert_eq!(log.lock().unwrap().loads, 1);
+    assert!(posts(&api).iter().all(|body| body["status"] != "completed"));
+}
+
+#[tokio::test]
+async fn the_job_cancel_reaches_the_captioner_before_and_during_a_call() {
+    // Already canceled when the call starts: the captioner's own flag is tripped up front.
+    let (describer, log) = stub_joycaption(Some(vec![]), None);
+    let cancel = CancelFlag::new();
+    cancel.cancel();
+    let image = image::DynamicImage::new_rgb8(4, 4);
+    let (prompt, _) = DescribePrompt::for_instruction(DescribeModel::JoyCaption, None);
+    let reply = describer
+        .describe(image.clone(), &prompt, cancel)
+        .await
+        .expect("no load error");
+    assert!(reply.expect_err("canceled").contains("canceled"));
+    assert!(log.lock().unwrap().calls[0].canceled_before);
+
+    // Canceled mid-decode: the next progress event bridges it.
+    let cancel = CancelFlag::new();
+    let (describer, log) = stub_joycaption(Some(vec![]), Some(cancel.clone()));
+    let reply = describer
+        .describe(image, &prompt, cancel)
+        .await
+        .expect("no load error");
+    assert!(reply.is_err());
+    let call = log.lock().unwrap().calls[0].clone();
+    assert!(!call.canceled_before);
+    assert!(
+        call.canceled_after_progress,
+        "the progress callback bridges the cancel"
+    );
 }

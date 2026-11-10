@@ -1,8 +1,11 @@
-//! rust-api dataset batch describe tests (SW-7082): job enqueue, item subset in dataset order,
-//! default/custom prompt carriage, and the 400s for an unsupported model, an unknown item and an
-//! oversized prompt.
+//! rust-api dataset batch describe tests (SW-7082, SW-7083): job enqueue, item subset in dataset
+//! order, default/custom prompt carriage, JoyCaption as the second describer, and the 400s for an
+//! unsupported model, an unknown item and an oversized prompt.
 use super::support::*;
-use sceneworks_core::dataset_batch_describe::{MAX_DESCRIBE_PROMPT_CHARS, VISION_CAPTIONER_REPO};
+use sceneworks_core::dataset_batch_describe::{
+    JOYCAPTION_REPO, MAX_DESCRIBE_PROMPT_CHARS, MAX_JOYCAPTION_DESCRIBE_PROMPT_CHARS,
+    VISION_CAPTIONER_REPO,
+};
 
 fn png_rgb(w: u32, h: u32, shade: u8) -> Vec<u8> {
     let mut out = Vec::new();
@@ -138,7 +141,12 @@ async fn batch_describe_refuses_other_models_unknown_items_and_oversized_prompts
         format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
     for (body, field, expect) in [
         (
-            json!({ "model": "fancyfeast/llama-joycaption-beta-one-hf-llava" }),
+            json!({ "model": "someone/other-vlm" }),
+            "model",
+            "Unsupported describe model",
+        ),
+        (
+            json!({ "model": "fancyfeast/llama-joycaption-alpha-two-hf-llava" }),
             "model",
             "Unsupported describe model",
         ),
@@ -157,6 +165,14 @@ async fn batch_describe_refuses_other_models_unknown_items_and_oversized_prompts
             "prompt",
             "at most",
         ),
+        (
+            json!({
+                "model": JOYCAPTION_REPO,
+                "prompt": "x".repeat(MAX_JOYCAPTION_DESCRIBE_PROMPT_CHARS + 1),
+            }),
+            "prompt",
+            "at most 3000 characters",
+        ),
     ] {
         let (status, error) = request(app.clone(), "POST", &route, body.clone()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {error}");
@@ -174,4 +190,40 @@ async fn batch_describe_refuses_other_models_unknown_items_and_oversized_prompts
             "{error}"
         );
     }
+}
+
+#[tokio::test]
+async fn batch_describe_accepts_joycaption_with_its_own_prompt_limit() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id, dataset_id, item_ids, _) = dataset_fixture(&temp_dir).await;
+    let route =
+        format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({ "model": format!("  {JOYCAPTION_REPO} "), "itemIds": [item_ids[1]] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["type"], "dataset_batch_describe");
+    assert_eq!(job["payload"]["model"], JOYCAPTION_REPO);
+    assert!(job["payload"].get("prompt").is_none());
+    assert_eq!(job["payload"]["items"].as_array().unwrap().len(), 1);
+
+    // An instruction exactly at JoyCaption's limit is accepted.
+    let at_limit = "x".repeat(MAX_JOYCAPTION_DESCRIBE_PROMPT_CHARS);
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({ "model": JOYCAPTION_REPO, "prompt": at_limit }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(
+        job["payload"]["prompt"].as_str().unwrap().chars().count(),
+        MAX_JOYCAPTION_DESCRIBE_PROMPT_CHARS
+    );
 }
