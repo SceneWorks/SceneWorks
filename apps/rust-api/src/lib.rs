@@ -289,6 +289,8 @@ use recipe_presets::{
     recipe_preset_catalog_with, recipe_preset_loras, serialize_preset_lora,
     stamp_recipe_preset_used, update_recipe_preset,
 };
+mod describe_prompts;
+use describe_prompts::get_default_describe_prompt;
 mod prompt_batches;
 use prompt_batches::{
     create_prompt_batch, delete_prompt_batch, duplicate_prompt_batch, get_prompt_batch,

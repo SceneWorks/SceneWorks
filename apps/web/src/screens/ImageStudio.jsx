@@ -747,7 +747,7 @@ export function ImageStudio() {
     if (launchRequest?.view !== "Image") {
       return;
     }
-    if (launchRequest.recipe) {
+    if (launchRequest.recipe || launchRequest.promptBatch) {
       return;
     }
     const freshLaunch = nonRecipeLaunchIdRef.current !== launchRequest.id;
@@ -1844,6 +1844,16 @@ export function ImageStudio() {
     }
     setSelectedPresetId(launchRequest.presetId);
   }, [launchRequest, setSelectedPresetId]);
+  // SW-7085: a prompt-batch launch (Training Studio's "Create Prompt Batch from Dataset") loads the
+  // saved batch and switches the composer to Batch mode, leaving model and mode as they are.
+  useEffect(() => {
+    if (launchRequest?.view !== "Image" || !launchRequest.promptBatch) {
+      return;
+    }
+    handleLoadBatch(launchRequest.promptBatch);
+    setBatchMode(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [launchRequest?.id]);
   // A general-preset launch (epic 11949): toggle it into the stack without touching the model
   // or mode. The chip is available in every studio, so a Video-bound user can re-add it there.
   useEffect(() => {

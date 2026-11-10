@@ -114,6 +114,29 @@ describe("ImageStudio Save as Preset", () => {
     await act(async () => {}); // flush mount effects (pose loaders, etc.)
   }
 
+  it("opens a launched prompt batch in Batch mode with one prompt per image (SW-7085)", async () => {
+    const blocks = [
+      "[3:4]\nDescription: A woman, {{woman_1}}, stands.\nStyle: 1960s print",
+      "[16:9]\nDescription: A man, {{man_1}}, sits.\nLighting: Window light",
+    ];
+    await render(baseContext({
+      studioLaunch: {
+        id: "batch-launch",
+        view: "Image",
+        promptBatch: {
+          id: "film_prints_prompts",
+          name: "Film prints prompts",
+          scope: "global",
+          prompts: blocks,
+          variables: [{ key: "woman_1", values: [] }, { key: "man_1", values: [] }],
+        },
+      },
+    }));
+    expect(container.querySelector(".batch-toggle")?.getAttribute("aria-pressed")).toBe("true");
+    expect(container.querySelector("textarea.batch-prompts")?.value).toBe(blocks.join("\n---\n"));
+    expect(container.textContent).toContain("2 prompts");
+  });
+
   it("previews and submits ratio batches at the largest closest model bucket", async () => {
     window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
       model: Z_IMAGE.id, count: 1, batchMode: true,

@@ -8,6 +8,8 @@ GET	/api/v1/training/targets	token
 HEAD	/api/v1/training/targets	token
 GET	/api/v1/training/presets	token
 HEAD	/api/v1/training/presets	token
+GET	/api/v1/training/describe-prompt/default	token
+HEAD	/api/v1/training/describe-prompt/default	token
 GET	/api/v1/training/data-walk	token
 HEAD	/api/v1/training/data-walk	token
 GET	/api/v1/training/iris/stage-presets	token

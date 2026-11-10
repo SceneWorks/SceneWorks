@@ -237,7 +237,18 @@ export function useSendToStudio({
     });
   }, [activeProjectRef, setActiveView, setStudioLaunch, stableHydrateLaunchDomains]);
 
-  const sendAssetToVideo = useCallback((asset, mode = null) => {
+  // SW-7085: open a saved prompt batch in Image Studio's Batch mode (Training Studio's "Create
+  // Prompt Batch from Dataset"). The launch carries the batch itself, so the studio loads it
+  // without waiting for its prompt-batch list to refresh.
+  const sendPromptBatchToImage = useCallback((batch) => {
+    if (!batch?.id) {
+      return;
+    }
+    setStudioLaunch({ id: crypto.randomUUID(), view: "Image", promptBatch: batch });
+    setActiveView("Image");
+  }, [setActiveView, setStudioLaunch]);
+
+  const sendAssetToVideo =useCallback((asset, mode = null) => {
     if (!asset) {
       return;
     }
@@ -286,6 +297,7 @@ export function useSendToStudio({
     sendAssetToImageEditor,
     clearEditorLaunch,
     sendPresetToStudio,
+    sendPromptBatchToImage,
     sendAssetToVideo,
     sendCharacterToImage,
     sendCharacterToVideo,
