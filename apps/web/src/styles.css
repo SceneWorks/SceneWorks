@@ -13808,6 +13808,13 @@ input.dataset-name-input.boxed:focus {
   width: 100%;
 }
 
+.dataset-prompt-batch-monitor-lost {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
 .dataset-prompt-batch-table {
   display: grid;
   gap: 10px;

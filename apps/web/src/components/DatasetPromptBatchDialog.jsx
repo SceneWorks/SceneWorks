@@ -23,9 +23,13 @@ import { ValidationSummary, invalidProps } from "../validation/Validation.jsx";
 // dataset image as six fields; the review table lets the user edit them, re-run one image, and save
 // the result as an Image Studio prompt batch (one `[W:H]` block per image, see promptBatchDescribe.js).
 //
-// The describe job (`dataset_batch_describe`) streams its partial result on every running post, so
-// the dialog polls the job and merges `result.items` into the table as images finish. A cancel keeps
-// every finished row: the canceled job's result carries them.
+// The describe job (`dataset_batch_describe`) stores each image's result as it finishes (the job's
+// `/result-items`) and reports only counts in its progress, so the dialog polls the job and, when
+// `processedCount` grows, reads the new items in order and merges them into the table. A cancel
+// keeps every finished row: the canceled job still serves the items it stored.
+//
+// Polling survives a dropped request: each read is retried with a bounded backoff, and if it still
+// fails the dialog stops monitoring without losing the job or the rows, and offers to resume.
 
 // The describers the job accepts: catalog id (install state) and the repo the job's `model` names.
 export const DESCRIBE_MODELS = [
@@ -43,6 +47,21 @@ export const DESCRIBE_FIELDS = [
 ];
 
 const POLL_MS = 1000;
+// The wait before each retry of a failed job or items read. A read still failing after the last
+// retry stops monitoring (the job itself keeps running) and the dialog offers to resume.
+export const POLL_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000];
+
+// Run `read`, retrying a failure after each POLL_RETRY_DELAYS_MS wait. An abort is never retried.
+async function withRetries(read, signal) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await read();
+    } catch (error) {
+      if (isAbortError(error) || signal?.aborted || attempt >= POLL_RETRY_DELAYS_MS.length) throw error;
+      await abortableDelay(POLL_RETRY_DELAYS_MS[attempt], signal);
+    }
+  }
+}
 
 // Characters as the API and worker count them (Unicode scalar values of the trimmed text).
 function promptChars(text) {
@@ -163,6 +182,15 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   const [saving, setSaving] = useState(false);
   const [savedBatch, setSavedBatch] = useState(null);
   const [saveError, setSaveError] = useState("");
+  // Set while a describe request is being started (confirm + POST + monitoring). The ref blocks a
+  // second click synchronously, before React re-renders the disabled buttons; the state disables them.
+  const submittingRef = useRef(false);
+  const [submitting, setSubmitting] = useState(false);
+  // Why monitoring stopped while the job was still active (its reads kept failing), or "".
+  const [monitorError, setMonitorError] = useState("");
+  const monitoringRef = useRef(false);
+  // How many of a job's stored items the table already holds, so polling reads only new ones.
+  const itemsRead = useRef({ jobId: null, count: 0 });
   const pollAbort = useRef(null);
 
   useEffect(() => () => pollAbort.current?.abort(), []);
@@ -239,54 +267,109 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   const processedCount = result?.processedCount ?? 0;
   const progressPercent = Math.round(Math.max(0, Math.min(1, Number(job?.progress) || 0)) * 100);
 
+  // Read the job's stored items from `from` on, page by page, merging them into the table. Returns
+  // how many items have been read in all.
+  const readItems = useCallback(async (jobId, from, model, signal) => {
+    let offset = from;
+    for (;;) {
+      const page = await withRetries(() => jobsApi.resultItems(jobId, token, { offset }, { signal }), signal);
+      const items = Array.isArray(page?.items) ? page.items : [];
+      if (items.length) setRows((current) => mergeDescribeRows(current, items, datasetOrder, model));
+      offset += items.length;
+      if (!items.length || page?.nextOffset == null) return offset;
+    }
+  }, [datasetOrder, token]);
+
   const pollJob = useCallback(async (jobId, signal) => {
     for (;;) {
       await abortableDelay(POLL_MS, signal);
-      const snapshot = await jobsApi.item(jobId, token, { signal });
-      setJob(snapshot);
-      if (Array.isArray(snapshot?.result?.items)) {
-        setRows((current) => mergeDescribeRows(current, snapshot.result.items, datasetOrder, snapshot.result.model));
+      const snapshot = await withRetries(() => jobsApi.item(jobId, token, { signal }), signal);
+      // The worker stores an item before the post that counts it, so `processedCount` items exist.
+      const processed = Number(snapshot?.result?.processedCount) || 0;
+      if (itemsRead.current.jobId === jobId && processed > itemsRead.current.count) {
+        itemsRead.current.count = await readItems(jobId, itemsRead.current.count, snapshot.result.model, signal);
       }
+      setJob(snapshot);
       if (terminalStatuses.has(snapshot?.status)) {
         return snapshot;
       }
     }
-  }, [datasetOrder, token]);
+  }, [readItems, token]);
 
-  async function submit(itemIds = null) {
-    if (running || !dataset?.id || !projectId) return;
-    setRunError("");
-    setRunMessage("");
-    setSavedBatch(null);
-    const body = { model: model.repo, requestedGpu: "auto" };
-    // The built-in default is sent as "no prompt" so the worker uses its own default instruction.
-    if (prompt.trim() && prompt.trim() !== (defaultPrompt ?? "").trim()) body.prompt = prompt;
-    if (itemIds) body.itemIds = itemIds;
+  function reportFinished(finished) {
+    setRerunItemId(null);
+    if (finished.status === "canceled") {
+      const kept = finished.result?.processedCount ?? 0;
+      setRunMessage(`Canceled. Kept ${kept} finished ${kept === 1 ? "image" : "images"}.`);
+    } else if (finished.status !== "completed") {
+      setRunError(finished.error || finished.message || "The describe job failed.");
+    } else if (finished.result?.failedCount) {
+      setRunMessage(`Described ${finished.result.describedCount} images; ${finished.result.failedCount} flagged.`);
+    }
+  }
+
+  // Poll `jobId` until it ends. If its reads keep failing, stop with the job and rows kept and
+  // record why, so the user can resume monitoring (or cancel) instead of facing a frozen dialog.
+  async function monitor(jobId) {
+    if (monitoringRef.current) return;
+    monitoringRef.current = true;
     pollAbort.current?.abort();
     const controller = new AbortController();
     pollAbort.current = controller;
+    setMonitorError("");
     try {
-      const created = await trainingApi.batchDescribeJobs(projectId, dataset.id, token, {
-        method: "POST",
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
+      reportFinished(await pollJob(jobId, controller.signal));
+    } catch (error) {
+      if (!isAbortError(error)) {
+        setMonitorError(errorMessage(error, "Lost contact with the describe job."));
+      }
+    } finally {
+      monitoringRef.current = false;
+    }
+  }
+
+  function resumeMonitoring() {
+    if (job?.id && running) monitor(job.id);
+  }
+
+  // Start a describe job: every image (`itemIds` null), or exactly `itemIds`. `confirmFirst`, when
+  // given, runs first and can decline. Ignored while a start is already in flight or a job runs.
+  async function submit(itemIds = null, confirmFirst = null) {
+    if (submittingRef.current || running || !dataset?.id || !projectId) return;
+    submittingRef.current = true;
+    setSubmitting(true);
+    try {
+      if (confirmFirst && !(await confirmFirst())) return;
+      setRunError("");
+      setRunMessage("");
+      setMonitorError("");
+      setSavedBatch(null);
+      const body = { model: model.repo, requestedGpu: "auto" };
+      // The built-in default is sent as "no prompt" so the worker uses its own default instruction.
+      if (prompt.trim() && prompt.trim() !== (defaultPrompt ?? "").trim()) body.prompt = prompt;
+      if (itemIds) body.itemIds = itemIds;
+      pollAbort.current?.abort();
+      const controller = new AbortController();
+      pollAbort.current = controller;
+      let created;
+      try {
+        created = await trainingApi.batchDescribeJobs(projectId, dataset.id, token, {
+          method: "POST",
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+      } catch (error) {
+        if (!isAbortError(error)) setRunError(errorMessage(error, "Could not run the describe job."));
+        return;
+      }
       if (!itemIds) setRows([]);
+      itemsRead.current = { jobId: created.id, count: 0 };
       setRerunItemId(itemIds?.length === 1 ? itemIds[0] : null);
       setJob(created);
-      const finished = await pollJob(created.id, controller.signal);
-      if (finished.status === "canceled") {
-        const kept = finished.result?.processedCount ?? 0;
-        setRunMessage(`Canceled. Kept ${kept} finished ${kept === 1 ? "image" : "images"}.`);
-      } else if (finished.status !== "completed") {
-        setRunError(finished.error || finished.message || "The describe job failed.");
-      } else if (finished.result?.failedCount) {
-        setRunMessage(`Described ${finished.result.describedCount} images; ${finished.result.failedCount} flagged.`);
-      }
-    } catch (error) {
-      if (!isAbortError(error)) setRunError(errorMessage(error, "Could not run the describe job."));
+      await monitor(created.id);
     } finally {
-      setRerunItemId(null);
+      submittingRef.current = false;
+      setSubmitting(false);
     }
   }
 
@@ -300,7 +383,10 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
       }
     } catch (error) {
       setRunError(errorMessage(error, "Could not cancel the describe job."));
+      return;
     }
+    // Monitoring had stopped: resume it so the cancel's outcome (and the kept rows) arrive.
+    if (monitorError) monitor(job.id);
   }
 
   function updateField(itemId, key, value) {
@@ -317,17 +403,17 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   }, [rows, datasetOrder]);
 
   async function describeAll() {
-    if (rows.some((row) => row.edited)) {
-      const proceed = await appConfirm({
-        title: "Describe every image again?",
-        message: "This replaces the whole table, including the fields you edited. Use “Describe remaining” to describe only images without a result.",
-        confirmLabel: "Describe all again",
-        cancelLabel: "Keep my edits",
-        tone: "danger",
-      });
-      if (!proceed) return;
-    }
-    await submit();
+    const confirmFirst = rows.some((row) => row.edited)
+      ? () =>
+          appConfirm({
+            title: "Describe every image again?",
+            message: "This replaces the whole table, including the fields you edited. Use “Describe remaining” to describe only images without a result.",
+            confirmLabel: "Describe all again",
+            cancelLabel: "Keep my edits",
+            tone: "danger",
+          })
+      : null;
+    await submit(null, confirmFirst);
   }
 
   const payload = () => promptBatchPayload({ rows, name: batchName, dataset });
@@ -365,8 +451,10 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
     onClose();
   }
 
+  // A job is starting or active: run controls and the inputs it was started from are locked.
+  const busy = running || submitting;
   const runBlocked =
-    running || dirty || !selectedAvailable || defaultPrompt === null || !datasetOrder.length || !promptValidation.ready;
+    busy || dirty || !selectedAvailable || defaultPrompt === null || !datasetOrder.length || !promptValidation.ready;
 
   return (
     <Modal className="dataset-caption-modal dataset-prompt-batch-modal" labelledBy="dataset-prompt-batch-title" onClose={onClose}>
@@ -389,7 +477,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
               <label className="training-toggle-line" key={entry.id}>
                 <input
                   checked={modelId === entry.id}
-                  disabled={running}
+                  disabled={busy}
                   name="dataset-prompt-batch-model"
                   onChange={() => chooseModel(entry.id)}
                   type="radio"
@@ -421,7 +509,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
         ) : null}
 
         <DescribePromptPresets
-          disabled={running || defaultPrompt === null}
+          disabled={busy || defaultPrompt === null}
           model={model.repo}
           onSelect={selectPreset}
           prompt={prompt}
@@ -431,7 +519,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
           Describing prompt
           <textarea
             aria-describedby="dataset-prompt-batch-prompt-hint"
-            disabled={running || defaultPrompt === null}
+            disabled={busy || defaultPrompt === null}
             onChange={(event) => editPrompt(event.target.value)}
             rows={8}
             {...invalidProps(promptValidation, "prompt")}
@@ -444,7 +532,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
         <div className="dataset-prompt-batch-prompt-actions">
           <button
             className="secondary-action"
-            disabled={running || defaultPrompt === null || prompt === defaultPrompt}
+            disabled={busy || defaultPrompt === null || prompt === defaultPrompt}
             onClick={() => selectPreset(defaultPrompt ?? "", { builtin: true })}
             type="button"
           >
@@ -464,6 +552,14 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
               {running ? "Describing" : job.status === "completed" ? "Described" : `Job ${job.status}`}: {processedCount} of {itemCount}{" "}
               {itemCount === 1 ? "image" : "images"}
             </span>
+          </div>
+        ) : null}
+        {monitorError && running ? (
+          <div className="inline-warning dataset-prompt-batch-monitor-lost" role="alert">
+            <span>Lost contact with the describe job: {monitorError} The job may still be running; finished rows are kept.</span>
+            <button className="secondary-action" onClick={resumeMonitoring} type="button">
+              Resume monitoring
+            </button>
           </div>
         ) : null}
         {runError ? <p className="inline-warning" role="alert">{runError}</p> : null}
@@ -503,7 +599,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
                       <label key={key}>
                         {label}
                         <textarea
-                          disabled={running}
+                          disabled={busy}
                           onChange={(event) => updateField(row.itemId, key, event.target.value)}
                           rows={key === "description" ? 3 : 2}
                           value={row.fields[key]}

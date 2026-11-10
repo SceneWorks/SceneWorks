@@ -12,13 +12,14 @@ vi.mock("../api/trainingResources.js", () => ({
     describePromptPreset: vi.fn(),
   },
 }));
-vi.mock("../api/jobsResources.js", () => ({ jobsApi: { item: vi.fn(), cancel: vi.fn() } }));
+vi.mock("../api/jobsResources.js", () => ({ jobsApi: { item: vi.fn(), cancel: vi.fn(), resultItems: vi.fn() } }));
 vi.mock("../pollJob.js", () => ({ abortableDelay: vi.fn(() => Promise.resolve()) }));
 vi.mock("../saveExportFile.js", () => ({ saveExportFile: vi.fn(async () => null) }));
 vi.mock("../appConfirm.jsx", () => ({ appConfirm: vi.fn(async () => true) }));
 
 const { trainingApi } = await import("../api/trainingResources.js");
 const { jobsApi } = await import("../api/jobsResources.js");
+const { abortableDelay } = await import("../pollJob.js");
 const { saveExportFile } = await import("../saveExportFile.js");
 const { appConfirm } = await import("../appConfirm.jsx");
 const { DatasetPromptBatchDialog } = await import("./DatasetPromptBatchDialog.jsx");
@@ -76,13 +77,27 @@ function snapshot(status, items, extra = {}) {
   };
 }
 
-// jobsApi.item returns pending promises the test resolves one poll at a time.
+// jobsApi.item returns pending promises the test resolves one poll at a time. Like the server, a
+// snapshot's result carries only counts: its `items` become the job's stored items, which
+// jobsApi.resultItems pages back out.
 let polls;
 let presetStore;
+let storedItems;
 function nextPoll(value) {
   const resolve = polls.shift();
   if (!resolve) throw new Error("no poll pending");
-  resolve(value);
+  if (Array.isArray(value?.result?.items)) {
+    storedItems = value.result.items;
+    const { items: _items, ...result } = value.result;
+    resolve({ ...value, result });
+  } else {
+    resolve(value);
+  }
+}
+function failPoll(error = new Error("network down")) {
+  const resolve = polls.shift();
+  if (!resolve) throw new Error("no poll pending");
+  resolve(Promise.reject(error));
 }
 
 function textarea(label) {
@@ -132,6 +147,13 @@ describe("DatasetPromptBatchDialog", () => {
     });
     jobsApi.item.mockReset().mockImplementation(() => new Promise((resolve) => polls.push(resolve)));
     jobsApi.cancel.mockReset().mockResolvedValue({});
+    storedItems = [];
+    jobsApi.resultItems.mockReset().mockImplementation(async (_jobId, _token, { offset = 0 } = {}) => ({
+      items: storedItems.slice(offset),
+      total: storedItems.length,
+      nextOffset: null,
+    }));
+    abortableDelay.mockClear();
     saveExportFile.mockClear();
     appConfirm.mockReset().mockResolvedValue(true);
     context = {
@@ -303,6 +325,130 @@ describe("DatasetPromptBatchDialog", () => {
     expect(exported).toMatchObject({ sceneworksPromptBatch: 1, name: "Film prints prompts" });
     expect(exported.prompts).toHaveLength(1);
     expect(exported.prompts[0].startsWith("[3:4]\n")).toBe(true);
+  });
+
+  it("reads only the new stored items on each poll, in pages, and never from the job result (SW-7082)", async () => {
+    await render();
+    await click(button("Describe images"));
+    await settle();
+    await act(async () => nextPoll(snapshot("running", [described("item_a", 300, 400)])));
+    await settle();
+    expect(jobsApi.resultItems).toHaveBeenLastCalledWith("job_1", "t", { offset: 0 }, expect.anything());
+    // The next page comes back in two server pages.
+    jobsApi.resultItems.mockImplementationOnce(async () => ({ items: [described("item_b", 400, 300)], total: 3, nextOffset: 2 }));
+    await act(async () =>
+      nextPoll(snapshot("completed", [described("item_a", 300, 400), described("item_b", 400, 300), described("item_c", 300, 300)])),
+    );
+    await settle();
+    const offsets = jobsApi.resultItems.mock.calls.map((call) => call[2].offset);
+    expect(offsets).toEqual([0, 1, 2]);
+    const rows = document.body.querySelectorAll(".dataset-prompt-batch-row");
+    expect([...rows].map((row) => row.dataset.itemId)).toEqual(["item_a", "item_b", "item_c"]);
+  });
+
+  it("retries a failed poll with a bounded backoff and keeps going (SW-7085 review)", async () => {
+    await render();
+    await click(button("Describe images"));
+    await settle();
+    await act(async () => failPoll());
+    await settle();
+    await act(async () => failPoll());
+    await settle();
+    expect(abortableDelay.mock.calls.map((call) => call[0])).toEqual(expect.arrayContaining([1000, 2000]));
+    await act(async () => nextPoll(snapshot("completed", [described("item_a", 300, 400)], { progress: 1 })));
+    await settle();
+    expect(document.body.querySelectorAll(".dataset-prompt-batch-row")).toHaveLength(1);
+    expect(document.body.textContent).toContain("Described: 1 of 3 images");
+    expect(button("Describe all again").disabled).toBe(false);
+    expect(document.body.textContent).not.toContain("Lost contact");
+  });
+
+  it("stops monitoring after the last retry without freezing, then resumes the same job (SW-7085 review)", async () => {
+    await render();
+    await click(button("Describe images"));
+    await settle();
+    await act(async () => nextPoll(snapshot("running", [described("item_a", 300, 400)])));
+    await settle();
+    // Every read fails: the first try and each retry.
+    for (let attempt = 0; attempt <= 4; attempt += 1) {
+      await act(async () => failPoll());
+      await settle();
+    }
+    expect(polls).toHaveLength(0);
+    expect(document.body.textContent).toContain("Lost contact with the describe job");
+    expect(document.body.querySelectorAll(".dataset-prompt-batch-row")).toHaveLength(1);
+    // The job may still be running, so no second job can start, but the dialog is not stuck.
+    expect(button("Describing…").disabled).toBe(true);
+    expect(button("Cancel")).toBeDefined();
+
+    await click(button("Resume monitoring"));
+    await settle();
+    expect(polls).toHaveLength(1);
+    expect(jobsApi.item).toHaveBeenLastCalledWith("job_1", "t", expect.anything());
+    await act(async () =>
+      nextPoll(snapshot("completed", [described("item_a", 300, 400), described("item_b", 400, 300)], { progress: 1 })),
+    );
+    await settle();
+    expect(document.body.querySelectorAll(".dataset-prompt-batch-row")).toHaveLength(2);
+    expect(jobsApi.resultItems.mock.calls.at(-1)[2].offset).toBe(1);
+    expect(document.body.textContent).not.toContain("Lost contact");
+    expect(button("Describe all again").disabled).toBe(false);
+    expect(trainingApi.batchDescribeJobs).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels a job whose monitoring stopped and resumes monitoring to collect the outcome", async () => {
+    await render();
+    await click(button("Describe images"));
+    await settle();
+    for (let attempt = 0; attempt <= 4; attempt += 1) {
+      await act(async () => failPoll());
+      await settle();
+    }
+    expect(document.body.textContent).toContain("Lost contact");
+    await click(button("Cancel"));
+    await settle();
+    expect(context.jobAction).toHaveBeenCalledWith(expect.objectContaining({ id: "job_1" }), "cancel");
+    await act(async () => nextPoll(snapshot("canceled", [described("item_a", 300, 400)])));
+    await settle();
+    expect(document.body.textContent).toContain("Canceled. Kept 1 finished image.");
+    expect(button("Cancel")).toBeUndefined();
+  });
+
+  it("starts ONE job when Describe is clicked twice before the request returns (SW-7085 review)", async () => {
+    let created;
+    trainingApi.batchDescribeJobs.mockReset().mockImplementation(
+      () => new Promise((resolve) => { created = resolve; }),
+    );
+    await render();
+    const describe = button("Describe images");
+    await act(async () => {
+      describe.click();
+      describe.click();
+    });
+    await settle();
+    expect(trainingApi.batchDescribeJobs).toHaveBeenCalledTimes(1);
+    expect(button("Describe images").disabled).toBe(true);
+    await act(async () => created({ id: "job_1", status: "queued", progress: 0 }));
+    await settle();
+    await act(async () => nextPoll(snapshot("completed", [described("item_a", 300, 400), described("item_b", 400, 300)])));
+    await settle();
+    // Every run control is blocked while a start is in flight: the per-row re-run and describe-remaining too.
+    trainingApi.batchDescribeJobs.mockReset().mockImplementation(
+      () => new Promise((resolve) => { created = resolve; }),
+    );
+    const rerun = [...document.body.querySelector('[data-item-id="item_b"]').querySelectorAll("button")]
+      .find((node) => node.textContent === "Re-run");
+    const remaining = button("Describe remaining (1)");
+    await act(async () => {
+      rerun.click();
+      remaining.click();
+      button("Describe all again").click();
+    });
+    await settle();
+    expect(trainingApi.batchDescribeJobs).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls[0][3].body).itemIds).toEqual(["item_b"]);
+    expect(button("Describe remaining (1)").disabled).toBe(true);
+    expect(button("Describe all again").disabled).toBe(true);
   });
 
   function presetPicker() {
