@@ -343,12 +343,12 @@ string_enum! {
         // native SCRFD+ArcFace stack); served by the Rust/MLX worker (MLX on Mac, candle off-Mac).
         FaceLikenessCompare => "face_likeness_compare",
         PromptRefine => "prompt_refine",
-        // Dataset prompt-batch describe (SW-7082): the Vision Captioner describes every image of a
-        // training dataset (or an item-id subset) as six JSON fields plus its pixel size, for
-        // Training Studio's "Create Prompt Batch from Dataset". It has NO capability of its own: it
-        // runs on the same native `core_llm::TextLlm` provider as `prompt_refine` and routes by that
-        // capability (see jobs_store::required_capability). Capability-routed, not GPU-required,
-        // exactly like `prompt_refine`.
+        // Dataset prompt-batch describe (SW-7082, SW-7083): the Vision Captioner or JoyCaption
+        // describes every image of a training dataset (or an item-id subset) as six JSON fields
+        // plus its pixel size, for Training Studio's "Create Prompt Batch from Dataset". It has NO
+        // capability of its own: the Vision Captioner runs on the native `core_llm::TextLlm`
+        // provider and routes by `prompt_refine`, JoyCaption by `training_caption` (see
+        // jobs_store::required_capability). Capability-routed, not GPU-required.
         DatasetBatchDescribe => "dataset_batch_describe",
     }
 }
