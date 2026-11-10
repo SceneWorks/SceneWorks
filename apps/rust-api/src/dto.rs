@@ -594,6 +594,25 @@ pub(crate) struct DatasetFaceAnalysisJobRequest {
     pub(crate) item_ids: Option<Vec<String>>,
 }
 
+/// Request to describe a training dataset's images for a prompt batch (SW-7082). Every field is
+/// optional: `model` defaults to the Vision Captioner (the only accepted value today), an absent or
+/// blank `prompt` uses the worker's default describing instruction, and `itemIds` restricts the run
+/// to those items (e.g. re-describing one image).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetBatchDescribeJobRequest {
+    #[serde(default)]
+    pub(crate) model: Option<String>,
+    /// The user's describing instruction. The JSON output contract is always appended by the
+    /// worker and is not part of this text.
+    #[serde(default)]
+    pub(crate) prompt: Option<String>,
+    #[serde(default)]
+    pub(crate) item_ids: Option<Vec<String>>,
+    #[serde(default = "default_requested_gpu")]
+    pub(crate) requested_gpu: String,
+}
+
 /// Request to generate SAM3 subject masks over a training dataset (sc-2126). The segmenter is fixed
 /// (SAM3 "person"), so the request only carries GPU routing and an optional item subset.
 #[derive(Debug, Clone, Deserialize)]

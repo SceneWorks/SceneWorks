@@ -118,7 +118,7 @@ fn resolve_max_new_tokens(
 /// reasoning block before generation and remains safe to constrain. Models without a thinking mode
 /// (including the default Anubis refiner) also keep the existing JSON constraint in every mode.
 #[cfg(any(test, native_lane))]
-fn json_decode_constraint(
+pub(crate) fn json_decode_constraint(
     emits_json: bool,
     supports_thinking: bool,
     thinking_mode: gen_core::core_llm::ThinkingMode,
@@ -640,7 +640,7 @@ fn magic_section(name: &str) -> String {
 /// trimmed body, or empty. Generalized from `magic_section` so the sc-8105 image-caption asset reuses
 /// the same parser.
 #[cfg(any(test, native_lane))]
-fn magic_section_from(source: &str, name: &str) -> String {
+pub(crate) fn magic_section_from(source: &str, name: &str) -> String {
     let mut capturing = false;
     let mut body: Vec<&str> = Vec::new();
     for line in source.lines() {
@@ -834,14 +834,25 @@ pub(crate) fn load_caption_image_ref(path: &Path) -> WorkerResult<gen_core::core
             path.display()
         ))
     })?;
-    let decoded = downscale_to_pixel_budget(decoded, VISION_REFERENCE_MAX_PIXELS).to_rgb8();
-    let (width, height) = (decoded.width(), decoded.height());
-    gen_core::core_llm::ImageRef::new(width, height, decoded.into_raw()).map_err(|error| {
+    vision_image_ref(decoded).map_err(|error| {
         WorkerError::InvalidPayload(format!(
             "image-caption reference image {}: {error}",
             path.display()
         ))
     })
+}
+
+/// An already-decoded image as the vision contract's `ImageRef` (RGB8), capped to
+/// [`VISION_REFERENCE_MAX_PIXELS`] first so it cannot OOM the dense ViT attention. Shared by
+/// [`load_caption_image_ref`] and the dataset batch describer (SW-7082), which decodes the image
+/// itself because it also reports the image's source pixel size.
+pub(crate) fn vision_image_ref(
+    decoded: image::DynamicImage,
+) -> Result<gen_core::core_llm::ImageRef, String> {
+    let decoded = downscale_to_pixel_budget(decoded, VISION_REFERENCE_MAX_PIXELS).to_rgb8();
+    let (width, height) = (decoded.width(), decoded.height());
+    gen_core::core_llm::ImageRef::new(width, height, decoded.into_raw())
+        .map_err(|error| error.to_string())
 }
 
 // ----------------------------------------------------------------------------------------------

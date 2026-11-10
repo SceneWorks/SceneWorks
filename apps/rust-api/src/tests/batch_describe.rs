@@ -1,0 +1,177 @@
+//! rust-api dataset batch describe tests (SW-7082): job enqueue, item subset in dataset order,
+//! default/custom prompt carriage, and the 400s for an unsupported model, an unknown item and an
+//! oversized prompt.
+use super::support::*;
+use sceneworks_core::dataset_batch_describe::{MAX_DESCRIBE_PROMPT_CHARS, VISION_CAPTIONER_REPO};
+
+fn png_rgb(w: u32, h: u32, shade: u8) -> Vec<u8> {
+    let mut out = Vec::new();
+    image::RgbImage::from_pixel(w, h, image::Rgb([shade, 64, 128]))
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .expect("encode image");
+    out
+}
+
+/// A project with one dataset of three images. Returns (app, project id, dataset id, item ids,
+/// item relative paths).
+async fn dataset_fixture(
+    temp_dir: &tempfile::TempDir,
+) -> (axum::Router, String, String, Vec<String>, Vec<String>) {
+    let app = create_app(test_settings(temp_dir)).expect("app creates");
+    let (_, project) = create_project(app.clone(), &"Batch describe project").await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let mut items = Vec::new();
+    for index in 0..3u8 {
+        let (status, upload) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/training/uploads"),
+            &format!("image_{index}.png"),
+            "image/png",
+            &png_rgb(16, 8, index * 60),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{upload}");
+        items.push(json!({
+            "path": upload["file"]["path"],
+            "displayName": format!("image_{index}.png"),
+        }));
+    }
+    let (status, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({ "name": "Describe set", "items": items }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{dataset}");
+    let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+    let field = |key: &str| -> Vec<String> {
+        dataset["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .map(|item| item[key].as_str().expect("item field").to_owned())
+            .collect()
+    };
+    (app, project_id, dataset_id, field("id"), field("path"))
+}
+
+#[tokio::test]
+async fn batch_describe_job_enqueues_every_image_with_the_vision_captioner_by_default() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id, dataset_id, item_ids, paths) = dataset_fixture(&temp_dir).await;
+    let route =
+        format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
+
+    let (status, job) = request(app.clone(), "POST", &route, json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["type"], "dataset_batch_describe");
+    assert_eq!(job["title"], "Describe Dataset Images — Describe set");
+    let payload = &job["payload"];
+    assert_eq!(payload["kind"], "dataset_batch_describe");
+    assert_eq!(payload["model"], VISION_CAPTIONER_REPO);
+    assert_eq!(payload["datasetId"], dataset_id.as_str());
+    assert_eq!(payload["datasetName"], "Describe set");
+    assert!(
+        payload.get("prompt").is_none(),
+        "no prompt means the worker's default instruction"
+    );
+    let job_items = payload["items"].as_array().expect("job items");
+    assert_eq!(job_items.len(), 3);
+    for ((job_item, item_id), path) in job_items.iter().zip(&item_ids).zip(&paths) {
+        assert_eq!(job_item["itemId"], item_id.as_str());
+        assert_eq!(job_item["relativePath"], path.as_str());
+        assert!(job_item["imagePath"]
+            .as_str()
+            .unwrap()
+            .ends_with(path.as_str()));
+    }
+}
+
+#[tokio::test]
+async fn batch_describe_subset_keeps_dataset_order_and_carries_the_custom_prompt() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id, dataset_id, item_ids, _) = dataset_fixture(&temp_dir).await;
+    let route =
+        format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({
+            "model": VISION_CAPTIONER_REPO,
+            "prompt": "  Describe only the clothing.  ",
+            // Asked for out of order: the job still describes them in dataset order.
+            "itemIds": [item_ids[2], item_ids[0]],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["payload"]["prompt"], "Describe only the clothing.");
+    let ids: Vec<_> = job["payload"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["itemId"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(ids, vec![item_ids[0].clone(), item_ids[2].clone()]);
+
+    // A blank prompt is the default instruction, not an empty one.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({ "prompt": "   ", "itemIds": [item_ids[1]] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert!(job["payload"].get("prompt").is_none());
+    assert_eq!(job["payload"]["items"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn batch_describe_refuses_other_models_unknown_items_and_oversized_prompts() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id, dataset_id, _, _) = dataset_fixture(&temp_dir).await;
+    let route =
+        format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
+    for (body, field, expect) in [
+        (
+            json!({ "model": "fancyfeast/llama-joycaption-beta-one-hf-llava" }),
+            "model",
+            "Unsupported describe model",
+        ),
+        (
+            json!({ "itemIds": ["not_an_item"] }),
+            "itemIds",
+            "Unknown dataset item id(s): not_an_item.",
+        ),
+        (
+            json!({ "itemIds": [] }),
+            "itemIds",
+            "at least one dataset item",
+        ),
+        (
+            json!({ "prompt": "x".repeat(MAX_DESCRIBE_PROMPT_CHARS + 1) }),
+            "prompt",
+            "at most",
+        ),
+    ] {
+        let (status, error) = request(app.clone(), "POST", &route, body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {error}");
+        assert_eq!(error["context"]["field"], field, "{error}");
+        assert!(
+            error["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(expect)
+                || error["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains(expect)
+                || error.to_string().contains(expect),
+            "{error}"
+        );
+    }
+}

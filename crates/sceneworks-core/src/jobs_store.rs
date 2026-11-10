@@ -4218,6 +4218,12 @@ fn derive_job_title(job_type: &JobType, payload: &Map<String, Value>) -> Option<
                 .to_owned();
             Some(format!("Subject Masks — {subject}"))
         }
+        JobType::DatasetBatchDescribe => {
+            let subject = first_str(payload, &["datasetName", "datasetId"])
+                .unwrap_or("(unnamed dataset)")
+                .to_owned();
+            Some(format!("Describe Dataset Images — {subject}"))
+        }
         JobType::FaceLikenessCompare => {
             // sc-4415: compare a candidate asset to a source identity reference. The candidate is the
             // user-facing subject of the row; fall back to a plain label when the payload omits it.
@@ -5302,6 +5308,9 @@ fn required_capability(job: &JobSnapshot) -> &str {
         // Dataset subject masks (sc-2126) run the same SAM3 checkpoint as smart-select, so they route
         // to any worker advertising `image_segment` instead of a capability of their own.
         JobType::DatasetSubjectMask => WorkerCapability::ImageSegment.as_str(),
+        // SW-7082: the dataset batch describer runs the Vision Captioner on the native
+        // `core_llm::TextLlm` provider that serves `prompt_refine`, so it routes by that capability.
+        JobType::DatasetBatchDescribe => WorkerCapability::PromptRefine.as_str(),
         // A download that ends in a LOCAL DERIVATION (sc-22999: YuE2's q8 / q4 tiers) runs the
         // audio lane's snapshot preparer after the fetch, so only a worker that links the audio lane
         // may claim it. `audio_generate` is advertised exactly when that lane is linked

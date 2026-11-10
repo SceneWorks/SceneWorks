@@ -272,6 +272,7 @@ fn capability_errors(contracts: &str, jobs_store: &str) -> Vec<String> {
     for (job, capability) in [
         ("ControlTraining", "LoraTrain"),
         ("DatasetSubjectMask", "ImageSegment"),
+        ("DatasetBatchDescribe", "PromptRefine"),
     ] {
         let arm = matched.arms.iter().find(|arm| {
             let mut variants = BTreeSet::new();
@@ -284,7 +285,13 @@ fn capability_errors(contracts: &str, jobs_store: &str) -> Vec<String> {
         }
     }
     for (job, wire) in &jobs {
-        if !["ControlTraining", "DatasetSubjectMask", "VectorGenerate"].contains(&job.as_str())
+        if ![
+            "ControlTraining",
+            "DatasetSubjectMask",
+            "DatasetBatchDescribe",
+            "VectorGenerate",
+        ]
+        .contains(&job.as_str())
             && !wires.contains(wire)
         {
             errors.push(format!(

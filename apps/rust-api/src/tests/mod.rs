@@ -12,6 +12,7 @@ mod embedded_web;
 mod import_repair;
 // `pub(crate)` so the sc-22714 review suite can drive the same in-process API + fake worker
 // instead of standing up a second one.
+mod batch_describe;
 pub(crate) mod film_harness;
 mod film_harness_anchoring;
 mod film_harness_fixes;

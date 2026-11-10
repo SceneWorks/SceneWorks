@@ -85,6 +85,10 @@ pub(super) fn routes() -> Router<AppState> {
             post(create_training_dataset_face_analysis_job),
         )
         .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/batch-describe-jobs",
+            post(create_training_dataset_batch_describe_job),
+        )
+        .route(
             "/api/v1/projects/:project_id/training/datasets/:dataset_id/subject-mask-jobs",
             post(create_training_dataset_subject_mask_job),
         )

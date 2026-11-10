@@ -3462,6 +3462,13 @@ fn gpu_job_rows(
             "prompt_refine_anubis_8b",
             json!({ "prompt": "probe" }),
         ),
+        (
+            "dataset_batch_describe",
+            "utility",
+            JobType::DatasetBatchDescribe,
+            "vision_caption_qwen3vl_8b",
+            json!({ "datasetId": "probe" }),
+        ),
     ];
 
     let mut rows = Vec::new();
