@@ -126,6 +126,43 @@ async fn describe_prompt_presets_persist_and_restore_the_exact_text() {
 }
 
 #[tokio::test]
+async fn a_deleted_preset_name_can_be_saved_again() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let first = json!({ "name": "Clothing only", "prompt": "First text." });
+    let (status, _) = request(app.clone(), "POST", PRESETS, first.clone()).await;
+    assert_eq!(status, StatusCode::CREATED);
+    // A live preset still owns its name.
+    let (status, error) = request(app.clone(), "POST", PRESETS, first).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+
+    let (status, _) = request(
+        app.clone(),
+        "DELETE",
+        &format!("{PRESETS}/clothing_only"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        PRESETS,
+        json!({ "name": "Clothing only", "prompt": "Second text." }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["id"], "clothing_only");
+    assert_eq!(created["prompt"], "Second text.");
+    assert!(created.get("archived").is_none(), "{created}");
+
+    let (_, list) = request(app, "GET", PRESETS, Value::Null).await;
+    let list = list.as_array().expect("preset list");
+    assert_eq!(list.len(), 2, "{list:?}");
+    assert_eq!(list[1]["prompt"], "Second text.");
+}
+
+#[tokio::test]
 async fn the_builtin_default_preset_cannot_be_overwritten_or_deleted() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");

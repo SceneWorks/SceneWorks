@@ -201,18 +201,53 @@ pub(crate) async fn create_describe_prompt_preset(
     State(state): State<AppState>,
     ApiJson(payload): ApiJson<Value>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    let preset = describe_preset_payload(payload)?;
+    let mut preset = describe_preset_payload(payload)?;
+    // Same id rule as the shared create helper: an explicit id, else the slugified name.
+    let object = preset
+        .as_object_mut()
+        .ok_or_else(|| ApiError::bad_request("Describing prompt preset must be an object"))?;
+    let id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            object
+                .get("name")
+                .and_then(Value::as_str)
+                .map(super::recipe_presets::slugify_preset_id)
+        })
+        .ok_or_else(|| ApiError::bad_request("Describing prompt preset name is required"))?;
+    object.insert("id".to_owned(), Value::String(id.clone()));
+    let timestamp = now_rfc3339();
+    object.insert("createdAt".to_owned(), Value::String(timestamp.clone()));
+    object.insert("updatedAt".to_owned(), Value::String(timestamp));
+    let preset = normalize_describe_preset_for_write(preset, "global", true)?;
     let manifest_path = describe_preset_manifest_path(&state);
-    let preset = super::manifest_entity::create_manifest_entry(
+    // A deleted preset is archived, not removed, but its name reads as free to the user: saving a
+    // new preset under it replaces the archived entry. A live preset with the id still conflicts.
+    let preset = mutate_manifest_entries(
         &state,
         &manifest_path,
         PRESET_MANIFEST_FIELD,
-        preset,
-        "global",
-        "Describing prompt preset must be an object",
-        "Describing prompt preset name is required",
-        "A describing prompt preset with that name already exists",
-        normalize_describe_preset_for_write,
+        move |mut entries| {
+            let existing = entries
+                .iter()
+                .position(|entry| entry.get("id").and_then(Value::as_str) == Some(id.as_str()));
+            match existing {
+                Some(index) if super::manifest_entity::manifest_entry_archived(&entries[index]) => {
+                    entries[index] = preset.clone();
+                }
+                Some(_) => {
+                    return Err(ApiError::bad_request(
+                        "A describing prompt preset with that name already exists",
+                    ))
+                }
+                None => entries.push(preset.clone()),
+            }
+            Ok((entries, preset))
+        },
     )
     .await?;
     Ok((StatusCode::CREATED, Json(preset)))
