@@ -32,6 +32,31 @@ pub(crate) struct MetricsQuery {
     pub(crate) limit: Option<u32>,
 }
 
+/// Paging of a job's per-item results (SW-7082, `GET /api/v1/jobs/:job_id/result-items`).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JobResultItemsQuery {
+    pub(crate) offset: Option<usize>,
+    pub(crate) limit: Option<usize>,
+}
+
+/// One per-item result a worker appends: its order among the job's items, and the item object
+/// (which carries its own `itemId`).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JobResultItemBody {
+    pub(crate) position: u64,
+    pub(crate) item: serde_json::Map<String, Value>,
+}
+
+/// Worker → API append of per-item results (SW-7082, `POST /api/v1/jobs/:job_id/result-items`).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JobResultItemsAppend {
+    pub(crate) worker_id: Option<String>,
+    pub(crate) items: Vec<JobResultItemBody>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PromptRefineRequest {
@@ -592,6 +617,33 @@ pub(crate) struct DatasetFaceAnalysisJobRequest {
     /// Restrict the pass to these dataset item ids; when absent, every item is analyzed.
     #[serde(default)]
     pub(crate) item_ids: Option<Vec<String>>,
+}
+
+/// Request to describe a training dataset's images for a prompt batch (SW-7082). Every field is
+/// optional: `model` defaults to the Vision Captioner (JoyCaption is the other accepted value,
+/// SW-7083), an absent or blank `prompt` uses that model's default describing instruction, and
+/// `itemIds` restricts the run to those items (e.g. re-describing one image).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetBatchDescribeJobRequest {
+    #[serde(default)]
+    pub(crate) model: Option<String>,
+    /// The user's describing instruction. The JSON output contract is always appended by the
+    /// worker and is not part of this text.
+    #[serde(default)]
+    pub(crate) prompt: Option<String>,
+    #[serde(default)]
+    pub(crate) item_ids: Option<Vec<String>>,
+    #[serde(default = "default_requested_gpu")]
+    pub(crate) requested_gpu: String,
+}
+
+/// `?model=<repo>` on the describing-prompt routes (SW-7085, SW-7086): which describer's default
+/// instruction and limit to serve. Absent means the Vision Captioner.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct DescribePromptQuery {
+    #[serde(default)]
+    pub(crate) model: Option<String>,
 }
 
 /// Request to generate SAM3 subject masks over a training dataset (sc-2126). The segmenter is fixed

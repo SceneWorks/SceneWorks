@@ -13747,6 +13747,122 @@ input.dataset-name-input.boxed:focus {
   font-family: var(--font-mono);
 }
 
+/* Create Prompt Batch from Dataset (SW-7085): the caption modal, widened for the review table. */
+.dataset-prompt-batch-modal {
+  width: min(1040px, 96vw);
+}
+
+.dataset-prompt-batch-models {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.dataset-prompt-batch-models legend {
+  margin-bottom: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.dataset-prompt-batch-unavailable {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.dataset-prompt-batch-prompt-actions,
+.dataset-prompt-batch-footer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+/* Saved describing prompts (SW-7086): picker + delete, then name + save, on one wrapping row. */
+.describe-prompt-presets {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) auto minmax(140px, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.describe-prompt-presets .inline-warning {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 640px) {
+  .describe-prompt-presets {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+}
+
+.dataset-prompt-batch-progress {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.dataset-prompt-batch-progress progress {
+  width: 100%;
+}
+
+.dataset-prompt-batch-monitor-lost {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.dataset-prompt-batch-table {
+  display: grid;
+  gap: 10px;
+}
+
+.dataset-prompt-batch-row {
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr);
+  gap: 12px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+}
+
+.dataset-prompt-batch-row.failed {
+  border-color: var(--warn);
+}
+
+.dataset-prompt-batch-thumb {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+}
+
+.dataset-prompt-batch-thumb img {
+  width: 100%;
+  border-radius: var(--r-sm);
+}
+
+.dataset-prompt-batch-size {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.dataset-prompt-batch-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+}
+
+@media (max-width: 640px) {
+  .dataset-prompt-batch-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 /* Asset preview chip (in pickers) */
 .asset-preview-chips {
   display: grid;

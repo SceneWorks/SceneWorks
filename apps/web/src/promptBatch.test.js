@@ -14,8 +14,30 @@ import {
   missingKeys,
   parsePromptResolution,
   resolvePrompt,
+  joinPromptLines,
   splitPromptLines,
 } from "./promptBatch.js";
+
+describe("joinPromptLines", () => {
+  it("writes single-line prompts one per line, exactly as before", () => {
+    expect(joinPromptLines(["cat", "dog"])).toBe("cat\ndog");
+    expect(joinPromptLines(["only"])).toBe("only");
+    expect(joinPromptLines([])).toBe("");
+  });
+
+  it("keeps ONE multi-line prompt as one prompt when read back (SW-7085 review)", () => {
+    const block = "[3:4]\nDescription: A woman stands.\nStyle: 1960s print";
+    const text = joinPromptLines([block]);
+    expect(text).toBe(`${block}\n---`);
+    expect(splitPromptLines(text)).toEqual([block]);
+  });
+
+  it("round-trips several prompts when any one spans lines", () => {
+    const prompts = ["[1:1]\nDescription: a", "single line", "[16:9]\nDescription: c"];
+    expect(joinPromptLines(prompts)).toBe(prompts.join("\n---\n"));
+    expect(splitPromptLines(joinPromptLines(prompts))).toEqual(prompts);
+  });
+});
 
 describe("splitPromptLines", () => {
   it("splits one prompt per line, ignoring blank lines", () => {

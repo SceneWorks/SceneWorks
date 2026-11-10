@@ -5,6 +5,18 @@ pub(super) fn routes() -> Router<AppState> {
         .route("/api/v1/training/targets", get(list_training_targets))
         .route("/api/v1/training/presets", get(list_training_presets))
         .route(
+            "/api/v1/training/describe-prompt/default",
+            get(get_default_describe_prompt),
+        )
+        .route(
+            "/api/v1/training/describe-prompt/presets",
+            get(list_describe_prompt_presets).post(create_describe_prompt_preset),
+        )
+        .route(
+            "/api/v1/training/describe-prompt/presets/:preset_id",
+            patch(update_describe_prompt_preset).delete(delete_describe_prompt_preset),
+        )
+        .route(
             "/api/v1/training/data-walk",
             get(iris_training::training_data_walk),
         )
@@ -83,6 +95,10 @@ pub(super) fn routes() -> Router<AppState> {
         .route(
             "/api/v1/projects/:project_id/training/datasets/:dataset_id/face-analysis-jobs",
             post(create_training_dataset_face_analysis_job),
+        )
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/batch-describe-jobs",
+            post(create_training_dataset_batch_describe_job),
         )
         .route(
             "/api/v1/projects/:project_id/training/datasets/:dataset_id/subject-mask-jobs",

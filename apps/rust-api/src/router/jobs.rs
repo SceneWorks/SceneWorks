@@ -34,6 +34,12 @@ pub(super) fn routes() -> Router<AppState> {
             "/api/v1/jobs/:job_id/metrics",
             get(get_job_metrics).post(upsert_job_metrics),
         )
+        // Per-item job results (SW-7082): the owning worker appends each finished item; the UI
+        // pages them back in order. Kept out of the progress result, which every POST replaces.
+        .route(
+            "/api/v1/jobs/:job_id/result-items",
+            get(list_job_result_items).post(append_job_result_items),
+        )
         .route("/api/v1/metrics", get(list_metrics))
         .route("/api/v1/queue", get(queue_summary))
         .route("/api/v1/logs", get(list_logs))
