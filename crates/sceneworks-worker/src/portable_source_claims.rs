@@ -391,6 +391,14 @@ fn catalog_hash(settings: &Settings) -> [u8; 32] {
                     .join(".sceneworks-download-complete.json")
             }),
     );
+    // Builtin model download receipts (SW-7030). `run_model_download_job` installs each builtin
+    // catalog `downloads[].repo` into `data/models/<safe_download_dir(repo)>` (the API enqueues
+    // exactly that targetDir) and writes its completion receipt there. The initial inventory can
+    // finish before the user installs a builtin auxiliary such as `controlnet_tile_sdxl`, and the
+    // builtin manifest itself never changes, so without this marker a completed install leaves the
+    // scan stale until the 30-minute rescan. The receipt is tiny JSON metadata — the watched file
+    // never hashes the multi-GiB weights it stands in for.
+    paths.extend(builtin_model_download_receipt_paths(settings));
     paths.extend(converted_builtin_model_ids().into_iter().map(|id| {
         settings
             .data_dir
@@ -851,6 +859,36 @@ fn converted_builtin_model_ids() -> Vec<String> {
         })
         .filter_map(|entry| entry.get("id").and_then(serde_json::Value::as_str))
         .map(str::to_owned)
+        .collect()
+}
+
+/// The builtin catalog's model download receipt paths (SW-7030): one
+/// `data/models/<safe_download_dir(repo)>/.sceneworks-download-complete.json` per
+/// `downloads[].repo` the embedded builtin manifest declares. Model Manager enqueues exactly that
+/// targetDir for each builtin `downloads[]` entry, and `run_model_download_job` writes its
+/// completion receipt there, so watching these markers detects a builtin auxiliary
+/// (`controlnet_tile_sdxl`, …) installed after the initial inventory scan. Pure metadata-only
+/// path construction — the multi-GiB weights these receipts stand in for are never hashed.
+fn builtin_model_download_receipt_paths(settings: &Settings) -> Vec<PathBuf> {
+    let Ok(manifest) = sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+    else {
+        return Vec::new();
+    };
+    manifest
+        .get("models")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("downloads").and_then(serde_json::Value::as_array))
+        .flatten()
+        .filter_map(|download| download.get("repo").and_then(serde_json::Value::as_str))
+        .map(|repo| {
+            settings
+                .data_dir
+                .join("models")
+                .join(crate::paths::safe_download_dir(repo))
+                .join(".sceneworks-download-complete.json")
+        })
         .collect()
 }
 
@@ -2618,6 +2656,66 @@ mod tests {
             progress.pending("worker-a").unwrap().1.is_empty(),
             "removed source is withdrawn"
         );
+    }
+
+    #[test]
+    fn builtin_model_download_receipt_schedules_inventory_rescan() {
+        // SW-7030: the initial inventory can finish before the user installs a builtin
+        // auxiliary (`controlnet_tile_sdxl`). `run_model_download_job` then writes its
+        // completion receipt under data/models/<safe_download_dir(repo)>/.sceneworks-download-complete.json
+        // — the targetDir Model Manager enqueues for the catalog `downloads[]` entry. That
+        // receipt must change the watched catalog so the next heartbeat rescans and
+        // advertises `sdxl_detail_tile_control` instead of waiting out the 30-minute interval.
+        let temp = tempfile::TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let mut settings = Settings::for_test(data.clone());
+        settings.config_dir = temp.path().join("config");
+        let source =
+            sceneworks_core::control_weights::shipped_auxiliary_source("sdxl_detail_tile_control")
+                .unwrap();
+        // The worker's initial inventory ran to completion before anything was installed.
+        let before = catalog_hash(&settings);
+        let schedule = InventorySchedule {
+            next_due: Some(Instant::now() + INVENTORY_RESCAN_INTERVAL),
+            catalog_hash: Some(before),
+        };
+        // The user installs the builtin auxiliary: `run_model_download_job` lands the weights
+        // in the HF cache the Detail enhancer resolves...
+        let hub = temp.path().join("hub");
+        let file = hub
+            .join("models--xinsir--controlnet-tile-sdxl-1.0/snapshots")
+            .join(source.revision)
+            .join("diffusion_pytorch_model.safetensors");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"tile control weights").unwrap();
+        // ...and writes its completion receipt into the app store target dir.
+        let target = data
+            .join("models")
+            .join(crate::paths::safe_download_dir(source.repo));
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(
+            target.join(".sceneworks-download-complete.json"),
+            br#"{"schemaVersion":2,"repo":"xinsir/controlnet-tile-sdxl-1.0"}"#,
+        )
+        .unwrap();
+        // The receipt changes the watched catalog, so the heartbeat rescan fires early...
+        let after = catalog_hash(&settings);
+        assert_ne!(
+            before, after,
+            "a completed builtin model download must schedule an inventory rescan"
+        );
+        assert!(scan_due(&schedule, Instant::now(), after));
+        // ...and the rescan advertises the Detail tile source from the installed snapshot.
+        crate::test_env::temp_env_vars(&[("HF_HUB_CACHE", hub.to_str().unwrap())], || {
+            let mut scanned = Vec::new();
+            collect_source_claims(&settings, |claim| scanned.push(claim));
+            assert!(
+                scanned
+                    .iter()
+                    .any(|claim| claim.source_id == "sdxl_detail_tile_control"),
+                "the installed builtin auxiliary is advertised without the 30-minute rescan"
+            );
+        });
     }
 
     #[test]

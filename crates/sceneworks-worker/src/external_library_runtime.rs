@@ -1585,7 +1585,7 @@ fn prune_portable_snapshots(current: &Path, settings: &Settings) -> WorkerResult
     Ok(())
 }
 
-fn private_tree_bytes(path: &Path) -> WorkerResult<u64> {
+pub(crate) fn private_tree_bytes(path: &Path) -> WorkerResult<u64> {
     let metadata = std::fs::symlink_metadata(path).map_err(WorkerError::Io)?;
     if metadata.file_type().is_symlink() {
         return Err(invalid_binding("private snapshot contains a link"));

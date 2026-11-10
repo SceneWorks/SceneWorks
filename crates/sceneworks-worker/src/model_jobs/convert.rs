@@ -234,13 +234,17 @@ fn selected_ltx_converter_upscaler_dir(
     } else {
         // mlx-gen-ltx reads the spatial upscaler by its canonical basename. The admitted
         // repository filename may be nested or renamed, so expose only that selected file
-        // under the expected name for this conversion attempt.
+        // under the expected name for this conversion attempt. COPY it, never hard-link:
+        // `selected` can live inside a verified portable snapshot bundle, and
+        // `private_tree_bytes`/`prune_portable_snapshots` enforce Unix `nlink == 1` on every
+        // private snapshot file — a hard link here would raise the source's link count to 2
+        // and make an unrelated source-bound job fail its bundle check with
+        // "private snapshot file has a hard-link alias" (SW-7030). The alias lives only for
+        // this conversion attempt in its own temp dir, so a copy preserves the invariant.
         let alias = tempfile::tempdir_in(out_dir.parent().unwrap_or(out_dir))
             .map_err(|error| error.to_string())?;
         let target = alias.path().join(default_name);
-        std::fs::hard_link(&selected, &target)
-            .or_else(|_| std::fs::copy(&selected, &target).map(|_| ()))
-            .map_err(|error| error.to_string())?;
+        std::fs::copy(&selected, &target).map_err(|error| error.to_string())?;
         Ok((alias.path().to_path_buf(), Some(alias)))
     }
 }
@@ -1060,6 +1064,51 @@ mod portable_conversion_source_tests {
         .unwrap();
         assert_eq!(std::fs::read(nested_dir.join(LTX_SPATIAL_UPSCALER_FILE)).unwrap(), b"nested");
         assert_ne!(nested_dir, snapshot);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn renamed_upscaler_alias_copies_without_hard_linking_the_private_snapshot() {
+        // SW-7030: a renamed `upscalerFile` stages the selected file under the canonical
+        // basename for mlx-gen-ltx. `upscaler_dir` can be a verified portable snapshot
+        // bundle (`ltx_convert_upscaler`), whose files must keep Unix nlink == 1: a
+        // concurrent source-bound job's `prune_portable_snapshots` walks every existing
+        // bundle with `private_tree_bytes` BEFORE checking its lease, so one aliased file
+        // fails that unrelated job with "private snapshot file has a hard-link alias" even
+        // below the cache limits. Staging must copy, never hard-link.
+        let root = tempfile::tempdir().unwrap();
+        let snapshot = root.path().join("snapshot");
+        let output = root.path().join("output");
+        std::fs::create_dir_all(snapshot.join("weights")).unwrap();
+        std::fs::create_dir(&output).unwrap();
+        let selected = snapshot.join("weights/upscaler.safetensors");
+        std::fs::write(&selected, b"private snapshot upscaler").unwrap();
+        let (alias_dir, alias) = selected_ltx_converter_upscaler_dir(
+            &snapshot,
+            Path::new("weights/upscaler.safetensors"),
+            &output,
+        )
+        .unwrap();
+        // The alias exposes the selected bytes under the canonical name...
+        assert_eq!(
+            std::fs::read(alias_dir.join(LTX_SPATIAL_UPSCALER_FILE)).unwrap(),
+            b"private snapshot upscaler"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                std::fs::metadata(&selected).unwrap().nlink(),
+                1,
+                "staging a renamed upscaler must not alias the private snapshot file"
+            );
+        }
+        // ...and the source bundle keeps passing the private-tree invariant a concurrent
+        // job checks while this conversion retains its alias.
+        crate::external_library_runtime::private_tree_bytes(&snapshot).unwrap();
+        drop(alias);
+        assert!(selected.is_file());
+        crate::external_library_runtime::private_tree_bytes(&snapshot).unwrap();
     }
 
     #[test]
