@@ -912,6 +912,9 @@ impl VerifiedPlanLayers {
 const PORTABLE_CACHE_MAX_ENTRIES: usize = 8;
 const PORTABLE_CACHE_MAX_BYTES: u64 = 256 * 1024 * 1024 * 1024;
 
+// On non-Unix the readonly bit must be cleared before removal (Windows semantics);
+// the Unix branches use explicit modes instead.
+#[cfg_attr(not(unix), allow(clippy::permissions_set_readonly_false))]
 fn remove_private_snapshot(root: &Path) -> io::Result<()> {
     if !root.exists() {
         return Ok(());
@@ -1613,7 +1616,7 @@ pub(crate) fn private_tree_bytes(path: &Path) -> WorkerResult<u64> {
 }
 
 fn create_private_directory(path: &Path) -> WorkerResult<()> {
-    let created = match std::fs::create_dir(path) {
+    let _created = match std::fs::create_dir(path) {
         Ok(()) => true,
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
         Err(error) => return Err(WorkerError::Io(error)),
@@ -1625,7 +1628,7 @@ fn create_private_directory(path: &Path) -> WorkerResult<()> {
         ));
     }
     #[cfg(unix)]
-    if created {
+    if _created {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
             .map_err(WorkerError::Io)?;
