@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Modal } from "./Modal.jsx";
 import { RequiredModelsNotice } from "./RequiredModelsNotice.jsx";
+import { DescribePromptPresets } from "./DescribePromptPresets.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { trainingApi } from "../api/trainingResources.js";
 import { jobsApi } from "../api/jobsResources.js";
@@ -318,6 +319,12 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
           )
         ) : null}
 
+        <DescribePromptPresets
+          disabled={running || defaultPrompt === null}
+          onSelect={setPrompt}
+          prompt={prompt}
+          token={token}
+        />
         <label>
           Describing prompt
           <textarea

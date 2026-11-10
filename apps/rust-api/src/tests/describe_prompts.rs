@@ -65,3 +65,109 @@ async fn prompt_batch_keeps_the_described_images_pixel_sizes() {
     assert_eq!(loaded["sourceImages"][0]["height"], 3200);
     assert_eq!(loaded["source"]["datasetId"], "ds_1");
 }
+
+const PRESETS: &str = "/api/v1/training/describe-prompt/presets";
+
+#[tokio::test]
+async fn describe_prompt_presets_persist_and_restore_the_exact_text() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    // Leading/trailing whitespace and inner newlines are kept as typed.
+    let text = "  Describe only the clothing.\n\nNever the faces.  \n";
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        PRESETS,
+        json!({ "name": "Clothing only", "prompt": text, "builtin": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["id"], "clothing_only");
+    assert_eq!(created["prompt"], text);
+    assert_eq!(created["scope"], "global");
+    assert!(
+        created.get("builtin").is_none(),
+        "a client cannot mark a stored preset built-in"
+    );
+
+    // A fresh app over the same config dir reads it back from disk.
+    let app = create_app(test_settings(&temp_dir)).expect("app re-creates");
+    let (status, list) = request(app.clone(), "GET", PRESETS, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let list = list.as_array().expect("preset list");
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0]["id"], "default");
+    assert_eq!(list[0]["builtin"], true);
+    assert_eq!(list[0]["prompt"], asset_system_section());
+    assert_eq!(list[1]["id"], "clothing_only");
+    assert_eq!(list[1]["prompt"], text);
+
+    let (status, updated) = request(
+        app.clone(),
+        "PATCH",
+        &format!("{PRESETS}/clothing_only"),
+        json!({ "prompt": "Describe only the shoes." }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["prompt"], "Describe only the shoes.");
+    assert_eq!(updated["name"], "Clothing only");
+
+    let (status, _) = request(
+        app.clone(),
+        "DELETE",
+        &format!("{PRESETS}/clothing_only"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, list) = request(app, "GET", PRESETS, Value::Null).await;
+    assert_eq!(list.as_array().expect("preset list").len(), 1);
+}
+
+#[tokio::test]
+async fn the_builtin_default_preset_cannot_be_overwritten_or_deleted() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let attempts = [
+        (
+            "POST",
+            PRESETS.to_owned(),
+            json!({ "name": "Default", "prompt": "x" }),
+        ),
+        (
+            "POST",
+            PRESETS.to_owned(),
+            json!({ "id": "default", "name": "Mine", "prompt": "x" }),
+        ),
+        (
+            "PATCH",
+            format!("{PRESETS}/default"),
+            json!({ "prompt": "x" }),
+        ),
+        ("DELETE", format!("{PRESETS}/default"), Value::Null),
+    ];
+    for (method, uri, body) in attempts {
+        let (status, error) = request(app.clone(), method, &uri, body).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}: {error}");
+    }
+    let (_, list) = request(app, "GET", PRESETS, Value::Null).await;
+    let list = list.as_array().expect("preset list");
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["prompt"], asset_system_section());
+}
+
+#[tokio::test]
+async fn describe_prompt_presets_refuse_a_blank_or_oversized_prompt() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    for body in [
+        json!({ "name": "Blank", "prompt": "   " }),
+        json!({ "name": "Missing" }),
+        json!({ "name": "Huge", "prompt": "x".repeat(MAX_DESCRIBE_PROMPT_CHARS + 1) }),
+        json!({ "prompt": "No name" }),
+    ] {
+        let (status, error) = request(app.clone(), "POST", PRESETS, body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {error}");
+    }
+}

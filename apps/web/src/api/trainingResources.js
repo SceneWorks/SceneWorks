@@ -35,6 +35,10 @@ export const trainingApi = {
     apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}/training/datasets/${encodeURIComponent(datasetId)}/batch-describe-jobs`, token, options),
   defaultDescribePrompt: (token, options = {}) =>
     apiFetch(`/api/v1/training/describe-prompt/default`, token, options),
+  describePromptPresets: (token, options = {}) =>
+    apiFetch(`/api/v1/training/describe-prompt/presets`, token, options),
+  describePromptPreset: (presetId, token, options = {}) =>
+    apiFetch(`/api/v1/training/describe-prompt/presets/${encodeURIComponent(presetId)}`, token, options),
   faceAnalysisJobs: (projectId, datasetId, token, options = {}) =>
     apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}/training/datasets/${encodeURIComponent(datasetId)}/face-analysis-jobs`, token, options),
   subjectMaskJobs: (projectId, datasetId, token, options = {}) =>

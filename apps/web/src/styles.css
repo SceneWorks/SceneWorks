@@ -13779,6 +13779,24 @@ input.dataset-name-input.boxed:focus {
   align-items: center;
 }
 
+/* Saved describing prompts (SW-7086): picker + delete, then name + save, on one wrapping row. */
+.describe-prompt-presets {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) auto minmax(140px, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.describe-prompt-presets .inline-warning {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 640px) {
+  .describe-prompt-presets {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+}
+
 .dataset-prompt-batch-progress {
   display: grid;
   gap: 4px;

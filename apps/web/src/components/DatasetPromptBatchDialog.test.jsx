@@ -5,7 +5,12 @@ import { AppContext } from "../context/AppContext.js";
 import { VISION_CAPTION_MODEL_REPO } from "../constants.js";
 
 vi.mock("../api/trainingResources.js", () => ({
-  trainingApi: { defaultDescribePrompt: vi.fn(), batchDescribeJobs: vi.fn() },
+  trainingApi: {
+    defaultDescribePrompt: vi.fn(),
+    batchDescribeJobs: vi.fn(),
+    describePromptPresets: vi.fn(),
+    describePromptPreset: vi.fn(),
+  },
 }));
 vi.mock("../api/jobsResources.js", () => ({ jobsApi: { item: vi.fn(), cancel: vi.fn() } }));
 vi.mock("../pollJob.js", () => ({ abortableDelay: vi.fn(() => Promise.resolve()) }));
@@ -64,6 +69,7 @@ function snapshot(status, items, extra = {}) {
 
 // jobsApi.item returns pending promises the test resolves one poll at a time.
 let polls;
+let presetStore;
 function nextPoll(value) {
   const resolve = polls.shift();
   if (!resolve) throw new Error("no poll pending");
@@ -95,6 +101,21 @@ describe("DatasetPromptBatchDialog", () => {
     polls = [];
     trainingApi.defaultDescribePrompt.mockReset().mockResolvedValue({ prompt: DEFAULT_PROMPT, maxChars: 32000 });
     trainingApi.batchDescribeJobs.mockReset().mockResolvedValue({ id: "job_1", status: "queued", progress: 0 });
+    // A tiny in-memory preset store standing in for the server catalog.
+    presetStore = [{ id: "default", name: "Default", prompt: DEFAULT_PROMPT, scope: "builtin", builtin: true }];
+    trainingApi.describePromptPresets.mockReset().mockImplementation(async (_token, options = {}) => {
+      if (options.method === "POST") {
+        const body = JSON.parse(options.body);
+        const created = { id: body.name.toLowerCase().replace(/[^a-z0-9]+/g, "_"), scope: "global", ...body };
+        presetStore = [...presetStore, created];
+        return created;
+      }
+      return presetStore;
+    });
+    trainingApi.describePromptPreset.mockReset().mockImplementation(async (id) => {
+      presetStore = presetStore.filter((preset) => preset.id !== id);
+      return {};
+    });
     jobsApi.item.mockReset().mockImplementation(() => new Promise((resolve) => polls.push(resolve)));
     jobsApi.cancel.mockReset().mockResolvedValue({});
     saveExportFile.mockClear();
@@ -262,6 +283,65 @@ describe("DatasetPromptBatchDialog", () => {
     expect(exported).toMatchObject({ sceneworksPromptBatch: 1, name: "Film prints prompts" });
     expect(exported.prompts).toHaveLength(1);
     expect(exported.prompts[0].startsWith("[3:4]\n")).toBe(true);
+  });
+
+  function presetPicker() {
+    return [...document.body.querySelectorAll("label")]
+      .find((node) => node.firstChild?.textContent?.trim() === "Saved prompt")
+      ?.querySelector("select");
+  }
+  async function choosePreset(id) {
+    const select = presetPicker();
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value").set.call(select, id);
+      select.dispatchEvent(new window.Event("change", { bubbles: true }));
+    });
+  }
+
+  it("saves an edited prompt as a named preset and restores its exact text when reopened (SW-7086)", async () => {
+    await render();
+    const edited = "  Describe only the clothing.\n\nNever the faces.  ";
+    await act(async () => setText(textarea("Describing prompt"), edited));
+    await act(async () => setText(textarea("Save as"), "Clothing only"));
+    await click(button("Save prompt"));
+    await settle();
+    expect(trainingApi.describePromptPresets).toHaveBeenCalledWith("t", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ name: "Clothing only", prompt: edited }),
+    }));
+
+    // Reopen: a fresh dialog lists the saved preset; selecting it restores the exact text.
+    await unmountRoot(root, container);
+    ({ container, root } = mountRoot());
+    await render();
+    const options = [...presetPicker().options].map((option) => [option.value, option.textContent]);
+    expect(options).toEqual([["default", "Default (built-in)"], ["clothing_only", "Clothing only"]]);
+    expect(textarea("Describing prompt").value).toBe(DEFAULT_PROMPT);
+    await choosePreset("clothing_only");
+    expect(textarea("Describing prompt").value).toBe(edited);
+    await runWith([described("item_a", 300, 400)]);
+    expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls[0][3].body).prompt).toBe(edited);
+  });
+
+  it("lists the built-in default, protects it, and selecting it sends the default instruction (SW-7086)", async () => {
+    presetStore.push({ id: "mine", name: "Mine", prompt: "Describe the shoes.", scope: "global" });
+    await render();
+    await choosePreset("mine");
+    expect(button("Delete").disabled).toBe(false);
+    await choosePreset("default");
+    expect(button("Delete").disabled).toBe(true);
+    expect(textarea("Describing prompt").value).toBe(DEFAULT_PROMPT);
+    await runWith([described("item_a", 300, 400)]);
+    expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls[0][3].body)).not.toHaveProperty("prompt");
+
+    // The server refuses writes to the built-in; the refusal is shown, not swallowed.
+    trainingApi.describePromptPresets.mockImplementationOnce(async () => {
+      throw new Error("The built-in default describing prompt cannot be changed or deleted.");
+    });
+    await act(async () => setText(textarea("Save as"), "Default"));
+    await click(button("Save prompt"));
+    await settle();
+    expect(document.body.textContent).toContain("cannot be changed or deleted");
   });
 
   it("blocks a run while the dataset has unsaved changes", async () => {

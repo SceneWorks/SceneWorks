@@ -290,7 +290,10 @@ use recipe_presets::{
     stamp_recipe_preset_used, update_recipe_preset,
 };
 mod describe_prompts;
-use describe_prompts::get_default_describe_prompt;
+use describe_prompts::{
+    create_describe_prompt_preset, delete_describe_prompt_preset, get_default_describe_prompt,
+    list_describe_prompt_presets, update_describe_prompt_preset,
+};
 mod prompt_batches;
 use prompt_batches::{
     create_prompt_batch, delete_prompt_batch, duplicate_prompt_batch, get_prompt_batch,

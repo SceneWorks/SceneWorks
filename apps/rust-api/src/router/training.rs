@@ -9,6 +9,14 @@ pub(super) fn routes() -> Router<AppState> {
             get(get_default_describe_prompt),
         )
         .route(
+            "/api/v1/training/describe-prompt/presets",
+            get(list_describe_prompt_presets).post(create_describe_prompt_preset),
+        )
+        .route(
+            "/api/v1/training/describe-prompt/presets/:preset_id",
+            patch(update_describe_prompt_preset).delete(delete_describe_prompt_preset),
+        )
+        .route(
             "/api/v1/training/data-walk",
             get(iris_training::training_data_walk),
         )
