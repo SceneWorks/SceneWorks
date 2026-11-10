@@ -373,6 +373,10 @@ pub const MINIMAX_H3_TRANSFORMER_CONFIG_FILE: &str = "config.json";
 /// The diffusers `_class_name` the published MiniMax-H3 DiT config declares
 /// (`MiniMaxH3Transformer3DModel`, read by both native providers' `dit::config`).
 pub const MINIMAX_H3_TRANSFORMER_CLASS: &str = "MiniMaxH3Transformer3DModel";
+/// The diffusers `_class_name` of MiniMax-H3-Image's `transformer_diffusers/config.json`
+/// (`MiniMaxAI/MiniMax-H3-Image` @ 492fd8c4, SW-7100). A different architecture from
+/// [`MINIMAX_H3_TRANSFORMER_CLASS`]: no audio stream, six per-step output heads.
+pub const MINIMAX_H3_IMAGE_TRANSFORMER_CLASS: &str = "MiniMaxH3ImageTransformer2DModel";
 
 /// Whether `dir` is a **loadable dense** MiniMax-H3 transformer component directory (sc-26680): the
 /// architecture `config.json` declaring [`MINIMAX_H3_TRANSFORMER_CLASS`], the one unsharded weight
@@ -1546,6 +1550,17 @@ fn detect_transformer_family(keys: &[&str]) -> Option<&'static str> {
     if any_key_contains(keys, "txtfusion.") {
         return Some(crate::model_family::KREA_2);
     }
+    // MiniMax-H3-Image (SW-7100): H3's refiner and block names WITHOUT the joint-audio heads, plus
+    // the six per-step `pdd_proj_out.N` output heads no other family has. Its own family, so H3's
+    // import admission below never claims it, and it must precede the Ideogram arm for the same
+    // `adaln_proj.` reason as H3.
+    if any_key_contains(keys, "pdd_proj_out.")
+        && (any_key_contains(keys, "token_refiner.refiner_blocks.")
+            || any_key_contains(keys, "token_refiner.blocks."))
+        && !any_key_contains(keys, "audio_proj_in.")
+    {
+        return Some(crate::model_family::MINIMAX_H3_IMAGE);
+    }
     // MiniMax-H3 (epic 17137; import sc-26680): a single-stream DiT whose two-block text refiner
     // (`token_refiner.refiner_blocks.N`) and joint-audio input head (`audio_proj_in`) appear in no
     // other family. MUST precede the Ideogram arm below: every H3 `transformer_blocks.N` carries an
@@ -2687,6 +2702,32 @@ mod tests {
         assert_eq!(verdict.family.as_deref(), Some("flux2"));
         assert_eq!(verdict.component, ComponentRole::Transformer);
         assert_eq!(verdict.quant, QuantFormat::Fp8InlineScale);
+    }
+
+    /// SW-7100 (AC3): a MiniMax-H3-Image DiT — H3's refiner and `adaln_proj` blocks, NO audio
+    /// heads, six `pdd_proj_out` heads — is its own family: not `minimax-h3` (so H3's fine-tune
+    /// import never admits it) and not `ideogram` (whose `adaln_proj.` marker would otherwise win).
+    #[test]
+    fn minimax_h3_image_dit_is_its_own_family_and_not_an_h3_import() {
+        let verdict = recognized(classify_base_header(&header(&[
+            ("token_refiner.refiner_blocks.0.attn.to_qkv.weight", "BF16"),
+            ("transformer_blocks.0.adaln_proj.linear.weight", "BF16"),
+            ("transformer_blocks.0.attn.to_q.weight", "BF16"),
+            ("pdd_proj_out.0.weight", "F32"),
+            ("proj_in.weight", "F32"),
+        ])));
+        assert_eq!(
+            verdict.family.as_deref(),
+            Some(crate::model_family::MINIMAX_H3_IMAGE)
+        );
+        assert!(import_supported(&verdict).is_err());
+        // The same keys WITH H3's audio heads are still H3.
+        let h3 = recognized(classify_base_header(&header(&[
+            ("token_refiner.refiner_blocks.0.attn.to_qkv.weight", "BF16"),
+            ("transformer_blocks.0.adaln_proj.linear.weight", "BF16"),
+            ("audio_proj_in.weight", "F32"),
+        ])));
+        assert_eq!(h3.family.as_deref(), Some(crate::model_family::MINIMAX_H3));
     }
 
     #[test]

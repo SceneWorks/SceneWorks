@@ -159,7 +159,7 @@ import { IRIS_RESTORE_DEFAULTS, irisRestoreControls, restorePlanBodyForRenders }
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import { StyledPromptPreview } from "../components/StyledPromptPreview.jsx";
 import { styleHintForId, styleTextForId } from "../data/styleCatalog.js";
-import { guidanceMethodDefaultFromModel, guidanceMethodOptionsFromModel, negativePromptInertAtGuidance, guidanceIsOff, patchGridHint, nativeResolutionHint, promptTokenLimitHint } from "../samplerOptions.js";
+import { fixedStepsForModel, guidanceMethodDefaultFromModel, guidanceMethodOptionsFromModel, negativePromptInertAtGuidance, guidanceIsOff, patchGridHint, nativeResolutionHint, promptTokenLimitHint } from "../samplerOptions.js";
 
 // Used only for models that don't declare limits.resolutions (e.g. user-imported).
 const DEFAULT_RESOLUTION_OPTIONS = ["768x768", "1024x1024", "1280x720", "720x1280"];
@@ -1497,6 +1497,9 @@ export function ImageStudio() {
   // these two for the same reason (`showGuidance` / `showNegative`).
   const supportsGuidance = selectedModel?.image?.supportsGuidance !== false;
   const supportsNegativePrompt = selectedModel?.image?.supportsNegativePrompt !== false;
+  // SW-7100: a fixed step count (hardMinSteps === hardMaxSteps) is no control at all — the Steps field
+  // is hidden and a stale override (a replayed recipe, another model's sticky value) is never sent.
+  const stepsFixed = fixedStepsForModel(selectedModel) != null;
   // sc-25679: a model whose negative prompt IS the CFG unconditional
   // (`image.negativePromptRequiresGuidance`, Iris-3B) refuses one with CFG off. The field stays
   // visible (the axis exists — raise Guidance and it applies) but is DISABLED and not sent while
@@ -2173,7 +2176,7 @@ export function ImageStudio() {
       count,
       mode,
       guidanceScale: supportsGuidance && !mossDmd ? finiteNumberOrUndefined(guidanceOverride) : undefined,
-      steps: mossDmd ? Number(mossDmdSteps) : finiteNumberOrUndefined(stepsOverride),
+      steps: mossDmd ? Number(mossDmdSteps) : stepsFixed ? undefined : finiteNumberOrUndefined(stepsOverride),
       sampler,
       scheduler,
       schedulerShift: mossDmd ? undefined : finiteNumberOrUndefined(schedulerShiftToSend),
@@ -2529,7 +2532,7 @@ export function ImageStudio() {
       supportsSchedulerShift,
       cfgInterval: resolvedCfgInterval,
       captionOverflow: outgoingCaptionOverflow,
-      stepsOverride,
+      stepsOverride: stepsFixed ? "" : stepsOverride,
       // Same rule for the guidance axis (sc-15299): a CFG-free engine never receives a scale, so
       // the override is blanked before it reaches the builder and `advanced.guidanceScale` is
       // omitted entirely. The model-switch reset already clears it in the ordinary case, but a

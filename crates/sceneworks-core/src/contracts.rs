@@ -172,6 +172,9 @@ string_enum! {
         // sc-25907: the distilled Turbo checkpoint stamps its own id for the same reason — its
         // weights are not base's, so a replayed asset must say which of the two produced it.
         QwenImage21Turbo => "qwen_image_2_1_turbo",
+        // SW-7100: MiniMax-H3-Image stamps its own id — its weights, latent space and licence are
+        // its own, not MiniMax-H3's.
+        MinimaxH3Image => "minimax_h3_image",
         LensTurbo => "lens_turbo",
         SenseNovaU1 => "sensenova_u1",
         FluxDiffusers => "flux_diffusers",

@@ -465,12 +465,18 @@ pub fn discovered_checkpoint_family(
         }
     }
     let mut diagnostics = Vec::new();
-    let h3 = discovery_has_h3_family(&resolved, discovery, &mut diagnostics);
+    // SW-7100: a MiniMax-H3-Image transformer (its own `_class_name`) is its own family. Named
+    // before the H3 aggregate below so its shards can never be labelled `minimax-h3`.
+    let h3_image = discovery_has_h3_image_family(&resolved, discovery, &mut diagnostics);
+    let h3 = !h3_image && discovery_has_h3_family(&resolved, discovery, &mut diagnostics);
     if diagnostics
         .iter()
         .any(|diagnostic| diagnostic.severity == CheckpointDiagnosticSeverityV1::Error)
     {
         return Err(diagnostics);
+    }
+    if h3_image {
+        return Ok(Some(crate::model_family::MINIMAX_H3_IMAGE.into()));
     }
     if h3 {
         return Ok(Some("minimax-h3".into()));
@@ -799,6 +805,36 @@ struct ArtifactObservation {
 
 /// Aggregate family evidence shared by the read-only query and full inspection. A shard need not
 /// contain every family marker; the complete inventory is still validated only by inspection.
+/// SW-7100: whether a discovered source is a MiniMax-H3-Image transformer — a shard's header names
+/// the image family (no audio stream, `pdd_proj_out` heads), or a `config.json` declares
+/// [`MINIMAX_H3_IMAGE_TRANSFORMER_CLASS`](crate::base_weights::MINIMAX_H3_IMAGE_TRANSFORMER_CLASS).
+fn discovery_has_h3_image_family(
+    resolved: &ResolvedInput,
+    discovery: &CheckpointDiscoveryV1,
+    diagnostics: &mut Vec<CheckpointDiagnosticV1>,
+) -> bool {
+    discovery.candidates.iter().any(|candidate| {
+        candidate.header_family.as_deref() == Some(crate::model_family::MINIMAX_H3_IMAGE)
+    }) || discovery.descriptor_paths.iter().any(|relative| {
+        if Path::new(relative)
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some("config.json")
+        {
+            return false;
+        }
+        let Some(path) = resolve_confined_artifact(resolved, relative, diagnostics) else {
+            return false;
+        };
+        crate::minimax_h3_codec::read_h3_descriptor(&path)
+            .ok()
+            .is_some_and(|config| {
+                config.get("_class_name").and_then(Value::as_str)
+                    == Some(crate::base_weights::MINIMAX_H3_IMAGE_TRANSFORMER_CLASS)
+            })
+    })
+}
+
 fn discovery_has_h3_family(
     resolved: &ResolvedInput,
     discovery: &CheckpointDiscoveryV1,
@@ -844,7 +880,10 @@ fn inspect_discovered_pass(
         .collect::<BTreeMap<_, _>>();
     let mut tensor_tables = BTreeMap::new();
     let mut indices = Vec::new();
-    let h3_context = discovery_has_h3_family(resolved, discovery, &mut pass.diagnostics);
+    // SW-7100: an H3-Image source never takes the H3 aggregate, even when a shard's local keys look
+    // like H3's.
+    let h3_context = !discovery_has_h3_image_family(resolved, discovery, &mut pass.diagnostics)
+        && discovery_has_h3_family(resolved, discovery, &mut pass.diagnostics);
 
     for candidate in &discovery.candidates {
         let Some(path) =
@@ -1789,6 +1828,58 @@ mod family_query_tests {
             None,
             "conflicting non-H3 evidence is not a local capability guess"
         );
+    }
+
+    /// SW-7100 (AC3): MiniMax-H3-Image weights are their own family. Its DiT shares H3's refiner
+    /// and block names, but carries no audio heads and six `pdd_proj_out` heads; a whole file, a
+    /// diffusers directory and a sharded directory whose shards are individually anonymous all
+    /// read `minimax-h3-image`, never `minimax-h3` (and never `ideogram` via `adaln_proj.`).
+    #[test]
+    fn minimax_h3_image_weights_are_never_classified_as_minimax_h3() {
+        const H3_IMAGE_KEYS: &[&str] = &[
+            "token_refiner.refiner_blocks.0.attn.to_qkv.weight",
+            "pdd_proj_out.0.weight",
+            "transformer_blocks.0.adaln_proj.linear.weight",
+        ];
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        weights(&root.join("whole.safetensors"), H3_IMAGE_KEYS);
+        weights(
+            &root.join("diffusers/diffusion_pytorch_model.safetensors"),
+            H3_IMAGE_KEYS,
+        );
+        // Each shard alone matches neither family; only the config names the architecture.
+        weights(
+            &root.join("sharded/one.safetensors"),
+            &["transformer_blocks.0.attn.to_q.weight"],
+        );
+        weights(
+            &root.join("sharded/two.safetensors"),
+            &["transformer_blocks.1.attn.to_q.weight"],
+        );
+        for directory in ["diffusers", "sharded"] {
+            std::fs::write(
+                root.join(directory).join("config.json"),
+                json!({"_class_name":crate::base_weights::MINIMAX_H3_IMAGE_TRANSFORMER_CLASS})
+                    .to_string(),
+            )
+            .unwrap();
+        }
+        for relative in ["whole.safetensors", "diffusers", "sharded"] {
+            assert_eq!(
+                query(root, relative).unwrap().as_deref(),
+                Some(crate::model_family::MINIMAX_H3_IMAGE),
+                "{relative}"
+            );
+        }
+        // The H3 fine-tune import's source-evidence check refuses the image family.
+        let declared =
+            json!({"family":"minimax-h3","baseModel":"minimax_h3","minimaxH3Partition":"t2va"});
+        assert!(crate::minimax_h3_import::validate_declared_source_family(
+            declared.as_object().unwrap(),
+            Some(crate::model_family::MINIMAX_H3_IMAGE),
+        )
+        .is_err());
     }
 
     #[cfg(unix)]

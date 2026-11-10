@@ -1179,6 +1179,13 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // adapters; `CandleImageRefusal::Supra2Surface` holds the candle gate to exactly the MLX arm's
     // shape (`supra2_mlx_eligible`).
     ModelCaps::new("supra2_img", true, true, false, false, false),
+    // MiniMax-H3-Image (SW-7100, feature SW-F363): `mlx-gen-minimax-h3` and
+    // `candle-gen-minimax-h3` register the SAME engine id `minimax_h3_image`, text-to-image only in
+    // this item. Both lanes take the pre-packed q8/q4 DiT tiers as a staged component (SW-7093), so
+    // Candle accepts a tier request; no adapters until SW-7101.
+    // `CandleImageRefusal::MinimaxH3ImageSurface` holds the candle gate to exactly the MLX arm's
+    // shape (`minimax_h3_image_mlx_eligible`).
+    ModelCaps::new("minimax_h3_image", true, true, true, false, false),
 ];
 
 /// The one-row-per-model VIDEO routing table (sc-9495) — the single source the video list constants
@@ -2652,6 +2659,7 @@ mod tests {
         "moss_image_base",
         "moss_image_sft",
         "supra2_img",
+        "minimax_h3_image",
     ];
 
     const EXPECTED_CANDLE_ROUTED_MODELS: &[&str] = &[
@@ -2721,6 +2729,7 @@ mod tests {
         "moss_image_base",
         "moss_image_sft",
         "supra2_img",
+        "minimax_h3_image",
     ];
 
     // sc-9983: Krea joins Lens as a BOTH-quant-and-LoRA candle family (sc-9607 flipped its
@@ -2801,6 +2810,8 @@ mod tests {
         "sensenova_u1_8b_infographic_v2_fast",
         "sensenova_u1_8b_infographic_v3",
         "sensenova_u1_8b_infographic_v3_fast",
+        // SW-7100: the pre-packed q8/q4 MiniMax-H3-Image DiT tiers (SW-7093) load on Candle.
+        "minimax_h3_image",
     ];
 
     // sc-9983: Krea moved to CANDLE_QUANT_LORA_MODELS (BOTH). sc-10676: Anima is the LoRA-only candle

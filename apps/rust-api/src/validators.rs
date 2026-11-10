@@ -508,10 +508,10 @@ pub(super) fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiErr
         SHAPE_MIN_IMAGE_DIMENSION
     };
     if let Some(width) = payload.width {
-        validate_dimension_in(width, "width", shape_floor, MAX_IMAGE_DIMENSION)?;
+        validate_dimension_in(width, "width", shape_floor, SHAPE_MAX_IMAGE_DIMENSION)?;
     }
     if let Some(height) = payload.height {
-        validate_dimension_in(height, "height", shape_floor, MAX_IMAGE_DIMENSION)?;
+        validate_dimension_in(height, "height", shape_floor, SHAPE_MAX_IMAGE_DIMENSION)?;
     }
     payload.upscale.validate().map_err(ApiError::bad_request)?;
 
@@ -1290,6 +1290,17 @@ pub(super) const MAX_IMAGE_DIMENSION: u32 = 4096;
 /// check runs before preset/model resolution. It is the outer bound only — see
 /// the shared core image-request boundary for the per-model floor that still applies.
 pub(super) const SHAPE_MIN_IMAGE_DIMENSION: u32 = 16;
+
+/// Payload-sanity CEILING for a named image width/height, before the model is known (SW-7100).
+///
+/// The FLOOR's twin: MiniMax-H3-Image declares `limits.maxDimension: 6272` (its published 21:9
+/// preset is 6272x2688), so this outer bound cannot stay at [`MAX_IMAGE_DIMENSION`] or that preset
+/// would 400 before the model gets a say. Nothing widens for any other model: once the model is
+/// resolved, the shared core boundary (`image_request::validate_image_request_payload`) judges the
+/// size against the model's own `limits.maxDimension`, and a model that declares none still falls
+/// back to the 4096 blanket. `the_shape_ceiling_covers_every_declared_image_edge` keeps this equal
+/// to the largest edge the shipped catalog declares.
+pub(super) const SHAPE_MAX_IMAGE_DIMENSION: u32 = 6272;
 
 /// Upper bound for video width/height — a lower backstop than images, matching
 /// the cap enforced when validating a video job request.

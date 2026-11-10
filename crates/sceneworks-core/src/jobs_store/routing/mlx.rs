@@ -123,6 +123,7 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
         "iris_3b" => iris_mlx_eligible(payload),
         "flux3_klein" | "flux3_klein_base" => flux3_mlx_eligible(payload),
         "supra2_img" => supra2_mlx_eligible(payload),
+        "minimax_h3_image" => minimax_h3_image_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm — enforced by
         // `every_mlx_routed_model_has_a_dispatch_arm` below, not just by this comment.
         _ => false,
@@ -608,6 +609,23 @@ pub(crate) fn supra2_mlx_eligible(payload: &Map<String, Value>) -> bool {
         && !["mlxQuantize", "quantTier"]
             .iter()
             .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
+}
+
+/// MiniMax-H3-Image (SW-7100) text-to-image: no source, reference, mask, control, pose, user LoRA,
+/// multi-phase schedule or hires fix (its second pass is an img2img refinement the t2i route does
+/// not take). A tier carrier (`mlxQuantize` / `quantTier`) IS admitted: both engines read the
+/// pre-packed q8/q4 DiT tiers. Reference editing (SW-7092) and LoRAs (SW-7101) widen this later.
+pub(crate) fn minimax_h3_image_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    let hires_fix_enabled = payload
+        .get("hiresFix")
+        .and_then(Value::as_object)
+        .and_then(|hires| hires.get("enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    !hires_fix_enabled
+        && mage_flow_mlx_eligible(payload)
+        && !has_nonempty_array(payload, "loras")
+        && !has_nonempty_nested_array(payload, "advanced", "phases")
 }
 
 /// Mage-Flow Edit requires a real primary source image. Optional plural references augment that

@@ -1393,6 +1393,9 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
         "iris_3b_restore",
         // sc-24214: Supra2-IMG's candle floor is declared from its resident set, not measured.
         "supra2_img",
+        // SW-7100: MiniMax-H3-Image's candle floors are derived from its staged component sizes,
+        // not measured (the feature's terminal item measures them).
+        "minimax_h3_image",
         // The six YuE entries left this set in sc-19387: their candle floors are CUDA-measured.
       ].sort(),
     );

@@ -303,6 +303,7 @@ pub(crate) async fn create_image_job(
     if let Some(entry) = model_manifest_entry.as_object() {
         sceneworks_core::image_request::validate_image_request_payload(&job_payload, entry)
             .map_err(ApiError::bad_request)?;
+        crate::models::ensure_run_license_acknowledged(&state, entry).await?;
         let (default_width, default_height) =
             image_default_resolution(entry).unwrap_or((1024, 1024));
         // Preserve omitted sides through storage/retry. The worker derives their actual canvas

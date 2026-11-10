@@ -1146,6 +1146,35 @@
       ]
     },
     {
+      "id": "minimax-h3-image",
+      "models": [
+        "minimax_h3_image"
+      ],
+      "name": "MiniMax-H3-Image + Qwen3-VL-32B",
+      "publisher": "MiniMax (MiniMax-H3-Image) · Alibaba Qwen (Qwen3-VL-32B)",
+      "license": "MiniMax-H3-Image Community License · Apache-2.0",
+      "homepage": "https://huggingface.co/MiniMaxAI/MiniMax-H3-Image",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "Text-to-image model. SceneWorks downloads on first use the diffusers-format image transformer, its per-step output heads, the image autoencoder, the tokenizer and the processor directly from the upstream MiniMaxAI/MiniMax-H3-Image repository (not re-hosted); the planned Q8/Q4 tiers are converted copies of the transformer at SceneWorks/minimax-h3-image-mlx and are not published yet. These weights are governed by the MiniMax-H3-Image Community License Agreement, a RESTRICTED licence and not a permissive one: it permits commercial use subject to an Acceptable Use Policy, requires separate written authorization above 1 million US dollars of annualized revenue or for any Hosted Service, requires displaying \"MiniMax-H3-Image\" on a commercial product's user interface, and expressly limits its Applicable Territory to the world EXCLUDING the European Union, the United Kingdom, the Republic of Korea and the United States of America. Read the full text below before use. The text encoder is the same Qwen3-VL-32B download MiniMax-H3 uses, byte-for-byte identical to Qwen/Qwen3-VL-32B-Instruct and under Apache-2.0; both notices apply.",
+      "documents": [
+        {
+          "label": "NOTICE (required by MiniMax-H3-Image Community License §III.4)",
+          "key": "minimax-h3-image-notice"
+        },
+        {
+          "label": "MiniMax-H3-Image Community License Agreement",
+          "key": "minimax-h3-image-community-license"
+        },
+        {
+          "label": "Apache License 2.0 (Qwen3-VL-32B text encoder)",
+          "key": "minimax-h3-image-qwen-apache"
+        }
+      ]
+    },    {
       "id": "wan2_1_t2v_14b_diffusers",
       "models": [],
       "appliesToModels": [

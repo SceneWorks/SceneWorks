@@ -543,6 +543,9 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         // sc-24213: Supra2-IMG runs CFG against the checkpoint's stored unconditional embedding and
         // refuses a negative prompt.
         ("supra2_img", true, false),
+        // SW-7100: MiniMax-H3-Image is guidance-distilled: no CFG, no negative prompt. Resolves
+        // through the registry from the inference pin that carries the `minimax_h3_image` provider (SW-7090).
+        ("minimax_h3_image", false, false),
     ];
     // Every row is covered by the expectation table (no row added without a flag pair here).
     assert_eq!(MODEL_TABLE.len(), expected.len());

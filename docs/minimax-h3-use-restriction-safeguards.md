@@ -423,3 +423,31 @@ catalog and is deleted rather than qualified** (sc-19541). What shipped, and why
 
 Item 2 above is a ship/no-ship call on the *product*, and it is Michael's; it is not a claim this
 document may make on either side, and it is not carried by hiding a catalog row.
+
+## MiniMax-H3-Image (SW-7100, feature SW-F363)
+
+`minimax_h3_image` ships under its **own** agreement, the **MiniMax-H3-Image Community License
+Agreement** (dated November 10, 2026; `apps/desktop/licenses/minimax-h3-image/`). Its text is the
+MiniMax H3 agreement with the model renamed and the date moved, with one substantive difference:
+**§IV.1** requires prior written authorization, requested through
+<https://platform.minimax.io/license>, once the annualized revenue of the licensee and its
+affiliates exceeds **1 million US dollars**, or whenever the licensee provides a **Hosted Service** to
+any third party — not H3's 20 million. §V.5 applies to it on the same terms, so S1–S8 apply to it as
+written above, with these per-model facts:
+
+* **S1** — the entry carries `requiresLicenseAcknowledgment`. It also names `MiniMaxAI/MiniMax-H3`
+  and `SceneWorks/minimax-h3-mlx` (it reads MiniMax-H3's text encoder), so the repo-keyed gate covers
+  those fetches too; a catalog-validated H3-Image download is gated by H3-Image's own terms.
+* **S2** — its `licenseNotice` names the territory, Exhibit A item 12, the 1 million USD / Hosted
+  Service trigger, the §IV.2 display requirement and §V.3, and states that **no written
+  authorization from MiniMax for this model is recorded** (the sc-17227 authorization names MiniMax
+  H3 only). `tests/test_builtin_manifest_audit.py::test_minimax_h3_image_license_notice_names_its_own_terms`
+  pins it.
+* **S3** — the verbatim agreement (SHA-256 `edfab8ec…cb4d26`, pinned by
+  `test_minimax_h3_image_shipped_license_is_the_upstream_text`), its §III.4 NOTICE and the
+  Apache-2.0 text of the shared text encoder ship under About → Licenses.
+* **S4** — §IV.2 requires the exact string **"MiniMax-H3-Image"** (hyphenated, unlike H3's
+  "MiniMax H3"). `ui.attribution` is "Powered by MiniMax-H3-Image" and renders in Image Studio and
+  the Simple Image Studio as well as the model card.
+* **Open item 2 above applies to this model too**: whether it ships in an Excluded Territory is a
+  ship/no-ship call that the acknowledgment does not resolve.

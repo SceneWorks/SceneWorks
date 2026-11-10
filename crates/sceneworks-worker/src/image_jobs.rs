@@ -2850,6 +2850,11 @@ mod iris;
 #[cfg(native_lane)]
 mod supra2;
 
+// MiniMax-H3-Image (SW-7100): tier resolution and component staging for `minimax_h3_image` (the
+// tier's DiT plus MiniMax-H3's own text encoder) on both native lanes.
+#[cfg(native_lane)]
+pub(crate) mod minimax_h3_image;
+
 // The generic image lane's request controls beyond the positional knobs (CFG interval,
 // caption-overflow policy, CFG-bound negative prompt) and the per-image provenance facts (engine
 // warnings, adapter apply reports), resolved identically by both arms (sc-25681).

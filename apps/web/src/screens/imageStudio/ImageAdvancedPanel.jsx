@@ -9,7 +9,7 @@ import { CAPTION_OVERFLOW_LABELS } from "./samplingControls.js";
 import { upscaleEngineHasSoftness, upscaleEngineIsRestoration, upscaleFactorsForEngine } from "../../upscaleEngines.js";
 import { irisRestoreControls } from "../../irisRestore.js";
 import { IrisRestoreControls } from "../../components/IrisRestoreControls.jsx";
-import { GUIDANCE_METHOD_LABELS, guidanceDefaultFromModel, maxStepsForModel, stepsDefaultFromModel } from "../../samplerOptions.js";
+import { GUIDANCE_METHOD_LABELS, fixedStepsForModel, guidanceDefaultFromModel, maxStepsForModel, stepsDefaultFromModel } from "../../samplerOptions.js";
 
 export function ImageAdvancedPanel({
   toggleAdvanced,
@@ -215,7 +215,9 @@ export function ImageAdvancedPanel({
                   />
                 </label>
               ) : null}
-              <SamplingStepsField
+              {/* SW-7100: a model with exactly one legal step count (hardMinSteps === hardMaxSteps)
+                  has no Steps control; the job leaves steps to the model default. */}
+              {mossDmd || fixedStepsForModel(selectedModel) == null ? <SamplingStepsField
                 value={mossDmd ? mossDmdSteps : stepsOverride}
                 onChange={(value) => mossDmd ? setMossDmdSteps(value) : setStepsOverride(value)}
                 inputProps={{
@@ -224,7 +226,7 @@ export function ImageAdvancedPanel({
                   placeholder: String(mossDmd ? 8 : stepsDefaultFromModel(selectedModel) ?? ""),
                   type: "number"
                 }}
-              />
+              /> : null}
               {supportsGuidance ? (
                 <label>
                   Guidance

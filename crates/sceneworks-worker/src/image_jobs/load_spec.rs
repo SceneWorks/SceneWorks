@@ -781,6 +781,12 @@ pub(super) fn attach_required_components(
     manifest_entry: &JsonObject,
     settings: &Settings,
 ) -> WorkerResult<LoadSpec> {
+    // MiniMax-H3-Image (SW-7100): its components are OPTIONAL in the descriptor (the engine falls
+    // back to the snapshot's own copies), but SceneWorks never installs those copies — the tier's
+    // DiT and MiniMax-H3's text encoder are always staged, independent of the linked descriptor.
+    if super::minimax_h3_image::is_model(model_id) {
+        return super::minimax_h3_image::attach_components(spec, manifest_entry, settings);
+    }
     let Some(descriptor) = crate::inference_runtime::media_descriptor(model_id) else {
         return Ok(spec);
     };

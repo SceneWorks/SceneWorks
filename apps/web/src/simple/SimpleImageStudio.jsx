@@ -42,6 +42,7 @@ import {
 } from "../resolutionOverride.js";
 import { minStepsForModel } from "../videoModelLimits.js";
 import {
+  fixedStepsForModel,
   maxStepsForModel,
   nativeResolutionHint,
   negativePromptInertAtGuidance,
@@ -57,6 +58,7 @@ import {
 import { useSimpleUi } from "./SimpleUiContext.js";
 import { useStudioState } from "./useStudioState.js";
 import { useSimpleLoras } from "./useSimpleLoras.js";
+import { ModelAttribution } from "../components/ModelAttribution.jsx";
 import { SimpleLoraField, promptWithKeyword } from "./SimpleLoraField.jsx";
 import { SimpleLoraSheet } from "./SimpleLoraSheet.jsx";
 import {
@@ -476,7 +478,8 @@ export function SimpleImageStudio() {
         // The advanced fold's knobs. Empty string means "the model default", exactly as the full
         // studio's overrides do, so an untouched control adds nothing to the payload.
         // Sent only for a model that shows the fold, so a sticky value never leaks elsewhere.
-        steps: nativeControls ? steps : "",
+        // SW-7100: a fixed step count has no control, so a sticky value is never sent either.
+        steps: nativeControls && fixedStepsForModel(selectedModel) == null ? steps : "",
         seed: nativeControls ? seed : "",
         negativePrompt:
           nativeControls && supportsNegativePrompt && !negativePromptCfgOff ? negativePrompt : "",
@@ -680,6 +683,9 @@ export function SimpleImageStudio() {
           />
           {/* sc-17162 — see the note in `studioParts.jsx`. `ui.description` had one reader in the
               whole app (the advanced Models card), so Simple identified a model by NAME ALONE. */}
+          {/* Licence-required attribution (MiniMax-H3-Image §IV.2, SW-7100) — the same manifest
+              field Video Studio renders; Simple users must see it too. */}
+          <ModelAttribution model={selectedModel} />
           <ModelDescription model={selectedModel} />
           <SheetSelect
             kind="grid"
@@ -816,7 +822,7 @@ export function SimpleImageStudio() {
               ) : null}
             </div>
           ) : null}
-          <div className="su-field">
+          {fixedStepsForModel(selectedModel) == null ? <div className="su-field">
             <label htmlFor="su-image-steps">Steps</label>
             <input
               className="su-input"
@@ -829,7 +835,7 @@ export function SimpleImageStudio() {
               type="number"
               value={steps}
             />
-          </div>
+          </div> : null}
           <div className="su-field">
             <label htmlFor="su-image-seed">Seed</label>
             <input

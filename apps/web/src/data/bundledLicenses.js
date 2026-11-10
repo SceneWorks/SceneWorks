@@ -118,6 +118,11 @@ import kreaRealtimeApache20 from "../../../desktop/licenses/krea-realtime/Apache
 import minimaxH3Notice from "../../../desktop/licenses/minimax-h3/NOTICE.txt?url&no-inline";
 import minimaxH3CommunityLicense from "../../../desktop/licenses/minimax-h3/MiniMax-H3-Community-License.txt?url&no-inline";
 import minimaxH3QwenApache20 from "../../../desktop/licenses/minimax-h3/Apache-2.0.txt?url&no-inline";
+// MiniMax-H3-Image (SW-7100): its OWN community licence and §III.4 NOTICE, plus the Apache-2.0
+// text of the Qwen3-VL-32B text encoder it shares with MiniMax-H3.
+import minimaxH3ImageNotice from "../../../desktop/licenses/minimax-h3-image/NOTICE.txt?url&no-inline";
+import minimaxH3ImageCommunityLicense from "../../../desktop/licenses/minimax-h3-image/MiniMax-H3-Image-Community-License.txt?url&no-inline";
+import minimaxH3ImageQwenApache20 from "../../../desktop/licenses/minimax-h3-image/Apache-2.0.txt?url&no-inline";
 import wan21VaeApache20 from "../../../desktop/licenses/wan2_1_t2v_14b_diffusers/Apache-2.0.txt?url&no-inline";
 import scail2MIT from "../../../desktop/licenses/scail2/MIT.txt?url&no-inline";
 import svdStableVideoDiffusionCommunityLicense from "../../../desktop/licenses/svd/Stable-Video-Diffusion-Community-License.txt?url&no-inline";
@@ -266,6 +271,9 @@ const DOCUMENT_URL = {
   "minimax-h3-notice": minimaxH3Notice,
   "minimax-h3-community-license": minimaxH3CommunityLicense,
   "minimax-h3-qwen-apache": minimaxH3QwenApache20,
+  "minimax-h3-image-notice": minimaxH3ImageNotice,
+  "minimax-h3-image-community-license": minimaxH3ImageCommunityLicense,
+  "minimax-h3-image-qwen-apache": minimaxH3ImageQwenApache20,
   "wan2.1-vae-alternate-apache": wan21VaeApache20,
   "scail2-mit": scail2MIT,
   "svd-stable-video-diffusion-community-license": svdStableVideoDiffusionCommunityLicense,
