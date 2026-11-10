@@ -70,6 +70,7 @@ function snapshot(status, items, extra = {}) {
       describedCount: items.length - failedCount,
       failedCount,
       canceled: status === "canceled",
+      model: extra.model ?? VISION_CAPTION_MODEL_REPO,
       items,
     },
   };
@@ -273,10 +274,15 @@ describe("DatasetPromptBatchDialog", () => {
     expect(payload.prompts[1].startsWith("[16:9]\nDescription: A woman, {{woman_1}}")).toBe(true);
     expect(payload.variables).toEqual([{ key: "girl_1", values: [] }, { key: "woman_1", values: [] }]);
     expect(payload.sourceImages).toEqual([
-      { itemId: "item_a", width: 2400, height: 3200, ratio: "3:4" },
-      { itemId: "item_b", width: 4000, height: 2250, ratio: "16:9" },
+      { itemId: "item_a", width: 2400, height: 3200, ratio: "3:4", model: VISION_CAPTION_MODEL_REPO },
+      { itemId: "item_b", width: 4000, height: 2250, ratio: "16:9", model: VISION_CAPTION_MODEL_REPO },
     ]);
-    expect(payload.source).toMatchObject({ kind: "training_dataset", datasetId: "ds_1", datasetVersion: 3 });
+    expect(payload.source).toMatchObject({
+      kind: "training_dataset",
+      datasetId: "ds_1",
+      datasetVersion: 3,
+      model: VISION_CAPTION_MODEL_REPO,
+    });
 
     await click(button("Open in Image Studio"));
     expect(context.sendPromptBatchToImage).toHaveBeenCalledWith(expect.objectContaining({ id: "film_prints_prompts" }));
@@ -481,6 +487,32 @@ describe("DatasetPromptBatchDialog", () => {
     expect(document.body.querySelector(".validation-chip")).toBeNull();
     await runWith([described("item_a", 300, 400)]);
     expect(JSON.parse(trainingApi.batchDescribeJobs.mock.calls[0][3].body)).not.toHaveProperty("prompt");
+  });
+
+  it("records the model that described each row, not the one selected at save time", async () => {
+    joyInstalled();
+    await render();
+    await runWith([described("item_a", 300, 400), described("item_b", 400, 300)]);
+    // Re-run one image with JoyCaption, then switch back to the Vision Captioner before saving.
+    await chooseModel("joycaption_beta_one");
+    await settle();
+    const rowB = document.body.querySelector('[data-item-id="item_b"]');
+    await click([...rowB.querySelectorAll("button")].find((node) => node.textContent === "Re-run"));
+    await settle();
+    await act(async () =>
+      nextPoll(snapshot("completed", [described("item_b", 400, 300)], { itemCount: 1, model: JOY_REPO })),
+    );
+    await settle();
+    await chooseModel("vision_caption_qwen3vl_8b");
+    await settle();
+    await click(button("Save prompt batch"));
+    await settle();
+    const payload = context.createPromptBatch.mock.calls[0][0];
+    expect(payload.sourceImages.map((image) => [image.itemId, image.model])).toEqual([
+      ["item_a", VISION_CAPTION_MODEL_REPO],
+      ["item_b", JOY_REPO],
+    ]);
+    expect(payload.source.model).toBe("mixed");
   });
 
   it("blocks a run while the dataset has unsaved changes", async () => {

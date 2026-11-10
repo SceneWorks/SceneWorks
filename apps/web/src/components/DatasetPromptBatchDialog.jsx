@@ -63,9 +63,12 @@ export function describePromptIssues(prompt, limit, modelLabel) {
   ];
 }
 
-function rowFromResultItem(item) {
+// `model` is the repo of the job that produced the item (the job result's `model`), so each row
+// remembers which describer wrote it even when rows come from different runs.
+function rowFromResultItem(item, model = null) {
   return {
     itemId: item.itemId,
+    model: typeof model === "string" && model ? model : null,
     imagePath: item.imagePath ?? "",
     assetId: item.assetId ?? null,
     width: item.width ?? null,
@@ -77,10 +80,10 @@ function rowFromResultItem(item) {
 }
 
 // Merge result items into the rows, replacing a row with the same item id and keeping dataset order.
-export function mergeDescribeRows(rows, items, datasetOrder = []) {
+export function mergeDescribeRows(rows, items, datasetOrder = [], model = null) {
   const byId = new Map(rows.map((row) => [row.itemId, row]));
   for (const item of items ?? []) {
-    if (item?.itemId) byId.set(item.itemId, rowFromResultItem(item));
+    if (item?.itemId) byId.set(item.itemId, rowFromResultItem(item, model));
   }
   const rank = new Map(datasetOrder.map((id, index) => [id, index]));
   return [...byId.values()].sort(
@@ -88,9 +91,20 @@ export function mergeDescribeRows(rows, items, datasetOrder = []) {
   );
 }
 
+// The describer recorded for a saved batch: the one model every included row was described with,
+// "mixed" when rows came from runs with different models (each `sourceImages` entry then names its
+// own), or null when no row recorded one. A single string keeps `source.model` the same shape it
+// has always had for the common one-model case; the per-row detail lives beside each image.
+export function describedByModel(rows) {
+  const models = new Set(rows.map((row) => row.model ?? null));
+  if (models.size === 1) return [...models][0];
+  return models.size ? "mixed" : null;
+}
+
 // The prompt-batch create payload for the reviewed rows: one formatter block per usable row, and
-// each block's exact source pixel size in `sourceImages` (same order as `prompts`).
-export function promptBatchPayload({ rows, name, dataset, model }) {
+// each block's exact source pixel size and describing model in `sourceImages` (same order as
+// `prompts`).
+export function promptBatchPayload({ rows, name, dataset }) {
   const inputs = rows.map((row) => ({ ...row }));
   const { text, skipped } = formatPromptBatch(inputs);
   const prompts = text ? text.split("\n---\n") : [];
@@ -105,13 +119,14 @@ export function promptBatchPayload({ rows, name, dataset, model }) {
       width: row.width,
       height: row.height,
       ratio: snapRatio(row.width, row.height),
+      model: row.model ?? null,
     })),
     source: {
       kind: "training_dataset",
       datasetId: dataset?.id ?? null,
       datasetName: dataset?.name ?? "",
       datasetVersion: dataset?.version ?? null,
-      model,
+      model: describedByModel(included),
     },
   };
 }
@@ -230,7 +245,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
       const snapshot = await jobsApi.item(jobId, token, { signal });
       setJob(snapshot);
       if (Array.isArray(snapshot?.result?.items)) {
-        setRows((current) => mergeDescribeRows(current, snapshot.result.items, datasetOrder));
+        setRows((current) => mergeDescribeRows(current, snapshot.result.items, datasetOrder, snapshot.result.model));
       }
       if (terminalStatuses.has(snapshot?.status)) {
         return snapshot;
@@ -315,7 +330,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
     await submit();
   }
 
-  const payload = () => promptBatchPayload({ rows, name: batchName, dataset, model: model.repo });
+  const payload = () => promptBatchPayload({ rows, name: batchName, dataset });
   const usableCount = useMemo(() => rows.length - formatPromptBatch(rows).skipped.length, [rows]);
 
   async function save() {
