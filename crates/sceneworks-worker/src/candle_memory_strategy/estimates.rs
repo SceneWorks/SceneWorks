@@ -574,7 +574,7 @@ pub(crate) fn request_regime(
 ///
 /// It is a floor, not evidence: its identity fields are the request's, it cites no source, and the
 /// candidate it prices carries `CandidateBasis::EstimateFloor`.
-pub(super) fn floor_pseudo_anchor(
+pub(crate) fn floor_pseudo_anchor(
     engine_id: &str,
     manifest: &JsonObject<String, Value>,
     staged_floor_bytes: u64,
