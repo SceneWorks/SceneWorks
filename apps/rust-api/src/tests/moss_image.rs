@@ -860,7 +860,7 @@ async fn moss_edit_mcp_round_trip(reference_count: usize) {
         .await
         .unwrap();
     });
-    let client = rmcp::model::ClientInfo::default()
+    let client = rmcp::model::ClientConfig::default()
         .serve(StreamableHttpClientTransport::from_config(
             StreamableHttpClientTransportConfig::with_uri(format!("http://{addr}/mcp")),
         ))
@@ -1258,7 +1258,7 @@ async fn moss_advanced_owned_npy_mcp_rest_and_portable_reacquisition_preserve_na
         .await
         .unwrap();
     });
-    let client = rmcp::model::ClientInfo::default()
+    let client = rmcp::model::ClientConfig::default()
         .serve(StreamableHttpClientTransport::from_config(
             StreamableHttpClientTransportConfig::with_uri(format!("http://{address}/mcp")),
         ))
@@ -1779,7 +1779,7 @@ async fn moss_consumer_mcp_to_real_api_persists_ordered_slots_without_rendering(
             .await
             .unwrap();
         });
-        let client = rmcp::model::ClientInfo::default()
+        let client = rmcp::model::ClientConfig::default()
             .serve(StreamableHttpClientTransport::from_config(
                 StreamableHttpClientTransportConfig::with_uri(format!("http://{addr}/mcp")),
             ))

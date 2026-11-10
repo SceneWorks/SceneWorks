@@ -19,7 +19,7 @@ use crate::contracts::{
 use crate::model_artifacts::portable_binding::{
     validate_portable_source_claims, PortableSourceClaim,
 };
-use crate::store_util::{ensure_column, parse_string_enum, random_hex};
+use crate::store_util::{ensure_column, parse_string_enum, random_hex, sql_int, unsigned_int};
 use crate::time::{format_unix_seconds, now_unix_seconds, parse_utc_seconds, utc_now};
 
 /// Server-minted, claim-only proof for an import worker. Never project this payload field to HTTP.
@@ -1865,11 +1865,11 @@ impl JobsStore {
                 metrics.height,
                 metrics.seed,
                 loras_json,
-                metrics.load_ms,
-                metrics.sample_ms,
-                metrics.decode_ms,
-                metrics.total_ms,
-                metrics.peak_memory_bytes,
+                metrics.load_ms.map(sql_int),
+                metrics.sample_ms.map(sql_int),
+                metrics.decode_ms.map(sql_int),
+                metrics.total_ms.map(sql_int),
+                metrics.peak_memory_bytes.map(sql_int),
                 metrics.peak_memory_pct.as_ref().and_then(Number::as_f64),
                 metrics.peak_gpu_load_pct.as_ref().and_then(Number::as_f64),
                 metrics.backend,
@@ -4560,11 +4560,13 @@ fn row_to_generation_metrics(row: &Row<'_>) -> rusqlite::Result<GenerationMetric
         height: row.get("height")?,
         seed: row.get("seed")?,
         loras: loras.and_then(|value| serde_json::from_str(&value).ok()),
-        load_ms: row.get("load_ms")?,
-        sample_ms: row.get("sample_ms")?,
-        decode_ms: row.get("decode_ms")?,
-        total_ms: row.get("total_ms")?,
-        peak_memory_bytes: row.get("peak_memory_bytes")?,
+        load_ms: row.get::<_, Option<i64>>("load_ms")?.map(unsigned_int),
+        sample_ms: row.get::<_, Option<i64>>("sample_ms")?.map(unsigned_int),
+        decode_ms: row.get::<_, Option<i64>>("decode_ms")?.map(unsigned_int),
+        total_ms: row.get::<_, Option<i64>>("total_ms")?.map(unsigned_int),
+        peak_memory_bytes: row
+            .get::<_, Option<i64>>("peak_memory_bytes")?
+            .map(unsigned_int),
         peak_memory_pct: peak_memory_pct.map(number_from_f64),
         peak_gpu_load_pct: peak_gpu_load_pct.map(number_from_f64),
         backend: row.get("backend")?,

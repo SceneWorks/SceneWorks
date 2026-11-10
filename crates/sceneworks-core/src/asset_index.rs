@@ -16,7 +16,7 @@ use crate::project_store::{
 };
 use crate::store_util::{
     is_safe_id, is_safe_relative_path, optional_bool, optional_str, optional_u64, read_json,
-    relative_string, required_str,
+    relative_string, required_str, sql_int,
 };
 
 pub(crate) const ASSET_SIDECAR_PATTERN: &str = "*.sceneworks.json";
@@ -568,7 +568,7 @@ fn upsert_asset_row(
             optional_str(asset, "generationSetId"),
             required_str(asset, "createdAt")?,
             optional_bool(status, "favorite").unwrap_or(false),
-            optional_u64(status, "rating").unwrap_or(0),
+            sql_int(optional_u64(status, "rating").unwrap_or(0)),
             optional_bool(status, "rejected").unwrap_or(false),
             optional_bool(status, "trashed").unwrap_or(false),
             sidecar_rel,
@@ -592,7 +592,7 @@ fn upsert_asset_row(
                         })
                         .flatten()
                 }),
-            sidecar_fingerprint.as_ref().map(|value| value.0),
+            sidecar_fingerprint.as_ref().map(|value| sql_int(value.0)),
             sidecar_fingerprint
                 .as_ref()
                 .and_then(|value| value.1.clone()),

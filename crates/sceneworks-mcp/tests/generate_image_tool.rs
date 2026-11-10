@@ -22,8 +22,8 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use futures_util::{stream, StreamExt};
 use rmcp::handler::client::ClientHandler;
 use rmcp::model::{
-    CallToolRequestParams, ClientInfo, ClientRequest, Meta, NumberOrString,
-    ProgressNotificationParam, ProgressToken, Request,
+    CallToolRequestParams, ClientConfig, ClientRequest, NumberOrString, ProgressNotificationParam,
+    ProgressToken, Request, RequestMetaObject,
 };
 use rmcp::service::{NotificationContext, PeerRequestOptions, RoleClient};
 use sceneworks_mcp::JobWaitConfig;
@@ -214,8 +214,8 @@ struct RecordingClient {
 }
 
 impl ClientHandler for RecordingClient {
-    fn get_info(&self) -> ClientInfo {
-        ClientInfo::default()
+    fn get_info(&self) -> ClientConfig {
+        ClientConfig::default()
     }
 
     fn on_progress(
@@ -274,7 +274,7 @@ fn generate_args(extra: Value) -> serde_json::Map<String, Value> {
 
 fn call_with_progress_token(args: serde_json::Map<String, Value>) -> CallToolRequestParams {
     let mut params = CallToolRequestParams::new("generate_image").with_arguments(args);
-    params.meta = Some(Meta::with_progress_token(ProgressToken(
+    params.meta = Some(RequestMetaObject::with_progress_token(ProgressToken(
         NumberOrString::String("progress-tok-1".into()),
     )));
     params
