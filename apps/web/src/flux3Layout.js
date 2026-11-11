@@ -22,10 +22,6 @@ export function recordedLayoutReferences(rawSettings) {
   };
 }
 
-export function isFlux3LayoutModel(model) {
-  return ["flux3_klein", "flux3_klein_base"].includes(typeof model === "string" ? model : model?.id ?? "");
-}
-
 export function orderedLayoutAssetIds(references) {
   return [references.sourceAssetId, ...(references.referenceAssetIds ?? []), references.referenceAssetId].filter(Boolean);
 }

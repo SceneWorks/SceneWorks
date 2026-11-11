@@ -20,7 +20,8 @@ import {
   imageModelServesMode,
   imageModelUsable,
   ltxIcLoraRequired,
-  lowStepSdxlCheckpoint,
+  hiresFixUnsupported,
+  isFlux3ImageModel,
   missingRequiredModels,
   poseModelUsable,
   supportedControlModes,
@@ -64,8 +65,24 @@ it("derives the seven native Candle video tier pickers from shipped variant ladd
   expect(candleVideoTierPickerAvailable({ ...ltx25, importedSource: { ownershipMode: "managed" } })).toBe(false);
 });
 
-it("identifies the one shipped low-step SDXL Hires.fix exclusion", () => {
-  expect(fallbackModels.filter(lowStepSdxlCheckpoint).map((model) => model.id)).toEqual(["realvisxl_lightning"]);
+it("excludes Hires.fix only through the typed supportsHiresFix fact", () => {
+  const lightning = { id: "realvisxl_lightning", family: "sdxl", type: "image",
+    defaults: { steps: 5 }, image: { supportsHiresFix: false } };
+  expect(hiresFixUnsupported(lightning)).toBe(true);
+  // A user override of the default step count cannot re-enable Hires.fix.
+  expect(hiresFixUnsupported({ ...lightning, defaults: { steps: 30 } })).toBe(true);
+  // A 5-step SDXL entry without the fact (or with it true) is not excluded.
+  const fiveStep = { id: "other_sdxl", family: "sdxl", type: "image", defaults: { steps: 5 } };
+  expect(hiresFixUnsupported(fiveStep)).toBe(false);
+  expect(hiresFixUnsupported({ ...fiveStep, image: { supportsHiresFix: true } })).toBe(false);
+  expect(hiresFixUnsupported(undefined)).toBe(false);
+});
+
+it("detects the FLUX.3 image family by family and type, not by id", () => {
+  expect(isFlux3ImageModel({ id: "flux3_custom", family: "flux3", type: "image" })).toBe(true);
+  expect(isFlux3ImageModel({ id: "flux3_klein", family: "flux3", type: "video" })).toBe(false);
+  expect(isFlux3ImageModel({ id: "flux3_klein", family: "flux2", type: "image" })).toBe(false);
+  expect(isFlux3ImageModel(undefined)).toBe(false);
 });
 
 describe("modelEligibility predicates", () => {

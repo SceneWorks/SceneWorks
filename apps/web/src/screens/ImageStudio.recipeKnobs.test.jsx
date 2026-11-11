@@ -678,7 +678,7 @@ describe("a replayed recipe reaches every allow-listed control", () => {
         sceneworksWorkflow: "image", mode: "edit_image", model: FLUX3.id,
         prompt: "a lighthouse", width, height, inputs: [{ kind: "reference" }],
       }, { model: { state: "resolved", catalogId: FLUX3.id }, loras: [], styles: [] },
-      { referenceAssetIds: [FLUX3_REFERENCE.id] });
+      { referenceAssetIds: [FLUX3_REFERENCE.id], models: [FLUX3] });
       expect(recipe.rawAdapterSettings).not.toHaveProperty("flux3ReferenceEditing");
       const createImageJob = vi.fn(async () => ({ id: "job-shared-flux3" }));
       await render(baseContext({ assets: [FLUX3_REFERENCE], createImageJob, studioLaunch: launch(recipe) }));
@@ -703,7 +703,7 @@ describe("a replayed recipe reaches every allow-listed control", () => {
         sceneworksWorkflow: "image", mode: "edit_image", model: model.id,
         prompt: "a lighthouse", width, height, inputs: [{ kind: "source", count: 1 }],
       }, { model: { state: "resolved", catalogId: model.id }, loras: [], styles: [] },
-      { sourceAssetId });
+      { sourceAssetId, models: [FLUX3] });
       expect(recipe.rawAdapterSettings).not.toHaveProperty("flux3ReferenceEditing");
       expect(recipe.rawAdapterSettings).not.toHaveProperty("referenceAssetIds");
       const createImageJob = vi.fn(async () => ({ id: "job-source-workflow" }));
@@ -760,6 +760,59 @@ describe("a replayed recipe reaches every allow-listed control", () => {
       expect(payload[mode === "edit_image" ? "sourceAssetId" : "referenceAssetId"]).toBe(FLUX3_REFERENCE.id);
     },
   );
+
+  describe("FLUX.3 layout references when the recipe's model is not in the catalog yet", () => {
+    const ids = [FLUX3_REFERENCE.id, FLUX3_REFERENCE.id];
+    const slots = ["instance-0", "instance-1"];
+    const layout = { version: 1, boxes: [{ id: "last-instance", desc: "remove last occurrence",
+      from: "ref_image_1", reference_id: "instance-1", src_bbox: [0, 0.25, 1, 1], tgt_bbox: null }] };
+    function layoutRecipe() {
+      const recipe = flux3Recipe(null, 768);
+      recipe.mode = "text_to_image";
+      delete recipe.rawAdapterSettings.referenceAssetIds;
+      recipe.rawAdapterSettings.flux3Layout = {
+        references: ids.map((assetId, ordinal) => ({ ordinal, assetId, orientedSize: [83, 67] })),
+        referenceInstanceIds: slots, authoring: layout,
+      };
+      return recipe;
+    }
+    const contextFor = (createImageJob, extra = {}) => baseContext({
+      assets: [FLUX3_REFERENCE], createImageJob, studioLaunch: launch(layoutRecipe()), ...extra });
+
+    it("restores them when the catalog arrives after the launch", async () => {
+      const createImageJob = vi.fn(async () => ({ id: "late-layout" }));
+      const context = contextFor(createImageJob, { imageModels: [], models: [] });
+      await render(context);
+      await render({ ...context, imageModels: [FLUX3], models: [FLUX3] });
+      await click(buttonByText("Generate"));
+      const payload = createImageJob.mock.calls[0][0];
+      expect(payload.mode).toBe("edit_image");
+      expect(payload.referenceAssetIds).toEqual(ids);
+      expect(payload.advanced.flux3_reference_ids).toEqual(slots);
+      expect(payload.advanced.flux3_layout).toEqual(layout);
+    });
+
+    it("restores nothing when the model resolves to a non-FLUX.3 family", async () => {
+      const createImageJob = vi.fn(async () => ({ id: "late-non-flux3" }));
+      const other = { ...FLUX3, family: "flux2", ui: {} };
+      const context = contextFor(createImageJob, { imageModels: [], models: [] });
+      await render(context);
+      await render({ ...context, imageModels: [other], models: [other] });
+      expect(persistedStudioSettings().flux3ReferenceSlots ?? []).toHaveLength(0);
+      expect(persistedStudioSettings().orderedCharacterReferences ?? false).toBe(false);
+    });
+
+    it("restores them identically when the catalog is already loaded", async () => {
+      const createImageJob = vi.fn(async () => ({ id: "loaded-layout" }));
+      await render(contextFor(createImageJob, { imageModels: [FLUX3], models: [FLUX3] }));
+      await click(buttonByText("Generate"));
+      const payload = createImageJob.mock.calls[0][0];
+      expect(payload.mode).toBe("edit_image");
+      expect(payload.referenceAssetIds).toEqual(ids);
+      expect(payload.advanced.flux3_reference_ids).toEqual(slots);
+      expect(payload.advanced.flux3_layout).toEqual(layout);
+    });
+  });
 
   it("keeps authored omitted axes while the model catalog is still loading", async () => {
     const createImageJob = vi.fn(async () => ({ id: "job-late-catalog" }));
