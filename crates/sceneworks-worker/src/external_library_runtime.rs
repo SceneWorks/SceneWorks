@@ -3217,6 +3217,16 @@ fn worker_catalog_member_path(
     component_id: Option<&str>,
     member: &PortableArtifactMember,
 ) -> WorkerResult<Option<PathBuf>> {
+    if collection == "models"
+        && id.starts_with(sceneworks_core::external_base_models::EXTERNAL_ID_PREFIX)
+    {
+        return crate::portable_source_claims::registered_external_base_path(
+            settings,
+            id,
+            component_id,
+            &member.files,
+        );
+    }
     if manifest_name == "user.models.jsonc"
         && collection == "models"
         && component_id.is_none()
@@ -3367,8 +3377,12 @@ fn worker_catalog_member_path_at(
             let Ok(normalized) = normalized else {
                 continue;
             };
-            if crate::portable_source_claims::capture_registered_files(&normalized)
-                .is_ok_and(|files| files == member.files)
+            let roots = crate::paths::allowed_model_roots(settings).unwrap_or_default();
+            if crate::portable_source_claims::capture_registered_files_with_roots(
+                &normalized,
+                &roots,
+            )
+            .is_ok_and(|files| files == member.files)
             {
                 return Ok(Some(normalized));
             }

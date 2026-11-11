@@ -3290,6 +3290,28 @@ impl TrainerLoadInputs {
         // actionable error naming the component id + repo.
         let mut components =
             resolve_trainer_components(engine_id, &plan.target.base_model, settings)?;
+        // Caller-staged text encoder (SW-7030, review 4533688101): when the
+        // portable guard already verified and staged the encoder, every
+        // consumer — including Iris rank processes, which re-resolve from the
+        // serialized plan with fresh settings — must load those exact bytes
+        // instead of reopening the original HF library, which may have changed
+        // or been disconnected after verification.
+        if let Some(path) = plan
+            .extra
+            .get("__portableAuxPaths")
+            .and_then(|paths| paths.get("text_encoder"))
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+        {
+            let dir = if path.is_file() {
+                path.parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| path.clone())
+            } else {
+                path
+            };
+            components.insert("text_encoder".to_owned(), WeightsSource::Dir(dir));
+        }
         // Iris REPA (sc-25689): the frozen teacher is a separately installed TRAINING resource,
         // re-verified (size + sha256) before every run and never downloaded here.
         let bound_teacher = plan
@@ -9740,6 +9762,43 @@ mod tests {
         assert!(flux3_trusted_training_base(&settings, &other).is_err());
         settings.verified_revision_sources[0].revision = "wrong-revision".to_owned();
         assert!(flux3_trusted_training_base(&settings, &path).is_err());
+    }
+
+    #[cfg(native_lane)]
+    #[test]
+    fn trainer_load_inputs_prefer_the_bound_portable_text_encoder() {
+        // SW-7030 (review 4533688101): a caller-staged text encoder in the
+        // serialized portable aux paths wins over reopening the HF library, so
+        // Iris rank processes (which re-resolve with fresh settings) load the
+        // exact verified bytes the coordinator staged.
+        let dir = tempfile::tempdir().unwrap();
+        let settings = test_settings(dir.path());
+        let base = dir.path().join("models/base-installed");
+        std::fs::create_dir_all(&base).unwrap();
+        let staged = dir
+            .path()
+            .join("models/portable-attempts/route/text_encoder");
+        std::fs::create_dir_all(&staged).unwrap();
+        let mut value = plan_json(dir.path(), "z_image_lora", "z_image_turbo", "lora", &[]);
+        value["__portableAuxPaths"] = json!({"text_encoder": staged.display().to_string()});
+        let mut plan = parse(value);
+        plan.target.base_model_path = base.display().to_string();
+
+        let inputs = TrainerLoadInputs::resolve(&settings, &plan, "unknown_engine").unwrap();
+        assert_eq!(
+            inputs.components.get("text_encoder"),
+            Some(&WeightsSource::Dir(staged.clone())),
+            "the bound staged encoder is the resolved component"
+        );
+
+        let mut unbound = plan.clone();
+        unbound.extra.remove("__portableAuxPaths");
+        let inputs = TrainerLoadInputs::resolve(&settings, &unbound, "unknown_engine").unwrap();
+        assert_ne!(
+            inputs.components.get("text_encoder"),
+            Some(&WeightsSource::Dir(staged)),
+            "without a bound path the staged snapshot is not invented"
+        );
     }
 
     #[cfg(native_lane)]

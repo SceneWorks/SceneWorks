@@ -2986,7 +2986,9 @@ fn allowed_local_roots_for(data_dir: &Path, external_model_roots: &[PathBuf]) ->
     // as "outside every managed root" (SW-7030, review 4533400131).
     std::iter::once(data_dir.to_path_buf())
         .chain(std::iter::once(
-            sceneworks_core::hf_home::huggingface_hub_cache_dir(data_dir),
+            sceneworks_core::hf_home::model_source_library(data_dir)
+                .root()
+                .to_path_buf(),
         ))
         .chain(external_model_roots.iter().cloned())
         .collect()
@@ -3612,11 +3614,11 @@ mod tests {
         let external = vec![PathBuf::from("/mnt/comfyui/models")];
         let roots = allowed_local_roots_for(&data_dir, &external);
         assert!(roots.contains(&data_dir));
-        assert!(
-            roots.contains(&sceneworks_core::hf_home::huggingface_hub_cache_dir(
-                &data_dir
-            ))
-        );
+        assert!(roots.contains(
+            &sceneworks_core::hf_home::model_source_library(&data_dir)
+                .root()
+                .to_path_buf()
+        ));
         assert!(roots.contains(&PathBuf::from("/mnt/comfyui/models")));
     }
 

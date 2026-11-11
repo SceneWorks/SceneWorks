@@ -566,7 +566,125 @@ fn collect_source_claims(settings: &Settings, mut publish: impl FnMut(PortableSo
         }
     }
     external_lora_source_claims(settings, &mut publish);
+    external_base_source_claims(settings, &mut publish);
     registered_digest_source_claims(settings, publish);
+}
+
+/// Advertise the operator's externally scanned ComfyUI base models (SW-7030,
+/// review 4533688093). Runnable `external_base_…` rows are forwarded to the
+/// worker as local Digest entries (primary anchor plus `components/{index}`
+/// members), so the worker must advertise registered digest claims under
+/// exactly the claim ids admission computes: kind `model` for the primary and
+/// kind `component` with component id `components/{index}` for each declared
+/// component. The assembly scan is shared with the API through
+/// `sceneworks_core::external_base_models`, so both sides assign the same id
+/// to the same tree.
+fn external_base_source_claims(settings: &Settings, publish: &mut impl FnMut(PortableSourceClaim)) {
+    if settings.external_model_roots.is_empty() {
+        return;
+    }
+    let mut claims = Vec::new();
+    for row in external_base_rows(settings) {
+        let Some(id) = row.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if let Some(anchor) = row
+            .get("installedPath")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|path| confine_managed_path(settings, Path::new(path)))
+        {
+            append_registered_claim(settings, &mut claims, "model", id, None, &anchor);
+        }
+        if let Some(components) = row.get("components").and_then(serde_json::Value::as_array) {
+            for (index, component) in components.iter().enumerate() {
+                let Some(confined) = component
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|path| confine_managed_path(settings, Path::new(path)))
+                else {
+                    continue;
+                };
+                append_registered_claim(
+                    settings,
+                    &mut claims,
+                    "component",
+                    id,
+                    Some(&format!("components/{index}")),
+                    &confined,
+                );
+            }
+        }
+    }
+    for claim in claims {
+        publish(claim);
+    }
+}
+
+/// The assembled external base-model rows the shared scan produces here.
+fn external_base_rows(settings: &Settings) -> Vec<serde_json::Value> {
+    let mut cache = sceneworks_core::external_base_models::ExternalBaseModelCache::default();
+    sceneworks_core::external_base_models::scan_external_base_models(
+        &settings.external_model_roots,
+        &mut cache,
+    )
+}
+
+/// Confine a scan-reported path to this worker's managed roots, returning the
+/// canonical target admission capture would hash.
+fn confine_managed_path(settings: &Settings, path: &Path) -> Option<PathBuf> {
+    let roots = crate::paths::allowed_model_roots(settings).ok()?;
+    sceneworks_core::model_artifacts::confine_artifact_path(path, &roots).ok()
+}
+
+/// Resolve an `external_base_…` model (or one of its `components/{index}`
+/// members) to this worker's confined copy of the exact frozen bytes, or
+/// `None` when the id is not external, is not present under the configured
+/// roots, or its bytes differ from the frozen ledger.
+pub(crate) fn registered_external_base_path(
+    settings: &Settings,
+    id: &str,
+    component_id: Option<&str>,
+    frozen_files: &[PortableArtifactFile],
+) -> WorkerResult<Option<PathBuf>> {
+    if !id.starts_with(sceneworks_core::external_base_models::EXTERNAL_ID_PREFIX) {
+        return Ok(None);
+    }
+    for row in external_base_rows(settings) {
+        if row.get("id").and_then(serde_json::Value::as_str) != Some(id) {
+            continue;
+        }
+        let candidate = match component_id {
+            None => row
+                .get("installedPath")
+                .and_then(serde_json::Value::as_str)
+                .map(PathBuf::from),
+            Some(component) => {
+                let Some(index) = component
+                    .strip_prefix("components/")
+                    .and_then(|index| index.parse::<usize>().ok())
+                else {
+                    return Ok(None);
+                };
+                row.get("components")
+                    .and_then(serde_json::Value::as_array)
+                    .and_then(|components| components.get(index))
+                    .and_then(|component| component.get("path"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(PathBuf::from)
+            }
+        };
+        let Some(confined) = candidate.and_then(|path| confine_managed_path(settings, &path))
+        else {
+            continue;
+        };
+        let roots = crate::paths::allowed_model_roots(settings).unwrap_or_default();
+        if capture_registered_files_with_roots(&confined, &roots)
+            .is_ok_and(|files| files == frozen_files)
+        {
+            return Ok(Some(confined));
+        }
+    }
+    Ok(None)
 }
 
 /// Advertise the operator's externally scanned ComfyUI LoRAs (SW-7030, review
@@ -2907,6 +3025,69 @@ mod tests {
         std::fs::write(&adapter, altered).unwrap();
         assert!(
             registered_external_lora_path(&settings, &id, &frozen)
+                .unwrap()
+                .is_none(),
+            "substituted bytes must not rebind"
+        );
+    }
+
+    #[test]
+    fn external_base_model_is_advertised_and_rebound_by_exact_worker_bytes() {
+        // SW-7030 (review 4533688093): a runnable external ComfyUI base model is
+        // forwarded as a local Digest entry, so the worker must advertise the
+        // matching `model` digest claim and rebind the anchor by exact bytes.
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("ComfyUI/models");
+        let anchor = root.join("diffusion_models/anchor.safetensors");
+        std::fs::create_dir_all(anchor.parent().unwrap()).unwrap();
+        let header = serde_json::json!({
+            "model.diffusion_model.input_blocks.0.0.weight":
+                {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]},
+        });
+        let header_bytes = serde_json::to_vec(&header).unwrap();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(header_bytes.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&header_bytes);
+        bytes.extend_from_slice(&[0_u8; 4]);
+        std::fs::write(&anchor, &bytes).unwrap();
+
+        let mut settings = Settings::for_test(temp.path().join("worker-data"));
+        settings.external_model_roots = vec![root];
+        let rows = external_base_rows(&settings);
+        assert_eq!(rows.len(), 1, "the shared scan assembles the anchor");
+        let id = rows[0]["id"].as_str().unwrap().to_owned();
+        assert!(id.starts_with("external_base_"), "synthetic id: {id}");
+
+        let frozen = capture_registered_files(&anchor).unwrap();
+        let ledger =
+            sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(
+                &frozen,
+            )
+            .unwrap();
+        let expected_claim = sceneworks_core::portable_sources::registered_digest_claim_id(
+            "model", &id, None, &ledger,
+        )
+        .unwrap();
+        let mut claims = Vec::new();
+        external_base_source_claims(&settings, &mut |claim| claims.push(claim));
+        assert!(
+            claims
+                .iter()
+                .any(|claim| claim.source_id == expected_claim && claim.files == frozen),
+            "the external base model is advertised with its exact byte ledger"
+        );
+        assert!(
+            registered_external_base_path(&settings, &id, None, &frozen)
+                .unwrap()
+                .is_some(),
+            "matching bytes resolve"
+        );
+
+        let mut altered = bytes.clone();
+        altered.extend_from_slice(b"tampered");
+        std::fs::write(&anchor, altered).unwrap();
+        assert!(
+            registered_external_base_path(&settings, &id, None, &frozen)
                 .unwrap()
                 .is_none(),
             "substituted bytes must not rebind"
