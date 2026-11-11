@@ -6438,17 +6438,15 @@ fn builtin_manifest_registers_the_wan_vace_fun_model() {
     // the wan-video adapter, ONLY the validated replace_person capability (no generic T2V/I2V on
     // this control checkpoint), the diffusers-conversion download repo (NOT the raw VideoX-Fun
     // alibaba-pai repo, which does not load), an MLX block, and NO Torch GGUF quantization.
-    let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../config/manifests/builtin.models.jsonc");
-    let raw = std::fs::read_to_string(&manifest_path).expect("read builtin.models.jsonc");
-    let manifest: Value =
-        serde_json::from_str(&strip_jsonc_comments(&raw)).expect("parse builtin.models.jsonc");
-    let model = manifest["models"]
-        .as_array()
-        .expect("models array")
-        .iter()
-        .find(|entry| entry["id"] == "wan_2_2_vace_fun_14b")
-        .expect("wan_2_2_vace_fun_14b is registered in the catalog");
+    // APPREG-4: memory facts live in the registry evidence store, not the hand-authored
+    // manifest, so read the shipped entry the way every consumer does (registry projection plus
+    // evidence), not the raw product file.
+    let model = Value::Object(
+        sceneworks_core::builtin_manifests::builtin_model_entry("wan_2_2_vace_fun_14b")
+            .expect("wan_2_2_vace_fun_14b is registered in the catalog")
+            .clone(),
+    );
+    let model = &model;
     assert_eq!(model["type"], "video");
     assert_eq!(model["family"], "wan-video");
     assert_eq!(model["adapter"], "wan_video");
