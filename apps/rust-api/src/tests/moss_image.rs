@@ -1347,6 +1347,7 @@ async fn assert_moss_shared_asset_usage_policy(parent_removed_after_decode: bool
     }).unwrap();
     claim_job_as_worker(
         &app,
+        &state,
         &job.id,
         "policy-publisher",
         &[
@@ -1928,6 +1929,7 @@ async fn terminal_image_side_effect_failure_preserves_published_assets_until_ide
         .unwrap();
     claim_job_as_worker(
         &app,
+        &state,
         &job.id,
         "terminal-publisher",
         &[

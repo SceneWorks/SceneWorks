@@ -1335,9 +1335,17 @@ fn catalog_records(path: &Path, collection: &str) -> Vec<serde_json::Value> {
     let Ok(raw) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(
-        &sceneworks_core::jsonc::strip_jsonc_comments(&raw),
-    ) else {
+    // A model manifest goes through the shared version normalizer: an unknown future version is
+    // refused (nothing advertised from it) instead of being read as the current format.
+    let parsed = if collection == "models" {
+        sceneworks_core::model_manifest_version::parse_user_model_manifest(&raw).ok()
+    } else {
+        serde_json::from_str::<serde_json::Value>(&sceneworks_core::jsonc::strip_jsonc_comments(
+            &raw,
+        ))
+        .ok()
+    };
+    let Some(value) = parsed else {
         return Vec::new();
     };
     value
@@ -1913,6 +1921,30 @@ fn capture_one(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Review finding 7: a read-only worker consumer of `user.models.jsonc` goes through the shared
+    /// version normalizer, so a future-version file advertises nothing instead of being read as
+    /// the current format, while an old v1 (or header-less) file still loads.
+    #[test]
+    fn user_model_manifest_readers_refuse_future_versions() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("user.models.jsonc");
+        std::fs::write(
+            &path,
+            json!({"schemaVersion":3,"models":[{"id":"later"}]}).to_string(),
+        )
+        .unwrap();
+        assert!(catalog_records(&path, "models").is_empty());
+        std::fs::write(&path, json!({"models":[{"id":"older"}]}).to_string()).unwrap();
+        assert_eq!(catalog_records(&path, "models").len(), 1);
+        // Non-model collections keep their own format.
+        std::fs::write(
+            &path,
+            json!({"schemaVersion":3,"loras":[{"id":"style"}]}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(catalog_records(&path, "loras").len(), 1);
+    }
 
     #[test]
     fn catalog_hash_does_not_initialize_training_directories_without_projects() {

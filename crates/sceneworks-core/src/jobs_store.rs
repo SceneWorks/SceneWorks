@@ -1264,7 +1264,10 @@ impl JobsStore {
 
     /// Small bounded batch for the API's historical source upgrade before a worker claim.
     /// The claim selector itself never admits an unbound model job, even if this batch cannot
-    /// authenticate it or a worker speaks only the versionless protocol.
+    /// authenticate it or a worker speaks only the versionless protocol. The exclusions mirror
+    /// [`crate::model_artifacts::portable_binding::model_free_job`] exactly, including its JSON
+    /// boolean typing (`1` is not `true`), so every row the claim gate treats as a model job is
+    /// offered to the upgrade.
     pub fn unbound_queued_model_jobs(&self, limit: usize) -> JobsStoreResult<Vec<JobSnapshot>> {
         let connection = self.open_connection()?;
         let mut statement = connection.prepare(
@@ -1274,15 +1277,16 @@ impl JobsStore {
                               'dataset_parquet_import','model_import','lora_import',
                               'model_download','lora_download')
              and not (type in ('lora_train','control_training')
-                      and coalesce(json_extract(payload_json, '$.dryRun'), -1) = 1)
+                      and coalesce(json_type(payload_json, '$.dryRun'), '') = 'true')
              and not (type = 'training_caption'
-                      and coalesce(json_extract(payload_json, '$.mode'), '') = 'triggerOnly')
+                      and coalesce(json_type(payload_json, '$.mode'), '') = 'text'
+                      and json_extract(payload_json, '$.mode') = 'triggerOnly')
              and not (type = 'catalog_analysis'
-                      and coalesce(json_extract(payload_json, '$.structuredAnalysisEnabled'), -1) = 0
-                      and coalesce(json_extract(payload_json, '$.visionAnalysisEnabled'), -1) = 0
-                      and coalesce(json_extract(payload_json, '$.semanticEmbeddingsEnabled'), -1) = 0)
+                      and coalesce(json_type(payload_json, '$.structuredAnalysisEnabled'), '') = 'false'
+                      and coalesce(json_type(payload_json, '$.visionAnalysisEnabled'), '') = 'false'
+                      and coalesce(json_type(payload_json, '$.semanticEmbeddingsEnabled'), '') = 'false')
              and not (type in ('person_detect','person_track')
-                      and coalesce(json_extract(payload_json, '$.preview'), -1) = 1)
+                      and coalesce(json_type(payload_json, '$.preview'), '') = 'true')
              order by historical_source_attempts asc, queue_rank desc,
                       created_at asc, rowid asc limit ?1",
         )?;
@@ -1351,9 +1355,12 @@ impl JobsStore {
         Ok(updated == 1)
     }
 
+    /// Fail a historical carrier whose source identity or bytes conflict with its original
+    /// declaration. `reason` names the conflict so the job says why it can never run.
     pub fn fail_historical_unbound_queued_job(
         &self,
         original: &JobSnapshot,
+        reason: &str,
     ) -> JobsStoreResult<Option<JobSnapshot>> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
@@ -1367,13 +1374,20 @@ impl JobsStore {
             return Ok(None);
         }
         let now = utc_now();
+        let message = if reason.trim().is_empty() {
+            "Historical model source could not be verified".to_owned()
+        } else {
+            format!(
+                "Historical model source could not be verified: {}",
+                reason.trim()
+            )
+        };
         transaction.execute(
             "update jobs set status = 'failed', stage = 'failed',
-                    message = 'Historical model source could not be verified',
-                    error = 'Historical model source could not be verified',
+                    message = ?3, error = ?3,
                     completed_at = ?1, updated_at = ?1, worker_id = null
               where id = ?2 and status = 'queued' and portable_model_binding_json is null",
-            params![now, original.id],
+            params![now, original.id, message],
         )?;
         let failed = self.get_job_on_connection(&transaction, &original.id)?;
         transaction.commit()?;
@@ -3529,7 +3543,8 @@ impl JobsStore {
     }
 
     /// A worker must explicitly advertise support before claiming a binding-bearing job.
-    /// Versionless workers retain their normal access to historical unbound jobs.
+    /// A versionless claim reaches only model-free jobs: an unbound historical model job is
+    /// unclaimable for every protocol version until the API upgrades its carrier.
     pub fn claim_next_job_routed_with_portable_binding(
         &self,
         worker_id: &str,
@@ -3680,7 +3695,6 @@ impl JobsStore {
             portable_backend.zip(portable_platform),
             &worker_claims,
             authenticated_for_dynamic_source,
-            portable_binding_version == 0,
         ) {
             Ok(queued) => queued,
             Err(error) => {
@@ -5591,7 +5605,6 @@ fn portable_worker_can_claim_job(
         Some((backend, platform)),
         &claims,
         authenticated,
-        false,
     )
 }
 
@@ -6144,7 +6157,6 @@ fn choose_claimable_job_from_candidates(
     portable_route: Option<(&str, &str)>,
     worker_claims: &[PortableSourceClaim],
     authenticated_for_dynamic_source: bool,
-    versionless_legacy_claim: bool,
 ) -> JobsStoreResult<Option<JobSnapshot>> {
     let mut compatible = Vec::new();
     let mut highest_compatible_rank = None;
@@ -6163,7 +6175,6 @@ fn choose_claimable_job_from_candidates(
             portable_route,
             worker_claims,
             authenticated_for_dynamic_source,
-            versionless_legacy_claim,
         )? {
             continue;
         }
@@ -6195,16 +6206,12 @@ fn candidate_matches_portable_worker_sources(
     portable_route: Option<(&str, &str)>,
     worker_claims: &[PortableSourceClaim],
     authenticated_for_dynamic_source: bool,
-    versionless_legacy_claim: bool,
 ) -> JobsStoreResult<bool> {
     let Some(binding) = JobsStore::read_portable_binding(connection, job_id)? else {
-        // A pre-registry model job has no authenticated source closure. A worker speaking
-        // the portable protocol must not fetch or load it: the API upgrades or fails the
-        // historical carrier before such a claim. Versionless workers retain their normal
-        // access to historical unbound jobs (see claim_next_job_routed_with_portable_binding).
-        if versionless_legacy_claim {
-            return Ok(true);
-        }
+        // A pre-registry model job has no authenticated source closure. It must be upgraded
+        // before any worker can fetch or load it, whatever claim protocol version the worker
+        // speaks (an omitted version is not a weaker policy). Model-free operational jobs keep
+        // their existing claim protocol.
         let (raw_type, raw_payload): (String, Option<String>) = connection.query_row(
             "select type, payload_json from jobs where id = ?1",
             params![job_id],

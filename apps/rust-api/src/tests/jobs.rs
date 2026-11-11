@@ -3196,6 +3196,162 @@ async fn historical_path_only_import_fails_before_worker_claim() {
     );
 }
 
+/// SW-7031 AC4 / APPREG-6: omitting `portableModelBindingVersion` is not a weaker claim policy.
+/// A versionless `/jobs/claim` never receives an unbound historical model job (FIFO-first here),
+/// while a model-free job keeps its existing versionless claim.
+#[tokio::test]
+async fn versionless_claim_never_reaches_an_unbound_historical_model_job() {
+    // A valid historical carrier (a pinned user audio model, unchanged catalog) whose route cannot
+    // be proven yet stays queued and unbound: exactly the row a versionless claim must not reach.
+    let temp = tempfile::tempdir().unwrap();
+    let manifests = temp.path().join("config/manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+    std::fs::write(
+        manifests.join("user.models.jsonc"),
+        json!({"schemaVersion":2,"models":[{"id":"custom_tts","name":"Custom TTS","type":"audio",
+            "family":"kokoro","adapter":"kokoro","downloads":[{"provider":"huggingface",
+            "repo":"owner/custom-tts","revision":"a".repeat(40),"files":["model.safetensors"]}]}]})
+        .to_string(),
+    )
+    .unwrap();
+    let (app, state) = create_app_with_state(test_settings(&temp)).unwrap();
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({"workerId":"versionless-worker", "gpuId":"0", "gpuName":"Legacy",
+            "capabilities":["gpu","audio_generate","model_download"], "loadedModels":[]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let create = |job_type: crate::JobType, payload: Value| crate::CreateJob {
+        job_type,
+        project_id: None,
+        project_name: None,
+        payload: payload.as_object().unwrap().clone(),
+        requested_gpu: "auto".into(),
+        source_job_id: None,
+        duplicate_of_job_id: None,
+        attempts: 1,
+        initial_status: None,
+    };
+    let entry = crate::models::resolve_model_manifest_entry(&state, "custom_tts")
+        .await
+        .unwrap();
+    let model_job = state
+        .jobs_store
+        .create_job(create(
+            crate::JobType::AudioGenerate,
+            json!({"model":"custom_tts","text":"historical","modelManifestEntry":entry}),
+        ))
+        .unwrap();
+    let download = state
+        .jobs_store
+        .create_job(create(
+            crate::JobType::ModelDownload,
+            json!({"modelId":"custom_tts"}),
+        ))
+        .unwrap();
+    let (status, claim) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({"workerId":"versionless-worker"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{claim}");
+    assert_eq!(claim["job"]["id"], json!(download.id), "{claim}");
+    let (status, claim) = request(
+        app,
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({"workerId":"versionless-worker"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{claim}");
+    assert!(claim["job"].is_null(), "{claim}");
+    let model_job = state.jobs_store.get_job(&model_job.id).unwrap();
+    assert_eq!(model_job.status, crate::JobStatus::Queued, "{model_job:?}");
+    assert!(model_job.worker_id.is_none());
+    assert!(state
+        .jobs_store
+        .portable_model_binding(&model_job.id)
+        .unwrap()
+        .is_none());
+}
+
+/// SW-7031 AC4 (review finding 5): a non-image/video carrier is re-resolved from the current
+/// catalog. A same-ID replacement of a user audio model with another pinned revision fails the
+/// historical job before any fetch or load instead of being compared against itself.
+#[tokio::test]
+async fn historical_audio_carrier_refuses_same_id_catalog_replacement() {
+    let temp = tempfile::tempdir().unwrap();
+    let manifests = temp.path().join("config/manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+    let entry = |revision: &str| {
+        json!({"id":"custom_tts","name":"Custom TTS","type":"audio","family":"kokoro",
+            "adapter":"kokoro","downloads":[{"provider":"huggingface","repo":"owner/custom-tts",
+            "revision":revision,"files":["model.safetensors"]}]})
+    };
+    let write_catalog = |revision: &str| {
+        std::fs::write(
+            manifests.join("user.models.jsonc"),
+            json!({"schemaVersion":2,"models":[entry(revision)]}).to_string(),
+        )
+        .unwrap();
+    };
+    write_catalog(&"a".repeat(40));
+    let (app, state) = create_app_with_state(test_settings(&temp)).unwrap();
+    let original = crate::models::resolve_model_manifest_entry(&state, "custom_tts")
+        .await
+        .unwrap();
+    assert_eq!(original["downloads"][0]["revision"], json!("a".repeat(40)));
+    let job = state
+        .jobs_store
+        .create_job(crate::CreateJob {
+            job_type: crate::JobType::AudioGenerate,
+            project_id: None,
+            project_name: None,
+            payload: json!({"model":"custom_tts","text":"hello","modelManifestEntry":original})
+                .as_object()
+                .unwrap()
+                .clone(),
+            requested_gpu: "auto".into(),
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+            initial_status: None,
+        })
+        .unwrap();
+    write_catalog(&"b".repeat(40));
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({"workerId":"audio-worker", "gpuId":"0", "gpuName":"Audio",
+            "capabilities":["gpu","audio_generate"], "loadedModels":[]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, claim) = request(
+        app,
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({"workerId":"audio-worker"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{claim}");
+    assert!(claim["job"].is_null(), "{claim}");
+    let job = state.jobs_store.get_job(&job.id).unwrap();
+    assert_eq!(job.status, crate::JobStatus::Failed, "{job:?}");
+    assert!(
+        job.error
+            .as_deref()
+            .is_some_and(|error| error.contains("differs from its original declaration")),
+        "{job:?}"
+    );
+}
+
 /// sc-13617 / F-055: raw jobs whose `model` reaches worker-side model path resolution must
 /// reject traversal before a job row exists. This table is the API-side inventory for that key.
 #[tokio::test]
@@ -3811,6 +3967,86 @@ async fn retry_and_duplicate_reauthorize_merged_control_weights_before_create() 
         jobs.as_array().expect("jobs array").len(),
         4,
         "only the original, freshly authorized duplicate, and two clean operations may persist"
+    );
+}
+
+/// Review finding 3: the claim-time historical upgrade re-resolves the authored text encoder the
+/// same way create/retry/duplicate do, instead of comparing a carrier that never re-ran the stamp.
+/// A historical job whose encoder choice has since disappeared fails with that resolution's own
+/// reason (not a generic identity mismatch), proving the authored choice was resolved, not dropped.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn historical_upgrade_re_resolves_the_authored_text_encoder() {
+    let _env = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    single_model_manifest(&manifest_dir, "krea_2_turbo", "SceneWorks/krea-2-turbo-mlx");
+    use_shipped_default_image_package(&manifest_dir, "krea_2_turbo");
+    let jobs_db_path = test_settings(&temp_dir).jobs_db_path;
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
+    let stale_id = "text_encoder_ffffffffffffffffffffffffffffffff";
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({"projectId":"project-1","mode":"text_to_image","prompt":"mist",
+            "model":"krea_2_turbo","count":1,"width":1024,"height":1024}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let jobs_store = sceneworks_core::jobs_store::JobsStore::new(jobs_db_path);
+    let admitted = jobs_store.get_job(created["id"].as_str().unwrap()).unwrap();
+    let mut payload = admitted.payload.clone();
+    payload
+        .entry("advanced")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .expect("advanced")
+        .insert("textEncoderModel".into(), json!(stale_id));
+    payload["modelManifestEntry"]["resolvedTextEncoder"] = json!({
+        "selectionId": stale_id, "sourceKind": "directory",
+        "path": temp_dir.path().join("old-root/text-encoder")
+    });
+    let historical = jobs_store
+        .create_job(crate::CreateJob {
+            job_type: admitted.job_type.clone(),
+            project_id: admitted.project_id.clone(),
+            project_name: None,
+            payload,
+            requested_gpu: admitted.requested_gpu.clone(),
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+            initial_status: None,
+        })
+        .unwrap();
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({"workerId":"encoder-worker","gpuId":"mlx","platform":"macos","gpuName":"MLX",
+            "capabilities":["gpu","image_generate"],"loadedModels":[]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, claim) = request(
+        app,
+        "POST",
+        "/api/v1/jobs/claim",
+        portable_test_worker_claim("encoder-worker", TestPortableRoute::MlxMacos),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{claim}");
+    assert_ne!(claim["job"]["id"], json!(historical.id), "{claim}");
+    let failed = jobs_store.get_job(&historical.id).unwrap();
+    assert_eq!(failed.status, crate::JobStatus::Failed, "{failed:?}");
+    assert!(
+        failed
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("is unavailable")),
+        "{failed:?}"
     );
 }
 

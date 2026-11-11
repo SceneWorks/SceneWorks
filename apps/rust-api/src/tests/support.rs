@@ -1068,36 +1068,76 @@ pub(crate) async fn claim_job_as_worker_on_route(
     assert_eq!(claimed["job"]["id"], job_id, "{claimed}");
 }
 
-/// Legacy helper for tests that insert unbound jobs directly into JobsStore.
+/// For tests that insert a job directly into JobsStore (a legacy unbound carrier): install a
+/// pinned-revision portable binding through the store's production historical-upgrade seam
+/// (`bind_historical_queued_job`), then claim it with the shipped worker's portable protocol on
+/// this host's native route. An unbound model job is unclaimable for every protocol version, so a
+/// versionless claim can no longer reach it.
 pub(crate) async fn claim_job_as_worker(
     app: &axum::Router,
+    state: &crate::AppState,
     job_id: &str,
     worker_id: &str,
     capabilities: &[&str],
 ) {
-    let (status, _) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/workers/register",
-        json!({
-            "workerId": worker_id,
-            "gpuId": "test-gpu",
-            "gpuName": "Test GPU",
-            "capabilities": capabilities,
-            "loadedModels": []
-        }),
+    use sceneworks_core::model_artifacts::portable_binding::{
+        canonical_authored_options_sha256, PortableArtifactFile, PortableArtifactMember,
+        PortableJobBinding, PortableModelBinding, PortableRouteBinding, PortableSourceIdentity,
+    };
+    use sceneworks_core::model_artifacts::{ArtifactIdentity, ArtifactMemberRole};
+    let route = if cfg!(target_os = "macos") {
+        TestPortableRoute::MlxMacos
+    } else {
+        TestPortableRoute::CandleLinux
+    };
+    let (backend, platform, _) = route.parts();
+    let job = state.jobs_store.get_job(job_id).expect("fixture job loads");
+    let model_id = job
+        .payload
+        .get("model")
+        .and_then(Value::as_str)
+        .expect("fixture job names its model")
+        .to_owned();
+    let authored = json!({ "model": model_id });
+    let member = PortableArtifactMember {
+        role: ArtifactMemberRole::Primary,
+        component_id: None,
+        source: PortableSourceIdentity::Revision {
+            identity: ArtifactIdentity::pinned("fixture/model", "1".repeat(40), "default")
+                .expect("pinned fixture identity"),
+        },
+        tier: None,
+        files: vec![PortableArtifactFile {
+            relative_path: "weights.safetensors".into(),
+            size_bytes: 1,
+            sha256: format!("sha256:{}", "a".repeat(64)),
+        }],
+    };
+    let model = PortableModelBinding::new(
+        "modelManifestEntry",
+        model_id,
+        backend,
+        "default",
+        None,
+        canonical_authored_options_sha256(&authored).expect("authored digest"),
+        vec![member],
     )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let (status, claimed) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/jobs/claim",
-        json!({ "workerId": worker_id }),
+    .expect("fixture model binding");
+    let route_binding =
+        PortableRouteBinding::new(backend, platform, vec![model]).expect("fixture route");
+    let binding = serde_json::to_value(
+        PortableJobBinding::new(
+            authored,
+            std::collections::BTreeMap::from([(route_binding.key(), route_binding)]),
+        )
+        .expect("fixture binding"),
     )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(claimed["job"]["id"], job_id);
+    .expect("fixture binding serializes");
+    assert!(state
+        .jobs_store
+        .bind_historical_queued_job(&job, &job.payload, &binding)
+        .expect("fixture binding installs"));
+    claim_job_as_worker_on_route(app, job_id, worker_id, capabilities, route).await;
 }
 
 pub(crate) const TEST_TRAINING_WORKER_ID: &str = "test-training-worker";

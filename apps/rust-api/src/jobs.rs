@@ -350,7 +350,8 @@ pub(crate) async fn claim_job(
 
 /// Older queued jobs have no private portable ledger. Rebuild a small batch from their original
 /// immutable carrier before selecting a claim; the store independently excludes every unbound
-/// model-backed row, so an unavailable source or a concurrent poll can never reach a worker.
+/// model-backed row from every claim, whatever protocol version (or none) the worker sends, so an
+/// unavailable source or a concurrent poll can never reach a worker.
 async fn upgrade_historical_queued_carriers(state: &AppState) -> Result<bool, ApiError> {
     let originals =
         store_call(state.clone(), |store, _| store.unbound_queued_model_jobs(8)).await?;
@@ -359,9 +360,7 @@ async fn upgrade_historical_queued_carriers(state: &AppState) -> Result<bool, Ap
         let mut current = original.payload.clone();
         let canonical = match original.job_type {
             JobType::ImageGenerate | JobType::ImageEdit | JobType::ImageDetail => {
-                canonicalize_image_model_payload(state, &original.job_type, &mut current)
-                    .await
-                    .map(|_| ())
+                upgrade_historical_image_carrier(state, &original.job_type, &mut current).await
             }
             JobType::VideoGenerate
             | JobType::VideoExtend
@@ -376,9 +375,27 @@ async fn upgrade_historical_queued_carriers(state: &AppState) -> Result<bool, Ap
                     current.insert("modelManifestEntry".to_owned(), entry);
                 })
             }
-            _ => Ok(()),
+            // Every other model-backed carrier (audio, vector, conversion, training bases, fixed
+            // utilities and reference models) re-resolves each slot from the current catalog, so a
+            // same-ID replacement is compared like an image or video one instead of against itself.
+            _ => reresolve_historical_entries(state, &original.job_type, &mut current).await,
         };
-        if canonical.is_err() {
+        if let Err(error) = canonical {
+            if error.status == axum::http::StatusCode::BAD_REQUEST {
+                // The current catalog refuses this carrier outright (a removed model, a trained
+                // checkpoint whose output directory is gone, an unavailable authored choice): the
+                // same request would be refused at create/retry, so it can never run.
+                let original_for_store = original.clone();
+                let failed = store_call(state.clone(), move |store, _| {
+                    store.fail_historical_unbound_queued_job(&original_for_store, &error.detail)
+                })
+                .await?;
+                if let Some(failed) = failed {
+                    publish(state, "job.updated", &failed);
+                    changed = true;
+                }
+                continue;
+            }
             // A disconnected library or other transient catalog resolution failure cannot
             // establish a replacement. The row remains unbound and unclaimable for retry.
             let original_for_store = original.clone();
@@ -394,10 +411,12 @@ async fn upgrade_historical_queued_carriers(state: &AppState) -> Result<bool, Ap
             &current,
         )
         .await;
-        if authority.is_err() {
+        if let Err(conflict) = authority {
+            // An identity or byte conflict is permanent: the original declaration can never be
+            // satisfied again, so the job fails with the reason instead of waiting forever.
             let original_for_store = original.clone();
             let failed = store_call(state.clone(), move |store, _| {
-                store.fail_historical_unbound_queued_job(&original_for_store)
+                store.fail_historical_unbound_queued_job(&original_for_store, &conflict.detail)
             })
             .await?;
             if let Some(failed) = failed {
@@ -415,8 +434,10 @@ async fn upgrade_historical_queued_carriers(state: &AppState) -> Result<bool, Ap
         .await
         .ok()
         .flatten() else {
-            // The original authority is valid, but no current exact route is provable yet.
-            // Leave the row unbound and unclaimable; a later worker heartbeat can retry.
+            // The original authority, including its local bytes, was verified above, so a capture
+            // failure here is about proving a route now: no eligible worker has advertised the
+            // exact closure yet, proof capacity is busy, or pinned publisher metadata is
+            // unreachable. Leave the row unbound and unclaimable; a later poll retries it.
             let original_for_store = original.clone();
             store_call(state.clone(), move |store, _| {
                 store.defer_historical_queued_job(&original_for_store)
@@ -433,6 +454,79 @@ async fn upgrade_historical_queued_carriers(state: &AppState) -> Result<bool, Ap
         .await?;
     }
     Ok(changed)
+}
+
+/// Rebuild an image carrier exactly as create/retry/duplicate do: the current catalog entry, then
+/// the server-owned resolution of the authored text-encoder choice. Without the second stamp a
+/// historical job that chose a non-default encoder could never match its original carrier.
+async fn upgrade_historical_image_carrier(
+    state: &AppState,
+    job_type: &JobType,
+    payload: &mut JsonObject,
+) -> Result<(), ApiError> {
+    let Some(mut entry) = canonicalize_image_model_payload(state, job_type, payload).await? else {
+        return Ok(());
+    };
+    if matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
+        let model_id = payload
+            .get("model")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ApiError::bad_request("model must be a string"))?
+            .to_owned();
+        resolve_selected_image_text_encoder(state, payload, &model_id, &mut entry).await?;
+        payload.insert("modelManifestEntry".to_owned(), entry);
+    }
+    Ok(())
+}
+
+/// Replace each model carrier slot of a non-image/video historical job with the current catalog's
+/// entry for the same id. A slot without an id has nothing to re-resolve; it becomes `null`, so the
+/// identity comparison refuses it rather than trusting the stored carrier (fail closed).
+async fn reresolve_historical_entries(
+    state: &AppState,
+    job_type: &JobType,
+    payload: &mut JsonObject,
+) -> Result<(), ApiError> {
+    async fn current_entry(
+        state: &AppState,
+        job_type: &JobType,
+        entry: &Value,
+    ) -> Result<Value, ApiError> {
+        let Some(id) = entry
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            return Ok(Value::Null);
+        };
+        validate_model_id(id)?;
+        if *job_type == JobType::VectorGenerate {
+            // Vector admission stamps the public catalog row (`create_vector_job`).
+            return Ok(crate::models::find_model_by_id(state, id)
+                .await?
+                .unwrap_or_else(|| json!({})));
+        }
+        resolve_model_manifest_entry(state, id).await
+    }
+    for key in ["modelManifestEntry", "baseModelManifestEntry"] {
+        if let Some(entry) = payload.get(key).filter(|entry| !entry.is_null()).cloned() {
+            let replacement = current_entry(state, job_type, &entry).await?;
+            payload.insert(key.to_owned(), replacement);
+        }
+    }
+    if let Some(entries) = payload
+        .get("modelManifestEntries")
+        .and_then(Value::as_array)
+        .cloned()
+    {
+        let mut rebuilt = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            rebuilt.push(current_entry(state, job_type, entry).await?);
+        }
+        payload.insert("modelManifestEntries".to_owned(), Value::Array(rebuilt));
+    }
+    Ok(())
 }
 
 /// Emit the macOS `mlx_unsupported` gap event (epic 3482 / sc-3484) as a structured JSON line
