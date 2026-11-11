@@ -226,19 +226,9 @@ export function routedLanes({
       }
     }
   }
-  for (const constructor of ["ModelCaps", "VideoModelCaps"]) {
-    const pattern = new RegExp(
-      `${constructor}::new\\(\\s*"([^"]+)"\\s*,\\s*(true|false)\\s*,\\s*(true|false)\\s*,`,
-      "g",
-    );
-    for (const match of (routingCatalog ?? "").matchAll(pattern)) {
-      if (match[2] === "true") add(match[1], "mlx");
-      if (match[3] === "true") add(match[1], "candle");
-    }
-  }
   // Resolve direct `CONST.contains(&model)` additions in the canonical backend-existence predicate.
-  // Derived capability-table constants need no special handling because the constructor loop above
-  // already reads their source rows. This arm is for genuinely bespoke direct slices such as
+  // Derived capability-table constants need no special handling because route-policy.json above
+  // already carries their rows. This arm is for genuinely bespoke direct slices such as
   // `CANDLE_SCAIL2_VIDEO_MODELS`, and follows the function body rather than hard-coding that name so
   // a future sibling route is discovered by the same oracle.
   const directSlices = new Map();
@@ -1279,15 +1269,15 @@ async function selfTest() {
     );
   }
 
-  // 7f. MUTATION CHECK ON THE PARSE ITSELF. A test that only asserts the oracle resolves something is
-  //     a false green, so pin the multi-line form directly: `sensenova_u1_8b_infographic_v2` is
-  //     declared across six lines, and the pre-sc-17395 single-line regex saw NO route for it.
+  // 7f. A test that only asserts the oracle resolves something is a false green, so pin one row
+  //     directly: `sensenova_u1_8b_infographic_v2` (whose wrapped ModelCaps row the pre-sc-17395
+  //     regex missed) must resolve both lanes from its typed route-policy row.
   {
     const lanes = routedLanes(inputs);
     const multiLine = lanes.get("sensenova_u1_8b_infographic_v2");
     if (!multiLine || !multiLine.has("mlx") || !multiLine.has("candle")) {
       failures.push(
-        "multi-line ModelCaps parse: sensenova_u1_8b_infographic_v2 must resolve to mlx+candle, got " +
+        "route-policy lane oracle: sensenova_u1_8b_infographic_v2 must resolve to mlx+candle, got " +
           `${multiLine ? [...multiLine].join(",") : "nothing"}`,
       );
     }

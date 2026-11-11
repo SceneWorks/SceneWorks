@@ -1441,11 +1441,11 @@ function modesFor(model) {
 //
 // ## Why both backends, for every id here
 //
-// Both worker routers wire the SAME seven families, and `crates/sceneworks-worker/src/image_jobs/routing.rs`
-// says so in the source: `WIRED_MLX_POSE_FAMILIES` is documented as "the MLX twin of
-// `WIRED_CANDLE_POSE_FAMILIES` … and the SAME id set — every candle wired family has a matching MLX control
-// lane". A model listed here therefore has a control lane on whichever backends it supports at all; the
-// per-backend loop below already restricts to those. `candle_declaration_matches_the_memory_matrix_generator`
+// Both worker routers wire the SAME seven families: a text-to-image model whose typed primary route on
+// a backend has a registered `<route>_control` strict-control engine (`wiredPoseFamiliesFromSpecs`,
+// over `config/manifests/registry/specs.json` and `image_jobs/strict_control.rs`). A model listed here
+// therefore has a control lane on whichever backends it supports at all; the per-backend loop below
+// already restricts to those. `candle_declaration_matches_the_memory_matrix_generator`
 // in `crates/sceneworks-worker/src/tests/gpu_and_manifest.rs` is the cross-language guard: adding a candle
 // control lane without adding it here turns that test red.
 export const CONTROL_LANE_MODELS = [
@@ -1542,39 +1542,18 @@ function overlaysFor(model, backend, route) {
   return sortedUnique(overlays);
 }
 
-function rustStringSlice(source, name) {
-  const match = source.match(
-    new RegExp(`const\\s+${name}:\\s*&\\[&str\\]\\s*=\\s*&\\[([\\s\\S]*?)\\];`),
-  );
-  if (!match) throw new Error(`memory-matrix: could not derive ${name} from image_jobs/routing.rs`);
-  return [...match[1].matchAll(/"([^"]+)"/g)].map((entry) => entry[1]);
-}
-
 // Fail closed in both directions. A worker route missing from CONTROL_LANE_MODELS would otherwise emit
 // zero cells, while a measurement block missing from the declaration would be orphaned. The MLX and
 // Candle router lists are checked independently: their documented twin relationship is not evidence and
 // must not be trusted if either source list drifts.
-function assertDeclaredControlLanes(
-  models,
-  imageRoutingSource,
-  strictControlSource = null,
-  registrySpecsSource = null,
-) {
+function assertDeclaredControlLanes(models, strictControlSource, registrySpecsSource) {
   const declared = new Set(CONTROL_LANE_MODELS);
-  const derivedPoseFamilies =
-    registrySpecsSource && strictControlSource
-      ? wiredPoseFamiliesFromSpecs(
-          registrySpecsSource,
-          parseStrictControlEngines(strictControlSource),
-        )
-      : null;
-  for (const [backend, sourceName] of [
-    ["mlx", "WIRED_MLX_POSE_FAMILIES"],
-    ["candle", "WIRED_CANDLE_POSE_FAMILIES"],
-  ]) {
-    const wired = derivedPoseFamilies
-      ? derivedPoseFamilies[backend]
-      : new Set(rustStringSlice(imageRoutingSource, sourceName));
+  const derivedPoseFamilies = wiredPoseFamiliesFromSpecs(
+    registrySpecsSource,
+    parseStrictControlEngines(strictControlSource),
+  );
+  for (const backend of ["mlx", "candle"]) {
+    const wired = derivedPoseFamilies[backend];
     const undeclaredRoutes = [...wired].filter((id) => !declared.has(id)).sort();
     const unwiredDeclarations = [...declared].filter((id) => !wired.has(id)).sort();
     if (undeclaredRoutes.length || unwiredDeclarations.length) {
@@ -2659,7 +2638,6 @@ export const SOURCE_PATHS = Object.freeze({
   routingCandle: "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
   routingMlx: "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
   engines: "crates/sceneworks-worker/src/engines.rs",
-  imageRouting: "crates/sceneworks-worker/src/image_jobs/routing.rs",
   strictControl: "crates/sceneworks-worker/src/image_jobs/strict_control.rs",
   // sc-18815: the video lane's route resolvers. The image lane resolves a provider from ONE table
   // (`engines.rs#MODEL_TABLE`); the video lane has no such table — `resolve_video_route` /
@@ -2901,12 +2879,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   // sc-16073: no advertised route without cells, and no orphaned control measurements. The worker's
   // MLX and Candle declarations are checked independently rather than trusting their documented twin
   // set, over the WHOLE universe rather than just the image half (sc-18815).
-  assertDeclaredControlLanes(
-    entries,
-    bodies.imageRouting,
-    bodies.strictControl,
-    bodies.registrySpecs,
-  );
+  assertDeclaredControlLanes(entries, bodies.strictControl, bodies.registrySpecs);
 
   const models = entries
     .map((model) => {
