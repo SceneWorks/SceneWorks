@@ -27,8 +27,8 @@ const MATRIX_MODALITIES = new Set(["image", "video"]);
 // sc-22512 deleted `EXPECTED_IMAGE_COUNT = 53` and `EXPECTED_VIDEO_COUNT = 11`. They were frozen
 // catalog populations: adding one model to the shipped catalog reddened generation before anything
 // had a chance to say whether the new entry was well-formed. The population is now DERIVED from the
-// catalog's own enumeration, and the cross-table agreement between the manifest, the source-owned
-// `EXPECTED_IMAGE_IDS` roster and the generated ownership rows carries the whole structural claim —
+// catalog's own enumeration, and the cross-table agreement between the manifest, the typed
+// registry's image roster and the generated ownership rows carries the whole structural claim —
 // that check reds on disagreement, which is present-and-contradictory data, at any population size.
 // SC-18218 removed FLUX.2-dev from the MLX staged-residency census when the then-pinned provider was
 // eager/resident-only; sc-20799 REVERSED that at pin ebcdc7da7, where all three Dev MLX providers
@@ -119,7 +119,7 @@ const GENERATION_CAPABILITIES = new Set([
 ]);
 
 // This is ownership metadata, not conformance data. Drift is checked against the
-// source-owned EXPECTED_IMAGE_IDS list and the shipped manifest below.
+// typed registry's image ids and the shipped manifest below.
 //
 // SC-15812: ownership is keyed BY BACKEND, not by model. An MLX story cannot be closed from CUDA
 // hardware and a Candle story cannot be closed from a Mac. Separate backend stories have separate
@@ -839,10 +839,18 @@ export function isImplemented(state) {
   return IMPLEMENTED_STATES.includes(state);
 }
 
-function parseExpectedImageIds(source) {
-  const match = source.match(/const EXPECTED_IMAGE_IDS:\s*&\[&str\]\s*=\s*&\[([\s\S]*?)\n\s*\];/);
-  if (!match) throw new Error("could not locate EXPECTED_IMAGE_IDS in engines.rs");
-  return [...match[1].matchAll(/"([^"]+)"/g)].map((item) => item[1]);
+/**
+ * The image ids of the compiled typed registry (`config/manifests/registry/specs.json`), minus the
+ * entries the matrix deliberately does not carry. The matrix's image population comes from the
+ * shipped manifest; this is the independent typed roster it must agree with (SW-7032 retired the
+ * hand-written `EXPECTED_IMAGE_IDS` test roster this used to regex-read out of `engines.rs`).
+ */
+export function typedImageIds(registrySpecsBody) {
+  const specs = JSON.parse(registrySpecsBody);
+  return Object.values(specs)
+    .filter((spec) => spec.product?.type === "image")
+    .map((spec) => spec.product.id)
+    .filter((id) => !OUT_OF_MATRIX_CATALOG_ENTRIES.has(id));
 }
 
 function parseEngineRoutes(source) {
@@ -2078,7 +2086,7 @@ function validateMatrix(matrix, expectedIds, backendTierOverrides, cellInventory
     const manifestOnly = ids.filter((id) => !expectedIds.includes(id));
     const sourceOnly = expectedIds.filter((id) => !ids.includes(id));
     throw new Error(
-      `manifest image ids, EXPECTED_IMAGE_IDS, and generated ownership rows disagree (manifest-only=${manifestOnly.join(",")}; source-only=${sourceOnly.join(",")})`,
+      `manifest image ids, typed registry image ids, and generated ownership rows disagree (manifest-only=${manifestOnly.join(",")}; registry-only=${sourceOnly.join(",")})`,
     );
   }
   assertMlxStagedCoverageIsStructurallyConsistent(matrix);
@@ -2864,7 +2872,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     (model) => MATRIX_MODALITIES.has(model.type) && !OUT_OF_MATRIX_CATALOG_ENTRIES.has(model.id),
   );
   const manifestById = new Map(entries.map((model) => [model.id, model]));
-  const expectedIds = parseExpectedImageIds(enginesBody);
+  const expectedIds = typedImageIds(bodies.registrySpecs);
   const routes = parseEngineRoutes(enginesBody);
   const videoRoutes = parseVideoRoutes(bodies);
   const routedBackends = routedLanes({

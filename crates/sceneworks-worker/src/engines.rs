@@ -1842,77 +1842,6 @@ mod tests {
         }
     }
 
-    /// Every image model in the shipped `builtin.models.jsonc`. A model added, removed, or renamed
-    /// without updating this list trips the count tripwire in
-    /// [`shipped_image_geometry_is_within_the_pinned_engine_envelope`], so a new image model cannot
-    /// silently ship with its advertised geometry unchecked against its engine (sc-12384 — the image
-    /// twin of [`pinned_engine_geometry`]'s `EXPECTED_VIDEO_IDS`). Backend-independent: this is the
-    /// full catalog set, and each id is size-checked on whichever backend(s) resolve its engine.
-    #[cfg(native_lane)]
-    const EXPECTED_IMAGE_IDS: &[&str] = &[
-        "flux3_klein",
-        "flux3_klein_base",
-        "iris_3b",
-        "supra2_img",
-        "moss_image_base",
-        "moss_image_sft",
-        "mage_flow_base",
-        "mage_flow",
-        "mage_flow_turbo",
-        "mage_flow_edit_base",
-        "mage_flow_edit",
-        "mage_flow_edit_turbo",
-        "z_image_turbo",
-        "z_image",
-        "z_image_edit",
-        "qwen_image",
-        "qwen_image_2_1",
-        "qwen_image_2_1_turbo",
-        "qwen_image_edit_2511",
-        "qwen_image_edit_2511_lightning",
-        "lens",
-        "lens_turbo",
-        "sensenova_u1_8b",
-        "sensenova_u1_8b_infographic_v2",
-        "sensenova_u1_8b_infographic_v3",
-        "sensenova_u1_8b_fast",
-        "sensenova_u1_8b_infographic_v2_fast",
-        "sensenova_u1_8b_infographic_v3_fast",
-        "flux_schnell",
-        "flux_dev",
-        "ideogram_4",
-        "ideogram_4_turbo",
-        "boogu_image",
-        "boogu_image_turbo",
-        "boogu_image_edit",
-        "krea_2_turbo",
-        "krea_2_raw",
-        "flux2_klein_9b",
-        "flux2_klein_9b_kv",
-        "flux2_klein_9b_true_v2",
-        "flux2_dev",
-        "chroma1_hd",
-        "chroma1_base",
-        "chroma1_flash",
-        "kolors",
-        "sd3_5_large",
-        "sd3_5_large_turbo",
-        "sd3_5_medium",
-        "sana_1600m",
-        "sana_sprint_1600m",
-        "anima_base",
-        "anima_aesthetic",
-        "anima_turbo",
-        "sdxl",
-        "realvisxl",
-        "realvisxl_lightning",
-        "illustrious_xl_v1",
-        "illustrious_xl_v2",
-        "instantid_realvisxl",
-        "pulid_flux_dev",
-        "bernini_image",
-    ];
-
     /// The backend-effective default resolution (`<backend>.defaults.resolution` overriding the base
     /// `defaults.resolution`) — the scalar companion to [`effective_list`], which handles the
     /// per-backend list axes. `None` when the model declares no default at all.
@@ -2078,8 +2007,8 @@ mod tests {
     /// Runs on whichever backend the current lane compiles — mlx on macOS CI, candle on the
     /// `backend-candle` Windows CI — each checking the binary its own platform ships. A model that
     /// registers on only one backend is size-checked on that backend's lane (every shipped image
-    /// model registers on at least one); the count tripwire is backend-independent, so a new image
-    /// model must still be assessed on both.
+    /// model registers on at least one); a typed image route the lane cannot resolve is red, so a
+    /// new image model is assessed on every backend its compiled `ModelSpec` routes it to.
     ///
     /// SCOPE: the `[min, max]` size envelope — the axis `Capabilities` exposes, and the axis both
     /// live bugs sat on. The per-engine ÷8/÷16/÷32 STRIDE is checked inside each engine's `validate`
@@ -2102,31 +2031,24 @@ mod tests {
             .filter(|m| m["type"].as_str() == Some("image"))
             .collect();
 
-        // Count/rename tripwire (backend-independent): the shipped image set must be exactly
-        // EXPECTED_IMAGE_IDS. A new or renamed image model is RED here until it is added — and thereby
-        // consciously assessed against its engine's envelope — rather than shipping unguarded.
-        let mut shipped_ids: Vec<&str> = image_models
-            .iter()
-            .filter_map(|m| m["id"].as_str())
-            .collect();
-        shipped_ids.sort_unstable();
-        let mut expected = EXPECTED_IMAGE_IDS.to_vec();
-        expected.sort_unstable();
-        assert_eq!(
-            shipped_ids, expected,
-            "the shipped image-model set changed — add the new/renamed id to EXPECTED_IMAGE_IDS and \
-             confirm its advertised buckets + default fit its engine's [min_size, max_size] envelope \
-             (sc-12384); do not let a new image model ship with unchecked geometry"
-        );
-
         let mut checked = 0usize;
         for model in image_models {
             let id = model["id"].as_str().expect("image model has an id");
             // The PINNED engine's size envelope on THIS backend, or skip: a model that registers only
             // on the other backend (a mac-only edit lane on the candle lane) or runs through a bespoke
             // provider with no gen-core descriptor (InstantID; candle PuLID) is size-checked on the
-            // lane that does resolve it — the count tripwire above still forces every id to be listed.
+            // lane that does resolve it. Every shipped image model is joined to its compiled
+            // `ModelSpec` (as `pinned_engine_geometry` does for video), and a typed image route on
+            // THIS backend that no pinned engine resolves is RED rather than skipped, so a new image
+            // model cannot ship with its geometry unchecked (sc-12384).
+            let spec = sceneworks_core::registry::builtin_model_spec(id)
+                .unwrap_or_else(|| panic!("{id}: shipped image model has no compiled ModelSpec"));
             let Some(resolved) = mlx_model(id) else {
+                assert!(
+                    !spec.routes.contains_key(backend),
+                    "{id}: the typed registry declares a {backend} image route, but no pinned \
+                     engine resolves it, so its advertised geometry would go unchecked (sc-12384)"
+                );
                 continue;
             };
             let min = resolved.descriptor.capabilities.min_size;
