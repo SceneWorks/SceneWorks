@@ -1518,7 +1518,7 @@ test("manifest tier provenance survives unrelated manifest drift but not a measu
   const previousEvidence = {
     repo: null,
     revision: null,
-    path: "manifest.jsonc#models/example/candle",
+    path: "manifest.jsonc#example/candle",
     sha256: "a".repeat(64),
     recordId: null,
     envelopeBytes: null,
@@ -1956,4 +1956,32 @@ test("a video record with quality not_run, warmPasses 0 and no lifecycleWarm*/li
   const priced = ({ phaseActivePeakBytes, phaseAllocatorEnvelopeBytes, overallAllocatorEnvelopeBytes }) =>
     ({ phaseActivePeakBytes, phaseAllocatorEnvelopeBytes, overallAllocatorEnvelopeBytes });
   assert.deepEqual(priced(single), priced(threeRender), "the extractor reads no warm-pass figure");
+});
+
+test("every evidence pointer in the anchor store resolves inside the file it names", async () => {
+  const store = JSON.parse(await readFile(path.join(ROOT, STORE_PATH), "utf8"));
+  const documents = new Map();
+  const pointers = [];
+  const visit = (value) => {
+    if (Array.isArray(value)) return value.forEach(visit);
+    if (value === null || typeof value !== "object") return;
+    if (typeof value.path === "string" && value.path.includes("#")) pointers.push(value.path);
+    Object.values(value).forEach(visit);
+  };
+  visit(store);
+  assert.ok(pointers.length > 0, "the store carries fragment evidence pointers");
+  for (const pointer of pointers) {
+    const [file, fragment] = pointer.split("#");
+    if (!documents.has(file)) {
+      documents.set(file, JSON.parse(await readFile(path.join(ROOT, file), "utf8")));
+    }
+    let node = documents.get(file);
+    for (const segment of fragment.split("/")) {
+      assert.ok(
+        node !== null && typeof node === "object" && segment in node,
+        `${pointer}: segment ${JSON.stringify(segment)} does not resolve`,
+      );
+      node = node[segment];
+    }
+  }
 });

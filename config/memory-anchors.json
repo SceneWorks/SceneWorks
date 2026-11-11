@@ -12293,7 +12293,7 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/registry/evidence.json#models/boogu_image/candle",
+        "path": "config/manifests/registry/evidence.json#boogu_image/candle",
         "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
@@ -12314,7 +12314,7 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/registry/evidence.json#models/boogu_image/candle",
+        "path": "config/manifests/registry/evidence.json#boogu_image/candle",
         "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
@@ -12335,7 +12335,7 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/registry/evidence.json#models/boogu_image/candle",
+        "path": "config/manifests/registry/evidence.json#boogu_image/candle",
         "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
@@ -12389,7 +12389,7 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/registry/evidence.json#models/boogu_image_turbo/candle",
+        "path": "config/manifests/registry/evidence.json#boogu_image_turbo/candle",
         "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
@@ -12410,7 +12410,7 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/registry/evidence.json#models/boogu_image_turbo/candle",
+        "path": "config/manifests/registry/evidence.json#boogu_image_turbo/candle",
         "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
@@ -12431,7 +12431,7 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/registry/evidence.json#models/boogu_image_turbo/candle",
+        "path": "config/manifests/registry/evidence.json#boogu_image_turbo/candle",
         "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
@@ -12837,7 +12837,7 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/registry/evidence.json#models/kolors/candle",
+        "path": "config/manifests/registry/evidence.json#kolors/candle",
         "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
@@ -12858,7 +12858,7 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/registry/evidence.json#models/kolors/candle",
+        "path": "config/manifests/registry/evidence.json#kolors/candle",
         "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
@@ -12879,7 +12879,7 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/registry/evidence.json#models/kolors/candle",
+        "path": "config/manifests/registry/evidence.json#kolors/candle",
         "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
@@ -13296,7 +13296,7 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/registry/evidence.json#models/scail2_14b/candle",
+        "path": "config/manifests/registry/evidence.json#scail2_14b/candle",
         "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
@@ -13459,7 +13459,7 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/registry/evidence.json#models/wan_2_2_i2v_14b/candle",
+        "path": "config/manifests/registry/evidence.json#wan_2_2_i2v_14b/candle",
         "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
@@ -13480,7 +13480,7 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/registry/evidence.json#models/wan_2_2_i2v_14b/candle",
+        "path": "config/manifests/registry/evidence.json#wan_2_2_i2v_14b/candle",
         "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
@@ -13501,7 +13501,7 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/registry/evidence.json#models/wan_2_2_i2v_14b/candle",
+        "path": "config/manifests/registry/evidence.json#wan_2_2_i2v_14b/candle",
         "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
@@ -13555,7 +13555,7 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/registry/evidence.json#models/wan_2_2_t2v_14b/candle",
+        "path": "config/manifests/registry/evidence.json#wan_2_2_t2v_14b/candle",
         "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
@@ -13576,7 +13576,7 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/registry/evidence.json#models/wan_2_2_t2v_14b/candle",
+        "path": "config/manifests/registry/evidence.json#wan_2_2_t2v_14b/candle",
         "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
@@ -13597,7 +13597,7 @@
       "evidence": {
         "repo": null,
         "revision": null,
-        "path": "config/manifests/registry/evidence.json#models/wan_2_2_t2v_14b/candle",
+        "path": "config/manifests/registry/evidence.json#wan_2_2_t2v_14b/candle",
         "sha256": "c6501206c1abcffddc669ef9f3ce8afb78f24a4560d1d6606609371d929799de",
         "recordId": null,
         "envelopeBytes": null,
