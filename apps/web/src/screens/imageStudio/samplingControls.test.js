@@ -54,8 +54,8 @@ describe("MiniMax-H3-Image sampler", () => {
     expect(h3ImageSamplerDefaults()).toEqual({ sampler: "euler", sNoise: 1.1, sNoiseEnd: 0.9, noiseClipStd: 0 });
   });
 
-  it("sends no block for Euler or for a model without the control", () => {
-    expect(resolveH3ImageSampler({ model: h3, options: h3ImageSamplerDefaults() })).toEqual({ block: null, error: null });
+  it("sends Euler explicitly, and no block for a model without the control", () => {
+    expect(resolveH3ImageSampler({ model: h3, options: h3ImageSamplerDefaults() })).toEqual({ block: { sampler: "euler" }, error: null });
     expect(resolveH3ImageSampler({ model: { image: {} }, options: lcm })).toEqual({ block: null, error: null });
   });
 

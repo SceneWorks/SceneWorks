@@ -712,6 +712,16 @@ pub(crate) fn normalize_recipe_preset_for_write(
         sceneworks_core::moss_image::options(advanced.as_object().expect("object"))
             .map_err(ApiError::bad_request)?;
     }
+    // SW-7106: a saved MiniMax-H3-Image sampler is validated like the job's own block, so a preset
+    // can never persist one the job door would refuse.
+    if let Some(sampler) = object.get("defaults").and_then(|d| d.get("h3ImageSampler")) {
+        let key = sceneworks_core::image_sampling_controls::H3_IMAGE_SAMPLER_KEY;
+        let advanced = json!({ key: sampler });
+        sceneworks_core::image_sampling_controls::requested_h3_image_sampler(
+            advanced.as_object().expect("object"),
+        )
+        .map_err(|message| ApiError::bad_request(format!("Recipe preset {message}")))?;
+    }
     validate_recipe_preset_prompt(object.get("prompt"))?;
     Ok(preset)
 }

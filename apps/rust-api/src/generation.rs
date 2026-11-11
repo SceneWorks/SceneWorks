@@ -2080,6 +2080,22 @@ pub(crate) async fn apply_recipe_preset_to_image_payload(
             }
         }
     }
+    // SW-7106: a preset's MiniMax-H3-Image sampler survives headless expansion onto the preset's
+    // own model. A caller's explicit block wins, and another model never inherits it.
+    if let Some(sampler) = preset.get("defaults").and_then(|d| d.get("h3ImageSampler")) {
+        let same_model = preset.get("model").and_then(Value::as_str)
+            == job_payload.get("model").and_then(Value::as_str);
+        if same_model {
+            let advanced = job_payload
+                .entry("advanced".to_owned())
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .ok_or_else(|| ApiError::bad_request("advanced must be an object"))?;
+            advanced
+                .entry(sceneworks_core::image_sampling_controls::H3_IMAGE_SAMPLER_KEY.to_owned())
+                .or_insert_with(|| sampler.clone());
+        }
+    }
     // Render defaults (count/resolution/negativePrompt) are intentionally NOT
     // applied here — the studio seeds those into the form from the preset and the
     // user can override them, so the submitted values are authoritative.

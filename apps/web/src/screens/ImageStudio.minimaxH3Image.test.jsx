@@ -212,17 +212,58 @@ describe("ImageStudio — MiniMax-H3-Image sampler (SW-7106)", () => {
     });
   });
 
-  it("sends no block for Euler and refuses an out-of-range LCM value before submitting", async () => {
+  it("sends Euler explicitly and refuses an out-of-range LCM value before submitting", async () => {
     const createImageJob = vi.fn(async () => ({ id: "job-h3" }));
     await render(baseContext({ createImageJob }));
     await act(async () => setTextarea(container.querySelector('textarea[aria-label="Prompt"]'), "a harbour at dawn"));
     await click(generateButton());
-    expect(createImageJob.mock.calls[0][0].advanced?.h3ImageSampler).toBeUndefined();
+    expect(createImageJob.mock.calls[0][0].advanced.h3ImageSampler).toEqual({ sampler: "euler" });
     await act(async () => setSelect(samplerSelect(), "lcm"));
     await act(async () => setInput(field(container, "Noise scale start"), "0"));
     expect(container.textContent).toContain("Noise scale start must be between 0.01 and 2.");
     await click(generateButton());
     expect(createImageJob).toHaveBeenCalledTimes(1);
+  });
+
+  it("saves LCM 1.1 / 0.9 / 0 in a recipe preset and restores it intact", async () => {
+    const buttonWithText = (text) => [...container.querySelectorAll("button")].find((b) => b.textContent.includes(text));
+    const context = baseContext({ createImageJob: vi.fn(async () => ({ id: "job-h3-preset" })) });
+    await render(context);
+    await act(async () => setSelect(samplerSelect(), "lcm"));
+    await act(async () => setInput(container.querySelector('input[aria-label="Preset name"]'), "H3 LCM"));
+    await click(buttonWithText("Save as preset"));
+    await click([...container.querySelectorAll(".save-preset-scope-picker .compact-selector-item")].find((b) => b.textContent.includes("This project")));
+    const preset = context.createPreset.mock.calls[0][0];
+    const lcm = { sampler: "lcm", sNoise: 1.1, sNoiseEnd: 0.9, noiseClipStd: 0 };
+    expect(preset.defaults.h3ImageSampler).toEqual(lcm);
+
+    // The saved preset is selected; deselect it and move to Euler, then apply it again: every LCM
+    // field comes back exactly.
+    await render({ ...context, presets: [preset] }, { open: false });
+    await click([...container.querySelectorAll(".preset-chips button")].find((b) => b.textContent === "None"));
+    await act(async () => setSelect(samplerSelect(), "euler"));
+    expect(field(container, "Noise scale start")).toBeUndefined();
+    await click(buttonWithText("H3 LCM"));
+    expect(samplerSelect().value).toBe("lcm");
+    expect(field(container, "Noise scale start").value).toBe("1.1");
+    expect(field(container, "Noise scale end").value).toBe("0.9");
+    expect(field(container, "Noise clip (std, 0 = off)").value).toBe("0");
+    await act(async () => setTextarea(container.querySelector('textarea[aria-label="Prompt"]'), "a harbour at dawn"));
+    await click(generateButton());
+    expect(context.createImageJob.mock.calls.at(-1)[0].advanced.h3ImageSampler).toEqual(lcm);
+  });
+
+  it("restores the sampler from a gallery recipe (reuse settings)", async () => {
+    const lcm = { sampler: "lcm", sNoise: 1.3, sNoiseEnd: 0.5, noiseClipStd: 2 };
+    const createImageJob = vi.fn(async () => ({ id: "job-h3-reuse" }));
+    await render(baseContext({
+      createImageJob,
+      studioLaunch: { id: "reuse", view: "Image", recipe: { mode: "text_to_image", model: H3_IMAGE.id, prompt: "a cup", loras: [], normalizedSettings: {}, rawAdapterSettings: { h3ImageSampler: lcm } } },
+    }));
+    expect(samplerSelect().value).toBe("lcm");
+    expect(field(container, "Noise scale start").value).toBe("1.3");
+    await click(generateButton());
+    expect(createImageJob.mock.calls[0][0].advanced.h3ImageSampler).toEqual(lcm);
   });
 
   it("is hidden for every other model", async () => {

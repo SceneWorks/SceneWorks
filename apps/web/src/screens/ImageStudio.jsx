@@ -120,7 +120,7 @@ import { finiteNumberOrUndefined, findModelEditLora, loraIsInstalled, serializeL
 import { PresetStackPreview, useGenerationStudio, useQuantTierPicker, useSavePreset } from "../components/generationStudio.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { useBatchPromptState } from "./imageStudio/useBatchPromptState.js";
-import { h3ImageSamplerDefaults, resolveCfgInterval, resolveH3ImageSampler, supportsH3ImageSampler } from "./imageStudio/samplingControls.js";
+import { h3ImageSamplerDefaults, h3ImageSamplerFromRecipe, resolveCfgInterval, resolveH3ImageSampler, supportsH3ImageSampler } from "./imageStudio/samplingControls.js";
 import { usePidState, useStrictControlState } from "./imageStudio/useImageControlState.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { imageBatchValidation, imageGenerateValidation } from "../imageStudioValidation.js";
@@ -2148,6 +2148,9 @@ export function ImageStudio() {
         (value) => setCfgInterval(value?.join?.(", ") ?? ""),
       ],
       ["captionOverflow", setCaptionOverflow],
+      // SW-7106: restore the saved MiniMax-H3-Image sampler (absent or Euler ⇒ Euler).
+      // The preset machinery applies through a functional update (to snapshot the prior value).
+      ["h3ImageSampler", (update) => setH3ImageSampler((current) => h3ImageSamplerFromRecipe(typeof update === "function" ? update(current) : update))],
       ["guidanceMethod", setGuidanceMethod],
       ["textEncoderModel", setTextEncoderModel],
       ["ipAdapterScale", setIpAdapterScale],
@@ -2207,6 +2210,13 @@ export function ImageStudio() {
       schedulerShift: mossDmd ? undefined : finiteNumberOrUndefined(schedulerShiftToSend),
       ...(resolvedCfgInterval ? { cfgInterval: resolvedCfgInterval } : {}),
       ...(outgoingCaptionOverflow !== "default" ? { captionOverflow: outgoingCaptionOverflow } : {}),
+      // SW-7106: a MiniMax-H3-Image preset always records its sampler, Euler included, so applying
+      // it restores Euler over a previously chosen LCM instead of leaving that choice in place.
+      // An out-of-range LCM value is saved as typed, so the preset save refuses it rather than
+      // quietly recording Euler.
+      ...(showH3ImageSampler ? {
+        h3ImageSampler: outgoingH3ImageSampler ?? { sampler: "lcm", sNoise: Number(h3ImageSampler.sNoise), sNoiseEnd: Number(h3ImageSampler.sNoiseEnd), noiseClipStd: Number(h3ImageSampler.noiseClipStd) },
+      } : {}),
       guidanceMethod,
       ...(supportsTextEncoderSelection &&
       selectedTextEncoderModel !== defaultTextEncoderId

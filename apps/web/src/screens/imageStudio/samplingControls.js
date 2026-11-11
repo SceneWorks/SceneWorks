@@ -43,11 +43,12 @@ export const h3ImageSamplerDefaults = () => ({ sampler: "euler", sNoise: 1.1, sN
 
 export const supportsH3ImageSampler = (model) => Boolean(model?.image?.supportsH3ImageSampler);
 
-// The `advanced.h3ImageSampler` block to send: null for a model without the control or for Euler
-// (the engine default, omitted so a default recipe stays byte-identical); `error` names the first
-// LCM field outside its range.
+// The `advanced.h3ImageSampler` block to send: null for a model without the control. Euler is sent
+// explicitly as `{sampler: "euler"}` so a selected recipe preset's server-side expansion can never
+// replace the user's Euler with the preset's LCM. `error` names the first LCM field out of range.
 export function resolveH3ImageSampler({ model, options }) {
-  if (!supportsH3ImageSampler(model) || options?.sampler !== "lcm") return { block: null, error: null };
+  if (!supportsH3ImageSampler(model)) return { block: null, error: null };
+  if (options?.sampler !== "lcm") return { block: { sampler: "euler" }, error: null };
   const block = { sampler: "lcm" };
   for (const { key, label, min, max } of H3_IMAGE_LCM_FIELDS) {
     const raw = options[key];

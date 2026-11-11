@@ -295,3 +295,99 @@ async fn minimax_h3_image_sampler_block_rides_the_job_and_invalid_values_are_ref
         );
     }
 }
+
+/// SW-7106: a recipe preset stores the sampler block intact and refuses an invalid one; a headless
+/// job naming the preset inherits it (an explicit block wins); duplicate and retry keep it.
+#[tokio::test]
+async fn minimax_h3_image_sampler_survives_presets_duplicate_and_retry() {
+    let _hf = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("config/manifests");
+    single_model_manifest(&config, "minimax_h3_image", "MiniMaxAI/MiniMax-H3-Image");
+    let entry = shipped_entry();
+    std::fs::write(
+        config.join("builtin.models.jsonc"),
+        json!({ "schemaVersion": 1, "models": [entry.clone()] }).to_string(),
+    )
+    .unwrap();
+    let settings = test_settings(&temp);
+    let ack_path =
+        sceneworks_core::license_acknowledgments::acknowledgments_file(&settings.config_dir);
+    sceneworks_core::license_acknowledgments::record_acknowledgment(
+        &ack_path,
+        &entry,
+        "test",
+        "2026-11-10T00:00:00Z",
+    )
+    .unwrap();
+    let app = create_app(settings).unwrap();
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"H3 Image").await;
+    let lcm = json!({ "sampler": "lcm", "sNoise": 1.1, "sNoiseEnd": 0.9, "noiseClipStd": 0 });
+    let preset_body = |name: &str, sampler: Value| {
+        json!({
+            "name": name, "model": "minimax_h3_image", "workflow": "text_to_image",
+            "defaults": { "h3ImageSampler": sampler },
+        })
+    };
+
+    let (status, refused) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/recipe-presets",
+        preset_body("H3 bad", json!({ "sampler": "lcm", "sNoise": 0 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert!(refused.to_string().contains("sNoise 0"), "{refused}");
+
+    let (status, preset) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/recipe-presets",
+        preset_body("H3 LCM", lcm.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{preset}");
+    assert_eq!(preset["defaults"]["h3ImageSampler"], lcm);
+
+    let job_body = |advanced: Value| {
+        json!({
+            "projectId": project["id"], "model": "minimax_h3_image", "prompt": "a lighthouse",
+            "width": 2048, "height": 2048, "recipePresetId": preset["id"], "advanced": advanced,
+        })
+    };
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        job_body(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["payload"]["advanced"]["h3ImageSampler"], lcm);
+    let (status, explicit) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        job_body(json!({ "h3ImageSampler": { "sampler": "euler" } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{explicit}");
+    assert_eq!(
+        explicit["payload"]["advanced"]["h3ImageSampler"],
+        json!({ "sampler": "euler" })
+    );
+
+    for (action, body) in [
+        ("duplicate", json!({ "payloadChanges": {} })),
+        ("retry", json!({})),
+    ] {
+        let route = format!("/api/v1/jobs/{}/{action}", job["id"].as_str().unwrap());
+        let (status, again) = request(app.clone(), "POST", &route, body).await;
+        assert_eq!(status, StatusCode::CREATED, "{action}: {again}");
+        assert_eq!(
+            again["payload"]["advanced"]["h3ImageSampler"], lcm,
+            "{action}"
+        );
+    }
+}
