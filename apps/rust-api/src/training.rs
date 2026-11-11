@@ -1538,13 +1538,14 @@ pub(crate) async fn list_training_dataset_batch_describe_jobs(
     Path((project_id, dataset_id)): Path<(String, String)>,
     Query(query): Query<crate::dto::BatchDescribeJobsQuery>,
 ) -> Result<Json<Vec<JobSnapshot>>, ApiError> {
+    let unfinished = query.unfinished.unwrap_or(false);
     let offset = query.offset.unwrap_or(0);
     let limit = query
         .limit
         .unwrap_or(MAX_LISTED_BATCH_DESCRIBE_JOBS)
         .clamp(1, MAX_LISTED_BATCH_DESCRIBE_JOBS);
     let jobs = store_call(state, move |store, _timeout| {
-        store.list_dataset_batch_describe_jobs(&project_id, &dataset_id, offset, limit)
+        store.list_dataset_batch_describe_jobs(&project_id, &dataset_id, unfinished, offset, limit)
     })
     .await?;
     Ok(Json(public_job_snapshots(jobs)))

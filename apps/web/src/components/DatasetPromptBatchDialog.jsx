@@ -438,9 +438,16 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
         const missing = new Set(images.keys());
         const runs = [];
         const jobsNewestFirst = [];
+        // The newest job still queued or running, found apart from the history scan, which may
+        // have to page past many newer jobs to reach it.
+        const unfinished = await withRetries(
+          () => trainingApi.listBatchDescribeJobs(projectId, dataset.id, token, { unfinished: true, limit: 1 }, { signal }),
+          signal,
+        );
+        const activeId = (Array.isArray(unfinished) ? unfinished[0]?.id : null) ?? null;
         let active = null;
         let activeCount = 0;
-        let activeRead = false;
+        let activeRead = !activeId;
         const newerDescribed = new Set();
         let offset = 0;
         let exhausted = false;
@@ -458,11 +465,6 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
               signal,
             );
             const listed = Array.isArray(page) ? page : [];
-            if (!jobsNewestFirst.length) {
-              // A job still queued or running is among the newest, so the first page decides.
-              active = listed.find((entry) => !terminalStatuses.has(entry?.status)) ?? null;
-              activeRead = !active;
-            }
             jobsNewestFirst.push(...listed);
             if (listed.length < RESTORE_JOBS_PAGE) exhausted = true;
           }
@@ -471,7 +473,8 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
         for (let entry = await nextJob(); entry; entry = await nextJob()) {
           const items = [];
           const count = await readItemPages(entry.id, 0, (page) => items.push(...page), signal);
-          if (entry === active) {
+          if (entry.id === activeId) {
+            active = entry;
             activeCount = count;
             activeRead = true;
           }
@@ -482,7 +485,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
             if (item?.itemId && !item.failed && resultMatchesImage(item, sources.get(item.itemId), images.get(item.itemId))) {
               missing.delete(item.itemId);
               // Described by a run newer than the active one, which therefore must not replace it.
-              if (active && !activeRead) newerDescribed.add(item.itemId);
+              if (!activeRead) newerDescribed.add(item.itemId);
             }
           }
           runs.push({ model: entry.result?.model ?? entry.payload?.model ?? null, items, sources });

@@ -34,9 +34,10 @@ export const trainingApi = {
   batchDescribeJobs: (projectId, datasetId, token, options = {}) =>
     apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}/training/datasets/${encodeURIComponent(datasetId)}/batch-describe-jobs`, token, options),
   // A page of the dataset's describe jobs, newest first (GET), so the dialog can rebuild its table.
-  listBatchDescribeJobs: (projectId, datasetId, token, { offset = 0, limit } = {}, options = {}) =>
+  // `unfinished` keeps only jobs still queued or running.
+  listBatchDescribeJobs: (projectId, datasetId, token, { offset = 0, limit, unfinished = false } = {}, options = {}) =>
     apiFetch(
-      `/api/v1/projects/${encodeURIComponent(projectId)}/training/datasets/${encodeURIComponent(datasetId)}/batch-describe-jobs?offset=${encodeURIComponent(offset)}${limit ? `&limit=${encodeURIComponent(limit)}` : ""}`,
+      `/api/v1/projects/${encodeURIComponent(projectId)}/training/datasets/${encodeURIComponent(datasetId)}/batch-describe-jobs?offset=${encodeURIComponent(offset)}${limit ? `&limit=${encodeURIComponent(limit)}` : ""}${unfinished ? "&unfinished=true" : ""}`,
       token,
       options,
     ),

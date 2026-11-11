@@ -115,6 +115,16 @@ function setText(element, value) {
   element.dispatchEvent(new window.Event("input", { bubbles: true }));
 }
 
+// The dataset's describe history, newest first, served like the API: `unfinished` keeps jobs not
+// yet in a terminal status; `offset`/`limit` page it.
+const TERMINAL = new Set(["completed", "failed", "canceled", "interrupted"]);
+function serveHistory(jobs) {
+  trainingApi.listBatchDescribeJobs.mockImplementation(async (_p, _d, _t, { offset = 0, limit, unfinished = false } = {}) => {
+    const listed = unfinished ? jobs.filter((job) => !TERMINAL.has(job.status)) : jobs;
+    return listed.slice(offset, limit ? offset + limit : undefined);
+  });
+}
+
 describe("DatasetPromptBatchDialog", () => {
   let container;
   let root;
@@ -129,7 +139,8 @@ describe("DatasetPromptBatchDialog", () => {
       .mockImplementation(async (_token, _options, model) => ({ model, ...DEFAULTS[model || VISION_CAPTION_MODEL_REPO] }));
     trainingApi.batchDescribeJobs.mockReset().mockResolvedValue({ id: "job_1", status: "queued", progress: 0 });
     // No earlier runs unless a test lists some.
-    trainingApi.listBatchDescribeJobs.mockReset().mockResolvedValue([]);
+    trainingApi.listBatchDescribeJobs.mockReset();
+    serveHistory([]);
     // A tiny in-memory preset store standing in for the server catalog.
     presetStore = [{ id: "default", name: "Default", prompt: DEFAULT_PROMPT, scope: "builtin", builtin: true }];
     trainingApi.describePromptPresets.mockReset().mockImplementation(async (_token, options = {}, model = "") => {
@@ -683,7 +694,7 @@ describe("DatasetPromptBatchDialog", () => {
   }
 
   it("restores earlier runs on open: newest success per image, interrupted run reported", async () => {
-    trainingApi.listBatchDescribeJobs.mockResolvedValue([
+    serveHistory([
       // Newest: interrupted by a restart after one image; item_b was flagged.
       { id: "job_new", status: "interrupted", result: { processedCount: 2, itemCount: 3, model: JOY_REPO } },
       { id: "job_old", status: "completed", result: { processedCount: 3, itemCount: 3, model: VISION_CAPTION_MODEL_REPO } },
@@ -718,7 +729,7 @@ describe("DatasetPromptBatchDialog", () => {
   });
 
   it("resumes monitoring a run that is still going when the dialog reopens", async () => {
-    trainingApi.listBatchDescribeJobs.mockResolvedValue([
+    serveHistory([
       { id: "job_1", status: "running", progress: 0.3, result: { processedCount: 1, itemCount: 3, model: VISION_CAPTION_MODEL_REPO } },
     ]);
     storedItems = [described("item_a", 300, 400)];
@@ -763,7 +774,7 @@ describe("DatasetPromptBatchDialog", () => {
 
   it("reads every run newer than a still-running older job before stopping", async () => {
     // Older job_1 (A, B) is still running; job_mid re-ran A; job_new (newest) re-ran C.
-    trainingApi.listBatchDescribeJobs.mockResolvedValue([
+    serveHistory([
       { id: "job_new", status: "completed", result: { processedCount: 1, itemCount: 1 } },
       { id: "job_mid", status: "completed", result: { processedCount: 1, itemCount: 1 } },
       { id: "job_1", status: "running", result: { processedCount: 2, itemCount: 3 } },
@@ -781,7 +792,7 @@ describe("DatasetPromptBatchDialog", () => {
   });
 
   it("keeps a newer run's result when a resumed older job later describes the same image", async () => {
-    trainingApi.listBatchDescribeJobs.mockResolvedValue([
+    serveHistory([
       { id: "job_new", status: "completed", result: {} },
       { id: "job_1", status: "running", result: { processedCount: 1, itemCount: 3 } },
     ]);
@@ -815,9 +826,7 @@ describe("DatasetPromptBatchDialog", () => {
   it("pages back through the history until every image is covered", async () => {
     // A full page of newer single-image re-runs of item_a, then the original full run on page 2.
     const reruns = Array.from({ length: RESTORE_JOBS_PAGE }, (_, index) => ({ id: `rerun_${index}`, status: "completed", result: {} }));
-    trainingApi.listBatchDescribeJobs.mockImplementation(async (_p, _d, _t, { offset = 0 } = {}) =>
-      offset === 0 ? reruns : offset === RESTORE_JOBS_PAGE ? [{ id: "job_full", status: "completed", result: {} }] : [],
-    );
+    serveHistory([...reruns, { id: "job_full", status: "completed", result: {} }]);
     serveStoredRuns({
       ...Object.fromEntries(reruns.map((run) => [run.id, [described("item_a", 300, 400, { description: "Re-run a." })]])),
       job_full: [described("item_a", 300, 400), described("item_b", 400, 300, { description: "Full b." }), described("item_c", 300, 400, { description: "Full c." })],
@@ -826,7 +835,25 @@ describe("DatasetPromptBatchDialog", () => {
     expect(rowText("item_a")).toBe("Re-run a.");
     expect(rowText("item_b")).toBe("Full b.");
     expect(rowText("item_c")).toBe("Full c.");
-    expect(trainingApi.listBatchDescribeJobs.mock.calls.map((call) => call[3].offset)).toEqual([0, RESTORE_JOBS_PAGE]);
+    expect(trainingApi.listBatchDescribeJobs.mock.calls.filter((call) => !call[3].unfinished).map((call) => call[3].offset)).toEqual([
+      0,
+      RESTORE_JOBS_PAGE,
+    ]);
+  });
+
+  it("resumes a running job that sits past the first page of history", async () => {
+    const reruns = Array.from({ length: RESTORE_JOBS_PAGE }, (_, index) => ({ id: `rerun_${index}`, status: "canceled", result: {} }));
+    serveHistory([...reruns, { id: "job_1", status: "running", progress: 0.3, result: { processedCount: 1, itemCount: 3 } }]);
+    storedItems = [described("item_a", 300, 400)];
+    jobsApi.resultItems.mockImplementation(async (jobId, _token, { offset = 0 } = {}) => {
+      const items = jobId === "job_1" ? storedItems : [];
+      return { items: items.slice(offset), total: items.length, nextOffset: null };
+    });
+    await render();
+    expect(button("Cancel")).toBeTruthy();
+    await act(async () => nextPoll(snapshot("completed", [described("item_a", 300, 400), described("item_b", 400, 300)], { progress: 1 })));
+    await settle();
+    expect(rowText("item_b")).toContain("(item_b)");
   });
 
   it("drops a restored result whose image was cropped or repointed since", async () => {
@@ -838,7 +865,7 @@ describe("DatasetPromptBatchDialog", () => {
         { id: "item_c", path: "images/item_c.png", contentHash: "hash-c2" },
       ],
     };
-    trainingApi.listBatchDescribeJobs.mockResolvedValue([
+    serveHistory([
       {
         id: "job_old",
         status: "completed",

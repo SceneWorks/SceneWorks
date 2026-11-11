@@ -1673,24 +1673,32 @@ impl JobsStore {
     /// A page of a dataset's batch describe jobs, newest first, so the Create Prompt Batch dialog
     /// can rebuild its table from the results those jobs stored. Every retained job counts,
     /// including canceled, interrupted and cleared ones: clearing hides a job from the queue, but
-    /// its stored descriptions are still the user's work.
+    /// its stored descriptions are still the user's work. `unfinished` keeps only jobs not yet
+    /// in a terminal status, so a still-running job is found however many newer jobs exist.
     pub fn list_dataset_batch_describe_jobs(
         &self,
         project_id: &str,
         dataset_id: &str,
+        unfinished: bool,
         offset: u32,
         limit: u32,
     ) -> JobsStoreResult<Vec<JobSnapshot>> {
         let connection = self.open_connection()?;
         let limit = limit.clamp(1, MAX_LISTED_JOBS);
-        let mut statement = connection.prepare(
+        let status_filter = if unfinished {
+            format!("and status not in ({})", terminal_statuses_sql())
+        } else {
+            String::new()
+        };
+        let mut statement = connection.prepare(&format!(
             "select * from jobs
               where type = ?1
                 and project_id = ?2
                 and json_extract(payload_json, '$.datasetId') = ?3
+                {status_filter}
               order by created_at desc, rowid desc
-              limit ?4 offset ?5",
-        )?;
+              limit ?4 offset ?5"
+        ))?;
         let jobs = collect_jobs(statement.query_map(
             params![
                 JobType::DatasetBatchDescribe.as_str(),

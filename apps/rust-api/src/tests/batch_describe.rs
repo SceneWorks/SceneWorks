@@ -372,6 +372,18 @@ async fn batch_describe_jobs_list_the_datasets_runs_newest_first() {
         .collect();
     assert_eq!(ids, vec![second["id"].clone(), first["id"].clone()]);
 
+    // Only the unfinished job: the canceled one is left out.
+    let (status, unfinished) = request(
+        app.clone(),
+        "GET",
+        &format!("{route}?unfinished=true"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{unfinished}");
+    assert_eq!(unfinished.as_array().map(|jobs| jobs.len()), Some(1));
+    assert_eq!(unfinished[0]["id"], second["id"]);
+
     // Paged: offset skips the newest jobs, limit caps the page.
     let (status, page) = request(
         app.clone(),
