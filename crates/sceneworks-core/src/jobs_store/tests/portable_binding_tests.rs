@@ -157,6 +157,26 @@ fn historical_unbound_model_jobs_cannot_reach_versionless_claims() {
     training.job_type = JobType::LoraTrain;
     training.payload = json!({"model":"example"}).as_object().unwrap().clone();
     let training = store.create_job(training).unwrap();
+    // Model-free person previews (`preview: true`) have no model bytes and no SAM3 paths;
+    // `unbound_queued_model_jobs` must match `model_free_job` and exclude them so the
+    // historical upgrade pass never selects and fails a newly queued preview. Non-preview
+    // person jobs still carry model bytes and DO enter the upgrade batch.
+    for job_type in [JobType::PersonDetect, JobType::PersonTrack] {
+        let mut preview = request();
+        preview.job_type = job_type;
+        preview.payload = json!({"preview": true, "videoAssetId": "clip-1"})
+            .as_object()
+            .unwrap()
+            .clone();
+        store.create_job(preview).unwrap();
+    }
+    let mut person_full = request();
+    person_full.job_type = JobType::PersonTrack;
+    person_full.payload = json!({"preview": false, "videoAssetId": "clip-1"})
+        .as_object()
+        .unwrap()
+        .clone();
+    let person_full = store.create_job(person_full).unwrap();
     let connection = store.open_connection().unwrap();
     assert!(!candidate_matches_portable_worker_sources(
         &connection,
@@ -179,7 +199,7 @@ fn historical_unbound_model_jobs_cannot_reach_versionless_claims() {
     let queued = store.unbound_queued_model_jobs(8).unwrap();
     assert_eq!(
         queued.iter().map(|job| &job.id).collect::<Vec<_>>(),
-        vec![&image.id, &training.id]
+        vec![&image.id, &training.id, &person_full.id]
     );
 }
 

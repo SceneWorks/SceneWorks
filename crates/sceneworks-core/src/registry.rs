@@ -132,9 +132,12 @@ impl ModelSpec {
             ("samplers", "sampler"),
             ("schedulers", "scheduler"),
         ] {
-            let offered = model["limits"][menu]
-                .as_array()
-                .expect("typed product menu");
+            // Not every builtin declares every menu: video/audio/utility products may
+            // have no `count` (or no `limits` at all). A presentation-only override for
+            // such a model must not panic — there is simply no menu to narrow.
+            let Some(offered) = model["limits"][menu].as_array() else {
+                continue;
+            };
             if let Some(requested) = limits
                 .and_then(|limits| limits.get(menu))
                 .and_then(Value::as_array)
@@ -156,8 +159,7 @@ impl ModelSpec {
             if let Some(choice) = defaults.and_then(|defaults| defaults.get(default)) {
                 if model["limits"][menu]
                     .as_array()
-                    .expect("typed product menu")
-                    .contains(choice)
+                    .is_some_and(|offered| offered.contains(choice))
                 {
                     model["defaults"][default] = choice.clone();
                 }

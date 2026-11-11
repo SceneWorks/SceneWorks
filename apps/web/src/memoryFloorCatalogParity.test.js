@@ -28,6 +28,7 @@ import {
   variantFootprintBytes,
 } from "./registryTierEvidence.js";
 import { isSelectableTier, tierHostEligible, tierQuantize } from "./quantTier.js";
+import { projectBuiltinMemoryEvidence } from "../../../scripts/lib/builtin-memory-evidence.mjs";
 import { needsLabel } from "./simple/SimpleModelManager.jsx";
 import { sdxlCudaMemoryEstimate } from "./sdxlCudaMemoryEndpoints.js";
 
@@ -50,6 +51,7 @@ import { sdxlCudaMemoryEstimate } from "./sdxlCudaMemoryEndpoints.js";
 // constants — never from a transcribed number — and the suite fails if it ever covers zero models.
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MANIFEST_PATH = resolve(HERE, "../../../config/manifests/builtin.models.jsonc");
+const EVIDENCE_PATH = resolve(HERE, "../../../config/manifests/registry/evidence.json");
 const BYTES_PER_GB = 1024 ** 3;
 
 // apps/rust-api/src/models.rs:4603 `is_supported_model_download`.
@@ -97,9 +99,13 @@ function catalogDownloadSizeBytes(manifestModel, download) {
 
 function loadManifestModels() {
   const parsed = JSON5.parse(readFileSync(MANIFEST_PATH, "utf8"));
-  const models = Array.isArray(parsed) ? parsed : parsed.models;
-  expect(Array.isArray(models), "manifest must expose a models array").toBe(true);
-  return models;
+  const manifest = Array.isArray(parsed) ? { models: parsed } : parsed;
+  expect(Array.isArray(manifest.models), "manifest must expose a models array").toBe(true);
+  // Measured memory facts moved to registry/evidence.json (SW-7031); the API
+  // projects them back onto the product manifest before serving the catalog,
+  // so this mirror applies the same shared projection the Node tooling uses.
+  const evidence = JSON.parse(readFileSync(EVIDENCE_PATH, "utf8"));
+  return projectBuiltinMemoryEvidence(manifest, evidence).models;
 }
 
 // Project a manifest entry into the CATALOG shape the web client actually receives, for the memory

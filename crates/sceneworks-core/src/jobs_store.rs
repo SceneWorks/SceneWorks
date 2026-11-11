@@ -1281,6 +1281,8 @@ impl JobsStore {
                       and coalesce(json_extract(payload_json, '$.structuredAnalysisEnabled'), -1) = 0
                       and coalesce(json_extract(payload_json, '$.visionAnalysisEnabled'), -1) = 0
                       and coalesce(json_extract(payload_json, '$.semanticEmbeddingsEnabled'), -1) = 0)
+             and not (type in ('person_detect','person_track')
+                      and coalesce(json_extract(payload_json, '$.preview'), -1) = 1)
              order by historical_source_attempts asc, queue_rank desc,
                       created_at asc, rowid asc limit ?1",
         )?;

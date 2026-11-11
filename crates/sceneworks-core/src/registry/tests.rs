@@ -225,6 +225,34 @@ fn user_menus_only_narrow_native_product_choices_and_reconcile_defaults() {
 }
 
 #[test]
+fn presentation_overrides_never_panic_when_builtin_lacks_image_menus() {
+    // Video, audio, and utility builtins lack `limits.count` (or `limits` altogether).
+    // Sweeping every registered builtin with a presentation-plus-menu override proves
+    // `GET /models` cannot panic on a `user.models.json` row for any modality.
+    let override_row = json!({
+        "hidden": true,
+        "name": "Custom label",
+        "ui": {"label": "Custom", "description": "Note"},
+        "limits": {"count": [1], "resolutions": ["512x512"]},
+        "defaults": {"count": 1, "resolution": "512x512"}
+    });
+    let mut saw_menuless = false;
+    for spec in super::builtin_model_specs() {
+        let base = spec.project(None);
+        if base["limits"]["count"].as_array().is_none() {
+            saw_menuless = true;
+        }
+        let projected = spec.project(Some(&override_row));
+        assert_eq!(projected["hidden"], true);
+        assert_eq!(projected["name"], "Custom label");
+    }
+    assert!(
+        saw_menuless,
+        "expected at least one non-image builtin without limits.count"
+    );
+}
+
+#[test]
 fn mutable_distribution_revision_cannot_enter_the_static_catalog() {
     let mut products: Value = serde_json::from_str(&product_json()).unwrap();
     let flux = products["models"]

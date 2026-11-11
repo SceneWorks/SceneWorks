@@ -564,7 +564,7 @@ describe("SimpleModelManager memory label: lanes are never crossed", () => {
   });
 
   it("uses each model's native provider capabilities for the displayed tier floor", async () => {
-    const model = { id: "flux3_klein", name: "FLUX.3", type: "image", installState: "installed",
+    const model = { id: "flux3_klein", name: "FLUX.3", family: "flux3", type: "image", installState: "installed",
       hasVariantMatrix: true, variants: [variant("nvfp4", "installed", null, null)],
       candle: { minMemoryGb: 16, measured: true, vramGbByTier: { nvfp4: 24 } } };
     const show = (capabilities, status = "online") => render(root, { models: [model],

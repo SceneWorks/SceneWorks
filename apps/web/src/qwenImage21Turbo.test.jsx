@@ -16,11 +16,15 @@ import JSON5 from "json5";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { click } from "./testUtils/dom.js";
 import { QWEN_IMAGE_2_1_MODEL_IDS, qwenRewriterAppliesTo } from "./constants.js";
+import { projectBuiltinMemoryEvidence } from "../../../scripts/lib/builtin-memory-evidence.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "../../..");
-const manifestModels = JSON5.parse(
-  readFileSync(resolve(REPO, "config/manifests/builtin.models.jsonc"), "utf8"),
+// Measured memory facts moved to registry/evidence.json (SW-7031); project them back
+// onto the product manifest the way the API/catalog consumers do.
+const manifestModels = projectBuiltinMemoryEvidence(
+  JSON5.parse(readFileSync(resolve(REPO, "config/manifests/builtin.models.jsonc"), "utf8")),
+  JSON.parse(readFileSync(resolve(REPO, "config/manifests/registry/evidence.json"), "utf8")),
 ).models;
 const entryOf = (id) => manifestModels.find((model) => model.id === id);
 const TURBO_ENTRY = entryOf("qwen_image_2_1_turbo");
@@ -51,15 +55,25 @@ function catalogModel(entry) {
 }
 
 describe("the Qwen rewriter gate agrees with the worker (sc-25908)", () => {
-  // The worker serves a rewrite only for `sceneworks_core::jobs_store::QWEN_IMAGE_2_1_MODEL_IDS`;
-  // the UI mirrors that id list. The two must name the same models, or the UI either hides a
-  // working rewriter (Turbo, before this story) or offers one the worker refuses.
+  // The worker serves a rewrite only for `sceneworks_core::jobs_store::QWEN_IMAGE_2_1_MODEL_IDS`,
+  // which the worker derives from the model registry (every builtin spec in the
+  // `qwen-image-2-1` product family); the UI mirrors that id list. The two must name the
+  // same models, or the UI either hides a working rewriter (Turbo, before this story) or
+  // offers one the worker refuses.
   // *Mutation that reds this:* dropping or adding an id on either side.
   it("offers the rewriter for exactly the models the worker accepts as a rewrite target", () => {
+    // The worker derives its rewrite-target list from the model registry
+    // (`crates/sceneworks-core/src/jobs_store/routing.rs`): every builtin spec whose
+    // product family is `qwen-image-2-1`. Derive the expected ids the same way, from
+    // the registry the worker reads, and pin the Rust filter expression so a change
+    // on either side reds this.
     const routing = readFileSync(resolve(REPO, "crates/sceneworks-core/src/jobs_store/routing.rs"), "utf8");
-    const declared = /pub const QWEN_IMAGE_2_1_MODEL_IDS: &\[&str\] = &\[([^\]]*)\];/.exec(routing);
-    expect(declared, "the Rust rewrite-target list is where this test reads it").toBeTruthy();
-    const rustIds = [...declared[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]).sort();
+    expect(routing).toContain('spec.product.family == "qwen-image-2-1"');
+    const specs = JSON.parse(readFileSync(resolve(REPO, "config/manifests/registry/specs.json"), "utf8"));
+    const rustIds = Object.values(specs)
+      .filter((spec) => spec?.product?.family === "qwen-image-2-1")
+      .map((spec) => spec.product.id)
+      .sort();
     expect([...QWEN_IMAGE_2_1_MODEL_IDS].sort()).toEqual(rustIds);
     const offered = manifestModels.filter(qwenRewriterAppliesTo).map((model) => model.id).sort();
     expect(offered).toEqual(rustIds);
