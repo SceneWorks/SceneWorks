@@ -353,16 +353,11 @@ pub(crate) async fn ensure_runtime_model_sources(
             .filter(|value| !value.is_empty())
             .ok_or_else(|| ApiError::bad_request("model_convert requires sourceRepo"))?
             .to_owned();
-        // The conversion's source repository, not its output model id, is the immutable runtime
-        // input. A cataloged repo carries its full manifest entry; an uncataloged one (user
-        // conversions of arbitrary repos are supported) carries a minimal declarative entry built
-        // from the request's own data — its install evidence is then whatever receipts the repo
-        // actually has, so a disconnect is still typed while a never-downloaded repo stays on the
-        // established convert/download path.
-        let entry = match resolve_model_manifest_entry_by_repo(state, &repository).await {
-            Ok(entry) => entry,
-            Err(_) => uncataloged_conversion_entry(&repository, payload)?,
-        };
+        // Conversion identities are model ids: multiple variants can share a repository while
+        // selecting different checkpoint files. Resolve the exact registered row and reject a
+        // mismatched request before freezing its source closure. Arbitrary-repository conversions
+        // retain their synthetic entry and established download path.
+        let entry = conversion_source_entry(state, &repository, payload).await?;
         payload.remove("modelManifestEntry");
         payload.insert("modelManifestEntries".to_owned(), json!([entry]));
         return preflight_payload_model_sources(state, job_type, payload).await;
@@ -489,6 +484,66 @@ pub(crate) async fn ensure_runtime_model_sources(
     }
 
     preflight_payload_model_sources(state, job_type, payload).await
+}
+
+async fn conversion_source_entry(
+    state: &AppState,
+    repository: &str,
+    payload: &JsonObject,
+) -> Result<Value, ApiError> {
+    let model_id = payload
+        .get("modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("model_convert requires modelId"))?;
+    let Some(_) = crate::models::find_model_by_id(state, model_id).await? else {
+        return uncataloged_conversion_entry(repository, payload);
+    };
+    let entry = crate::models::resolve_model_manifest_entry(state, model_id).await?;
+    let source_file = payload.get("sourceFile").and_then(Value::as_str);
+    let declared_source_repo = entry
+        .get("mlx")
+        .and_then(|mlx| mlx.get("convertSourceRepo"))
+        .and_then(Value::as_str);
+    let declared_source_file = entry
+        .get("mlx")
+        .and_then(|mlx| mlx.get("convertSourceFile"))
+        .and_then(Value::as_str);
+    let matches_repo = entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|download| {
+            sceneworks_core::model_artifacts::artifact_selection::is_supported_model_download(
+                download,
+            )
+        })
+        .any(|download| {
+            download.get("repo").and_then(Value::as_str) == Some(repository)
+                && source_file.is_none_or(|file| {
+                    download
+                        .get("files")
+                        .and_then(Value::as_array)
+                        .is_none_or(|files| {
+                            files.iter().any(|pattern| {
+                                pattern.as_str().is_some_and(|pattern| {
+                                    glob::Pattern::new(pattern)
+                                        .is_ok_and(|pattern| pattern.matches(file))
+                                })
+                            })
+                        })
+                })
+        });
+    if !matches_repo
+        || declared_source_repo.is_some_and(|declared| declared != repository)
+        || source_file != declared_source_file
+    {
+        return Err(ApiError::model_artifact_conflict(
+            format!("Conversion source for model '{model_id}' does not match its catalog entry."),
+            "model_artifact_incomplete",
+        ));
+    }
+    Ok(entry)
 }
 
 pub(crate) fn looks_like_huggingface_repository(value: &str) -> bool {

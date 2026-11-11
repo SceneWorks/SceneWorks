@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import atexit
 import copy
+import hashlib
 import json
 import os
 import re
 import sqlite3
 import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import lru_cache
@@ -89,6 +91,120 @@ def write_updated_snapshots() -> None:
 
 
 atexit.register(write_updated_snapshots)
+
+
+def seed_local_fixture_model_sources(root: Path) -> None:
+    """Mirror the real `z_image_turbo` publisher pin into the synthetic manifest.
+
+    SW-7030: admission freezes a job's complete source closure at enqueue, and a
+    manifest entry with neither a pinned download nor a loadable local source is
+    refused (409 `model_artifact_incomplete`). The synthetic catalog's
+    `z_image_turbo` fixture carried `downloads: []`, which pre-SW-7030 admission
+    never inspected. This seeder rewrites that entry's downloads to the REAL
+    builtin's pinned turnkey (repo/revision/variant/files verbatim), so the
+    fixtures route and freeze exactly what a production z_image_turbo request
+    does — Revision members resolved from the publisher pin, no local source and
+    no producer receipt. The pinned metadata lookup reaches the Hugging Face
+    tree API exactly as the e2e smoke suite's z_image_turbo jobs already do
+    (same CI lane, network available); the returned per-file digests are
+    content hashes of an immutable revision, so the snapshots stay
+    deterministic across runs and machines."""
+    manifest_path = root / "config" / "manifests" / "builtin.models.jsonc"
+    text = manifest_path.read_text(encoding="utf-8")
+    old = '"downloads": [],\n              "paths": {},\n              "defaults": { "width": 1024, "height": 1024 },\n              "limits": {},\n              "loraCompatibility": { "families": ["z-image"] },\n              "ui": { "label": "Z-Image" }'
+    # The real builtin's pinned q4 turnkey (config/manifests/builtin.models.jsonc), verbatim.
+    new = '"downloads": [\n                {\n                  "provider": "huggingface",\n                  "repo": "SceneWorks/z-image-turbo-mlx",\n                  "revision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",\n                  "variant": "q4",\n                  "default": true,\n                  "files": ["q4/*"],\n                  "estimatedSizeBytes": 5909406487\n                }\n              ],\n              "paths": {},\n              "defaults": { "width": 1024, "height": 1024 },\n              "limits": {},\n              "loraCompatibility": { "families": ["z-image"] },\n              "ui": { "label": "Z-Image" }'
+    assert old in text, "the z_image_turbo fixture block drifted from this seeder"
+    manifest_path.write_text(text.replace(old, new), encoding="utf-8")
+
+
+# The portable binding contract version this harness's fake workers claim with (SW-7030).
+PORTABLE_MODEL_BINDING_VERSION = 2
+
+
+def portable_claim_envelope(worker_id: str, capabilities: list[str]) -> dict:
+    """A production worker's registration + claim envelope for the harness fakes.
+
+    A worker registration without `platform` can never match a frozen route's
+    platform, and a claim without the portable route envelope is refused every
+    bound job (`{"job": null}`). The fake harness workers therefore advertise
+    the same `platform` + route envelope a real worker sends — the established
+    pattern in apps/rust-api/src/tests/support.rs (`TestPortableRoute`) and the
+    e2e smoke harness.
+
+    The route is pinned to `candle:linux` regardless of the host OS: the frozen
+    route set is a property of the model manifests (their per-download
+    platforms), never of the API host, and the platform check compares the
+    CLAIM against the worker's REGISTERED platform row — so a fake registered as
+    a linux candle worker claims the candle:linux route identically on a macOS
+    dev box and a Linux CI runner. That keeps the recorded snapshots
+    OS-independent (`gpuId: 0`, `platform: linux` everywhere), which a
+    host-derived backend could not.
+    """
+    backend = "candle"
+    platform = "linux"
+    gpu_id = "0"
+    # The `candle` marker capability is the seam `worker_is_candle` keys off.
+    advertise = list(capabilities) + [backend]
+    registration = {
+        "workerId": worker_id,
+        "gpuId": gpu_id,
+        "gpuName": "Fixture GPU",
+        "platform": platform,
+        "capabilities": advertise,
+        "loadedModels": [],
+    }
+    claim = {
+        "workerId": worker_id,
+        "portableModelBindingVersion": PORTABLE_MODEL_BINDING_VERSION,
+        "portableBackend": backend,
+        "portablePlatform": platform,
+    }
+    return {"registration": registration, "claim": claim}
+
+
+def portable_lora_source_claim(lora_id: str, path: Path) -> dict:
+    """The `registered_digest:lora:...` source claim a production worker derives from its
+    own inventory of the same LoRA bytes (SW-7030), so the harness's fake workers advertise
+    the exact local source closure a character's bound LoRA entry requires at enqueue.
+    Path-free: keyed by the logical lora id + the sha256 file ledger — the same envelope
+    the Rust-API harness fixture (`advertise_fixture_lora_sources`) builds, and the same
+    shape the e2e smoke harness derives. `sourceId` embeds sha256(("lora", id, None)) and
+    the ledger; admission recomputes both from the frozen member, so any drift is a 409
+    rather than a silent mismatch."""
+    payload = path.read_bytes()
+    sha256 = "sha256:" + hashlib.sha256(payload).hexdigest()
+    files = [
+        {
+            "relativePath": path.name,
+            "sizeBytes": path.stat().st_size,
+            "sha256": sha256,
+        }
+    ]
+    # Mirror portable_file_ledger_sha256 (crates/sceneworks-core/...): sha256 over each
+    # file's (relative path, NUL, size, NUL, sha256, newline) run.
+    ledger = "sha256:" + hashlib.sha256(
+        path.name.encode()
+        + b"\x00"
+        + str(path.stat().st_size).encode()
+        + b"\x00"
+        + sha256.encode()
+        + b"\n"
+    ).hexdigest()
+    identity = json.dumps(["lora", lora_id, None], separators=(",", ":")).encode()
+    source_id = (
+        "registered_digest:lora:"
+        + hashlib.sha256(identity).hexdigest()
+        + ":"
+        + ledger
+    )
+    return {
+        "schemaVersion": PORTABLE_MODEL_BINDING_VERSION,
+        "sourceId": source_id,
+        "provenance": {"kind": "operator_override"},
+        "files": files,
+        "closureSha256": ledger,
+    }
 
 
 def write_contract_manifests(config_dir: Path) -> None:
@@ -201,6 +317,7 @@ class ServerApiHarness:
         self.root = root
         self.runtime = "rust"
         write_contract_manifests(root / "config")
+        seed_local_fixture_model_sources(root)
         # sc-19708: the catalog now reports the configured model-library root
         # (`modelResolution.configuredLibraryPath`). That root is environment-derived — the API
         # resolves HF_HUB_CACHE / HUGGINGFACE_HUB_CACHE / HF_HOME and otherwise falls back to the
@@ -763,7 +880,7 @@ def attach_character_lora_pair(
     character_ids: list[str],
     *,
     snapshot: bool = True,
-) -> tuple[list[str], Any]:
+) -> tuple[list[str], Any, list[Path]]:
     responses = [
         runtime.request(
             "POST",
@@ -787,13 +904,15 @@ def attach_character_lora_pair(
         snapshot=snapshot,
     )
     lora_link_ids = [response.body["loras"][0]["id"] for response in responses]
+    copied_paths = []
     for runtime, response in zip(runtimes, responses):
         copied_path = runtime.project_path / response.body["loras"][0]["projectPath"]
         assert copied_path.exists(), f"{runtime.name} did not copy character LoRA to {copied_path}"
         assert copied_path.read_bytes() == safetensors_bytes()
+        copied_paths.append(copied_path)
     copied_rel_paths = [response.body["loras"][0]["projectPath"] for response in responses]
     assert_runtime_consistency("character lora copied project path", baseline_runtime, candidate_runtime, copied_rel_paths[0], copied_rel_paths[1])
-    return lora_link_ids, normalized
+    return lora_link_ids, normalized, copied_paths
 
 
 def read_sse_message(lines: Any) -> dict[str, Any]:
@@ -1245,7 +1364,7 @@ def test_character_look_and_lora_contracts(contract_runtimes):
         snapshot=True,
     )
 
-    lora_link_ids, _ = attach_character_lora_pair(
+    lora_link_ids, _, _ = attach_character_lora_pair(
         contract_runtimes,
         baseline_runtime,
         candidate_runtime,
@@ -1322,7 +1441,26 @@ def test_character_test_job_contracts(contract_runtimes):
     character_ids, _ = create_character_pair(contract_runtimes, baseline_runtime, candidate_runtime)
     attach_character_reference_pair(contract_runtimes, baseline_runtime, candidate_runtime, character_ids, snapshot=False)
     look_ids, _ = create_character_look_pair(contract_runtimes, baseline_runtime, candidate_runtime, character_ids, snapshot=False)
-    attach_character_lora_pair(contract_runtimes, baseline_runtime, candidate_runtime, character_ids, snapshot=False)
+    _, _, copied_lora_paths = attach_character_lora_pair(contract_runtimes, baseline_runtime, candidate_runtime, character_ids, snapshot=False)
+
+    # SW-7030: the character's bound LoRA entry becomes a Digest member of the frozen
+    # route, and admission refuses an image job whose local source closure no
+    # authenticated worker advertises. Register the harness's fake worker with the
+    # same portable envelope a production worker sends — platform + route on the
+    # claim envelope, plus the `registered_digest:lora:...` claim over the copied
+    # adapter bytes — so the test job enqueues exactly as it would against a live
+    # worker inventory.
+    for runtime, character_id, copied_lora_path in zip(contract_runtimes, character_ids, copied_lora_paths):
+        character = runtime.request(
+            "GET",
+            f"/api/v1/projects/{runtime.project_id}/characters/{character_id}",
+        ).body
+        lora_link_id = character["loras"][0]["id"]
+        claim = portable_lora_source_claim(lora_link_id, copied_lora_path)
+        envelope = portable_claim_envelope("character-test-worker", ["image_generate"])
+        envelope["registration"]["portableSourceClaims"] = [claim]
+        registration = runtime.request("POST", "/api/v1/workers/register", json_payload=envelope["registration"])
+        assert registration.status_code == 200, f"{runtime.name} worker registration failed: {registration.body}"
 
     test_jobs = []
     event_sets = []
@@ -1618,7 +1756,11 @@ def test_model_lora_and_image_job_contracts(contract_runtimes):
                 "projectId": runtime.project_id,
                 "projectName": "Parity Project",
                 "prompt": "mist over hills",
-                "model": "base-model",
+                # SW-7030: `base-model` is an unrouted synthetic id (neither MLX- nor
+                # candle-routed in the routing tables), so admission now fails it closed
+                # (400 "No native route..."); z_image_turbo is the routed fixture whose
+                # local source `seed_local_fixture_model_sources` stages.
+                "model": "z_image_turbo",
                 "seed": 101,
                 "requestedGpu": "auto",
             },
@@ -1634,19 +1776,14 @@ def test_job_state_transition_contracts(contract_runtimes):
     baseline_runtime, candidate_runtime = contract_runtimes
     create_projects(contract_runtimes, baseline_runtime, candidate_runtime)
 
+    # SW-7030: the fake worker uses the production portable route envelope (platform +
+    # binding-version + backend/platform on the claim) exactly as a real worker does —
+    # a plain claim is refused every bound job. The registration/claim pair is built by
+    # `portable_claim_envelope`, which picks the backend from the host OS like a real worker.
+    envelopes = [portable_claim_envelope("parity-worker", ["image_generate"]) for _ in contract_runtimes]
     workers = [
-        runtime.request(
-            "POST",
-            "/api/v1/workers/register",
-            json_payload={
-                "workerId": "parity-worker",
-                "gpuId": "gpu-0",
-                "gpuName": "Fixture GPU",
-                "capabilities": ["image_generate"],
-                "loadedModels": ["Tongyi-MAI/Z-Image-Turbo"],
-            },
-        )
-        for runtime in contract_runtimes
+        runtime.request("POST", "/api/v1/workers/register", json_payload=envelope["registration"])
+        for runtime, envelope in zip(contract_runtimes, envelopes)
     ]
     assert_response_contract("worker registration response", baseline_runtime, candidate_runtime, workers[0], workers[1], expected_status=200, snapshot=True)
 
@@ -1658,7 +1795,7 @@ def test_job_state_transition_contracts(contract_runtimes):
                 "projectId": runtime.project_id,
                 "projectName": "Parity Project",
                 "prompt": "mist over hills",
-                "model": "base-model",
+                "model": "z_image_turbo",
                 "seed": 101,
                 "requestedGpu": "auto",
             },
@@ -1669,7 +1806,10 @@ def test_job_state_transition_contracts(contract_runtimes):
         runtime.job_id = response.body["id"]
     assert_response_contract("transition image job response", baseline_runtime, candidate_runtime, image_jobs[0], image_jobs[1], expected_status=201, snapshot=True)
 
-    claimed_jobs = [runtime.request("POST", "/api/v1/jobs/claim", json_payload={"workerId": "parity-worker"}) for runtime in contract_runtimes]
+    claimed_jobs = [
+        runtime.request("POST", "/api/v1/jobs/claim", json_payload=envelope["claim"])
+        for runtime, envelope in zip(contract_runtimes, envelopes)
+    ]
     assert_response_contract("job claim response", baseline_runtime, candidate_runtime, claimed_jobs[0], claimed_jobs[1], expected_status=200, snapshot=True)
 
     busy_workers = [
@@ -1715,20 +1855,28 @@ def concurrent_claim_result(runtime: ContractRuntime) -> list[Any]:
     # generation job types, whose typed routes resolve a model manifest entry the generic
     # route cannot. image_detail is a real caller of this route (the web batch ops post it)
     # and is GPU-routed, so the two-workers-one-gpu race below is unchanged.
-    runtime.request(
-        "POST",
-        "/api/v1/workers/register",
-        json_payload={"workerId": "claim-worker-a", "gpuId": "gpu-0", "capabilities": ["image_detail"], "loadedModels": []},
-    )
-    runtime.request(
-        "POST",
-        "/api/v1/workers/register",
-        json_payload={"workerId": "claim-worker-b", "gpuId": "gpu-0", "capabilities": ["image_detail"], "loadedModels": []},
-    )
+    # SW-7030: both workers use the production portable route envelope (`platform` on
+    # registration, binding-version + backend/platform on the claim) so a frozen binding
+    # is actually claimable by one of them, exactly as two real workers racing would be.
+    envelopes = {
+        worker_id: portable_claim_envelope(worker_id, ["image_detail"])
+        for worker_id in ["claim-worker-a", "claim-worker-b"]
+    }
+    for worker_id in ["claim-worker-a", "claim-worker-b"]:
+        runtime.request(
+            "POST",
+            "/api/v1/workers/register",
+            json_payload=envelopes[worker_id]["registration"],
+        )
     runtime.request("POST", "/api/v1/jobs", json_payload={"type": "image_detail", "payload": {}, "requestedGpu": "auto"})
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [
-            executor.submit(runtime.request, "POST", "/api/v1/jobs/claim", json_payload={"workerId": worker_id})
+            executor.submit(
+                runtime.request,
+                "POST",
+                "/api/v1/jobs/claim",
+                json_payload=envelopes[worker_id]["claim"],
+            )
             for worker_id in ["claim-worker-a", "claim-worker-b"]
         ]
     responses = [future.result() for future in futures]

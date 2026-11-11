@@ -2473,7 +2473,7 @@ async fn raw_batch_detail_rejects_every_explicit_packed_tier_carrier() {
 async fn retry_and_duplicate_recanonicalize_batch_detail_manifest_and_dense_tier() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_shipped_image_model_manifests(temp_dir.path());
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (app, _state) = raw_detail_fixture_app(test_settings(&temp_dir));
     let (status, original) = request(
         app.clone(),
         "POST",
@@ -3353,12 +3353,12 @@ async fn raw_model_convert_rejects_unrecoverable_output_before_enqueue() {
     );
 }
 
-/// Write a two-variant convert-at-install family that SHARES one source repo — the Anima shape: each
+/// Write a three-variant convert-at-install family that SHARES one source repo — the Anima shape: each
 /// card names its own `mlx.convertSourceFile` inside `owner/shared`, and the per-variant downloads are
 /// serialized, so one variant's weights land while the other's are still streaming.
 fn shared_repo_convert_manifest(config_dir: &std::path::Path) {
     std::fs::create_dir_all(config_dir).expect("manifest dir creates");
-    let models = ["alpha", "beta"]
+    let models = ["alpha", "beta", "gamma"]
         .into_iter()
         .map(|variant| {
             json!({
@@ -3390,6 +3390,28 @@ fn shared_repo_convert_manifest(config_dir: &std::path::Path) {
     write_empty_sibling_manifests(config_dir);
 }
 
+#[test]
+fn shipped_anima_variants_declare_distinct_conversion_sources() {
+    for variant in ["base", "aesthetic", "turbo"] {
+        let entry =
+            sceneworks_core::builtin_manifests::builtin_model_entry(&format!("anima_{variant}"))
+                .expect("shipped Anima variant");
+        let source_file = format!("split_files/diffusion_models/anima-{variant}-v1.0.safetensors");
+        assert_eq!(entry["mlx"]["convertSourceRepo"], "circlestone-labs/Anima");
+        assert_eq!(entry["mlx"]["convertSourceFile"], source_file);
+        assert!(entry["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|download| {
+                download["repo"] == "circlestone-labs/Anima"
+                    && download["files"]
+                        .as_array()
+                        .is_some_and(|files| files.iter().any(|file| file == &source_file))
+            }));
+    }
+}
+
 /// Seed `file` into the HF cache snapshot for `repo` under `data_dir`, the way a completed download
 /// leaves it (`refs/main` → `snapshots/<rev>/<file>`).
 fn seed_snapshot_file(data_dir: &std::path::Path, repo: &str, file: &str) {
@@ -3416,6 +3438,7 @@ async fn model_convert_is_refused_while_its_source_weights_are_still_downloading
     shared_repo_convert_manifest(&temp_dir.path().join("config/manifests"));
     let settings = test_settings(&temp_dir);
     let data_dir = settings.data_dir.clone();
+    let jobs_db_path = settings.jobs_db_path.clone();
     let app = create_training_fixture_app(settings).expect("app creates");
 
     // Nothing cached at all: the source repo, not just one variant's file, is missing.
@@ -3468,6 +3491,69 @@ async fn model_convert_is_refused_while_its_source_weights_are_still_downloading
         StatusCode::CREATED,
         "a cached source must still convert: {body}"
     );
+    assert_eq!(
+        body["payload"]["modelManifestEntries"][0]["id"],
+        "fixture_alpha"
+    );
+
+    // Every variant must freeze its own source row, even after all three siblings share a
+    // downloaded repository. Selecting by repository alone silently freezes the first row.
+    for variant in ["beta", "gamma"] {
+        seed_snapshot_file(
+            &data_dir,
+            "owner/shared",
+            &format!("split_files/diffusion_models/{variant}.safetensors"),
+        );
+        let (status, accepted) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/models/fixture_{variant}/convert"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{accepted}");
+        assert_eq!(
+            accepted["payload"]["modelManifestEntries"][0]["id"],
+            format!("fixture_{variant}")
+        );
+        assert_eq!(
+            accepted["payload"]["modelManifestEntries"][0]["downloads"][0]["files"][0],
+            format!("split_files/diffusion_models/{variant}.safetensors")
+        );
+        let connection = rusqlite::Connection::open(&jobs_db_path).expect("jobs db opens");
+        let binding: String = connection
+            .query_row(
+                "SELECT portable_model_binding_json FROM jobs WHERE id = ?1",
+                [accepted["id"].as_str().expect("convert job id")],
+                |row| row.get(0),
+            )
+            .expect("frozen conversion binding");
+        assert!(
+            binding.contains(&format!(
+                "split_files/diffusion_models/{variant}.safetensors"
+            )),
+            "the frozen source closure must select the requested variant: {binding}"
+        );
+    }
+
+    let (status, forged) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "model_convert",
+            "requestedGpu": "auto",
+            "payload": {
+                "modelId": "fixture_beta",
+                "sourceRepo": "owner/shared",
+                "sourceFile": "split_files/diffusion_models/alpha.safetensors",
+                "converter": "anima_quant",
+                "outputDir": data_dir.join("models/mlx/forged-beta").display().to_string()
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{forged}");
 
     // An in-flight download for the model itself is reported as such, with its progress, even once
     // the file exists (a re-download of the same variant).

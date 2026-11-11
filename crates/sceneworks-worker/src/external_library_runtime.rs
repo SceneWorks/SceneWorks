@@ -912,6 +912,9 @@ impl VerifiedPlanLayers {
 const PORTABLE_CACHE_MAX_ENTRIES: usize = 8;
 const PORTABLE_CACHE_MAX_BYTES: u64 = 256 * 1024 * 1024 * 1024;
 
+// On non-Unix the readonly bit must be cleared before removal (Windows semantics);
+// the Unix branches use explicit modes instead.
+#[cfg_attr(not(unix), allow(clippy::permissions_set_readonly_false))]
 fn remove_private_snapshot(root: &Path) -> io::Result<()> {
     if !root.exists() {
         return Ok(());
@@ -1585,7 +1588,7 @@ fn prune_portable_snapshots(current: &Path, settings: &Settings) -> WorkerResult
     Ok(())
 }
 
-fn private_tree_bytes(path: &Path) -> WorkerResult<u64> {
+pub(crate) fn private_tree_bytes(path: &Path) -> WorkerResult<u64> {
     let metadata = std::fs::symlink_metadata(path).map_err(WorkerError::Io)?;
     if metadata.file_type().is_symlink() {
         return Err(invalid_binding("private snapshot contains a link"));
@@ -1613,7 +1616,7 @@ fn private_tree_bytes(path: &Path) -> WorkerResult<u64> {
 }
 
 fn create_private_directory(path: &Path) -> WorkerResult<()> {
-    let created = match std::fs::create_dir(path) {
+    let _created = match std::fs::create_dir(path) {
         Ok(()) => true,
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
         Err(error) => return Err(WorkerError::Io(error)),
@@ -1625,7 +1628,7 @@ fn create_private_directory(path: &Path) -> WorkerResult<()> {
         ));
     }
     #[cfg(unix)]
-    if created {
+    if _created {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
             .map_err(WorkerError::Io)?;
@@ -3214,6 +3217,16 @@ fn worker_catalog_member_path(
     component_id: Option<&str>,
     member: &PortableArtifactMember,
 ) -> WorkerResult<Option<PathBuf>> {
+    if collection == "models"
+        && id.starts_with(sceneworks_core::external_base_models::EXTERNAL_ID_PREFIX)
+    {
+        return crate::portable_source_claims::registered_external_base_path(
+            settings,
+            id,
+            component_id,
+            &member.files,
+        );
+    }
     if manifest_name == "user.models.jsonc"
         && collection == "models"
         && component_id.is_none()
@@ -3273,6 +3286,13 @@ fn worker_lora_catalog_member_path(
             path.map(Some)
                 .ok_or_else(|| invalid_binding("registered character LoRA bytes are unavailable"))
         });
+    }
+    if id.starts_with(sceneworks_core::external_loras::EXTERNAL_ID_PREFIX) {
+        return crate::portable_source_claims::registered_external_lora_path(
+            settings,
+            id,
+            &member.files,
+        );
     }
     if let Some(global) =
         worker_catalog_member_path(settings, "user.loras.jsonc", "loras", id, None, member)?
@@ -3357,8 +3377,12 @@ fn worker_catalog_member_path_at(
             let Ok(normalized) = normalized else {
                 continue;
             };
-            if crate::portable_source_claims::capture_registered_files(&normalized)
-                .is_ok_and(|files| files == member.files)
+            let roots = crate::paths::allowed_model_roots(settings).unwrap_or_default();
+            if crate::portable_source_claims::capture_registered_files_with_roots(
+                &normalized,
+                &roots,
+            )
+            .is_ok_and(|files| files == member.files)
             {
                 return Ok(Some(normalized));
             }

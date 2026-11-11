@@ -348,6 +348,20 @@ pub fn pid_backbone_for(model: &str) -> Option<&'static str> {
     }
 }
 
+/// Strict-control depth needs the estimator only for automatic preprocessing:
+/// a job that already carries a user control map (`advanced.controlImage`)
+/// bypasses it, mirroring the worker loader predicate.
+pub fn strict_control_requires_depth_estimator(advanced: Option<&Value>) -> bool {
+    advanced
+        .and_then(|v| v.get("controlMode"))
+        .and_then(Value::as_str)
+        == Some("depth")
+        && advanced
+            .and_then(|v| v.get("controlImage"))
+            .and_then(Value::as_str)
+            .is_none_or(|id| id.trim().is_empty())
+}
+
 pub fn required_portable_aux_source_ids(
     job_type: &JobType,
     payload: &JsonObject,
@@ -488,11 +502,7 @@ pub fn required_portable_aux_source_ids(
                 .is_some_and(|poses| !poses.is_empty())
         {
             ids.push("strict_control".to_owned());
-            if advanced
-                .and_then(|value| value.get("controlMode"))
-                .and_then(Value::as_str)
-                == Some("depth")
-            {
+            if strict_control_requires_depth_estimator(payload.get("advanced")) {
                 ids.push("depth_anything_v2_small".to_owned());
             }
         }

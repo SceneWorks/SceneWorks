@@ -29,6 +29,127 @@ from rust_api_harness import (
     wait_for_health,
 )
 
+# The portable binding contract this file exercises end to end. The fake worker below
+# plays the production worker's role over the same endpoints, so it must use the SAME
+# portable route claim envelope a real worker sends (SW-7030): registration carries
+# `platform` (+ optional `portableSourceClaims` for advertised local sources) and the
+# claim carries `portableModelBindingVersion`, `portableBackend`, and `portablePlatform`.
+# A claim without them returns `{"job": null}` for every bound job — the fixture would
+# then assert against `None` (the pre-SW-7030 tests never observed a claim at all), or
+# worse, quietly stop exercising the routes they exist to cover. The harness workers in
+# apps/rust-api/src/tests/support.rs (`TestPortableRoute`) pin the same pairing.
+PORTABLE_MODEL_BINDING_VERSION = 2
+PORTABLE_CLAIM_BACKEND = "candle"
+PORTABLE_CLAIM_PLATFORM = "linux"
+
+
+def portable_claim_envelope(worker_id: str, backend: str = PORTABLE_CLAIM_BACKEND, platform: str = PORTABLE_CLAIM_PLATFORM) -> dict:
+    """The production worker's claim request shape for the fake worker role.
+
+    `candle:linux` is the fixture's route because a bound job's frozen route set for a
+    `requestedGpu: auto` image job includes it (an `mlx:macos` pair would work on a Mac
+    host but is refused off it, and `cpu` refuses GPU model work). The API validates the
+    pair against the worker's registered `platform` and GPU id exactly as it does for a
+    real worker, so the fake workers register under the `linux` platform and advertise
+    the `candle` marker capability (the same seam `worker_is_candle` keys off for a real
+    CUDA worker) alongside `image_generate`.
+    """
+    return {
+        "workerId": worker_id,
+        "portableModelBindingVersion": PORTABLE_MODEL_BINDING_VERSION,
+        "portableBackend": backend,
+        "portablePlatform": platform,
+    }
+
+
+def register_worker(base_url: str, worker_id: str, gpu: dict, source_claims: list[dict] | None = None) -> dict:
+    """POST /api/v1/workers/register. The image queue only offers an
+    image_generate job to a worker advertising that capability, so the tests
+    register with it explicitly (the retired Python `worker_capabilities` derived
+    a richer set; image routing only needs `image_generate`).
+
+    `platform` + `portableSourceClaims` are the production registration envelope:
+    without `platform` the registered worker can never match a frozen route's platform,
+    and without the source claims admission refuses a bound job whose closure no
+    authenticated worker advertises (SW-7030)."""
+    body = {
+        "workerId": worker_id,
+        "gpuId": gpu["id"],
+        "gpuName": gpu["name"],
+        "platform": PORTABLE_CLAIM_PLATFORM,
+        # The `candle` marker is the seam `worker_is_candle` keys off, so the fake
+        # worker's `portableBackend: candle` claim envelope is accepted exactly like a
+        # real CUDA worker's (see `portable_claim_envelope`).
+        "capabilities": gpu["capabilities"] + [PORTABLE_CLAIM_BACKEND],
+        "loadedModels": gpu.get("loadedModels", []),
+    }
+    if source_claims:
+        body["portableSourceClaims"] = source_claims
+    response = httpx.post(f"{base_url}/api/v1/workers/register", json=body, timeout=10)
+    response.raise_for_status()
+    return response.json()
+
+
+def portable_lora_source_claim(lora_id: str, path: Path) -> dict:
+    """The `registered_digest:lora:...` source claim a production worker derives from
+    its own inventory of the same LoRA bytes, so the fake worker advertises the exact
+    local source closure a bound `loras` entry requires (SW-7030). Path-free: keyed by
+    the logical lora id + the sha256 file ledger — the same envelope the Rust-API harness
+    fixture `advertise_fixture_lora_sources` builds. `sourceId` embeds
+    sha256(("lora", lora_id, None)) and the file ledger; the API recomputes both from the
+    frozen member, so any drift is a 409 rather than a silent mismatch."""
+    import hashlib
+
+    payload = path.read_bytes()
+    sha256 = "sha256:" + hashlib.sha256(payload).hexdigest()
+    files = [
+        {
+            "relativePath": path.name,
+            "sizeBytes": path.stat().st_size,
+            "sha256": sha256,
+        }
+    ]
+    # Mirror portable_file_ledger_sha256 (crates/sceneworks-core/.../portable_binding.rs):
+    # sha256 over each file's (relative path, NUL, size, NUL, sha256, newline) run.
+    ledger = hashlib.sha256(
+        path.name.encode()
+        + b"\x00"
+        + str(path.stat().st_size).encode()
+        + b"\x00"
+        + sha256.encode()
+        + b"\n"
+    ).hexdigest()
+    ledger = "sha256:" + ledger
+    identity = json.dumps(["lora", lora_id, None], separators=(",", ":")).encode()
+    source_id = (
+        "registered_digest:lora:"
+        + hashlib.sha256(identity).hexdigest()
+        + ":"
+        + ledger
+    )
+    return {
+        "schemaVersion": PORTABLE_MODEL_BINDING_VERSION,
+        "sourceId": source_id,
+        "provenance": {"kind": "operator_override"},
+        "files": files,
+        "closureSha256": ledger,
+    }
+
+
+def claim_job(base_url: str, worker_id: str) -> dict:
+    """POST /api/v1/jobs/claim — returns the claimed job envelope's `job`.
+
+    Carries the same portable route envelope a production worker sends, or the API
+    returns `{"job": null}` for every bound job (SW-7030) and the caller asserts
+    against `None`."""
+    response = httpx.post(
+        f"{base_url}/api/v1/jobs/claim",
+        json=portable_claim_envelope(worker_id),
+        timeout=5,
+    )
+    response.raise_for_status()
+    return response.json()["job"]
+
 # sc-8861 (F-059): these e2e tests used to drive the live Rust API via
 # `scene_worker.runtime.ApiClient` and run the image pipeline with the in-process
 # Python worker (`run_image_job`). Both couple the ONLY live coverage of the Rust
@@ -43,35 +164,6 @@ from rust_api_harness import (
 # `cargo run -p sceneworks-rust-api`, so the whole module is e2e: it must run in the
 # CI step that follows the Rust build, not the lightweight worker-suite step (sc-4180).
 pytestmark = pytest.mark.e2e
-
-
-def register_worker(base_url: str, worker_id: str, gpu: dict) -> dict:
-    """POST /api/v1/workers/register. The image queue only offers an
-    image_generate job to a worker advertising that capability, so the tests
-    register with it explicitly (the retired Python `worker_capabilities` derived
-    a richer set; image routing only needs `image_generate`)."""
-    response = httpx.post(
-        f"{base_url}/api/v1/workers/register",
-        json={
-            "workerId": worker_id,
-            "gpuId": gpu["id"],
-            "gpuName": gpu["name"],
-            "capabilities": gpu["capabilities"],
-            "loadedModels": gpu.get("loadedModels", []),
-        },
-        timeout=5,
-    )
-    response.raise_for_status()
-    return response.json()
-
-
-def claim_job(base_url: str, worker_id: str) -> dict:
-    """POST /api/v1/jobs/claim — returns the claimed job envelope's `job`."""
-    response = httpx.post(
-        f"{base_url}/api/v1/jobs/claim", json={"workerId": worker_id}, timeout=5
-    )
-    response.raise_for_status()
-    return response.json()["job"]
 
 
 def heartbeat(base_url: str, worker_id: str, status: str, current_job_id: str | None, loaded_models: list[str]) -> None:
@@ -453,10 +545,24 @@ def test_character_image_angle_and_pose_sets_carry_loras_through_worker(rust_api
     )
 
     worker_id = "lora-e2e-worker"
+    # SW-7030 portable binding: the submitted `loras` entry becomes a Digest member of the
+    # frozen route, and admission refuses a bound job whose closure no *authenticated*
+    # worker advertises. The test wrote the exact bytes above (`kelsie.safetensors`), so
+    # the fake worker registers the same `registered_digest:lora:...` source claim a
+    # production worker derives from its own inventory of the same file — path-free,
+    # keyed by the logical id + the sha256 file ledger. This is the same envelope the
+    # Rust-API harness fixtures build (`advertise_fixture_lora_sources`), reproduced here
+    # so the fake worker claims through the same contract it exists to test.
+    lora_source_claim = portable_lora_source_claim(lora_id, lora_dir / "kelsie.safetensors")
     register_worker(
         rust_api,
         worker_id,
-        {"id": "gpu-0", "name": "GPU 0", "capabilities": ["image_generate"]},
+        {
+            "id": "gpu-0",
+            "name": "GPU 0",
+            "capabilities": ["image_generate"],
+        },
+        source_claims=[lora_source_claim],
     )
 
     loras = [{"id": lora_id, "weight": 0.8}]

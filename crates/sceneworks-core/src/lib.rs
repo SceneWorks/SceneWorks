@@ -24,6 +24,8 @@ pub mod disk;
 pub mod display_util;
 pub mod download_receipt;
 pub mod env_util;
+pub mod external_base_models;
+pub mod external_loras;
 pub mod external_roots;
 pub mod file_lock;
 pub mod film_compile;

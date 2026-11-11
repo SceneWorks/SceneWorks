@@ -371,16 +371,18 @@
   },
   "busy worker heartbeat response": {
     "capabilities": [
-      "image_generate"
+      "image_generate",
+      "candle"
     ],
     "currentJobId": "job_fixture",
-    "gpuId": "gpu-0",
+    "gpuId": "0",
     "gpuName": "Fixture GPU",
     "id": "parity-worker",
     "lastSeenAt": "<timestamp>",
     "loadedModels": [
       "Tongyi-MAI/Z-Image-Turbo"
     ],
+    "platform": "linux",
     "registeredAt": "<timestamp>",
     "status": "busy"
   },
@@ -1292,7 +1294,6 @@
               "name": "Mira LoRA",
               "projectPath": "loras/characters/character_fixture/mira.safetensors",
               "scope": "project",
-              "sourcePath": "<runtime-root>/data/loras/mira.safetensors",
               "triggerWords": [
                 "mira"
               ],
@@ -1314,7 +1315,19 @@
                 "height": 1024,
                 "width": 1024
               },
-              "downloads": [],
+              "downloads": [
+                {
+                  "default": true,
+                  "estimatedSizeBytes": 5909406487,
+                  "files": [
+                    "q4/*"
+                  ],
+                  "provider": "huggingface",
+                  "repo": "SceneWorks/z-image-turbo-mlx",
+                  "revision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
+                  "variant": "q4"
+                }
+              ],
               "family": "z-image",
               "id": "z_image_turbo",
               "limits": {},
@@ -1324,7 +1337,6 @@
                 ]
               },
               "name": "Z-Image Turbo",
-              "paths": {},
               "type": "image",
               "ui": {
                 "label": "Z-Image"
@@ -1415,7 +1427,6 @@
                   "name": "Mira LoRA",
                   "projectPath": "loras/characters/character_fixture/mira.safetensors",
                   "scope": "project",
-                  "sourcePath": "<runtime-root>/data/loras/mira.safetensors",
                   "triggerWords": [
                     "mira"
                   ],
@@ -1437,7 +1448,19 @@
                     "height": 1024,
                     "width": 1024
                   },
-                  "downloads": [],
+                  "downloads": [
+                    {
+                      "default": true,
+                      "estimatedSizeBytes": 5909406487,
+                      "files": [
+                        "q4/*"
+                      ],
+                      "provider": "huggingface",
+                      "repo": "SceneWorks/z-image-turbo-mlx",
+                      "revision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
+                      "variant": "q4"
+                    }
+                  ],
                   "family": "z-image",
                   "id": "z_image_turbo",
                   "limits": {},
@@ -1447,7 +1470,6 @@
                     ]
                   },
                   "name": "Z-Image Turbo",
-                  "paths": {},
                   "type": "image",
                   "ui": {
                     "label": "Z-Image"
@@ -1468,7 +1490,7 @@
             "queueRank": 0,
             "requestedGpu": "auto",
             "result": {},
-            "revision": 0,
+            "revision": 1,
             "sourceJobId": null,
             "stage": "queued",
             "startedAt": null,
@@ -1494,7 +1516,23 @@
           "saving": 0
         },
         "maxJobAttempts": 5,
-        "workers": []
+        "workers": [
+          {
+            "capabilities": [
+              "image_generate",
+              "candle"
+            ],
+            "currentJobId": null,
+            "gpuId": "0",
+            "gpuName": "Fixture GPU",
+            "id": "character-test-worker",
+            "lastSeenAt": "<timestamp>",
+            "loadedModels": [],
+            "platform": "linux",
+            "registeredAt": "<timestamp>",
+            "status": "idle"
+          }
+        ]
       },
       "event": "queue.updated"
     }
@@ -1554,7 +1592,6 @@
           "name": "Mira LoRA",
           "projectPath": "loras/characters/character_fixture/mira.safetensors",
           "scope": "project",
-          "sourcePath": "<runtime-root>/data/loras/mira.safetensors",
           "triggerWords": [
             "mira"
           ],
@@ -1576,7 +1613,19 @@
             "height": 1024,
             "width": 1024
           },
-          "downloads": [],
+          "downloads": [
+            {
+              "default": true,
+              "estimatedSizeBytes": 5909406487,
+              "files": [
+                "q4/*"
+              ],
+              "provider": "huggingface",
+              "repo": "SceneWorks/z-image-turbo-mlx",
+              "revision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
+              "variant": "q4"
+            }
+          ],
           "family": "z-image",
           "id": "z_image_turbo",
           "limits": {},
@@ -1586,7 +1635,6 @@
             ]
           },
           "name": "Z-Image Turbo",
-          "paths": {},
           "type": "image",
           "ui": {
             "label": "Z-Image"
@@ -1641,7 +1689,7 @@
     },
     {
       "job": {
-        "assignedGpu": "gpu-0",
+        "assignedGpu": "0",
         "attempts": 1,
         "cancelRequested": false,
         "canceledAt": null,
@@ -3073,7 +3121,7 @@
         "queueRank": 0,
         "requestedGpu": "auto",
         "result": {},
-        "revision": 1,
+        "revision": 2,
         "sourceJobId": null,
         "stage": "preparing",
         "startedAt": "<timestamp>",
@@ -3081,6 +3129,197 @@
         "type": "image_detail",
         "updatedAt": "<timestamp>",
         "workerId": "claim-worker-fixture"
+      },
+      "portableModelBinding": {
+        "backend": "candle",
+        "models": [
+          {
+            "authoredOptionsSha256": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+            "backend": "candle",
+            "members": [
+              {
+                "componentId": null,
+                "files": [
+                  {
+                    "relativePath": "q4/model_index.json",
+                    "sha256": "sha256:f15de0dfcd39efb54005fe7110fc07580dc7b90e73b2a7fb2ad4500381592e96",
+                    "sizeBytes": 708
+                  },
+                  {
+                    "relativePath": "q4/scheduler/scheduler_config.json",
+                    "sha256": "sha256:4276ecb13fc42b6667fe47bac67a376e99e4c26d477e189c4630dd7037a25a9a",
+                    "sizeBytes": 526
+                  },
+                  {
+                    "relativePath": "q4/text_encoder/config.json",
+                    "sha256": "sha256:a8f9012db64f73f511194410833e08a17ec7731633ee76e1f7607a450fdd1eff",
+                    "sizeBytes": 622
+                  },
+                  {
+                    "relativePath": "q4/text_encoder/model.safetensors",
+                    "sha256": "sha256:a7fd7d2ad78efc7e8d458d57133743975d6530a8997f7bdf3bbb15b012b3f7f2",
+                    "sizeBytes": 200319615
+                  },
+                  {
+                    "relativePath": "q4/text_encoder_2/config.json",
+                    "sha256": "sha256:b42a851375035e5acf481e9911033720fa264ba3b0eadd66561d54bb369b7b06",
+                    "sizeBytes": 632
+                  },
+                  {
+                    "relativePath": "q4/text_encoder_2/model.safetensors",
+                    "sha256": "sha256:92b857bd91793f138921adfd589ae7fde5016f0301ef1da097fc5d786eb7f3b0",
+                    "sizeBytes": 610428696
+                  },
+                  {
+                    "relativePath": "q4/tokenizer/merges.txt",
+                    "sha256": "sha256:0bc7695944744789d6fd6d0ab754bcbbb9e36f1c182df0a006d619ce70a1e052",
+                    "sizeBytes": 573514
+                  },
+                  {
+                    "relativePath": "q4/tokenizer/special_tokens_map.json",
+                    "sha256": "sha256:c8227988aadac941e93b5ffef08b4add8ccbdb26404a62b3e41f61eef119b252",
+                    "sizeBytes": 496
+                  },
+                  {
+                    "relativePath": "q4/tokenizer/tokenizer_config.json",
+                    "sha256": "sha256:2edbd316072af0382bb999f82b007ad8af159d6277648e29b7747d72c3add791",
+                    "sizeBytes": 734
+                  },
+                  {
+                    "relativePath": "q4/tokenizer/vocab.json",
+                    "sha256": "sha256:fd67774a869730a6b27bf53d3e434e72054f2a825873c7af3bece183bb1f791e",
+                    "sizeBytes": 1109372
+                  },
+                  {
+                    "relativePath": "q4/tokenizer_2/merges.txt",
+                    "sha256": "sha256:0bc7695944744789d6fd6d0ab754bcbbb9e36f1c182df0a006d619ce70a1e052",
+                    "sizeBytes": 573514
+                  },
+                  {
+                    "relativePath": "q4/tokenizer_2/special_tokens_map.json",
+                    "sha256": "sha256:a83f5831a70d1d21c057186d35aaa504894103d24ee905baa99bc7e83ceb70ee",
+                    "sizeBytes": 484
+                  },
+                  {
+                    "relativePath": "q4/tokenizer_2/tokenizer_config.json",
+                    "sha256": "sha256:6e6c80bd367c7b39df2d7add74577ffd79d0840f3aa96e3b5893b95230743bcf",
+                    "sizeBytes": 893
+                  },
+                  {
+                    "relativePath": "q4/tokenizer_2/vocab.json",
+                    "sha256": "sha256:fd67774a869730a6b27bf53d3e434e72054f2a825873c7af3bece183bb1f791e",
+                    "sizeBytes": 1109372
+                  },
+                  {
+                    "relativePath": "q4/unet/config.json",
+                    "sha256": "sha256:94451caaaf76836bf7f43e04b3a045dee5e827e4871050c1c7b4474fa402d213",
+                    "sizeBytes": 1840
+                  },
+                  {
+                    "relativePath": "q4/unet/diffusion_pytorch_model.safetensors",
+                    "sha256": "sha256:4499043323dcdc144c0d9efb06250690d902763861e88919a41f6a4c113d300d",
+                    "sizeBytes": 2595556032
+                  },
+                  {
+                    "relativePath": "q4/vae/config.json",
+                    "sha256": "sha256:5d301324288c14277bab2b284004b91b81faffc800202ddba59e401c82683959",
+                    "sizeBytes": 807
+                  },
+                  {
+                    "relativePath": "q4/vae/diffusion_pytorch_model.fp16.safetensors",
+                    "sha256": "sha256:6353737672c94b96174cb590f711eac6edf2fcce5b6e91aa9d73c5adc589ee48",
+                    "sizeBytes": 167335342
+                  },
+                  {
+                    "relativePath": "q4/vae/diffusion_pytorch_model.safetensors",
+                    "sha256": "sha256:78f6189c8492013e3cac81637a1f657f790a237387f8a9dfd6bfa5fee28eb646",
+                    "sizeBytes": 334643268
+                  }
+                ],
+                "role": "primary",
+                "source": {
+                  "identity": {
+                    "fingerprint": "SceneWorks/realvisxl-mlx@e40202d63baef826c7df95a639a811698c1178d2:q4",
+                    "repository": "SceneWorks/realvisxl-mlx",
+                    "revision": "e40202d63baef826c7df95a639a811698c1178d2",
+                    "variant": "q4"
+                  },
+                  "kind": "revision"
+                },
+                "tier": "q4"
+              },
+              {
+                "componentId": "modelManifestEntries/0/downloads/1",
+                "files": [
+                  {
+                    "relativePath": "tokenizer.json",
+                    "sha256": "sha256:a83e0809aa4c3af7208b2df632a7a69668c6d48775b3c3fe4e1b1199d1f8b8f4",
+                    "sizeBytes": 2224003
+                  }
+                ],
+                "role": "co_requisite",
+                "source": {
+                  "identity": {
+                    "fingerprint": "openai/clip-vit-large-patch14@32bd64288804d66eefd0ccbe215aa642df71cc41:default",
+                    "repository": "openai/clip-vit-large-patch14",
+                    "revision": "32bd64288804d66eefd0ccbe215aa642df71cc41",
+                    "variant": "default"
+                  },
+                  "kind": "revision"
+                },
+                "tier": "default"
+              },
+              {
+                "componentId": "modelManifestEntries/0/downloads/2",
+                "files": [
+                  {
+                    "relativePath": "tokenizer.json",
+                    "sha256": "sha256:b556ac8c99757ffb677208af34bc8c6721572114111a6e0aaf5fa69ff0b8d842",
+                    "sizeBytes": 2224041
+                  }
+                ],
+                "role": "co_requisite",
+                "source": {
+                  "identity": {
+                    "fingerprint": "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k@743c27bd53dfe508a0ade0f50698f99b39d03bec:default",
+                    "repository": "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k",
+                    "revision": "743c27bd53dfe508a0ade0f50698f99b39d03bec",
+                    "variant": "default"
+                  },
+                  "kind": "revision"
+                },
+                "tier": "default"
+              },
+              {
+                "componentId": "modelManifestEntries/0/downloads/3",
+                "files": [
+                  {
+                    "relativePath": "diffusion_pytorch_model.safetensors",
+                    "sha256": "sha256:1b909373b28f2137098b0fd9dbc6f97f8410854f31f84ddc9fa04b077b0ace2c",
+                    "sizeBytes": 334643238
+                  }
+                ],
+                "role": "co_requisite",
+                "source": {
+                  "identity": {
+                    "fingerprint": "madebyollin/sdxl-vae-fp16-fix@207b116dae70ace3637169f1ddd2434b91b3a8cd:default",
+                    "repository": "madebyollin/sdxl-vae-fp16-fix",
+                    "revision": "207b116dae70ace3637169f1ddd2434b91b3a8cd",
+                    "variant": "default"
+                  },
+                  "kind": "revision"
+                },
+                "tier": "default"
+              }
+            ],
+            "modelId": "realvisxl",
+            "schemaVersion": 2,
+            "slot": "modelManifestEntries/0",
+            "tier": "q4",
+            "variant": "q4"
+          }
+        ],
+        "platform": "linux"
       }
     }
   ],
@@ -3137,11 +3376,13 @@
       "loras": [],
       "maskAssetId": null,
       "mode": "text_to_image",
-      "model": "base-model",
+      "model": "z_image_turbo",
       "modelManifestEntry": {
         "adapter": "z_image_diffusers",
         "capabilities": [
-          "text_to_image"
+          "text_to_image",
+          "edit_image",
+          "character_image"
         ],
         "catalogScope": "builtin",
         "defaults": {
@@ -3150,36 +3391,29 @@
         },
         "downloads": [
           {
-            "estimatedSizeBytes": 536870912,
-            "files": [
-              "*.bin"
-            ],
-            "provider": "huggingface",
-            "repo": "owner/alternate-base-model"
-          },
-          {
             "default": true,
-            "estimatedSizeBytes": 12884901888,
+            "estimatedSizeBytes": 5909406487,
             "files": [
-              "*.safetensors"
+              "q4/*"
             ],
             "provider": "huggingface",
-            "repo": "owner/base-model"
+            "repo": "SceneWorks/z-image-turbo-mlx",
+            "revision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
+            "variant": "q4"
           }
         ],
         "family": "z-image",
-        "id": "base-model",
+        "id": "z_image_turbo",
         "limits": {},
         "loraCompatibility": {
           "families": [
             "z-image"
           ]
         },
-        "name": "User Model",
-        "paths": {},
+        "name": "Z-Image Turbo",
         "type": "image",
         "ui": {
-          "label": "User"
+          "label": "Z-Image"
         }
       },
       "negativePrompt": "",
@@ -3216,7 +3450,7 @@
     "detail": "Unsupported job status"
   },
   "job cancel request response": {
-    "assignedGpu": "gpu-0",
+    "assignedGpu": "0",
     "attempts": 1,
     "cancelRequested": true,
     "canceledAt": null,
@@ -3239,11 +3473,13 @@
       "loras": [],
       "maskAssetId": null,
       "mode": "text_to_image",
-      "model": "base-model",
+      "model": "z_image_turbo",
       "modelManifestEntry": {
         "adapter": "z_image_diffusers",
         "capabilities": [
-          "text_to_image"
+          "text_to_image",
+          "edit_image",
+          "character_image"
         ],
         "catalogScope": "builtin",
         "defaults": {
@@ -3252,36 +3488,29 @@
         },
         "downloads": [
           {
-            "estimatedSizeBytes": 536870912,
-            "files": [
-              "*.bin"
-            ],
-            "provider": "huggingface",
-            "repo": "owner/alternate-base-model"
-          },
-          {
             "default": true,
-            "estimatedSizeBytes": 12884901888,
+            "estimatedSizeBytes": 5909406487,
             "files": [
-              "*.safetensors"
+              "q4/*"
             ],
             "provider": "huggingface",
-            "repo": "owner/base-model"
+            "repo": "SceneWorks/z-image-turbo-mlx",
+            "revision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
+            "variant": "q4"
           }
         ],
         "family": "z-image",
-        "id": "base-model",
+        "id": "z_image_turbo",
         "limits": {},
         "loraCompatibility": {
           "families": [
             "z-image"
           ]
         },
-        "name": "User Model",
-        "paths": {},
+        "name": "Z-Image Turbo",
         "type": "image",
         "ui": {
-          "label": "User"
+          "label": "Z-Image"
         }
       },
       "negativePrompt": "",
@@ -3301,7 +3530,7 @@
     "queueRank": 0,
     "requestedGpu": "auto",
     "result": {},
-    "revision": 3,
+    "revision": 4,
     "sourceJobId": null,
     "stage": "preparing",
     "startedAt": "<timestamp>",
@@ -3313,7 +3542,7 @@
   },
   "job claim response": {
     "job": {
-      "assignedGpu": "gpu-0",
+      "assignedGpu": "0",
       "attempts": 1,
       "cancelRequested": false,
       "canceledAt": null,
@@ -3336,11 +3565,13 @@
         "loras": [],
         "maskAssetId": null,
         "mode": "text_to_image",
-        "model": "base-model",
+        "model": "z_image_turbo",
         "modelManifestEntry": {
           "adapter": "z_image_diffusers",
           "capabilities": [
-            "text_to_image"
+            "text_to_image",
+            "edit_image",
+            "character_image"
           ],
           "catalogScope": "builtin",
           "defaults": {
@@ -3349,36 +3580,30 @@
           },
           "downloads": [
             {
-              "estimatedSizeBytes": 536870912,
-              "files": [
-                "*.bin"
-              ],
-              "provider": "huggingface",
-              "repo": "owner/alternate-base-model"
-            },
-            {
               "default": true,
-              "estimatedSizeBytes": 12884901888,
+              "estimatedSizeBytes": 5909406487,
               "files": [
-                "*.safetensors"
+                "q4/*"
               ],
               "provider": "huggingface",
-              "repo": "owner/base-model"
+              "repo": "SceneWorks/z-image-turbo-mlx",
+              "revision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
+              "variant": "q4"
             }
           ],
           "family": "z-image",
-          "id": "base-model",
+          "id": "z_image_turbo",
           "limits": {},
           "loraCompatibility": {
             "families": [
               "z-image"
             ]
           },
-          "name": "User Model",
+          "name": "Z-Image Turbo",
           "paths": {},
           "type": "image",
           "ui": {
-            "label": "User"
+            "label": "Z-Image"
           }
         },
         "negativePrompt": "",
@@ -3398,7 +3623,7 @@
       "queueRank": 0,
       "requestedGpu": "auto",
       "result": {},
-      "revision": 1,
+      "revision": 2,
       "sourceJobId": null,
       "stage": "preparing",
       "startedAt": "<timestamp>",
@@ -3407,10 +3632,103 @@
       "type": "image_generate",
       "updatedAt": "<timestamp>",
       "workerId": "parity-worker"
+    },
+    "portableModelBinding": {
+      "backend": "candle",
+      "models": [
+        {
+          "authoredOptionsSha256": "sha256:295ca5d853fdfb3786a120372790a1274ef483dabaf9957be7c512394653f34a",
+          "backend": "candle",
+          "members": [
+            {
+              "componentId": null,
+              "files": [
+                {
+                  "relativePath": "q4/model_index.json",
+                  "sha256": "sha256:18a90e1bc117a29a8b7961bb200c86ff0b9704609e87c7171511dc724fcdc9d3",
+                  "sizeBytes": 467
+                },
+                {
+                  "relativePath": "q4/scheduler/scheduler_config.json",
+                  "sha256": "sha256:3b979ab0956e4f5e8d02ec409ac6a4ece1555191d15bd10788fdc85fea5d13fc",
+                  "sizeBytes": 173
+                },
+                {
+                  "relativePath": "q4/text_encoder/config.json",
+                  "sha256": "sha256:6237fccdd922663bd3d8bce89bc390ca073ca22c10e8b3e1fe81a58ccf2169db",
+                  "sizeBytes": 786
+                },
+                {
+                  "relativePath": "q4/text_encoder/model.safetensors",
+                  "sha256": "sha256:fea2bae722a320fa00d82e1c5c19c190f04f0f06f9ec717002445751c906c123",
+                  "sizeBytes": 2263022397
+                },
+                {
+                  "relativePath": "q4/tokenizer/merges.txt",
+                  "sha256": "sha256:8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+                  "sizeBytes": 1671853
+                },
+                {
+                  "relativePath": "q4/tokenizer/tokenizer.json",
+                  "sha256": "sha256:aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+                  "sizeBytes": 11422654
+                },
+                {
+                  "relativePath": "q4/tokenizer/tokenizer_config.json",
+                  "sha256": "sha256:d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101",
+                  "sizeBytes": 9732
+                },
+                {
+                  "relativePath": "q4/tokenizer/vocab.json",
+                  "sha256": "sha256:ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+                  "sizeBytes": 2776833
+                },
+                {
+                  "relativePath": "q4/transformer/config.json",
+                  "sha256": "sha256:3a634d2dd4c84aa9ae511ad88a61fa2a427c05f61940fda45a15aa97cb20a7c6",
+                  "sizeBytes": 535
+                },
+                {
+                  "relativePath": "q4/transformer/model.safetensors",
+                  "sha256": "sha256:92f8759a225638bfa0def69eb8d5f57c036cf9ac9534083798dc1ffb31648252",
+                  "sizeBytes": 3465846156
+                },
+                {
+                  "relativePath": "q4/vae/config.json",
+                  "sha256": "sha256:6796c3b467bd2d5527bf839f5b59f4143b7d01e9a742b206e121d3db2d0b365a",
+                  "sizeBytes": 865
+                },
+                {
+                  "relativePath": "q4/vae/model.safetensors",
+                  "sha256": "sha256:cf464128954beb608171d11f60f2c54e4e0b15bdc8a4bc7190e162b306fd9fd1",
+                  "sizeBytes": 164654036
+                }
+              ],
+              "role": "primary",
+              "source": {
+                "identity": {
+                  "fingerprint": "SceneWorks/z-image-turbo-mlx@bb2bc9893b3c49ae96c813350775f791a2e8bc80:q4",
+                  "repository": "SceneWorks/z-image-turbo-mlx",
+                  "revision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
+                  "variant": "q4"
+                },
+                "kind": "revision"
+              },
+              "tier": "q4"
+            }
+          ],
+          "modelId": "z_image_turbo",
+          "schemaVersion": 2,
+          "slot": "modelManifestEntry",
+          "tier": "q4",
+          "variant": "q4"
+        }
+      ],
+      "platform": "linux"
     }
   },
   "job terminal progress response": {
-    "assignedGpu": "gpu-0",
+    "assignedGpu": "0",
     "attempts": 1,
     "cancelRequested": true,
     "canceledAt": "<timestamp>",
@@ -3433,11 +3751,13 @@
       "loras": [],
       "maskAssetId": null,
       "mode": "text_to_image",
-      "model": "base-model",
+      "model": "z_image_turbo",
       "modelManifestEntry": {
         "adapter": "z_image_diffusers",
         "capabilities": [
-          "text_to_image"
+          "text_to_image",
+          "edit_image",
+          "character_image"
         ],
         "catalogScope": "builtin",
         "defaults": {
@@ -3446,36 +3766,29 @@
         },
         "downloads": [
           {
-            "estimatedSizeBytes": 536870912,
-            "files": [
-              "*.bin"
-            ],
-            "provider": "huggingface",
-            "repo": "owner/alternate-base-model"
-          },
-          {
             "default": true,
-            "estimatedSizeBytes": 12884901888,
+            "estimatedSizeBytes": 5909406487,
             "files": [
-              "*.safetensors"
+              "q4/*"
             ],
             "provider": "huggingface",
-            "repo": "owner/base-model"
+            "repo": "SceneWorks/z-image-turbo-mlx",
+            "revision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
+            "variant": "q4"
           }
         ],
         "family": "z-image",
-        "id": "base-model",
+        "id": "z_image_turbo",
         "limits": {},
         "loraCompatibility": {
           "families": [
             "z-image"
           ]
         },
-        "name": "User Model",
-        "paths": {},
+        "name": "Z-Image Turbo",
         "type": "image",
         "ui": {
-          "label": "User"
+          "label": "Z-Image"
         }
       },
       "negativePrompt": "",
@@ -3495,7 +3808,7 @@
     "queueRank": 0,
     "requestedGpu": "auto",
     "result": {},
-    "revision": 5,
+    "revision": 6,
     "sourceJobId": null,
     "stage": "canceled",
     "startedAt": "<timestamp>",
@@ -3540,11 +3853,9 @@
         "triggerWords": [],
         "updatedAt": "<timestamp>"
       },
-      "manifestPath": "<runtime-root>/config/manifests/user.loras.jsonc",
       "name": "Imported LoRA",
       "repo": "owner/style-lora",
       "scope": "global",
-      "targetDir": "<runtime-root>/data/loras/imported_lora",
       "triggerWords": []
     },
     "progress": 0.0,
@@ -3644,8 +3955,7 @@
       "modelId": "base-model",
       "modelName": "User Model",
       "provider": "huggingface",
-      "repo": "owner/base-model",
-      "targetDir": "<runtime-root>/data/models/owner__base-model"
+      "repo": "owner/base-model"
     },
     "progress": 0.0,
     "projectId": null,
@@ -3784,17 +4094,29 @@
         "height": 1024,
         "width": 1024
       },
-      "downloadSizeBytes": null,
-      "downloadSizeEstimated": false,
-      "downloadSizeLabel": null,
-      "downloadable": false,
-      "downloads": [],
+      "downloadSizeBytes": 5909406487,
+      "downloadSizeEstimated": true,
+      "downloadSizeLabel": "5.5 GB",
+      "downloadable": true,
+      "downloads": [
+        {
+          "default": true,
+          "estimatedSizeBytes": 5909406487,
+          "files": [
+            "q4/*"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/z-image-turbo-mlx",
+          "revision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
+          "variant": "q4"
+        }
+      ],
       "family": "z-image",
       "gated": false,
-      "hasVariantMatrix": false,
+      "hasVariantMatrix": true,
       "id": "z_image_turbo",
       "installState": "missing",
-      "installedPath": null,
+      "installedPath": "<runtime-root>/data/models/SceneWorks__z-image-turbo-mlx",
       "limits": {},
       "loraCompatibility": {
         "families": [
@@ -3837,7 +4159,20 @@
         "label": "Z-Image"
       },
       "updateAvailable": false,
-      "variants": []
+      "variants": [
+        {
+          "cacheState": "missing",
+          "downloadSizeBytes": 5909406487,
+          "footprint": null,
+          "installState": "missing",
+          "installed": false,
+          "installedPath": null,
+          "missingRequiredFiles": [],
+          "pendingArtifact": false,
+          "tierDeletable": true,
+          "variant": "q4"
+        }
+      ]
     }
   ],
   "persisted character sidecar": {
@@ -4194,9 +4529,6 @@
             "types": []
           },
           "name": "SAM3 Person Segmenter",
-          "paths": {
-            "model": "${HF_CACHE}/SceneWorks/sam3-mlx"
-          },
           "type": "utility",
           "ui": {
             "description": "Text-concept person segmentation (\"person\" prompt, no manual box) behind person tracking and Smart Select. Required by person-mask features; installed once and shared by the MLX and candle lanes.",
@@ -4310,16 +4642,18 @@
     "workers": [
       {
         "capabilities": [
-          "image_generate"
+          "image_generate",
+          "candle"
         ],
         "currentJobId": null,
-        "gpuId": "gpu-0",
+        "gpuId": "0",
         "gpuName": "Fixture GPU",
         "id": "parity-worker",
         "lastSeenAt": "<timestamp>",
         "loadedModels": [
           "Tongyi-MAI/Z-Image-Turbo"
         ],
+        "platform": "linux",
         "registeredAt": "<timestamp>",
         "status": "idle"
       }
@@ -4525,6 +4859,7 @@
             ],
             "provider": "huggingface",
             "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+            "revision": "b8fff7315c768468a5333511427288870b2e9635",
             "variant": "bf16"
           }
         ],
@@ -4596,9 +4931,6 @@
           "repo": "SceneWorks/wan2.2-ti2v-5b-mlx"
         },
         "name": "Wan2.2",
-        "paths": {
-          "model": "${HF_CACHE}/SceneWorks/wan2.2-ti2v-5b-mlx"
-        },
         "quantization": {
           "variants": {
             "gguf-q4_k_m": {
@@ -4621,7 +4953,6 @@
           "durationHint": "Use shorter clips until local looping behavior is validated.",
           "label": "Wan2.2",
           "promptGuide": {
-            "path": "/prompt-guides/wan-2-2.md",
             "sources": [
               {
                 "label": "Qwen Cloud video prompt guide",
@@ -4999,11 +5330,13 @@
       "loras": [],
       "maskAssetId": null,
       "mode": "text_to_image",
-      "model": "base-model",
+      "model": "z_image_turbo",
       "modelManifestEntry": {
         "adapter": "z_image_diffusers",
         "capabilities": [
-          "text_to_image"
+          "text_to_image",
+          "edit_image",
+          "character_image"
         ],
         "catalogScope": "builtin",
         "defaults": {
@@ -5012,36 +5345,29 @@
         },
         "downloads": [
           {
-            "estimatedSizeBytes": 536870912,
-            "files": [
-              "*.bin"
-            ],
-            "provider": "huggingface",
-            "repo": "owner/alternate-base-model"
-          },
-          {
             "default": true,
-            "estimatedSizeBytes": 12884901888,
+            "estimatedSizeBytes": 5909406487,
             "files": [
-              "*.safetensors"
+              "q4/*"
             ],
             "provider": "huggingface",
-            "repo": "owner/base-model"
+            "repo": "SceneWorks/z-image-turbo-mlx",
+            "revision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
+            "variant": "q4"
           }
         ],
         "family": "z-image",
-        "id": "base-model",
+        "id": "z_image_turbo",
         "limits": {},
         "loraCompatibility": {
           "families": [
             "z-image"
           ]
         },
-        "name": "User Model",
-        "paths": {},
+        "name": "Z-Image Turbo",
         "type": "image",
         "ui": {
-          "label": "User"
+          "label": "Z-Image"
         }
       },
       "negativePrompt": "",
@@ -5073,16 +5399,16 @@
   },
   "worker registration response": {
     "capabilities": [
-      "image_generate"
+      "image_generate",
+      "candle"
     ],
     "currentJobId": null,
-    "gpuId": "gpu-0",
+    "gpuId": "0",
     "gpuName": "Fixture GPU",
     "id": "parity-worker",
     "lastSeenAt": "<timestamp>",
-    "loadedModels": [
-      "Tongyi-MAI/Z-Image-Turbo"
-    ],
+    "loadedModels": [],
+    "platform": "linux",
     "registeredAt": "<timestamp>",
     "status": "idle"
   }

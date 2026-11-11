@@ -257,6 +257,9 @@ struct InventorySchedule {
 struct InventoryProgress {
     claims: Vec<PortableSourceClaim>,
     scanned: Vec<PortableSourceClaim>,
+    // A proved source may back a queued job for arbitrarily long while this worker is busy.
+    // Keep its last proved claim until replacement or worker restart; the pre-loader guard
+    // rechecks the exact bytes before opening the selected source.
     probed: BTreeMap<String, (PortableSourceClaim, Instant)>,
     generation: u64,
     acknowledged_by_worker: BTreeMap<String, u64>,
@@ -277,10 +280,8 @@ impl InventoryProgress {
     }
 
     fn publish_probe(&mut self, claim: PortableSourceClaim) {
-        self.probed.insert(
-            claim.source_id.clone(),
-            (claim.clone(), Instant::now() + Duration::from_secs(60)),
-        );
+        self.probed
+            .insert(claim.source_id.clone(), (claim.clone(), Instant::now()));
         self.publish_claim(claim);
     }
 
@@ -308,8 +309,6 @@ impl InventoryProgress {
     }
 
     fn rebuild_claims(&mut self) {
-        self.probed
-            .retain(|_, (_, expires)| *expires > Instant::now());
         let mut claims = self.scanned.clone();
         for (claim, _) in self.probed.values() {
             if !claims
@@ -392,6 +391,14 @@ fn catalog_hash(settings: &Settings) -> [u8; 32] {
                     .join(".sceneworks-download-complete.json")
             }),
     );
+    // Builtin model download receipts (SW-7030). `run_model_download_job` installs each builtin
+    // catalog `downloads[].repo` into `data/models/<safe_download_dir(repo)>` (the API enqueues
+    // exactly that targetDir) and writes its completion receipt there. The initial inventory can
+    // finish before the user installs a builtin auxiliary such as `controlnet_tile_sdxl`, and the
+    // builtin manifest itself never changes, so without this marker a completed install leaves the
+    // scan stale until the 30-minute rescan. The receipt is tiny JSON metadata — the watched file
+    // never hashes the multi-GiB weights it stands in for.
+    paths.extend(builtin_model_download_receipt_paths(settings));
     paths.extend(converted_builtin_model_ids().into_iter().map(|id| {
         settings
             .data_dir
@@ -558,7 +565,192 @@ fn collect_source_claims(settings: &Settings, mut publish: impl FnMut(PortableSo
             }
         }
     }
+    external_lora_source_claims(settings, &mut publish);
+    external_base_source_claims(settings, &mut publish);
     registered_digest_source_claims(settings, publish);
+}
+
+/// Advertise the operator's externally scanned ComfyUI base models (SW-7030,
+/// review 4533688093). Runnable `external_base_…` rows are forwarded to the
+/// worker as local Digest entries (primary anchor plus `components/{index}`
+/// members), so the worker must advertise registered digest claims under
+/// exactly the claim ids admission computes: kind `model` for the primary and
+/// kind `component` with component id `components/{index}` for each declared
+/// component. The assembly scan is shared with the API through
+/// `sceneworks_core::external_base_models`, so both sides assign the same id
+/// to the same tree.
+fn external_base_source_claims(settings: &Settings, publish: &mut impl FnMut(PortableSourceClaim)) {
+    if settings.external_model_roots.is_empty() {
+        return;
+    }
+    let mut claims = Vec::new();
+    for row in external_base_rows(settings) {
+        let Some(id) = row.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if let Some(anchor) = row
+            .get("installedPath")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|path| confine_managed_path(settings, Path::new(path)))
+        {
+            append_registered_claim(settings, &mut claims, "model", id, None, &anchor);
+        }
+        if let Some(components) = row.get("components").and_then(serde_json::Value::as_array) {
+            for (index, component) in components.iter().enumerate() {
+                let Some(confined) = component
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|path| confine_managed_path(settings, Path::new(path)))
+                else {
+                    continue;
+                };
+                append_registered_claim(
+                    settings,
+                    &mut claims,
+                    "component",
+                    id,
+                    Some(&format!("components/{index}")),
+                    &confined,
+                );
+            }
+        }
+    }
+    for claim in claims {
+        publish(claim);
+    }
+}
+
+/// The assembled external base-model rows the shared scan produces here.
+fn external_base_rows(settings: &Settings) -> Vec<serde_json::Value> {
+    let mut cache = sceneworks_core::external_base_models::ExternalBaseModelCache::default();
+    sceneworks_core::external_base_models::scan_external_base_models(
+        &settings.external_model_roots,
+        &mut cache,
+    )
+}
+
+/// Confine a scan-reported path to this worker's managed roots, returning the
+/// canonical target admission capture would hash.
+fn confine_managed_path(settings: &Settings, path: &Path) -> Option<PathBuf> {
+    let roots = crate::paths::allowed_model_roots(settings).ok()?;
+    sceneworks_core::model_artifacts::confine_artifact_path(path, &roots).ok()
+}
+
+/// Resolve an `external_base_…` model (or one of its `components/{index}`
+/// members) to this worker's confined copy of the exact frozen bytes, or
+/// `None` when the id is not external, is not present under the configured
+/// roots, or its bytes differ from the frozen ledger.
+pub(crate) fn registered_external_base_path(
+    settings: &Settings,
+    id: &str,
+    component_id: Option<&str>,
+    frozen_files: &[PortableArtifactFile],
+) -> WorkerResult<Option<PathBuf>> {
+    if !id.starts_with(sceneworks_core::external_base_models::EXTERNAL_ID_PREFIX) {
+        return Ok(None);
+    }
+    for row in external_base_rows(settings) {
+        if row.get("id").and_then(serde_json::Value::as_str) != Some(id) {
+            continue;
+        }
+        let candidate = match component_id {
+            None => row
+                .get("installedPath")
+                .and_then(serde_json::Value::as_str)
+                .map(PathBuf::from),
+            Some(component) => {
+                let Some(index) = component
+                    .strip_prefix("components/")
+                    .and_then(|index| index.parse::<usize>().ok())
+                else {
+                    return Ok(None);
+                };
+                row.get("components")
+                    .and_then(serde_json::Value::as_array)
+                    .and_then(|components| components.get(index))
+                    .and_then(|component| component.get("path"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(PathBuf::from)
+            }
+        };
+        let Some(confined) = candidate.and_then(|path| confine_managed_path(settings, &path))
+        else {
+            continue;
+        };
+        let roots = crate::paths::allowed_model_roots(settings).unwrap_or_default();
+        if capture_registered_files_with_roots(&confined, &roots)
+            .is_ok_and(|files| files == frozen_files)
+        {
+            return Ok(Some(confined));
+        }
+    }
+    Ok(None)
+}
+
+/// Advertise the operator's externally scanned ComfyUI LoRAs (SW-7030, review
+/// 4531591689). The API's `lora_catalog` publishes these synthetic `external_…`
+/// rows as installed, so portable admission requires a registered digest claim
+/// for exactly that id; the scan is shared with the API through
+/// `sceneworks_core::external_loras`, so both sides assign the same id to the
+/// same file. Each candidate is confined through
+/// `normalize_app_managed_lora_path` before its bytes are hashed, exactly like
+/// manifest-backed adapters. This runs regardless of `config_dir`: external
+/// roots come from the process environment, never from a manifest.
+fn external_lora_source_claims(settings: &Settings, publish: &mut impl FnMut(PortableSourceClaim)) {
+    if settings.external_model_roots.is_empty() {
+        return;
+    }
+    let mut claims = Vec::new();
+    for (id, path) in external_lora_entries(settings) {
+        let Ok(confined) = crate::paths::normalize_app_managed_lora_path(settings, &path) else {
+            continue;
+        };
+        append_registered_claim(settings, &mut claims, "lora", &id, None, &confined);
+    }
+    for claim in claims {
+        publish(claim);
+    }
+}
+
+/// The `(id, path)` pairs the shared external-LoRA scan assigns on this worker.
+fn external_lora_entries(settings: &Settings) -> Vec<(String, PathBuf)> {
+    let mut cache = sceneworks_core::external_loras::ExternalLoraCache::default();
+    sceneworks_core::external_loras::scan_external_loras(&settings.external_model_roots, &mut cache)
+        .into_iter()
+        .filter_map(|row| {
+            let id = row.get("id")?.as_str()?.to_owned();
+            let path = row.pointer("/source/path")?.as_str()?.to_owned();
+            Some((id, PathBuf::from(path)))
+        })
+        .collect()
+}
+
+/// Resolve an `external_…` LoRA id to this worker's confined copy of the exact
+/// frozen bytes, or `None` when the id is not external, is not present under
+/// the configured roots, or its bytes differ from the frozen ledger.
+pub(crate) fn registered_external_lora_path(
+    settings: &Settings,
+    id: &str,
+    frozen_files: &[PortableArtifactFile],
+) -> WorkerResult<Option<PathBuf>> {
+    if !id.starts_with(sceneworks_core::external_loras::EXTERNAL_ID_PREFIX) {
+        return Ok(None);
+    }
+    for (entry_id, path) in external_lora_entries(settings) {
+        if entry_id != id {
+            continue;
+        }
+        let Ok(confined) = crate::paths::normalize_app_managed_lora_path(settings, &path) else {
+            continue;
+        };
+        let roots = crate::paths::allowed_model_roots(settings).unwrap_or_default();
+        if capture_registered_files_with_roots(&confined, &roots)
+            .is_ok_and(|files| files == frozen_files)
+        {
+            return Ok(Some(confined));
+        }
+    }
+    Ok(None)
 }
 
 fn selected_text_encoder_root_and_files(
@@ -622,6 +814,7 @@ fn registered_digest_source_claims(
     let manifests = settings.config_dir.join("manifests");
     let checkpoint_plans =
         sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
+    let roots = crate::paths::allowed_model_roots(settings).unwrap_or_default();
     for model in catalog_records(&manifests.join("user.models.jsonc"), "models") {
         let Some(id) = model.get("id").and_then(serde_json::Value::as_str) else {
             continue;
@@ -636,9 +829,11 @@ fn registered_digest_source_claims(
                 let files = if let Some(files) = captured.get(&path) {
                     Some(files.clone())
                 } else {
-                    capture_registered_files(&path).ok().inspect(|files| {
-                        captured.insert(path.clone(), files.clone());
-                    })
+                    capture_registered_files_with_roots(&path, &roots)
+                        .ok()
+                        .inspect(|files| {
+                            captured.insert(path.clone(), files.clone());
+                        })
                 };
                 if let Some(files) = files {
                     append_registered_claim_files(&mut claims, "model", id, None, files.clone());
@@ -694,7 +889,7 @@ fn registered_digest_source_claims(
             continue;
         };
         for path in builtin_lora_source_paths(settings, &lora) {
-            append_registered_claim(&mut claims, "lora", id, None, &path);
+            append_registered_claim(settings, &mut claims, "lora", id, None, &path);
             for claim in claims.drain(..) {
                 publish(claim);
             }
@@ -715,7 +910,7 @@ fn registered_digest_source_claims(
                 continue;
             };
             if let Ok(path) = normalize_catalog_lora_path(settings, &manifest, &path) {
-                append_registered_claim(&mut claims, "lora", id, None, &path);
+                append_registered_claim(settings, &mut claims, "lora", id, None, &path);
             }
             for claim in claims.drain(..) {
                 publish(claim);
@@ -740,7 +935,7 @@ fn registered_digest_source_claims(
                     continue;
                 };
                 if let Some(path) = character_lora_copy_path(settings, project_path, link) {
-                    append_registered_claim(&mut claims, "lora", id, None, &path);
+                    append_registered_claim(settings, &mut claims, "lora", id, None, &path);
                 }
                 for claim in claims.drain(..) {
                     publish(claim);
@@ -756,7 +951,7 @@ fn registered_digest_source_claims(
             let Some(path) = control_overlay_entry_file(settings, &manifest, &overlay) else {
                 continue;
             };
-            append_registered_claim(&mut claims, "control", id, None, &path);
+            append_registered_claim(settings, &mut claims, "control", id, None, &path);
             for claim in claims.drain(..) {
                 publish(claim);
             }
@@ -852,6 +1047,36 @@ fn converted_builtin_model_ids() -> Vec<String> {
         })
         .filter_map(|entry| entry.get("id").and_then(serde_json::Value::as_str))
         .map(str::to_owned)
+        .collect()
+}
+
+/// The builtin catalog's model download receipt paths (SW-7030): one
+/// `data/models/<safe_download_dir(repo)>/.sceneworks-download-complete.json` per
+/// `downloads[].repo` the embedded builtin manifest declares. Model Manager enqueues exactly that
+/// targetDir for each builtin `downloads[]` entry, and `run_model_download_job` writes its
+/// completion receipt there, so watching these markers detects a builtin auxiliary
+/// (`controlnet_tile_sdxl`, …) installed after the initial inventory scan. Pure metadata-only
+/// path construction — the multi-GiB weights these receipts stand in for are never hashed.
+fn builtin_model_download_receipt_paths(settings: &Settings) -> Vec<PathBuf> {
+    let Ok(manifest) = sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+    else {
+        return Vec::new();
+    };
+    manifest
+        .get("models")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("downloads").and_then(serde_json::Value::as_array))
+        .flatten()
+        .filter_map(|download| download.get("repo").and_then(serde_json::Value::as_str))
+        .map(|repo| {
+            settings
+                .data_dir
+                .join("models")
+                .join(crate::paths::safe_download_dir(repo))
+                .join(".sceneworks-download-complete.json")
+        })
         .collect()
 }
 
@@ -1242,20 +1467,29 @@ pub(crate) fn registered_builtin_lora_path(
 }
 
 fn append_registered_claim(
+    settings: &Settings,
     claims: &mut Vec<PortableSourceClaim>,
     kind: &str,
     model_id: &str,
     component_id: Option<&str>,
     selected: &Path,
 ) {
-    let Ok(files) = capture_registered_files(selected) else {
+    let roots = crate::paths::allowed_model_roots(settings).unwrap_or_default();
+    let Ok(files) = capture_registered_files_with_roots(selected, &roots) else {
         return;
     };
     append_registered_claim_files(claims, kind, model_id, component_id, files);
 }
 
 pub(crate) fn capture_registered_files(selected: &Path) -> WorkerResult<Vec<PortableArtifactFile>> {
-    let mut files = capture_files(selected)?;
+    capture_registered_files_with_roots(selected, &[])
+}
+
+pub(crate) fn capture_registered_files_with_roots(
+    selected: &Path,
+    allowed_roots: &[PathBuf],
+) -> WorkerResult<Vec<PortableArtifactFile>> {
+    let mut files = capture_files_with_roots(selected, allowed_roots)?;
     if selected.is_dir() {
         files.retain(|file| {
             !matches!(
@@ -1392,8 +1626,8 @@ fn flux2_conversion_source_claims(
     settings: &Settings,
     mut publish: impl FnMut(PortableSourceClaim),
 ) {
-    let hub = sceneworks_core::hf_home::huggingface_hub_cache_dir(&settings.data_dir);
-    let Ok(repos) = std::fs::read_dir(hub) else {
+    let library = sceneworks_core::hf_home::model_source_library(&settings.data_dir);
+    let Ok(repos) = std::fs::read_dir(library.root()) else {
         return;
     };
     for repo in repos.flatten() {
@@ -1405,7 +1639,10 @@ fn flux2_conversion_source_claims(
             continue;
         };
         let repository = format!("{owner}/{name}");
-        let Ok(revisions) = std::fs::read_dir(repo.path().join("snapshots")) else {
+        let Ok(snapshots) = library.snapshots_root_from_repository_root(&repo.path()) else {
+            continue;
+        };
+        let Ok(revisions) = std::fs::read_dir(snapshots) else {
             continue;
         };
         for revision in revisions.flatten() {
@@ -1454,11 +1691,11 @@ pub(crate) fn capture_selected_source(
     if let Some((repository, revision, tier)) =
         sceneworks_core::portable_sources::parse_flux2_convert_base_claim_id(source_id)
     {
-        let hub = sceneworks_core::hf_home::huggingface_hub_cache_dir(&settings.data_dir);
-        let library =
-            sceneworks_core::model_artifacts::ArtifactSourceLibrary::new(hub).map_err(|_| {
-                WorkerError::InvalidPayload("conversion source root is invalid".to_owned())
-            })?;
+        let source_library = sceneworks_core::hf_home::model_source_library(&settings.data_dir);
+        let library = sceneworks_core::model_artifacts::ArtifactSourceLibrary::new(
+            source_library.root().to_path_buf(),
+        )
+        .map_err(|_| WorkerError::InvalidPayload("conversion source root is invalid".to_owned()))?;
         let Ok((_, snapshot)) = library.discover_snapshot(repository, Some(revision)) else {
             return Ok(None);
         };
@@ -1508,7 +1745,8 @@ pub(crate) fn capture_selected_source(
     } else {
         PortableSourceProvenance::OperatorOverride
     };
-    let files = capture_files(&selected)?;
+    let roots = crate::paths::allowed_model_roots(settings).unwrap_or_default();
+    let files = capture_files_with_roots(&selected, &roots)?;
     let claim = PortableSourceClaim::new(source_id, provenance, files)
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
     Ok(Some((claim, selected)))
@@ -1524,8 +1762,18 @@ fn capture_flux2_borrowed_files(
         return Ok(None);
     }
     let mut files = Vec::new();
+    let canonical_root = std::fs::canonicalize(selected).map_err(WorkerError::Io)?;
     for component in ["vae", "text_encoder", "tokenizer"] {
-        capture_tree(selected, &selected.join(component), &mut files)?;
+        let allowed = vec![canonical_root.clone()];
+        let mut visited = std::collections::HashSet::from([canonical_root.clone()]);
+        capture_tree(
+            selected,
+            &selected.join(component),
+            &allowed,
+            &mut visited,
+            &mut files,
+            0,
+        )?;
     }
     files.sort();
     if files.is_empty() {
@@ -1535,6 +1783,21 @@ fn capture_flux2_borrowed_files(
 }
 
 fn capture_files(selected: &Path) -> WorkerResult<Vec<PortableArtifactFile>> {
+    capture_files_with_roots(selected, &[])
+}
+
+/// Capture a registered source's file ledger, following directory links the
+/// way API admission capture does (SW-7030, review 4533400138): a linked
+/// directory (e.g. `text_encoder/` pointing at shared components elsewhere
+/// under the data dir) keeps its logical relative path, while confinement and
+/// hashing resolve through the canonical target. A link whose target escapes
+/// every allowed root — the canonical tree root plus any caller-supplied
+/// managed roots — is refused, and canonical directories are visited once so
+/// link cycles cannot recurse forever.
+fn capture_files_with_roots(
+    selected: &Path,
+    allowed_roots: &[PathBuf],
+) -> WorkerResult<Vec<PortableArtifactFile>> {
     let mut found = Vec::new();
     if selected.is_file() {
         let name = selected.file_name().ok_or_else(|| {
@@ -1542,7 +1805,14 @@ fn capture_files(selected: &Path) -> WorkerResult<Vec<PortableArtifactFile>> {
         })?;
         capture_one(selected, PathBuf::from(name), &mut found)?;
     } else if selected.is_dir() {
-        capture_tree(selected, selected, &mut found)?;
+        let canonical_root = std::fs::canonicalize(selected).map_err(WorkerError::Io)?;
+        let mut allowed: Vec<PathBuf> = allowed_roots
+            .iter()
+            .filter_map(|root| std::fs::canonicalize(root).ok())
+            .collect();
+        allowed.push(canonical_root.clone());
+        let mut visited = std::collections::HashSet::from([canonical_root]);
+        capture_tree(selected, selected, &allowed, &mut visited, &mut found, 0)?;
     } else {
         return Err(WorkerError::InvalidPayload(
             "auxiliary source is unavailable".to_owned(),
@@ -1557,22 +1827,41 @@ fn capture_files(selected: &Path) -> WorkerResult<Vec<PortableArtifactFile>> {
     Ok(found)
 }
 
+const MAX_CAPTURE_DEPTH: usize = 16;
+
 fn capture_tree(
     root: &Path,
     current: &Path,
+    allowed: &[PathBuf],
+    visited: &mut std::collections::HashSet<PathBuf>,
     found: &mut Vec<PortableArtifactFile>,
+    depth: usize,
 ) -> WorkerResult<()> {
-    for entry in std::fs::read_dir(current).map_err(WorkerError::Io)? {
-        let path = entry.map_err(WorkerError::Io)?.path();
-        let metadata = std::fs::symlink_metadata(&path).map_err(WorkerError::Io)?;
-        if metadata.is_dir() {
-            capture_tree(root, &path, found)?;
-        } else if metadata.is_file() || metadata.file_type().is_symlink() && path.is_file() {
+    if depth > MAX_CAPTURE_DEPTH {
+        return Err(WorkerError::InvalidPayload(
+            "auxiliary source tree is too deep".to_owned(),
+        ));
+    }
+    let canonical_current = std::fs::canonicalize(current).map_err(WorkerError::Io)?;
+    for entry in std::fs::read_dir(&canonical_current).map_err(WorkerError::Io)? {
+        let entry = entry.map_err(WorkerError::Io)?;
+        let path = current.join(entry.file_name());
+        let canonical = std::fs::canonicalize(&path).map_err(WorkerError::Io)?;
+        if canonical.is_dir() {
+            if !allowed.iter().any(|root| canonical.starts_with(root)) {
+                return Err(WorkerError::InvalidPayload(
+                    "auxiliary source link escapes its managed roots".to_owned(),
+                ));
+            }
+            if visited.insert(canonical) {
+                capture_tree(root, &path, allowed, visited, found, depth + 1)?;
+            }
+        } else if canonical.is_file() {
             let relative = path
                 .strip_prefix(root)
                 .expect("traversed path is inside root")
                 .to_path_buf();
-            capture_one(&path, relative, found)?;
+            capture_one(&canonical, relative, found)?;
         } else {
             return Err(WorkerError::InvalidPayload(
                 "auxiliary source contains a non-file entry".to_owned(),
@@ -1698,6 +1987,46 @@ mod tests {
                 .unwrap()
                 .is_none());
         }
+    }
+
+    #[test]
+    fn proved_utility_source_survives_busy_queue_and_rechecks_bytes_before_load() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = Settings::for_test(temp.path().join("worker-data"));
+        let selected = settings.data_dir.join("models/utility");
+        std::fs::create_dir_all(&selected).unwrap();
+        let weights = selected.join("model.safetensors");
+        std::fs::write(&weights, b"source").unwrap();
+        let files = capture_registered_files(&selected).unwrap();
+        let claim = PortableSourceClaim::new(
+            "test_queued_utility".to_owned(),
+            PortableSourceProvenance::OperatorOverride,
+            files.clone(),
+        )
+        .unwrap();
+        let mut inventory = InventoryProgress::default();
+        inventory.publish_probe(claim.clone());
+        let generation = inventory.generation;
+        inventory.acknowledge(&settings.worker_id, generation);
+        // The worker remains busy beyond the old 60-second probe lifetime, and an ordinary
+        // inventory sweep does not discover this uncataloged app-managed source.
+        inventory.probed.get_mut(&claim.source_id).unwrap().1 =
+            Instant::now() - Duration::from_secs(61);
+        inventory.replace_scanned(Vec::new());
+        assert!(inventory.claims.contains(&claim));
+        inventory.reset_worker(&settings.worker_id);
+        assert!(inventory
+            .pending(&settings.worker_id)
+            .unwrap()
+            .1
+            .contains(&claim));
+
+        // A retained scheduling claim does not authorize a changed checkpoint at the loader.
+        std::fs::write(&weights, b"mutate").unwrap();
+        assert!(
+            selected_app_managed_exact_source(&settings, selected.to_str().unwrap(), &files,)
+                .is_err()
+        );
     }
 
     #[test]
@@ -2576,6 +2905,265 @@ mod tests {
             progress.pending("worker-a").unwrap().1.is_empty(),
             "removed source is withdrawn"
         );
+    }
+
+    #[test]
+    fn builtin_model_download_receipt_schedules_inventory_rescan() {
+        // SW-7030: the initial inventory can finish before the user installs a builtin
+        // auxiliary (`controlnet_tile_sdxl`). `run_model_download_job` then writes its
+        // completion receipt under data/models/<safe_download_dir(repo)>/.sceneworks-download-complete.json
+        // — the targetDir Model Manager enqueues for the catalog `downloads[]` entry. That
+        // receipt must change the watched catalog so the next heartbeat rescans and
+        // advertises `sdxl_detail_tile_control` instead of waiting out the 30-minute interval.
+        let temp = tempfile::TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let mut settings = Settings::for_test(data.clone());
+        settings.config_dir = temp.path().join("config");
+        let source =
+            sceneworks_core::control_weights::shipped_auxiliary_source("sdxl_detail_tile_control")
+                .unwrap();
+        // The worker's initial inventory ran to completion before anything was installed.
+        let before = catalog_hash(&settings);
+        let schedule = InventorySchedule {
+            next_due: Some(Instant::now() + INVENTORY_RESCAN_INTERVAL),
+            catalog_hash: Some(before),
+        };
+        // The user installs the builtin auxiliary: `run_model_download_job` lands the weights
+        // in the HF cache the Detail enhancer resolves...
+        let hub = temp.path().join("hub");
+        let file = hub
+            .join("models--xinsir--controlnet-tile-sdxl-1.0/snapshots")
+            .join(source.revision)
+            .join("diffusion_pytorch_model.safetensors");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"tile control weights").unwrap();
+        // ...and writes its completion receipt into the app store target dir.
+        let target = data
+            .join("models")
+            .join(crate::paths::safe_download_dir(source.repo));
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(
+            target.join(".sceneworks-download-complete.json"),
+            br#"{"schemaVersion":2,"repo":"xinsir/controlnet-tile-sdxl-1.0"}"#,
+        )
+        .unwrap();
+        // The receipt changes the watched catalog, so the heartbeat rescan fires early...
+        let after = catalog_hash(&settings);
+        assert_ne!(
+            before, after,
+            "a completed builtin model download must schedule an inventory rescan"
+        );
+        assert!(scan_due(&schedule, Instant::now(), after));
+        // ...and the rescan advertises the Detail tile source from the installed snapshot.
+        crate::test_env::temp_env_vars(&[("HF_HUB_CACHE", hub.to_str().unwrap())], || {
+            let mut scanned = Vec::new();
+            collect_source_claims(&settings, |claim| scanned.push(claim));
+            assert!(
+                scanned
+                    .iter()
+                    .any(|claim| claim.source_id == "sdxl_detail_tile_control"),
+                "the installed builtin auxiliary is advertised without the 30-minute rescan"
+            );
+        });
+    }
+
+    #[test]
+    fn external_lora_is_advertised_and_rebound_by_exact_worker_bytes() {
+        // SW-7030 (review 4531591689): an externally scanned ComfyUI LoRA gets a
+        // synthetic `external_…` catalog row from the API, so the worker must
+        // advertise the matching registered digest claim and rebind it by exact
+        // bytes under its own configured root.
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("ComfyUI/models");
+        let adapter = root.join("loras/Wan/detailz-wan.safetensors");
+        std::fs::create_dir_all(adapter.parent().unwrap()).unwrap();
+        let header = serde_json::json!({
+            "diffusion_model.blocks.0.cross_attn.k.lora_down.weight":
+                {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]},
+            "diffusion_model.blocks.0.cross_attn.k.lora_up.weight":
+                {"dtype": "F32", "shape": [1], "data_offsets": [4, 8]},
+        });
+        let header_bytes = serde_json::to_vec(&header).unwrap();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(header_bytes.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&header_bytes);
+        bytes.extend_from_slice(&[0_u8; 8]);
+        std::fs::write(&adapter, &bytes).unwrap();
+
+        let mut settings = Settings::for_test(temp.path().join("worker-data"));
+        settings.external_model_roots = vec![root];
+        let entries = external_lora_entries(&settings);
+        assert_eq!(entries.len(), 1, "the shared scan finds the adapter");
+        let (id, _) = entries.into_iter().next().unwrap();
+        assert!(id.starts_with("external_"), "synthetic id: {id}");
+
+        let frozen = capture_registered_files(&adapter).unwrap();
+        // Scope to the external-LoRA pass: the full inventory also hashes any
+        // real weights installed on the host for unrelated static sources.
+        let mut claims = Vec::new();
+        external_lora_source_claims(&settings, &mut |claim| claims.push(claim));
+        let ledger =
+            sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(
+                &frozen,
+            )
+            .unwrap();
+        let expected_claim = sceneworks_core::portable_sources::registered_digest_claim_id(
+            "lora", &id, None, &ledger,
+        )
+        .unwrap();
+        assert!(
+            claims
+                .iter()
+                .any(|claim| claim.source_id == expected_claim && claim.files == frozen),
+            "the external LoRA is advertised with its exact byte ledger"
+        );
+        let resolved = registered_external_lora_path(&settings, &id, &frozen)
+            .unwrap()
+            .expect("matching bytes resolve");
+        assert!(resolved.ends_with("detailz-wan.safetensors"));
+
+        // Altered bytes no longer match the frozen ledger.
+        let mut altered = bytes.clone();
+        altered.extend_from_slice(b"tampered");
+        std::fs::write(&adapter, altered).unwrap();
+        assert!(
+            registered_external_lora_path(&settings, &id, &frozen)
+                .unwrap()
+                .is_none(),
+            "substituted bytes must not rebind"
+        );
+    }
+
+    #[test]
+    fn external_base_model_is_advertised_and_rebound_by_exact_worker_bytes() {
+        // SW-7030 (review 4533688093): a runnable external ComfyUI base model is
+        // forwarded as a local Digest entry, so the worker must advertise the
+        // matching `model` digest claim and rebind the anchor by exact bytes.
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("ComfyUI/models");
+        let anchor = root.join("diffusion_models/anchor.safetensors");
+        std::fs::create_dir_all(anchor.parent().unwrap()).unwrap();
+        let header = serde_json::json!({
+            "model.diffusion_model.input_blocks.0.0.weight":
+                {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]},
+        });
+        let header_bytes = serde_json::to_vec(&header).unwrap();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(header_bytes.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&header_bytes);
+        bytes.extend_from_slice(&[0_u8; 4]);
+        std::fs::write(&anchor, &bytes).unwrap();
+
+        let mut settings = Settings::for_test(temp.path().join("worker-data"));
+        settings.external_model_roots = vec![root];
+        let rows = external_base_rows(&settings);
+        assert_eq!(rows.len(), 1, "the shared scan assembles the anchor");
+        let id = rows[0]["id"].as_str().unwrap().to_owned();
+        assert!(id.starts_with("external_base_"), "synthetic id: {id}");
+
+        let frozen = capture_registered_files(&anchor).unwrap();
+        let ledger =
+            sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(
+                &frozen,
+            )
+            .unwrap();
+        let expected_claim = sceneworks_core::portable_sources::registered_digest_claim_id(
+            "model", &id, None, &ledger,
+        )
+        .unwrap();
+        let mut claims = Vec::new();
+        external_base_source_claims(&settings, &mut |claim| claims.push(claim));
+        assert!(
+            claims
+                .iter()
+                .any(|claim| claim.source_id == expected_claim && claim.files == frozen),
+            "the external base model is advertised with its exact byte ledger"
+        );
+        assert!(
+            registered_external_base_path(&settings, &id, None, &frozen)
+                .unwrap()
+                .is_some(),
+            "matching bytes resolve"
+        );
+
+        let mut altered = bytes.clone();
+        altered.extend_from_slice(b"tampered");
+        std::fs::write(&anchor, altered).unwrap();
+        assert!(
+            registered_external_base_path(&settings, &id, None, &frozen)
+                .unwrap()
+                .is_none(),
+            "substituted bytes must not rebind"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registered_directory_model_traverses_linked_directories_within_managed_roots() {
+        // SW-7030 (review 4533400138): a registered local directory model whose
+        // `text_encoder/` is a symlink to shared components elsewhere under the
+        // data dir must still produce its exact file ledger, with logical
+        // relative paths, while a link escaping every managed root is refused.
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let shared = data.join("models/shared/text_encoder");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("model.safetensors"), b"encoder bytes").unwrap();
+        let model = data.join("models/local/demo");
+        std::fs::create_dir_all(&model).unwrap();
+        std::fs::write(model.join("dit.safetensors"), b"dit bytes").unwrap();
+        symlink(&shared, model.join("text_encoder")).unwrap();
+
+        let settings = Settings::for_test(data.clone());
+        let roots = crate::paths::allowed_model_roots(&settings).unwrap();
+        let files = capture_registered_files_with_roots(&model, &roots).unwrap();
+        let relatives: Vec<PathBuf> = files
+            .iter()
+            .map(|file| file.relative_path.clone())
+            .collect();
+        assert!(relatives.contains(&PathBuf::from("dit.safetensors")));
+        assert!(relatives.contains(&PathBuf::from("text_encoder/model.safetensors")));
+
+        // Review 4533885128: the `user.models.jsonc` inventory loop must also
+        // pass managed roots so this model's claim is actually published.
+        let mut inv_settings = Settings::for_test(data.clone());
+        inv_settings.config_dir = temp.path().join("config");
+        let user_manifest = inv_settings.config_dir.join("manifests/user.models.jsonc");
+        std::fs::create_dir_all(user_manifest.parent().unwrap()).unwrap();
+        std::fs::write(
+            &user_manifest,
+            serde_json::json!({
+                "models": [{"id": "linked_demo", "installedPath": model.display().to_string()}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let ledger =
+            sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(&files)
+                .unwrap();
+        let expected_claim = sceneworks_core::portable_sources::registered_digest_claim_id(
+            "model",
+            "linked_demo",
+            None,
+            &ledger,
+        )
+        .unwrap();
+        let mut published = Vec::new();
+        registered_digest_source_claims(&inv_settings, |claim| published.push(claim));
+        assert!(
+            published
+                .iter()
+                .any(|claim| claim.source_id == expected_claim),
+            "inventory must advertise the linked directory model"
+        );
+
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.safetensors"), b"secret").unwrap();
+        symlink(&outside, model.join("escaped")).unwrap();
+        assert!(capture_registered_files_with_roots(&model, &roots).is_err());
     }
 
     #[test]

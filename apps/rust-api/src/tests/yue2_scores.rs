@@ -345,7 +345,7 @@ async fn mcp_agent_round_trips_yue2_score_tools() {
         )
         .await;
     });
-    let client = rmcp::model::ClientInfo::default()
+    let client = rmcp::model::ClientConfig::default()
         .serve(StreamableHttpClientTransport::from_config(
             StreamableHttpClientTransportConfig::with_uri(format!("http://{addr}/mcp")),
         ))

@@ -454,6 +454,53 @@ pub(crate) fn selected_route_source_rows(
             }
         }
     }
+    // `advanced.decoder` selects a component of the OWNING generation-model carrier, never of
+    // every auxiliary entry riding the same job. The enqueue gate
+    // (`validate_selected_decoder_for_manifest`) already judged the selection against the same
+    // server-owned `modelManifestEntry`; an auxiliary carrier attached by
+    // `ensure_runtime_model_sources` (e.g. an Iris upscale task) carries no decoder of its own,
+    // so the previous per-entry capture made such an auxiliary fail the whole route with
+    // "cannot use decoder" and the all-carrier predicate below refused it as unavailable.
+    if matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
+        if let Some(decoder) = advanced
+            .and_then(|value| value.get("decoder"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty() && *value != "native")
+        {
+            let (slot, entry) = owning_decoder_carrier(entries)
+                .ok_or("selected decoder has no owning generation-model carrier")?;
+            let id = entry
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("selected model");
+            let option = entry
+                .pointer(&format!("/decoders/byBackend/{backend}"))
+                .and_then(Value::as_array)
+                .and_then(|options| {
+                    options
+                        .iter()
+                        .find(|option| option.get("id").and_then(Value::as_str) == Some(decoder))
+                })
+                .ok_or_else(|| format!("{id} cannot use decoder {decoder} on {backend}"))?;
+            let component = option
+                .get("componentId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("decoder {decoder} has no component"))?;
+            let download = ["downloads", "conditionalComponents"]
+                .into_iter()
+                .filter_map(|field| entry.get(field).and_then(Value::as_array))
+                .flatten()
+                .find(|row| row.get("componentId").and_then(Value::as_str) == Some(component))
+                .ok_or_else(|| format!("{id} lacks selected component {component}"))?;
+            rows.push(SelectedRouteSource {
+                model_slot: slot.to_owned(),
+                component_id: component.to_owned(),
+                role: ArtifactMemberRole::OptionalComponent,
+                source: SelectedSourceLocation::ManifestDownload(download.clone()),
+                selected_tier: None,
+            });
+        }
+    }
     for (slot, entry) in entries {
         let id = entry
             .get("id")
@@ -702,26 +749,6 @@ pub(crate) fn selected_route_source_rows(
                 push_operator_source(&mut rows, slot, "sdxl_ip_adapter");
                 push_operator_source(&mut rows, slot, "sdxl_ip_encoder");
             }
-            if let Some(decoder) = advanced
-                .and_then(|value| value.get("decoder"))
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty() && *value != "native")
-            {
-                let option = entry
-                    .pointer(&format!("/decoders/byBackend/{backend}"))
-                    .and_then(Value::as_array)
-                    .and_then(|options| {
-                        options.iter().find(|option| {
-                            option.get("id").and_then(Value::as_str) == Some(decoder)
-                        })
-                    })
-                    .ok_or_else(|| format!("{id} cannot use decoder {decoder} on {backend}"))?;
-                let component = option
-                    .get("componentId")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| format!("decoder {decoder} has no component"))?;
-                add_component(&mut rows, component, ArtifactMemberRole::OptionalComponent)?;
-            }
             if matches!(id, "flux3_klein" | "flux3_klein_base")
                 && advanced
                     .and_then(|value| value.get("enhancePrompt"))
@@ -790,11 +817,9 @@ pub(crate) fn selected_route_source_rows(
                     source,
                     selected_tier: tier,
                 });
-                if advanced
-                    .and_then(|value| value.get("controlMode"))
-                    .and_then(Value::as_str)
-                    == Some("depth")
-                {
+                if sceneworks_core::portable_sources::strict_control_requires_depth_estimator(
+                    payload.get("advanced"),
+                ) {
                     push_operator_source(&mut rows, slot, "depth_anything_v2_small");
                 }
             }
@@ -871,6 +896,7 @@ pub(crate) fn eligible_portable_routes(
     payload: &JsonObject,
     entries: &[(String, &Value)],
     requested_gpu: &str,
+    data_dir: &std::path::Path,
 ) -> Result<Vec<(String, String)>, ApiError> {
     if entries.is_empty() {
         return Ok(Vec::new());
@@ -981,7 +1007,7 @@ pub(crate) fn eligible_portable_routes(
             platforms
                 .iter()
                 .filter(|platform| {
-                    entries_support_route(job_type, payload, entries, backend, platform)
+                    entries_support_route(job_type, payload, entries, backend, platform, data_dir)
                         && selected_decoder_available_on_route(job_type, payload, entries, backend)
                 })
                 .map(|platform| (backend.to_owned(), (*platform).to_owned())),
@@ -993,6 +1019,19 @@ pub(crate) fn eligible_portable_routes(
         ));
     }
     Ok(routes)
+}
+
+/// The carrier slot that owns `advanced.decoder` compatibility and source capture: the selected
+/// generation model itself (`modelManifestEntry`, injected by the typed image route), never an
+/// auxiliary carrier riding the same job — one added by `ensure_runtime_model_sources` (e.g. an
+/// Iris upscale task) advertises no generation decoder. A decoder selection with no owning
+/// carrier cannot be proven compatible, so both the route predicate and source capture fail
+/// closed on the missing slot instead of surveying unrelated entries.
+fn owning_decoder_carrier<'a>(entries: &'a [(String, &'a Value)]) -> Option<(&'a str, &'a Value)> {
+    entries
+        .iter()
+        .find(|(slot, _)| slot == "modelManifestEntry")
+        .map(|(slot, entry)| (slot.as_str(), *entry))
 }
 
 fn selected_decoder_available_on_route(
@@ -1013,7 +1052,10 @@ fn selected_decoder_available_on_route(
     else {
         return true;
     };
-    entries.iter().all(|(_, entry)| {
+    // Decoder compatibility is a property of the owning generation-model carrier alone. The
+    // previous all-carrier predicate made every auxiliary carrier advertise the generation
+    // model's decoder, refusing routes whose auxiliaries legitimately carry none of their own.
+    owning_decoder_carrier(entries).is_some_and(|(_, entry)| {
         let component = entry
             .pointer(&format!("/decoders/byBackend/{backend}"))
             .and_then(Value::as_array)
@@ -1040,6 +1082,7 @@ fn entries_support_route(
     entries: &[(String, &Value)],
     backend: &str,
     platform: &str,
+    data_dir: &std::path::Path,
 ) -> bool {
     entries.iter().all(|(slot, entry)| {
         let Some(id) = entry.get("id").and_then(Value::as_str) else {
@@ -1076,7 +1119,16 @@ fn entries_support_route(
                 && slot == "modelManifestEntries/0"
                 && entry.get("adapter").and_then(Value::as_str) == Some("prompt-refine"))
             // Dataset captioning selects JoyCaption by its authored repository. That selected
-            // executable utility is also carried in the first auxiliary slot.
+            // executable utility is also carried in the first auxiliary slot. A LOCAL
+            // selection keeps the same local-versus-repository classification source
+            // resolution (`ensure_runtime_model_sources`) established: a selection that
+            // exists as an app-managed directory is local even when it is repo-shaped
+            // (`models/my-joycaption` has two components and differs from the publisher
+            // repository), so `app_managed_utility_path_exists` accepts it exactly as
+            // `model_sources` did before the entry was attached. Rejecting every repo-shaped
+            // string here stranded that valid local selection with no admissible route at
+            // all — "No native route can claim this model request" — before worker proof
+            // could run.
             && !(*job_type == JobType::TrainingCaption
                 && slot == "modelManifestEntries/0"
                 && payload.get("captioner").and_then(Value::as_str) == Some("joy_caption")
@@ -1089,6 +1141,10 @@ fn entries_support_route(
                         .and_then(Value::as_str)
                         .is_some_and(|selection| {
                             !crate::model_sources::looks_like_huggingface_repository(selection)
+                                || crate::model_sources::app_managed_utility_path_exists(
+                                    data_dir,
+                                    selection,
+                                )
                         }))))
             // Dataset Doctor's selected CLIP embedder is likewise an executable utility in
             // the first auxiliary slot, selected by its catalog id rather than a repo string.
@@ -1156,9 +1212,14 @@ mod tests {
         .as_object()
         .unwrap()
         .clone();
-        let routes =
-            eligible_portable_routes(&JobType::TrainingCaption, &payload, &entries, "auto")
-                .expect("selected JoyCaption repository is executable");
+        let routes = eligible_portable_routes(
+            &JobType::TrainingCaption,
+            &payload,
+            &entries,
+            "auto",
+            std::path::Path::new(""),
+        )
+        .expect("selected JoyCaption repository is executable");
         assert!(routes.contains(&("mlx".to_owned(), "macos".to_owned())));
         assert!(routes.contains(&("candle".to_owned(), "windows".to_owned())));
 
@@ -1167,24 +1228,63 @@ mod tests {
             "modelNameOrPath".to_owned(),
             serde_json::json!("/managed/captioner"),
         );
-        let local_routes =
-            eligible_portable_routes(&JobType::TrainingCaption, &local, &entries, "auto")
-                .expect("app-managed JoyCaption selection retains the native route");
+        let local_routes = eligible_portable_routes(
+            &JobType::TrainingCaption,
+            &local,
+            &entries,
+            "auto",
+            std::path::Path::new(""),
+        )
+        .expect("app-managed JoyCaption selection retains the native route");
         assert!(local_routes.contains(&("mlx".to_owned(), "macos".to_owned())));
 
+        // PR #3347 review 4527337951: a repo-shaped RELATIVE selection that exists as an
+        // app-managed directory is LOCAL, exactly as `ensure_runtime_model_sources`
+        // classified it before attaching this entry (`!looks_like_repo ||
+        // app_managed_utility_path_exists`). The route predicate must preserve that
+        // classification: rejecting every two-component string stranded the valid local
+        // selection with no admissible route at all.
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(temp.path().join("models/my-joycaption"))
+            .expect("app-managed local dir");
+        let mut repo_shaped_local = payload.clone();
+        repo_shaped_local.insert(
+            "modelNameOrPath".to_owned(),
+            serde_json::json!("models/my-joycaption"),
+        );
+        let repo_shaped_routes = eligible_portable_routes(
+            &JobType::TrainingCaption,
+            &repo_shaped_local,
+            &entries,
+            "auto",
+            temp.path(),
+        )
+        .expect("a repo-shaped app-managed local dir retains the native route");
+        assert!(repo_shaped_routes.contains(&("mlx".to_owned(), "macos".to_owned())));
+        assert!(repo_shaped_routes.contains(&("candle".to_owned(), "windows".to_owned())));
+        // The same repo-shaped selection with NO app-managed directory behind it stays a
+        // repository string, and a non-matching one still fails closed.
         let mut wrong_repo = payload.clone();
         wrong_repo.insert(
             "modelNameOrPath".to_owned(),
             serde_json::json!("other/model"),
         );
-        assert!(
-            eligible_portable_routes(&JobType::TrainingCaption, &wrong_repo, &entries, "auto")
-                .is_err()
-        );
-        assert!(
-            eligible_portable_routes(&JobType::DatasetAnalysis, &payload, &entries, "auto")
-                .is_err()
-        );
+        assert!(eligible_portable_routes(
+            &JobType::TrainingCaption,
+            &wrong_repo,
+            &entries,
+            "auto",
+            temp.path(),
+        )
+        .is_err());
+        assert!(eligible_portable_routes(
+            &JobType::DatasetAnalysis,
+            &payload,
+            &entries,
+            "auto",
+            std::path::Path::new(""),
+        )
+        .is_err());
     }
 
     #[test]
@@ -1199,16 +1299,26 @@ mod tests {
             .as_object()
             .unwrap()
             .clone();
-        let routes =
-            eligible_portable_routes(&JobType::DatasetAnalysis, &payload, &entries, "auto")
-                .expect("selected CLIP embedder is executable");
+        let routes = eligible_portable_routes(
+            &JobType::DatasetAnalysis,
+            &payload,
+            &entries,
+            "auto",
+            std::path::Path::new(""),
+        )
+        .expect("selected CLIP embedder is executable");
         assert!(routes.contains(&("mlx".to_owned(), "macos".to_owned())));
         assert!(routes.contains(&("candle".to_owned(), "windows".to_owned())));
         let mut wrong = payload.clone();
         wrong.insert("embedder".to_owned(), serde_json::json!("other"));
-        assert!(
-            eligible_portable_routes(&JobType::DatasetAnalysis, &wrong, &entries, "auto").is_err()
-        );
+        assert!(eligible_portable_routes(
+            &JobType::DatasetAnalysis,
+            &wrong,
+            &entries,
+            "auto",
+            std::path::Path::new(""),
+        )
+        .is_err());
     }
 
     #[test]
@@ -1302,6 +1412,7 @@ mod tests {
                 klein.as_object().unwrap(),
                 &entries,
                 "auto",
+                std::path::Path::new("")
             )
             .unwrap(),
             [
@@ -1315,6 +1426,7 @@ mod tests {
             klein.as_object().unwrap(),
             &entries,
             "mlx",
+            std::path::Path::new("")
         )
         .is_err());
         let rows = selected_route_source_rows(
@@ -1343,6 +1455,7 @@ mod tests {
                 ltx.as_object().unwrap(),
                 &entries,
                 "auto",
+                std::path::Path::new("")
             )
             .unwrap(),
             [("cpu".to_owned(), "macos".to_owned())],
@@ -1438,6 +1551,72 @@ mod tests {
     }
 
     #[test]
+    fn strict_control_depth_requires_estimator_only_without_control_image() {
+        let entry = json!({"id":"krea_2_turbo"});
+        let entries = [("modelManifestEntry".to_owned(), &entry)];
+        let auto_depth = json!({
+            "model":"krea_2_turbo",
+            "advanced":{
+                "poses":[{"id":"front"}],
+                "controlMode":"depth",
+                "controlWeights":{
+                    "overlayId":"depth-approved",
+                    "_catalogAuthorized":true,
+                    "path":"/api-host/depth.safetensors"
+                }
+            }
+        });
+        let auto_obj = auto_depth.as_object().unwrap();
+        let auto_rows =
+            selected_route_source_rows(&JobType::ImageGenerate, auto_obj, &entries, "mlx", "macos")
+                .unwrap();
+        assert!(auto_rows
+            .iter()
+            .any(|row| row.component_id == "depth_anything_v2_small"));
+        assert!(
+            sceneworks_core::portable_sources::required_portable_aux_source_ids(
+                &JobType::ImageGenerate,
+                auto_obj,
+                &entry,
+                "mlx",
+            )
+            .unwrap()
+            .contains(&"depth_anything_v2_small".to_owned())
+        );
+
+        let user_map = json!({
+            "model":"krea_2_turbo",
+            "advanced":{
+                "poses":[{"id":"front"}],
+                "controlMode":"depth",
+                "controlImage":"asset-depth-map",
+                "controlWeights":{
+                    "overlayId":"depth-approved",
+                    "_catalogAuthorized":true,
+                    "path":"/api-host/depth.safetensors"
+                }
+            }
+        });
+        let user_obj = user_map.as_object().unwrap();
+        let user_rows =
+            selected_route_source_rows(&JobType::ImageGenerate, user_obj, &entries, "mlx", "macos")
+                .unwrap();
+        assert!(!user_rows
+            .iter()
+            .any(|row| row.component_id == "depth_anything_v2_small"));
+        assert!(
+            !sceneworks_core::portable_sources::required_portable_aux_source_ids(
+                &JobType::ImageGenerate,
+                user_obj,
+                &entry,
+                "mlx",
+            )
+            .unwrap()
+            .contains(&"depth_anything_v2_small".to_owned())
+        );
+    }
+
+    #[test]
     fn kolors_selects_ip_only_for_the_reference_loader_and_pid_for_candle_pose() {
         let entry = json!({"id":"kolors"});
         let entries = [("modelManifestEntry".to_owned(), &entry)];
@@ -1491,6 +1670,7 @@ mod tests {
             payload.as_object().expect("payload object"),
             &entry_ref,
             "auto",
+            std::path::Path::new(""),
         )
         .expect("routable job")
     }
@@ -1523,6 +1703,7 @@ mod tests {
             payload.as_object().unwrap(),
             &entry_ref,
             "auto",
+            std::path::Path::new("")
         )
         .is_err());
     }
@@ -1537,6 +1718,7 @@ mod tests {
             payload.as_object().unwrap(),
             &entry_ref,
             "cpu",
+            std::path::Path::new("")
         )
         .is_err());
     }
@@ -1548,11 +1730,25 @@ mod tests {
         let payload = json!({"model":"flux_schnell"});
         let payload = payload.as_object().unwrap();
         assert_eq!(
-            eligible_portable_routes(&JobType::ImageGenerate, payload, &entry_ref, "mlx").unwrap(),
+            eligible_portable_routes(
+                &JobType::ImageGenerate,
+                payload,
+                &entry_ref,
+                "mlx",
+                std::path::Path::new("")
+            )
+            .unwrap(),
             vec![("mlx".to_owned(), "macos".to_owned())]
         );
         assert_eq!(
-            eligible_portable_routes(&JobType::ImageGenerate, payload, &entry_ref, "0").unwrap(),
+            eligible_portable_routes(
+                &JobType::ImageGenerate,
+                payload,
+                &entry_ref,
+                "0",
+                std::path::Path::new("")
+            )
+            .unwrap(),
             vec![
                 ("candle".to_owned(), "linux".to_owned()),
                 ("candle".to_owned(), "windows".to_owned())
@@ -1655,10 +1851,24 @@ mod tests {
         let payload = json!({"model":"qwen_image","advanced":{"decoder":"wan_2_1_vae"}});
         let payload = payload.as_object().unwrap();
         assert_eq!(
-            eligible_portable_routes(&JobType::ImageGenerate, payload, &entries, "auto").unwrap(),
+            eligible_portable_routes(
+                &JobType::ImageGenerate,
+                payload,
+                &entries,
+                "auto",
+                std::path::Path::new("")
+            )
+            .unwrap(),
             vec![("mlx".to_owned(), "macos".to_owned())]
         );
-        assert!(eligible_portable_routes(&JobType::ImageGenerate, payload, &entries, "0").is_err());
+        assert!(eligible_portable_routes(
+            &JobType::ImageGenerate,
+            payload,
+            &entries,
+            "0",
+            std::path::Path::new("")
+        )
+        .is_err());
         assert!(selected_route_source_rows(
             &JobType::ImageGenerate,
             payload,
@@ -1667,6 +1877,68 @@ mod tests {
             "macos"
         )
         .is_ok());
+    }
+
+    #[test]
+    fn decoder_compatibility_belongs_to_the_owning_generation_slot() {
+        let entry = json!({
+            "id":"qwen_image",
+            "decoders":{"byBackend":{"mlx":[{"id":"wan_2_1_vae","componentId":"vae"}]}},
+            "downloads":[{"componentId":"vae","required":"soft","repo":"donor/vae",
+                "revision":"0123456789012345678901234567890123456789","files":["vae.safetensors"]}]
+        });
+        // An auxiliary carrier attached by ensure_runtime_model_sources (an Iris upscale task)
+        // carries no decoder of its own and must neither veto the route nor fail source capture.
+        let iris = json!({"id":"iris_3b_restore","type":"utility",
+            "downloads":[{"provider":"huggingface","repo":"speridlabs/iris-3b",
+                "revision":"7445443349bc9abe3c96f01ff793e2098ca012b3",
+                "files":["upscaler/model.safetensors"]}]});
+        let entries = vec![
+            ("modelManifestEntry".to_owned(), &entry),
+            ("modelManifestEntries/0".to_owned(), &iris),
+        ];
+        // The upscale block is what attaches the auxiliary carrier in the real seam
+        // (`fixed_runtime_model_ids` names iris_3b_restore for an enabled Iris pass).
+        let payload = json!({"model":"qwen_image","advanced":{"decoder":"wan_2_1_vae"},
+            "upscale":{"enabled":true,"engine":"iris"}});
+        let payload = payload.as_object().unwrap();
+        assert_eq!(
+            eligible_portable_routes(
+                &JobType::ImageGenerate,
+                payload,
+                &entries,
+                "auto",
+                std::path::Path::new("")
+            )
+            .unwrap(),
+            vec![("mlx".to_owned(), "macos".to_owned())]
+        );
+        let rows =
+            selected_route_source_rows(&JobType::ImageGenerate, payload, &entries, "mlx", "macos")
+                .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].model_slot, "modelManifestEntry");
+        assert_eq!(rows[0].component_id, "vae");
+        // A decoder selection with no owning generation-model carrier fails closed instead of
+        // surveying unrelated auxiliary entries.
+        let auxiliary_only = [("modelManifestEntries/0".to_owned(), &iris)];
+        assert!(!selected_decoder_available_on_route(
+            &JobType::ImageGenerate,
+            payload,
+            &auxiliary_only,
+            "mlx",
+        ));
+        assert_eq!(
+            selected_route_source_rows(
+                &JobType::ImageGenerate,
+                payload,
+                &auxiliary_only,
+                "mlx",
+                "macos",
+            )
+            .unwrap_err(),
+            "selected decoder has no owning generation-model carrier"
+        );
     }
 
     #[test]
@@ -1722,14 +1994,16 @@ mod tests {
             &JsonObject::new(),
             &entries,
             "candle",
-            "linux"
+            "linux",
+            std::path::Path::new("")
         ));
         assert!(!entries_support_route(
             &JobType::CatalogAnalysis,
             &JsonObject::new(),
             &entries,
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
         let non_component = json!({"id":"unroutable_utility_source","type":"utility","downloads":[{"provider":"huggingface","repo":"example/person","revision":"0123456789012345678901234567890123456789","files":["model.safetensors"],"platforms":["linux"]}]});
         let entries = [("modelManifestEntries/0".to_owned(), &non_component)];
@@ -1738,14 +2012,16 @@ mod tests {
             &JsonObject::new(),
             &entries,
             "candle",
-            "linux"
+            "linux",
+            std::path::Path::new("")
         ));
         assert!(!entries_support_route(
             &JobType::ImageGenerate,
             &JsonObject::new(),
             &entries,
             "candle",
-            "linux"
+            "linux",
+            std::path::Path::new("")
         ));
     }
 
@@ -1766,14 +2042,16 @@ mod tests {
             &default_upscale,
             &[("modelManifestEntries/0".to_owned(), &fixed)],
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
         assert!(!entries_support_route(
             &JobType::ImageUpscale,
             &default_upscale,
             &[("modelManifestEntries/0".to_owned(), &foreign)],
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
         let seedvr2 = json!({"engine":"seedvr2"}).as_object().unwrap().clone();
         assert!(!entries_support_route(
@@ -1781,7 +2059,8 @@ mod tests {
             &seedvr2,
             &[("modelManifestEntries/0".to_owned(), &fixed)],
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
     }
 
@@ -1805,7 +2084,8 @@ mod tests {
             &selected,
             &entry,
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
         for rejected in [
             json!({"baseModel":"iris_3b_restore","plan":{"target":{"kernel":"iris_train","baseModel":"iris_3b_depth"}}}),
@@ -1817,7 +2097,8 @@ mod tests {
                 rejected.as_object().unwrap(),
                 &entry,
                 "mlx",
-                "macos"
+                "macos",
+                std::path::Path::new("")
             ));
         }
         let foreign = json!({"id":"person_detector","type":"utility",
@@ -1829,7 +2110,8 @@ mod tests {
             &selected,
             &[("modelManifestEntries/0".to_owned(), &foreign)],
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
     }
 
@@ -1849,7 +2131,8 @@ mod tests {
             &depth_request,
             &[("modelManifestEntries/0".to_owned(), &depth)],
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
         let wrong_task = json!({"id":"trained-depth","type":"utility","irisTask":"restoration",
             "trainedCheckpoint":{"task":"restoration","engineModel":"iris_3b_restore"}});
@@ -1858,7 +2141,8 @@ mod tests {
             &depth_request,
             &[("modelManifestEntries/0".to_owned(), &wrong_task)],
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
         let foreign_request = json!({"irisModel":"other-depth"})
             .as_object()
@@ -1869,7 +2153,8 @@ mod tests {
             &foreign_request,
             &[("modelManifestEntries/0".to_owned(), &depth)],
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
         let restoration = json!({"id":"trained-restore","type":"utility",
             "irisTask":"restoration","trainedCheckpoint":{"task":"restoration",
@@ -1883,7 +2168,8 @@ mod tests {
             &restore_request,
             &[("modelManifestEntries/0".to_owned(), &restoration)],
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
         let wrong_engine = json!({"engine":"real-esrgan","irisModel":"trained-restore"})
             .as_object()
@@ -1894,7 +2180,8 @@ mod tests {
             &wrong_engine,
             &[("modelManifestEntries/0".to_owned(), &restoration)],
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
     }
 
@@ -1909,21 +2196,24 @@ mod tests {
             &JsonObject::new(),
             &[("modelManifestEntries/0".to_owned(), &selected)],
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
         assert!(!entries_support_route(
             &JobType::PromptRefine,
             &JsonObject::new(),
             &[("modelManifestEntries/1".to_owned(), &selected)],
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
         assert!(!entries_support_route(
             &JobType::ImageGenerate,
             &JsonObject::new(),
             &[("modelManifestEntries/0".to_owned(), &selected)],
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
         let foreign = json!({"id":"person_detector","type":"utility",
             "adapter":"person-detect","downloads":[{"provider":"huggingface",
@@ -1934,7 +2224,8 @@ mod tests {
             &JsonObject::new(),
             &[("modelManifestEntries/0".to_owned(), &foreign)],
             "mlx",
-            "macos"
+            "macos",
+            std::path::Path::new("")
         ));
     }
 
@@ -1954,6 +2245,7 @@ mod tests {
             payload.as_object().unwrap(),
             &entries,
             "auto",
+            std::path::Path::new(""),
         )
         .unwrap();
         assert_eq!(routes.len(), 3);

@@ -108,6 +108,48 @@ pub(crate) fn assert_h3_component_authority_required(
 
 pub(crate) use sceneworks_core::test_env::{isolate_hf_cache, EnvVars as HfCacheEnvGuard};
 
+const MLX_MEMORY_CAP_ENV: &str = "SCENEWORKS_MLX_MEMORY_CAP_GB";
+
+/// Full-fine-tune test environment: HF-cache isolation PLUS a deterministic
+/// `SCENEWORKS_MLX_MEMORY_CAP_GB` budget.
+///
+/// The fixture's `transformer/` bytes are real files (the frozen source closure needs the exact
+/// staged fixture bytes), so `full_finetune_memory_error` has a signal where the pre-portable
+/// marker-only seed had none — and its live `sysctl hw.memsize` probe then refuses the submission
+/// on a ~7 GB hosted macOS runner ("needs ~9 GB … but this machine has ~7 GB") while a big dev
+/// Mac admits it, making the fixture a property of the host. The cap REPLACES the probed total
+/// (`resolve_budget` in the worker crate), so pinning it makes the gate judge a deterministic
+/// budget on every host.
+///
+/// Mirrors `iris_env` (crates/.../iris_training.rs): the cap is set directly rather than through
+/// a second [`HfCacheEnvGuard`], because [`EnvVars::set`] holds the ONE shared env lock and is
+/// NOT reentrant — a nested guard here would self-deadlock (the lock is already held by this
+/// guard's own `isolate_hf_cache`). Restored on drop, after the cap is put back and before the
+/// HF-cache guard releases the lock.
+pub(crate) struct TrainingEnv {
+    previous_cap: Option<String>,
+    _hf: HfCacheEnvGuard,
+}
+
+pub(crate) fn training_env(cap_gb: &str) -> TrainingEnv {
+    let hf = isolate_hf_cache();
+    let previous_cap = std::env::var(MLX_MEMORY_CAP_ENV).ok();
+    std::env::set_var(MLX_MEMORY_CAP_ENV, cap_gb);
+    TrainingEnv {
+        previous_cap,
+        _hf: hf,
+    }
+}
+
+impl Drop for TrainingEnv {
+    fn drop(&mut self) {
+        match &self.previous_cap {
+            Some(previous) => std::env::set_var(MLX_MEMORY_CAP_ENV, previous),
+            None => std::env::remove_var(MLX_MEMORY_CAP_ENV),
+        }
+    }
+}
+
 /// Pin the source cache under the shared test lock, clearing lower-priority overrides.
 pub(crate) fn pin_hf_hub_cache(hub: &std::path::Path) -> HfCacheEnvGuard {
     sceneworks_core::test_env::EnvVars::set_os(&[
@@ -817,6 +859,10 @@ pub(crate) async fn submit_full_finetune_job(
         .cloned()
         .expect("Mage-Flow advertises at least one training resolution");
 
+    // The caller pins a deterministic unified-memory budget via `training_env` — see that
+    // helper for why the fixture's real staged bytes otherwise make admission a property of
+    // the host. No env guard HERE: [`EnvVars::set`] is not reentrant and the caller already
+    // holds the shared env lock.
     let (status, job) = request(
         app.clone(),
         "POST",

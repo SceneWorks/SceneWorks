@@ -464,6 +464,11 @@ fn is_source_choice_container(key: &str) -> bool {
             | "veda"
             | "source"
             | "upscale"
+            // The YuE2 block's `decoder` names the VAE snapshot the worker's
+            // `selected_portable_model_artifact_closure` selects (the generic `decoder` leaf only
+            // projects under keys that are already containers), so a duplicate that changes it
+            // must not keep the frozen decoder binding (SW-7030).
+            | "yue2"
     )
 }
 
@@ -489,8 +494,10 @@ fn is_source_choice_leaf(key: &str, parent: Option<&str>) -> bool {
             | "variant"
             | "quantTier"
             | "mlxQuantize"
+            | "convRot"
             | "decoder"
             | "controlMode"
+            | "controlImage"
             | "overlayId"
             | "componentId"
             | "textEncoderModel"
@@ -579,7 +586,13 @@ pub(crate) async fn validate_frozen_replay_binding(
     // The private persisted ledger was authenticated at original admission. Replay checks the
     // current source policy and exact local/worker availability without contacting mutable HEAD
     // or requiring a second publisher metadata lookup during an API network outage.
-    let candidate = replay_from_frozen_policy(job_type, payload, requested_gpu, frozen)?;
+    let candidate = replay_from_frozen_policy(
+        &state.settings.data_dir,
+        job_type,
+        payload,
+        requested_gpu,
+        frozen,
+    )?;
     for (key, route) in &candidate.routes {
         if frozen.routes.get(key) != Some(route) {
             return Err(incomplete(format!(
@@ -592,6 +605,7 @@ pub(crate) async fn validate_frozen_replay_binding(
 }
 
 fn replay_from_frozen_policy(
+    data_dir: &Path,
     job_type: &JobType,
     payload: &JsonObject,
     requested_gpu: &str,
@@ -621,15 +635,16 @@ fn replay_from_frozen_policy(
         payload,
         &entries,
         requested_gpu,
+        data_dir,
     )? {
         let key = format!("{backend}:{platform}");
         let Some(route) = frozen.routes.get(&key) else {
-            if requested_gpu == "auto" {
-                // Initial admission may have frozen only routes with a worker able to prove the
-                // complete local Digest closure. A newly eligible route cannot expand replay.
-                continue;
-            }
-            return Err(incomplete(format!("replay route {key} was not frozen")));
+            // Initial admission may have frozen only routes with a worker able to prove the
+            // complete local Digest closure. A newly eligible route cannot expand replay,
+            // and an explicit GPU id selects a backend, not a platform: intersect the
+            // enumerated platforms with the frozen routes for that backend and reject
+            // only when no compatible route remains (the empty check below).
+            continue;
         };
         if route.models.len() != entries.len() {
             return Err(incomplete("replay model carrier count changed"));
@@ -803,6 +818,7 @@ pub(crate) async fn derive_vector_raster_child_binding(
         child_payload,
         &entries,
         requested_gpu,
+        &state.settings.data_dir,
     )? {
         let key = format!("{backend}:{platform}");
         let Some(parent_route) =
@@ -960,6 +976,7 @@ async fn capture_portable_model_binding_inner(
         payload,
         &entries,
         requested_gpu,
+        &state.settings.data_dir,
     )? {
         let frozen_route = frozen
             .map(|frozen| {
@@ -3063,8 +3080,26 @@ async fn verify_produced_local_source_offloaded(
 }
 
 fn allowed_local_roots(state: &AppState) -> Vec<PathBuf> {
-    std::iter::once(state.settings.data_dir.clone())
-        .chain(state.settings.external_model_roots.iter().cloned())
+    allowed_local_roots_for(
+        &state.settings.data_dir,
+        &state.settings.external_model_roots,
+    )
+}
+
+fn allowed_local_roots_for(data_dir: &Path, external_model_roots: &[PathBuf]) -> Vec<PathBuf> {
+    // The configured Hugging Face cache is a managed root in its own right: it
+    // commonly lives outside `data_dir` (the default `~/.cache/huggingface/hub`),
+    // and installed HF-backed LoRAs and non-default text encoders resolve their
+    // installed paths into it. The worker's `allowed_model_roots` already
+    // authorizes it; capture must agree or those installed sources are refused
+    // as "outside every managed root" (SW-7030, review 4533400131).
+    std::iter::once(data_dir.to_path_buf())
+        .chain(std::iter::once(
+            sceneworks_core::hf_home::model_source_library(data_dir)
+                .root()
+                .to_path_buf(),
+        ))
+        .chain(external_model_roots.iter().cloned())
         .collect()
 }
 
@@ -3106,21 +3141,31 @@ fn collect_source_files(
             "local model source exceeds portable closure bounds",
         ));
     }
-    let path = confine_artifact_path(path, allowed_roots)
+    // Confinement, directory reads and hashing resolve through the CANONICAL target; the
+    // loader-visible relative name follows the link itself. Replacing `path` with its canonical
+    // symlink target (the previous behavior) rebased each linked child onto the target's root,
+    // so `strip_prefix(root)` rejected a valid linked file — a converted install's borrowed
+    // text-encoder/VAE absolute symlinks — as "escaping its selected source". The two concerns
+    // stay separate: a link must still confine to a managed root (a target outside every allowed
+    // root is refused below), but its in-source name is what the loader opens, including inside
+    // linked directories.
+    let canonical = confine_artifact_path(path, allowed_roots)
         .map_err(|error| incomplete(error.to_string()))?;
-    if path.is_dir() {
-        let mut children = std::fs::read_dir(&path)
+    let metadata = std::fs::metadata(&canonical)
+        .map_err(|error| incomplete(format!("local model source is unavailable: {error}")))?;
+    if metadata.is_dir() {
+        let mut children = std::fs::read_dir(&canonical)
             .map_err(|error| incomplete(format!("local model directory is unreadable: {error}")))?
-            .map(|entry| entry.map(|entry| entry.path()))
+            .map(|entry| entry.map(|entry| entry.file_name()))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| incomplete(format!("local model directory is unreadable: {error}")))?;
         children.sort();
         for child in children {
-            collect_source_files(root, &child, allowed_roots, selected, depth + 1)?;
+            collect_source_files(root, &path.join(child), allowed_roots, selected, depth + 1)?;
         }
         return Ok(());
     }
-    if !path.is_file() {
+    if !metadata.is_file() {
         return Err(incomplete(
             "selected local model source is not a regular file",
         ));
@@ -3148,10 +3193,8 @@ fn collect_source_files(
         // markers. Keep the portable byte ledger identical to that content scope.
         return Ok(());
     }
-    let size_bytes = std::fs::metadata(&path)
-        .map_err(|error| incomplete(format!("local model file is unavailable: {error}")))?
-        .len();
-    let sha256 = sceneworks_core::hashing::sha256_file(&path)
+    let size_bytes = metadata.len();
+    let sha256 = sceneworks_core::hashing::sha256_file(&canonical)
         .map_err(|error| incomplete(format!("local model file cannot be hashed: {error}")))?;
     selected.push(PortableArtifactFile {
         relative_path,
@@ -3640,6 +3683,103 @@ mod tests {
         assert_eq!(files[0].relative_path, PathBuf::from("weights.safetensors"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn linked_local_sources_keep_loader_names_and_stay_confined() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let install = root.path().join("models/mlx/anima_base/bf16");
+        std::fs::create_dir_all(install.join("vae")).unwrap();
+        std::fs::write(install.join("dit.safetensors"), b"packed dit").unwrap();
+        // A converted install borrows its dense VAE and text encoder as absolute symlinks into a
+        // managed root OUTSIDE the selected source (the HF cache under the same data dir).
+        let borrowed = root.path().join("models/hf-cache/borrowed");
+        std::fs::create_dir_all(borrowed.join("text_encoder")).unwrap();
+        std::fs::write(borrowed.join("vae.safetensors"), b"borrowed vae").unwrap();
+        std::fs::write(
+            borrowed.join("text_encoder/model.safetensors"),
+            b"borrowed text encoder",
+        )
+        .unwrap();
+        symlink(
+            borrowed.join("vae.safetensors"),
+            install.join("vae/qwen_image_vae.safetensors"),
+        )
+        .unwrap();
+        symlink(borrowed.join("text_encoder"), install.join("text_encoder")).unwrap();
+
+        let digest = |path: std::path::PathBuf| {
+            format!(
+                "sha256:{}",
+                sceneworks_core::hashing::sha256_file(&path).unwrap()
+            )
+        };
+        // Linked files — and the contents of a linked directory — keep their loader-visible
+        // in-source names, hashed through the link target's bytes.
+        let expected = [
+            (
+                PathBuf::from("dit.safetensors"),
+                std::fs::metadata(install.join("dit.safetensors"))
+                    .unwrap()
+                    .len(),
+                digest(install.join("dit.safetensors")),
+            ),
+            (
+                PathBuf::from("text_encoder/model.safetensors"),
+                std::fs::metadata(borrowed.join("text_encoder/model.safetensors"))
+                    .unwrap()
+                    .len(),
+                digest(borrowed.join("text_encoder/model.safetensors")),
+            ),
+            (
+                PathBuf::from("vae/qwen_image_vae.safetensors"),
+                std::fs::metadata(borrowed.join("vae.safetensors"))
+                    .unwrap()
+                    .len(),
+                digest(borrowed.join("vae.safetensors")),
+            ),
+        ];
+        let actual = capture_local_source_files(&install, &[root.path().to_path_buf()])
+            .unwrap()
+            .into_iter()
+            .map(|file| (file.relative_path, file.size_bytes, file.sha256))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+
+        // A link whose target escapes every managed root stays refused before any read.
+        let escape = tempfile::tempdir().unwrap();
+        std::fs::write(escape.path().join("escape.safetensors"), b"outside").unwrap();
+        symlink(
+            escape.path().join("escape.safetensors"),
+            install.join("escaped.safetensors"),
+        )
+        .unwrap();
+        let error = capture_local_source_files(&install, &[root.path().to_path_buf()])
+            .unwrap_err()
+            .detail;
+        assert!(
+            error.contains("outside every managed root"),
+            "escaping link must stay refused: {error}"
+        );
+    }
+
+    #[test]
+    fn allowed_local_roots_include_data_hf_cache_and_external_roots() {
+        // SW-7030 (review 4533400131): the configured HF cache is a managed
+        // capture root even when it lives outside the data dir.
+        let data_dir = PathBuf::from("/srv/sceneworks/data");
+        let external = vec![PathBuf::from("/mnt/comfyui/models")];
+        let roots = allowed_local_roots_for(&data_dir, &external);
+        assert!(roots.contains(&data_dir));
+        assert!(roots.contains(
+            &sceneworks_core::hf_home::model_source_library(&data_dir)
+                .root()
+                .to_path_buf()
+        ));
+        assert!(roots.contains(&PathBuf::from("/mnt/comfyui/models")));
+    }
+
     #[test]
     fn authored_projection_keeps_choices_without_local_paths_or_credentials() {
         let payload = json!({
@@ -3786,6 +3926,63 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_krea_convrot_change_requires_fresh_source_choice() {
+        let ordinary = json!({
+            "model":"krea_2_turbo", "prompt":"red kite",
+            "advanced":{"convRot":false}
+        });
+        let changed_prompt = json!({
+            "model":"krea_2_turbo", "prompt":"blue kite",
+            "advanced":{"convRot":false}
+        });
+        let convrot = json!({
+            "model":"krea_2_turbo", "prompt":"red kite",
+            "advanced":{"convRot":true}
+        });
+        let source = portable_authored_options(ordinary.as_object().unwrap());
+        assert_eq!(
+            source,
+            portable_authored_options(changed_prompt.as_object().unwrap())
+        );
+        assert_ne!(
+            source,
+            portable_authored_options(convrot.as_object().unwrap())
+        );
+    }
+
+    #[test]
+    fn duplicate_yue2_decoder_change_requires_fresh_source_choice() {
+        let ordinary = json!({
+            "model":"yue2", "prompt":"red kite",
+            "yue2":{"kind":"create","lyrics":"la","computePolicy":"bf16",
+                     "decoder":"legacy","runId":"yue2run_one"}
+        });
+        // A duplicate rewrites the prompt and mints a fresh run id: neither is a source choice.
+        let changed_prompt = json!({
+            "model":"yue2", "prompt":"blue kite",
+            "yue2":{"kind":"create","lyrics":"la","computePolicy":"bf16",
+                     "decoder":"legacy","runId":"yue2run_two"}
+        });
+        let decoder = json!({
+            "model":"yue2", "prompt":"red kite",
+            "yue2":{"kind":"create","lyrics":"la","computePolicy":"bf16",
+                     "decoder":"standard","runId":"yue2run_one"}
+        });
+        let source = portable_authored_options(ordinary.as_object().unwrap());
+        // Only the decoder is source-affecting inside the block (the worker's
+        // `selected_portable_model_artifact_closure` reads it as the VAE choice).
+        assert_eq!(source["yue2"], json!({"decoder":"legacy"}));
+        assert_eq!(
+            source,
+            portable_authored_options(changed_prompt.as_object().unwrap())
+        );
+        assert_ne!(
+            source,
+            portable_authored_options(decoder.as_object().unwrap())
+        );
+    }
+
+    #[test]
     fn pid_source_override_is_authored_without_physical_locator() {
         let original = json!({"advanced":{
             "usePid":true,
@@ -3871,6 +4068,32 @@ mod tests {
         assert!(model_free_job(
             &JobType::CatalogAnalysis,
             no_models.as_object().unwrap()
+        ));
+    }
+
+    #[test]
+    fn preview_person_jobs_are_model_free_while_real_runs_freeze_bindings() {
+        // A procedural preview (`preview: true`) runs the CPU utility placeholder and
+        // loads no model bytes, so admission freezes no binding for it — even though the
+        // request still carries the detector/segmenter catalog entries. The real run
+        // keeps its binding.
+        let preview = json!({"sourceAssetId":"asset", "preview":true});
+        assert!(model_free_job(
+            &JobType::PersonDetect,
+            preview.as_object().unwrap()
+        ));
+        assert!(model_free_job(
+            &JobType::PersonTrack,
+            preview.as_object().unwrap()
+        ));
+        let real = json!({"sourceAssetId":"asset", "preview":false});
+        assert!(!model_free_job(
+            &JobType::PersonDetect,
+            real.as_object().unwrap()
+        ));
+        assert!(!model_free_job(
+            &JobType::PersonTrack,
+            real.as_object().unwrap()
         ));
     }
 
