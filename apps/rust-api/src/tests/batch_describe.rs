@@ -325,3 +325,82 @@ async fn batch_describe_items_are_appended_by_the_owner_and_paged_back_in_order(
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn batch_describe_jobs_list_the_datasets_runs_newest_first() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id, dataset_id, item_ids, _) = dataset_fixture(&temp_dir).await;
+    let route =
+        format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
+
+    let (status, empty) = request(app.clone(), "GET", &route, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{empty}");
+    assert_eq!(empty, json!([]));
+
+    let (status, first) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({ "itemIds": [item_ids[0]] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+    // Each payload item records the image's identity when it was described.
+    assert!(first["payload"]["items"][0]
+        .as_object()
+        .expect("payload item")
+        .contains_key("contentHash"));
+    let (status, second) = request(app.clone(), "POST", &route, json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{second}");
+    // A canceled run still lists: its stored descriptions are the user's work.
+    let (status, canceled) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{}/cancel", first["id"].as_str().unwrap()),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{canceled}");
+
+    let (status, jobs) = request(app.clone(), "GET", &route, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{jobs}");
+    let ids: Vec<_> = jobs
+        .as_array()
+        .expect("job list")
+        .iter()
+        .map(|job| job["id"].clone())
+        .collect();
+    assert_eq!(ids, vec![second["id"].clone(), first["id"].clone()]);
+
+    // Only the unfinished job: the canceled one is left out.
+    let (status, unfinished) = request(
+        app.clone(),
+        "GET",
+        &format!("{route}?unfinished=true"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{unfinished}");
+    assert_eq!(unfinished.as_array().map(|jobs| jobs.len()), Some(1));
+    assert_eq!(unfinished[0]["id"], second["id"]);
+
+    // Paged: offset skips the newest jobs, limit caps the page.
+    let (status, page) = request(
+        app.clone(),
+        "GET",
+        &format!("{route}?offset=1&limit=1"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page.as_array().map(|jobs| jobs.len()), Some(1));
+    assert_eq!(page[0]["id"], first["id"]);
+
+    // Another dataset's history is separate.
+    let other = format!(
+        "/api/v1/projects/{project_id}/training/datasets/other-dataset/batch-describe-jobs"
+    );
+    let (status, none) = request(app.clone(), "GET", &other, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{none}");
+    assert_eq!(none, json!([]));
+}

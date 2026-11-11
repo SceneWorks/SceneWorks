@@ -33,6 +33,14 @@ export const trainingApi = {
     apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}/training/datasets/${encodeURIComponent(datasetId)}/analysis-jobs`, token, options),
   batchDescribeJobs: (projectId, datasetId, token, options = {}) =>
     apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}/training/datasets/${encodeURIComponent(datasetId)}/batch-describe-jobs`, token, options),
+  // A page of the dataset's describe jobs, newest first (GET), so the dialog can rebuild its table.
+  // `unfinished` keeps only jobs still queued or running.
+  listBatchDescribeJobs: (projectId, datasetId, token, { offset = 0, limit, unfinished = false } = {}, options = {}) =>
+    apiFetch(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/training/datasets/${encodeURIComponent(datasetId)}/batch-describe-jobs?offset=${encodeURIComponent(offset)}${limit ? `&limit=${encodeURIComponent(limit)}` : ""}${unfinished ? "&unfinished=true" : ""}`,
+      token,
+      options,
+    ),
   // `model` (a describer repo) selects that model's default instruction and limit.
   defaultDescribePrompt: (token, options = {}, model = "") =>
     apiFetch(`/api/v1/training/describe-prompt/default${model ? `?model=${encodeURIComponent(model)}` : ""}`, token, options),

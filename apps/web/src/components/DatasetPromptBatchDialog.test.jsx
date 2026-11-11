@@ -8,6 +8,7 @@ vi.mock("../api/trainingResources.js", () => ({
   trainingApi: {
     defaultDescribePrompt: vi.fn(),
     batchDescribeJobs: vi.fn(),
+    listBatchDescribeJobs: vi.fn(),
     describePromptPresets: vi.fn(),
     describePromptPreset: vi.fn(),
   },
@@ -22,7 +23,7 @@ const { jobsApi } = await import("../api/jobsResources.js");
 const { abortableDelay } = await import("../pollJob.js");
 const { saveExportFile } = await import("../saveExportFile.js");
 const { appConfirm } = await import("../appConfirm.jsx");
-const { DatasetPromptBatchDialog } = await import("./DatasetPromptBatchDialog.jsx");
+const { DatasetPromptBatchDialog, RESTORE_JOBS_PAGE } = await import("./DatasetPromptBatchDialog.jsx");
 
 const DEFAULT_PROMPT = "You are a meticulous scene describer.\n## LABELS";
 const JOY_REPO = "fancyfeast/llama-joycaption-beta-one-hf-llava";
@@ -114,6 +115,16 @@ function setText(element, value) {
   element.dispatchEvent(new window.Event("input", { bubbles: true }));
 }
 
+// The dataset's describe history, newest first, served like the API: `unfinished` keeps jobs not
+// yet in a terminal status; `offset`/`limit` page it.
+const TERMINAL = new Set(["completed", "failed", "canceled", "interrupted"]);
+function serveHistory(jobs) {
+  trainingApi.listBatchDescribeJobs.mockImplementation(async (_p, _d, _t, { offset = 0, limit, unfinished = false } = {}) => {
+    const listed = unfinished ? jobs.filter((job) => !TERMINAL.has(job.status)) : jobs;
+    return listed.slice(offset, limit ? offset + limit : undefined);
+  });
+}
+
 describe("DatasetPromptBatchDialog", () => {
   let container;
   let root;
@@ -127,6 +138,9 @@ describe("DatasetPromptBatchDialog", () => {
       .mockReset()
       .mockImplementation(async (_token, _options, model) => ({ model, ...DEFAULTS[model || VISION_CAPTION_MODEL_REPO] }));
     trainingApi.batchDescribeJobs.mockReset().mockResolvedValue({ id: "job_1", status: "queued", progress: 0 });
+    // No earlier runs unless a test lists some.
+    trainingApi.listBatchDescribeJobs.mockReset();
+    serveHistory([]);
     // A tiny in-memory preset store standing in for the server catalog.
     presetStore = [{ id: "default", name: "Default", prompt: DEFAULT_PROMPT, scope: "builtin", builtin: true }];
     trainingApi.describePromptPresets.mockReset().mockImplementation(async (_token, options = {}, model = "") => {
@@ -167,7 +181,9 @@ describe("DatasetPromptBatchDialog", () => {
       createModelDownloadJob: vi.fn(async () => ({ id: "dl_1" })),
       jobAction: vi.fn(async () => ({})),
       setActiveView: vi.fn(),
+      promptBatches: [],
       createPromptBatch: vi.fn(async (payload) => ({ id: "film_prints_prompts", ...payload })),
+      updatePromptBatch: vi.fn(async (id, payload) => ({ id, ...payload })),
       sendPromptBatchToImage: vi.fn(),
     };
   });
@@ -665,5 +681,224 @@ describe("DatasetPromptBatchDialog", () => {
     await render({ dirty: true });
     expect(document.body.textContent).toContain("Save the dataset first");
     expect(button("Describe images").disabled).toBe(true);
+  });
+  // Earlier runs stored per job: `{ [jobId]: items }`, served by jobsApi.resultItems.
+  function serveStoredRuns(byJob) {
+    jobsApi.resultItems.mockReset().mockImplementation(async (jobId, _token, { offset = 0 } = {}) => {
+      const items = byJob[jobId] ?? [];
+      return { items: items.slice(offset), total: items.length, nextOffset: null };
+    });
+  }
+  function rowText(itemId) {
+    return document.body.querySelector(`[data-item-id="${itemId}"] textarea`)?.value;
+  }
+
+  it("restores earlier runs on open: newest success per image, interrupted run reported", async () => {
+    serveHistory([
+      // Newest: interrupted by a restart after one image; item_b was flagged.
+      { id: "job_new", status: "interrupted", result: { processedCount: 2, itemCount: 3, model: JOY_REPO } },
+      { id: "job_old", status: "completed", result: { processedCount: 3, itemCount: 3, model: VISION_CAPTION_MODEL_REPO } },
+    ]);
+    serveStoredRuns({
+      job_new: [
+        described("item_a", 300, 400, { description: "Newest a." }),
+        described("item_b", 400, 300, { failed: true, error: "Bad reply." }),
+      ],
+      job_old: [
+        described("item_a", 300, 400, { description: "Old a." }),
+        described("item_b", 400, 300, { description: "Old b." }),
+        described("item_gone", 400, 300, { description: "Removed from the dataset." }),
+      ],
+    });
+    await render();
+    const rows = [...document.body.querySelectorAll(".dataset-prompt-batch-row")].map((row) => row.dataset.itemId);
+    expect(rows).toEqual(["item_a", "item_b"]);
+    expect(rowText("item_a")).toBe("Newest a.");
+    // The newer run flagged item_b; the older success is kept instead.
+    expect(rowText("item_b")).toBe("Old b.");
+    expect(document.body.textContent).toContain("Restored 2 described images from earlier runs.");
+    expect(document.body.textContent).toContain("The last run stopped (interrupted) after 2 of 3 images.");
+    expect(button("Describe remaining (1)")).toBeTruthy();
+    await click(button("Save prompt batch"));
+    await settle();
+    const payload = context.createPromptBatch.mock.calls[0][0];
+    expect(payload.sourceImages.map((image) => [image.itemId, image.model])).toEqual([
+      ["item_a", JOY_REPO],
+      ["item_b", VISION_CAPTION_MODEL_REPO],
+    ]);
+  });
+
+  it("resumes monitoring a run that is still going when the dialog reopens", async () => {
+    serveHistory([
+      { id: "job_1", status: "running", progress: 0.3, result: { processedCount: 1, itemCount: 3, model: VISION_CAPTION_MODEL_REPO } },
+    ]);
+    storedItems = [described("item_a", 300, 400)];
+    await render();
+    expect(rowText("item_a")).toContain("(item_a)");
+    expect(button("Cancel")).toBeTruthy();
+    await act(async () => nextPoll(snapshot("completed", [described("item_a", 300, 400), described("item_b", 400, 300)], { progress: 1 })));
+    await settle();
+    expect([...document.body.querySelectorAll(".dataset-prompt-batch-row")].map((row) => row.dataset.itemId)).toEqual([
+      "item_a",
+      "item_b",
+    ]);
+    // The resumed poll read only the item it had not seen.
+    expect(jobsApi.resultItems.mock.calls.at(-1)[2]).toEqual({ offset: 1 });
+  });
+
+  it("replaces a saved batch with the same name after a confirm instead of failing", async () => {
+    context.promptBatches = [
+      {
+        id: "film_prints_prompts",
+        name: "Film Prints Prompts ",
+        scope: "global",
+        prompts: ["old"],
+        variables: [{ key: "woman_1", values: ["Ada"] }, { key: "man_1", values: ["Bo"] }],
+      },
+    ];
+    await render();
+    await runWith([described("item_a", 300, 400)]);
+    appConfirm.mockResolvedValueOnce(false);
+    await click(button("Save prompt batch"));
+    await settle();
+    expect(context.updatePromptBatch).not.toHaveBeenCalled();
+    expect(context.createPromptBatch).not.toHaveBeenCalled();
+    await click(button("Save prompt batch"));
+    await settle();
+    expect(context.createPromptBatch).not.toHaveBeenCalled();
+    expect(context.updatePromptBatch).toHaveBeenCalledWith("film_prints_prompts", expect.objectContaining({ name: "Film prints prompts" }), "global");
+    // The filled-in value for a key the new prompts still use is kept.
+    expect(context.updatePromptBatch.mock.calls[0][1].variables).toEqual([{ key: "woman_1", values: ["Ada"] }]);
+    expect(button("Open in Image Studio")).toBeTruthy();
+  });
+
+  it("reads every run newer than a still-running older job before stopping", async () => {
+    // Older job_1 (A, B) is still running; job_mid re-ran A; job_new (newest) re-ran C.
+    serveHistory([
+      { id: "job_new", status: "completed", result: { processedCount: 1, itemCount: 1 } },
+      { id: "job_mid", status: "completed", result: { processedCount: 1, itemCount: 1 } },
+      { id: "job_1", status: "running", result: { processedCount: 2, itemCount: 3 } },
+    ]);
+    serveStoredRuns({
+      job_new: [described("item_c", 300, 400, { description: "Newest c." })],
+      job_mid: [described("item_a", 300, 400, { description: "Re-run a." })],
+      job_1: [described("item_a", 300, 400, { description: "Old a." }), described("item_b", 400, 300, { description: "Old b." })],
+    });
+    await render();
+    expect(rowText("item_a")).toBe("Re-run a.");
+    expect(rowText("item_b")).toBe("Old b.");
+    expect(rowText("item_c")).toBe("Newest c.");
+    expect(button("Cancel")).toBeTruthy();
+  });
+
+  it("keeps a newer run's result when a resumed older job later describes the same image", async () => {
+    serveHistory([
+      { id: "job_new", status: "completed", result: {} },
+      { id: "job_1", status: "running", result: { processedCount: 1, itemCount: 3 } },
+    ]);
+    // job_1 (the polled job) has described only item_a so far; job_new already re-ran item_b.
+    storedItems = [described("item_a", 300, 400, { description: "Old a." })];
+    const newer = [described("item_b", 400, 300, { description: "Newer b." })];
+    jobsApi.resultItems.mockImplementation(async (jobId, _token, { offset = 0 } = {}) => {
+      const items = jobId === "job_new" ? newer : storedItems;
+      return { items: items.slice(offset), total: items.length, nextOffset: null };
+    });
+    await render();
+    expect(rowText("item_b")).toBe("Newer b.");
+    await act(async () =>
+      nextPoll(
+        snapshot(
+          "completed",
+          [
+            described("item_a", 300, 400, { description: "Old a." }),
+            described("item_b", 400, 300, { description: "Older b." }),
+            described("item_c", 300, 400, { description: "Old c." }),
+          ],
+          { progress: 1 },
+        ),
+      ),
+    );
+    await settle();
+    expect(rowText("item_b")).toBe("Newer b.");
+    expect(rowText("item_c")).toBe("Old c.");
+  });
+
+  it("pages back through the history until every image is covered", async () => {
+    // A full page of newer single-image re-runs of item_a, then the original full run on page 2.
+    const reruns = Array.from({ length: RESTORE_JOBS_PAGE }, (_, index) => ({ id: `rerun_${index}`, status: "completed", result: {} }));
+    serveHistory([...reruns, { id: "job_full", status: "completed", result: {} }]);
+    serveStoredRuns({
+      ...Object.fromEntries(reruns.map((run) => [run.id, [described("item_a", 300, 400, { description: "Re-run a." })]])),
+      job_full: [described("item_a", 300, 400), described("item_b", 400, 300, { description: "Full b." }), described("item_c", 300, 400, { description: "Full c." })],
+    });
+    await render();
+    expect(rowText("item_a")).toBe("Re-run a.");
+    expect(rowText("item_b")).toBe("Full b.");
+    expect(rowText("item_c")).toBe("Full c.");
+    expect(trainingApi.listBatchDescribeJobs.mock.calls.filter((call) => !call[3].unfinished).map((call) => call[3].offset)).toEqual([
+      0,
+      RESTORE_JOBS_PAGE,
+    ]);
+  });
+
+  it("resumes a running job that sits past the first page of history", async () => {
+    const reruns = Array.from({ length: RESTORE_JOBS_PAGE }, (_, index) => ({ id: `rerun_${index}`, status: "canceled", result: {} }));
+    serveHistory([...reruns, { id: "job_1", status: "running", progress: 0.3, result: { processedCount: 1, itemCount: 3 } }]);
+    storedItems = [described("item_a", 300, 400)];
+    jobsApi.resultItems.mockImplementation(async (jobId, _token, { offset = 0 } = {}) => {
+      const items = jobId === "job_1" ? storedItems : [];
+      return { items: items.slice(offset), total: items.length, nextOffset: null };
+    });
+    await render();
+    expect(button("Cancel")).toBeTruthy();
+    await act(async () => nextPoll(snapshot("completed", [described("item_a", 300, 400), described("item_b", 400, 300)], { progress: 1 })));
+    await settle();
+    expect(rowText("item_b")).toContain("(item_b)");
+  });
+
+  it("drops a restored result whose image was cropped or repointed since", async () => {
+    const changed = {
+      ...dataset,
+      items: [
+        { id: "item_a", path: "images/item_a.png", contentHash: "hash-a" },
+        { id: "item_b", path: "images/item_b_cropped.png", width: 300, height: 300 },
+        { id: "item_c", path: "images/item_c.png", contentHash: "hash-c2" },
+      ],
+    };
+    serveHistory([
+      {
+        id: "job_old",
+        status: "completed",
+        payload: {
+          items: [
+            { itemId: "item_a", relativePath: "images/item_a.png", contentHash: "hash-a" },
+            // An older job without hashes: the path tells item_b changed.
+            { itemId: "item_b", relativePath: "images/item_b.png" },
+            { itemId: "item_c", relativePath: "images/item_c.png", contentHash: "hash-c1" },
+          ],
+        },
+        result: { processedCount: 3, itemCount: 3 },
+      },
+    ]);
+    serveStoredRuns({
+      job_old: [described("item_a", 300, 400), described("item_b", 400, 300), described("item_c", 300, 400)],
+    });
+    await render({ dataset: changed });
+    expect([...document.body.querySelectorAll(".dataset-prompt-batch-row")].map((row) => row.dataset.itemId)).toEqual(["item_a"]);
+    expect(button("Describe remaining (2)")).toBeTruthy();
+  });
+
+  it("asks before closing with unsaved edits", async () => {
+    const onClose = vi.fn();
+    await render({ onClose });
+    await runWith([described("item_a", 300, 400)]);
+    await act(async () => setText(document.body.querySelector('[data-item-id="item_a"] textarea'), "Edited."));
+    appConfirm.mockResolvedValueOnce(false);
+    await click(button("Close"));
+    await settle();
+    expect(onClose).not.toHaveBeenCalled();
+    await click(button("Close"));
+    await settle();
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });

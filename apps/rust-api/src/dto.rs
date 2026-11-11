@@ -151,6 +151,16 @@ pub(crate) struct CharactersQuery {
 }
 
 /// Query parameters for the dataset readiness report (sc-6533). The training UI passes what it has
+/// A page of a dataset's batch describe jobs, newest first: skip `offset` jobs, return at most
+/// `limit` (default and maximum 200); `unfinished=true` keeps only jobs not yet finished.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BatchDescribeJobsQuery {
+    pub(crate) unfinished: Option<bool>,
+    pub(crate) offset: Option<u32>,
+    pub(crate) limit: Option<u32>,
+}
+
 /// selected; all are optional and fall back to per-kind defaults in `readiness_context`.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

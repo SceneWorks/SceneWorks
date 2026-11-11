@@ -1526,6 +1526,31 @@ pub(crate) async fn create_training_dataset_batch_describe_job(
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
+/// The most describe jobs one page of a dataset's history lists. Each "Describe" click, re-run and
+/// "Describe remaining" is one job; the dialog pages further back while images remain uncovered.
+const MAX_LISTED_BATCH_DESCRIBE_JOBS: u32 = 200;
+
+/// A page of a dataset's batch describe jobs, newest first (`offset`, `limit`). The Create Prompt
+/// Batch dialog reads their stored result items to rebuild its table when it reopens, after a
+/// restart included.
+pub(crate) async fn list_training_dataset_batch_describe_jobs(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id)): Path<(String, String)>,
+    Query(query): Query<crate::dto::BatchDescribeJobsQuery>,
+) -> Result<Json<Vec<JobSnapshot>>, ApiError> {
+    let unfinished = query.unfinished.unwrap_or(false);
+    let offset = query.offset.unwrap_or(0);
+    let limit = query
+        .limit
+        .unwrap_or(MAX_LISTED_BATCH_DESCRIBE_JOBS)
+        .clamp(1, MAX_LISTED_BATCH_DESCRIBE_JOBS);
+    let jobs = store_call(state, move |store, _timeout| {
+        store.list_dataset_batch_describe_jobs(&project_id, &dataset_id, unfinished, offset, limit)
+    })
+    .await?;
+    Ok(Json(public_job_snapshots(jobs)))
+}
+
 /// Validate a batch describe request: the model (absent means the Vision Captioner; JoyCaption is
 /// the other accepted describer) and the instruction length, which depends on the model (JoyCaption
 /// takes one prompt of at most 4,000 characters, so its instruction is capped lower). Returns the
@@ -1612,6 +1637,9 @@ fn batch_describe_items(
                 "imagePath": dataset_root.join(&item.path).display().to_string(),
                 "relativePath": item.path,
                 "assetId": item.asset_id,
+                // The image's identity when it was described, so a reopened dialog can tell a
+                // result for these pixels from one for an image cropped or repointed since.
+                "contentHash": item.content_hash,
             })
         })
         .collect();
