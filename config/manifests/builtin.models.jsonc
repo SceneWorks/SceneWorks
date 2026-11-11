@@ -27754,6 +27754,159 @@
       }
     },
     {
+      // MiniMax-H3-Image PROMPT EXPANDER (SW-7102, feature SW-F363).
+      //
+      // `MiniMaxAI/MiniMax-H3-Image-PE` @ 35603d4b is a fine-tune of Qwen3.8-27B (`qwen3_5`, 64
+      // layers, Qwen3-VL vision tower; 27,356,728,560 parameters read from the snapshot's tensor
+      // headers). It runs on the existing native TextLlm lane as the `prompt_refine` task
+      // `minimax_h3_image_expand`; the engine adapter is `core_llm::minimax_h3_image_pe`. It turns a
+      // short prompt (or an edit instruction plus its ordered `<Picture N>` references) into
+      // MiniMax-H3-Image's long caption and proposes an aspect ratio. The user reviews and accepts
+      // the expansion before it replaces the prompt, and accepts the size separately.
+      //
+      // THE PROMPTS ARE NEVER COPIED. The system and task prompts are MiniMax Materials. The worker
+      // reads them at run time from the UPSTREAM snapshot's `prompt/` directory and checks each file
+      // against `prompt/manifest.json` (itself pinned by SHA-256 in the engine). The `prompt` co-
+      // requisite below fetches exactly those five files, so every tier — including a converted one,
+      // which never carries `prompt/` — has them.
+      //
+      // TIERS. nvfp4 is MiniMax's published ModelOpt NVFP4 checkpoint (17,916,124,008 B of weights),
+      // which loads only on Blackwell CUDA (sm_120+), hence Windows/Linux only. bf16/q8/q4 are the
+      // SW-7099 conversions (`SceneWorks/minimax-h3-image-pe/{bf16,q8,q4}/`), NOT YET PUBLISHED: null
+      // SHA + `pendingArtifact`, so none is offered for install yet. Their sizes are DERIVED, not
+      // measured: 25,598,361,600 quantized decoder-projection parameters (the NVFP4 packed set) at 16 /
+      // 8.5 / 4.5 bits each, plus 1,758,366,960 dense parameters (embeddings, head, vision tower) at
+      // bf16, plus the 20,284,856 B of tokenizer and config sidecars. The terminal item publishes them,
+      // pins the revision, drops the flag and replaces the derived sizes with the hosted totals.
+      "id": "minimax_h3_image_pe",
+      "autoDownload": false,
+      "macOnly": false,
+      "minMemoryGb": 24,
+      "name": "MiniMax-H3-Image Prompt Expander",
+      "family": "minimax-h3-image-pe",
+      "type": "utility",
+      "adapter": "prompt-refine",
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3-Image-PE",
+          "revision": "35603d4b63949afa12cb098227fffefedf081afa",
+          "variant": "nvfp4",
+          "default": true,
+          "files": [
+            "config.json",
+            "generation_config.json",
+            "hf_quant_config.json",
+            "chat_template.jinja",
+            "processor_config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "model.safetensors.index.json",
+            "model-*.safetensors"
+          ],
+          "platforms": ["windows", "linux"],
+          // Hub tree at the pinned revision: these twelve files.
+          "estimatedSizeBytes": 17936408864,
+          "footprint": { "diskSizeBytes": 17936408864, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-image-pe",
+          "revision": "0000000000000000000000000000000000000000",
+          "pendingArtifact": true,
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          // DERIVED (unpublished): 27,356,728,560 x 2 + 20,284,856.
+          "estimatedSizeBytes": 54733741976,
+          "footprint": { "diskSizeBytes": 54733741976, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-image-pe",
+          "revision": "0000000000000000000000000000000000000000",
+          "pendingArtifact": true,
+          "variant": "q8",
+          "files": ["q8/*"],
+          // DERIVED (unpublished): 25,598,361,600 x 8.5 / 8 + 1,758,366,960 x 2 + 20,284,856.
+          "estimatedSizeBytes": 30735277976,
+          "footprint": { "diskSizeBytes": 30735277976, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-image-pe",
+          "revision": "0000000000000000000000000000000000000000",
+          "pendingArtifact": true,
+          "variant": "q4",
+          "files": ["q4/*"],
+          // DERIVED (unpublished): 25,598,361,600 x 4.5 / 8 + 1,758,366,960 x 2 + 20,284,856.
+          "estimatedSizeBytes": 17936097176,
+          "footprint": { "diskSizeBytes": 17936097176, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // The prompt files, read at run time from the upstream snapshot for every tier.
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3-Image-PE",
+          "revision": "35603d4b63949afa12cb098227fffefedf081afa",
+          "coRequisite": true,
+          "componentId": "prompt",
+          "subdir": "prompt",
+          "files": [
+            "prompt/manifest.json",
+            "prompt/t2i/system_prompt.txt",
+            "prompt/t2i/task_prompt.txt",
+            "prompt/t2i/request_params.json",
+            "prompt/edit/task_prompt.txt"
+          ],
+          "estimatedSizeBytes": 56282
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/MiniMaxAI/MiniMax-H3-Image-PE"
+      },
+      // E23 — the licence gate. The expander is under the MiniMax-H3-Image Community License
+      // Agreement (its model card's `license_name`; the agreement's closing note names the
+      // prompt-enhancer model expressly). The repository ships no LICENSE file of its own, so the
+      // link is the agreement as published with MiniMax-H3-Image at its pinned revision.
+      "gated": false,
+      "requiresLicenseAcknowledgment": true,
+      "licenseUrl": "https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/492fd8c4eca666f1085f57e30738c1e0d86b3439/LICENSE",
+      "licenseNotice": "MiniMax-H3-Image-PE, MiniMax-H3-Image's prompt expander, is governed by the MiniMax-H3-Image Community License Agreement (dated November 10, 2026) — the same agreement as MiniMax-H3-Image, not SceneWorks' own AGPL-3.0 licence. Its weights and its prompt files are both MiniMax Materials; SceneWorks reads the prompts from MiniMax's own repository on your machine and never copies them. The agreement grants a NON-TRANSFERABLE licence (§II) and binds whoever uses the model (§I.9), so SceneWorks' own acceptance does not stand in for yours. (1) APPLICABLE TERRITORY (§I.3, §I.5, §V.4): use is authorized only within the Applicable Territory, which is worldwide excluding the European Union, the United Kingdom, the Republic of Korea, and the United States of America. No written authorization from MiniMax for this model is recorded in SceneWorks. (2) ACCEPTABLE USE POLICY (§V.1 and Exhibit A): twenty prohibited uses; item 12 requires you to clearly and prominently disclose that content is machine-generated whenever you publish it to a public environment. (3) ADDITIONAL COMMERCIAL TERMS (§IV.1): you must obtain separate prior written authorization from MiniMax, requested through https://platform.minimax.io/license, if the annualized revenue of you and your affiliates exceeds 1 million US dollars, or if you provide a Hosted Service to any third party. (4) ATTRIBUTION (§IV.2): a commercial product or service that uses the model must prominently display \"MiniMax-H3-Image\" on its user interface. (5) NO IMPROVING OTHER AI MODELS (§V.3): you may not use the Works or any of their Outputs or results — expanded prompts included — to improve any other artificial intelligence model, other than MiniMax-H3-Image or its Model Derivatives. The expander is an OPTIONAL download: MiniMax-H3-Image generates normally without it, and installing it only adds an Expand prompt action you choose to run. Read the full text under About → Licenses before downloading.",
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      // DERIVED floors, NOT measured: the tier's weights plus ~6 GB for the 4096-token decode, the
+      // prompt prefill and up to sixteen edit references through the vision tower — bf16 54.7 GB,
+      // q8 30.7 GB, q4 17.9 GB, nvfp4 17.9 GB (Candle only). The engine's own memory admission
+      // refuses a load that does not fit; the expander is staged out of memory before a
+      // MiniMax-H3-Image render loads.
+      "mlx": {
+        "minMemoryGb": 61,
+        "minMemoryGbByTier": { "bf16": 61, "q8": 37, "q4": 24 }
+      },
+      "candle": {
+        "minMemoryGb": 61,
+        "minMemoryGbByTier": { "bf16": 61, "q8": 37, "q4": 24, "nvfp4": 24 },
+        "measured": false
+      },
+      "ui": {
+        "label": "MiniMax-H3-Image Prompt Expander",
+        "attribution": "Powered by MiniMax-H3-Image",
+        "description": "Optional prompt expander for MiniMax-H3-Image. Turns a short prompt into the long caption the image model was trained on and proposes an aspect ratio; you review the expansion and accept it before it replaces your prompt, and the proposed size is only offered. MiniMax-H3-Image works fully without it. The published NVFP4 checkpoint needs a Blackwell NVIDIA GPU; the bf16, Q8 and Q4 tiers are not published yet. Governed by the MiniMax-H3-Image Community License Agreement, which you must accept before downloading.",
+        "recommendedFor": ["minimax_h3_image_prompt_expand"],
+        "promptGuide": {
+          "title": "MiniMax-H3-Image Prompt Guide",
+          "path": "/prompt-guides/minimax-h3-image.md",
+          "sources": [
+            { "label": "MiniMax-H3-Image-PE model card", "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3-Image-PE" }
+          ]
+        }
+      }
+    },
+    {
       // Dataset captioning LLM (sc-5620, the JoyCaption twin of the sc-5605 prompt_refine gap).
       // The native captioner (`caption_jobs.rs`, the `training_caption` job used by LoRA-training
       // auto-captioning) runs JoyCaption in-process — the MLX provider on macOS (sc-3556) and

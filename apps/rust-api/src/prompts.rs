@@ -8,6 +8,10 @@ pub(crate) const MAX_MOOD_BOARD_IMAGES: usize = 6;
 
 // The API and worker classify the same core-owned discriminator.
 pub(crate) use sceneworks_core::contracts::QWEN_IMAGE_REWRITE_TASK;
+pub(crate) use sceneworks_core::contracts::{
+    MINIMAX_H3_IMAGE_EXPAND_MAX_REFERENCES, MINIMAX_H3_IMAGE_EXPAND_TASK,
+    MINIMAX_H3_IMAGE_MODEL_ID, MINIMAX_H3_IMAGE_PE_MODEL_ID,
+};
 
 /// Maximum reference images on a Qwen-Image 2.1 rewrite request.
 ///
@@ -42,7 +46,11 @@ pub(crate) async fn create_prompt_refine_job(
     // references is not an error — it is the legitimate text-to-image case, and it is what selects
     // the T2I rewriter over the editing one in the worker.
     let is_qwen_rewrite = task == Some(QWEN_IMAGE_REWRITE_TASK);
-    let carries_reference_images = is_vision_task || is_qwen_rewrite;
+    // MiniMax-H3-Image's prompt expansion (SW-7102) has the same shape: driven by the user's text,
+    // with zero references meaning text-to-image and one or more meaning an edit whose instruction
+    // names them as `<Picture N>` in order.
+    let is_h3_expand = task == Some(MINIMAX_H3_IMAGE_EXPAND_TASK);
+    let carries_reference_images = is_vision_task || is_qwen_rewrite || is_h3_expand;
 
     let prompt = payload.prompt.trim();
     if prompt.is_empty() && !is_vision_task {
@@ -92,7 +100,16 @@ pub(crate) async fn create_prompt_refine_job(
         //
         // The rewrite's ceiling is 10 rather than 6, and for a different reason — see
         // `MAX_QWEN_REWRITE_IMAGES`: it must be shown exactly the ordered list the render will use.
-        let (cap, cap_message) = if is_qwen_rewrite {
+        let (cap, cap_message) = if is_h3_expand {
+            (
+                MINIMAX_H3_IMAGE_EXPAND_MAX_REFERENCES,
+                format!(
+                    "MiniMax-H3-Image prompt expansion accepts at most \
+                     {MINIMAX_H3_IMAGE_EXPAND_MAX_REFERENCES} reference images — the same ordered \
+                     list the render takes"
+                ),
+            )
+        } else if is_qwen_rewrite {
             (
                 MAX_QWEN_REWRITE_IMAGES,
                 format!(
@@ -125,7 +142,7 @@ pub(crate) async fn create_prompt_refine_job(
             }
             // A single reference keeps the scalar `imagePath` (byte-identical to the pre-mood-board path);
             // multiple references ride the `imagePaths` array the worker prefers.
-            if image_paths.len() == 1 && !is_qwen_rewrite {
+            if image_paths.len() == 1 && !is_qwen_rewrite && !is_h3_expand {
                 job_payload.insert(
                     "imagePath".to_owned(),
                     Value::String(image_paths.into_iter().next().unwrap()),
@@ -252,6 +269,10 @@ pub(crate) async fn create_prompt_refine_job(
         }
     }
 
+    if is_h3_expand {
+        prepare_h3_image_expand(&state, &payload, &mut job_payload).await?;
+    }
+
     let job = create_generation_job(
         state,
         JobType::PromptRefine,
@@ -262,6 +283,71 @@ pub(crate) async fn create_prompt_refine_job(
     )
     .await?;
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
+}
+
+/// The MiniMax-H3-Image expansion's own admission (SW-7102): it serves only `minimax_h3_image`,
+/// its edit aspect selection is `adaptive` or a positive-integer `W:H`, its licence must be
+/// accepted before it runs, and the worker receives its server-owned catalog entry (tiers and the
+/// upstream `prompt/` co-requisite) as `modelManifestEntry`.
+async fn prepare_h3_image_expand(
+    state: &AppState,
+    payload: &PromptRefineRequest,
+    job_payload: &mut JsonObject,
+) -> Result<(), ApiError> {
+    let target = payload
+        .model_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(MINIMAX_H3_IMAGE_MODEL_ID);
+    if target != MINIMAX_H3_IMAGE_MODEL_ID {
+        return Err(ApiError::bad_request(format!(
+            "MiniMax-H3-Image prompt expansion only applies to {MINIMAX_H3_IMAGE_MODEL_ID}; this \
+             request targets {target}"
+        )));
+    }
+    job_payload.insert(
+        "modelId".to_owned(),
+        Value::String(MINIMAX_H3_IMAGE_MODEL_ID.to_owned()),
+    );
+    if let Some(aspect) = payload
+        .aspect_ratio
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if aspect != "adaptive" && !is_positive_ratio(aspect) {
+            return Err(ApiError::bad_request(
+                "aspectRatio for MiniMax-H3-Image prompt expansion must be adaptive or a \
+                 positive-integer W:H",
+            ));
+        }
+    }
+    let entry =
+        crate::models::resolve_model_manifest_entry(state, MINIMAX_H3_IMAGE_PE_MODEL_ID).await?;
+    let object = entry
+        .as_object()
+        .filter(|object| !object.is_empty())
+        .ok_or_else(|| {
+            ApiError::internal(format!(
+                "the {MINIMAX_H3_IMAGE_PE_MODEL_ID} catalog entry is missing"
+            ))
+        })?;
+    crate::models::ensure_run_license_acknowledged(state, object).await?;
+    job_payload.insert("modelManifestEntry".to_owned(), entry);
+    Ok(())
+}
+
+/// Whether `value` is a positive-integer `W:H`.
+fn is_positive_ratio(value: &str) -> bool {
+    let positive = |part: &str| {
+        !part.is_empty()
+            && part.bytes().all(|byte| byte.is_ascii_digit())
+            && part.parse::<u64>().is_ok_and(|number| number > 0)
+    };
+    value
+        .split_once(':')
+        .is_some_and(|(width, height)| positive(width) && positive(height))
 }
 
 /// Resolve an `image_caption` reference asset to an absolute on-disk path. Mirrors the worker's
@@ -289,6 +375,17 @@ mod tests {
     /// board's. Asserting both together is what stops a future "unify the caps" cleanup from
     /// silently cutting what the rewriter is allowed to see — at which point its `<imageN>`
     /// numbering would stop matching the references the render conditions on.
+    #[test]
+    fn the_expansion_aspect_selection_is_a_positive_integer_ratio() {
+        for ratio in ["1:1", "16:9", "21:9", "4736:3552"] {
+            assert!(is_positive_ratio(ratio), "{ratio}");
+        }
+        for value in ["", "16", "0:1", "1:0", "16:9:1", "a:b", "1.5:1", "-1:2"] {
+            assert!(!is_positive_ratio(value), "{value}");
+        }
+        assert_eq!(MINIMAX_H3_IMAGE_EXPAND_MAX_REFERENCES, 16);
+    }
+
     #[test]
     fn the_rewrite_ceiling_is_the_renders_not_the_mood_boards() {
         assert_eq!(MAX_QWEN_REWRITE_IMAGES, 10);

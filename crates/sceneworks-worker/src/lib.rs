@@ -545,6 +545,11 @@ mod qwen_alpha;
 // a no-backend build keeps the module for its pure-function tests.
 #[cfg_attr(not(native_lane), allow(dead_code))]
 mod qwen_prompt_rewrite;
+// MiniMax-H3-Image's prompt expander (SW-7102): where its tier weights and its upstream `prompt/`
+// files are on disk, and the job-result shape. The request and reply contract are the engine's
+// (`core_llm::minimax_h3_image_pe`); `prompt_refine_jobs` drives it on the same TextLlm lane.
+#[cfg_attr(not(native_lane), allow(dead_code))]
+mod minimax_h3_image_prompt_expand;
 // sc-6541 closed-loop study: test-only LoRA output-quality eval harness (research instrument) —
 // see the module doc + docs/sc-6541/closed-loop-protocol.md.
 #[cfg(all(test, target_os = "macos"))]

@@ -218,9 +218,14 @@ pub(crate) async fn ensure_run_license_acknowledged(
     state: &AppState,
     entry: &JsonObject,
 ) -> Result<(), ApiError> {
-    if entry.get("family").and_then(Value::as_str)
-        != Some(sceneworks_core::model_family::MINIMAX_H3_IMAGE)
-    {
+    // SW-7102: the prompt expander is under the same agreement and is gated the same way.
+    if !matches!(
+        entry.get("family").and_then(Value::as_str),
+        Some(
+            sceneworks_core::model_family::MINIMAX_H3_IMAGE
+                | sceneworks_core::model_family::MINIMAX_H3_IMAGE_PE
+        )
+    ) {
         return Ok(());
     }
     let entry = Value::Object(entry.clone());

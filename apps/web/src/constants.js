@@ -125,6 +125,17 @@ export function qwenRewriterAppliesTo(model) {
   return QWEN_IMAGE_2_1_MODEL_IDS.includes(model?.id);
 }
 
+// MiniMax-H3-Image and its OPTIONAL prompt expander, MiniMax-H3-Image-PE (SW-7102). One checkpoint
+// serves both workflows; references attached select the edit workflow server-side. Mirrors
+// `sceneworks_core::contracts::{MINIMAX_H3_IMAGE_MODEL_ID, MINIMAX_H3_IMAGE_PE_MODEL_ID}`.
+export const MINIMAX_H3_IMAGE_MODEL_ID = "minimax_h3_image";
+export const MINIMAX_H3_IMAGE_PE_MODEL_ID = "minimax_h3_image_pe";
+
+// Whether the MiniMax-H3-Image prompt expander applies to the selected generation model.
+export function h3ImageExpanderAppliesTo(model) {
+  return model?.id === MINIMAX_H3_IMAGE_MODEL_ID;
+}
+
 // DWPose whole-body pose detector (sc-17634 re-host, `type: "utility"` in builtin.models.jsonc).
 // One catalog entry carrying BOTH ONNX graphs the pose lane loads — YOLOX person boxes + the RTMW
 // 133-point COCO-WholeBody model. Since sc-17634 the worker's resolver is CACHE-ONLY: it never

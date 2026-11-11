@@ -451,3 +451,27 @@ written above, with these per-model facts:
   the Simple Image Studio as well as the model card.
 * **Open item 2 above applies to this model too**: whether it ships in an Excluded Territory is a
   ship/no-ship call that the acknowledgment does not resolve.
+
+### MiniMax-H3-Image-PE, the prompt expander (SW-7102)
+
+`minimax_h3_image_pe` (`MiniMaxAI/MiniMax-H3-Image-PE` @ 35603d4b) is MiniMax-H3-Image's optional
+prompt expander. Its model card names the **MiniMax-H3-Image Community License Agreement**, and the
+agreement's closing note places the prompt-enhancer model under it, so the per-model facts above
+apply with these differences:
+
+* **S1** — its own catalog entry carries `requiresLicenseAcknowledgment`, and the acknowledgment is
+  recorded against its own id: accepting MiniMax-H3-Image's terms does not accept the expander's.
+  The API checks it again at run time (`ensure_run_license_acknowledged`, scoped to both families),
+  so a cache filled by another route cannot expand a prompt without an acceptance on record.
+* **S2** — its `licenseNotice` names the same five terms, including §IV.1's 1 million USD / Hosted
+  Service trigger and §V.3 (expanded prompts are Outputs).
+  `tests/test_builtin_manifest_audit.py::test_minimax_h3_image_pe_license_notice_names_its_own_terms`
+  pins it.
+* **S3** — its own licence entry (`apps/desktop/licenses/minimax-h3-image-pe/`) ships a §III.4
+  NOTICE and points at the verbatim agreement shipped with MiniMax-H3-Image. The repository has no
+  LICENSE file of its own.
+* **S4** — `ui.attribution` is "Powered by MiniMax-H3-Image".
+* **The prompts are never redistributed.** The system and task prompts are MiniMax Materials. The
+  worker reads them from the upstream snapshot's `prompt/` directory, checked against its
+  `prompt/manifest.json` (whose own SHA-256 the engine pins), and the converted tiers never carry
+  them. No prompt text is in this repository, tests included.
