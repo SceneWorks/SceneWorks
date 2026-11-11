@@ -180,6 +180,86 @@ mod tests {
         );
     }
 
+    fn manifest_schema() -> Value {
+        serde_json::from_str(include_str!(
+            "../../../packages/schemas/model-manifest.schema.json"
+        ))
+        .expect("schema parses")
+    }
+
+    /// The v2 memory-key rule applies to exactly the REGISTERED builtin ids, so its id enum must
+    /// stay the registry's id set.
+    #[test]
+    fn v2_memory_rule_names_exactly_the_registered_builtins() {
+        let schema = manifest_schema();
+        let mut declared = schema["allOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find_map(|rule| rule.pointer("/then/properties/models/items/if/properties/id/enum"))
+            .expect("the v2 memory rule is keyed on registered ids")
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| id.as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        declared.sort();
+        let mut registered = crate::registry::builtin_model_specs()
+            .map(|spec| {
+                spec.project(None)["id"]
+                    .as_str()
+                    .expect("spec id")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        registered.sort();
+        assert_eq!(declared, registered);
+    }
+
+    /// Review decision D: an H3-import-shaped v2 user row carries the memory floor the importer
+    /// copies from its base (`apply_minimax_h3_studio_surface_defaults`); its id is not registered,
+    /// so the evidence store has no row for it and the v2 schema permits those keys. It validates
+    /// and round-trips through the shared normalizer unchanged, while the same keys on an override
+    /// of a REGISTERED builtin stay forbidden.
+    #[test]
+    fn h3_import_shaped_v2_row_validates_and_round_trips() {
+        let mut row = json!({
+            "id": "custom_h3_import", "name": "Custom H3", "type": "video",
+            "family": "minimax-h3", "baseModel": "minimax_h3", "minimaxH3Partition": "fl2va"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        crate::minimax_h3_import::apply_minimax_h3_studio_surface_defaults(&mut row);
+        assert!(
+            row["mlx"]["minMemoryGb"].is_number(),
+            "the importer copies the base's memory floor: {row:?}"
+        );
+        let manifest = json!({"schemaVersion": 2, "models": [row.clone()]});
+        // Full-row schema enforcement is builtin-only (sc-12338: the user manifest is a lenient
+        // extension surface whose import keys such as `baseModel` the builtin authoring schema does
+        // not list), so validate the importer's row against the schema's v2 versioning rules.
+        let schema = manifest_schema();
+        let validator = jsonschema::validator_for(&json!({"allOf": schema["allOf"]}))
+            .expect("schema v2 rules compile");
+        let errors = validator
+            .iter_errors(&manifest)
+            .map(|error| format!("{} at {}", error, error.instance_path))
+            .collect::<Vec<_>>();
+        assert!(errors.is_empty(), "{errors:#?}");
+        let mut round = manifest.clone();
+        assert!(!normalize_user_model_manifest(&mut round).unwrap());
+        assert_eq!(round, manifest);
+        assert_eq!(
+            parse_user_model_manifest(&manifest.to_string()).unwrap(),
+            manifest
+        );
+
+        let override_row = json!({"id": "minimax_h3", "name": "My H3", "type": "video",
+            "family": "minimax-h3", "mlx": {"minMemoryGb": 40}});
+        assert!(!validator.is_valid(&json!({"schemaVersion": 2, "models": [override_row]})));
+    }
+
     #[test]
     fn read_side_parse_refuses_future_versions_and_upgrades_old_ones() {
         let future = "// user\n{\"schemaVersion\": 3, \"models\": [{\"id\": \"later\"}]}";
