@@ -163,3 +163,53 @@ async fn prompt_batch_crud_routes_persist_global_and_project_batches() {
     assert!(!remaining.contains(&"character_turnaround"));
     assert!(remaining.contains(&"character_turnaround_copy"));
 }
+
+#[tokio::test]
+async fn deleted_prompt_batch_name_can_be_saved_again() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let create = |prompt: &'static str| {
+        request(
+            app.clone(),
+            "POST",
+            "/api/v1/prompt-batches",
+            json!({ "name": "Reused Name", "prompts": [prompt] }),
+        )
+    };
+
+    let (status, _) = create("first").await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // A live batch with the name still conflicts.
+    let (status, conflict) = create("clash").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(conflict["detail"], "Prompt batch already exists");
+
+    let (status, _) = request(
+        app.clone(),
+        "DELETE",
+        "/api/v1/prompt-batches/reused_name",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Once deleted, the name is free: the new batch replaces the archived entry.
+    let (status, recreated) = create("second").await;
+    assert_eq!(status, StatusCode::CREATED, "{recreated}");
+    assert_eq!(recreated["id"], "reused_name");
+    assert_eq!(recreated["prompts"][0], "second");
+    assert!(recreated.get("archived").is_none(), "{recreated}");
+
+    let (status, list) = request(
+        app.clone(),
+        "GET",
+        "/api/v1/prompt-batches?include_archived=true",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let list = list.as_array().expect("list array");
+    assert_eq!(list.len(), 1, "the archived entry is replaced, not kept");
+    assert_eq!(list[0]["prompts"][0], "second");
+}
