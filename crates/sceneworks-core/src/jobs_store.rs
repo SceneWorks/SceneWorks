@@ -1670,14 +1670,15 @@ impl JobsStore {
         Ok(jobs)
     }
 
-    /// A dataset's batch describe jobs, newest first, so the Create Prompt Batch dialog can rebuild
-    /// its table from the results those jobs stored. Every retained job counts, including canceled,
-    /// interrupted and cleared ones: clearing hides a job from the queue, but its stored
-    /// descriptions are still the user's work.
+    /// A page of a dataset's batch describe jobs, newest first, so the Create Prompt Batch dialog
+    /// can rebuild its table from the results those jobs stored. Every retained job counts,
+    /// including canceled, interrupted and cleared ones: clearing hides a job from the queue, but
+    /// its stored descriptions are still the user's work.
     pub fn list_dataset_batch_describe_jobs(
         &self,
         project_id: &str,
         dataset_id: &str,
+        offset: u32,
         limit: u32,
     ) -> JobsStoreResult<Vec<JobSnapshot>> {
         let connection = self.open_connection()?;
@@ -1688,14 +1689,15 @@ impl JobsStore {
                 and project_id = ?2
                 and json_extract(payload_json, '$.datasetId') = ?3
               order by created_at desc, rowid desc
-              limit ?4",
+              limit ?4 offset ?5",
         )?;
         let jobs = collect_jobs(statement.query_map(
             params![
                 JobType::DatasetBatchDescribe.as_str(),
                 project_id,
                 dataset_id,
-                limit
+                limit,
+                offset
             ],
             row_to_job,
         )?)?;

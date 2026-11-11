@@ -51,6 +51,8 @@ export const DESCRIBE_FIELDS = [
 ];
 
 const POLL_MS = 1000;
+// Describe jobs read per page of the dataset's history while restoring the table.
+export const RESTORE_JOBS_PAGE = 50;
 // The wait before each retry of a failed job or items read. A read still failing after the last
 // retry stops monitoring (the job itself keeps running) and the dialog offers to resume.
 export const POLL_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000];
@@ -156,6 +158,17 @@ export function promptBatchNamed(batches, name) {
       (batch) => (batch?.scope ?? "global") === "global" && String(batch?.name ?? "").trim().toLowerCase() === wanted,
     ) ?? null
   );
+}
+
+// The replacement for a saved batch keeps the values the user gave its variables (in Image Studio)
+// for every key the new prompts still use: from the stored variable, or its `lastValues` entry.
+export function keepVariableValues(variables, existing) {
+  const stored = new Map((existing?.variables ?? []).map((variable) => [variable?.key, variable?.values]));
+  const last = existing?.lastValues ?? {};
+  return variables.map((variable) => {
+    const values = [stored.get(variable.key), last[variable.key]].find((entry) => Array.isArray(entry) && entry.length);
+    return values ? { ...variable, values: [...values] } : variable;
+  });
 }
 
 // The describer recorded for a saved batch: the one model every included row was described with,
@@ -406,22 +419,43 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
     setRestoring(true);
     (async () => {
       try {
-        const listed = await withRetries(
-          () => trainingApi.listBatchDescribeJobs(projectId, dataset.id, token, { signal }),
-          signal,
-        );
-        const jobsNewestFirst = Array.isArray(listed) ? listed : [];
-        const active = jobsNewestFirst.find((entry) => !terminalStatuses.has(entry?.status)) ?? null;
-        // Read runs newest first, so a newer result always wins. Stop once every image has a
-        // current successful result, but never before the active job is read (its count seeds
-        // polling).
+        // Read runs newest first, a page of the history at a time, so a newer result always
+        // wins. Stop once every image has a current successful result, but never before the
+        // active job is read (its count seeds polling).
         const images = new Map(datasetItems.map((image) => [image.id, image]));
         const missing = new Set(images.keys());
         const runs = [];
+        const jobsNewestFirst = [];
+        let active = null;
         let activeCount = 0;
-        let activeRead = !active;
-        for (const entry of jobsNewestFirst) {
-          if (activeRead && !missing.size) break;
+        let activeRead = false;
+        let offset = 0;
+        let exhausted = false;
+        const nextJob = async () => {
+          if (offset >= jobsNewestFirst.length && !exhausted) {
+            const page = await withRetries(
+              () =>
+                trainingApi.listBatchDescribeJobs(
+                  projectId,
+                  dataset.id,
+                  token,
+                  { offset: jobsNewestFirst.length, limit: RESTORE_JOBS_PAGE },
+                  { signal },
+                ),
+              signal,
+            );
+            const listed = Array.isArray(page) ? page : [];
+            if (!jobsNewestFirst.length) {
+              // A job still queued or running is among the newest, so the first page decides.
+              active = listed.find((entry) => !terminalStatuses.has(entry?.status)) ?? null;
+              activeRead = !active;
+            }
+            jobsNewestFirst.push(...listed);
+            if (listed.length < RESTORE_JOBS_PAGE) exhausted = true;
+          }
+          return offset < jobsNewestFirst.length ? jobsNewestFirst[offset++] : null;
+        };
+        for (let entry = await nextJob(); entry; entry = await nextJob()) {
           const items = [];
           const count = await readItemPages(entry.id, 0, (page) => items.push(...page), signal);
           if (entry === active) {
@@ -437,6 +471,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
             }
           }
           runs.push({ model: entry.result?.model ?? entry.payload?.model ?? null, items, sources });
+          if (activeRead && !missing.size) break;
         }
         if (signal.aborted) return;
         const restored = restoreDescribeRows(runs, datasetItems);
@@ -571,7 +606,8 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
           tone: "danger",
         });
         if (!replace) return;
-        setSavedBatch((await updatePromptBatch(existing.id, body, "global")) ?? null);
+        const replacement = { ...body, variables: keepVariableValues(body.variables, existing) };
+        setSavedBatch((await updatePromptBatch(existing.id, replacement, "global")) ?? null);
       } else {
         setSavedBatch((await createPromptBatch(body)) ?? null);
       }

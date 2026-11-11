@@ -23,7 +23,7 @@ const { jobsApi } = await import("../api/jobsResources.js");
 const { abortableDelay } = await import("../pollJob.js");
 const { saveExportFile } = await import("../saveExportFile.js");
 const { appConfirm } = await import("../appConfirm.jsx");
-const { DatasetPromptBatchDialog } = await import("./DatasetPromptBatchDialog.jsx");
+const { DatasetPromptBatchDialog, RESTORE_JOBS_PAGE } = await import("./DatasetPromptBatchDialog.jsx");
 
 const DEFAULT_PROMPT = "You are a meticulous scene describer.\n## LABELS";
 const JOY_REPO = "fancyfeast/llama-joycaption-beta-one-hf-llava";
@@ -736,7 +736,15 @@ describe("DatasetPromptBatchDialog", () => {
   });
 
   it("replaces a saved batch with the same name after a confirm instead of failing", async () => {
-    context.promptBatches = [{ id: "film_prints_prompts", name: "Film Prints Prompts ", scope: "global", prompts: ["old"] }];
+    context.promptBatches = [
+      {
+        id: "film_prints_prompts",
+        name: "Film Prints Prompts ",
+        scope: "global",
+        prompts: ["old"],
+        variables: [{ key: "woman_1", values: ["Ada"] }, { key: "man_1", values: ["Bo"] }],
+      },
+    ];
     await render();
     await runWith([described("item_a", 300, 400)]);
     appConfirm.mockResolvedValueOnce(false);
@@ -748,6 +756,8 @@ describe("DatasetPromptBatchDialog", () => {
     await settle();
     expect(context.createPromptBatch).not.toHaveBeenCalled();
     expect(context.updatePromptBatch).toHaveBeenCalledWith("film_prints_prompts", expect.objectContaining({ name: "Film prints prompts" }), "global");
+    // The filled-in value for a key the new prompts still use is kept.
+    expect(context.updatePromptBatch.mock.calls[0][1].variables).toEqual([{ key: "woman_1", values: ["Ada"] }]);
     expect(button("Open in Image Studio")).toBeTruthy();
   });
 
@@ -768,6 +778,23 @@ describe("DatasetPromptBatchDialog", () => {
     expect(rowText("item_b")).toBe("Old b.");
     expect(rowText("item_c")).toBe("Newest c.");
     expect(button("Cancel")).toBeTruthy();
+  });
+
+  it("pages back through the history until every image is covered", async () => {
+    // A full page of newer single-image re-runs of item_a, then the original full run on page 2.
+    const reruns = Array.from({ length: RESTORE_JOBS_PAGE }, (_, index) => ({ id: `rerun_${index}`, status: "completed", result: {} }));
+    trainingApi.listBatchDescribeJobs.mockImplementation(async (_p, _d, _t, { offset = 0 } = {}) =>
+      offset === 0 ? reruns : offset === RESTORE_JOBS_PAGE ? [{ id: "job_full", status: "completed", result: {} }] : [],
+    );
+    serveStoredRuns({
+      ...Object.fromEntries(reruns.map((run) => [run.id, [described("item_a", 300, 400, { description: "Re-run a." })]])),
+      job_full: [described("item_a", 300, 400), described("item_b", 400, 300, { description: "Full b." }), described("item_c", 300, 400, { description: "Full c." })],
+    });
+    await render();
+    expect(rowText("item_a")).toBe("Re-run a.");
+    expect(rowText("item_b")).toBe("Full b.");
+    expect(rowText("item_c")).toBe("Full c.");
+    expect(trainingApi.listBatchDescribeJobs.mock.calls.map((call) => call[3].offset)).toEqual([0, RESTORE_JOBS_PAGE]);
   });
 
   it("drops a restored result whose image was cropped or repointed since", async () => {

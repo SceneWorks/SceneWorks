@@ -1526,22 +1526,25 @@ pub(crate) async fn create_training_dataset_batch_describe_job(
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
-/// The most describe jobs one dataset's history lists. Each "Describe" click, re-run and "Describe
-/// remaining" is one job, so this covers far more history than the dialog needs to rebuild a table.
+/// The most describe jobs one page of a dataset's history lists. Each "Describe" click, re-run and
+/// "Describe remaining" is one job; the dialog pages further back while images remain uncovered.
 const MAX_LISTED_BATCH_DESCRIBE_JOBS: u32 = 200;
 
-/// A dataset's batch describe jobs, newest first. The Create Prompt Batch dialog reads their
-/// stored result items to rebuild its table when it reopens, after a restart included.
+/// A page of a dataset's batch describe jobs, newest first (`offset`, `limit`). The Create Prompt
+/// Batch dialog reads their stored result items to rebuild its table when it reopens, after a
+/// restart included.
 pub(crate) async fn list_training_dataset_batch_describe_jobs(
     State(state): State<AppState>,
     Path((project_id, dataset_id)): Path<(String, String)>,
+    Query(query): Query<crate::dto::BatchDescribeJobsQuery>,
 ) -> Result<Json<Vec<JobSnapshot>>, ApiError> {
+    let offset = query.offset.unwrap_or(0);
+    let limit = query
+        .limit
+        .unwrap_or(MAX_LISTED_BATCH_DESCRIBE_JOBS)
+        .clamp(1, MAX_LISTED_BATCH_DESCRIBE_JOBS);
     let jobs = store_call(state, move |store, _timeout| {
-        store.list_dataset_batch_describe_jobs(
-            &project_id,
-            &dataset_id,
-            MAX_LISTED_BATCH_DESCRIBE_JOBS,
-        )
+        store.list_dataset_batch_describe_jobs(&project_id, &dataset_id, offset, limit)
     })
     .await?;
     Ok(Json(public_job_snapshots(jobs)))

@@ -372,6 +372,18 @@ async fn batch_describe_jobs_list_the_datasets_runs_newest_first() {
         .collect();
     assert_eq!(ids, vec![second["id"].clone(), first["id"].clone()]);
 
+    // Paged: offset skips the newest jobs, limit caps the page.
+    let (status, page) = request(
+        app.clone(),
+        "GET",
+        &format!("{route}?offset=1&limit=1"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page.as_array().map(|jobs| jobs.len()), Some(1));
+    assert_eq!(page[0]["id"], first["id"]);
+
     // Another dataset's history is separate.
     let other = format!(
         "/api/v1/projects/{project_id}/training/datasets/other-dataset/batch-describe-jobs"
