@@ -135,6 +135,7 @@ fn private_portable_binding_roundtrips_nested_plan_context_for_claim() {
         Some(("cpu", std::env::consts::OS)),
         &[claim],
         false,
+        false,
     )
     .unwrap());
 }
@@ -157,14 +158,24 @@ fn historical_unbound_model_jobs_cannot_reach_versionless_claims() {
     training.payload = json!({"model":"example"}).as_object().unwrap().clone();
     let training = store.create_job(training).unwrap();
     let connection = store.open_connection().unwrap();
-    assert!(
-        !candidate_matches_portable_worker_sources(&connection, &image.id, None, &[], false,)
-            .unwrap()
-    );
-    assert!(
-        candidate_matches_portable_worker_sources(&connection, &download.id, None, &[], false,)
-            .unwrap()
-    );
+    assert!(!candidate_matches_portable_worker_sources(
+        &connection,
+        &image.id,
+        None,
+        &[],
+        false,
+        false
+    )
+    .unwrap());
+    assert!(candidate_matches_portable_worker_sources(
+        &connection,
+        &download.id,
+        None,
+        &[],
+        false,
+        false,
+    )
+    .unwrap());
     let queued = store.unbound_queued_model_jobs(8).unwrap();
     assert_eq!(
         queued.iter().map(|job| &job.id).collect::<Vec<_>>(),
@@ -210,6 +221,7 @@ fn historical_binding_install_is_atomic_and_refuses_a_changed_job() {
         Some(("cpu", std::env::consts::OS)),
         &[],
         false,
+        false,
     )
     .unwrap());
     assert!(!candidate_matches_portable_worker_sources(
@@ -217,6 +229,7 @@ fn historical_binding_install_is_atomic_and_refuses_a_changed_job() {
         &original.id,
         None,
         &[],
+        false,
         false,
     )
     .unwrap());
@@ -327,15 +340,21 @@ fn claim_requires_one_worker_with_primary_digest_and_auxiliary_claim() {
         .unwrap());
     let connection = store.open_connection().unwrap();
     let route = Some(("cpu", std::env::consts::OS));
-    assert!(
-        !candidate_matches_portable_worker_sources(&connection, &job.id, route, &[], false)
-            .unwrap()
-    );
+    assert!(!candidate_matches_portable_worker_sources(
+        &connection,
+        &job.id,
+        route,
+        &[],
+        false,
+        false
+    )
+    .unwrap());
     assert!(!candidate_matches_portable_worker_sources(
         &connection,
         &job.id,
         route,
         std::slice::from_ref(&digest_claim),
+        false,
         false,
     )
     .unwrap());
@@ -345,6 +364,7 @@ fn claim_requires_one_worker_with_primary_digest_and_auxiliary_claim() {
         route,
         std::slice::from_ref(&auxiliary_claim),
         false,
+        false,
     )
     .unwrap());
     assert!(candidate_matches_portable_worker_sources(
@@ -352,6 +372,7 @@ fn claim_requires_one_worker_with_primary_digest_and_auxiliary_claim() {
         &job.id,
         route,
         &[digest_claim, auxiliary_claim],
+        false,
         false,
     )
     .unwrap());
@@ -438,6 +459,7 @@ fn local_utility_digest_requires_keyed_worker_even_when_raw_kind_is_missing_or_s
         route,
         std::slice::from_ref(&claim),
         false,
+        false,
     )
     .unwrap());
     assert!(candidate_matches_portable_worker_sources(
@@ -446,6 +468,7 @@ fn local_utility_digest_requires_keyed_worker_even_when_raw_kind_is_missing_or_s
         route,
         std::slice::from_ref(&claim),
         true,
+        false,
     )
     .unwrap());
     let unkeyed = store.get_worker("unkeyed").unwrap();

@@ -297,21 +297,36 @@ test("backend scopes preserve the routing oracle's canonical lane order", () => 
 });
 
 test("backend scopes follow real routing even when manifest tuning blocks are absent", async () => {
-  const [manifestBody, routingCatalog, routingCandle, routingMlx] = await Promise.all([
-    readFile(new URL("../config/manifests/builtin.models.jsonc", import.meta.url), "utf8"),
-    readFile(
-      new URL("../crates/sceneworks-core/src/jobs_store/routing/catalog.rs", import.meta.url),
-      "utf8",
-    ),
-    readFile(
-      new URL("../crates/sceneworks-core/src/jobs_store/routing/candle.rs", import.meta.url),
-      "utf8",
-    ),
-    readFile(new URL("../crates/sceneworks-core/src/jobs_store/routing/mlx.rs", import.meta.url), "utf8"),
-  ]);
+  const [manifestBody, routingCatalog, routingCandle, routingMlx, routePolicy, registrySpecs] =
+    await Promise.all([
+      readFile(new URL("../config/manifests/builtin.models.jsonc", import.meta.url), "utf8"),
+      readFile(
+        new URL("../crates/sceneworks-core/src/jobs_store/routing/catalog.rs", import.meta.url),
+        "utf8",
+      ),
+      readFile(
+        new URL("../crates/sceneworks-core/src/jobs_store/routing/candle.rs", import.meta.url),
+        "utf8",
+      ),
+      readFile(
+        new URL("../crates/sceneworks-core/src/jobs_store/routing/mlx.rs", import.meta.url),
+        "utf8",
+      ),
+      readFile(
+        new URL("../config/manifests/registry/route-policy.json", import.meta.url),
+        "utf8",
+      ),
+      readFile(new URL("../config/manifests/registry/specs.json", import.meta.url), "utf8"),
+    ]);
   const manifest = JSON.parse(stripJsoncComments(manifestBody));
   const byId = new Map(manifest.models.map((model) => [model.id, model]));
-  const lanes = routedLanes({ routingCatalog, routingCandle, routingMlx });
+  const lanes = routedLanes({
+    routingCatalog,
+    routingCandle,
+    routingMlx,
+    routePolicy,
+    registrySpecs,
+  });
 
   // sc-20799 gave every remaining image entry a candle tuning block, so the absent-block premise no
   // longer has a live manifest instance. The claim under test is unchanged — the oracle keys on
@@ -1339,7 +1354,13 @@ test("MiniMax-H3 Candle dispatch exposes the authorized base and Ref2VA routes",
     ["minimax_h3_ref", "minimax_h3"],
   ]);
   const publicRoutes = parseVideoRoutes(bodies);
-  const routedBackends = routedLanes({ routingCatalog, routingCandle, routingMlx });
+  const routedBackends = routedLanes({
+    routingCatalog,
+    routingCandle,
+    routingMlx,
+    routePolicy: bodies.routePolicy,
+    registrySpecs: bodies.registrySpecs,
+  });
   // sc-20755 authorizes the base t2va/fl2va executor and sc-20756 authorizes Ref2VA.
   // The worker keeps this family on its dedicated direct resolver rather than the generic
   // `*_engine_id` parsers, so public authorization is the catalog lane, not `publicRoutes`.
@@ -1461,13 +1482,34 @@ test("mochi_1 is routed but deliberately outside the universe (sc-18815)", async
   // frozen with no weights lane and epic 18803 lists it out of scope, so it must NOT be admitted —
   // and the reason has to be the MANIFEST, not a coincidence of some other filter that a later
   // change could remove. Pinned from both sides.
-  const [manifestBody, routingCatalog, routingCandle, routingMlx] = await Promise.all([
-    readFile(new URL("../config/manifests/builtin.models.jsonc", import.meta.url), "utf8"),
-    readFile(new URL("../crates/sceneworks-core/src/jobs_store/routing/catalog.rs", import.meta.url), "utf8"),
-    readFile(new URL("../crates/sceneworks-core/src/jobs_store/routing/candle.rs", import.meta.url), "utf8"),
-    readFile(new URL("../crates/sceneworks-core/src/jobs_store/routing/mlx.rs", import.meta.url), "utf8"),
-  ]);
-  const routed = routedLanes({ routingCatalog, routingCandle, routingMlx });
+  const [manifestBody, routingCatalog, routingCandle, routingMlx, routePolicy, registrySpecs] =
+    await Promise.all([
+      readFile(new URL("../config/manifests/builtin.models.jsonc", import.meta.url), "utf8"),
+      readFile(
+        new URL("../crates/sceneworks-core/src/jobs_store/routing/catalog.rs", import.meta.url),
+        "utf8",
+      ),
+      readFile(
+        new URL("../crates/sceneworks-core/src/jobs_store/routing/candle.rs", import.meta.url),
+        "utf8",
+      ),
+      readFile(
+        new URL("../crates/sceneworks-core/src/jobs_store/routing/mlx.rs", import.meta.url),
+        "utf8",
+      ),
+      readFile(
+        new URL("../config/manifests/registry/route-policy.json", import.meta.url),
+        "utf8",
+      ),
+      readFile(new URL("../config/manifests/registry/specs.json", import.meta.url), "utf8"),
+    ]);
+  const routed = routedLanes({
+    routingCatalog,
+    routingCandle,
+    routingMlx,
+    routePolicy,
+    registrySpecs,
+  });
   assert.ok(routed.get("mochi_1")?.size, "mochi is routed, so its absence is not a routing accident");
   assert.ok(
     !JSON.parse(stripJsoncComments(manifestBody)).models.some((model) => model.id === "mochi_1"),
@@ -2339,11 +2381,14 @@ test("the fingerprint covers exactly the anchor and catalog sources, and the art
   assert.deepEqual(SOURCE_PATHS, {
     manifest: "config/manifests/builtin.models.jsonc",
     memoryEvidence: "config/manifests/registry/evidence.json",
+    routePolicy: "config/manifests/registry/route-policy.json",
+    registrySpecs: "config/manifests/registry/specs.json",
     routingCatalog: "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
     routingCandle: "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
     routingMlx: "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
     engines: "crates/sceneworks-worker/src/engines.rs",
     imageRouting: "crates/sceneworks-worker/src/image_jobs/routing.rs",
+    strictControl: "crates/sceneworks-worker/src/image_jobs/strict_control.rs",
     videoRouteWan: "crates/sceneworks-worker/src/video_jobs/wan.rs",
     videoRouteLtx: "crates/sceneworks-worker/src/video_jobs/ltx.rs",
     videoRouteSvd: "crates/sceneworks-worker/src/video_jobs/svd.rs",
@@ -2353,6 +2398,7 @@ test("the fingerprint covers exactly the anchor and catalog sources, and the art
     videoRouteCandle: "crates/sceneworks-worker/src/video_jobs/candle.rs",
     mlxFitGate: "crates/sceneworks-worker/src/mlx_fit_gate.rs",
     memoryRouteRegistry: "crates/sceneworks-worker/src/memory_route_registry.rs",
+    memoryRoutePolicy: "config/manifests/registry/memory-route-policy.json",
     instantId: "crates/sceneworks-worker/src/image_jobs/instantid.rs",
     anchorStore: "config/memory-anchors.json",
     anchorLoaderClosures: "config/anchor-loader-closures.json",

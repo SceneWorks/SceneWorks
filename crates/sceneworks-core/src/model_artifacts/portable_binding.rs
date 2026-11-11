@@ -1476,6 +1476,8 @@ pub fn model_free_job(
         && payload.get("dryRun").and_then(Value::as_bool) == Some(true)
         || matches!(job_type, JobType::TrainingCaption)
             && payload.get("mode").and_then(Value::as_str) == Some("triggerOnly")
+        || matches!(job_type, JobType::PersonDetect | JobType::PersonTrack)
+            && payload.get("preview").and_then(Value::as_bool) == Some(true)
         || matches!(job_type, JobType::CatalogAnalysis)
             && [
                 "structuredAnalysisEnabled",

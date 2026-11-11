@@ -32,16 +32,27 @@ import {
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 async function realInputs() {
-  const [ledger, manifest, mlxFitGate, routingCatalog, routingCandle, routingMlx, schema] =
-    await Promise.all([
-      readFile(path.join(ROOT, "config/tier-integrity.jsonc"), "utf8"),
-      readFile(path.join(ROOT, "config/manifests/builtin.models.jsonc"), "utf8"),
-      rustFacadeSource(path.join(ROOT, "crates/sceneworks-worker/src/mlx_fit_gate.rs")),
-      readFile(path.join(ROOT, "crates/sceneworks-core/src/jobs_store/routing/catalog.rs"), "utf8"),
-      readFile(path.join(ROOT, "crates/sceneworks-core/src/jobs_store/routing/candle.rs"), "utf8"),
-      readFile(path.join(ROOT, "crates/sceneworks-core/src/jobs_store/routing/mlx.rs"), "utf8"),
-      readFile(path.join(ROOT, "packages/schemas/tier-integrity.schema.json"), "utf8"),
-    ]);
+  const [
+    ledger,
+    manifest,
+    mlxFitGate,
+    routingCatalog,
+    routingCandle,
+    routingMlx,
+    routePolicy,
+    registrySpecs,
+    schema,
+  ] = await Promise.all([
+    readFile(path.join(ROOT, "config/tier-integrity.jsonc"), "utf8"),
+    readFile(path.join(ROOT, "config/manifests/builtin.models.jsonc"), "utf8"),
+    rustFacadeSource(path.join(ROOT, "crates/sceneworks-worker/src/mlx_fit_gate.rs")),
+    readFile(path.join(ROOT, "crates/sceneworks-core/src/jobs_store/routing/catalog.rs"), "utf8"),
+    readFile(path.join(ROOT, "crates/sceneworks-core/src/jobs_store/routing/candle.rs"), "utf8"),
+    readFile(path.join(ROOT, "crates/sceneworks-core/src/jobs_store/routing/mlx.rs"), "utf8"),
+    readFile(path.join(ROOT, "config/manifests/registry/route-policy.json"), "utf8"),
+    readFile(path.join(ROOT, "config/manifests/registry/specs.json"), "utf8"),
+    readFile(path.join(ROOT, "packages/schemas/tier-integrity.schema.json"), "utf8"),
+  ]);
   return {
     ledger: JSON.parse(stripJsoncComments(ledger)),
     ledgerSource: ledger,
@@ -53,6 +64,8 @@ async function realInputs() {
     routingCatalog,
     routingCandle,
     routingMlx,
+    routePolicy,
+    registrySpecs,
     schema: JSON.parse(schema),
   };
 }

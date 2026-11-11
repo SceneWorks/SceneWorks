@@ -6,6 +6,10 @@ import { fileURLToPath } from "node:url";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import {
+  projectBuiltinMemoryEvidence,
+  readBuiltinMemoryEvidenceSync,
+} from "./lib/builtin-memory-evidence.mjs";
+import {
   GENERATED_BEGIN,
   GENERATED_END,
   catalogAxes,
@@ -746,7 +750,10 @@ test("no overlay-bearing manifest row promises an identity its candle engine wit
   // citation above is the authority. Either way the manifest claim below is asserted.
   assert.equal(typeof derived, "boolean");
 
-  const models = parse(read("config/manifests/builtin.models.jsonc")).models;
+  const models = projectBuiltinMemoryEvidence(
+    parse(read("config/manifests/builtin.models.jsonc")),
+    readBuiltinMemoryEvidenceSync(ROOT),
+  ).models;
   let withheld = 0;
   let published = 0;
   for (const [id, crate] of Object.entries(withholding)) {

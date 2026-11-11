@@ -11,6 +11,10 @@ import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { projectBuiltinMemoryEvidence } from "./lib/builtin-memory-evidence.mjs";
 import { canonicalSourceText, semanticSourceBody } from "./lib/source-revision.mjs";
 import { routedLanes } from "./check-tier-integrity.mjs";
+import {
+  parseStrictControlEngines,
+  wiredPoseFamiliesFromSpecs,
+} from "./lib/manifest-memory-declarations.mjs";
 import { CONVERTER_TIER_OVERRIDES, contractIsLoraOnly } from "./lib/manifest-memory-declarations.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -1542,13 +1546,27 @@ function rustStringSlice(source, name) {
 // zero cells, while a measurement block missing from the declaration would be orphaned. The MLX and
 // Candle router lists are checked independently: their documented twin relationship is not evidence and
 // must not be trusted if either source list drifts.
-function assertDeclaredControlLanes(models, imageRoutingSource) {
+function assertDeclaredControlLanes(
+  models,
+  imageRoutingSource,
+  strictControlSource = null,
+  registrySpecsSource = null,
+) {
   const declared = new Set(CONTROL_LANE_MODELS);
+  const derivedPoseFamilies =
+    registrySpecsSource && strictControlSource
+      ? wiredPoseFamiliesFromSpecs(
+          registrySpecsSource,
+          parseStrictControlEngines(strictControlSource),
+        )
+      : null;
   for (const [backend, sourceName] of [
     ["mlx", "WIRED_MLX_POSE_FAMILIES"],
     ["candle", "WIRED_CANDLE_POSE_FAMILIES"],
   ]) {
-    const wired = new Set(rustStringSlice(imageRoutingSource, sourceName));
+    const wired = derivedPoseFamilies
+      ? derivedPoseFamilies[backend]
+      : new Set(rustStringSlice(imageRoutingSource, sourceName));
     const undeclaredRoutes = [...wired].filter((id) => !declared.has(id)).sort();
     const unwiredDeclarations = [...declared].filter((id) => !wired.has(id)).sort();
     if (undeclaredRoutes.length || unwiredDeclarations.length) {
@@ -2627,11 +2645,14 @@ export const SOURCE_PATHS = Object.freeze({
   // ── The POPULATION: which coordinates exist, and which rungs their code implements ───────────
   manifest: "config/manifests/builtin.models.jsonc",
   memoryEvidence: "config/manifests/registry/evidence.json",
+  routePolicy: "config/manifests/registry/route-policy.json",
+  registrySpecs: "config/manifests/registry/specs.json",
   routingCatalog: "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
   routingCandle: "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
   routingMlx: "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
   engines: "crates/sceneworks-worker/src/engines.rs",
   imageRouting: "crates/sceneworks-worker/src/image_jobs/routing.rs",
+  strictControl: "crates/sceneworks-worker/src/image_jobs/strict_control.rs",
   // sc-18815: the video lane's route resolvers. The image lane resolves a provider from ONE table
   // (`engines.rs#MODEL_TABLE`); the video lane has no such table — `resolve_video_route` /
   // `resolve_candle_video_route` (`video_jobs/mod.rs`) consult one `*_engine_id` function per family,
@@ -2850,6 +2871,8 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     routingCatalog: bodies.routingCatalog,
     routingCandle: bodies.routingCandle,
     routingMlx: bodies.routingMlx,
+    routePolicy: bodies.routePolicy,
+    registrySpecs: bodies.registrySpecs,
   });
   const stagedResidencyEngines = parseMlxStagedResidencyEngines(mlxFitBody);
   const candleBespokeStagedLanes = parseCandleBespokeStagedLanes(bodies.memoryRoutePolicy, bodies.memoryRouteRegistry);
@@ -2870,7 +2893,12 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   // sc-16073: no advertised route without cells, and no orphaned control measurements. The worker's
   // MLX and Candle declarations are checked independently rather than trusting their documented twin
   // set, over the WHOLE universe rather than just the image half (sc-18815).
-  assertDeclaredControlLanes(entries, bodies.imageRouting);
+  assertDeclaredControlLanes(
+    entries,
+    bodies.imageRouting,
+    bodies.strictControl,
+    bodies.registrySpecs,
+  );
 
   const models = entries
     .map((model) => {

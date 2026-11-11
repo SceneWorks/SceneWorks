@@ -403,6 +403,25 @@ export function parseStrictControlEngines(source) {
   return new Set(ids);
 }
 
+export function wiredPoseFamiliesFromSpecs(registrySpecsSource, controlEngines) {
+  const specs =
+    typeof registrySpecsSource === "string"
+      ? JSON.parse(registrySpecsSource)
+      : registrySpecsSource;
+  const poseFamilies = { mlx: new Set(), candle: new Set() };
+  for (const [id, spec] of Object.entries(specs)) {
+    const caps = spec?.product?.capabilities ?? [];
+    if (!caps.includes("text_to_image")) continue;
+    for (const backend of ["mlx", "candle"]) {
+      const routeId = spec?.routes?.[backend]?.id;
+      if (routeId && controlEngines.has(`${routeId}_control`)) {
+        poseFamilies[backend].add(id);
+      }
+    }
+  }
+  return poseFamilies;
+}
+
 /**
  * The MLX lanes whose declaration rows MUST carry `requestContexts`.
  *
@@ -418,8 +437,10 @@ export function parseStrictControlEngines(source) {
  * reported. Candle is unaffected: its request-strategy reader returns `Ok(false)` for a row with no
  * `requestContexts`, which is inert rather than malformed.
  */
-export function parseRequestContextLanes(source) {
-  const table = source.match(/const RULES: &\[MemoryRouteRule\] = &\[([\s\S]*?)\n\];/);
+export function parseRequestContextLanes(source, policySource = null) {
+  const table =
+    source.match(/const RULES: &\[MemoryRouteRule\] = &\[([\s\S]*?)\n\];/) ??
+    source.match(/const LEGACY_RULES: &\[MemoryRouteRule\] = &\[([\s\S]*?)\n\];/);
   if (!table) throw new Error("could not locate RULES in memory_route_registry.rs");
   const lanes = new Set();
   let seen = 0;
@@ -432,6 +453,13 @@ export function parseRequestContextLanes(source) {
       throw new Error(`memory-route rule ${seen} is under-keyed`);
     }
     if (backend === "Mlx" && legacy === "false") lanes.add(`mlx:${provider}`);
+  }
+  if (policySource) {
+    const policy = typeof policySource === "string" ? JSON.parse(policySource) : policySource;
+    for (const row of policy.declaredRoutes ?? []) {
+      seen += 1;
+      if (row.backend === "mlx") lanes.add(`mlx:${row.provider}`);
+    }
   }
   if (seen === 0) throw new Error("RULES parsed to zero memory-route rules");
   return lanes;
@@ -653,15 +681,22 @@ export function planProjection({
   strictControlSource,
   imageRoutingSource,
   routeRegistrySource,
+  memoryRoutePolicySource = null,
+  registrySpecsSource = null,
 }) {
   const models = manifest.models ?? [];
   const routes = parseEngineModelTable(enginesSource);
   const controlEngines = parseStrictControlEngines(strictControlSource);
-  const requestContextLanes = parseRequestContextLanes(routeRegistrySource);
-  const poseFamilies = {
-    mlx: rustStringSlice(imageRoutingSource, "WIRED_MLX_POSE_FAMILIES"),
-    candle: rustStringSlice(imageRoutingSource, "WIRED_CANDLE_POSE_FAMILIES"),
-  };
+  const requestContextLanes = parseRequestContextLanes(
+    routeRegistrySource,
+    memoryRoutePolicySource,
+  );
+  const poseFamilies = registrySpecsSource
+    ? wiredPoseFamiliesFromSpecs(registrySpecsSource, controlEngines)
+    : {
+        mlx: rustStringSlice(imageRoutingSource, "WIRED_MLX_POSE_FAMILIES"),
+        candle: rustStringSlice(imageRoutingSource, "WIRED_CANDLE_POSE_FAMILIES"),
+      };
   const inventory = engineContractInventory(engineFacts);
   const witnessIndex = routeWitnessInventory(engineFacts);
 

@@ -84,6 +84,8 @@ const MLX_FIT_GATE = "crates/sceneworks-worker/src/mlx_fit_gate.rs";
 const ROUTING_CATALOG = "crates/sceneworks-core/src/jobs_store/routing/catalog.rs";
 const ROUTING_CANDLE = "crates/sceneworks-core/src/jobs_store/routing/candle.rs";
 const ROUTING_MLX = "crates/sceneworks-core/src/jobs_store/routing/mlx.rs";
+const ROUTE_POLICY = "config/manifests/registry/route-policy.json";
+const REGISTRY_SPECS = "config/manifests/registry/specs.json";
 const OUTPUT_JSON = "docs/generated/tier-integrity.json";
 const OUTPUT_MD = "docs/generated/tier-integrity.md";
 
@@ -189,12 +191,41 @@ function parseJsonc(body) {
  * rather than as "no constraint": a lane oracle that silently resolves nothing is exactly the failure
  * this function replaces, so it fails CLOSED.
  */
-export function routedLanes({ routingCatalog, routingCandle, routingMlx }) {
+export function routedLanes({
+  routingCatalog,
+  routingCandle,
+  routingMlx,
+  routePolicy,
+  registrySpecs,
+}) {
   const lanes = new Map();
   const add = (id, lane) => {
     if (!lanes.has(id)) lanes.set(id, new Set());
     lanes.get(id).add(lane);
   };
+  if (routePolicy) {
+    const policy = typeof routePolicy === "string" ? JSON.parse(routePolicy) : routePolicy;
+    for (const row of policy.image ?? []) {
+      if (row.mlxRouted) add(row.id, "mlx");
+      if (row.candleRouted) add(row.id, "candle");
+    }
+    for (const row of policy.video ?? []) {
+      if (row.videoMlxRouted) add(row.id, "mlx");
+      if (row.candleVideoRouted) add(row.id, "candle");
+    }
+  }
+  if (registrySpecs) {
+    const specs = typeof registrySpecs === "string" ? JSON.parse(registrySpecs) : registrySpecs;
+    for (const [id, spec] of Object.entries(specs)) {
+      if (
+        spec?.product?.family === "scail2" &&
+        Array.isArray(spec?.videoRoutes?.candle) &&
+        spec.videoRoutes.candle.length > 0
+      ) {
+        add(id, "candle");
+      }
+    }
+  }
   for (const constructor of ["ModelCaps", "VideoModelCaps"]) {
     const pattern = new RegExp(
       `${constructor}::new\\(\\s*"([^"]+)"\\s*,\\s*(true|false)\\s*,\\s*(true|false)\\s*,`,
@@ -332,13 +363,21 @@ export function validate({
   routingCatalog,
   routingCandle,
   routingMlx,
+  routePolicy,
+  registrySpecs,
   schema,
 }) {
   const errors = [];
   const rows = [];
   const unverifiedTiers = [];
   const byId = new Map((manifest.models ?? []).map((entry) => [entry.id, entry]));
-  const routedBackends = routedLanes({ routingCatalog, routingCandle, routingMlx });
+  const routedBackends = routedLanes({
+    routingCatalog,
+    routingCandle,
+    routingMlx,
+    routePolicy,
+    registrySpecs,
+  });
   const exceptions = ledger.exceptions ?? [];
 
   if (exceptions.length === 0) {
@@ -943,17 +982,29 @@ function renderMarkdown({ rows, unverifiedTiers }) {
 }
 
 async function readInputs() {
-  const [ledgerBody, manifestBody, memoryEvidence, mlxFitGate, routingCatalog, routingCandle, routingMlx, schemaBody] =
-    await Promise.all([
-      readFile(path.join(ROOT, LEDGER), "utf8"),
-      readFile(path.join(ROOT, MANIFEST), "utf8"),
-      readBuiltinMemoryEvidence(ROOT),
-      rustFacadeSource(path.join(ROOT, MLX_FIT_GATE)),
-      readFile(path.join(ROOT, ROUTING_CATALOG), "utf8"),
-      readFile(path.join(ROOT, ROUTING_CANDLE), "utf8"),
-      readFile(path.join(ROOT, ROUTING_MLX), "utf8"),
-      readFile(path.join(ROOT, SCHEMA), "utf8"),
-    ]);
+  const [
+    ledgerBody,
+    manifestBody,
+    memoryEvidence,
+    mlxFitGate,
+    routingCatalog,
+    routingCandle,
+    routingMlx,
+    routePolicy,
+    registrySpecs,
+    schemaBody,
+  ] = await Promise.all([
+    readFile(path.join(ROOT, LEDGER), "utf8"),
+    readFile(path.join(ROOT, MANIFEST), "utf8"),
+    readBuiltinMemoryEvidence(ROOT),
+    rustFacadeSource(path.join(ROOT, MLX_FIT_GATE)),
+    readFile(path.join(ROOT, ROUTING_CATALOG), "utf8"),
+    readFile(path.join(ROOT, ROUTING_CANDLE), "utf8"),
+    readFile(path.join(ROOT, ROUTING_MLX), "utf8"),
+    readFile(path.join(ROOT, ROUTE_POLICY), "utf8"),
+    readFile(path.join(ROOT, REGISTRY_SPECS), "utf8"),
+    readFile(path.join(ROOT, SCHEMA), "utf8"),
+  ]);
   return {
     ledger: parseJsonc(ledgerBody),
     ledgerSource: ledgerBody,
@@ -962,6 +1013,8 @@ async function readInputs() {
     routingCatalog,
     routingCandle,
     routingMlx,
+    routePolicy,
+    registrySpecs,
     schema: JSON.parse(schemaBody),
   };
 }
@@ -1214,7 +1267,14 @@ async function selfTest() {
   {
     expect(
       "unresolvable lane oracle",
-      validate({ ...inputs, routingCatalog: "", routingCandle: "", routingMlx: "" }).errors,
+      validate({
+        ...inputs,
+        routingCatalog: "",
+        routingCandle: "",
+        routingMlx: "",
+        routePolicy: "",
+        registrySpecs: "",
+      }).errors,
       "no lane could be resolved",
     );
   }

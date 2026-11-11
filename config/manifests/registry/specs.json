@@ -66408,7 +66408,8 @@
           "estimatedSizeBytes": 9560000000,
           "files": [],
           "provider": "huggingface",
-          "repo": "stabilityai/stable-video-diffusion-img2vid-xt"
+          "repo": "stabilityai/stable-video-diffusion-img2vid-xt",
+          "revision": "9e43909513c6714f1bc78bcb44d96e733cd242aa"
         }
       ],
       "family": "svd",
@@ -67253,6 +67254,7 @@
           ],
           "provider": "huggingface",
           "repo": "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+          "revision": "b8fff7315c768468a5333511427288870b2e9635",
           "variant": "bf16"
         }
       ],
@@ -68056,6 +68058,7 @@
           ],
           "provider": "huggingface",
           "repo": "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+          "revision": "596658fd9ca6b7b71d5057529bbf319ecbc61d74",
           "variant": "bf16"
         }
       ],
@@ -68877,7 +68880,8 @@
             "macos"
           ],
           "provider": "huggingface",
-          "repo": "linoyts/Wan2.2-VACE-Fun-14B-diffusers"
+          "repo": "linoyts/Wan2.2-VACE-Fun-14B-diffusers",
+          "revision": "1abfb95801b7bd8f952083ebf80b93448ddb0ce4"
         },
         {
           "estimatedSizeBytes": 81200000000,
@@ -68887,7 +68891,8 @@
             "linux"
           ],
           "provider": "huggingface",
-          "repo": "linoyts/Wan2.2-VACE-Fun-14B-diffusers"
+          "repo": "linoyts/Wan2.2-VACE-Fun-14B-diffusers",
+          "revision": "1abfb95801b7bd8f952083ebf80b93448ddb0ce4"
         }
       ],
       "family": "wan-video",

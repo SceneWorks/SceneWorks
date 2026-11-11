@@ -3678,6 +3678,7 @@ impl JobsStore {
             portable_backend.zip(portable_platform),
             &worker_claims,
             authenticated_for_dynamic_source,
+            portable_binding_version == 0,
         ) {
             Ok(queued) => queued,
             Err(error) => {
@@ -5588,6 +5589,7 @@ fn portable_worker_can_claim_job(
         Some((backend, platform)),
         &claims,
         authenticated,
+        false,
     )
 }
 
@@ -6131,6 +6133,7 @@ fn worker_may_support_claim_candidate(worker: &WorkerSnapshot, candidate: &Claim
 
 /// Scan durable candidate headers, select the exact compatibility/affinity
 /// winner entirely from scalars, then hydrate that one routing snapshot.
+#[allow(clippy::too_many_arguments)] // claim selection threads every durable routing fact
 fn choose_claimable_job_from_candidates(
     connection: &Connection,
     candidates: Vec<ClaimCandidate>,
@@ -6139,6 +6142,7 @@ fn choose_claimable_job_from_candidates(
     portable_route: Option<(&str, &str)>,
     worker_claims: &[PortableSourceClaim],
     authenticated_for_dynamic_source: bool,
+    versionless_legacy_claim: bool,
 ) -> JobsStoreResult<Option<JobSnapshot>> {
     let mut compatible = Vec::new();
     let mut highest_compatible_rank = None;
@@ -6157,6 +6161,7 @@ fn choose_claimable_job_from_candidates(
             portable_route,
             worker_claims,
             authenticated_for_dynamic_source,
+            versionless_legacy_claim,
         )? {
             continue;
         }
@@ -6188,11 +6193,16 @@ fn candidate_matches_portable_worker_sources(
     portable_route: Option<(&str, &str)>,
     worker_claims: &[PortableSourceClaim],
     authenticated_for_dynamic_source: bool,
+    versionless_legacy_claim: bool,
 ) -> JobsStoreResult<bool> {
     let Some(binding) = JobsStore::read_portable_binding(connection, job_id)? else {
-        // A pre-registry model job has no authenticated source closure. It must be upgraded
-        // before a worker can fetch or load it, including a versionless worker. Model-free
-        // operational jobs retain their existing claim protocol.
+        // A pre-registry model job has no authenticated source closure. A worker speaking
+        // the portable protocol must not fetch or load it: the API upgrades or fails the
+        // historical carrier before such a claim. Versionless workers retain their normal
+        // access to historical unbound jobs (see claim_next_job_routed_with_portable_binding).
+        if versionless_legacy_claim {
+            return Ok(true);
+        }
         let (raw_type, raw_payload): (String, Option<String>) = connection.query_row(
             "select type, payload_json from jobs where id = ?1",
             params![job_id],
