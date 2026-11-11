@@ -109,13 +109,12 @@ pub fn model_mac_support(
 pub(crate) fn image_model_mac_support(model: &str, _family: Option<&str>) -> ModelMacSupport {
     let supported = crate::registry::builtin_model_spec(model).map_or_else(
         || LEGACY_IMAGE_MLX_ROUTED.contains(&model),
+        // Exactly the claim gate's authority, as for video: a builtin with no route-policy row is
+        // refused by the router, so it must not read as MLX-supported in the catalog.
         |spec| {
             spec.routing
                 .as_ref()
                 .is_some_and(crate::registry::RoutePolicy::mlx_routed)
-                // Some shipped variant descriptors have no row in the historical router list.
-                // The request probes below still decide the offered modes and conditioning.
-                || (spec.routing.is_none() && spec.routes.contains_key("mlx"))
         },
     );
     if !supported {
@@ -728,8 +727,8 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
 //
 // The schema-validated route-policy.json owns SceneWorks router admission. Build.rs compiles its
 // typed rows to the static slices consumed by existing job predicates; the native descriptor
-// export separately owns engine breadth. The frozen membership test below checks that the policy
-// migration preserves every existing route and catches the five formerly missing MLX gate rows.
+// export separately owns engine breadth. route-policy.json carries the former IMAGE_MODEL_CAPS
+// and VIDEO_MODEL_CAPS rows unchanged; the migration added and repaired no route.
 
 /// One image model's SceneWorks router admission policy. Build.rs derives the static list
 /// constants from these generated rows; the checked-in typed JSON is the sole authored owner.

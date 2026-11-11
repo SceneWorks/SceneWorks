@@ -698,7 +698,6 @@ def test_the_fingerprint_covers_only_the_anchor_and_catalog_sources():
         "routingCandle",
         "routingMlx",
         "engines",
-        "imageRouting",
         "videoRouteWan",
         "videoRouteLtx",
         "videoRouteSvd",

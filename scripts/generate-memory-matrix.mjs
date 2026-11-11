@@ -27,8 +27,8 @@ const MATRIX_MODALITIES = new Set(["image", "video"]);
 // sc-22512 deleted `EXPECTED_IMAGE_COUNT = 53` and `EXPECTED_VIDEO_COUNT = 11`. They were frozen
 // catalog populations: adding one model to the shipped catalog reddened generation before anything
 // had a chance to say whether the new entry was well-formed. The population is now DERIVED from the
-// catalog's own enumeration, and the cross-table agreement between the manifest, the source-owned
-// `EXPECTED_IMAGE_IDS` roster and the generated ownership rows carries the whole structural claim —
+// catalog's own enumeration, and the cross-table agreement between the manifest, the typed
+// registry's image roster and the generated ownership rows carries the whole structural claim —
 // that check reds on disagreement, which is present-and-contradictory data, at any population size.
 // SC-18218 removed FLUX.2-dev from the MLX staged-residency census when the then-pinned provider was
 // eager/resident-only; sc-20799 REVERSED that at pin ebcdc7da7, where all three Dev MLX providers
@@ -119,7 +119,7 @@ const GENERATION_CAPABILITIES = new Set([
 ]);
 
 // This is ownership metadata, not conformance data. Drift is checked against the
-// source-owned EXPECTED_IMAGE_IDS list and the shipped manifest below.
+// typed registry's image ids and the shipped manifest below.
 //
 // SC-15812: ownership is keyed BY BACKEND, not by model. An MLX story cannot be closed from CUDA
 // hardware and a Candle story cannot be closed from a Mac. Separate backend stories have separate
@@ -839,10 +839,18 @@ export function isImplemented(state) {
   return IMPLEMENTED_STATES.includes(state);
 }
 
-function parseExpectedImageIds(source) {
-  const match = source.match(/const EXPECTED_IMAGE_IDS:\s*&\[&str\]\s*=\s*&\[([\s\S]*?)\n\s*\];/);
-  if (!match) throw new Error("could not locate EXPECTED_IMAGE_IDS in engines.rs");
-  return [...match[1].matchAll(/"([^"]+)"/g)].map((item) => item[1]);
+/**
+ * The image ids of the compiled typed registry (`config/manifests/registry/specs.json`), minus the
+ * entries the matrix deliberately does not carry. The matrix's image population comes from the
+ * shipped manifest; this is the independent typed roster it must agree with (SW-7032 retired the
+ * hand-written `EXPECTED_IMAGE_IDS` test roster this used to regex-read out of `engines.rs`).
+ */
+export function typedImageIds(registrySpecsBody) {
+  const specs = JSON.parse(registrySpecsBody);
+  return Object.values(specs)
+    .filter((spec) => spec.product?.type === "image")
+    .map((spec) => spec.product.id)
+    .filter((id) => !OUT_OF_MATRIX_CATALOG_ENTRIES.has(id));
 }
 
 function parseEngineRoutes(source) {
@@ -1433,11 +1441,11 @@ function modesFor(model) {
 //
 // ## Why both backends, for every id here
 //
-// Both worker routers wire the SAME seven families, and `crates/sceneworks-worker/src/image_jobs/routing.rs`
-// says so in the source: `WIRED_MLX_POSE_FAMILIES` is documented as "the MLX twin of
-// `WIRED_CANDLE_POSE_FAMILIES` … and the SAME id set — every candle wired family has a matching MLX control
-// lane". A model listed here therefore has a control lane on whichever backends it supports at all; the
-// per-backend loop below already restricts to those. `candle_declaration_matches_the_memory_matrix_generator`
+// Both worker routers wire the SAME seven families: a text-to-image model whose typed primary route on
+// a backend has a registered `<route>_control` strict-control engine (`wiredPoseFamiliesFromSpecs`,
+// over `config/manifests/registry/specs.json` and `image_jobs/strict_control.rs`). A model listed here
+// therefore has a control lane on whichever backends it supports at all; the per-backend loop below
+// already restricts to those. `candle_declaration_matches_the_memory_matrix_generator`
 // in `crates/sceneworks-worker/src/tests/gpu_and_manifest.rs` is the cross-language guard: adding a candle
 // control lane without adding it here turns that test red.
 export const CONTROL_LANE_MODELS = [
@@ -1534,39 +1542,18 @@ function overlaysFor(model, backend, route) {
   return sortedUnique(overlays);
 }
 
-function rustStringSlice(source, name) {
-  const match = source.match(
-    new RegExp(`const\\s+${name}:\\s*&\\[&str\\]\\s*=\\s*&\\[([\\s\\S]*?)\\];`),
-  );
-  if (!match) throw new Error(`memory-matrix: could not derive ${name} from image_jobs/routing.rs`);
-  return [...match[1].matchAll(/"([^"]+)"/g)].map((entry) => entry[1]);
-}
-
 // Fail closed in both directions. A worker route missing from CONTROL_LANE_MODELS would otherwise emit
 // zero cells, while a measurement block missing from the declaration would be orphaned. The MLX and
 // Candle router lists are checked independently: their documented twin relationship is not evidence and
 // must not be trusted if either source list drifts.
-function assertDeclaredControlLanes(
-  models,
-  imageRoutingSource,
-  strictControlSource = null,
-  registrySpecsSource = null,
-) {
+function assertDeclaredControlLanes(models, strictControlSource, registrySpecsSource) {
   const declared = new Set(CONTROL_LANE_MODELS);
-  const derivedPoseFamilies =
-    registrySpecsSource && strictControlSource
-      ? wiredPoseFamiliesFromSpecs(
-          registrySpecsSource,
-          parseStrictControlEngines(strictControlSource),
-        )
-      : null;
-  for (const [backend, sourceName] of [
-    ["mlx", "WIRED_MLX_POSE_FAMILIES"],
-    ["candle", "WIRED_CANDLE_POSE_FAMILIES"],
-  ]) {
-    const wired = derivedPoseFamilies
-      ? derivedPoseFamilies[backend]
-      : new Set(rustStringSlice(imageRoutingSource, sourceName));
+  const derivedPoseFamilies = wiredPoseFamiliesFromSpecs(
+    registrySpecsSource,
+    parseStrictControlEngines(strictControlSource),
+  );
+  for (const backend of ["mlx", "candle"]) {
+    const wired = derivedPoseFamilies[backend];
     const undeclaredRoutes = [...wired].filter((id) => !declared.has(id)).sort();
     const unwiredDeclarations = [...declared].filter((id) => !wired.has(id)).sort();
     if (undeclaredRoutes.length || unwiredDeclarations.length) {
@@ -2078,7 +2065,7 @@ function validateMatrix(matrix, expectedIds, backendTierOverrides, cellInventory
     const manifestOnly = ids.filter((id) => !expectedIds.includes(id));
     const sourceOnly = expectedIds.filter((id) => !ids.includes(id));
     throw new Error(
-      `manifest image ids, EXPECTED_IMAGE_IDS, and generated ownership rows disagree (manifest-only=${manifestOnly.join(",")}; source-only=${sourceOnly.join(",")})`,
+      `manifest image ids, typed registry image ids, and generated ownership rows disagree (manifest-only=${manifestOnly.join(",")}; registry-only=${sourceOnly.join(",")})`,
     );
   }
   assertMlxStagedCoverageIsStructurallyConsistent(matrix);
@@ -2651,7 +2638,6 @@ export const SOURCE_PATHS = Object.freeze({
   routingCandle: "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
   routingMlx: "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
   engines: "crates/sceneworks-worker/src/engines.rs",
-  imageRouting: "crates/sceneworks-worker/src/image_jobs/routing.rs",
   strictControl: "crates/sceneworks-worker/src/image_jobs/strict_control.rs",
   // sc-18815: the video lane's route resolvers. The image lane resolves a provider from ONE table
   // (`engines.rs#MODEL_TABLE`); the video lane has no such table — `resolve_video_route` /
@@ -2864,7 +2850,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     (model) => MATRIX_MODALITIES.has(model.type) && !OUT_OF_MATRIX_CATALOG_ENTRIES.has(model.id),
   );
   const manifestById = new Map(entries.map((model) => [model.id, model]));
-  const expectedIds = parseExpectedImageIds(enginesBody);
+  const expectedIds = typedImageIds(bodies.registrySpecs);
   const routes = parseEngineRoutes(enginesBody);
   const videoRoutes = parseVideoRoutes(bodies);
   const routedBackends = routedLanes({
@@ -2893,12 +2879,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   // sc-16073: no advertised route without cells, and no orphaned control measurements. The worker's
   // MLX and Candle declarations are checked independently rather than trusting their documented twin
   // set, over the WHOLE universe rather than just the image half (sc-18815).
-  assertDeclaredControlLanes(
-    entries,
-    bodies.imageRouting,
-    bodies.strictControl,
-    bodies.registrySpecs,
-  );
+  assertDeclaredControlLanes(entries, bodies.strictControl, bodies.registrySpecs);
 
   const models = entries
     .map((model) => {

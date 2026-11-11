@@ -2387,7 +2387,6 @@ test("the fingerprint covers exactly the anchor and catalog sources, and the art
     routingCandle: "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
     routingMlx: "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
     engines: "crates/sceneworks-worker/src/engines.rs",
-    imageRouting: "crates/sceneworks-worker/src/image_jobs/routing.rs",
     strictControl: "crates/sceneworks-worker/src/image_jobs/strict_control.rs",
     videoRouteWan: "crates/sceneworks-worker/src/video_jobs/wan.rs",
     videoRouteLtx: "crates/sceneworks-worker/src/video_jobs/ltx.rs",

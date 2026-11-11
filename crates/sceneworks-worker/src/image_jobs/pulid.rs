@@ -730,14 +730,9 @@ mod pulid_tests {
         assert!(!inputs.use_pid);
         assert!(!inputs.has_phases);
 
-        let raw = include_str!("../../../../config/manifests/builtin.models.jsonc");
-        let manifest: Value =
-            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
-                .expect("builtin manifest parses");
-        let manifest = manifest["models"]
-            .as_array()
-            .and_then(|models| models.iter().find(|model| model["id"] == PULID_MODEL))
-            .and_then(Value::as_object)
+        // The production accessor: the shipped row with its typed memory evidence projected in,
+        // which is the `modelManifestEntry` the API attaches to a PuLID job (SW-7031).
+        let manifest = sceneworks_core::builtin_manifests::builtin_model_entry(PULID_MODEL)
             .expect("shipped PuLID manifest");
         let identity_spec = || {
             let mut spec = LoadSpec::new(WeightsSource::Dir("pulid-q4".into()))

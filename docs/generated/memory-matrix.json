@@ -1,11 +1,11 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:ed7d401ae8691569d1fdd92a1f6eb7de5e31b4b1164c6c8005254cfc1a52cdf5",
+    "sceneWorksRevision": "source-tree:0a56812ce9adb0b01fde75f656f1502f4e465955eae4d4777902ada07368df74",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "93aa79c6a5386f67519f26c91b6d49b461d4e9dea802f50dfd3a288666dcbb5b"
+        "sha256": "e1e9103ff83860111b23739fd3b726d19df022b701a8d85392903dadeeb40416"
       },
       "memoryEvidence": {
         "path": "config/manifests/registry/evidence.json",
@@ -17,15 +17,15 @@
       },
       "registrySpecs": {
         "path": "config/manifests/registry/specs.json",
-        "sha256": "971788ee510a217cff3350040ff2eec2fa3c48b8afbbe86d3cb45b34f3891548"
+        "sha256": "467f074ab88710c9f3edca630e50d66fa1a76701e92340510671e02288d05fec"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
-        "sha256": "c6d1a42d8c917a5c9c8984e2f7421d97fb3dd29e57b10d72ccaff0eb26e73647"
+        "sha256": "4c324ab875f4531faeb3d517ac42c0777894d7cbe9bf39e491a4e9bccde26f79"
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
-        "sha256": "a19c475f812e6ae39d69a609b239255feb3811320c8b58a9d38745daf4ab4c85"
+        "sha256": "9596aed37608430495c1f8bb5bb23d3723bfdb965b425ee9a3d18c9c6bf772a3"
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
@@ -33,11 +33,7 @@
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
-        "sha256": "936ccbfed31374bcb6dd7e3010d46867d0d3a03fd4287bc022da3ff004bb5611"
-      },
-      "imageRouting": {
-        "path": "crates/sceneworks-worker/src/image_jobs/routing.rs",
-        "sha256": "d67c04ab988f7a581d295f911c86c096245c4df1fa39a29ca70438c3a1a3525b"
+        "sha256": "d9aa0028361346c60c2ae2e9cf9e111c0b2cae2499890c466ba5fb6fbe90fd63"
       },
       "strictControl": {
         "path": "crates/sceneworks-worker/src/image_jobs/strict_control.rs",
@@ -89,7 +85,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "799abe2a832554cabeea6868dbf9c5749b8da9cfc75c9d50103bd805f3e8c7be"
+        "sha256": "b6984469dcd8f0b18b56d09ffa547e8791389e32e32fba2e7e2b473fd517acd7"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -113,7 +109,7 @@
       },
       "anchorExtractor": {
         "path": "scripts/extract-memory-anchors.mjs",
-        "sha256": "6fd6f76dd54947266a34accf136c54f542cb026c7dcd9ec1466757601aa0dd70"
+        "sha256": "d908098749569825e89a12f54acd4e02891a700072438d45148030d239109dd1"
       }
     }
   },

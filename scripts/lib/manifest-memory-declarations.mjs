@@ -229,17 +229,6 @@ const GENERATION_CAPABILITIES = new Set([
   "character_image",
 ]);
 
-/** A `&[&str]` Rust const, read as text. The matrix generator reads the same two pose-family lists the
- *  same way; `image_jobs/routing.rs` compiles only under macOS or `backend-candle`, so a text read is the
- *  only way for a portable script to see them at all. */
-export function rustStringSlice(source, name) {
-  const match = source.match(
-    new RegExp(`const\\s+${name}:\\s*&\\[&str\\]\\s*=\\s*&\\[([\\s\\S]*?)\\];`),
-  );
-  if (!match) throw new Error(`could not derive ${name} from image_jobs/routing.rs`);
-  return new Set([...match[1].matchAll(/"([^"]+)"/g)].map((entry) => entry[1]));
-}
-
 /**
  * True when this backend's exact contract names ONLY the LoRA load profile, so the model cannot
  * serve a plain public coordinate on that backend at all (sc-20799 — Qwen Edit Lightning's
@@ -679,10 +668,9 @@ export function planProjection({
   engineFacts,
   enginesSource,
   strictControlSource,
-  imageRoutingSource,
   routeRegistrySource,
   memoryRoutePolicySource = null,
-  registrySpecsSource = null,
+  registrySpecsSource,
 }) {
   const models = manifest.models ?? [];
   const routes = parseEngineModelTable(enginesSource);
@@ -691,12 +679,10 @@ export function planProjection({
     routeRegistrySource,
     memoryRoutePolicySource,
   );
-  const poseFamilies = registrySpecsSource
-    ? wiredPoseFamiliesFromSpecs(registrySpecsSource, controlEngines)
-    : {
-        mlx: rustStringSlice(imageRoutingSource, "WIRED_MLX_POSE_FAMILIES"),
-        candle: rustStringSlice(imageRoutingSource, "WIRED_CANDLE_POSE_FAMILIES"),
-      };
+  if (!registrySpecsSource) {
+    throw new Error("planProjection needs registrySpecsSource to derive the wired pose families");
+  }
+  const poseFamilies = wiredPoseFamiliesFromSpecs(registrySpecsSource, controlEngines);
   const inventory = engineContractInventory(engineFacts);
   const witnessIndex = routeWitnessInventory(engineFacts);
 
@@ -1151,8 +1137,8 @@ export function projectManifestBody({
   engineFacts,
   enginesSource,
   strictControlSource,
-  imageRoutingSource,
   routeRegistrySource,
+  registrySpecsSource,
 }) {
   // Start from the manifest WITHOUT any previous generated region, so what a rerun reads as
   // "already declared by hand" never includes what the last run wrote. Without this the projection
@@ -1164,8 +1150,8 @@ export function projectManifestBody({
     engineFacts,
     enginesSource,
     strictControlSource,
-    imageRoutingSource,
     routeRegistrySource,
+    registrySpecsSource,
   });
   return { body: applyProjection(base, plan.plans), ...plan };
 }

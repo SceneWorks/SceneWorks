@@ -24,7 +24,7 @@ import {
   projectProviderRows,
   routeWitnessInventory,
   splitTrailingTrivia,
-  rustStringSlice,
+  wiredPoseFamiliesFromSpecs,
   withheldRungs,
   witnessCoordinatesForTier,
 } from "./lib/manifest-memory-declarations.mjs";
@@ -108,10 +108,16 @@ const STRICT_CONTROL_ENGINES: &[StrictControlEngine] = &[
 ];
 `;
 
-const FIXTURE_IMAGE_ROUTING = `
-const WIRED_MLX_POSE_FAMILIES: &[&str] = &["widget"];
-const WIRED_CANDLE_POSE_FAMILIES: &[&str] = &["widget"];
-`;
+// The typed registry rows the pose families derive from: `widget` routes `widget` on both backends,
+// and `widget_control` is a registered strict-control engine.
+const FIXTURE_REGISTRY_SPECS = JSON.stringify({
+  widget: {
+    product: { id: "widget", type: "image", capabilities: ["text_to_image", "edit_image"] },
+    routes: { mlx: { id: "widget" }, candle: { id: "widget" } },
+  },
+});
+const fixturePoseFamilies = () =>
+  wiredPoseFamiliesFromSpecs(FIXTURE_REGISTRY_SPECS, parseStrictControlEngines(FIXTURE_STRICT_CONTROL));
 
 // `legacy_shaping: true` everywhere, so the fixture lanes take projected rows. The
 // request-context test below flips one row to false.
@@ -200,7 +206,7 @@ const fixtureInput = (overrides = {}) => ({
   engineFacts: fixtureFacts(),
   enginesSource: FIXTURE_ENGINES,
   strictControlSource: FIXTURE_STRICT_CONTROL,
-  imageRoutingSource: FIXTURE_IMAGE_ROUTING,
+  registrySpecsSource: FIXTURE_REGISTRY_SPECS,
   routeRegistrySource: fixtureRouteRegistry(),
   ...overrides,
 });
@@ -248,10 +254,7 @@ test("route witnesses index per tier and report an unwitnessed tier as absent", 
 
 test("catalog axes come from the entry's own capabilities, lora flag and advertised tiers", () => {
   const model = parse(FIXTURE_MANIFEST).models[0];
-  const poseFamilies = {
-    mlx: rustStringSlice(FIXTURE_IMAGE_ROUTING, "WIRED_MLX_POSE_FAMILIES"),
-    candle: rustStringSlice(FIXTURE_IMAGE_ROUTING, "WIRED_CANDLE_POSE_FAMILIES"),
-  };
+  const poseFamilies = fixturePoseFamilies();
   const axes = catalogAxes(model, "mlx", poseFamilies);
   assert.deepEqual([...axes.modes], ["text_to_image", "edit_image"]);
   assert.deepEqual([...axes.overlays], ["none", "lora", "control"]);
@@ -350,7 +353,6 @@ test("the model table and strict-control table parse from their Rust sources", (
 test("a missing source table is a hard failure, never an empty projection", () => {
   assert.throws(() => parseEngineModelTable("// nothing here"), /MODEL_TABLE/);
   assert.throws(() => parseStrictControlEngines("// nothing here"), /STRICT_CONTROL_ENGINES/);
-  assert.throws(() => rustStringSlice("// nothing here", "WIRED_MLX_POSE_FAMILIES"), /routing\.rs/);
   assert.throws(() => parseRequestContextLanes("// nothing here"), /RULES/);
 });
 
@@ -393,10 +395,7 @@ const projectWidget = (options = {}) => {
     engine: inventory.get(`mlx:${provider}`),
     witnesses: witnesses.get(`mlx:${provider}`),
     withhold: withheldRungs(host, "mlx"),
-    axes: catalogAxes(host, "mlx", {
-      mlx: rustStringSlice(FIXTURE_IMAGE_ROUTING, "WIRED_MLX_POSE_FAMILIES"),
-      candle: rustStringSlice(FIXTURE_IMAGE_ROUTING, "WIRED_CANDLE_POSE_FAMILIES"),
-    }),
+    axes: catalogAxes(host, "mlx", fixturePoseFamilies()),
   });
 };
 

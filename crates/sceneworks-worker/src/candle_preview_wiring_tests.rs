@@ -364,6 +364,39 @@ fn bespoke_candle_requests_bind_a_live_preview_sink() {
     }
 }
 
+/// The imported-checkpoint lanes build the shared `GenerationRequest` with a struct-update entry,
+/// so the rest-init sweep below (bespoke `*Request` types only) cannot see them lose `preview`.
+/// Each lane must name a live `preview` in at least one of its `GenerationRequest` literals; the
+/// retired capability matrix held this for its imported-family preview cells (sc-18481).
+///
+/// Failing mutation: drop `preview,` from `mage_finetuned.rs`'s `GenerationRequest` literal.
+#[test]
+fn imported_checkpoint_lanes_bind_a_live_preview_sink() {
+    for file in [
+        "krea_imported.rs",
+        "sdxl_imported.rs",
+        "mage_finetuned.rs",
+        "checkpoint_plan.rs",
+    ] {
+        let bindings = preview_bindings(&source_for(file), "GenerationRequest");
+        assert!(
+            !bindings.is_empty(),
+            "src/image_jobs/{file}: no `GenerationRequest` literal binds `preview`, so the \
+             imported checkpoint renders with no live preview"
+        );
+        for binding in bindings {
+            let value = binding
+                .split_once(':')
+                .map(|(_, value)| value.trim().to_owned())
+                .unwrap_or_else(|| "preview".to_owned());
+            assert!(
+                !is_default_expression(&value),
+                "src/image_jobs/{file}: `GenerationRequest.preview` is bound to the inert default"
+            );
+        }
+    }
+}
+
 /// The sweep: nothing under `src/image_jobs/` may default a `preview` field, including lanes not yet
 /// listed in [`WIRED_LANES`]. When sc-16953…sc-16959 add the field to their own request structs, the
 /// compile break must be fixed by wiring, not by defaulting — and this catches the difference without

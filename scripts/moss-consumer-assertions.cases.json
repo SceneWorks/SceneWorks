@@ -618,6 +618,20 @@
       ]
     },
     {
+      "id": "SW-catalog-candle-adapter-projection",
+      "tests": [
+        "catalog"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
+          "op": "replace",
+          "old": "pub(crate) CANDLE_LORA_MODELS, IMAGE_MODEL_CAPS, candle_lora",
+          "new": "pub(crate) CANDLE_LORA_MODELS, IMAGE_MODEL_CAPS, candle_quant_lora"
+        }
+      ]
+    },
+    {
       "id": "SW-request-sampler",
       "tests": [
         "protocol"

@@ -86,6 +86,22 @@ pub struct ProductModel {
     pub fields: BTreeMap<String, Value>,
 }
 
+impl ProductModel {
+    /// The checkpoint's `image.supportsHiresFix` fact: false for a checkpoint that cannot run
+    /// Hires.fix's img2img second pass. Absent means true. Author choices never change it.
+    pub fn supports_hires_fix(&self) -> bool {
+        supports_hires_fix(self.fields.get("image"))
+    }
+}
+
+/// `image.supportsHiresFix` of a product or manifest `image` block; absent means true.
+pub fn supports_hires_fix(image: Option<&Value>) -> bool {
+    image
+        .and_then(|image| image.get("supportsHiresFix"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VideoRoute {
     pub mode: String,

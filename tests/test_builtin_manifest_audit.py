@@ -204,7 +204,10 @@ def test_v2_product_manifest_keeps_memory_evidence_out_of_authored_rows() -> Non
     assert product["schemaVersion"] == 2
     schema = _load_schema(SCHEMA_PATH)
     assert not list(jsonschema.Draft202012Validator(schema).iter_errors(product))
-    assert len(product["models"]) == len(_load_builtin_models_manifest()["models"]) == 143
+    projected = _load_builtin_models_manifest()["models"]
+    assert product["models"], "the v2 product manifest ships models"
+    assert len(product["models"]) == len(projected)
+    assert [model["id"] for model in product["models"]] == [model["id"] for model in projected]
     measured = {"minMemoryGb", "minMemoryGbByTier", "memoryStrategyContract",
                 "memoryStrategyCapabilities", "memoryStrategyStructuralExemptions", "calibrations",
                 "vramGbByTier", "vramMeasuredPixels", "supportsSequentialOffload",

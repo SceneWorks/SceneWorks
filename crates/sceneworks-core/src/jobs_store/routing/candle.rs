@@ -118,6 +118,11 @@ struct CandleImageRoute {
     shape: fn(&Map<String, Value>) -> bool,
 }
 
+/// Every SenseNova-U1 variant, from the typed registry's `sensenova-u1` family.
+fn is_sensenova_model(model: &str) -> bool {
+    crate::jobs_store::routing::SENSENOVA_MODEL_IDS.contains(&model)
+}
+
 enum ModelMatch {
     Any(&'static [&'static str]),
     Family(fn(&str) -> bool),
@@ -183,14 +188,7 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
     },
     CandleImageRoute {
         lane: CandleImageLane::SenseNovaEdit,
-        models: ModelMatch::Any(&[
-            "sensenova_u1_8b",
-            "sensenova_u1_8b_infographic_v2",
-            "sensenova_u1_8b_infographic_v3",
-            "sensenova_u1_8b_fast",
-            "sensenova_u1_8b_infographic_v2_fast",
-            "sensenova_u1_8b_infographic_v3_fast",
-        ]),
+        models: ModelMatch::Family(is_sensenova_model),
         shape: sensenova_edit_candle_eligible,
     },
     CandleImageRoute {

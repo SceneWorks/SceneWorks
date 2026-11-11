@@ -24,8 +24,11 @@ fn every_builtin_memory_fact_is_projected_from_validated_evidence() {
     assert_eq!(raw["schemaVersion"], 2);
     super::evidence::validate_evidence_document(EVIDENCE, &raw).unwrap();
     let effective = crate::builtin_manifests::builtin_manifest("builtin.models.jsonc").unwrap();
-    assert_eq!(raw["models"].as_array().unwrap().len(), 143);
-    assert_eq!(effective["models"].as_array().unwrap().len(), 143);
+    assert!(!raw["models"].as_array().unwrap().is_empty());
+    assert_eq!(
+        raw["models"].as_array().unwrap().len(),
+        effective["models"].as_array().unwrap().len()
+    );
     let evidence: Value = serde_json::from_str(EVIDENCE).unwrap();
     let mut mlx_count = 0;
     let mut candle_count = 0;
@@ -81,7 +84,10 @@ fn every_builtin_memory_fact_is_projected_from_validated_evidence() {
             }
         }
     }
-    assert_eq!((mlx_count, candle_count), (75, 86));
+    assert!(
+        mlx_count > 0 && candle_count > 0,
+        "the projection reached no backend block (mlx {mlx_count}, candle {candle_count})"
+    );
     let mut malformed = evidence.clone();
     malformed["flux_schnell"]["mlx"]["unknownMemoryKey"] = json!(1);
     assert!(super::evidence::validate_evidence_document(&malformed.to_string(), &raw).is_err());
@@ -273,10 +279,10 @@ fn mutable_distribution_revision_cannot_enter_the_static_catalog() {
 }
 
 #[test]
-fn all_frozen_builtin_rows_have_exact_typed_product_and_evidence_projection() {
+fn all_builtin_rows_have_exact_typed_product_and_evidence_projection() {
     let effective = crate::builtin_manifests::builtin_manifest("builtin.models.jsonc").unwrap();
     let rows = effective["models"].as_array().unwrap();
-    assert_eq!(rows.len(), 143);
+    assert!(!rows.is_empty());
     assert_eq!(super::BUILTINS.len(), rows.len());
     for row in rows {
         let id = row["id"].as_str().unwrap();
@@ -326,10 +332,37 @@ fn all_public_generator_and_provider_families_have_native_projections() {
             .filter(|spec| spec.product.model_type == model_type && has_route(spec))
             .count()
     };
-    assert_eq!(count("image", |spec| !spec.routes.is_empty()), 59);
-    assert_eq!(count("video", |spec| !spec.video_routes.is_empty()), 13);
-    assert_eq!(count("audio", |spec| !spec.provider_routes.is_empty()), 15);
-    assert_eq!(count("vector", |spec| !spec.provider_routes.is_empty()), 2);
+    // Shape, not population: every shipped video, audio and vector model has its native projection,
+    // and the only image models without a generic native route are identity-only models (their sole
+    // operation is `character_image`), which bespoke identity lanes serve.
+    for (model_type, has_route) in [
+        (
+            "video",
+            (|spec| !spec.video_routes.is_empty()) as fn(&ModelSpec) -> bool,
+        ),
+        ("audio", |spec| !spec.provider_routes.is_empty()),
+        ("vector", |spec| !spec.provider_routes.is_empty()),
+    ] {
+        let total = count(model_type, |_| true);
+        assert!(total > 0, "no shipped {model_type} model");
+        assert_eq!(
+            count(model_type, has_route),
+            total,
+            "{model_type} projection"
+        );
+    }
+    assert!(count("image", |spec| !spec.routes.is_empty()) > 0);
+    for spec in models
+        .values()
+        .filter(|spec| spec.product.model_type == "image" && spec.routes.is_empty())
+    {
+        assert_eq!(
+            spec.product.fields["capabilities"],
+            json!(["character_image"]),
+            "{} has no native image route but is not an identity-only model",
+            spec.product.id
+        );
+    }
     assert_eq!(
         models["starvector_1b"].provider_routes["mlx"][0].id,
         "mlx-starvector-1b"
@@ -403,9 +436,20 @@ fn pid_decoder_overlays_are_installable_without_standalone_provider_routes() {
 }
 
 #[test]
-fn router_policy_and_preview_feature_export_keep_the_frozen_population() {
+fn router_policy_and_preview_feature_export_cover_every_builtin() {
     let policy = super::policy::parse(POLICY).unwrap();
-    assert_eq!((policy.image.len(), policy.video.len()), (63, 14));
+    // Shape, not population: one row per shipped image/video builtin plus the legacy aliases.
+    let builtins = |model_type: &str| {
+        super::BUILTINS
+            .values()
+            .filter(|spec| spec.product.model_type == model_type)
+            .count()
+    };
+    let image_aliases = policy.image.iter().filter(|row| row.legacy_alias).count();
+    let video_aliases = policy.video.iter().filter(|row| row.legacy_alias).count();
+    assert!(builtins("image") > 0 && builtins("video") > 0);
+    assert_eq!(policy.image.len(), builtins("image") + image_aliases);
+    assert_eq!(policy.video.len(), builtins("video") + video_aliases);
     let aliases: Vec<_> = policy
         .image
         .iter()
@@ -441,7 +485,7 @@ fn router_policy_and_preview_feature_export_keep_the_frozen_population() {
 
     let source: Value = serde_json::from_str(&preview_json()).unwrap();
     let preview = source["models"].as_object().unwrap();
-    assert_eq!(preview.len(), 83);
+    assert!(!preview.is_empty());
     for (id, lanes) in preview {
         let exported = super::preview_feature(id).unwrap_or_else(|| panic!("missing {id} preview"));
         assert_eq!(
@@ -457,5 +501,12 @@ fn router_policy_and_preview_feature_export_keep_the_frozen_population() {
             }
         }
     }
-    assert_eq!(super::LEGACY_PREVIEW.len(), 8);
+    // The legacy table holds exactly the exported ids that are not builtins.
+    let legacy: std::collections::BTreeSet<_> = super::LEGACY_PREVIEW.keys().cloned().collect();
+    let non_builtin: std::collections::BTreeSet<_> = preview
+        .keys()
+        .filter(|id| builtin_model_spec(id).is_none())
+        .cloned()
+        .collect();
+    assert_eq!(legacy, non_builtin);
 }

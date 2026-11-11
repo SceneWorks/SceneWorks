@@ -87,7 +87,6 @@ function projectionPlan() {
       ),
       enginesSource: read("crates/sceneworks-worker/src/engines.rs"),
       strictControlSource: read("crates/sceneworks-worker/src/image_jobs/strict_control.rs"),
-      imageRoutingSource: read("crates/sceneworks-worker/src/image_jobs/routing.rs"),
       routeRegistrySource: read("crates/sceneworks-worker/src/memory_route_registry.rs"),
       memoryRoutePolicySource: read("config/manifests/registry/memory-route-policy.json"),
       registrySpecsSource: read("config/manifests/registry/specs.json"),

@@ -1194,7 +1194,7 @@ export function contractEstimateEvidence(
   return {
     repo: null,
     revision: null,
-    path: `${manifestPath}#models/${cell.modelId}/${cell.backend}/memoryStrategyContract`,
+    path: `${manifestPath}#${cell.modelId}/${cell.backend}/memoryStrategyContract`,
     sha256: manifestSha256,
     recordId: null,
     envelopeBytes: null,
@@ -1223,7 +1223,7 @@ export function manifestTierEvidence(
   return {
     repo: null,
     revision: null,
-    path: `${manifestPath}#models/${cell.modelId}/${cell.backend}`,
+    path: `${manifestPath}#${cell.modelId}/${cell.backend}`,
     sha256: manifestSha256,
     recordId: null,
     envelopeBytes: null,
