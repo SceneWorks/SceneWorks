@@ -260,6 +260,9 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   const monitoringRef = useRef(false);
   // How many of a job's stored items the table already holds, so polling reads only new ones.
   const itemsRead = useRef({ jobId: null, count: 0 });
+  // When the dialog resumes an older running job, the images newer runs already described: that
+  // job's later results for them are older work and must not replace the restored rows.
+  const supersededItems = useRef({ jobId: null, ids: new Set() });
   const pollAbort = useRef(null);
 
   useEffect(() => () => pollAbort.current?.abort(), []);
@@ -351,7 +354,16 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
 
   const readItems = useCallback(
     (jobId, from, model, signal) =>
-      readItemPages(jobId, from, (items) => setRows((current) => mergeDescribeRows(current, items, datasetOrder, model)), signal),
+      readItemPages(
+        jobId,
+        from,
+        (items) => {
+          const superseded = supersededItems.current.jobId === jobId ? supersededItems.current.ids : null;
+          const fresh = superseded ? items.filter((item) => !superseded.has(item?.itemId)) : items;
+          if (fresh.length) setRows((current) => mergeDescribeRows(current, fresh, datasetOrder, model));
+        },
+        signal,
+      ),
     [datasetOrder, readItemPages],
   );
 
@@ -429,6 +441,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
         let active = null;
         let activeCount = 0;
         let activeRead = false;
+        const newerDescribed = new Set();
         let offset = 0;
         let exhausted = false;
         const nextJob = async () => {
@@ -468,6 +481,8 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
           for (const item of items) {
             if (item?.itemId && !item.failed && resultMatchesImage(item, sources.get(item.itemId), images.get(item.itemId))) {
               missing.delete(item.itemId);
+              // Described by a run newer than the active one, which therefore must not replace it.
+              if (active && !activeRead) newerDescribed.add(item.itemId);
             }
           }
           runs.push({ model: entry.result?.model ?? entry.payload?.model ?? null, items, sources });
@@ -478,6 +493,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
         setRows(restored);
         if (active) {
           itemsRead.current = { jobId: active.id, count: activeCount };
+          supersededItems.current = { jobId: active.id, ids: newerDescribed };
           setJob(active);
           monitor(active.id);
         } else if (restored.length) {

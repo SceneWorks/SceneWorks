@@ -780,6 +780,38 @@ describe("DatasetPromptBatchDialog", () => {
     expect(button("Cancel")).toBeTruthy();
   });
 
+  it("keeps a newer run's result when a resumed older job later describes the same image", async () => {
+    trainingApi.listBatchDescribeJobs.mockResolvedValue([
+      { id: "job_new", status: "completed", result: {} },
+      { id: "job_1", status: "running", result: { processedCount: 1, itemCount: 3 } },
+    ]);
+    // job_1 (the polled job) has described only item_a so far; job_new already re-ran item_b.
+    storedItems = [described("item_a", 300, 400, { description: "Old a." })];
+    const newer = [described("item_b", 400, 300, { description: "Newer b." })];
+    jobsApi.resultItems.mockImplementation(async (jobId, _token, { offset = 0 } = {}) => {
+      const items = jobId === "job_new" ? newer : storedItems;
+      return { items: items.slice(offset), total: items.length, nextOffset: null };
+    });
+    await render();
+    expect(rowText("item_b")).toBe("Newer b.");
+    await act(async () =>
+      nextPoll(
+        snapshot(
+          "completed",
+          [
+            described("item_a", 300, 400, { description: "Old a." }),
+            described("item_b", 400, 300, { description: "Older b." }),
+            described("item_c", 300, 400, { description: "Old c." }),
+          ],
+          { progress: 1 },
+        ),
+      ),
+    );
+    await settle();
+    expect(rowText("item_b")).toBe("Newer b.");
+    expect(rowText("item_c")).toBe("Old c.");
+  });
+
   it("pages back through the history until every image is covered", async () => {
     // A full page of newer single-image re-runs of item_a, then the original full run on page 2.
     const reruns = Array.from({ length: RESTORE_JOBS_PAGE }, (_, index) => ({ id: `rerun_${index}`, status: "completed", result: {} }));
