@@ -329,6 +329,27 @@ mod tests {
         entry.as_object().unwrap().clone()
     }
 
+    /// Registers a private hub cache under the test's temp dir for `data`, so no resolution or
+    /// fixture write can reach the real (shared) Hugging Face cache. Asserts that before returning.
+    fn isolated_cache(
+        temporary: &Path,
+    ) -> (
+        PathBuf,
+        sceneworks_core::hf_home::test_support::CacheRootGuard,
+    ) {
+        let data = temporary.join("data");
+        let hub = temporary.join("private-hub");
+        let guard =
+            sceneworks_core::hf_home::test_support::CacheRootGuard::new(data.clone(), hub.clone());
+        let resolved = crate::huggingface_hub_cache_dir(&data);
+        assert_eq!(resolved, hub, "the guard must override HF_HOME");
+        assert!(
+            resolved.starts_with(temporary),
+            "synthetic snapshots must stay inside the guarded temporary root"
+        );
+        (data, guard)
+    }
+
     fn snapshot(data: &Path, repo: &str, revision: &str) -> PathBuf {
         let dir = crate::huggingface_hub_cache_dir(data)
             .join(format!("models--{}", repo.replace('/', "--")))
@@ -367,10 +388,11 @@ mod tests {
     #[test]
     fn bf16_resolves_the_upstream_root_and_stages_h3s_text_encoder() {
         let temporary = tempfile::tempdir().unwrap();
-        let data = temporary.path();
-        let settings = settings(data);
+        let (data, _guard) = isolated_cache(temporary.path());
+        let settings = settings(&data);
         let entry = shipped_entry();
         let root = snapshot(&settings.data_dir, IMAGE_REPO, IMAGE_REV);
+        assert!(root.starts_with(temporary.path()));
         let resolved = resolve_weights_dir(&request(&entry, json!({})), &settings).unwrap();
         assert_eq!(resolved, None, "nothing installed yet");
         for file in [
@@ -420,8 +442,8 @@ mod tests {
     #[test]
     fn a_published_packed_tier_stages_its_dit_and_the_same_tier_text_encoder() {
         let temporary = tempfile::tempdir().unwrap();
-        let data = temporary.path();
-        let settings = settings(data);
+        let (data, _guard) = isolated_cache(temporary.path());
+        let settings = settings(&data);
         let mut entry = shipped_entry();
         let rehost_rev = "1111111111111111111111111111111111111111";
         for row in entry["downloads"].as_array_mut().unwrap() {
@@ -431,6 +453,7 @@ mod tests {
             }
         }
         let root = snapshot(&settings.data_dir, IMAGE_REPO, IMAGE_REV);
+        assert!(root.starts_with(temporary.path()));
         touch(root.join("vae_diffusers/config.json"));
         touch(root.join("tokenizer/tokenizer.json"));
         let rehost = snapshot(
