@@ -814,6 +814,7 @@ fn registered_digest_source_claims(
     let manifests = settings.config_dir.join("manifests");
     let checkpoint_plans =
         sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
+    let roots = crate::paths::allowed_model_roots(settings).unwrap_or_default();
     for model in catalog_records(&manifests.join("user.models.jsonc"), "models") {
         let Some(id) = model.get("id").and_then(serde_json::Value::as_str) else {
             continue;
@@ -828,9 +829,11 @@ fn registered_digest_source_claims(
                 let files = if let Some(files) = captured.get(&path) {
                     Some(files.clone())
                 } else {
-                    capture_registered_files(&path).ok().inspect(|files| {
-                        captured.insert(path.clone(), files.clone());
-                    })
+                    capture_registered_files_with_roots(&path, &roots)
+                        .ok()
+                        .inspect(|files| {
+                            captured.insert(path.clone(), files.clone());
+                        })
                 };
                 if let Some(files) = files {
                     append_registered_claim_files(&mut claims, "model", id, None, files.clone());
@@ -3122,6 +3125,39 @@ mod tests {
             .collect();
         assert!(relatives.contains(&PathBuf::from("dit.safetensors")));
         assert!(relatives.contains(&PathBuf::from("text_encoder/model.safetensors")));
+
+        // Review 4533885128: the `user.models.jsonc` inventory loop must also
+        // pass managed roots so this model's claim is actually published.
+        let mut inv_settings = Settings::for_test(data.clone());
+        inv_settings.config_dir = temp.path().join("config");
+        let user_manifest = inv_settings.config_dir.join("manifests/user.models.jsonc");
+        std::fs::create_dir_all(user_manifest.parent().unwrap()).unwrap();
+        std::fs::write(
+            &user_manifest,
+            serde_json::json!({
+                "models": [{"id": "linked_demo", "installedPath": model.display().to_string()}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let ledger =
+            sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(&files)
+                .unwrap();
+        let expected_claim = sceneworks_core::portable_sources::registered_digest_claim_id(
+            "model",
+            "linked_demo",
+            None,
+            &ledger,
+        )
+        .unwrap();
+        let mut published = Vec::new();
+        registered_digest_source_claims(&inv_settings, |claim| published.push(claim));
+        assert!(
+            published
+                .iter()
+                .any(|claim| claim.source_id == expected_claim),
+            "inventory must advertise the linked directory model"
+        );
 
         let outside = temp.path().join("outside");
         std::fs::create_dir_all(&outside).unwrap();

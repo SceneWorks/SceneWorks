@@ -3189,12 +3189,51 @@ fn resolve_trainer_components(
     engine_id: &str,
     base_model_id: &str,
     settings: &Settings,
+    bound_aux_paths: Option<&Value>,
 ) -> WorkerResult<std::collections::BTreeMap<String, WeightsSource>> {
+    // Seed any component the portable guard already verified and staged into
+    // `__portableAuxPaths` BEFORE consulting the HF cache (SW-7030, reviews
+    // 4533688101 & 4533885136): Iris rank processes construct fresh settings
+    // and do not inherit the coordinator's process-global overlay, so
+    // disconnecting or mutating the original HF library after staging must
+    // neither fail rank startup nor substitute unverified bytes.
+    let mut prebound = std::collections::BTreeMap::new();
+    if let Some(paths) = bound_aux_paths.and_then(Value::as_object) {
+        if let Some(descriptor) = crate::inference_runtime::media_descriptor(engine_id) {
+            for &component_id in descriptor.required_components {
+                if let Some(source) = paths
+                    .get(component_id)
+                    .and_then(Value::as_str)
+                    .map(PathBuf::from)
+                    .map(bound_component_weights_source)
+                {
+                    prebound.insert(component_id.to_owned(), source);
+                }
+            }
+        }
+        if !prebound.contains_key("text_encoder") {
+            if let Some(source) = paths
+                .get("text_encoder")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+                .map(bound_component_weights_source)
+            {
+                prebound.insert("text_encoder".to_owned(), source);
+            }
+        }
+    }
     let Some(descriptor) = crate::inference_runtime::media_descriptor(engine_id) else {
-        return Ok(std::collections::BTreeMap::new());
+        return Ok(prebound);
     };
     if descriptor.required_components.is_empty() {
-        return Ok(std::collections::BTreeMap::new());
+        return Ok(prebound);
+    }
+    if descriptor
+        .required_components
+        .iter()
+        .all(|component_id| prebound.contains_key(*component_id))
+    {
+        return Ok(prebound);
     }
     let manifest_entry = builtin_model_manifest_entry(base_model_id).ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
@@ -3202,12 +3241,22 @@ fn resolve_trainer_components(
              '{engine_id}' components from"
         ))
     })?;
-    crate::model_jobs::resolve_co_requisites_for_tier(
+    crate::model_jobs::resolve_co_requisites_for_tier_with_prebound(
         &descriptor,
         &manifest_entry,
         settings,
         Some(TRAINING_COMPONENT_TIER),
+        &prebound,
     )
+}
+
+#[cfg(native_lane)]
+fn bound_component_weights_source(path: PathBuf) -> WeightsSource {
+    if path.is_file() {
+        WeightsSource::File(path)
+    } else {
+        WeightsSource::Dir(path)
+    }
 }
 
 /// Everything a trainer's [`LoadSpec`] is built from, resolved from the plan before any weights
@@ -3288,30 +3337,12 @@ impl TrainerLoadInputs {
         // `coRequisite` downloads the trainer's engine consumes — SDXL's CLIP-L/bigG tokenizers +
         // fp16-fix VAE on candle, Iris' Qwen3-VL text encoder. A missing one fails the job with an
         // actionable error naming the component id + repo.
-        let mut components =
-            resolve_trainer_components(engine_id, &plan.target.base_model, settings)?;
-        // Caller-staged text encoder (SW-7030, review 4533688101): when the
-        // portable guard already verified and staged the encoder, every
-        // consumer — including Iris rank processes, which re-resolve from the
-        // serialized plan with fresh settings — must load those exact bytes
-        // instead of reopening the original HF library, which may have changed
-        // or been disconnected after verification.
-        if let Some(path) = plan
-            .extra
-            .get("__portableAuxPaths")
-            .and_then(|paths| paths.get("text_encoder"))
-            .and_then(Value::as_str)
-            .map(PathBuf::from)
-        {
-            let dir = if path.is_file() {
-                path.parent()
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| path.clone())
-            } else {
-                path
-            };
-            components.insert("text_encoder".to_owned(), WeightsSource::Dir(dir));
-        }
+        let mut components = resolve_trainer_components(
+            engine_id,
+            &plan.target.base_model,
+            settings,
+            plan.extra.get("__portableAuxPaths"),
+        )?;
         // Iris REPA (sc-25689): the frozen teacher is a separately installed TRAINING resource,
         // re-verified (size + sha256) before every run and never downloaded here.
         let bound_teacher = plan
@@ -9779,25 +9810,31 @@ mod tests {
             .path()
             .join("models/portable-attempts/route/text_encoder");
         std::fs::create_dir_all(&staged).unwrap();
-        let mut value = plan_json(dir.path(), "z_image_lora", "z_image_turbo", "lora", &[]);
+        // Real descriptor with `required_components: ["text_encoder"]` (`iris_3b`),
+        // empty HF cache: without pre-seeding, `resolve_co_requisites_for_tier`
+        // fails before the bound path is ever consulted (review 4533885136).
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HOME", ""),
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+        ]);
+        let mut value = plan_json(dir.path(), "iris_train", "iris_3b", "lora", &[]);
         value["__portableAuxPaths"] = json!({"text_encoder": staged.display().to_string()});
         let mut plan = parse(value);
         plan.target.base_model_path = base.display().to_string();
 
-        let inputs = TrainerLoadInputs::resolve(&settings, &plan, "unknown_engine").unwrap();
+        let inputs = TrainerLoadInputs::resolve(&settings, &plan, "iris_3b").unwrap();
         assert_eq!(
             inputs.components.get("text_encoder"),
-            Some(&WeightsSource::Dir(staged.clone())),
-            "the bound staged encoder is the resolved component"
+            Some(&WeightsSource::Dir(staged)),
+            "the bound staged encoder satisfies iris_3b's required_components without the HF cache"
         );
 
         let mut unbound = plan.clone();
         unbound.extra.remove("__portableAuxPaths");
-        let inputs = TrainerLoadInputs::resolve(&settings, &unbound, "unknown_engine").unwrap();
-        assert_ne!(
-            inputs.components.get("text_encoder"),
-            Some(&WeightsSource::Dir(staged)),
-            "without a bound path the staged snapshot is not invented"
+        assert!(
+            TrainerLoadInputs::resolve(&settings, &unbound, "iris_3b").is_err(),
+            "without a bound path an uninstalled required component still fails"
         );
     }
 
@@ -10214,7 +10251,7 @@ mod tests {
         let dense_settings = test_settings(dense.path());
         stage(&dense_settings, "bf16");
         let components =
-            resolve_trainer_components("mage_flow_base", "mage_flow_base", &dense_settings)
+            resolve_trainer_components("mage_flow_base", "mage_flow_base", &dense_settings, None)
                 .expect("the bf16 shared components are staged");
         let keys: Vec<&str> = components.keys().map(String::as_str).collect();
         assert_eq!(keys, vec!["text_encoder", "vae"]);
@@ -10235,7 +10272,7 @@ mod tests {
         let settings = test_settings(temp.path());
         stage(&settings, "q4");
 
-        let error = resolve_trainer_components("mage_flow_base", "mage_flow_base", &settings)
+        let error = resolve_trainer_components("mage_flow_base", "mage_flow_base", &settings, None)
             .expect_err(
                 "only the q4 shared components are installed, so a training run — which needs the \
                  DENSE base — must be refused",
