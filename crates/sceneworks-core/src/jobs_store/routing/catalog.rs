@@ -727,8 +727,8 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
 //
 // The schema-validated route-policy.json owns SceneWorks router admission. Build.rs compiles its
 // typed rows to the static slices consumed by existing job predicates; the native descriptor
-// export separately owns engine breadth. The frozen membership test below checks that the policy
-// migration preserves every existing route and catches the five formerly missing MLX gate rows.
+// export separately owns engine breadth. route-policy.json carries the former IMAGE_MODEL_CAPS
+// and VIDEO_MODEL_CAPS rows unchanged; the migration added and repaired no route.
 
 /// One image model's SceneWorks router admission policy. Build.rs derives the static list
 /// constants from these generated rows; the checked-in typed JSON is the sole authored owner.
