@@ -91,6 +91,8 @@ POST	/api/v1/projects/:project_id/training/datasets/:dataset_id/parquet-import-j
 POST	/api/v1/projects/:project_id/training/datasets/:dataset_id/parquet-import-finalize	token
 POST	/api/v1/projects/:project_id/training/datasets/:dataset_id/analysis-jobs	token
 POST	/api/v1/projects/:project_id/training/datasets/:dataset_id/face-analysis-jobs	token
+GET	/api/v1/projects/:project_id/training/datasets/:dataset_id/batch-describe-jobs	token
+HEAD	/api/v1/projects/:project_id/training/datasets/:dataset_id/batch-describe-jobs	token
 POST	/api/v1/projects/:project_id/training/datasets/:dataset_id/batch-describe-jobs	token
 POST	/api/v1/projects/:project_id/training/datasets/:dataset_id/subject-mask-jobs	token
 GET	/api/v1/projects/:project_id/training/datasets/:dataset_id/subject-masks	token
