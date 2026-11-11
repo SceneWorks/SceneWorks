@@ -1,5 +1,6 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { recipeToStudioPatch } from "./recipeToStudioPatch.js";
+import { isFlux3ImageModel } from "../../modelEligibility.js";
 
 export function useImageRecipeReplay({
   model,
@@ -93,10 +94,14 @@ export function useImageRecipeReplay({
   setHiresFixUpscaleBy,
   setHiresFixCfgScale
 }) {
+  // A recipe whose model the catalog has not delivered yet keeps its FLUX.3-only restore here
+  // until the model resolves (applied only if it resolves to a FLUX.3 image model).
+  const pendingFlux3Recipe = useRef(null);
   useEffect(() => {
     const patch = recipeToStudioPatch(launchRequest, { model, models, recipeMode,
       mossEditActive: mossEditTransition.current.active, advancedDefaultsModel: advancedDefaultsModel.current,
       ipAdapterScale, controlnetScale, trueCfgScale, img2imgStrength, textStyleGain, controlScale });
+    pendingFlux3Recipe.current = patch?.flags.flux3Pending ? launchRequest : null;
     if (!patch) return;
     const { values, flags } = patch;
     mossEditTransition.current.replay = flags.mossEditReplay;
@@ -183,4 +188,29 @@ export function useImageRecipeReplay({
   // The launch id owns one-shot hydration; local values must not replay the launch.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [launchRequest?.id]);
+
+  useEffect(() => {
+    const pending = pendingFlux3Recipe.current;
+    if (!pending) return;
+    const resolved = models.find((entry) => entry.id === pending.recipe?.model);
+    if (!resolved) return;
+    pendingFlux3Recipe.current = null;
+    if (!isFlux3ImageModel(resolved)) return;
+    // Re-derive against the resolved model and apply only the FLUX.3 reference restore.
+    const patch = recipeToStudioPatch(pending, { model, models, recipeMode,
+      mossEditActive: mossEditTransition.current.active, advancedDefaultsModel: advancedDefaultsModel.current,
+      ipAdapterScale, controlnetScale, trueCfgScale, img2imgStrength, textStyleGain, controlScale });
+    if (!patch) return;
+    const flux3Setters = {
+      flux3ReferenceSlots: setFlux3ReferenceSlots,
+      orderedCharacterReferences: setOrderedCharacterReferences,
+      referenceAssetIds: setReferenceAssetIds,
+      mode: setMode,
+    };
+    for (const [key, setter] of Object.entries(flux3Setters)) {
+      if (Object.hasOwn(patch.values, key)) setter(patch.values[key]);
+    }
+  // Runs when the catalog changes; the pending ref scopes it to the one launch awaiting a model.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [models]);
 }

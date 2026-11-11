@@ -23,6 +23,9 @@ export function recipeToStudioPatch(launchRequest, { model, models = [], recipeM
   const recipe = launchRequest.recipe;
   const recipeModel = models.find((entry) => entry.id === recipe.model);
   const flux3Recipe = isFlux3ImageModel(recipeModel);
+  // The recipe names a model this catalog has not delivered yet: the FLUX.3-only restore stays
+  // pending (flags.flux3Pending) and useImageRecipeReplay re-derives it when the model resolves.
+  const flux3Pending = Boolean(recipe.model) && !recipeModel;
   if (recipe.uiPreserveComposedPrompt === true) flags.clearGeneralStack = true;
   const settings = recipe.normalizedSettings ?? {};
   const rawSettings = recipe.rawAdapterSettings ?? {};
@@ -280,5 +283,6 @@ export function recipeToStudioPatch(launchRequest, { model, models = [], recipeM
   values.hiresFixUpscaleBy = hiresFix?.upscaleBy ?? 2;
   values.hiresFixCfgScale = hiresFix?.cfgScale ?? "";
 
+  flags.flux3Pending = flux3Pending;
   return { values, flags };
 }

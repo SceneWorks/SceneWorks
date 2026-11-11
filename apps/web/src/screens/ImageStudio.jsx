@@ -743,10 +743,15 @@ export function ImageStudio() {
     }
   }, [mode, selectedAssetEditableSourceId, changeSourceAssetId]);
 
-  // Derived outside the launch effect so a catalog refresh cannot re-fire the launch.
-  const launchTargetsFlux3 = isFlux3ImageModel(
-    models.find((entry) => entry.id === (launchRequest?.model ?? referenceChangeState.current?.model)),
-  );
+  // Derived outside the launch effect so a catalog refresh cannot re-fire the launch. The
+  // launch's model can name an id the catalog has not delivered yet: the FLUX.3 reference binding
+  // then stays pending (see the effect after the launch effect) and applies only if the model
+  // resolves to a FLUX.3 image model.
+  const launchTargetId = launchRequest?.model ?? referenceChangeState.current?.model;
+  const launchTargetModel = models.find((entry) => entry.id === launchTargetId);
+  const launchTargetsFlux3 = isFlux3ImageModel(launchTargetModel);
+  const launchTargetPending = Boolean(launchTargetId) && !launchTargetModel;
+  const pendingFlux3Binding = useRef(null);
   useEffect(() => {
     if (launchRequest?.view !== "Image") {
       return;
@@ -792,13 +797,27 @@ export function ImageStudio() {
     }
     if (launchRequest.mode === "edit_image" && selectedAssetEditableSourceId) {
       changeSourceAssetId(selectedAssetEditableSourceId);
+      pendingFlux3Binding.current = null;
       if (launchTargetsFlux3) {
         // A launch can switch models in this same commit, before changeSource sees the new model.
         setReferenceAssetIds([selectedAssetEditableSourceId]);
         setFlux3ReferenceSlots(reconcileLayoutReferences([], [selectedAssetEditableSourceId]));
+      } else if (launchTargetPending) {
+        pendingFlux3Binding.current = { launchId: launchRequest.id, targetId: launchTargetId, sourceId: selectedAssetEditableSourceId };
       }
     }
-  }, [launchRequest, selectedAsset?.id, selectedAssetEditableSourceId, changeSourceAssetId, launchTargetsFlux3]);
+    // launchTargetsFlux3 / launchTargetPending are read at launch time; the pending binding below
+    // finishes the loading-catalog case without re-running the launch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [launchRequest, selectedAsset?.id, selectedAssetEditableSourceId, changeSourceAssetId]);
+  useEffect(() => {
+    const pending = pendingFlux3Binding.current;
+    if (!pending || launchTargetPending) return;
+    pendingFlux3Binding.current = null;
+    if (launchRequest?.id !== pending.launchId || !launchTargetsFlux3) return;
+    setReferenceAssetIds([pending.sourceId]);
+    setFlux3ReferenceSlots(reconcileLayoutReferences([], [pending.sourceId]));
+  }, [launchTargetPending, launchTargetsFlux3, launchRequest?.id]);
 
   // Mac UI gating (sc-3486): on a Mac in MLX-required mode, hide torch-only models from the
   // picker so the user can't select something that would only error. Inert elsewhere.
