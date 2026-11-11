@@ -434,6 +434,38 @@
       ]
     },
     {
+      "key": "MiniMaxAI/MiniMax-H3-Image-PE@35603d4b63949afa12cb098227fffefedf081afa",
+      "repo": "MiniMaxAI/MiniMax-H3-Image-PE",
+      "revision": "35603d4b63949afa12cb098227fffefedf081afa",
+      "resolvedSha": "35603d4b63949afa12cb098227fffefedf081afa",
+      "servedRepo": "MiniMaxAI/MiniMax-H3-Image-PE",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "assets/minimax-h3-image.jpg",
+        "chat_template.jinja",
+        "config.json",
+        "generation_config.json",
+        "hf_quant_config.json",
+        "model-00001-of-00004.safetensors",
+        "model-00002-of-00004.safetensors",
+        "model-00003-of-00004.safetensors",
+        "model-00004-of-00004.safetensors",
+        "model.safetensors.index.json",
+        "processor_config.json",
+        "prompt/edit/task_prompt.txt",
+        "prompt/manifest.json",
+        "prompt/t2i/request_params.json",
+        "prompt/t2i/system_prompt.txt",
+        "prompt/t2i/task_prompt.txt",
+        "requirements.txt",
+        "scripts/expand_prompt.py",
+        "tokenizer.json",
+        "tokenizer_config.json"
+      ]
+    },
+    {
       "key": "MiniMaxAI/MiniMax-H3-Image@492fd8c4eca666f1085f57e30738c1e0d86b3439",
       "repo": "MiniMaxAI/MiniMax-H3-Image",
       "revision": "492fd8c4eca666f1085f57e30738c1e0d86b3439",

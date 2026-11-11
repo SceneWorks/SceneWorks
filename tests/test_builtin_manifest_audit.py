@@ -4254,6 +4254,125 @@ def test_minimax_h3_image_shipped_license_is_the_upstream_text():
         assert fragment in notice, fragment
 
 
+# ---------------------------------------------------------------------------------------------
+# SW-7102 — MiniMax-H3-Image-PE, the prompt expander (feature SW-F363).
+# ---------------------------------------------------------------------------------------------
+
+_PE_REPO = "MiniMaxAI/MiniMax-H3-Image-PE"
+_PE_REVISION = "35603d4b63949afa12cb098227fffefedf081afa"
+_PE_PROMPT_FILES = [
+    "prompt/manifest.json",
+    "prompt/t2i/system_prompt.txt",
+    "prompt/t2i/task_prompt.txt",
+    "prompt/t2i/request_params.json",
+    "prompt/edit/task_prompt.txt",
+]
+
+
+def test_minimax_h3_image_pe_declares_its_tiers_and_the_upstream_prompt_files():
+    """E17: its own entry — the published NVFP4 tier (Blackwell CUDA, so Windows/Linux only), the
+    three converted tiers pending publication (null SHA + `pendingArtifact`), and a `prompt`
+    co-requisite that fetches the five prompt files from the UPSTREAM snapshot for every tier."""
+    entry = _models_by_id()["minimax_h3_image_pe"]
+    assert entry["type"] == "utility"
+    assert entry["adapter"] == "prompt-refine"
+    assert entry["family"] == "minimax-h3-image-pe"
+    assert entry["autoDownload"] is False
+    primaries = {
+        download["variant"]: download
+        for download in entry["downloads"]
+        if download.get("coRequisite") is not True
+    }
+    assert sorted(primaries) == ["bf16", "nvfp4", "q4", "q8"]
+    nvfp4 = primaries["nvfp4"]
+    assert (nvfp4["repo"], nvfp4["revision"]) == (_PE_REPO, _PE_REVISION)
+    assert nvfp4["default"] is True and nvfp4.get("pendingArtifact") is None
+    assert nvfp4["platforms"] == ["windows", "linux"]
+    assert not any(pattern.startswith("prompt") for pattern in nvfp4["files"])
+    for tier in ("bf16", "q8", "q4"):
+        row = primaries[tier]
+        assert row["pendingArtifact"] is True, tier
+        assert row["revision"] == "0" * 40, tier
+        assert row["files"] == [f"{tier}/*"], tier
+    prompt_rows = [
+        download
+        for download in entry["downloads"]
+        if download.get("coRequisite") is True and download.get("componentId") == "prompt"
+    ]
+    assert len(prompt_rows) == 1
+    prompt_row = prompt_rows[0]
+    assert (prompt_row["repo"], prompt_row["revision"]) == (_PE_REPO, _PE_REVISION)
+    assert prompt_row["files"] == _PE_PROMPT_FILES
+    assert set(entry["candle"]["minMemoryGbByTier"]) == {"bf16", "q8", "q4", "nvfp4"}
+    assert set(entry["mlx"]["minMemoryGbByTier"]) == {"bf16", "q8", "q4"}
+    assert entry["candle"]["measured"] is False
+
+
+def test_minimax_h3_image_pe_license_notice_names_its_own_terms():
+    """E23 / S2: the expander is under the MiniMax-H3-Image agreement and its gate names the same
+    terms — §IV.1's 1 million USD / Hosted Service trigger, the territory, Exhibit A item 12, §IV.2
+    and §V.3 — and says the prompts are read, never copied."""
+    entry = _models_by_id()["minimax_h3_image_pe"]
+    assert entry["requiresLicenseAcknowledgment"] is True
+    assert entry["licenseUrl"].startswith("https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/")
+    notice = entry["licenseNotice"]
+    assert "MiniMax-H3-Image Community License Agreement" in notice
+    assert "NON-TRANSFERABLE" in notice
+    for territory in (
+        "European Union",
+        "United Kingdom",
+        "Republic of Korea",
+        "United States of America",
+    ):
+        assert territory in notice, territory
+    assert "machine-generated" in notice
+    assert "1 million US dollars" in notice
+    assert "Hosted Service" in notice
+    assert "https://platform.minimax.io/license" in notice
+    assert "20 million" not in notice
+    assert "(5) NO IMPROVING OTHER AI MODELS (§V.3)" in notice
+    assert "never copies them" in notice
+    assert entry["ui"]["attribution"] == "Powered by MiniMax-H3-Image"
+
+
+def test_minimax_h3_image_pe_has_its_own_license_entry_and_notice():
+    """S3: its own About → Licenses entry and §III.4 NOTICE, pointing at the verbatim agreement
+    shipped with MiniMax-H3-Image (the expander's repository has no LICENSE file of its own)."""
+    licenses = json.loads(
+        (ROOT / "apps" / "desktop" / "licenses" / "manifest.json").read_text(encoding="utf-8")
+    )
+    components = licenses["components"] if isinstance(licenses, dict) else licenses
+    entries = [component for component in components if component.get("id") == "minimax-h3-image-pe"]
+    assert len(entries) == 1
+    assert entries[0]["models"] == ["minimax_h3_image_pe"]
+    keys = [document["key"] for document in entries[0]["documents"]]
+    assert keys == ["minimax-h3-image-pe-notice", "minimax-h3-image-community-license"]
+    notice = (
+        ROOT / "apps" / "desktop" / "licenses" / "minimax-h3-image-pe" / "NOTICE.txt"
+    ).read_text(encoding="utf-8")
+    assert notice.startswith(
+        "MiniMax-H3-Image is licensed under the MiniMax-H3-Image Community License Agreement,"
+    )
+    assert "MiniMax-H3-Image-PE" in notice
+
+
+def test_minimax_h3_image_pe_prompt_text_is_not_in_the_repository():
+    """E16: no MiniMax prompt file is vendored anywhere in the repository, fixtures included —
+    nothing named like one of the expander's prompt files lives outside dependency trees."""
+    import os
+
+    names = {path.split("/")[-1] for path in _PE_PROMPT_FILES} - {"manifest.json"}
+    skip = {"node_modules", "target", ".git", "dist", ".venv"}
+    offenders = []
+    for directory, subdirectories, files in os.walk(ROOT):
+        subdirectories[:] = [name for name in subdirectories if name not in skip]
+        parts = Path(directory).parts
+        for name in files:
+            if name in names and "prompt" in parts:
+                offenders.append(str((Path(directory) / name).relative_to(ROOT)))
+    assert not offenders, offenders
+
+
 def test_schema_accepts_license_acknowledgment_without_gated():
     """The authoring contract must permit the decoupled shape. Guard the SCHEMA, not just the
     shipped entries: without these keys the catalog stops validating (additionalProperties: false),

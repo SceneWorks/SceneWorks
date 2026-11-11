@@ -10,6 +10,7 @@ pub(super) struct RefineCompletion {
     pub(super) max_new_tokens: u32,
     pub(super) done_message: &'static str,
     pub(super) qwen_rewriter: Option<crate::qwen_prompt_rewrite::Rewriter>,
+    pub(super) h3_expand: Option<H3ExpandReply>,
     pub(super) image_reference_count: usize,
     pub(super) emits_json: bool,
     pub(super) output: gen_core::core_llm::TextLlmOutput,
@@ -30,12 +31,23 @@ pub(super) async fn finalize_refine_job(
         max_new_tokens,
         done_message,
         qwen_rewriter,
+        h3_expand,
         image_reference_count,
         emits_json,
         output,
         kv_cache,
     } = completion;
     let backend = REFINE_BACKEND;
+    // SW-7102: an expansion that ran out of budget is reported as truncation, before the empty and
+    // parse checks below would report it as a missing or garbled answer. The expander reasons first
+    // and emits the JSON object last, so a short budget loses the object (often leaving no answer
+    // text at all, which the empty check would otherwise claim).
+    if h3_expand.is_some() && output.finish_reason == Some(gen_core::core_llm::FinishReason::Length)
+    {
+        return Err(WorkerError::Engine(
+            crate::minimax_h3_image_prompt_expand::truncated_reply_error(max_new_tokens),
+        ));
+    }
     // A JSON task isolates the object (the web parses + validates a caption; image_caption validates
     // here too, and the film plan is parsed strictly by the harness); the free-text rewrite cleans to
     // prose.
@@ -126,6 +138,33 @@ pub(super) async fn finalize_refine_job(
             image_reference_count,
         ));
         result_refined = suggestion.rewritten_prompt;
+    }
+    // SW-7102: the expansion's reply is the engine's strict two-field object. The expanded caption
+    // takes the usual `refinedPrompt` slot, beside the untouched `originalPrompt`; the proposed
+    // ratio rides `rewriteSuggestion` for the UI to offer. A reply that is not exactly the schema
+    // is refused, never repaired.
+    if let Some(reply) = &h3_expand {
+        let expansion = crate::minimax_h3_image_prompt_expand::parse_reply(
+            &refined,
+            reply.workflow,
+            &reply.allowed_ratios,
+            &reply.aspect,
+        )
+        .map_err(|error| {
+            WorkerError::Engine(format!(
+                "The MiniMax-H3-Image prompt expander returned output this build cannot read: \
+                 {error}. The reply began: {}",
+                crate::qwen_prompt_rewrite::reply_excerpt(&refined, 500)
+            ))
+        })?;
+        rewrite_suggestion = Some(
+            crate::minimax_h3_image_prompt_expand::suggestion_result_block(
+                &expansion,
+                reply.workflow,
+                reply.tier,
+            ),
+        );
+        result_refined = expansion.expanded_caption;
     }
     // sc-24029 widened this to carry the finish reason, usage and the ceiling on every refine
     // result; sc-24113 builds it eagerly so the rewrite's suggestion block can ride alongside.

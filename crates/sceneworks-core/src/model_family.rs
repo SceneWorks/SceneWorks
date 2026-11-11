@@ -16,6 +16,10 @@ pub const MINIMAX_H3: &str = "minimax-h3";
 /// H3's fine-tune import nor H3's LoRAs apply to it. Every needle that would match `minimax-h3`
 /// is checked against this identity FIRST.
 pub const MINIMAX_H3_IMAGE: &str = "minimax-h3-image";
+/// MiniMax-H3-Image-PE (SW-7102): the image model's prompt expander, a Qwen3.8-27B fine-tune that
+/// runs on the text-LLM lane. A utility family of its own: it is never a checkpoint, LoRA base or
+/// image route, but it is under the same MiniMax-H3-Image Community License.
+pub const MINIMAX_H3_IMAGE_PE: &str = "minimax-h3-image-pe";
 pub const QWEN_IMAGE: &str = "qwen-image";
 pub const QWEN_IMAGE_2_1: &str = "qwen-image-2-1";
 pub const WAN_VIDEO: &str = "wan-video";

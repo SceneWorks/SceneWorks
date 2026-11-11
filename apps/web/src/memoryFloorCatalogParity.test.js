@@ -1396,6 +1396,8 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
         // SW-7100: MiniMax-H3-Image's candle floors are derived from its staged component sizes,
         // not measured (the feature's terminal item measures them).
         "minimax_h3_image",
+        // SW-7102: its prompt expander's floors are derived from its tier weight sizes.
+        "minimax_h3_image_pe",
         // The six YuE entries left this set in sc-19387: their candle floors are CUDA-measured.
       ].sort(),
     );

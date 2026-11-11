@@ -140,7 +140,7 @@ import { allPossibleTiers, installedTiers, isBelowFloor, modelQualityFloor, nati
 import { suggestTier } from "../tierSuggestion.js";
 import { useHostMemory } from "../hooks/useHostMemory.js";
 import { hostMemoryGbForBackend } from "../hostMemory.js";
-import { MAX_LISTED_JOBS, PROMPT_REFINE_MODEL_ID, qwenRewriterAppliesTo, QWEN_REWRITE_I2I_MODEL_ID, QWEN_REWRITE_T2I_MODEL_ID, VISION_CAPTION_MODEL_ID } from "../constants.js";
+import { h3ImageExpanderAppliesTo, MAX_LISTED_JOBS, MINIMAX_H3_IMAGE_PE_MODEL_ID, PROMPT_REFINE_MODEL_ID, qwenRewriterAppliesTo, QWEN_REWRITE_I2I_MODEL_ID, QWEN_REWRITE_T2I_MODEL_ID, VISION_CAPTION_MODEL_ID } from "../constants.js";
 import { parseResolution, pickClosestResolution } from "../resolutionMatch.js";
 import { fitsResolutionOptions } from "../resolutionMemory.js";
 
@@ -250,6 +250,8 @@ export function ImageStudio() {
     // global: a ReferenceError at render in a module that is not in strict-undefined territory only
     // because eslint caught it first. Destructured here, beside the sibling it mirrors.
     qwenRewritePrompt,
+    // SW-7102: MiniMax-H3-Image's prompt expander, the same review-and-accept shape.
+    h3ImageExpandPrompt,
     magicPrompt,
     imageCaption,
     imageDescribe,
@@ -901,6 +903,20 @@ export function ImageStudio() {
     Boolean(qwenRewriteModel) &&
     qwenRewriteModel.installState !== "missing" &&
     typeof qwenRewritePrompt === "function";
+  // SW-7102 — MiniMax-H3-Image's optional prompt expander. One checkpoint serves text-to-image and
+  // edit (references present, read as `<Picture N>` in the same order the render takes), and the
+  // tile renders only when it is installed, exactly like the Qwen rewriter above.
+  const h3ExpandModel = useMemo(
+    () =>
+      h3ImageExpanderAppliesTo(selectedModel)
+        ? models.find((entry) => entry.id === MINIMAX_H3_IMAGE_PE_MODEL_ID)
+        : undefined,
+    [models, selectedModel],
+  );
+  const h3ExpandAvailable =
+    Boolean(h3ExpandModel) &&
+    h3ExpandModel.installState !== "missing" &&
+    typeof h3ImageExpandPrompt === "function";
   const catalogTextEncoderOptions = selectedModel?.textEncoderOptions ?? [];
   // A replayed/saved authored id remains a real control value even if the refreshed catalog can no
   // longer advertise this surface. Keep it visible and submit it unchanged so the server rejects a
@@ -2935,6 +2951,11 @@ export function ImageStudio() {
             qwenRewriteReferenceIds={qwenRewriteReferenceIds}
             qwenRewriteModel={qwenRewriteModel}
             qwenRewritePrompt={qwenRewritePrompt}
+            h3ExpandAvailable={h3ExpandAvailable}
+            h3ExpandModel={h3ExpandModel}
+            h3ExpandPrompt={h3ImageExpandPrompt}
+            resolution={resolution}
+            selectedModel={selectedModel}
             flux3LayoutAvailable={flux3LayoutAvailable}
             flux3Layout={flux3Layout}
             setFlux3Layout={setFlux3Layout}
