@@ -6,6 +6,8 @@ use std::sync::LazyLock;
 use serde_json::{Map, Value};
 
 mod spec;
+#[cfg(test)]
+pub(crate) use spec::GeneratorRoute;
 pub use spec::{ModelSpec, RoutePolicy};
 #[allow(dead_code)]
 // Build-time parser validates the serialized policy; runtime reads that projection.
@@ -15,6 +17,8 @@ mod exceptions;
 pub use exceptions::{approved_backend_exceptions, ApprovedBackendException};
 mod trainer_routes;
 pub(crate) use trainer_routes::{expected_backend_local_trainer_id, native_training_kernels};
+#[cfg(test)]
+pub(crate) use trainer_routes::{native_trainer_serves, offered_network_types};
 #[allow(dead_code)] // Shared with build.rs, where every shipped evidence row is validated.
 mod evidence;
 #[cfg(test)]

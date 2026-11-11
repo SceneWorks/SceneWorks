@@ -127,42 +127,77 @@ fn training_kernels_from_facts(
     targets
         .iter()
         .filter(|target| {
-            let Some(engine) = facts.trainer_mappings.get(&target.id) else {
-                return false;
-            };
-            let Some(descriptor) = facts
-                .snapshot
-                .trainer_capabilities
+            offered_network_types(target)
                 .iter()
-                .find(|descriptor| {
-                    descriptor.id == *engine && descriptor.backend == facts.snapshot.backend
-                })
-            else {
-                return false;
-            };
-            if descriptor.max_reference_images
-                < crate::training::training_target_max_reference_images(target)
-            {
-                return false;
-            }
-            let offered = target
-                .limits
-                .get("networkTypes")
-                .and_then(serde_json::Value::as_array);
-            match offered {
-                Some(types) => types.iter().any(|kind| match kind.as_str() {
-                    Some("lora") => descriptor.supports_lora,
-                    Some("lokr") => descriptor.supports_lokr,
-                    Some("control") => descriptor.supports_control,
-                    Some("full") => descriptor.supports_full_finetune,
-                    _ => false,
-                }),
-                None if target.kernel == "krea_control" => descriptor.supports_control,
-                None => descriptor.supports_lora,
-            }
+                .any(|kind| trainer_serves(facts, target, kind))
         })
         .map(|target| target.kernel.clone())
         .collect()
+}
+
+/// The network types a shipped target offers. A target that declares no `networkTypes` offers
+/// its kernel's one technique: control for Krea Control, LoRA otherwise.
+pub(crate) fn offered_network_types(target: &crate::training::TrainingTarget) -> Vec<String> {
+    match target
+        .limits
+        .get("networkTypes")
+        .and_then(serde_json::Value::as_array)
+    {
+        Some(types) => types
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+        None if target.kernel == "krea_control" => vec!["control".to_owned()],
+        None => vec!["lora".to_owned()],
+    }
+}
+
+/// Whether `backend`'s native export serves `target` with network type `kind`.
+#[cfg(test)]
+pub(crate) fn native_trainer_serves(
+    backend: &str,
+    target: &crate::training::TrainingTarget,
+    kind: &str,
+) -> bool {
+    EXPORTS
+        .get(backend)
+        .is_some_and(|facts| trainer_serves(facts, target, kind))
+}
+
+/// The target maps to a trainer registered on this backend, that trainer accepts the target's
+/// reference cap (an instruction-edit target must never land on a text-to-image-only trainer under
+/// the same engine id), and it supports the technique.
+fn trainer_serves(
+    facts: &TrainerFacts,
+    target: &crate::training::TrainingTarget,
+    kind: &str,
+) -> bool {
+    let Some(engine) = facts.trainer_mappings.get(&target.id) else {
+        return false;
+    };
+    let Some(descriptor) = facts
+        .snapshot
+        .trainer_capabilities
+        .iter()
+        .find(|descriptor| {
+            descriptor.id == *engine && descriptor.backend == facts.snapshot.backend
+        })
+    else {
+        return false;
+    };
+    if descriptor.max_reference_images
+        < crate::training::training_target_max_reference_images(target)
+    {
+        return false;
+    }
+    match kind {
+        "lora" => descriptor.supports_lora,
+        "lokr" => descriptor.supports_lokr,
+        "control" => descriptor.supports_control,
+        "full" => descriptor.supports_full_finetune,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -192,18 +227,9 @@ mod tests {
             .find(|trainer| trainer.backend == facts.snapshot.backend && trainer.id == *engine)
     }
 
+    /// The production per-(target, technique) predicate the kernel projection is built from.
     fn supports(facts: &TrainerFacts, target: &TrainingTarget, kind: &str) -> bool {
-        let Some(trainer) = registered(facts, target) else {
-            return false;
-        };
-        trainer.max_reference_images >= training_target_max_reference_images(target)
-            && match kind {
-                "lora" => trainer.supports_lora,
-                "lokr" => trainer.supports_lokr,
-                "control" => trainer.supports_control,
-                "full" => trainer.supports_full_finetune,
-                _ => false,
-            }
+        trainer_serves(facts, target, kind)
     }
 
     fn training_job(target: &TrainingTarget, kind: &str) -> crate::contracts::JobSnapshot {
@@ -294,17 +320,27 @@ mod tests {
                 );
             }
         }
-        let mut missing = native("candle");
-        missing.trainer_mappings.remove("ltx_video_lora");
-        assert_ne!(
-            missing
-                .trainer_mappings
-                .keys()
-                .map(String::as_str)
-                .collect::<BTreeSet<_>>(),
-            product_ids,
-            "a missing Candle target must not satisfy the paired population"
-        );
+        // A target the Candle export no longer maps is unclaimable there: the production kernel
+        // projection drops it rather than borrowing another target's trainer.
+        for id in ["ltx_video_lora", "ltx_2_5_video_lora"] {
+            let target = targets
+                .targets
+                .iter()
+                .find(|target| target.id == id)
+                .unwrap()
+                .clone();
+            let mut missing = native("candle");
+            assert!(
+                training_kernels_from_facts(&missing, std::slice::from_ref(&target))
+                    .contains(&target.kernel),
+                "{id} is served before the mapping is withdrawn"
+            );
+            missing.trainer_mappings.remove(id);
+            assert!(
+                training_kernels_from_facts(&missing, std::slice::from_ref(&target)).is_empty(),
+                "a withdrawn Candle mapping for {id} must not stay claimable"
+            );
+        }
     }
 
     #[test]
@@ -420,35 +456,44 @@ mod tests {
                 "ltx_2_3",
                 "a same-capability newer trainer cannot satisfy the LTX 2.3 product target"
             );
-            let mut facts = native(backend);
-            assert!(supports(&facts, &target, "lora"));
-            facts.trainer_mappings.insert(
-                target.id.clone(),
-                if backend == "mlx" {
-                    "ltx_2_5"
-                } else {
-                    "ltx_2_5_distilled"
-                }
-                .to_owned(),
+            let only = std::slice::from_ref(&target);
+            let facts = native(backend);
+            assert_eq!(
+                training_kernels_from_facts(&facts, only),
+                BTreeSet::from([target.kernel.clone()]),
+                "{backend} serves the LTX 2.3 target"
             );
-            assert_ne!(
-                facts.trainer_mappings[&target.id],
-                expected_backend_local_trainer_id(&target, backend).unwrap(),
-                "a newer registered trainer is not the target's native identity"
-            );
-            facts
+            let mut unregistered = native(backend);
+            unregistered
                 .trainer_mappings
-                .insert(target.id.clone(), "ltx_2_3".to_owned());
-            facts
+                .insert(target.id.clone(), "unregistered_native_trainer".to_owned());
+            assert!(
+                training_kernels_from_facts(&unregistered, only).is_empty(),
+                "{backend} unregistered trainer id"
+            );
+            let mut missing = native(backend);
+            missing
                 .snapshot
                 .trainer_capabilities
                 .retain(|trainer| trainer.id != "ltx_2_3");
             assert!(
-                !supports(&facts, &target, "lora"),
+                training_kernels_from_facts(&missing, only).is_empty(),
                 "{backend} missing descriptor"
             );
-            let mut facts = native(backend);
-            facts
+            let mut wrong_backend = native(backend);
+            wrong_backend
+                .snapshot
+                .trainer_capabilities
+                .iter_mut()
+                .find(|trainer| trainer.id == "ltx_2_3")
+                .unwrap()
+                .backend = "wrong_backend".to_owned();
+            assert!(
+                training_kernels_from_facts(&wrong_backend, only).is_empty(),
+                "{backend} wrong-backend descriptor"
+            );
+            let mut no_lora = native(backend);
+            no_lora
                 .snapshot
                 .trainer_capabilities
                 .iter_mut()
@@ -456,7 +501,7 @@ mod tests {
                 .unwrap()
                 .supports_lora = false;
             assert!(
-                !supports(&facts, &target, "lora"),
+                training_kernels_from_facts(&no_lora, only).is_empty(),
                 "{backend} missing LoRA support"
             );
         }
@@ -491,24 +536,38 @@ mod tests {
         for backend in ["mlx", "candle"] {
             let facts = native(backend);
             assert_eq!(registered(&facts, edit).unwrap().id, "qwen_image_2_1");
-            for kind in ["lora", "lokr"] {
-                assert!(supports(&facts, edit, kind), "{backend} edit/{kind}");
-                let mut too_small = facts.clone();
-                too_small
+            for (cap, edit_served) in [
+                (0, false),
+                (required - 1, false),
+                (required, true),
+                (required + 2, true),
+            ] {
+                let mut capped = facts.clone();
+                capped
                     .snapshot
                     .trainer_capabilities
                     .iter_mut()
                     .find(|trainer| trainer.id == "qwen_image_2_1")
                     .unwrap()
-                    .max_reference_images = required - 1;
-                assert!(
-                    !supports(&too_small, edit, kind),
-                    "{backend} edit/{kind} cap"
+                    .max_reference_images = cap;
+                for kind in ["lora", "lokr"] {
+                    assert_eq!(
+                        supports(&capped, edit, kind),
+                        edit_served,
+                        "{backend} edit/{kind} with a trainer cap of {cap}"
+                    );
+                    assert!(
+                        supports(&capped, t2i, kind),
+                        "{backend} t2i/{kind} has no ref cap"
+                    );
+                }
+                let kernels = training_kernels_from_facts(&capped, &targets.targets);
+                assert_eq!(
+                    kernels.contains(&edit.kernel),
+                    edit_served,
+                    "{backend} edit kernel projection with a trainer cap of {cap}"
                 );
-                assert!(
-                    supports(&too_small, t2i, kind),
-                    "{backend} t2i/{kind} has no ref cap"
-                );
+                assert!(kernels.contains(&t2i.kernel), "{backend} t2i kernel");
             }
         }
     }
