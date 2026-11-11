@@ -1,3 +1,4 @@
+import { isFlux3ImageModel } from "./modelEligibility.js";
 // Generation-time quant-tier selection (sc-8515, epic 8506). When a user has MORE THAN ONE
 // quant tier of a model INSTALLED, the studio lets them toggle which tier generates, for A/B
 // comparison. This module derives the picker's options from the model's per-variant install
@@ -77,7 +78,7 @@ export function isFp8rTier(tier) {
 export function nativeTierEligibility(model, workers = []) {
   const has = (cap) => workers.some((worker) => worker?.status !== "offline" &&
     Array.isArray(worker?.capabilities) && worker.capabilities.includes(cap));
-  const flux3 = model?.family === "flux3" && model?.type === "image";
+  const flux3 = isFlux3ImageModel(model);
   return {
     convRotEligible: has("int8_convrot"),
     nvfp4Eligible: has(flux3 ? "flux3_nvfp4" : "nvfp4"),

@@ -3,6 +3,7 @@ import { recipeToStudioPatch } from "./recipeToStudioPatch.js";
 
 export function useImageRecipeReplay({
   model,
+  models,
   launchRequest,
   setRecipeTierRequest,
   setFlux3Layout,
@@ -93,7 +94,7 @@ export function useImageRecipeReplay({
   setHiresFixCfgScale
 }) {
   useEffect(() => {
-    const patch = recipeToStudioPatch(launchRequest, { model, recipeMode,
+    const patch = recipeToStudioPatch(launchRequest, { model, models, recipeMode,
       mossEditActive: mossEditTransition.current.active, advancedDefaultsModel: advancedDefaultsModel.current,
       ipAdapterScale, controlnetScale, trueCfgScale, img2imgStrength, textStyleGain, controlScale });
     if (!patch) return;

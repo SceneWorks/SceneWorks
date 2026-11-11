@@ -36,10 +36,17 @@ export function candleVideoTierPickerAvailable(model) {
       download.platforms?.some((platform) => platform === "windows" || platform === "linux")) === true;
 }
 
-// The shipped low-step SDXL checkpoint cannot run Hires.fix's second diffusion pass.
-export function lowStepSdxlCheckpoint(model) {
-  return model?.family === "sdxl" && model?.type === "image" &&
-    model?.defaults?.steps === 5 && !Array.isArray(model?.limits?.samplers);
+// Hires.fix needs a second diffusion pass. The catalog states, as an author-owned typed fact,
+// which image engines cannot run it (the shipped low-step SDXL Lightning checkpoint); absent or
+// true means supported. Never infer this from mutable defaults such as `defaults.steps`.
+export function hiresFixUnsupported(model) {
+  return model?.image?.supportsHiresFix === false;
+}
+
+// The FLUX.3 image family: layout boxes, ordered references, reference-canvas geometry,
+// the nvfp4 tier and prompt enhancement all key off this one family/type fact.
+export function isFlux3ImageModel(model) {
+  return model?.family === "flux3" && model?.type === "image";
 }
 
 // Platform support is supplied by the catalog projection of typed routes and feature facts.

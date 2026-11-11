@@ -510,7 +510,7 @@ export function workflowReplaySeed(share) {
 export function recipeFromWorkflowShare(
   share,
   report = null,
-  { substituteModelId = null, referenceAssetIds = [], sourceAssetId = null, tensorPicks = {}, assets = [] } = {},
+  { substituteModelId = null, referenceAssetIds = [], sourceAssetId = null, tensorPicks = {}, assets = [], models = [] } = {},
 ) {
   if (!share) {
     return null;
@@ -606,7 +606,7 @@ export function recipeFromWorkflowShare(
   // A shared reference workflow carries authored OPTIONAL axes, not output geometry. Keep this
   // as UI launch intent: only the worker may write flux3ReferenceEditing provenance/facts.
   if (share.sceneworksWorkflow === "image" && share.inputs?.some(({ kind }) =>
-    isFlux3ReferenceRequest(modelId, kind === "reference" ? references : kind === "source" ? [sourceAssetId] : []))) {
+    isFlux3ReferenceRequest(models.find((entry) => entry.id === modelId), kind === "reference" ? references : kind === "source" ? [sourceAssetId] : []))) {
     recipe.uiDimensionIntent = {
       width: Number.isInteger(width) && width > 0 ? width : null,
       height: Number.isInteger(height) && height > 0 ? height : null,

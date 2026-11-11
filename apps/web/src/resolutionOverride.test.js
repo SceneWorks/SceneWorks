@@ -144,7 +144,7 @@ describe("evaluateModelDimensions (native-resolution enforcement)", () => {
 });
 
 describe("optional reference axes do not loosen malformed geometry validation", () => {
-  const flux3Model = { id: "flux3_klein", limits: { minDimension: 64, maxDimension: 4096,
+  const flux3Model = { id: "flux3_klein", family: "flux3", type: "image", limits: { minDimension: 64, maxDimension: 4096,
     requiresDimensionsMultipleOf: 16, resolutions: ["1024x1024"] } };
 
   it.each([

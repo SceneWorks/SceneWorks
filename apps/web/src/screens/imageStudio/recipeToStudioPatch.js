@@ -2,7 +2,8 @@ import { emptyAppearance, normalizeAppearance } from "../../data/appearanceCatal
 import { mossAdvancedDefaults } from "../../mossImageAdvanced.js";
 import { isMossEdit, mossEditDefaults, mossDefaults } from "../../mossImage.js";
 import { deserializePhases } from "../../imageMultiPhase.js";
-import { isFlux3LayoutModel, reconcileLayoutReferences, recordedLayoutReferences } from "../../flux3Layout.js";
+import { reconcileLayoutReferences, recordedLayoutReferences } from "../../flux3Layout.js";
+import { isFlux3ImageModel } from "../../modelEligibility.js";
 import { orderCaption, validateCaption } from "../../ideogramCaption.js";
 import { workflowPoseRecords } from "../../poseLibrary.js";
 import { noPresetId } from "../../presetUtils.js";
@@ -12,7 +13,7 @@ import { irisControlsFromRecord } from "../../irisRestore.js";
 
 // Pure launch normalization: absence stays absent; repeated writes resolve in their
 // original order (ordinary MOSS settings intentionally override generic knobs).
-export function recipeToStudioPatch(launchRequest, { model, recipeMode, mossEditActive, advancedDefaultsModel, ipAdapterScale, controlnetScale, trueCfgScale, img2imgStrength, textStyleGain, controlScale }) {
+export function recipeToStudioPatch(launchRequest, { model, models = [], recipeMode, mossEditActive, advancedDefaultsModel, ipAdapterScale, controlnetScale, trueCfgScale, img2imgStrength, textStyleGain, controlScale }) {
   const values = {};
   const flags = {};
 
@@ -20,6 +21,8 @@ export function recipeToStudioPatch(launchRequest, { model, recipeMode, mossEdit
     return null;
   }
   const recipe = launchRequest.recipe;
+  const recipeModel = models.find((entry) => entry.id === recipe.model);
+  const flux3Recipe = isFlux3ImageModel(recipeModel);
   if (recipe.uiPreserveComposedPrompt === true) flags.clearGeneralStack = true;
   const settings = recipe.normalizedSettings ?? {};
   const rawSettings = recipe.rawAdapterSettings ?? {};
@@ -29,19 +32,19 @@ export function recipeToStudioPatch(launchRequest, { model, recipeMode, mossEdit
   values.recipeTierRequest = restoredTier ? { model: recipe.model, tier: restoredTier } : null;
   // Restore the authoring document, never the worker's rounded/locked caption table.
   values.flux3Layout = rawSettings.flux3_layout ?? rawSettings.flux3Layout?.authoring ?? { version: 1, boxes: [] };
-  const recordedReferences = isFlux3LayoutModel(recipe.model) ? recordedLayoutReferences(rawSettings) : null;
+  const recordedReferences = flux3Recipe ? recordedLayoutReferences(rawSettings) : null;
   const orderedReferences = rawSettings.referenceAssetIds ?? recordedReferences?.assetIds;
   // Reference-conditioned text uses the existing edit UI. Character jobs retain their actual
   // identity/mode while the existing plural reference carrier preserves every attachment.
-  const nextMode = isFlux3LayoutModel(recipe.model) && orderedReferences?.length && recipeMode(recipe) === "text_to_image"
+  const nextMode = flux3Recipe && orderedReferences?.length && recipeMode(recipe) === "text_to_image"
     ? "edit_image" : recipeMode(recipe);
   const restoredReferenceAssets = orderedReferences ?? (nextMode === "edit_image"
     ? [rawSettings.referenceAssetId ?? launchRequest.sourceAssetId ?? launchRequest.assetId ?? settings.sourceAssetId].filter(Boolean)
     : [rawSettings.referenceAssetId ?? launchRequest.referenceAssetId].filter(Boolean));
-  values.orderedCharacterReferences = isFlux3LayoutModel(recipe.model) && nextMode === "character_image" && Array.isArray(orderedReferences);
+  values.orderedCharacterReferences = flux3Recipe && nextMode === "character_image" && Array.isArray(orderedReferences);
   values.flux3ReferenceSlots = reconcileLayoutReferences([], restoredReferenceAssets,
     rawSettings.flux3_reference_ids ?? recordedReferences?.referenceIds);
-  const dimensionIntent = recipeImageDimensionIntent(recipe);
+  const dimensionIntent = recipeImageDimensionIntent(recipe, recipeModel);
   const replayMossEdit = isMossEdit(recipe.model ?? model, nextMode);
   flags.mossEditReplay = replayMossEdit !== mossEditActive;
   const resolutionFromRecipe = recipeResolution(recipe);
@@ -184,7 +187,7 @@ export function recipeToStudioPatch(launchRequest, { model, recipeMode, mossEdit
         ? rawSettings.referenceAssetIds
         : null;
   // FLUX.3 layout recipes restore their recorded layout references (main, sc-26233).
-  if (isFlux3LayoutModel(recipe.model)) {
+  if (flux3Recipe) {
     values.referenceAssetIds = restoredReferenceAssets.filter(Boolean);
   } else if (isMossEdit(recipe.model ?? model, nextMode)) {
     // Missing identities stay visible and block submission; never drop a slot or use the output.

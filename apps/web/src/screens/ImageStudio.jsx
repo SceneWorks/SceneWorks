@@ -45,7 +45,7 @@ import {
 
 import { OrderedReferenceList } from "../components/OrderedReferenceList.jsx";
 
-import { isFlux3LayoutModel, orderedLayoutAssetIds, reconcileLayoutReferences, moveLayoutReference, bindLayoutReferenceIds } from "../flux3Layout.js";
+import { orderedLayoutAssetIds, reconcileLayoutReferences, moveLayoutReference, bindLayoutReferenceIds } from "../flux3Layout.js";
 import { maxReferencesForModel } from "../imageReferenceLimits.js";
 import { pidDecodeHeadsUp } from "../pidDecodeNotice.js";
 import { promptEnhancementAvailable } from "../promptEnhancement.js";
@@ -146,7 +146,8 @@ import {
   DEFAULT_MAC_CAPABILITIES,
   macAvailableModels,
   macGatingActive,
-  lowStepSdxlCheckpoint,
+  hiresFixUnsupported,
+  isFlux3ImageModel,
   macModelFeatureBlock,
 } from "../modelEligibility.js";
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
@@ -742,6 +743,10 @@ export function ImageStudio() {
     }
   }, [mode, selectedAssetEditableSourceId, changeSourceAssetId]);
 
+  // Derived outside the launch effect so a catalog refresh cannot re-fire the launch.
+  const launchTargetsFlux3 = isFlux3ImageModel(
+    models.find((entry) => entry.id === (launchRequest?.model ?? referenceChangeState.current?.model)),
+  );
   useEffect(() => {
     if (launchRequest?.view !== "Image") {
       return;
@@ -787,13 +792,13 @@ export function ImageStudio() {
     }
     if (launchRequest.mode === "edit_image" && selectedAssetEditableSourceId) {
       changeSourceAssetId(selectedAssetEditableSourceId);
-      if (isFlux3LayoutModel(launchRequest.model ?? referenceChangeState.current?.model)) {
+      if (launchTargetsFlux3) {
         // A launch can switch models in this same commit, before changeSource sees the new model.
         setReferenceAssetIds([selectedAssetEditableSourceId]);
         setFlux3ReferenceSlots(reconcileLayoutReferences([], [selectedAssetEditableSourceId]));
       }
     }
-  }, [launchRequest, selectedAsset?.id, selectedAssetEditableSourceId, changeSourceAssetId]);
+  }, [launchRequest, selectedAsset?.id, selectedAssetEditableSourceId, changeSourceAssetId, launchTargetsFlux3]);
 
   // Mac UI gating (sc-3486): on a Mac in MLX-required mode, hide torch-only models from the
   // picker so the user can't select something that would only error. Inert elsewhere.
@@ -1349,14 +1354,14 @@ export function ImageStudio() {
   // Keep the selected reference valid: default to the first approved reference when
   // none is chosen or the current one no longer belongs to this character.
   useEffect(() => {
-    if (mode !== "character_image" || (isFlux3LayoutModel(model) && orderedCharacterReferences)) {
+    if (mode !== "character_image" || (isFlux3ImageModel(selectedModel) && orderedCharacterReferences)) {
       return;
     }
     if (characterReferences.some((reference) => reference.assetId === referenceAssetId)) {
       return;
     }
     changeReferenceAssetId(characterReferences[0]?.assetId ?? "", false);
-  }, [mode, model, orderedCharacterReferences, characterReferences, referenceAssetId, changeReferenceAssetId]);
+  }, [mode, model, selectedModel, orderedCharacterReferences, characterReferences, referenceAssetId, changeReferenceAssetId]);
   // Seed a character-appropriate default prompt when entering character mode, unless
   // the user has already typed/picked their own. The generic text-to-image default
   // ("neon street at midnight") makes no sense for character variations.
@@ -1530,7 +1535,7 @@ export function ImageStudio() {
     supportsImg2img || selectedModel?.family === "sdxl",
   );
   const hiresFixAccelerationBlocked =
-    lowStepSdxlCheckpoint(selectedModel) ||
+    hiresFixUnsupported(selectedModel) ||
     ["lightning", "lcm", "hyper"].includes(sampler);
   const hiresFixInputBlocked =
     Boolean(img2imgReferenceAssetId) ||
@@ -1857,6 +1862,7 @@ export function ImageStudio() {
   }, [launchRequest?.id]);
   useImageRecipeReplay({
     model,
+    models,
     launchRequest,
   setRecipeTierRequest,
   setFlux3Layout,
@@ -1952,10 +1958,10 @@ export function ImageStudio() {
   // families (Mage-Flow) declare a ÷16 stride and a 512–2048 native range; every other model keeps the
   // global 256–4096 envelope with no stride. Drives the override inputs' min/max/step affordance below.
   // Match the references actually emitted by buildImageJobRequest, not hidden/stale picker state.
-  const jobReferences = imageJobReferences({ model, mode, multiReference, orderedCharacterReferences, sourceWithMultiReference,
+  const jobReferences = imageJobReferences({ selectedModel, mode, multiReference, orderedCharacterReferences, sourceWithMultiReference,
     editSecondPair, sourceAssetId, controlPreprocessSourceId, referenceAssetIds, referenceAssetId,
     supportsImg2img, img2imgReferenceAssetId });
-  const flux3LayoutAvailable = isFlux3LayoutModel(selectedModel);
+  const flux3LayoutAvailable = isFlux3ImageModel(selectedModel);
   const layoutAssetIds = orderedLayoutAssetIds(jobReferences);
   const layoutReferences = flux3LayoutAvailable
     ? reconcileLayoutReferences(flux3ReferenceSlots, layoutAssetIds) : [];
@@ -1998,7 +2004,7 @@ export function ImageStudio() {
     setReferenceAssetIds(ids);
     if (orderedCharacterActive) setReferenceAssetId(ids[0] ?? "");
   };
-  const flux3ReferenceRequest = isFlux3ReferenceRequest(model, Object.values(jobReferences).flat());
+  const flux3ReferenceRequest = isFlux3ReferenceRequest(selectedModel, Object.values(jobReferences).flat());
   const activeDimensionIntent = flux3ReferenceRequest && referenceDimensionIntent?.model === model &&
     referenceDimensionIntent?.mode === mode ? referenceDimensionIntent : null;
   useEffect(() => {
@@ -2222,7 +2228,7 @@ export function ImageStudio() {
     referenceAssetIds,
     referenceDimensionIntent,
     orderedCharacterReferences,
-    ...(isFlux3LayoutModel(model) && mode === "character_image" ? { characterId, characterLookId, referenceAssetId } : {}),
+    ...(isFlux3ImageModel(selectedModel) && mode === "character_image" ? { characterId, characterLookId, referenceAssetId } : {}),
     flux3Layout,
     flux3ReferenceSlots,
     ipAdapterScale,

@@ -1790,9 +1790,14 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
       .querySelector("form")
       .dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
     expect(createVideoJob).not.toHaveBeenCalled();
-    await act(async () => {});
-    expect(container.querySelector(".settings-field-model select").value).toBe("fallback_video");
-    expect(tierPicker().value).toBe("q4");
+    // The fallback model snap and the tier reseed are separate effect passes that a loaded machine
+    // can flush after a bare act(); wait for the settled UI state rather than a single tick.
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(container.querySelector(".settings-field-model select").value).toBe("fallback_video");
+        expect(tierPicker().value).toBe("q4");
+      });
+    });
     expect(container.textContent).toContain("requires Bernini at Q8");
     expect(container.textContent).toContain("not available on the current backend");
     expect(buttonWithText(container, "Render clip").disabled).toBe(true);

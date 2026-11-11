@@ -678,7 +678,7 @@ describe("a replayed recipe reaches every allow-listed control", () => {
         sceneworksWorkflow: "image", mode: "edit_image", model: FLUX3.id,
         prompt: "a lighthouse", width, height, inputs: [{ kind: "reference" }],
       }, { model: { state: "resolved", catalogId: FLUX3.id }, loras: [], styles: [] },
-      { referenceAssetIds: [FLUX3_REFERENCE.id] });
+      { referenceAssetIds: [FLUX3_REFERENCE.id], models: [FLUX3] });
       expect(recipe.rawAdapterSettings).not.toHaveProperty("flux3ReferenceEditing");
       const createImageJob = vi.fn(async () => ({ id: "job-shared-flux3" }));
       await render(baseContext({ assets: [FLUX3_REFERENCE], createImageJob, studioLaunch: launch(recipe) }));
@@ -703,7 +703,7 @@ describe("a replayed recipe reaches every allow-listed control", () => {
         sceneworksWorkflow: "image", mode: "edit_image", model: model.id,
         prompt: "a lighthouse", width, height, inputs: [{ kind: "source", count: 1 }],
       }, { model: { state: "resolved", catalogId: model.id }, loras: [], styles: [] },
-      { sourceAssetId });
+      { sourceAssetId, models: [FLUX3] });
       expect(recipe.rawAdapterSettings).not.toHaveProperty("flux3ReferenceEditing");
       expect(recipe.rawAdapterSettings).not.toHaveProperty("referenceAssetIds");
       const createImageJob = vi.fn(async () => ({ id: "job-source-workflow" }));
