@@ -365,17 +365,7 @@ fn wired_pose_family(model: &str, backend: &str) -> bool {
 
 #[cfg(native_lane)]
 pub(super) fn wired_pose_families(backend: &str) -> Vec<String> {
-    let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-        .iter()
-        .find(|(name, _)| *name == "builtin.models.jsonc")
-        .expect("shipped builtin manifest")
-        .1;
-    let manifest: serde_json::Value =
-        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
-            .expect("shipped manifest parses");
-    manifest["models"]
-        .as_array()
-        .expect("shipped models")
+    sceneworks_core::builtin_manifests::builtin_model_entries()
         .iter()
         .filter_map(|row| row["id"].as_str())
         .filter(|id| wired_pose_family(id, backend))
