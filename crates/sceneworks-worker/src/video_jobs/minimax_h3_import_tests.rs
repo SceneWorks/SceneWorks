@@ -488,7 +488,7 @@ fn an_imported_h3_dit_reaches_the_candle_provider_as_its_transformer_with_its_id
         ("HUGGINGFACE_HUB_CACHE", ""),
         ("HF_HOME", ""),
     ]);
-    use crate::minimax_h3_import_fixture::{SHARED_REVISION, TIER_REVISION};
+    use crate::minimax_h3_import_fixture::{shared_revision, tier_revision};
     let data = tempfile::Builder::new()
         .prefix("sw_candle_imported_h3_")
         .tempdir()
@@ -498,9 +498,9 @@ fn an_imported_h3_dit_reaches_the_candle_provider_as_its_transformer_with_its_id
             .expect("repo cache path")
             .join("snapshots")
             .join(if repo == "SceneWorks/minimax-h3-mlx" {
-                TIER_REVISION
+                tier_revision()
             } else {
-                SHARED_REVISION
+                shared_revision()
             });
         std::fs::create_dir_all(&root).expect("snapshot dir");
         root
@@ -584,7 +584,7 @@ fn an_imported_h3_dit_reaches_the_candle_provider_as_its_transformer_with_its_id
         .collect::<Vec<_>>();
     assert!(!shared.is_empty());
     for member in shared {
-        assert_eq!(member["revision"], SHARED_REVISION);
+        assert_eq!(member["revision"], shared_revision());
         for file in member["files"].as_array().unwrap() {
             let path = bound_root.join(file["relativePath"].as_str().unwrap());
             let pin = spec
@@ -1027,9 +1027,9 @@ fn candle_imported_partition_staging_matches_the_task_selected_sibling() {
             .unwrap()
             .join("snapshots")
             .join(if repo == "SceneWorks/minimax-h3-mlx" {
-                crate::minimax_h3_import_fixture::TIER_REVISION
+                crate::minimax_h3_import_fixture::tier_revision()
             } else {
-                crate::minimax_h3_import_fixture::SHARED_REVISION
+                crate::minimax_h3_import_fixture::shared_revision()
             });
         std::fs::create_dir_all(&root).unwrap();
         root
@@ -1686,7 +1686,7 @@ fn drive_bound_component_import(
 #[test]
 fn bound_shared_tier_and_exact_snapshots_reach_native_loadspec_despite_distracting_main() {
     use crate::minimax_h3_import_fixture::{
-        component_downloads, write_companion, write_shared_configs, SHARED_REVISION, TIER_REVISION,
+        component_downloads, shared_revision, tier_revision, write_companion, write_shared_configs,
     };
     let _env = crate::test_env::EnvVars::set(&[
         ("HF_HUB_CACHE", ""),
@@ -1713,8 +1713,8 @@ fn bound_shared_tier_and_exact_snapshots_reach_native_loadspec_despite_distracti
             .unwrap();
             dir
         };
-        let base_a = snapshot("MiniMaxAI/MiniMax-H3", SHARED_REVISION);
-        let tier_a = snapshot("SceneWorks/minimax-h3-mlx", TIER_REVISION);
+        let base_a = snapshot("MiniMaxAI/MiniMax-H3", shared_revision());
+        let tier_a = snapshot("SceneWorks/minimax-h3-mlx", tier_revision());
         let base_b = snapshot(
             "MiniMaxAI/MiniMax-H3",
             "3333333333333333333333333333333333333333",
