@@ -1913,3 +1913,34 @@ fn every_advertised_image_operation_has_an_evaluated_cell() {
         "only {checked} advertised image operations were evaluated"
     );
 }
+
+/// The catalog's MLX verdict for a builtin is the claim gate's: every shipped image and video
+/// builtin carries a route-policy row, and its `macSupport.supported` equals that row's MLX
+/// admission. A builtin with no row would otherwise read one way in the catalog and be refused by
+/// the router, leaving its job queued unclaimed.
+#[test]
+fn builtin_mac_support_is_exactly_the_route_policy_admission() {
+    let mut checked = 0;
+    for spec in crate::registry::builtin_model_specs() {
+        let kind = spec.product.model_type.as_str();
+        if !matches!(kind, "image" | "video") {
+            continue;
+        }
+        let policy = spec
+            .routing
+            .as_ref()
+            .unwrap_or_else(|| panic!("{} has no route-policy row", spec.product.id));
+        assert_eq!(
+            super::catalog::model_mac_support(&spec.product.id, kind, Some(&spec.product.family))
+                .supported,
+            policy.mlx_routed(),
+            "{} catalog MLX verdict differs from its route policy",
+            spec.product.id
+        );
+        checked += 1;
+    }
+    assert!(
+        checked > 60,
+        "only {checked} image/video builtins were checked"
+    );
+}

@@ -109,13 +109,12 @@ pub fn model_mac_support(
 pub(crate) fn image_model_mac_support(model: &str, _family: Option<&str>) -> ModelMacSupport {
     let supported = crate::registry::builtin_model_spec(model).map_or_else(
         || LEGACY_IMAGE_MLX_ROUTED.contains(&model),
+        // Exactly the claim gate's authority, as for video: a builtin with no route-policy row is
+        // refused by the router, so it must not read as MLX-supported in the catalog.
         |spec| {
             spec.routing
                 .as_ref()
                 .is_some_and(crate::registry::RoutePolicy::mlx_routed)
-                // Some shipped variant descriptors have no row in the historical router list.
-                // The request probes below still decide the offered modes and conditioning.
-                || (spec.routing.is_none() && spec.routes.contains_key("mlx"))
         },
     );
     if !supported {
