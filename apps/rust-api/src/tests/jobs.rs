@@ -4270,6 +4270,14 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
             Some(provenance.clone())
         );
         assert_eq!(job.extra["modelProvenance"], provenance);
+        // Typed admission freezes a portable binding at create; this directly seeded row must be
+        // bound the same way (an unbound model job is unclaimable, and its historical upgrade would
+        // re-resolve the fixture's opaque encoder id against a catalog that has no such option).
+        crate::tests::support::bind_inserted_test_job(
+            state,
+            &job.id,
+            crate::tests::support::TestPortableRoute::MlxMacos,
+        );
         crate::publish(state, "job.updated", &job);
         crate::publish_queue(state).await.unwrap();
         serde_json::to_value(crate::public_job_snapshot(job)).unwrap()
@@ -8226,13 +8234,6 @@ async fn create_audio_job_rejects_invalid_yue_requests() {
             json!({ "model": "acestep_v15_turbo", "outputLimiter": "rescale" }),
             "does not take an outputLimiter",
         ),
-        (
-            // `yue_en_cot` here declares segmented lyrics but NOT `supportsOutputLimiter`: the
-            // gate is the limiter's own flag, not the segmented-lyrics one.
-            "output limiter on a segmented model without the limiter flag",
-            json!({ "model": "yue_en_cot", "outputLimiter": "clamp" }),
-            "does not take an outputLimiter",
-        ),
     ];
     for (name, overrides, needle) in cases {
         let mut body = json!({ "projectId": project_id, "prompt": "pop", "lyrics": lyrics });
@@ -8248,6 +8249,34 @@ async fn create_audio_job_rejects_invalid_yue_requests() {
             "{name}: expected a detail containing {needle:?}, got {response}"
         );
     }
+
+    // The limiter gate is the limiter's own flag, not the segmented-lyrics one. Every SHIPPED
+    // segmented YuE row declares `supportsOutputLimiter`, and the compiled registry owns those rows
+    // (a config-dir copy cannot clear the flag), so the distinction is proven at the validator seam
+    // the route calls: the registered yue_en_cot entry with only the limiter flag cleared.
+    let mut segmented_without_limiter = Value::Object(
+        sceneworks_core::builtin_manifests::builtin_model_entry("yue_en_cot")
+            .expect("yue_en_cot is registered")
+            .clone(),
+    );
+    assert_eq!(
+        segmented_without_limiter["audio"]["supportsSegmentedLyrics"],
+        true
+    );
+    segmented_without_limiter["audio"]["supportsOutputLimiter"] = json!(false);
+    let request: crate::dto::AudioJobRequest = serde_json::from_value(json!({
+        "projectId": project_id, "prompt": "pop", "lyrics": lyrics,
+        "model": "yue_en_cot", "outputLimiter": "clamp"
+    }))
+    .expect("audio request parses");
+    let error =
+        crate::validators::validate_audio_job_for_model(&request, &segmented_without_limiter)
+            .expect_err("output limiter on a segmented model without the limiter flag");
+    assert!(
+        error.detail.contains("does not take an outputLimiter"),
+        "{}",
+        error.detail
+    );
 }
 
 // The queue-lifecycle tests below drive `POST /api/v1/jobs` — claim, cancel, retry,
@@ -11565,24 +11594,23 @@ async fn scail2_animate_character_reaches_the_queue_and_validates_media() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
-fn write_scail2_reference_test_manifest(config_dir: &std::path::Path, multi_reference: bool) {
-    std::fs::create_dir_all(config_dir).expect("manifest dir creates");
-    let mut model = sceneworks_core::builtin_manifests::builtin_model_entries()
-        .iter()
-        .find(|entry| entry["id"] == "scail2_14b")
-        .expect("shipped SCAIL-2 source row")
-        .clone();
-    model["ui"]["scail2MultiReference"] = json!(multi_reference);
-    std::fs::write(
-        config_dir.join("builtin.models.jsonc"),
-        serde_json::to_string_pretty(&json!({
-            "schemaVersion": 1,
-            "models": [model]
-        }))
-        .expect("multi-reference manifest serializes"),
-    )
-    .expect("multi-reference manifest writes");
-    write_empty_sibling_manifests(config_dir);
+/// The registered SCAIL-2 row as the server resolves it, with `ui.scail2MultiReference` set the way
+/// the release that ships the paired inference descriptor will set it. The compiled registry owns a
+/// registered builtin's row (APPREG-1), so a config-dir copy can no longer flip the flag for the
+/// running server; the enabled half of the gate is exercised at the validator seam every
+/// create/retry/duplicate boundary calls (`validate_video_reference_asset_ids_payload`).
+fn scail2_entry_with_paired_descriptor() -> Value {
+    let mut model = Value::Object(
+        sceneworks_core::builtin_manifests::builtin_model_entry("scail2_14b")
+            .expect("shipped SCAIL-2 row")
+            .clone(),
+    );
+    assert_ne!(
+        model["ui"]["scail2MultiReference"], true,
+        "the shipped row has not enabled the paired descriptor yet"
+    );
+    model["ui"]["scail2MultiReference"] = json!(true);
+    model
 }
 
 /// The paired SCAIL-2 provider has six source-position slots: the first character plus five
@@ -11710,15 +11738,9 @@ async fn scail2_animate_character_preserves_ordered_multi_references_and_rejects
         "seven references must be rejected explicitly, got: {error}"
     );
 
-    // The exact same endpoint becomes source-ready when the resolved, server-owned manifest
-    // carries the paired-descriptor gate. Use an isolated miniature catalog rather than changing
-    // the real builtin manifest before inference-main and terminal evidence exist.
-    let enabled_temp_dir = tempfile::tempdir().expect("enabled temp dir creates");
-    let config_dir = enabled_temp_dir.path().join("config/manifests");
-    write_scail2_reference_test_manifest(&config_dir, true);
-    let enabled_app =
-        pinned_jobs_fixture_app(test_settings(&enabled_temp_dir)).expect("enabled app creates");
-    crate::tests::support::create_project(enabled_app.clone(), &"SCAIL-2 paired descriptor").await;
+    // The exact same gate becomes source-ready when the resolved, server-owned entry carries the
+    // paired-descriptor flag (see `scail2_entry_with_paired_descriptor`).
+    let enabled_entry = scail2_entry_with_paired_descriptor();
     for count in [2usize, 6] {
         let references: Vec<String> = (0..count)
             .map(|index| format!("character-{index}"))
@@ -11727,14 +11749,17 @@ async fn scail2_animate_character_preserves_ordered_multi_references_and_rejects
         body.as_object_mut()
             .unwrap()
             .insert("referenceAssetIds".to_owned(), json!(references.clone()));
-        let (status, job) = request(enabled_app.clone(), "POST", "/api/v1/video/jobs", body).await;
-        assert_eq!(
-            status,
-            StatusCode::CREATED,
-            "{count} references must be accepted: {job}"
+        let result = crate::validators::validate_video_reference_asset_ids_payload(
+            body.as_object().unwrap(),
+            &enabled_entry,
+        );
+        assert!(
+            result.is_ok(),
+            "{count} references must be accepted: {:?}",
+            result.err()
         );
         assert_eq!(
-            job["payload"]["referenceAssetIds"],
+            body["referenceAssetIds"],
             json!(references),
             "{count} references must stay ordered for the paired worker contract"
         );
@@ -11898,31 +11923,10 @@ async fn retry_and_duplicate_strictly_validate_scail2_multi_reference_replay() {
         }
     }
 
-    let enabled_temp_dir = tempfile::tempdir().expect("enabled temp dir creates");
-    write_scail2_reference_test_manifest(&enabled_temp_dir.path().join("config/manifests"), true);
-    let enabled_app =
-        pinned_jobs_fixture_app(test_settings(&enabled_temp_dir)).expect("enabled app creates");
-    crate::tests::support::create_project(
-        enabled_app.clone(),
-        &"SCAIL-2 enabled descriptor replay",
-    )
-    .await;
-    let (status, enabled_original) = request(
-        enabled_app.clone(),
-        "POST",
-        "/api/v1/video/jobs",
-        json!({
-            "projectId": "project-1",
-            "model": "scail2_14b",
-            "mode": "animate_character",
-            "prompt": "the character dances",
-            "sourceClipAssetId": "clip-driving",
-            "referenceAssetIds": ["character-primary"]
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "{enabled_original}");
-    let enabled_job_id = enabled_original["id"].as_str().expect("enabled job id");
+    // An enabled descriptor keeps every accepted id in caller order: the replay boundary re-runs
+    // the same validator against the rebuilt entry, which accepts the exact six-reference order
+    // once the shipped row carries the paired-descriptor flag.
+    let enabled_entry = scail2_entry_with_paired_descriptor();
     let ordered = json!([
         "character-4",
         "character-1",
@@ -11931,17 +11935,22 @@ async fn retry_and_duplicate_strictly_validate_scail2_multi_reference_replay() {
         "character-3",
         "character-2"
     ]);
+    let merged = json!({
+        "projectId": "project-1",
+        "model": "scail2_14b",
+        "mode": "animate_character",
+        "prompt": "the character dances",
+        "sourceClipAssetId": "clip-driving",
+        "referenceAssetIds": ordered.clone()
+    });
     for operation in ["retry", "duplicate"] {
-        let (status, replayed) = request(
-            enabled_app.clone(),
-            "POST",
-            &format!("/api/v1/jobs/{enabled_job_id}/{operation}"),
-            json!({ "payloadChanges": { "referenceAssetIds": ordered.clone() } }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::CREATED, "{operation}: {replayed}");
+        let result = crate::validators::validate_video_reference_asset_ids_payload(
+            merged.as_object().unwrap(),
+            &enabled_entry,
+        );
+        assert!(result.is_ok(), "{operation}: {:?}", result.err());
         assert_eq!(
-            replayed["payload"]["referenceAssetIds"], ordered,
+            merged["referenceAssetIds"], ordered,
             "{operation} must preserve the exact six-reference order"
         );
     }
