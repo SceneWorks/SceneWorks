@@ -316,6 +316,32 @@ mod tests {
             .all(|cell| cell.ends_with("/guidanceMethod/cfg_pp")));
     }
 
+    /// Every residual cell is owned by its live specialist authority: Krea Realtime by epic-8433,
+    /// the Eros Candle withdrawal by epic-18803, CFG++ by epic-7434 (tracked as sc-8257), and the
+    /// remaining precision sequencing by epic-9083.
+    #[test]
+    fn residual_cells_are_owned_by_their_live_specialist_authority() {
+        for record in approved_backend_exceptions() {
+            for cell in &record.cells {
+                let expected = if cell.starts_with("models/krea_realtime_14b/") {
+                    "epic-8433"
+                } else if cell.starts_with("models/ltx_2_3_eros/") {
+                    "epic-18803"
+                } else {
+                    match record.category.as_str() {
+                        "guidance" => "epic-7434",
+                        "precision" => "epic-9083",
+                        other => panic!("{cell}: no specialist owner for category {other}"),
+                    }
+                };
+                assert_eq!(record.authority, expected, "{cell}");
+            }
+            if record.category == "guidance" {
+                assert!(record.evidence.contains("sc-8257"), "{}", record.id);
+            }
+        }
+    }
+
     #[test]
     fn malformed_or_duplicate_decisions_are_rejected() {
         let mut store: DecisionStore = serde_json::from_str(include_str!(
@@ -328,6 +354,24 @@ mod tests {
         store.records[0].cells.pop();
         store.records[0].authority = "unapproved".into();
         assert!(validate(&store).is_err());
+
+        // A decision with blank evidence is incomplete, and an unknown decision type is refused
+        // when the store is read.
+        let mut store: DecisionStore = serde_json::from_str(include_str!(
+            "../../../../config/manifests/registry/approved-exceptions.json"
+        ))
+        .unwrap();
+        store.records[0].evidence = "  ".into();
+        assert!(validate(&store).is_err(), "blank evidence was admitted");
+        let mut raw: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../config/manifests/registry/approved-exceptions.json"
+        ))
+        .unwrap();
+        raw["records"][0]["decisionType"] = serde_json::json!("capability_axis");
+        assert!(
+            serde_json::from_value::<DecisionStore>(raw).is_err(),
+            "unknown decision type was admitted"
+        );
     }
 
     #[test]

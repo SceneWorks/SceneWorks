@@ -650,6 +650,9 @@ mod residual {
 
     pub(super) const BACKENDS: [&str; 2] = ["mlx", "candle"];
 
+    /// `cell path -> (served on MLX, served on Candle)`.
+    pub(super) type Cells = BTreeMap<String, (bool, bool)>;
+
     fn worker(backend: &str) -> WorkerSnapshot {
         let raw = match backend {
             "mlx" => include_str!(
@@ -853,6 +856,8 @@ mod residual {
         spec.routes.get(backend)
     }
 
+    /// A backend serves an adapter cell when its typed descriptor declares it, or (Candle) the
+    /// request lands on a bespoke lane, and the production gate claims the request.
     fn served(
         lanes: &Lanes,
         spec: &ModelSpec,
@@ -861,6 +866,33 @@ mod residual {
         descriptor: impl Fn(&GeneratorRoute) -> bool,
     ) -> bool {
         let declared = image_route(spec, backend).is_some_and(&descriptor)
+            || (backend == "candle" && candle_bespoke_lane(job));
+        declared && lanes.claims(backend, job)
+    }
+
+    /// Operations and conditioning shapes may also be served by a bespoke production lane the
+    /// shared generator descriptor does not spell (identity adapters, edit lanes). On Candle the
+    /// router names that lane. The MLX router has no lane enum but refuses every request shape it
+    /// has no lane for, so its admission of the carrier-bearing request is the lane's claim, with
+    /// one exception: MLX admits a pose on a pose-as-reference model by folding it into the
+    /// reference, so a strict `control` cell on MLX also needs the product to declare a pose
+    /// control surface (`ui.controlModes`).
+    fn served_by_lane(
+        lanes: &Lanes,
+        spec: &ModelSpec,
+        backend: &str,
+        job: &JobSnapshot,
+        shape: Option<&str>,
+        descriptor: impl Fn(&GeneratorRoute) -> bool,
+    ) -> bool {
+        let mlx_lane = backend == "mlx"
+            && (shape != Some("control")
+                || field(spec, "ui")
+                    .and_then(|ui| ui.get("controlModes"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|modes| modes.iter().any(|mode| mode == "pose")));
+        let declared = image_route(spec, backend).is_some_and(&descriptor)
+            || mlx_lane
             || (backend == "candle" && candle_bespoke_lane(job));
         declared && lanes.claims(backend, job)
     }
@@ -1003,12 +1035,10 @@ mod residual {
         Some((kind, payload))
     }
 
-    fn image_residual(lanes: &Lanes, spec: &ModelSpec, out: &mut BTreeSet<String>) {
+    fn image_cells(lanes: &Lanes, spec: &ModelSpec, out: &mut Cells) {
         let id = spec.product.id.clone();
         let mut push = |axis: &str, value: &str, mlx: bool, candle: bool| {
-            if mlx && !candle {
-                out.insert(format!("models/{id}/{axis}/{value}"));
-            }
+            out.insert(format!("models/{id}/{axis}/{value}"), (mlx, candle));
         };
         let operations = evaluated_operations(spec);
         for operation in &operations {
@@ -1021,7 +1051,7 @@ mod residual {
                     image_route(spec, b).is_some_and(|r| r.supports_prompt_enhancement)
                         && lanes.claims(b, &probe)
                 } else {
-                    served(lanes, spec, b, &probe, |_| true)
+                    served_by_lane(lanes, spec, b, &probe, None, |_| true)
                 }
             });
             push("operationAndMode", operation, mlx, candle);
@@ -1057,6 +1087,11 @@ mod residual {
         if ui_flag(spec, "poseLibrary") {
             shapes.insert("control".into());
         }
+        // A character request is a reference request: its face or subject travels in the
+        // reference carrier.
+        if operations.iter().any(|op| op == "character_image") {
+            shapes.insert("reference".into());
+        }
         for shape in &shapes {
             let Some((kind, payload)) =
                 conditioning_request(spec, shape, job_type.clone(), base.clone(), &operations)
@@ -1065,7 +1100,7 @@ mod residual {
             };
             let probe = job(kind, &spec.product.id, payload);
             let [mlx, candle] = BACKENDS.map(|b| {
-                served(lanes, spec, b, &probe, |r| {
+                served_by_lane(lanes, spec, b, &probe, Some(shape), |r| {
                     r.conditioning.iter().any(|k| k == shape)
                 })
             });
@@ -1134,14 +1169,12 @@ mod residual {
         super::super::canonical_video_route_probe(model, mode).expect("canonical video probe")
     }
 
-    fn video_residual(lanes: &Lanes, spec: &ModelSpec, out: &mut BTreeSet<String>) {
+    fn video_cells(lanes: &Lanes, spec: &ModelSpec, out: &mut Cells) {
         use super::super::catalog::VIDEO_UI_MODES;
         use super::super::video_mode_conditioning_requirements;
         let id = spec.product.id.as_str();
         let mut push = |axis: &str, value: &str, mlx: bool, candle: bool| {
-            if mlx && !candle {
-                out.insert(format!("models/{id}/{axis}/{value}"));
-            }
+            out.insert(format!("models/{id}/{axis}/{value}"), (mlx, candle));
         };
         for mode in VIDEO_UI_MODES {
             let probe = video_probe(id, mode);
@@ -1236,7 +1269,7 @@ mod residual {
 
     /// Every MLX-only utility request: the representative request of each model-independent GPU
     /// job type, each upscale engine, and each vector mode a shipped model advertises.
-    pub(super) fn gpu_job_cells(lanes: &Lanes) -> BTreeSet<String> {
+    pub(super) fn gpu_job_cells(lanes: &Lanes) -> Cells {
         let mut probes: Vec<(String, JobSnapshot)> = [
             (
                 "person_detect",
@@ -1365,16 +1398,20 @@ mod residual {
         }
         probes
             .into_iter()
-            .filter(|(_, probe)| lanes.claims("mlx", probe) && !lanes.claims("candle", probe))
-            .map(|(cell, _)| cell)
+            .map(|(cell, probe)| {
+                (
+                    cell,
+                    (lanes.claims("mlx", &probe), lanes.claims("candle", &probe)),
+                )
+            })
             .collect()
     }
 
     /// Every MLX-only training cell: a shipped target and network type the MLX trainer export
     /// serves and the MLX lane claims, but Candle does not.
-    pub(super) fn training_cells(lanes: &Lanes) -> BTreeSet<String> {
+    pub(super) fn training_cells(lanes: &Lanes) -> Cells {
         use crate::registry::{native_trainer_serves, offered_network_types};
-        let mut out = BTreeSet::new();
+        let mut out = Cells::new();
         for target in crate::training::builtin_training_targets().targets {
             for kind in offered_network_types(&target) {
                 let job_type = if kind == "control" {
@@ -1401,41 +1438,54 @@ mod residual {
                 probe.payload.remove("prompt");
                 let [mlx, candle] = BACKENDS
                     .map(|b| native_trainer_serves(b, &target, &kind) && lanes.claims(b, &probe));
-                if mlx && !candle {
-                    out.insert(format!("trainingKernels/{}/{kind}", target.id));
-                }
+                out.insert(
+                    format!("trainingKernels/{}/{kind}", target.id),
+                    (mlx, candle),
+                );
             }
         }
         out
     }
 
-    /// Every MLX-only cell of the given generators, from typed specs and production claims.
-    pub(super) fn mlx_only_cells<'a>(
+    /// Every cell of the given generators as `(mlx, candle)`, from typed specs and production
+    /// claims.
+    pub(super) fn model_cells<'a>(
         lanes: &Lanes,
         specs: impl Iterator<Item = &'a ModelSpec>,
-    ) -> BTreeSet<String> {
-        let mut out = BTreeSet::new();
+    ) -> Cells {
+        let mut out = Cells::new();
         for spec in specs {
             match spec.product.model_type.as_str() {
-                "image" => image_residual(lanes, spec, &mut out),
-                "video" => video_residual(lanes, spec, &mut out),
+                "image" => image_cells(lanes, spec, &mut out),
+                "video" => video_cells(lanes, spec, &mut out),
                 _ => {}
             }
             let preview = |b: &str| spec.preview_by_backend.get(b).copied() == Some(true);
-            if preview("mlx") && !preview("candle") {
-                out.insert(format!("models/{}/preview", spec.product.id));
-            }
+            out.insert(
+                format!("models/{}/preview", spec.product.id),
+                (preview("mlx"), preview("candle")),
+            );
         }
         out
+    }
+
+    /// Every cell the shipped catalog, trainer exports and utility lanes define.
+    pub(super) fn all_cells(lanes: &Lanes) -> Cells {
+        let mut cells = model_cells(lanes, crate::registry::builtin_model_specs());
+        cells.extend(training_cells(lanes));
+        cells.extend(gpu_job_cells(lanes));
+        cells
     }
 }
 
 #[test]
 fn every_mlx_only_cell_is_an_approved_exception() {
     let lanes = residual::Lanes::new();
-    let mut residual = residual::mlx_only_cells(&lanes, crate::registry::builtin_model_specs());
-    residual.extend(residual::training_cells(&lanes));
-    residual.extend(residual::gpu_job_cells(&lanes));
+    let residual: BTreeSet<String> = residual::all_cells(&lanes)
+        .into_iter()
+        .filter(|(_, (mlx, candle))| *mlx && !*candle)
+        .map(|(cell, _)| cell)
+        .collect();
     let approved: BTreeSet<String> = crate::registry::approved_backend_exceptions()
         .iter()
         .flat_map(|record| record.cells.iter().cloned())
@@ -1447,5 +1497,419 @@ fn every_mlx_only_cell_is_an_approved_exception() {
         "the approved exception register must equal the typed MLX-only residual set.\n\
          MLX-only with no approved product decision: {unapproved:#?}\n\
          approved but no longer MLX-only: {no_longer_residual:#?}"
+    );
+}
+
+/// The two-lane answers the retired matrix's regression tests pinned, re-asserted on the typed cell
+/// evaluator above (typed descriptors joined with the production claim gate). Each row names the
+/// retired test it came from in `docs/.../sw7032-matrix-test-disposition.tsv`.
+#[test]
+fn former_matrix_cells_keep_their_two_lane_answers() {
+    const BOTH: (bool, bool) = (true, true);
+    const NEITHER: (bool, bool) = (false, false);
+    const MLX_ONLY: (bool, bool) = (true, false);
+    const CANDLE_ONLY: (bool, bool) = (false, true);
+    let mut expected: Vec<(String, (bool, bool))> = Vec::new();
+    let mut add = |cell: String, answer: (bool, bool)| expected.push((cell, answer));
+
+    // qwen_image_2_1_adapters_are_served_on_both_registered_lanes
+    for adapter in ["lora", "lokr"] {
+        add(
+            format!("models/qwen_image_2_1/userAdapters/{adapter}"),
+            BOTH,
+        );
+    }
+    // sc19059_resolved_candle_conditioning_is_not_left_in_the_residual_register
+    for model in ["sdxl", "realvisxl", "realvisxl_lightning"] {
+        add(format!("models/{model}/conditioningShape/control"), BOTH);
+    }
+    // sc18476_conditioning_cells_match_production_routes
+    for model in [
+        "sensenova_u1_8b",
+        "sensenova_u1_8b_infographic_v2",
+        "sensenova_u1_8b_infographic_v3",
+        "sensenova_u1_8b_fast",
+        "sensenova_u1_8b_infographic_v2_fast",
+        "sensenova_u1_8b_infographic_v3_fast",
+        "qwen_image_edit_2511",
+        "qwen_image_edit_2511_lightning",
+        "flux2_dev",
+    ] {
+        for shape in ["reference", "multiReference"] {
+            add(format!("models/{model}/conditioningShape/{shape}"), BOTH);
+        }
+    }
+    for model in ["qwen_image_edit_2511", "qwen_image_edit_2511_lightning"] {
+        for operation in ["edit_image", "character_image"] {
+            add(format!("models/{model}/operationAndMode/{operation}"), BOTH);
+        }
+        // sc18477_bespoke_qwen_edit_adapter_cells_match_production_routes
+        for adapter in ["lora", "lokr"] {
+            add(format!("models/{model}/userAdapters/{adapter}"), BOTH);
+        }
+    }
+    // sc18481_existing_candle_image_lanes_are_not_descriptor_false_negatives
+    for (model, shape) in [
+        ("bernini_image", "reference"),
+        ("flux_dev", "reference"),
+        ("flux_schnell", "reference"),
+        ("sdxl", "reference"),
+        ("sdxl", "mask"),
+        ("realvisxl", "reference"),
+        ("realvisxl", "mask"),
+        ("illustrious_xl_v1", "reference"),
+        ("illustrious_xl_v1", "mask"),
+        ("illustrious_xl_v2", "reference"),
+        ("illustrious_xl_v2", "mask"),
+        ("kolors", "control"),
+    ] {
+        add(format!("models/{model}/conditioningShape/{shape}"), BOTH);
+    }
+    // sc18481_z_image_edit_and_removed_no_op_style_claims_use_real_product_shapes
+    add(
+        "models/z_image_edit/operationAndMode/image_to_image".into(),
+        BOTH,
+    );
+    add(
+        "models/wan_2_2_i2v_14b/operationAndMode/first_last_frame".into(),
+        NEITHER,
+    );
+    // sc18481_cross_platform_catalog_rows_retain_both_native_text_routes
+    for model in [
+        "flux2_klein_9b",
+        "flux2_dev",
+        "sd3_5_large",
+        "sd3_5_medium",
+        "anima_base",
+        "anima_aesthetic",
+        "anima_turbo",
+    ] {
+        add(
+            format!("models/{model}/operationAndMode/text_to_image"),
+            BOTH,
+        );
+    }
+    // sc18481_bespoke_identity_routes_are_derived_from_the_live_lane_tables
+    for model in ["instantid_realvisxl", "pulid_flux_dev"] {
+        add(
+            format!("models/{model}/operationAndMode/character_image"),
+            BOTH,
+        );
+        add(format!("models/{model}/conditioningShape/reference"), BOTH);
+    }
+    add("models/pulid_flux_dev/preview".into(), BOTH);
+    // sc20739_strict_pose_control_uses_only_real_product_lanes
+    for model in [
+        "z_image_turbo",
+        "z_image",
+        "qwen_image",
+        "flux_dev",
+        "krea_2_turbo",
+        "flux2_dev",
+        "sdxl",
+        "realvisxl",
+        "realvisxl_lightning",
+        "illustrious_xl_v1",
+        "illustrious_xl_v2",
+    ] {
+        add(format!("models/{model}/conditioningShape/control"), BOTH);
+    }
+    for model in [
+        "qwen_image_edit_2511_lightning",
+        "flux2_klein_9b",
+        "flux2_klein_9b_kv",
+        "flux2_klein_9b_true_v2",
+    ] {
+        add(format!("models/{model}/conditioningShape/control"), NEITHER);
+    }
+    // sc18481_cfg_pp_has_an_exact_guidance_axis_and_live_specialist_owner
+    for model in [
+        "sdxl",
+        "realvisxl",
+        "illustrious_xl_v1",
+        "illustrious_xl_v2",
+    ] {
+        add(format!("models/{model}/guidanceMethod/cfg"), BOTH);
+        add(format!("models/{model}/guidanceMethod/cfg_pp"), MLX_ONLY);
+    }
+    // sc18481_bernini_preserves_candle_only_adapters_without_global_ui_exposure
+    for model in ["bernini", "bernini_image"] {
+        for adapter in ["lora", "lokr"] {
+            add(
+                format!("models/{model}/userAdapters/{adapter}"),
+                CANDLE_ONLY,
+            );
+        }
+    }
+    // advanced_video_gpu_rows_use_models_that_advertise_each_operation +
+    // audit_regressions_are_derived_from_production_truth
+    add(
+        "models/flux2_dev/operationAndMode/prompt_enhancement".into(),
+        BOTH,
+    );
+    for model in ["ltx_2_3", "ltx_2_3_eros", "ltx_2_5"] {
+        for mode in ["extend_clip", "video_bridge", "replace_person"] {
+            add(
+                format!("models/{model}/operationAndMode/{mode}"),
+                if model == "ltx_2_3_eros" {
+                    MLX_ONLY
+                } else {
+                    BOTH
+                },
+            );
+        }
+    }
+    add(
+        "models/wan_2_2_vace_fun_14b/operationAndMode/replace_person".into(),
+        BOTH,
+    );
+    for shape in ["controlClip", "reference"] {
+        add(
+            format!("models/wan_2_2_vace_fun_14b/conditioningShape/{shape}"),
+            BOTH,
+        );
+    }
+    for adapter in ["lora", "lokr"] {
+        add(
+            format!("models/wan_2_2_vace_fun_14b/userAdapters/{adapter}"),
+            BOTH,
+        );
+        add(format!("models/scail2_14b/userAdapters/{adapter}"), BOTH);
+    }
+    add(
+        "models/wan_2_2_vace_fun_14b/precisionTier/bf16".into(),
+        BOTH,
+    );
+    for tier in ["q4", "q8"] {
+        add(
+            format!("models/wan_2_2_vace_fun_14b/precisionTier/{tier}"),
+            MLX_ONLY,
+        );
+    }
+    for (shape, answer) in [
+        ("reference", NEITHER),
+        ("multiReference", BOTH),
+        ("videoClip", BOTH),
+    ] {
+        add(format!("models/bernini/conditioningShape/{shape}"), answer);
+    }
+    for model in [
+        "bernini",
+        "bernini_image",
+        "ltx_2_3",
+        "sana_1600m",
+        "sana_sprint_1600m",
+        "scail2_14b",
+    ] {
+        add(format!("models/{model}/precisionTier/bf16"), BOTH);
+    }
+    for model in ["bernini", "bernini_image"] {
+        for tier in ["q4", "q8"] {
+            add(format!("models/{model}/precisionTier/{tier}"), BOTH);
+        }
+    }
+    add(
+        "models/krea_2_turbo/precisionTier/int8-convrot".into(),
+        CANDLE_ONLY,
+    );
+    for tier in ["q4", "q8"] {
+        add(format!("models/mage_flow_edit/precisionTier/{tier}"), BOTH);
+    }
+    for shape in ["reference", "multiReference"] {
+        add(
+            format!("models/mage_flow_edit/conditioningShape/{shape}"),
+            BOTH,
+        );
+    }
+    for model in ["sana_1600m", "sana_sprint_1600m"] {
+        add(
+            format!("models/{model}/operationAndMode/image_to_image"),
+            BOTH,
+        );
+        add(format!("models/{model}/conditioningShape/reference"), BOTH);
+    }
+    add("trainingKernels/mage_flow_base_lora/full".into(), BOTH);
+    add("gpuJobTypes/image_upscale/engine:aura-sr".into(), NEITHER);
+    for engine in ["real-esrgan", "seedvr2"] {
+        add(format!("gpuJobTypes/image_upscale/engine:{engine}"), BOTH);
+    }
+    // qwen_image_2_1_training_target_is_supported_on_both_backends_at_the_pin
+    for target in ["qwen_image_2_1_lora", "qwen_image_2_1_edit_lora"] {
+        for kind in ["lora", "lokr"] {
+            add(format!("trainingKernels/{target}/{kind}"), BOTH);
+        }
+    }
+    // terminal_vector_install_is_projected_from_native_worker_capabilities
+    add("gpuJobTypes/vector_generate/image_to_svg".into(), BOTH);
+
+    let lanes = residual::Lanes::new();
+    let cells = residual::all_cells(&lanes);
+    // InstantID's pose drives its landmark ControlNet on both lanes; the product declares no
+    // `controlModes` for it, so the cell is asserted through the production lanes directly.
+    let pose = serde_json::json!({"mode":"character_image","referenceAssetId":"face","advanced":{"poses":[{}]}});
+    for backend in ["mlx", "candle"] {
+        assert!(
+            image_claim("instantid_realvisxl", pose.clone(), backend),
+            "InstantID strict pose on {backend}"
+        );
+    }
+    let mut instantid = super::canonical_video_route_probe("wan_2_2", "text_to_video").unwrap();
+    instantid.job_type = crate::contracts::JobType::ImageGenerate;
+    let mut payload = pose.as_object().unwrap().clone();
+    payload.insert("model".into(), serde_json::json!("instantid_realvisxl"));
+    instantid.payload = payload;
+    assert_eq!(
+        super::candle::image_job_candle_lane(&instantid),
+        Some(super::candle::CandleImageLane::InstantId)
+    );
+    // bespoke_conditioning_authority_is_exact_and_route_backed: the plural character request
+    // reaches the bespoke Qwen-Edit lane only for the edit model, never for its text-to-image
+    // sibling, and a blank reference is not a conditioned request on either FLUX.2 lane.
+    let candle_lane = |model: &str, fields: serde_json::Value| {
+        let mut job = super::canonical_video_route_probe("wan_2_2", "text_to_video").unwrap();
+        job.job_type = crate::contracts::JobType::ImageGenerate;
+        let mut payload = fields.as_object().unwrap().clone();
+        payload.insert("model".into(), serde_json::json!(model));
+        job.payload = payload;
+        super::candle::image_job_candle_lane(&job)
+    };
+    let plural = serde_json::json!({"mode":"character_image","referenceAssetIds":["a","b"]});
+    assert_eq!(
+        candle_lane("qwen_image_edit_2511", plural.clone()),
+        Some(super::candle::CandleImageLane::QwenEdit)
+    );
+    assert_ne!(
+        candle_lane("qwen_image", plural.clone()),
+        Some(super::candle::CandleImageLane::QwenEdit)
+    );
+    assert!(!image_claim("qwen_image", plural, "candle"));
+    for backend in ["mlx", "candle"] {
+        assert!(!image_claim(
+            "flux2_dev",
+            serde_json::json!({"mode":"character_image","referenceAssetId":" "}),
+            backend
+        ));
+    }
+    // sc18481_supported_import_defaults_are_provenanced_and_use_live_family_routes: per family,
+    // which lanes serve an imported checkpoint, its conditioning, and its adapters. A source shape
+    // registered on either lane is probed on both, so a lane that registers no route refuses.
+    let imported = |family: &str, backend: &str, extra: serde_json::Value| {
+        let sources: BTreeSet<String> = ["mlx", "candle"]
+            .into_iter()
+            .flat_map(|lane| super::catalog::imported_provider_routes(lane, family))
+            .filter(|route| route.operation == "generate")
+            .map(|route| route.source.clone())
+            .collect();
+        assert!(!sources.is_empty(), "{family} registers an imported route");
+        sources.into_iter().any(|source| {
+            let mut entry = serde_json::Map::new();
+            crate::lora_family::apply_model_manifest_defaults(&mut entry, "image", Some(family));
+            entry.insert("id".into(), serde_json::json!("user_import_probe"));
+            entry.insert("family".into(), serde_json::json!(family));
+            entry.insert("importSourceShape".into(), serde_json::json!(source));
+            entry.insert(
+                "paths".into(),
+                serde_json::json!({"model":"/tmp/registered-import"}),
+            );
+            let mut payload = serde_json::json!({
+                "model": "user_import_probe",
+                "mode": "text_to_image",
+                "modelManifestEntry": entry
+            });
+            for (key, value) in extra.as_object().unwrap() {
+                payload[key] = value.clone();
+            }
+            super::catalog::imported_image_request_provider_eligible(
+                "user_import_probe",
+                payload.as_object().unwrap(),
+                backend,
+            )
+        })
+    };
+    for (family, serves) in [
+        ("krea_2", BOTH),
+        ("sdxl", BOTH),
+        ("mage-flow", MLX_ONLY),
+        ("flux2", CANDLE_ONLY),
+    ] {
+        let answer = |extra: serde_json::Value| {
+            (
+                imported(family, "mlx", extra.clone()),
+                imported(family, "candle", extra),
+            )
+        };
+        assert_eq!(
+            answer(serde_json::json!({})),
+            serves,
+            "imported {family} text"
+        );
+        let adapters = if matches!(family, "krea_2" | "sdxl") {
+            BOTH
+        } else {
+            (serves.0 && family == "flux2", serves.1 && family == "flux2")
+        };
+        for adapter in ["lora", "lokr"] {
+            assert_eq!(
+                answer(serde_json::json!({"loras":[{"id":"probe","networkType":adapter}]})),
+                adapters,
+                "imported {family}/{adapter}"
+            );
+        }
+    }
+    for fields in [
+        serde_json::json!({"mode":"edit_image","sourceAssetId":"probe"}),
+        serde_json::json!({"mode":"edit_image","sourceAssetId":"probe","referenceAssetIds":["a","b"]}),
+    ] {
+        for backend in ["mlx", "candle"] {
+            assert!(
+                imported("krea_2", backend, fields.clone()),
+                "imported krea_2 conditioned edit on {backend}: {fields}"
+            );
+        }
+    }
+    let wrong: Vec<String> = expected
+        .iter()
+        .filter_map(|(cell, answer)| {
+            let actual = cells.get(cell);
+            (actual != Some(answer)).then(|| format!("{cell}: expected {answer:?}, got {actual:?}"))
+        })
+        .collect();
+    assert!(
+        wrong.is_empty(),
+        "former matrix cells changed their two-lane answer:\n  {}",
+        wrong.join("\n  ")
+    );
+}
+
+/// Every operation a shipped image model advertises has a canonical production request, so its
+/// two-lane answer is evaluated rather than silently skipped.
+#[test]
+fn every_advertised_image_operation_has_an_evaluated_cell() {
+    let lanes = residual::Lanes::new();
+    let cells = residual::model_cells(&lanes, crate::registry::builtin_model_specs());
+    let mut checked = 0;
+    for spec in
+        crate::registry::builtin_model_specs().filter(|spec| spec.product.model_type == "image")
+    {
+        for operation in spec
+            .product
+            .fields
+            .get("capabilities")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+        {
+            let cell = format!("models/{}/operationAndMode/{operation}", spec.product.id);
+            assert!(
+                cells.contains_key(&cell),
+                "{cell} has no canonical production request"
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        checked > 100,
+        "only {checked} advertised image operations were evaluated"
     );
 }
