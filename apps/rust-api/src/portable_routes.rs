@@ -817,11 +817,9 @@ pub(crate) fn selected_route_source_rows(
                     source,
                     selected_tier: tier,
                 });
-                if advanced
-                    .and_then(|value| value.get("controlMode"))
-                    .and_then(Value::as_str)
-                    == Some("depth")
-                {
+                if sceneworks_core::portable_sources::strict_control_requires_depth_estimator(
+                    payload.get("advanced"),
+                ) {
                     push_operator_source(&mut rows, slot, "depth_anything_v2_small");
                 }
             }
@@ -1550,6 +1548,72 @@ mod tests {
                 && row.role == ArtifactMemberRole::Control
                 && matches!(&row.source, SelectedSourceLocation::LocalPath(path) if path == "/api-host/pose.safetensors")
         }));
+    }
+
+    #[test]
+    fn strict_control_depth_requires_estimator_only_without_control_image() {
+        let entry = json!({"id":"krea_2_turbo"});
+        let entries = [("modelManifestEntry".to_owned(), &entry)];
+        let auto_depth = json!({
+            "model":"krea_2_turbo",
+            "advanced":{
+                "poses":[{"id":"front"}],
+                "controlMode":"depth",
+                "controlWeights":{
+                    "overlayId":"depth-approved",
+                    "_catalogAuthorized":true,
+                    "path":"/api-host/depth.safetensors"
+                }
+            }
+        });
+        let auto_obj = auto_depth.as_object().unwrap();
+        let auto_rows =
+            selected_route_source_rows(&JobType::ImageGenerate, auto_obj, &entries, "mlx", "macos")
+                .unwrap();
+        assert!(auto_rows
+            .iter()
+            .any(|row| row.component_id == "depth_anything_v2_small"));
+        assert!(
+            sceneworks_core::portable_sources::required_portable_aux_source_ids(
+                &JobType::ImageGenerate,
+                auto_obj,
+                &entry,
+                "mlx",
+            )
+            .unwrap()
+            .contains(&"depth_anything_v2_small".to_owned())
+        );
+
+        let user_map = json!({
+            "model":"krea_2_turbo",
+            "advanced":{
+                "poses":[{"id":"front"}],
+                "controlMode":"depth",
+                "controlImage":"asset-depth-map",
+                "controlWeights":{
+                    "overlayId":"depth-approved",
+                    "_catalogAuthorized":true,
+                    "path":"/api-host/depth.safetensors"
+                }
+            }
+        });
+        let user_obj = user_map.as_object().unwrap();
+        let user_rows =
+            selected_route_source_rows(&JobType::ImageGenerate, user_obj, &entries, "mlx", "macos")
+                .unwrap();
+        assert!(!user_rows
+            .iter()
+            .any(|row| row.component_id == "depth_anything_v2_small"));
+        assert!(
+            !sceneworks_core::portable_sources::required_portable_aux_source_ids(
+                &JobType::ImageGenerate,
+                user_obj,
+                &entry,
+                "mlx",
+            )
+            .unwrap()
+            .contains(&"depth_anything_v2_small".to_owned())
+        );
     }
 
     #[test]

@@ -351,6 +351,7 @@ fn is_source_choice_leaf(key: &str, parent: Option<&str>) -> bool {
             | "convRot"
             | "decoder"
             | "controlMode"
+            | "controlImage"
             | "overlayId"
             | "componentId"
             | "textEncoderModel"
