@@ -3012,6 +3012,9 @@ async fn downloadable_model_catalog_uses_huggingface_cache_install_state() {
 
 #[tokio::test]
 async fn downloadable_model_catalog_flags_incomplete_huggingface_snapshots() {
+    // The subject is the catalog's diffusers-snapshot completeness heuristic over a manifest row's
+    // unpinned HF repo. A registered id's row comes from the compiled registry (its own pinned
+    // downloads), so the fixture row is authored under an unregistered id.
     let _env = isolate_hf_cache(); // resolve the HF cache under the tempdir, never a dev's real cache (sc-13835)
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -3023,7 +3026,7 @@ async fn downloadable_model_catalog_flags_incomplete_huggingface_snapshots() {
             {
               "schemaVersion": 1,
               "models": [{
-                "id": "sdxl",
+                "id": "sdxl_snapshot_fixture",
                 "name": "SDXL",
                 "type": "image",
                 "family": "sdxl",
@@ -3085,7 +3088,7 @@ async fn downloadable_model_catalog_flags_incomplete_huggingface_snapshots() {
     let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(models[0]["id"], "sdxl");
+    assert_eq!(models[0]["id"], "sdxl_snapshot_fixture");
     assert_eq!(models[0]["installState"], "missing");
     assert_eq!(models[0]["cacheState"], "incomplete");
     assert_eq!(models[0]["repairAvailable"], true);
@@ -3100,6 +3103,9 @@ async fn downloadable_model_catalog_flags_incomplete_huggingface_snapshots() {
 
 #[tokio::test]
 async fn downloadable_model_catalog_ignores_absent_optional_diffusers_components() {
+    // The subject is the catalog's diffusers-snapshot completeness heuristic over a manifest row's
+    // unpinned HF repo. A registered id's row comes from the compiled registry (its own pinned
+    // downloads), so the fixture row is authored under an unregistered id.
     // Chroma's model_index.json declares `feature_extractor` and `image_encoder`
     // as `[null, null]` — diffusers' sentinel for optional components the pipeline
     // doesn't use, which have no files on disk by design. The health check must
@@ -3116,7 +3122,7 @@ async fn downloadable_model_catalog_ignores_absent_optional_diffusers_components
             {
               "schemaVersion": 1,
               "models": [{
-                "id": "chroma1_base",
+                "id": "chroma_snapshot_fixture",
                 "name": "Chroma1-Base",
                 "type": "image",
                 "family": "chroma",
@@ -3189,7 +3195,7 @@ async fn downloadable_model_catalog_ignores_absent_optional_diffusers_components
     let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(models[0]["id"], "chroma1_base");
+    assert_eq!(models[0]["id"], "chroma_snapshot_fixture");
     assert_eq!(models[0]["installState"], "installed");
     assert_eq!(models[0]["cacheState"], "complete");
     assert_eq!(models[0]["repairAvailable"], false);
@@ -3198,6 +3204,9 @@ async fn downloadable_model_catalog_ignores_absent_optional_diffusers_components
 
 #[tokio::test]
 async fn downloadable_model_catalog_treats_processor_components_as_weightless() {
+    // The subject is the catalog's diffusers-snapshot completeness heuristic over a manifest row's
+    // unpinned HF repo. A registered id's row comes from the compiled registry (its own pinned
+    // downloads), so the fixture row is authored under an unregistered id.
     // Qwen-Image-Edit-2511's model_index.json declares a `processor`
     // (Qwen2VLProcessor) — a transformers preprocessing wrapper that carries no
     // model weights and ships `preprocessor_config.json` instead of `config.json`.
@@ -3215,7 +3224,7 @@ async fn downloadable_model_catalog_treats_processor_components_as_weightless() 
             {
               "schemaVersion": 1,
               "models": [{
-                "id": "qwen_image_edit_2511",
+                "id": "qwen_edit_snapshot_fixture",
                 "name": "Qwen-Image-Edit-2511",
                 "type": "image",
                 "family": "qwen-image",
@@ -3290,7 +3299,7 @@ async fn downloadable_model_catalog_treats_processor_components_as_weightless() 
     let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(models[0]["id"], "qwen_image_edit_2511");
+    assert_eq!(models[0]["id"], "qwen_edit_snapshot_fixture");
     assert_eq!(models[0]["installState"], "installed");
     assert_eq!(models[0]["cacheState"], "complete");
     assert_eq!(models[0]["repairAvailable"], false);

@@ -1080,16 +1080,27 @@ pub(crate) async fn claim_job_as_worker(
     worker_id: &str,
     capabilities: &[&str],
 ) {
-    use sceneworks_core::model_artifacts::portable_binding::{
-        canonical_authored_options_sha256, PortableArtifactFile, PortableArtifactMember,
-        PortableJobBinding, PortableModelBinding, PortableRouteBinding, PortableSourceIdentity,
-    };
-    use sceneworks_core::model_artifacts::{ArtifactIdentity, ArtifactMemberRole};
     let route = if cfg!(target_os = "macos") {
         TestPortableRoute::MlxMacos
     } else {
         TestPortableRoute::CandleLinux
     };
+    bind_inserted_test_job(state, job_id, route);
+    claim_job_as_worker_on_route(app, job_id, worker_id, capabilities, route).await;
+}
+
+/// Install a pinned-revision portable binding for one directly inserted (unbound) job on `route`
+/// through the store's production historical-upgrade seam (`bind_historical_queued_job`).
+pub(crate) fn bind_inserted_test_job(
+    state: &crate::AppState,
+    job_id: &str,
+    route: TestPortableRoute,
+) {
+    use sceneworks_core::model_artifacts::portable_binding::{
+        canonical_authored_options_sha256, PortableArtifactFile, PortableArtifactMember,
+        PortableJobBinding, PortableModelBinding, PortableRouteBinding, PortableSourceIdentity,
+    };
+    use sceneworks_core::model_artifacts::{ArtifactIdentity, ArtifactMemberRole};
     let (backend, platform, _) = route.parts();
     let job = state.jobs_store.get_job(job_id).expect("fixture job loads");
     let model_id = job
@@ -1137,7 +1148,6 @@ pub(crate) async fn claim_job_as_worker(
         .jobs_store
         .bind_historical_queued_job(&job, &job.payload, &binding)
         .expect("fixture binding installs"));
-    claim_job_as_worker_on_route(app, job_id, worker_id, capabilities, route).await;
 }
 
 pub(crate) const TEST_TRAINING_WORKER_ID: &str = "test-training-worker";

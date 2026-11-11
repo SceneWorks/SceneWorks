@@ -144,28 +144,62 @@ fn pinned_jobs_fixture_app(
 
 #[tokio::test]
 async fn handwritten_job_source_without_immutable_revision_still_fails_admission() {
+    // By design a registered builtin's downloads come from the compiled registry, which pins every
+    // row at build time, so a config-dir copy can no longer hand-write an unpinned source for one
+    // (and a user row that is not an import is refused by provider registration before capture).
+    // The admission rule this test owns is therefore exercised at the admission capture seam
+    // itself: the registered krea_2_turbo carrier with its default download hand-edited to carry
+    // no revision, or a mutable `main`, must fail closed with `model_artifact_incomplete`.
+    let shipped = sceneworks_core::builtin_manifests::builtin_model_entry("krea_2_turbo")
+        .expect("krea_2_turbo is registered");
+    let default_index = shipped["downloads"]
+        .as_array()
+        .expect("shipped downloads")
+        .iter()
+        .position(|row| row["default"] == true)
+        .expect("shipped default package");
+    assert!(
+        shipped["downloads"][default_index]["revision"]
+            .as_str()
+            .is_some_and(|revision| revision.len() == 40),
+        "the registered row itself is pinned"
+    );
     for revision in [None, Some("main")] {
         let temp = tempfile::tempdir().expect("temp dir");
-        let manifest_dir = temp.path().join("config/manifests");
-        single_model_manifest(&manifest_dir, "krea_2_turbo", "SceneWorks/krea-2-turbo-mlx");
-        if let Some(revision) = revision {
-            let path = manifest_dir.join("builtin.models.jsonc");
-            let raw = std::fs::read_to_string(&path).expect("test catalog");
-            let mut catalog: Value = serde_json::from_str(&raw).expect("test catalog parses");
-            catalog["models"][0]["downloads"][0]["revision"] = json!(revision);
-            std::fs::write(path, catalog.to_string()).expect("mutable test catalog writes");
+        let (_, state) = create_app_with_state(test_settings(&temp)).expect("admission state");
+        let mut entry = Value::Object(shipped.clone());
+        let download = entry["downloads"][default_index]
+            .as_object_mut()
+            .expect("download row");
+        match revision {
+            Some(revision) => {
+                download.insert("revision".into(), json!(revision));
+            }
+            None => {
+                download.remove("revision");
+            }
         }
-        let app = create_app(test_settings(&temp)).expect("unmodified admission app");
-        let (status, body) = request(
-            app,
-            "POST",
-            "/api/v1/image/jobs",
-            json!({"projectId":"project-1","model":"krea_2_turbo",
-                "mode":"text_to_image","prompt":"a lighthouse","count":1}),
+        let payload = json!({"projectId":"project-1","model":"krea_2_turbo",
+            "mode":"text_to_image","prompt":"a lighthouse","count":1,
+            "modelManifestEntry": entry});
+        let error = crate::portable_admission::capture_portable_model_binding(
+            &state,
+            &crate::JobType::ImageGenerate,
+            payload.as_object().unwrap(),
+            "auto",
         )
-        .await;
-        assert_eq!(status, StatusCode::CONFLICT, "{revision:?}: {body}");
-        assert_eq!(body["code"], "model_artifact_incomplete");
+        .await
+        .expect_err("an unpinned hand-written source must not bind");
+        assert_eq!(
+            error.status,
+            StatusCode::CONFLICT,
+            "{revision:?}: {error:?}"
+        );
+        assert_eq!(
+            error.code,
+            Some("model_artifact_incomplete"),
+            "{revision:?}"
+        );
     }
 }
 
@@ -9347,10 +9381,23 @@ async fn image_job_route_threads_upscale_contract_when_enabled() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     assert!(base_job["payload"].get("upscale").is_none());
-    assert_eq!(
-        base_job["payload"]["modelManifestEntry"]["resources"]["imageUpscalers"]["real-esrgan"]
-            ["x4"]["file"],
-        json!("RealESRGAN_x4plus.pth")
+    // By design the job carries the REGISTERED z_image_turbo row, and that compiled row declares no
+    // `resources` block: the config-dir copy's invented `imageUpscalers` cannot reach the payload.
+    // The shipped Real-ESRGAN weights are declared by the registered `real_esrgan` utility row,
+    // which the worker resolves from its install (`upscale_jobs::manifest_onnx_resource` falls back
+    // to that install when the generation entry carries no resource). The contract this route owns,
+    // threading `upscale` only when enabled and validating its factor, is asserted below.
+    assert!(
+        base_job["payload"]["modelManifestEntry"]
+            .get("resources")
+            .is_none(),
+        "{base_job}"
+    );
+    assert!(
+        sceneworks_core::builtin_manifests::builtin_model_entry("real_esrgan")
+            .and_then(|entry| entry.get("resources"))
+            .and_then(|resources| resources.pointer("/imageUpscalers/real-esrgan/x4/file"))
+            .is_some_and(|file| file == "RealESRGAN_x4plus.pth")
     );
 
     let mut disabled_request = base_request.clone();
@@ -12236,6 +12283,9 @@ async fn generation_job_routes_reject_incompatible_loras() {
 /// own — its defaults, limits and repo are written here — so nothing this test pins has changed.
 #[tokio::test]
 async fn video_jobs_expand_recipe_presets_server_side() {
+    // The registered row names real pinned repositories; resolve them against a tempdir HF
+    // cache, never a developer's real cache (sc-13835).
+    let _hf = isolate_hf_cache();
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
@@ -12386,7 +12436,9 @@ async fn video_jobs_expand_recipe_presets_server_side() {
             // Client render settings that DIFFER from the preset's declared
             // defaults — the studio seeds the form from the preset but the user
             // is free to override, so these submitted values must win.
-            "duration": 10,
+            // wan_2_2's compiled row caps clips at 8 s, so the client override that must win over
+            // the preset's 8 s default is 7 s (any in-cap value different from the preset).
+            "duration": 7,
             "fps": 24,
             "width": 640,
             "height": 640,
@@ -12405,7 +12457,7 @@ async fn video_jobs_expand_recipe_presets_server_side() {
     );
     // Render settings are client-owned and overrideable: the submitted values
     // win over the preset's declared defaults (8 / 30 / 1280x720 / best / jitter).
-    assert_eq!(video_job["payload"]["duration"], 10);
+    assert_eq!(video_job["payload"]["duration"], 7);
     assert_eq!(video_job["payload"]["fps"], 24);
     assert_eq!(video_job["payload"]["width"], 640);
     assert_eq!(video_job["payload"]["height"], 640);
@@ -12758,6 +12810,9 @@ async fn mac_only_video_is_rejected_before_enqueue_on_direct_preset_and_replay_r
 
 #[tokio::test]
 async fn preset_overridden_image_model_carries_its_own_manifest_entry() {
+    // The registered row names real pinned repositories; resolve them against a tempdir HF
+    // cache, never a developer's real cache (sc-13835).
+    let _hf = isolate_hf_cache();
     // sc-12300: create_image_job has the identical ordering shape as create_video_job —
     // apply_recipe_preset_to_image_payload may overwrite job_payload["model"] (gated on the
     // omitted-model default_image_model()), and the entry was likewise resolved from the
@@ -12866,12 +12921,25 @@ async fn preset_overridden_image_model_carries_its_own_manifest_entry() {
         entry["id"], "z_image",
         "manifest entry should be resolved from the post-override model"
     );
-    assert_eq!(
-        entry["downloads"][0]["repo"], "owner/z_image",
-        "wrong repo => the worker fetches the wrong model's weights (loud failure)"
+    // z_image is registered, so its entry is the compiled registry row (the config-dir copy's
+    // `owner/z_image` repo is not authority); it must still be z_image's OWN row, not the default's.
+    let shipped = sceneworks_core::builtin_manifests::builtin_model_entry("z_image")
+        .expect("z_image is registered");
+    let default_shipped =
+        sceneworks_core::builtin_manifests::builtin_model_entry(&default_image_model)
+            .expect("the default image model is registered");
+    assert_ne!(
+        shipped["downloads"][0]["repo"],
+        default_shipped["downloads"][0]["repo"]
     );
     assert_eq!(
-        entry["limits"]["requiresDimensionsMultipleOf"], 16,
+        entry["downloads"][0]["repo"], shipped["downloads"][0]["repo"],
+        "wrong repo => the worker fetches the wrong model's weights (loud failure)"
+    );
+    // The compiled z_image row declares no `requiresDimensionsMultipleOf` (the fixture's 16 was
+    // config-dir only), so compare the whole geometry envelope against z_image's own row.
+    assert_eq!(
+        entry["limits"], shipped["limits"],
         "wrong dimension floor => silently renders off-bucket geometry"
     );
 }
@@ -14350,6 +14418,8 @@ async fn image_steps_under_the_models_hard_floor_is_rejected() {
 /// and a request with no `hiresFix` block creates a payload without the key.
 #[tokio::test]
 async fn image_hires_fix_is_forwarded_for_capable_models_and_refused_for_others() {
+    // The refusal half needs a registered image model that is neither SDXL nor img2img-capable; the
+    // compiled z_image_turbo row now advertises img2img, so chroma1_base (which does not) is used.
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
@@ -14376,7 +14446,7 @@ async fn image_hires_fix_is_forwarded_for_capable_models_and_refused_for_others(
               "ui": { "label": "Img2Img", "img2img": true }
             },
             {
-              "id": "z_image_turbo",
+              "id": "chroma1_base",
               "name": "Plain",
               "family": "z-image",
               "type": "image",
@@ -14447,7 +14517,7 @@ async fn image_hires_fix_is_forwarded_for_capable_models_and_refused_for_others(
         "/api/v1/image/jobs",
         json!({
             "projectId": project_id,
-            "model": "z_image_turbo",
+            "model": "chroma1_base",
             "prompt": "a lighthouse",
             "hiresFix": { "enabled": true }
         }),
@@ -14459,10 +14529,7 @@ async fn image_hires_fix_is_forwarded_for_capable_models_and_refused_for_others(
         "a non-img2img model must refuse Hires.fix at enqueue: {body}"
     );
     let detail = body["detail"].as_str().unwrap_or_default();
-    assert!(
-        detail.contains("z_image_turbo"),
-        "names the model: {detail}"
-    );
+    assert!(detail.contains("chroma1_base"), "names the model: {detail}");
     assert!(
         detail.contains("img2img-capable"),
         "names the missing capability: {detail}"
@@ -14476,7 +14543,7 @@ async fn image_hires_fix_is_forwarded_for_capable_models_and_refused_for_others(
         "/api/v1/image/jobs",
         json!({
             "projectId": project_id,
-            "model": "z_image_turbo",
+            "model": "chroma1_base",
             "prompt": "a lighthouse"
         }),
     )
@@ -14592,7 +14659,9 @@ async fn image_sampler_off_the_models_menu_is_rejected() {
         );
     }
 
-    let (status, body) = post("z_image_turbo", json!({ "sampler": "dpmpp_3m" })).await;
+    // A registered builtin's menu comes from the compiled registry, and z_image_turbo now declares
+    // one; realvisxl_lightning is the shipped image model that declares no sampler menu.
+    let (status, body) = post("realvisxl_lightning", json!({ "sampler": "dpmpp_3m" })).await;
     assert_eq!(
         status,
         StatusCode::CREATED,
@@ -14831,6 +14900,9 @@ async fn a_native_prompt_batch_is_typed_at_image_enqueue() {
 /// twin, so a gate that simply rejected everything could not pass.
 #[tokio::test]
 async fn image_reference_count_and_free_size_are_bounded_by_the_models_declared_limits() {
+    // The registered row names real pinned repositories; resolve them against a tempdir HF
+    // cache, never a developer's real cache (sc-13835).
+    let _hf = isolate_hf_cache();
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
@@ -14995,23 +15067,35 @@ async fn image_reference_count_and_free_size_are_bounded_by_the_models_declared_
 
     // A model that declares NO cap is untouched: absent means no opinion, so every other image
     // model in the catalog is byte-for-byte unchanged by this gate.
-    let (status, body) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/image/jobs",
-        json!({
+    // qwen_image_2_1_turbo is registered and its compiled row declares a reference cap, so a
+    // config-dir copy cannot make it uncapped. flux2_klein_9b is the shipped multi-reference
+    // edit model that declares none. By design its native route (like every shipped native image
+    // route other than Qwen-Image 2.1) owns its own source contract of at most 4 references, so
+    // eleven are refused by that ROUTE, never by this declared-cap gate: the gate stays silent.
+    let post_uncapped = |count: usize| {
+        let app = app.clone();
+        let body = json!({
             "projectId": project_id,
-            "model": "qwen_image_2_1_turbo",
+            "model": "flux2_klein_9b",
             "mode": "edit_image",
             "prompt": "swap the sky",
-            "referenceAssetIds": refs(11),
-        }),
-    )
-    .await;
+            "referenceAssetIds": refs(count),
+        });
+        async move { request(app, "POST", "/api/v1/image/jobs", body).await }
+    };
+    let (status, body) = post_uncapped(1).await;
     assert_eq!(
         status,
         StatusCode::CREATED,
         "a model with no declared reference cap is unchanged: {body}"
+    );
+    let (_, body) = post_uncapped(11).await;
+    assert!(
+        !body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("reference images, but this request supplies"),
+        "a model with no declared reference cap is unchanged by the declared-cap gate: {body}"
     );
 
     // FREE SIZE — the declared envelope admits a size the blanket 256 floor would have refused
@@ -15083,7 +15167,7 @@ async fn image_reference_count_and_free_size_are_bounded_by_the_models_declared_
         "/api/v1/image/jobs",
         json!({
             "projectId": project_id,
-            "model": "qwen_image_2_1_turbo",
+            "model": "z_image_turbo", // registered; its compiled row declares no minDimension
             "prompt": "a lighthouse",
             "width": 64,
             "height": 64,
@@ -15561,23 +15645,33 @@ async fn qwen_image_2_1_edit_validates_the_whole_ordered_conditioning_list() {
 
     // ── The declared cap applies only to this model. A second native route with no authored
     // reference cap admits both one and eleven valid references through its own source contract.
-    for body in [
-        json!({
-            "projectId": project_id, "model": "qwen_image_2_1_turbo", "mode": "edit_image",
-            "prompt": "compose these", "referenceAssetIds": [assets[0]]
-        }),
-        json!({
-            "projectId": project_id, "model": "qwen_image_2_1_turbo", "mode": "edit_image",
-            "prompt": "compose these", "referenceAssetIds": assets[0..11]
-        }),
-    ] {
-        let (status, response) = post(body.clone()).await;
-        assert_eq!(
-            status,
-            StatusCode::CREATED,
-            "a model declaring no cap admits its own valid reference request: {body} -> {response}"
-        );
-    }
+    // qwen_image_2_1_turbo is registered and its compiled row declares a reference cap, so a
+    // config-dir copy cannot make it uncapped. flux2_klein_9b is the shipped multi-reference
+    // edit model that declares none.
+    // By design flux2_klein_9b's native route admits at most 4 references through its own source
+    // contract, so the eleven-reference request is refused by that route, not by the declared cap.
+    let body = json!({
+        "projectId": project_id, "model": "flux2_klein_9b", "mode": "edit_image",
+        "prompt": "compose these", "referenceAssetIds": [assets[0]]
+    });
+    let (status, response) = post(body.clone()).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a model declaring no cap admits its own valid reference request: {body} -> {response}"
+    );
+    let body = json!({
+        "projectId": project_id, "model": "flux2_klein_9b", "mode": "edit_image",
+        "prompt": "compose these", "referenceAssetIds": assets[0..11]
+    });
+    let (_, response) = post(body.clone()).await;
+    assert!(
+        !response["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("reference images, but this request supplies"),
+        "the declared cap applies only to the declaring model: {body} -> {response}"
+    );
 
     // ── And plain text-to-image on the capped model is not this gate's business either.
     let (status, body) = post(json!({
@@ -15608,7 +15702,10 @@ async fn video_steps_under_the_post_preset_models_hard_floor_is_rejected() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
-    let default_video_model = crate::defaults::default_video_model();
+    // The shipped default video model (ltx_2_3) is registered and its compiled row declares a fixed
+    // 8-step schedule, so a config-dir copy cannot make it step-agnostic. The "no floor / no menu"
+    // comparison model is wan_2_2: a registered text-to-video model that declares no step contract.
+    let default_video_model = "wan_2_2".to_owned();
     std::fs::write(
         config_dir.join("builtin.models.jsonc"),
         r#"
@@ -15817,7 +15914,10 @@ async fn video_steps_off_the_post_preset_models_exact_menu_is_rejected() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
-    let default_video_model = crate::defaults::default_video_model();
+    // The shipped default video model (ltx_2_3) is registered and its compiled row declares a fixed
+    // 8-step schedule, so a config-dir copy cannot make it step-agnostic. The "no floor / no menu"
+    // comparison model is wan_2_2: a registered text-to-video model that declares no step contract.
+    let default_video_model = "wan_2_2".to_owned();
     std::fs::write(
         config_dir.join("builtin.models.jsonc"),
         r#"
