@@ -2655,19 +2655,20 @@ fn pending_caption_payload_rewrite_refreshes_claim_facts_atomically() {
 fn real_lora_train_requires_execute_capability() {
     let store = store("lora-train-execute-routing");
     // A GPU worker that can validate dry-run plans but lacks the inference backend
-    // advertises lora_train but not lora_train_execute.
+    // advertises lora_train but not lora_train_execute. Both workers are the shipped candle
+    // lane, so the real (model-backed) run reaches the execute gate through the bound claim.
     store
         .register_portable_worker(RegisterWorker {
             worker_id: "dry-only".to_owned(),
             gpu_id: "gpu-0".to_owned(),
             gpu_name: None,
-            capabilities: vec![WorkerCapability::Gpu, WorkerCapability::LoraTrain],
+            capabilities: with_candle(vec![WorkerCapability::Gpu, WorkerCapability::LoraTrain]),
             loaded_models: Vec::new(),
             utilization: None,
         })
         .expect("worker registers");
     let real = store
-        .create_job(lora_train_job("auto", false))
+        .create_job(trainable_lora_train_job(false))
         .expect("real training job creates");
 
     // The dry-run-only worker must not claim the real job; it stays queued for a
@@ -2682,11 +2683,11 @@ fn real_lora_train_requires_execute_capability() {
             worker_id: "trainer".to_owned(),
             gpu_id: "gpu-1".to_owned(),
             gpu_name: None,
-            capabilities: vec![
+            capabilities: with_candle(vec![
                 WorkerCapability::Gpu,
                 WorkerCapability::LoraTrain,
                 WorkerCapability::LoraTrainExecute,
-            ],
+            ]),
             loaded_models: Vec::new(),
             utilization: None,
         })
@@ -2731,9 +2732,9 @@ fn dry_run_lora_train_does_not_require_execute_capability() {
 #[test]
 fn training_progress_stages_persist_under_running_and_reject_unknown_status() {
     let store = store("training-progress-stages");
-    register_gpu_worker(&store, "trainer", "gpu-0", training_caps());
+    register_gpu_worker(&store, "trainer", "gpu-0", with_candle(training_caps()));
     let job = store
-        .create_job(lora_train_job("auto", false))
+        .create_job(trainable_lora_train_job(false))
         .expect("training job creates");
     assert_eq!(
         store
@@ -2799,9 +2800,9 @@ fn training_progress_stages_persist_under_running_and_reject_unknown_status() {
 #[test]
 fn training_progress_merges_latest_sample_batches_into_history() {
     let store = store("training-sample-history");
-    register_gpu_worker(&store, "trainer", "gpu-0", training_caps());
+    register_gpu_worker(&store, "trainer", "gpu-0", with_candle(training_caps()));
     let job = store
-        .create_job(lora_train_job("auto", false))
+        .create_job(trainable_lora_train_job(false))
         .expect("training job creates");
     assert_eq!(
         store
@@ -4147,6 +4148,22 @@ fn lora_train_job(requested_gpu: &str, dry_run: bool) -> CreateJob {
     }
 }
 
+/// A `lora_train` job whose resolved plan names a shipped native trainer (Z-Image LoRA), so the
+/// shipped candle worker can claim its real run through the bound claim. The plan-only
+/// [`lora_train_job`] names no kernel, which no native worker trains.
+fn trainable_lora_train_job(dry_run: bool) -> CreateJob {
+    let mut job = lora_train_job("auto", dry_run);
+    job.payload.insert(
+        "plan".to_owned(),
+        json!({
+            "planVersion": 1,
+            "target": { "kernel": "z_image_lora", "baseModel": "z_image_turbo" },
+            "config": { "advanced": { "networkType": "lora" } }
+        }),
+    );
+    job
+}
+
 #[test]
 fn lora_train_rejects_cpu_requested_gpu() {
     let store = store("lora-train-rejects-cpu");
@@ -4542,7 +4559,7 @@ fn qwen_edit_lightning_image_job_defers_to_mlx_worker() {
 }
 
 #[test]
-fn mlx_worker_excluded_from_torch_only_image_job() {
+fn mlx_worker_excluded_from_unsupported_image_job() {
     let store = store("mlx-routing-exclude");
     register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
 
@@ -4564,14 +4581,17 @@ fn mlx_worker_excluded_from_torch_only_image_job() {
         .expect("mlx claim ok")
         .is_none());
 
-    // The generic descriptor below is a synthetic compatibility check, not a deployed fallback.
-    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
-    let claimed = store
-        .claim_portable("worker-torch")
-        .expect("torch claim ok")
-        .expect("torch claims the job");
-    assert_eq!(claimed.id, job.id);
-    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+    // No native lane serves the source-less edit: the shipped candle worker declines it too, and
+    // the job remains queued instead of reaching a claimant that would drop the edit.
+    register_gpu_worker(&store, "worker-candle", "0", with_candle(image_caps()));
+    assert!(store
+        .claim_portable("worker-candle")
+        .expect("candle claim ok")
+        .is_none());
+    assert_eq!(
+        store.get_job(&job.id).expect("job loads").status,
+        JobStatus::Queued
+    );
 }
 
 #[test]
@@ -4665,10 +4685,25 @@ fn queue_summary_counts_and_active_jobs_ignore_500_row_cap() {
 #[test]
 fn mlx_required_defers_eligible_job_even_with_no_idle_mlx_worker() {
     let store = store("mlx-required-defer");
-    // Only an MPS worker is registered — no idle `mlx` worker to take the job. With the
-    // flag OFF this exercises the legacy generic-worker branch; with it ON the MPS worker yields
-    // unconditionally ("never MPS" on Mac). Production has no Python fallback.
-    register_gpu_worker(&store, "worker-mps", "mps", image_caps());
+    // The only `mlx` worker is busy with another job — no idle `mlx` worker to take this one, so
+    // the flag-OFF soft deferral (idle mlx worker only) would let the non-mlx worker claim it.
+    // With the flag ON the non-mlx worker yields unconditionally ("never off-MLX" on Mac).
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
+    let busy = store
+        .create_job(image_job_with(
+            json!({ "model": "z_image_turbo", "prompt": "the mlx worker's current job" }),
+            "auto",
+        ))
+        .expect("busy job creates");
+    assert_eq!(
+        store
+            .claim_portable("worker-mlx")
+            .expect("mlx claim ok")
+            .expect("mlx claims its current job")
+            .id,
+        busy.id
+    );
+    register_gpu_worker(&store, "worker-candle", "0", with_candle(image_caps()));
     store
         .create_job(image_job_with(
             json!({ "model": "z_image_turbo", "prompt": "a misty fjord" }),
@@ -4677,11 +4712,11 @@ fn mlx_required_defers_eligible_job_even_with_no_idle_mlx_worker() {
         .expect("job creates");
 
     let (claimed, decision) = store
-        .claim_portable_routed("worker-mps", true)
+        .claim_portable_routed("worker-candle", true)
         .expect("claim ok");
     assert!(
         claimed.is_none(),
-        "MPS worker must not claim the MLX-eligible job when mlx is required"
+        "a non-mlx worker must not claim the MLX-eligible job when mlx is required"
     );
     let decision = decision.expect("a routing decision is reported");
     assert_eq!(decision.decision, "deferred_to_mlx");
@@ -4763,26 +4798,30 @@ fn fail_stranded_mlx_jobs_is_noop_when_not_required() {
 }
 
 #[test]
-fn mlx_required_still_lets_mps_claim_a_non_eligible_model() {
-    // 3483 only gates MLX-*eligible* jobs. An unsupported model is not eligible, so this synthetic
-    // MPS descriptor can still claim it — surfacing it as a loud
-    // `mlx_unsupported` failure is sc-3484's job, not this slice's.
+fn mlx_required_still_lets_a_non_mlx_worker_claim_a_non_eligible_job() {
+    // 3483 only gates MLX-*eligible* jobs. A 14B Wan MoE `extend_clip` has no MLX keyframe path
+    // (not eligible) but is served by the candle Wan-VACE lane, so the candle worker can still
+    // claim it with mlx required — surfacing MLX-unsupported work as a loud `mlx_unsupported`
+    // failure is sc-3484's job, not this slice's. A live mlx worker is registered so the claim
+    // has an MLX home it could have deferred to.
     let store = store("mlx-required-noneligible");
-    register_gpu_worker(&store, "worker-mps", "mps", image_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
+    register_gpu_worker(&store, "worker-candle", "0", with_candle(video_caps()));
     let job = store
-        .create_job(image_job_with(
-            json!({ "model": "pulid_flux_dev", "prompt": "p" }),
+        .create_job(video_job_typed(
+            JobType::VideoExtend,
+            json!({ "model": "wan_2_2_t2v_14b", "mode": "extend_clip", "sourceClipAssetId": "left" }),
             "auto",
         ))
         .expect("job creates");
 
     let claimed = store
-        .claim_portable_routed("worker-mps", true)
+        .claim_portable_routed("worker-candle", true)
         .expect("claim ok")
         .0
-        .expect("MPS claims the non-eligible job");
+        .expect("candle claims the non-eligible job");
     assert_eq!(claimed.id, job.id);
-    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("0"));
 }
 
 // epic 5483 / sc-5502 — the off-Mac candle twin of the MLX sweeps: the `candle_supported` oracle
@@ -6533,18 +6572,12 @@ fn routing_decision_reports_claimed_by_gpu_for_uncategorized_worker() {
     // Defensive catch-all: a GPU worker that is neither `mlx` nor candle (no `candle` marker)
     // claims an MLX-eligible auto job. With the Python torch worker retired from every surface
     // this should not happen in practice, so the decision is named generically
-    // (`claimed_by_gpu`) rather than after a backend that no longer exists.
-    register_gpu_worker(&store, "worker-gpu", "cuda:0", image_caps());
+    // (`claimed_by_gpu`) rather than after a backend that no longer exists. Such a worker speaks
+    // no portable route, so it can only ever reach model-free work: a dry-run plan validation of
+    // an MLX-native training family is the MLX-eligible job it can still claim.
+    register_gpu_worker(&store, "worker-gpu", "cuda:0", training_caps());
     let job = store
-        .create_job(image_job_with(
-            json!({
-                "model": "qwen_image_edit_2511_lightning",
-                "mode": "edit_image",
-                "sourceAssetId": "asset_1",
-                "prompt": "p"
-            }),
-            "auto",
-        ))
+        .create_job(trainable_lora_train_job(true))
         .expect("job creates");
 
     let (claimed, decision) = store
@@ -6555,10 +6588,7 @@ fn routing_decision_reports_claimed_by_gpu_for_uncategorized_worker() {
     assert_eq!(decision.decision, "claimed_by_gpu");
     assert_eq!(decision.reason, "gpu_worker");
     assert_eq!(decision.gpu_id, "cuda:0");
-    assert_eq!(
-        decision.model.as_deref(),
-        Some("qwen_image_edit_2511_lightning")
-    );
+    assert_eq!(decision.job_type, "lora_train");
 }
 
 #[test]
@@ -6586,9 +6616,9 @@ fn routing_decision_reports_claimed_by_candle() {
 }
 
 #[test]
-fn routing_decision_reports_deferred_to_mlx_for_torch_worker() {
+fn routing_decision_reports_deferred_to_mlx_for_candle_worker() {
     let store = store("route-decision-defer");
-    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    register_gpu_worker(&store, "worker-candle", "0", with_candle(image_caps()));
     register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
     store
         .create_job(image_job_with(
@@ -6598,12 +6628,14 @@ fn routing_decision_reports_deferred_to_mlx_for_torch_worker() {
         .expect("job creates");
 
     let (claimed, decision) = store
-        .claim_portable_routed("worker-torch", false)
-        .expect("torch claim ok");
-    assert!(claimed.is_none(), "torch defers to the idle mlx worker");
+        .claim_portable_routed("worker-candle", false)
+        .expect("candle claim ok");
+    assert!(claimed.is_none(), "candle defers to the idle mlx worker");
     let decision = decision.expect("routing decision present");
     assert_eq!(decision.decision, "deferred_to_mlx");
     assert_eq!(decision.reason, "idle_mlx_available");
+    assert_eq!(decision.gpu_id, "0");
+    assert_eq!(decision.model.as_deref(), Some("z_image_turbo"));
 }
 
 #[test]
@@ -6628,20 +6660,22 @@ fn routing_decision_reports_claimed_by_mlx() {
 }
 
 #[test]
-fn routing_decision_is_none_for_non_mlx_model() {
+fn routing_decision_is_none_for_non_mlx_job() {
     let store = store("route-decision-none");
-    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    // A 14B Wan MoE `extend_clip` has no MLX keyframe path; the candle Wan-VACE lane serves it.
+    register_gpu_worker(&store, "worker-candle", "0", with_candle(video_caps()));
     store
-        .create_job(image_job_with(
-            json!({ "model": "some_torch_only_model", "prompt": "p" }),
+        .create_job(video_job_typed(
+            JobType::VideoExtend,
+            json!({ "model": "wan_2_2_t2v_14b", "mode": "extend_clip", "sourceClipAssetId": "left" }),
             "auto",
         ))
         .expect("job creates");
 
     let (claimed, decision) = store
-        .claim_portable_routed("worker-torch", false)
-        .expect("torch claim ok");
-    assert!(claimed.is_some(), "torch claims the torch-only job");
+        .claim_portable_routed("worker-candle", false)
+        .expect("candle claim ok");
+    assert!(claimed.is_some(), "candle claims the non-MLX job");
     assert!(
         decision.is_none(),
         "a non-MLX-eligible claim is routing-neutral (no event)"
@@ -6723,12 +6757,13 @@ fn sdxl_masked_image_edit_job_type_defers_to_mlx_worker() {
 }
 
 #[test]
-fn active_mlx_image_edit_blocks_mps_image_edit_claim() {
-    let store = store("mlx-mps-shared-gpu-active-mlx");
-    register_gpu_worker(&store, "worker-mps", "mps", image_edit_caps());
+fn active_mlx_image_edit_blocks_a_second_apple_gpu_image_edit_claim() {
+    // The Apple unified GPU runs one GPU job at a time: while an image edit is active on it, a
+    // second image edit waits instead of being claimed onto the same GPU.
+    let store = store("mlx-shared-gpu-active-mlx");
     register_gpu_worker(&store, "worker-mlx", "mlx", image_edit_caps());
 
-    let mlx_job = store
+    let first = store
         .create_job(image_edit_job_with(
             json!({
                 "model": "qwen_image_edit_2511_lightning",
@@ -6738,96 +6773,97 @@ fn active_mlx_image_edit_blocks_mps_image_edit_claim() {
             }),
             "auto",
         ))
-        .expect("mlx job creates");
-    let claimed_mlx = store
+        .expect("first job creates");
+    let claimed_first = store
         .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .expect("mlx claims the first job");
-    assert_eq!(claimed_mlx.id, mlx_job.id);
-    assert_eq!(claimed_mlx.assigned_gpu.as_deref(), Some("mlx"));
+    assert_eq!(claimed_first.id, first.id);
+    assert_eq!(claimed_first.assigned_gpu.as_deref(), Some("mlx"));
 
-    // An unported image model is assigned to the synthetic generic descriptor in this compatibility
-    // test: it is not in MLX_ROUTED_MODELS, so it is not soft-deferred to the mlx worker. Production
-    // has no such fallback worker, so an unsupported model remains queued. (Every real built-in image
-    // family is MLX-routed after Lens landed in epic 3164 / sc-5105.)
-    let mps_job = store
-        .create_job(image_job_with(
-            json!({
-                "model": "unported_image_model",
-                "prompt": "p"
-            }),
-            "auto",
-        ))
-        .expect("mps job creates");
-
-    assert!(
-        store
-            .claim_portable("worker-mps")
-            .expect("mps claim ok")
-            .is_none(),
-        "MPS must wait while the MLX worker is using the shared Apple GPU"
-    );
-
-    complete_job(&store, &claimed_mlx.id);
-    let claimed_mps = store
-        .claim_portable("worker-mps")
-        .expect("mps claim ok")
-        .expect("mps claims once mlx completes");
-    assert_eq!(claimed_mps.id, mps_job.id);
-    assert_eq!(claimed_mps.assigned_gpu.as_deref(), Some("mps"));
-}
-
-#[test]
-fn active_mps_image_edit_blocks_mlx_image_edit_claim() {
-    let store = store("mlx-mps-shared-gpu-active-mps");
-    register_gpu_worker(&store, "worker-mps", "mps", image_edit_caps());
-    register_gpu_worker(&store, "worker-mlx", "mlx", image_edit_caps());
-
-    // A synthetic unported image model exercises the MPS compatibility descriptor (not in
-    // MLX_ROUTED_MODELS, so it is not soft-deferred to mlx). Production has no MPS fallback.
-    let mps_job = store
-        .create_job(image_job_with(
-            json!({
-                "model": "unported_image_model",
-                "prompt": "p"
-            }),
-            "auto",
-        ))
-        .expect("mps job creates");
-    let claimed_mps = store
-        .claim_portable("worker-mps")
-        .expect("mps claim ok")
-        .expect("mps claims the first job");
-    assert_eq!(claimed_mps.id, mps_job.id);
-    assert_eq!(claimed_mps.assigned_gpu.as_deref(), Some("mps"));
-
-    let mlx_job = store
+    let second = store
         .create_job(image_edit_job_with(
             json!({
                 "model": "qwen_image_edit_2511_lightning",
                 "mode": "edit_image",
                 "sourceAssetId": "asset_2",
-                "prompt": "make it a watercolor painting"
+                "prompt": "make it a charcoal sketch"
             }),
             "auto",
         ))
-        .expect("mlx job creates");
+        .expect("second job creates");
 
     assert!(
         store
             .claim_portable("worker-mlx")
             .expect("mlx claim ok")
             .is_none(),
-        "MLX must wait while the MPS worker is using the shared Apple GPU"
+        "a second edit must wait while the first is using the shared Apple GPU"
     );
 
-    complete_job(&store, &claimed_mps.id);
-    let claimed_mlx = store
+    complete_job(&store, &claimed_first.id);
+    let claimed_second = store
         .claim_portable("worker-mlx")
         .expect("mlx claim ok")
-        .expect("mlx claims once mps completes");
-    assert_eq!(claimed_mlx.id, mlx_job.id);
-    assert_eq!(claimed_mlx.assigned_gpu.as_deref(), Some("mlx"));
+        .expect("mlx claims once the first edit completes");
+    assert_eq!(claimed_second.id, second.id);
+    assert_eq!(claimed_second.assigned_gpu.as_deref(), Some("mlx"));
+}
+
+#[test]
+fn active_candle_image_edit_blocks_another_workers_claim_on_the_same_gpu() {
+    // Two worker registrations on one CUDA index (for example a restarted worker whose
+    // predecessor's job is still active) share that GPU: while one holds an active image edit,
+    // the other waits instead of claiming a second GPU job onto the same device.
+    let store = store("candle-shared-gpu-active-edit");
+    register_gpu_worker(&store, "worker-a", "0", with_candle(image_edit_caps()));
+    register_gpu_worker(&store, "worker-b", "0", with_candle(image_edit_caps()));
+
+    let first = store
+        .create_job(image_edit_job_with(
+            json!({
+                "model": "qwen_image_edit_2511_lightning",
+                "mode": "edit_image",
+                "sourceAssetId": "asset_1",
+                "prompt": "make it a watercolor painting"
+            }),
+            "auto",
+        ))
+        .expect("first job creates");
+    let claimed_first = store
+        .claim_portable("worker-a")
+        .expect("worker-a claim ok")
+        .expect("worker-a claims the first job");
+    assert_eq!(claimed_first.id, first.id);
+    assert_eq!(claimed_first.assigned_gpu.as_deref(), Some("0"));
+
+    let second = store
+        .create_job(image_edit_job_with(
+            json!({
+                "model": "qwen_image_edit_2511_lightning",
+                "mode": "edit_image",
+                "sourceAssetId": "asset_2",
+                "prompt": "make it a charcoal sketch"
+            }),
+            "auto",
+        ))
+        .expect("second job creates");
+
+    assert!(
+        store
+            .claim_portable("worker-b")
+            .expect("worker-b claim ok")
+            .is_none(),
+        "worker-b must wait while worker-a is using the shared GPU"
+    );
+
+    complete_job(&store, &claimed_first.id);
+    let claimed_second = store
+        .claim_portable("worker-b")
+        .expect("worker-b claim ok")
+        .expect("worker-b claims once the first edit completes");
+    assert_eq!(claimed_second.id, second.id);
+    assert_eq!(claimed_second.assigned_gpu.as_deref(), Some("0"));
 }
 
 #[test]
@@ -6858,14 +6894,14 @@ fn routing_decision_reports_claimed_by_mlx_for_image_edit() {
 }
 
 #[test]
-fn torch_only_image_model_stays_on_torch() {
-    let store = store("mlx-routing-image-torch-only");
+fn unported_image_model_stays_queued_off_every_native_lane() {
+    let store = store("mlx-routing-image-unported");
     register_gpu_worker(&store, "worker-mlx", "mlx", image_edit_caps());
 
     // An unported image model (not in MLX_ROUTED_MODELS) is refused by the mlx worker and remains
     // queued in production. Every ported image family — incl. Kolors' full surface (epic 3090),
     // PuLID-FLUX (sc-3344), and Lens (epic 3164 / sc-5105, the last one) — is MLX now, so this
-    // synthetic compatibility example must use an unported model id.
+    // example must use an unported model id.
     let job = store
         .create_job(image_job_with(
             json!({
@@ -6881,18 +6917,20 @@ fn torch_only_image_model_stays_on_torch() {
         .expect("mlx claim ok")
         .is_none());
 
-    // This legacy fixture exercises a synthetic generic claim, which is routing-neutral (no event).
-    // Production has no fallback; unsupported shapes remain queued.
-    register_gpu_worker(&store, "worker-torch", "mps", image_edit_caps());
+    // The shipped candle lane has no route for it either: the refusal is routing-neutral (no
+    // gpu_route_decision) and the job remains queued.
+    register_gpu_worker(&store, "worker-candle", "0", with_candle(image_edit_caps()));
     let (claimed, decision) = store
-        .claim_portable_routed("worker-torch", false)
-        .expect("torch claim ok");
-    let claimed = claimed.expect("torch claims it");
-    assert_eq!(claimed.id, job.id);
-    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+        .claim_portable_routed("worker-candle", false)
+        .expect("candle claim ok");
+    assert!(claimed.is_none(), "candle declines the unported model");
     assert!(
         decision.is_none(),
-        "a torch-only image model is routing-neutral (no gpu_route_decision)"
+        "an unported image model is routing-neutral (no gpu_route_decision)"
+    );
+    assert_eq!(
+        store.get_job(&job.id).expect("job loads").status,
+        JobStatus::Queued
     );
 }
 
@@ -6928,23 +6966,23 @@ fn z_image_edit_routes_to_mlx() {
 #[test]
 fn explicit_gpu_image_job_is_not_deferred_to_mlx_worker() {
     let store = store("mlx-routing-explicit-gpu");
-    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    register_gpu_worker(&store, "worker-candle", "0", with_candle(image_caps()));
     register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
 
-    // This legacy fixture pins the MLX-eligible job to a synthetic generic GPU descriptor.
+    // The user pins the MLX-eligible job to the candle GPU; the idle mlx worker does not take it.
     let job = store
         .create_job(image_job_with(
             json!({ "model": "z_image_turbo", "prompt": "p" }),
-            "mps",
+            "0",
         ))
         .expect("job creates");
 
     let claimed = store
-        .claim_portable("worker-torch")
-        .expect("torch claim ok")
-        .expect("torch claims the explicit-gpu job");
+        .claim_portable("worker-candle")
+        .expect("candle claim ok")
+        .expect("candle claims the explicit-gpu job");
     assert_eq!(claimed.id, job.id);
-    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("0"));
 }
 
 // --- Training routing (epic 3039, sc-3043/3049) ---
@@ -7061,19 +7099,19 @@ fn joy_caption_falls_back_to_torch_when_no_mlx_worker() {
 #[test]
 fn explicit_gpu_joy_caption_is_not_deferred_to_mlx_worker() {
     let store = store("mlx-caption-explicit-gpu");
-    register_gpu_worker(&store, "worker-torch", "mps", caption_caps());
+    register_gpu_worker(&store, "worker-candle", "0", with_candle(caption_caps()));
     register_gpu_worker(&store, "worker-mlx", "mlx", caption_caps());
 
     let job = store
-        .create_job(joy_caption_job("mps"))
+        .create_job(joy_caption_job("0"))
         .expect("caption job creates");
 
     let claimed = store
-        .claim_portable("worker-torch")
-        .expect("torch claim ok")
-        .expect("torch claims explicit caption job");
+        .claim_portable("worker-candle")
+        .expect("candle claim ok")
+        .expect("candle claims explicit caption job");
     assert_eq!(claimed.id, job.id);
-    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("0"));
 }
 
 #[test]
@@ -7190,12 +7228,14 @@ fn mlx_worker_excluded_from_lokr_wan_training_job() {
         .expect("mlx claim ok")
         .is_none());
 
-    register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
+    // The candle Wan MoE trainer serves LoKr, so the shipped candle worker claims it.
+    register_gpu_worker(&store, "worker-candle", "0", with_candle(training_caps()));
     let claimed = store
-        .claim_portable("worker-torch")
-        .expect("torch claim ok")
-        .expect("torch claims the LoKr-on-Wan job");
+        .claim_portable("worker-candle")
+        .expect("candle claim ok")
+        .expect("candle claims the LoKr-on-Wan job");
     assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("0"));
 }
 
 #[test]
@@ -7846,13 +7886,15 @@ fn mlx_worker_excluded_from_advanced_mode_video_job() {
         .expect("mlx claim ok")
         .is_none());
 
-    register_gpu_worker(&store, "worker-torch", "mps", video_caps());
-    let claimed = store
-        .claim_portable("worker-torch")
-        .expect("torch claim ok")
-        .expect("torch claims the job");
-    assert_eq!(claimed.id, job.id);
-    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+    register_gpu_worker(&store, "worker-candle", "0", with_candle(video_caps()));
+    assert!(store
+        .claim_portable("worker-candle")
+        .expect("candle claim ok")
+        .is_none());
+    assert_eq!(
+        store.get_job(&job.id).expect("job loads").status,
+        JobStatus::Queued
+    );
 }
 
 #[test]
@@ -7922,7 +7964,7 @@ fn flf_video_job_defers_from_torch_worker_to_idle_mlx_worker() {
 }
 
 #[test]
-fn flf_video_job_stays_on_torch_for_non_flf_capable_wan_moe() {
+fn flf_video_job_stays_queued_for_non_flf_capable_wan_moe() {
     // FLF on the 14B Wan MoE engines has no native engine Keyframe path and remains queued.
     let store = store("mlx-video-routing-flf-moe");
     register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
@@ -7939,13 +7981,15 @@ fn flf_video_job_stays_on_torch_for_non_flf_capable_wan_moe() {
         .expect("mlx claim ok")
         .is_none());
 
-    register_gpu_worker(&store, "worker-torch", "mps", video_caps());
-    let claimed = store
-        .claim_portable("worker-torch")
-        .expect("torch claim ok")
-        .expect("torch claims the job");
-    assert_eq!(claimed.id, job.id);
-    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+    register_gpu_worker(&store, "worker-candle", "0", with_candle(video_caps()));
+    assert!(store
+        .claim_portable("worker-candle")
+        .expect("candle claim ok")
+        .is_none());
+    assert_eq!(
+        store.get_job(&job.id).expect("job loads").status,
+        JobStatus::Queued
+    );
 }
 
 #[test]
@@ -7995,10 +8039,11 @@ fn clip_conditioning_video_job_defers_from_torch_worker_to_idle_mlx_worker() {
 }
 
 #[test]
-fn clip_conditioning_video_job_stays_on_torch_for_wan_moe_engines() {
-    // extend_clip / video_bridge have no `Keyframe` path on the 14B Wan MoE engines, so they remain
-    // queued even though the mlx worker advertises VideoExtend/VideoBridge. (Wan TI2V-5B
-    // `wan_2_2` IS MLX-eligible — sc-3357 — and is covered by the defer test above.)
+fn clip_conditioning_video_job_stays_off_mlx_for_wan_moe_engines() {
+    // extend_clip / video_bridge have no MLX `Keyframe` path on the 14B Wan MoE engines, so the
+    // mlx worker refuses them even though it advertises VideoExtend/VideoBridge. (Wan TI2V-5B
+    // `wan_2_2` IS MLX-eligible — sc-3357 — and is covered by the defer test above.) The candle
+    // Wan-VACE lane serves both modes for the MoE model (sc-5494), so the candle worker claims them.
     for (job_type, mode) in [
         (JobType::VideoExtend, "extend_clip"),
         (JobType::VideoBridge, "video_bridge"),
@@ -8009,7 +8054,10 @@ fn clip_conditioning_video_job_stays_on_torch_for_wan_moe_engines() {
         let job = store
             .create_job(video_job_typed(
                 job_type.clone(),
-                json!({ "model": "wan_2_2_t2v_14b", "mode": mode, "sourceClipAssetId": "left" }),
+                json!({
+                    "model": "wan_2_2_t2v_14b", "mode": mode,
+                    "sourceClipAssetId": "left", "bridgeRightClipAssetId": "right",
+                }),
                 "auto",
             ))
             .expect("job creates");
@@ -8022,13 +8070,13 @@ fn clip_conditioning_video_job_stays_on_torch_for_wan_moe_engines() {
             "{mode}: mlx worker must not claim a 14B Wan MoE clip job"
         );
 
-        register_gpu_worker(&store, "worker-torch", "mps", video_caps());
+        register_gpu_worker(&store, "worker-candle", "0", with_candle(video_caps()));
         let claimed = store
-            .claim_portable("worker-torch")
-            .expect("torch claim ok")
-            .expect("torch claims the Wan clip job");
+            .claim_portable("worker-candle")
+            .expect("candle claim ok")
+            .expect("candle claims the Wan clip job");
         assert_eq!(claimed.id, job.id);
-        assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+        assert_eq!(claimed.assigned_gpu.as_deref(), Some("0"));
     }
 }
 
@@ -8055,22 +8103,22 @@ fn mlx_eligible_video_job_falls_back_to_torch_when_no_mlx_worker() {
 #[test]
 fn explicit_gpu_video_job_is_not_deferred_to_mlx_worker() {
     let store = store("mlx-video-routing-explicit-gpu");
-    register_gpu_worker(&store, "worker-torch", "mps", video_caps());
+    register_gpu_worker(&store, "worker-candle", "0", with_candle(video_caps()));
     register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
 
     let job = store
         .create_job(video_job_with(
             json!({ "model": "wan_2_2", "mode": "text_to_video", "prompt": "p" }),
-            "mps",
+            "0",
         ))
         .expect("job creates");
 
     let claimed = store
-        .claim_portable("worker-torch")
-        .expect("torch claim ok")
-        .expect("torch claims the explicit-gpu job");
+        .claim_portable("worker-candle")
+        .expect("candle claim ok")
+        .expect("candle claims the explicit-gpu job");
     assert_eq!(claimed.id, job.id);
-    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("0"));
 }
 
 #[test]
@@ -8510,51 +8558,47 @@ fn sdxl_and_realvisxl_route_to_mlx_worker() {
 }
 
 #[test]
-fn realvisxl_lightning_reference_falls_back_off_mlx() {
+fn realvisxl_lightning_conditioning_stays_off_mlx() {
     // sc-6075: RealVisXL Lightning is txt2img-only — the engine's few-step `lightning` sampler
     // rejects reference/img2img conditioning. A reference or edit_image job is therefore NOT
-    // MLX-eligible (`realvisxl_lightning_mlx_eligible`). This legacy fixture exercises the generic
-    // descriptor branch; production has no fallback and leaves the shape queued.
-    let store = store("mlx-routing-realvisxl-lightning");
-    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
-    register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
-
-    for payload in [
-        json!({ "model": "realvisxl_lightning", "prompt": "p", "referenceAssetId": "asset_1" }),
-        json!({ "model": "realvisxl_lightning", "prompt": "p", "mode": "edit_image",
-                "sourceAssetId": "src_1" }),
+    // MLX-eligible (`realvisxl_lightning_mlx_eligible`). No native lane serves the shape, so the
+    // shipped candle worker declines it too and production leaves it queued.
+    for (label, payload) in [
+        (
+            "reference",
+            json!({ "model": "realvisxl_lightning", "prompt": "p", "referenceAssetId": "asset_1" }),
+        ),
+        (
+            "edit",
+            json!({ "model": "realvisxl_lightning", "prompt": "p", "mode": "edit_image",
+                    "sourceAssetId": "src_1" }),
+        ),
     ] {
+        let store = store(&format!("mlx-routing-realvisxl-lightning-{label}"));
+        register_gpu_worker(&store, "worker-candle", "0", with_candle(image_caps()));
+        register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
         let job = store
             .create_job(image_job_with(payload, "auto"))
             .expect("lightning conditioned job creates");
-        let claimed = store
-            .claim_portable("worker-torch")
-            .expect("torch claim ok")
-            .expect("torch claims the txt2img-only-gated lightning job");
-        assert_eq!(claimed.id, job.id);
-        assert_ne!(
-            claimed.assigned_gpu.as_deref(),
-            Some("mlx"),
-            "txt2img-only lightning conditioning must not route to the mlx worker"
+        assert!(
+            store
+                .claim_portable("worker-mlx")
+                .expect("mlx claim ok")
+                .is_none(),
+            "{label}: txt2img-only lightning conditioning must not route to the mlx worker"
         );
-        store
-            .update_job_progress(
-                &claimed.id,
-                ProgressUpdate {
-                    status: JobStatus::Completed,
-                    stage: ProgressStage::Completed,
-                    progress: 1.0,
-                    message: "done".to_owned(),
-                    error: None,
-                    result: None,
-                    eta_seconds: None,
-                    peak_gpu_memory_pct: None,
-                    peak_gpu_load_pct: None,
-                    backend: None,
-                    worker_id: Some("worker-torch".to_owned()),
-                },
-            )
-            .expect("complete job");
+        assert!(
+            store
+                .claim_portable("worker-candle")
+                .expect("candle claim ok")
+                .is_none(),
+            "{label}: no native lane serves lightning conditioning"
+        );
+        assert_eq!(
+            store.get_job(&job.id).expect("job loads").status,
+            JobStatus::Queued,
+            "{label}"
+        );
     }
 }
 
@@ -8746,12 +8790,12 @@ fn native_candle_utility_capabilities_dispatch_supported_shapes_only() {
 #[test]
 fn non_mlx_model_image_job_is_not_routed_to_mlx_worker() {
     let store = store("mlx-routing-non-mlx-model");
-    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    register_gpu_worker(&store, "worker-candle", "0", with_candle(image_caps()));
     register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
 
-    // A synthetic unsupported image model shape with no mlx-gen engine (`pulid_flux_dev` plain
-    // txt2img) exercises the generic-descriptor branch while the mlx worker refuses it. Production
-    // has no Python fallback; the shape remains queued.
+    // An unsupported image model shape with no mlx-gen engine (`pulid_flux_dev` plain txt2img) is
+    // refused by the mlx worker. Production has no Python fallback and the candle lane has no
+    // route for it either; the shape remains queued.
     let job = store
         .create_job(image_job_with(
             json!({ "model": "pulid_flux_dev", "prompt": "p" }),
@@ -8759,12 +8803,21 @@ fn non_mlx_model_image_job_is_not_routed_to_mlx_worker() {
         ))
         .expect("job creates");
 
-    let claimed = store
-        .claim_portable("worker-torch")
-        .expect("torch claim ok")
-        .expect("torch claims the non-MLX-model job");
-    assert_eq!(claimed.id, job.id);
-    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+    assert!(
+        store
+            .claim_portable("worker-mlx")
+            .expect("mlx claim ok")
+            .is_none(),
+        "the mlx worker must not claim the non-MLX-model job"
+    );
+    assert!(store
+        .claim_portable("worker-candle")
+        .expect("candle claim ok")
+        .is_none());
+    assert_eq!(
+        store.get_job(&job.id).expect("job loads").status,
+        JobStatus::Queued
+    );
 }
 
 #[test]
