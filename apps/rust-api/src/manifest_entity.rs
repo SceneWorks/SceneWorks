@@ -101,8 +101,8 @@ pub(crate) async fn manifest_location_if_present(
 }
 
 /// Shared CREATE: derive the id (from an explicit id or a slugified name), stamp
-/// created/updated timestamps, then finalize + dedup-check + append inside the shared
-/// manifest read→merge→save lock. `finalize` carries the entity's normalize (and, for
+/// created/updated timestamps, then finalize + dedup-check + append (or replace an archived
+/// entry of the same id) inside the shared manifest read→merge→save lock. `finalize` carries the entity's normalize (and, for
 /// recipe presets, model/LoRA validation); it is called with `require_all = true`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn create_manifest_entry(
@@ -141,10 +141,19 @@ pub(crate) async fn create_manifest_entry(
     object.insert("updatedAt".to_owned(), Value::String(timestamp));
     mutate_manifest_entries(state, manifest_path, manifest_field, move |mut entries| {
         let entry = finalize(entry, scope, true)?;
-        if entries.iter().any(|existing| entry_has_id(existing, &id)) {
-            return Err(ApiError::bad_request(already_exists_msg));
+        // A deleted entry is archived, not removed, and nothing lists it again — so its name
+        // reads as free to the user. Creating under that id replaces the archived entry in
+        // place; only a live entry with the id is a conflict.
+        match entries
+            .iter()
+            .position(|existing| entry_has_id(existing, &id))
+        {
+            Some(index) if manifest_entry_archived(&entries[index]) => {
+                entries[index] = entry.clone();
+            }
+            Some(_) => return Err(ApiError::bad_request(already_exists_msg)),
+            None => entries.push(entry.clone()),
         }
-        entries.push(entry.clone());
         Ok((entries, entry))
     })
     .await
