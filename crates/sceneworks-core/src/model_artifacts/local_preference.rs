@@ -18,9 +18,9 @@
 //!   is decided by the GUARD — the only layer that can see every model a job will load — and handed
 //!   here already decided (see [`prefer_local_snapshots`]); a directory-level seam cannot re-ask
 //!   "does this bundle hold what THIS caller needs" once it has answered with a path.
-//! - **The bound on "process-wide", stated honestly.** The worker claim loop runs one job at a
-//!   time, so no two JOBS overlap. That is not the whole story: in the desktop deployment the
-//!   utility worker runs INSIDE the API process (`spawn_inprocess_utility_worker`), so an API read
+//! - **The bound on "process-wide", stated honestly.** A standalone worker claim loop runs one
+//!   job at a time. The desktop API runs multiple in-process utility loops; conflicting portable
+//!   job scopes wait for the earlier verified bundle while independent scopes may overlap. An API read
 //!   path resolving through the same prefer-local
 //!   [`crate::hf_home::model_source_library`] can observe a scope a job installed. For a file
 //!   OUTSIDE that job's union the leased bundle does not hold it, and such a reader sees it as
@@ -31,9 +31,10 @@
 //!   `an_out_of_union_reader_sees_absent_never_the_wrong_bytes`. Narrowing this further means
 //!   giving API read paths a non-preferring library, which is a change across every
 //!   `model_source_library` caller rather than a local one.
-//! - Preference is keyed on the exact `(repository, immutable revision)` pair. A superseded
-//!   revision therefore never matches, and a bundle is never consulted for a revision it does not
-//!   contain — the source tier keeps serving those.
+//! - Exact pinned lookups are keyed on `(repository, immutable revision)`, but scopes with
+//!   different revisions of one repository cannot overlap: unpinned portable and disconnected
+//!   source lookups choose a revision by repository alone. A superseded revision never matches an
+//!   exact lookup, and a bundle is never consulted for a revision it does not contain.
 //! - Nothing here downloads, writes, or mutates anything. Redirection only ever answers with a
 //!   path inside an already-published, already-verified bundle.
 
@@ -42,7 +43,9 @@ use super::{
     MODEL_ARTIFACT_CONTRACT_VERSION,
 };
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 /// One `(repository, revision)` pair served from a leased local bundle.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -176,11 +179,22 @@ struct HeldEntry {
     /// single-owner: two scopes may legitimately serve one shared component snapshot, and a
     /// single-owner model would silently un-serve the other one the moment the first scope drops.
     holders: usize,
+    /// Portable job scopes freeze the repository revision before dispatch. Their unpinned
+    /// loader lookups must use that revision even when the source library has another refs/main.
+    portable_holders: usize,
 }
 
 #[derive(Debug, Default)]
 struct ActiveOverlay {
     entries: Vec<HeldEntry>,
+    next_ticket: u64,
+    waiters: Vec<WaitingScope>,
+}
+
+#[derive(Debug)]
+struct WaitingScope {
+    ticket: u64,
+    repositories: Vec<String>,
 }
 
 fn active() -> &'static Mutex<ActiveOverlay> {
@@ -188,8 +202,62 @@ fn active() -> &'static Mutex<ActiveOverlay> {
     ACTIVE.get_or_init(|| Mutex::new(ActiveOverlay::default()))
 }
 
+fn overlay_changed() -> &'static Condvar {
+    static CHANGED: Condvar = Condvar::new();
+    &CHANGED
+}
+
 fn lock_active() -> MutexGuard<'static, ActiveOverlay> {
     active().lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The async owner cancels a blocking overlay wait when its heartbeat fails or its job future
+/// goes away. A wake is paired with a bounded retry so a notification racing `Condvar::wait`
+/// cannot leave an abandoned utility job ahead of live FIFO waiters.
+#[derive(Clone, Debug, Default)]
+pub struct PortableOverlayWaitCancellation(Arc<AtomicBool>);
+
+impl PortableOverlayWaitCancellation {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+        overlay_changed().notify_all();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+struct WaitRegistration {
+    ticket: u64,
+    armed: bool,
+}
+
+impl Drop for WaitRegistration {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut active = lock_active();
+            active.waiters.retain(|waiter| waiter.ticket != self.ticket);
+            drop(active);
+            overlay_changed().notify_all();
+        }
+    }
+}
+
+fn register_waiter(repositories: Vec<String>) -> Result<WaitRegistration, ArtifactContractError> {
+    let mut active = lock_active();
+    let ticket = active.next_ticket;
+    active.next_ticket = active.next_ticket.checked_add(1).ok_or_else(|| {
+        ArtifactContractError("portable overlay waiter sequence exhausted".to_owned())
+    })?;
+    active.waiters.push(WaitingScope {
+        ticket,
+        repositories,
+    });
+    Ok(WaitRegistration {
+        ticket,
+        armed: true,
+    })
 }
 
 /// RAII preference scope. Dropping it restores source-tier resolution exactly; it holds no locks
@@ -197,6 +265,7 @@ fn lock_active() -> MutexGuard<'static, ActiveOverlay> {
 #[derive(Debug)]
 pub struct ActiveLocalArtifacts {
     entries: Arc<Vec<LocalArtifactOverlayEntry>>,
+    portable: bool,
 }
 
 impl ActiveLocalArtifacts {
@@ -216,12 +285,17 @@ impl Drop for ActiveLocalArtifacts {
             let Some(index) = active.entries.iter().position(|held| &held.entry == entry) else {
                 continue;
             };
+            if self.portable {
+                active.entries[index].portable_holders -= 1;
+            }
             if active.entries[index].holders > 1 {
                 active.entries[index].holders -= 1;
             } else {
                 active.entries.remove(index);
             }
         }
+        drop(active);
+        overlay_changed().notify_all();
     }
 }
 
@@ -234,10 +308,40 @@ impl Drop for ActiveLocalArtifacts {
 /// so a pair is either serveable for every consumer in the process or served to none of them.
 ///
 /// A pair already served by a live scope is refcounted, and only when the serving entry is
-/// IDENTICAL. A different bundle claiming the same snapshot is refused outright: silently picking
-/// one is exactly how a load gets handed a snapshot verified for a different selection.
+/// IDENTICAL. Different revisions of a repository also conflict because unpinned lookup cannot
+/// distinguish their owning jobs. This immediate form refuses a different bundle claiming the same snapshot:
+/// silently picking one is exactly how a load gets handed a snapshot verified for a different
+/// selection. In-process utility jobs use [`wait_for_portable_snapshots`] instead.
 pub fn prefer_local_snapshots(
     entries: Vec<LocalArtifactOverlayEntry>,
+) -> Result<ActiveLocalArtifacts, ArtifactContractError> {
+    prefer_snapshots(entries, false, None)
+}
+
+/// Install an authoritative portable-job scope. The worker has already frozen and verified
+/// every repository revision in this closure, so an unpinned loader lookup must not consult a
+/// stale or newer `refs/main` while the job runs. Normal resolved-local scopes remain unchanged.
+pub fn prefer_portable_snapshots(
+    entries: Vec<LocalArtifactOverlayEntry>,
+) -> Result<ActiveLocalArtifacts, ArtifactContractError> {
+    prefer_snapshots(entries, true, None)
+}
+
+/// The in-process utility pool may run two jobs whose independently verified private bundles
+/// cover the same repository, even at different revisions. Wait for the prior scope to finish
+/// instead of reporting a source failure; other repositories remain free to run concurrently. The
+/// caller runs this blocking wait on the worker's blocking pool while heartbeats continue.
+pub fn wait_for_portable_snapshots(
+    entries: Vec<LocalArtifactOverlayEntry>,
+    cancellation: &PortableOverlayWaitCancellation,
+) -> Result<ActiveLocalArtifacts, ArtifactContractError> {
+    prefer_snapshots(entries, true, Some(cancellation))
+}
+
+fn prefer_snapshots(
+    entries: Vec<LocalArtifactOverlayEntry>,
+    portable: bool,
+    cancellation: Option<&PortableOverlayWaitCancellation>,
 ) -> Result<ActiveLocalArtifacts, ArtifactContractError> {
     let mut requested: Vec<LocalArtifactOverlayEntry> = Vec::new();
     for entry in entries {
@@ -250,28 +354,84 @@ pub fn prefer_local_snapshots(
             None => requested.push(entry),
         }
     }
+    let requested_repositories = requested
+        .iter()
+        .map(|entry| entry.repository.clone())
+        .collect::<Vec<_>>();
+    if cancellation.is_some_and(PortableOverlayWaitCancellation::is_cancelled) {
+        return Err(ArtifactContractError(
+            "portable overlay wait canceled".to_owned(),
+        ));
+    }
+    // Declared before `active`: on a panic the mutex guard drops first, then registration Drop
+    // removes this ticket and wakes the next waiter.
+    let mut registration = cancellation
+        .map(|_| register_waiter(requested_repositories.clone()))
+        .transpose()?;
     let mut active = lock_active();
-    for entry in &requested {
-        if let Some(held) = active.entries.iter().find(|held| {
-            held.entry.repository == entry.repository && held.entry.revision == entry.revision
-        }) {
-            if &held.entry != entry {
-                return Err(conflicting_claim(entry));
-            }
+    loop {
+        if cancellation.is_some_and(PortableOverlayWaitCancellation::is_cancelled) {
+            return Err(ArtifactContractError(
+                "portable overlay wait canceled".to_owned(),
+            ));
         }
+        let active_conflict = requested.iter().find(|entry| {
+            active
+                .entries
+                .iter()
+                .any(|held| held.entry.repository == entry.repository && &held.entry != *entry)
+        });
+        let earlier_waiter = active.waiters.iter().find(|waiter| {
+            registration
+                .as_ref()
+                .is_none_or(|mine| waiter.ticket < mine.ticket)
+                && requested_repositories
+                    .iter()
+                    .any(|repository| waiter.repositories.contains(repository))
+        });
+        let Some(conflict) = active_conflict.or_else(|| {
+            earlier_waiter.and_then(|waiter| {
+                requested
+                    .iter()
+                    .find(|entry| waiter.repositories.contains(&entry.repository))
+            })
+        }) else {
+            break;
+        };
+        if cancellation.is_none() {
+            return Err(conflicting_claim(conflict));
+        }
+        active = overlay_changed()
+            .wait_timeout(active, Duration::from_millis(250))
+            .unwrap_or_else(PoisonError::into_inner)
+            .0;
+    }
+    if let Some(registration) = registration.as_mut() {
+        active
+            .waiters
+            .retain(|waiter| waiter.ticket != registration.ticket);
+        registration.armed = false;
     }
     for entry in &requested {
         match active.entries.iter_mut().find(|held| &held.entry == entry) {
-            Some(held) => held.holders += 1,
+            Some(held) => {
+                held.holders += 1;
+                if portable {
+                    held.portable_holders += 1;
+                }
+            }
             None => active.entries.push(HeldEntry {
                 entry: entry.clone(),
                 holders: 1,
+                portable_holders: usize::from(portable),
             }),
         }
     }
     drop(active);
+    overlay_changed().notify_all();
     Ok(ActiveLocalArtifacts {
         entries: Arc::new(requested),
+        portable,
     })
 }
 
@@ -325,6 +485,36 @@ pub fn unique_local_snapshot(repository: &str) -> Option<(String, PathBuf)> {
         first.entry.revision.clone(),
         first.entry.snapshot_root.clone(),
     ))
+}
+
+/// An active portable job's unique frozen revision for a repository. An ambiguous pair fails
+/// closed even if `refs/main` happens to name one of them.
+pub fn unique_portable_snapshot(
+    repository: &str,
+) -> Result<Option<(String, PathBuf)>, ArtifactContractError> {
+    let active = lock_active();
+    let mut matches = active
+        .entries
+        .iter()
+        .filter(|held| held.portable_holders > 0 && held.entry.repository == repository);
+    let Some(first) = matches.next() else {
+        return Ok(None);
+    };
+    if matches.next().is_some() {
+        return Err(ArtifactContractError(format!(
+            "portable source {repository} has multiple frozen active revisions"
+        )));
+    }
+    if !first.entry.snapshot_root.is_dir() {
+        return Err(ArtifactContractError(format!(
+            "portable source {repository}@{} frozen snapshot is missing",
+            first.entry.revision
+        )));
+    }
+    Ok(Some((
+        first.entry.revision.clone(),
+        first.entry.snapshot_root.clone(),
+    )))
 }
 
 /// Rewrite an already-confined path that points into the configured source library so it reads

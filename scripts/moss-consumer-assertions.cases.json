@@ -902,7 +902,7 @@
           "op": "replace",
           "old": "\"moss_image_sft\" => Some(\"moss_image_sft\"),",
           "new": "\"moss_image_sft\" => Some(\"moss_image_base\"),",
-          "anchor": "pub(crate) fn engine_trainer_id_for("
+          "anchor": "pub fn engine_trainer_id_for("
         }
       ]
     },

@@ -1,6 +1,42 @@
 //! rust-api catalog tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
 
+fn catalog_convert_revision(repo: &str, reference: &str) -> Option<&'static str> {
+    assert_eq!(reference, "main");
+    assert!(
+        matches!(
+            repo,
+            "owner/plain" | "MiniMaxAI/MiniMax-H3" | "Lightricks/LTX-Video"
+        ),
+        "unexpected conversion source: {repo}"
+    );
+    Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+}
+
+fn catalog_convert_pinned_files(
+    selectors: &[String],
+) -> Vec<sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile> {
+    use sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile;
+    selectors
+        .iter()
+        .map(|selector| PortableArtifactFile {
+            relative_path: std::path::PathBuf::from(selector.replace('*', "fixture")),
+            size_bytes: 1,
+            sha256: format!("sha256:{}", "b".repeat(64)),
+        })
+        .collect()
+}
+
+fn pin_catalog_convert_metadata(state: &crate::AppState) {
+    // These license and replay tests name synthetic repositories; admission still validates the
+    // immutable revision and file closure returned by these per-app fixtures.
+    *state.test_hooks.dynamic_hf_revision_override.lock() = Some(catalog_convert_revision);
+    *state.test_hooks.pinned_metadata_override.lock() =
+        Some(std::sync::Arc::new(|_, _, selectors| {
+            catalog_convert_pinned_files(selectors)
+        }));
+}
+
 /// Retain this guard across the complete fixture, including awaited catalog mutations.
 fn catalog_fixture_cache_root(
     settings: &Settings,
@@ -1569,15 +1605,15 @@ async fn model_and_lora_routes_match_manifest_behavior() {
               "schemaVersion": 1,
               "models": [
                 {
-                  "id": "base-model",
+                  "id": "z_image_turbo",
                   "name": "Base Model",
                   "family": "z-image",
                   "type": "image",
                   "adapter": "z_image_diffusers",
                   "capabilities": ["text_to_image", "edit_image"],
                   "downloads": [
-                    { "provider": "huggingface", "repo": "owner/alternate-model", "files": ["*.bin"], "estimatedSizeBytes": 536870912 },
-                    { "provider": "huggingface", "repo": "owner/model", "files": ["*.safetensors"], "default": true, "estimatedSizeBytes": 12884901888 }
+                    { "provider": "huggingface", "repo": "owner/alternate-model", "revision": "fedcba9876543210fedcba9876543210fedcba98", "files": ["*.bin"], "estimatedSizeBytes": 536870912 },
+                    { "provider": "huggingface", "repo": "owner/model", "revision": "0123456789abcdef0123456789abcdef01234567", "files": ["*.safetensors"], "default": true, "estimatedSizeBytes": 12884901888 }
                   ],
                   "paths": {},
                   "defaults": {},
@@ -1597,7 +1633,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
               "schemaVersion": 1,
               "models": [
                 {
-                  "id": "base-model",
+                  "id": "z_image_turbo",
                   "name": "User Model",
                   "ui": { "label": "User" },
                   "customPluginMetadata": { "vendorKey": "preserved" }
@@ -1648,7 +1684,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
                   "id": "cinematic",
                   "name": "Cinematic",
                   "workflow": "text_to_image",
-                  "model": "base-model",
+                  "model": "z_image_turbo",
                   "defaults": { "count": 4, "resolution": "1280x720", "negativePrompt": "flat lighting" },
                   "prompt": { "suffix": "cinematic lighting" },
                   "loras": [{ "id": "style-lora", "weight": 0.5 }]
@@ -1679,7 +1715,72 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
     write_test_safetensors(&lora_dir.join("style.safetensors"));
 
-    let app = create_app(settings.clone()).expect("app creates");
+    let (app, state) = create_app_with_state(settings.clone()).expect("app creates");
+    *state.test_hooks.pinned_metadata_override.lock() =
+        Some(std::sync::Arc::new(|repository, revision, selectors| {
+            if repository == "owner/model"
+                && revision == "0123456789abcdef0123456789abcdef01234567"
+                && selectors == ["*.safetensors".to_owned()]
+            {
+                vec![
+                    sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile {
+                        relative_path: "model.safetensors".into(),
+                        size_bytes: 7,
+                        sha256: format!(
+                            "sha256:{}",
+                            sceneworks_core::hashing::sha256_bytes(b"fixture")
+                        ),
+                    },
+                ]
+            } else {
+                Vec::new()
+            }
+        }));
+    let lora_bytes = std::fs::read(lora_dir.join("style.safetensors")).unwrap();
+    let lora_files = vec![
+        sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile {
+            relative_path: "style.safetensors".into(),
+            size_bytes: lora_bytes.len() as u64,
+            sha256: format!(
+                "sha256:{}",
+                sceneworks_core::hashing::sha256_bytes(&lora_bytes)
+            ),
+        },
+    ];
+    let lora_source_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+        "lora",
+        "style-lora",
+        None,
+        &sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(
+            &lora_files,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let lora_claim = sceneworks_core::model_artifacts::portable_binding::PortableSourceClaim::new(
+        lora_source_id,
+        sceneworks_core::model_artifacts::portable_binding::PortableSourceProvenance::OperatorOverride,
+        lora_files,
+    )
+    .unwrap();
+    state
+        .jobs_store
+        .register_worker_with_portable_sources(
+            sceneworks_core::jobs_store::RegisterWorker {
+                worker_id: "catalog-mlx-worker".into(),
+                gpu_id: "mlx".into(),
+                gpu_name: None,
+                capabilities: vec![
+                    sceneworks_core::contracts::WorkerCapability::Gpu,
+                    sceneworks_core::contracts::WorkerCapability::ImageGenerate,
+                ],
+                loaded_models: vec![],
+                utilization: None,
+            },
+            Some("macos"),
+            Some(&[lora_claim]),
+        )
+        .unwrap();
     let (status, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(models[0]["name"], "User Model");
@@ -1736,7 +1837,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         .find(|preset| preset["id"] == "legacy_edit")
         .expect("legacy edit preset");
     assert_eq!(legacy_edit["workflow"], "edit_image");
-    assert_eq!(legacy_edit["model"], "base-model");
+    assert_eq!(legacy_edit["model"], "z_image_turbo");
     assert_eq!(legacy_edit["loras"][0]["id"], "style-lora");
     assert_eq!(
         legacy_edit["appliedDefaults"]["notes"][0],
@@ -1744,7 +1845,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     );
     assert_eq!(
         legacy_edit["appliedDefaults"]["notes"][1],
-        "model defaulted to base-model for legacy preset"
+        "model defaulted to z_image_turbo for legacy preset"
     );
     assert_eq!(
         legacy_edit["appliedDefaults"]["notes"][2],
@@ -1780,7 +1881,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         json!({
             "projectId": project_id,
             "prompt": "city at night",
-            "model": "base-model",
+            "model": "z_image_turbo",
             // Client render settings that DIFFER from the preset's declared
             // defaults (count 2 / 1280x720 / "flat lighting") — the studio seeds
             // the form from the preset but the user can override, so these
@@ -1794,13 +1895,18 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(status, StatusCode::CREATED, "{image_job}");
     assert_eq!(
         image_job["payload"]["prompt"],
         "city at night, cinematic lighting"
     );
     assert_eq!(image_job["payload"]["loras"][0]["id"], "style-lora");
-    assert!(image_job["payload"]["loras"][0]["installedPath"]
+    assert!(image_job["payload"]["loras"][0]["installedPath"].is_null());
+    let stored_image_job = state
+        .jobs_store
+        .get_job(image_job["id"].as_str().unwrap())
+        .unwrap();
+    assert!(stored_image_job.payload["loras"][0]["installedPath"]
         .as_str()
         .is_some_and(|value| value.ends_with("data/loras/style.safetensors")
             || value.ends_with("data\\loras\\style.safetensors")
@@ -1810,7 +1916,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         image_job["payload"]["loras"][0]["source"]["path"],
         "loras/style.safetensors"
     );
-    assert_eq!(image_job["payload"]["model"], "base-model");
+    assert_eq!(image_job["payload"]["model"], "z_image_turbo");
     assert_eq!(
         image_job["payload"]["modelManifestEntry"]["catalogScope"],
         "builtin"
@@ -1843,7 +1949,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         json!({
             "projectId": project_id,
             "prompt": "city with selected lora",
-            "model": "base-model",
+            "model": "z_image_turbo",
             "count": 1,
             "width": 512,
             "height": 512,
@@ -1869,7 +1975,12 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         null_path_job["payload"]["loras"][0]["compatibility"]["families"][0],
         "z-image"
     );
-    assert!(null_path_job["payload"]["loras"][0]["installedPath"]
+    assert!(null_path_job["payload"]["loras"][0]["installedPath"].is_null());
+    let stored_null_path_job = state
+        .jobs_store
+        .get_job(null_path_job["id"].as_str().unwrap())
+        .unwrap();
+    assert!(stored_null_path_job.payload["loras"][0]["installedPath"]
         .as_str()
         .is_some_and(|value| value.ends_with("data/loras/style.safetensors")
             || value.ends_with("data\\loras\\style.safetensors")
@@ -1891,12 +2002,12 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(preset_model_job["payload"]["model"], "base-model");
+    assert_eq!(preset_model_job["payload"]["model"], "z_image_turbo");
 
     let (status, job) = request(
         app.clone(),
         "POST",
-        "/api/v1/models/base-model/download",
+        "/api/v1/models/z_image_turbo/download",
         json!({ "requestedGpu": "" }),
     )
     .await;
@@ -1906,14 +2017,14 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     assert_eq!(job["payload"]["modelName"], "User Model");
     assert_eq!(job["payload"]["repo"], "owner/model");
     assert_eq!(job["payload"]["files"][0], "*.safetensors");
-    assert_eq!(job["payload"]["targetDir"], models[0]["installedPath"]);
+    assert!(job["payload"].get("targetDir").is_none());
 
     // Removing a user overlay does not remove or reclassify the protected builtin. The direct
     // manifest lookup in the delete route owns this behavior independently of routing scope.
     let (status, deleted_overlay) = request(
         app.clone(),
         "DELETE",
-        "/api/v1/models/base-model?permanent=true",
+        "/api/v1/models/z_image_turbo?permanent=true",
         Value::Null,
     )
     .await;
@@ -1927,7 +2038,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         .as_array()
         .expect("models array")
         .iter()
-        .find(|model| model["id"] == "base-model")
+        .find(|model| model["id"] == "z_image_turbo")
         .expect("protected builtin remains after overlay deletion");
     assert_eq!(restored_builtin["name"], "Base Model");
     assert_eq!(restored_builtin["catalogScope"], "builtin");
@@ -1945,10 +2056,8 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     assert_eq!(job["payload"]["repo"], "owner/lora");
     assert_eq!(job["payload"]["loraId"], "imported_lora");
     assert_eq!(job["payload"]["scope"], "global");
-    assert!(job["payload"]["targetDir"]
-        .as_str()
-        .is_some_and(|value| value.ends_with("data/loras/imported_lora")
-            || value.ends_with("data\\loras\\imported_lora")));
+    assert!(job["payload"].get("targetDir").is_none());
+    assert!(job["payload"].get("manifestPath").is_none());
     assert_eq!(job["payload"]["manifestEntry"]["scope"], "global");
     assert!(job["payload"].get("sourcePath").is_none());
 
@@ -2007,10 +2116,15 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         upload_job["payload"]["manifestEntry"]["files"][0],
         "detail.safetensors"
     );
+    assert!(upload_job["payload"]["sourcePath"].is_null());
+    let stored_upload = state
+        .jobs_store
+        .get_job(upload_job["id"].as_str().unwrap())
+        .unwrap();
     let source_path = std::path::PathBuf::from(
-        upload_job["payload"]["sourcePath"]
+        stored_upload.payload["sourcePath"]
             .as_str()
-            .expect("source path"),
+            .expect("private source path"),
     );
     assert_eq!(
         std::fs::read(&source_path).expect("staged upload reads"),
@@ -2127,7 +2241,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
               "schemaVersion": 1,
               "models": [
                 {
-                  "id": "base-model",
+                  "id": "z_image_turbo",
                   "name": "Base Model",
                   "family": "z-image",
                   "type": "image",
@@ -2305,10 +2419,10 @@ async fn paired_moe_lora_upload_writes_convention_files_and_records_base_model()
     // import normalizes both halves to the dot-delimited high/low_noise convention
     // (off-convention upload names included) and persists the chosen A14B baseModel.
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (app, state) = create_app_with_state(test_settings(&temp_dir)).expect("app creates");
     let wan_bytes = test_safetensors_bytes_with_keys(&wan_video_tensor_keys());
     let (status, job) = request_multipart_lora_pair_upload(
-        app,
+        app.clone(),
         &[
             ("name", "Wan MoE"),
             ("scope", "global"),
@@ -2338,14 +2452,32 @@ async fn paired_moe_lora_upload_writes_convention_files_and_records_base_model()
         format!("{lora_id}.low_noise.safetensors")
     );
 
+    // The API must not publish either host staging path, while the worker-owned row retains both
+    // exact files to import. GET uses the same public projection as the enqueue response.
+    assert!(job["payload"].get("sourcePath").is_none(), "{job}");
+    assert!(job["payload"].get("secondarySourcePath").is_none(), "{job}");
+    assert!(job["payload"].get("targetDir").is_none(), "{job}");
+    assert!(job["payload"].get("manifestPath").is_none(), "{job}");
+    let job_id = job["id"].as_str().expect("job id");
+    let (get_status, public_job) =
+        request(app, "GET", &format!("/api/v1/jobs/{job_id}"), Value::Null).await;
+    assert_eq!(get_status, StatusCode::OK);
+    assert!(public_job["payload"].get("sourcePath").is_none());
+    assert!(public_job["payload"].get("secondarySourcePath").is_none());
+    assert!(public_job["payload"].get("targetDir").is_none());
+    assert!(public_job["payload"].get("manifestPath").is_none());
+    let worker_job = state.jobs_store.get_job(job_id).expect("worker-owned job");
+    assert!(worker_job.payload["targetDir"].is_string());
+    assert!(worker_job.payload["manifestPath"].is_string());
+
     // Both halves staged on disk; the worker renames them on import.
     let primary = std::path::PathBuf::from(
-        job["payload"]["sourcePath"]
+        worker_job.payload["sourcePath"]
             .as_str()
             .expect("primary source path"),
     );
     let secondary = std::path::PathBuf::from(
-        job["payload"]["secondarySourcePath"]
+        worker_job.payload["secondarySourcePath"]
             .as_str()
             .expect("secondary source path"),
     );
@@ -6328,8 +6460,13 @@ fn builtin_manifest_registers_the_wan_vace_fun_model() {
     let macos = download_for("macos");
     assert_eq!(macos["provider"], "huggingface");
     assert_eq!(macos["repo"], "linoyts/Wan2.2-VACE-Fun-14B-diffusers");
+    assert_eq!(
+        macos["revision"],
+        "1abfb95801b7bd8f952083ebf80b93448ddb0ce4"
+    );
     let windows = download_for("windows");
     assert_eq!(windows["repo"], "linoyts/Wan2.2-VACE-Fun-14B-diffusers");
+    assert_eq!(windows["revision"], macos["revision"]);
     assert_eq!(
         download_for("linux")["repo"],
         "linoyts/Wan2.2-VACE-Fun-14B-diffusers",
@@ -6353,6 +6490,83 @@ fn builtin_manifest_registers_the_wan_vace_fun_model() {
         model.get("quantization").is_none(),
         "native-first: no Torch GGUF quantization block"
     );
+}
+
+#[test]
+fn shipped_hugging_face_downloads_have_immutable_selected_revisions() {
+    use sceneworks_core::model_artifacts::artifact_selection::{
+        is_supported_model_download, selected_model_artifact_closure,
+    };
+
+    let manifest = sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+        .expect("shipped model manifest");
+    let models = manifest["models"].as_array().expect("models array");
+    for model in models {
+        for download in model["downloads"].as_array().into_iter().flatten() {
+            if !is_supported_model_download(download) || download["provider"] != "huggingface" {
+                continue;
+            }
+            let revision = download["revision"].as_str().unwrap_or_default();
+            assert!(
+                revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                "{}/{} has no immutable publisher revision",
+                model["id"],
+                download["repo"]
+            );
+        }
+    }
+
+    for (id, platform, tier, repo, revision) in [
+        (
+            "svd",
+            "macos",
+            None,
+            "stabilityai/stable-video-diffusion-img2vid-xt",
+            "9e43909513c6714f1bc78bcb44d96e733cd242aa",
+        ),
+        (
+            "wan_2_2",
+            "windows",
+            Some("bf16"),
+            "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
+            "b8fff7315c768468a5333511427288870b2e9635",
+        ),
+        (
+            "wan_2_2_i2v_14b",
+            "linux",
+            Some("bf16"),
+            "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+            "596658fd9ca6b7b71d5057529bbf319ecbc61d74",
+        ),
+        (
+            "wan_2_2_vace_fun_14b",
+            "macos",
+            None,
+            "linoyts/Wan2.2-VACE-Fun-14B-diffusers",
+            "1abfb95801b7bd8f952083ebf80b93448ddb0ce4",
+        ),
+        (
+            "wan_2_2_vace_fun_14b",
+            "windows",
+            None,
+            "linoyts/Wan2.2-VACE-Fun-14B-diffusers",
+            "1abfb95801b7bd8f952083ebf80b93448ddb0ce4",
+        ),
+    ] {
+        let model = models
+            .iter()
+            .find(|model| model["id"] == id)
+            .expect("shipped model");
+        let selected = selected_model_artifact_closure(model, platform, tier);
+        let primary = selected["downloads"]
+            .as_array()
+            .expect("selected downloads")
+            .iter()
+            .find(|row| row["coRequisite"] != true)
+            .expect("selected primary");
+        assert_eq!(primary["repo"], repo, "{id}/{platform}/{tier:?}");
+        assert_eq!(primary["revision"], revision, "{id}/{platform}/{tier:?}");
+    }
 }
 
 #[test]
@@ -7950,7 +8164,8 @@ async fn license_acknowledgment_model_convert_is_refused_for_a_restricted_base_r
 
     let settings = test_settings(&temp_dir);
     let output_dir = settings.data_dir.join("models/mlx/converted-1");
-    let app = create_app(settings).expect("app creates");
+    let (app, state) = create_app_with_state(settings).expect("app creates");
+    pin_catalog_convert_metadata(&state);
 
     let convert_payload = |base_repo: &str, acknowledged: bool| {
         let mut payload = json!({
@@ -8590,10 +8805,9 @@ async fn model_import_accepts_a_linked_library_root_and_refuses_unconfined_ones(
         job["payload"]["linkedRelativePath"],
         json!("checkpoints/dit.safetensors")
     );
-    assert_eq!(
-        job["payload"]["targetDir"],
-        Value::Null,
-        "a linked import installs nothing, so it gets no install directory: {job:?}"
+    assert!(
+        job["payload"].get("targetDir").is_none(),
+        "a linked import publishes no install directory: {job:?}"
     );
     let entry = &job["payload"]["manifestEntry"];
     assert_eq!(entry["source"]["provider"], json!("linked-library"));
@@ -8795,7 +9009,8 @@ async fn fetching_job_replays_require_current_receipts_for_every_source_type() {
     let config_dir = temp.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).unwrap();
     write_license_acknowledgment_catalog(&config_dir);
-    let app = create_app(settings.clone()).unwrap();
+    let (app, state) = create_app_with_state(settings.clone()).unwrap();
+    pin_catalog_convert_metadata(&state);
     let ack = "/api/v1/models/minimax_h3/license-acknowledgment";
     let (status, accepted) = request(app.clone(), "PUT", ack, Value::Null).await;
     assert_eq!(status, StatusCode::OK, "{accepted}");

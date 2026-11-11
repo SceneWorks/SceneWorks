@@ -56,8 +56,38 @@ pub(super) async fn create_generation_job_with_binding(
     if let Some(binding) = download_binding.as_mut().and_then(Value::as_object_mut) {
         binding.insert("payload".to_owned(), json!(payload));
     }
+    let portable_binding =
+        if let Some((_, parent_binding)) = vector_replay_raster_source(&state, &payload).await? {
+            let frozen = serde_json::from_value(parent_binding).map_err(|error| {
+                ApiError::bad_request(format!("Invalid recorded vector source binding: {error}"))
+            })?;
+            Some(
+                crate::portable_admission::derive_vector_raster_child_binding(
+                    &state,
+                    &job_type,
+                    &payload,
+                    &requested_gpu,
+                    &frozen,
+                )
+                .await?,
+            )
+        } else {
+            crate::portable_admission::capture_portable_model_binding(
+                &state,
+                &job_type,
+                &payload,
+                &requested_gpu,
+            )
+            .await?
+        }
+        .map(|binding| {
+            serde_json::to_value(binding).map_err(|error| {
+                ApiError::internal(format!("Serialize portable model binding: {error}"))
+            })
+        })
+        .transpose()?;
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.create_job_with_download_binding(
+        store.create_job_with_portable_binding(
             CreateJob {
                 job_type,
                 project_id,
@@ -71,10 +101,11 @@ pub(super) async fn create_generation_job_with_binding(
             },
             model_provenance.as_ref(),
             download_binding.as_ref(),
+            portable_binding.as_ref(),
         )
     })
     .await?;
-    publish(&state, "job.updated", &job);
+    publish(&state, "job.updated", &public_job_snapshot(job.clone()));
     publish_queue(&state).await?;
     Ok(job)
 }
@@ -264,12 +295,23 @@ pub(crate) async fn create_image_job(
         .to_owned();
     // The shared canonicalizer reads the final payload and also owns retry/duplicate, so no
     // alternate image boundary can retain caller-supplied manifest metadata.
-    let mut model_manifest_entry =
+    let mut model_manifest_entry = if let Some((frozen_raster, _)) =
+        vector_replay_raster_source(&state, &job_payload).await?
+    {
+        if frozen_raster.get("id").and_then(Value::as_str) != Some(model_id.as_str()) {
+            return Err(ApiError::bad_request(
+                "Recorded vector raster source differs from the replayed model",
+            ));
+        }
+        job_payload.insert("modelManifestEntry".into(), frozen_raster.clone());
+        frozen_raster
+    } else {
         crate::jobs::canonicalize_image_model_payload(&state, &job_type, &mut job_payload)
             .await?
             .ok_or_else(|| {
                 ApiError::internal("image model canonicalization returned no catalog entry")
-            })?;
+            })?
+    };
     // Overlay the authored text-encoder selection onto the canonical entry and re-stamp it, so the
     // worker sees the resolved encoder rather than the catalog default. The decoder gate then runs
     // against the same server-owned entry.
@@ -1040,6 +1082,168 @@ enum VectorWorkflowReplayRelation<'a> {
     },
 }
 
+struct VectorReplayChild {
+    job: JobSnapshot,
+    binding: Value,
+    provenance: Option<Value>,
+    download_binding: Option<Value>,
+}
+
+struct VectorReplaySource {
+    parent: JobSnapshot,
+    binding: Value,
+    child: Option<VectorReplayChild>,
+}
+
+/// The newly created vector parent carries its original raster slot on replay. Read this
+/// server-owned carrier and frozen envelope before the typed image route consults current catalog
+/// defaults; a mutable publisher ref may have moved since the first workflow was admitted.
+async fn vector_replay_raster_source(
+    state: &AppState,
+    payload: &JsonObject,
+) -> Result<Option<(Value, Value)>, ApiError> {
+    let Some(parent_id) = payload.get("workflowParentId").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let parent_id = parent_id.to_owned();
+    store_call(state.clone(), move |store, _timeout| {
+        let parent = store.get_job(&parent_id)?;
+        if parent.source_job_id.is_none() && parent.duplicate_of_job_id.is_none() {
+            return Ok(None);
+        }
+        let raster = parent
+            .payload
+            .get("modelManifestEntries")
+            .and_then(Value::as_array)
+            .and_then(|entries| entries.first())
+            .cloned()
+            .ok_or_else(|| {
+                JobsStoreError::InvalidStatus(
+                    "recorded vector workflow has no frozen raster carrier".into(),
+                )
+            })?;
+        let binding = store.portable_model_binding(&parent_id)?.ok_or_else(|| {
+            JobsStoreError::InvalidStatus(
+                "recorded vector workflow has no frozen source binding".into(),
+            )
+        })?;
+        Ok(Some((raster, binding)))
+    })
+    .await
+}
+
+async fn vector_replay_source(
+    state: &AppState,
+    relation: VectorWorkflowReplayRelation<'_>,
+) -> Result<Option<VectorReplaySource>, ApiError> {
+    let original_id = match relation {
+        VectorWorkflowReplayRelation::Fresh => return Ok(None),
+        VectorWorkflowReplayRelation::Retry { source_job_id, .. } => source_job_id,
+        VectorWorkflowReplayRelation::Duplicate {
+            duplicate_of_job_id,
+        } => duplicate_of_job_id,
+    }
+    .to_owned();
+    store_call(state.clone(), move |store, _timeout| {
+        let parent = store.get_job(&original_id)?;
+        let binding = store.portable_model_binding(&original_id)?.ok_or_else(|| {
+            JobsStoreError::InvalidStatus("vector workflow has no frozen source binding".into())
+        })?;
+        let child = parent
+            .payload
+            .get("workflow")
+            .and_then(|workflow| workflow.get("childJobId"))
+            .and_then(Value::as_str)
+            .map(|child_id| {
+                let job = store.get_job(child_id)?;
+                let binding = store.portable_model_binding(child_id)?.ok_or_else(|| {
+                    JobsStoreError::InvalidStatus(
+                        "vector raster child has no frozen source binding".into(),
+                    )
+                })?;
+                Ok::<VectorReplayChild, JobsStoreError>(VectorReplayChild {
+                    job,
+                    binding,
+                    provenance: store.model_provenance(child_id)?,
+                    download_binding: store.download_binding(child_id)?,
+                })
+            })
+            .transpose()?;
+        Ok(Some(VectorReplaySource {
+            parent,
+            binding,
+            child,
+        }))
+    })
+    .await
+}
+
+async fn enqueue_replayed_vector_raster_child(
+    state: &AppState,
+    source: &VectorReplayChild,
+    parent_id: &str,
+    workflow_id: &str,
+    requested_gpu: &str,
+) -> Result<JobSnapshot, ApiError> {
+    if !matches!(
+        source.job.job_type,
+        JobType::ImageGenerate | JobType::ImageEdit
+    ) {
+        return Err(ApiError::bad_request(
+            "Recorded vector raster child has an invalid job type",
+        ));
+    }
+    let mut payload = source.job.payload.clone();
+    payload.insert(
+        "workflowParentId".into(),
+        Value::String(parent_id.to_owned()),
+    );
+    payload.insert("workflowId".into(), Value::String(workflow_id.to_owned()));
+    let frozen: sceneworks_core::model_artifacts::portable_binding::PortableJobBinding =
+        serde_json::from_value(source.binding.clone()).map_err(|error| {
+            ApiError::bad_request(format!("Invalid recorded raster source binding: {error}"))
+        })?;
+    crate::portable_admission::validate_frozen_replay_binding(
+        state,
+        &source.job.job_type,
+        &payload,
+        requested_gpu,
+        &frozen,
+    )
+    .await?;
+    let job = store_call(state.clone(), {
+        let job_type = source.job.job_type.clone();
+        let project_id = source.job.project_id.clone();
+        let project_name = source.job.project_name.clone();
+        let requested_gpu = requested_gpu.to_owned();
+        let provenance = source.provenance.clone();
+        let download_binding = source.download_binding.clone();
+        let binding = source.binding.clone();
+        move |store, _timeout| {
+            store.create_job_with_portable_binding(
+                CreateJob {
+                    job_type,
+                    project_id,
+                    project_name,
+                    payload,
+                    requested_gpu,
+                    source_job_id: None,
+                    duplicate_of_job_id: None,
+                    attempts: 1,
+                    initial_status: None,
+                },
+                provenance.as_ref(),
+                download_binding.as_ref(),
+                Some(&binding),
+            )
+        }
+    })
+    .await?;
+    publish(state, "job.updated", &public_job_snapshot(job.clone()));
+    publish_queue(state).await?;
+    Ok(job)
+}
+
 fn typed_vector_workflow_error(code: &'static str, detail: impl Into<String>) -> ApiError {
     ApiError::typed(
         StatusCode::CONFLICT,
@@ -1162,6 +1366,56 @@ async fn create_vector_prompt_workflow_internal(
     payload: VectorPromptWorkflowRequest,
     relation: VectorWorkflowReplayRelation<'_>,
 ) -> Result<JobSnapshot, ApiError> {
+    let replay_source = vector_replay_source(&state, relation).await?;
+    if replay_source.is_some() {
+        // Keep the original byte identity, while rechecking whether today's server still permits
+        // the same logical stages. A removed/disabled model cannot be revived by its old carrier.
+        let current_raster = crate::models::find_model_by_id(&state, &payload.raster_model)
+            .await?
+            .ok_or_else(|| {
+                ApiError::bad_request("Recorded raster model is no longer registered")
+            })?;
+        if current_raster.get("type").and_then(Value::as_str) != Some("image")
+            || current_raster.get("usable").and_then(Value::as_bool) == Some(false)
+            || !current_raster
+                .get("capabilities")
+                .and_then(Value::as_array)
+                .is_some_and(|capabilities| {
+                    capabilities
+                        .iter()
+                        .any(|capability| capability.as_str() == Some("text_to_image"))
+                })
+        {
+            return Err(typed_vector_workflow_error(
+                "vector_workflow_raster_unsupported",
+                "Recorded raster model is no longer authorized for text_to_image.",
+            ));
+        }
+        let current_vector = crate::models::find_model_by_id(&state, &payload.vector_model)
+            .await?
+            .ok_or_else(|| {
+                ApiError::bad_request("Recorded vector model is no longer registered")
+            })?;
+        validate_vector_model_manifest(
+            &payload.vector_model,
+            VectorMode::ImageToSvg,
+            &current_vector,
+        )?;
+        if current_vector.get("usable").and_then(Value::as_bool) == Some(false) {
+            return Err(typed_vector_workflow_error(
+                "vector_workflow_vector_unclaimable",
+                "Recorded vector model is no longer usable.",
+            ));
+        }
+        for current in [&current_raster, &current_vector] {
+            if let Some(entry) = current.as_object() {
+                crate::models::ensure_inherited_component_licenses_acknowledged(
+                    &state, entry, false,
+                )
+                .await?;
+            }
+        }
+    }
     let raster_request: ImageJobRequest = serde_json::from_value(json!({
         "projectId": payload.project_id,
         "projectName": payload.project_name,
@@ -1178,14 +1432,43 @@ async fn create_vector_prompt_workflow_internal(
     .map_err(|error| ApiError::bad_request(format!("Invalid raster stage: {error}")))?;
     validate_image_job(&raster_request)?;
 
-    let raster_model = crate::models::find_model_by_id(&state, &payload.raster_model)
-        .await?
-        .unwrap_or_else(|| json!({}));
-    let vector_model = crate::models::find_model_by_id(&state, &payload.vector_model)
-        .await?
-        .unwrap_or_else(|| json!({}));
-    let raster_revision =
-        validate_raster_workflow_model(&state, &payload.raster_model, &raster_model)?;
+    let raster_model = if let Some(source) = &replay_source {
+        source
+            .parent
+            .payload
+            .get("modelManifestEntries")
+            .and_then(Value::as_array)
+            .and_then(|entries| entries.first())
+            .or_else(|| {
+                source
+                    .child
+                    .as_ref()
+                    .and_then(|child| child.job.payload.get("modelManifestEntry"))
+            })
+            .cloned()
+            .ok_or_else(|| ApiError::bad_request("Recorded raster stage has no model carrier"))?
+    } else {
+        crate::models::find_model_by_id(&state, &payload.raster_model)
+            .await?
+            .unwrap_or_else(|| json!({}))
+    };
+    let vector_model = if let Some(source) = &replay_source {
+        source
+            .parent
+            .payload
+            .get("modelManifestEntry")
+            .cloned()
+            .ok_or_else(|| ApiError::bad_request("Recorded vector parent has no model carrier"))?
+    } else {
+        crate::models::find_model_by_id(&state, &payload.vector_model)
+            .await?
+            .unwrap_or_else(|| json!({}))
+    };
+    let raster_revision = if replay_source.is_some() {
+        authoritative_workflow_revision(&raster_model)?
+    } else {
+        validate_raster_workflow_model(&state, &payload.raster_model, &raster_model)?
+    };
     let vector_revision = authoritative_workflow_revision(&vector_model)?;
     validate_workflow_revision(
         "raster",
@@ -1215,11 +1498,13 @@ async fn create_vector_prompt_workflow_internal(
     };
     validate_vector_request(&pending_vector_request)?;
     validate_vector_provider_request(&pending_vector_request, &vector_model)?;
-    validate_vector_model_availability(
-        &payload.vector_model,
-        enqueue_backend(&state),
-        &vector_model,
-    )?;
+    if replay_source.is_none() {
+        validate_vector_model_availability(
+            &payload.vector_model,
+            enqueue_backend(&state),
+            &vector_model,
+        )?;
+    }
 
     let parent_id = format!("job_{}", uuid::Uuid::new_v4().simple());
     let workflow_id = format!("vwf_{}", uuid::Uuid::new_v4().simple());
@@ -1227,6 +1512,12 @@ async fn create_vector_prompt_workflow_internal(
     parent_payload.remove("requestedGpu");
     parent_payload.remove("sourceAssetId");
     parent_payload.insert("modelManifestEntry".to_owned(), vector_model.clone());
+    // The parent is durable before its raster child is enqueued. Freeze both stage sources here,
+    // so a child-creation failure can still retry the original raster revision after HEAD drifts.
+    parent_payload.insert(
+        "modelManifestEntries".to_owned(),
+        Value::Array(vec![raster_model.clone()]),
+    );
     parent_payload.insert(
         "workflow".to_owned(),
         json!({
@@ -1266,14 +1557,49 @@ async fn create_vector_prompt_workflow_internal(
             duplicate_of_job_id,
         } => (None, Some(duplicate_of_job_id.to_owned()), 1),
     };
+    let portable_binding = if let Some(source) = &replay_source {
+        let frozen: sceneworks_core::model_artifacts::portable_binding::PortableJobBinding =
+            serde_json::from_value(source.binding.clone()).map_err(|error| {
+                ApiError::bad_request(format!("Invalid recorded vector source binding: {error}"))
+            })?;
+        crate::portable_admission::validate_frozen_replay_binding(
+            &state,
+            &JobType::VectorGenerate,
+            &parent_payload,
+            &payload.requested_gpu,
+            &frozen,
+        )
+        .await?;
+        Some(source.binding.clone())
+    } else {
+        crate::portable_admission::capture_portable_model_binding(
+            &state,
+            &JobType::VectorGenerate,
+            &parent_payload,
+            &payload.requested_gpu,
+        )
+        .await?
+        .map(|binding| {
+            serde_json::to_value(binding).map_err(|error| {
+                ApiError::internal(format!("Serialize portable model binding: {error}"))
+            })
+        })
+        .transpose()?
+    };
+    if portable_binding.is_none() {
+        return Err(ApiError::bad_request(
+            "The vector workflow has no complete portable model source binding.",
+        ));
+    }
     let parent = store_call(state.clone(), {
         let parent_id = parent_id.clone();
         let project_id = payload.project_id.clone();
         let project_name = payload.project_name.clone();
         let requested_gpu = payload.requested_gpu.clone();
         let parent_payload = parent_payload.clone();
+        let portable_binding = portable_binding.clone();
         move |store, _timeout| {
-            store.create_job_with_id(
+            store.create_job_with_id_and_portable_binding(
                 parent_id,
                 CreateJob {
                     job_type: JobType::VectorGenerate,
@@ -1286,18 +1612,36 @@ async fn create_vector_prompt_workflow_internal(
                     attempts,
                     initial_status: Some(JobStatus::PendingWorkflow),
                 },
+                portable_binding.as_ref(),
             )
         }
     })
     .await?;
-    publish(&state, "job.updated", &parent);
+    publish(&state, "job.updated", &public_job_snapshot(parent.clone()));
     publish_queue(&state).await?;
 
     let mut child_request = raster_request;
     child_request.workflow_parent_id = Some(parent_id.clone());
     child_request.workflow_id = Some(workflow_id.clone());
-    let child = match create_image_job(State(state.clone()), ApiJson(child_request)).await {
-        Ok((_status, Json(child))) => child,
+    let child_result = if let Some(source) = replay_source
+        .as_ref()
+        .and_then(|source| source.child.as_ref())
+    {
+        enqueue_replayed_vector_raster_child(
+            &state,
+            source,
+            &parent_id,
+            &workflow_id,
+            &payload.requested_gpu,
+        )
+        .await
+    } else {
+        create_image_job(State(state.clone()), ApiJson(child_request))
+            .await
+            .map(|(_, Json(child))| child)
+    };
+    let child = match child_result {
+        Ok(child) => child,
         Err(error) => {
             let _ = store_call(state.clone(), {
                 let parent_id = parent_id.clone();
@@ -3198,11 +3542,22 @@ mod plan_backed_video_enqueue_tests {
 
     /// An app whose catalog holds ONE imported `wan-video` model. `import_plan` is spliced in
     /// verbatim so the control case can drop it and change nothing else.
-    fn app_with_imported_wan(temp_dir: &tempfile::TempDir, import_plan: &str) -> axum::Router {
+    fn app_with_imported_wan(
+        temp_dir: &tempfile::TempDir,
+        import_plan: &str,
+    ) -> (axum::Router, crate::AppState) {
         if !import_plan.is_empty() {
             use sceneworks_core::checkpoint_import::{
                 CheckpointContainerV1, ImportLayerV1, ImportPlanV1, SourceLocatorV1,
             };
+            let library = temp_dir.path().join("wan-library");
+            std::fs::create_dir_all(&library).unwrap();
+            std::fs::write(library.join("model.safetensors"), b"wan-fixture").unwrap();
+            let root = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(
+                &test_settings(temp_dir).data_dir,
+            )
+            .approve_root(&library)
+            .unwrap();
             let plan = ImportPlanV1::new(
                 format!("checkpoint-plan-{}", "3".repeat(64)),
                 "wan-video",
@@ -3212,9 +3567,9 @@ mod plan_backed_video_enqueue_tests {
                     target_path: "model.safetensors".into(),
                     container: CheckpointContainerV1::Safetensors,
                     source: SourceLocatorV1::linked(
-                        "root-wan-fixture",
+                        &root.root_id,
                         "model.safetensors",
-                        "a".repeat(64),
+                        sceneworks_core::hashing::sha256_bytes(b"wan-fixture"),
                     )
                     .unwrap(),
                 }],
@@ -3236,7 +3591,66 @@ mod plan_backed_video_enqueue_tests {
                 }}"#
             ),
         );
-        create_app(test_settings(temp_dir)).expect("app creates")
+        let (app, state) = create_app_with_state(test_settings(temp_dir)).expect("app creates");
+        if !import_plan.is_empty() {
+            use sceneworks_core::jobs_store::RegisterWorker;
+            use sceneworks_core::model_artifacts::portable_binding::{
+                portable_file_ledger_sha256, PortableArtifactFile, PortableSourceClaim,
+                PortableSourceProvenance,
+            };
+            let files = vec![PortableArtifactFile {
+                relative_path: "artifact".into(),
+                size_bytes: b"wan-fixture".len() as u64,
+                sha256: format!(
+                    "sha256:{}",
+                    sceneworks_core::hashing::sha256_bytes(b"wan-fixture")
+                ),
+            }];
+            let source_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+                "model-bytes",
+                "imported_wan_2_2_abc123",
+                None,
+                &portable_file_ledger_sha256(&files).unwrap(),
+            )
+            .unwrap();
+            let claim = PortableSourceClaim::new(
+                source_id,
+                PortableSourceProvenance::OperatorOverride,
+                files,
+            )
+            .unwrap();
+            for (worker_id, gpu_id, platform) in [
+                ("wan-plan-mlx", "mlx", "macos"),
+                ("wan-plan-candle-linux", "cuda:0", "linux"),
+                ("wan-plan-candle-windows", "cuda:1", "windows"),
+            ] {
+                let mut capabilities = vec![
+                    sceneworks_core::contracts::WorkerCapability::Gpu,
+                    sceneworks_core::contracts::WorkerCapability::VideoGenerate,
+                ];
+                if gpu_id != "mlx" {
+                    capabilities.push(sceneworks_core::contracts::WorkerCapability::Unknown(
+                        "candle".into(),
+                    ));
+                }
+                state
+                    .jobs_store
+                    .register_worker_with_portable_sources(
+                        RegisterWorker {
+                            worker_id: worker_id.into(),
+                            gpu_id: gpu_id.into(),
+                            gpu_name: None,
+                            capabilities,
+                            loaded_models: vec![],
+                            utilization: None,
+                        },
+                        Some(platform),
+                        Some(std::slice::from_ref(&claim)),
+                    )
+                    .unwrap();
+            }
+        }
+        (app, state)
     }
 
     const IMPORT_PLAN: &str = r#","importPlan": { "checkpointId": "ckpt_wan_abc123" }"#;
@@ -3250,7 +3664,7 @@ mod plan_backed_video_enqueue_tests {
     #[tokio::test]
     async fn a_plan_backed_wan_checkpoint_enqueues_a_text_to_video_job() {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
-        let app = app_with_imported_wan(&temp_dir, IMPORT_PLAN);
+        let (app, state) = app_with_imported_wan(&temp_dir, IMPORT_PLAN);
         create_project(&app).await;
 
         let (status, job) = request(
@@ -3270,6 +3684,20 @@ mod plan_backed_video_enqueue_tests {
         // Not merely accepted — still QUEUED after `fail_job_if_platform_unreachable` has run, so
         // the row is genuinely waiting for a worker rather than terminal-failed on the way out.
         assert_eq!(job["status"], "queued", "{job}");
+        let frozen = state
+            .jobs_store
+            .portable_model_binding(job["id"].as_str().unwrap())
+            .unwrap()
+            .expect("checkpoint job has a private portable binding");
+        let frozen: sceneworks_core::model_artifacts::portable_binding::PortableJobBinding =
+            serde_json::from_value(frozen).unwrap();
+        let plan = frozen.routes.values().next().unwrap().models[0]
+            .checkpoint_plan
+            .as_ref()
+            .expect("trusted checkpoint plan is frozen");
+        assert_eq!(plan.family, "wan-video");
+        assert_eq!(plan.layers[0].target_path, "model.safetensors");
+        assert!(!serde_json::to_string(plan).unwrap().contains("wan-library"));
         // The plan identity the worker's Wan lane resolves through is on the enqueued payload.
         assert_eq!(
             job["payload"]["modelManifestEntry"]["importPlan"]["checkpointId"],
@@ -3287,7 +3715,7 @@ mod plan_backed_video_enqueue_tests {
     #[tokio::test]
     async fn the_same_imported_wan_entry_without_a_plan_is_still_refused_by_the_no_lane_gate() {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
-        let app = app_with_imported_wan(&temp_dir, "");
+        let (app, _) = app_with_imported_wan(&temp_dir, "");
         create_project(&app).await;
 
         let (status, error) = request(
@@ -3319,7 +3747,7 @@ mod plan_backed_video_enqueue_tests {
     #[tokio::test]
     async fn a_plan_backed_wan_checkpoint_is_refused_on_a_mode_its_lane_does_not_serve() {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
-        let app = app_with_imported_wan(&temp_dir, IMPORT_PLAN);
+        let (app, _) = app_with_imported_wan(&temp_dir, IMPORT_PLAN);
         create_project(&app).await;
 
         let (status, error) = request(
@@ -3350,11 +3778,28 @@ mod plan_backed_video_enqueue_tests {
 #[cfg(test)]
 mod imported_minimax_h3_video_tests {
     use crate::tests::support::*;
+    use sceneworks_core::model_artifacts::portable_binding::{
+        canonical_authored_options_sha256, registered_digest_member_claim_id, PortableArtifactFile,
+        PortableCheckpointPlan, PortableJobBinding, PortableModelBinding, PortableSourceClaim,
+        PortableSourceIdentity, PortableSourceProvenance,
+    };
+    use sceneworks_core::model_artifacts::ArtifactMemberRole;
     use sceneworks_worker::minimax_h3_import_fixture::{
         stage_managed_minimax_h3_import, ManagedMiniMaxH3Import,
     };
 
     const IMPORTED_ID: &str = "minimax_h3_custom";
+
+    fn pinned_component_metadata(selectors: &[String]) -> Vec<PortableArtifactFile> {
+        selectors
+            .iter()
+            .map(|selector| PortableArtifactFile {
+                relative_path: selector.replace('*', "fixture.safetensors").into(),
+                size_bytes: 1,
+                sha256: format!("sha256:{}", "a".repeat(64)),
+            })
+            .collect()
+    }
 
     /// E6/E8/E9: a fresh import captures real component contents BEFORE committing its plan.
     /// Retain the fixture's scoped source-library guard for the entire API request lifetime.
@@ -3371,7 +3816,10 @@ mod imported_minimax_h3_video_tests {
         imported
     }
 
-    fn app_with(temp_dir: &tempfile::TempDir, entry: Value) -> axum::Router {
+    fn app_and_state_with(
+        temp_dir: &tempfile::TempDir,
+        entry: Value,
+    ) -> (axum::Router, crate::AppState) {
         let config_dir = temp_dir.path().join("config/manifests");
         std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
         let user_models = json!({ "schemaVersion": 1, "models": [entry] }).to_string();
@@ -3412,7 +3860,88 @@ mod imported_minimax_h3_video_tests {
             )
             .unwrap();
         }
-        create_app(test_settings(temp_dir)).expect("app creates")
+        let (app, state) = create_app_with_state(test_settings(temp_dir)).expect("app creates");
+        // The imported primary is real managed checkpoint bytes. The unrelated publisher
+        // companions need deterministic pinned metadata for this weights-free API route test.
+        *state.test_hooks.pinned_metadata_override.lock() =
+            Some(std::sync::Arc::new(|_, _, selectors| {
+                pinned_component_metadata(selectors)
+            }));
+        (app, state)
+    }
+
+    fn app_with(temp_dir: &tempfile::TempDir, entry: Value) -> axum::Router {
+        app_and_state_with(temp_dir, entry).0
+    }
+
+    fn register_imported_h3_worker(state: &crate::AppState, entry: &Value) {
+        use sceneworks_core::contracts::WorkerCapability;
+        use sceneworks_core::jobs_store::RegisterWorker;
+
+        let slot = "modelManifestEntry";
+        let checkpoint_id = entry["importPlan"]["checkpointId"]
+            .as_str()
+            .expect("import checkpoint id");
+        let resolved = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(
+            &state.settings.data_dir,
+        )
+        .resolve(checkpoint_id)
+        .expect("trusted imported plan");
+        let members = crate::portable_admission::capture_local_model_entry(state, entry, slot)
+            .expect("exact managed local bytes");
+        let layer_prefix = format!("{slot}/importPlan/layers/");
+        let primary_layer = resolved.plan.layers.iter().find(|layer| {
+            !members.iter().any(|member| {
+                member.component_id.as_deref()
+                    == Some(format!("{layer_prefix}{}", layer.layer_id).as_str())
+            })
+        });
+        let plan = PortableCheckpointPlan::from_import_plan(
+            &resolved.plan,
+            primary_layer.map(|layer| layer.layer_id.clone()),
+        )
+        .expect("portable imported plan");
+        let binding = PortableModelBinding::new(
+            slot,
+            IMPORTED_ID,
+            "mlx",
+            "local",
+            None,
+            canonical_authored_options_sha256(&json!({})).expect("authored options hash"),
+            members,
+        )
+        .expect("portable model")
+        .with_checkpoint_plan(plan)
+        .expect("plan-backed portable model");
+        let claims = binding
+            .members
+            .iter()
+            .filter(|member| matches!(member.source, PortableSourceIdentity::Digest { .. }))
+            .map(|member| {
+                PortableSourceClaim::new(
+                    registered_digest_member_claim_id(&binding, member, &json!({}))
+                        .expect("logical source ID"),
+                    PortableSourceProvenance::OperatorOverride,
+                    member.files.clone(),
+                )
+                .expect("exact worker source claim")
+            })
+            .collect::<Vec<_>>();
+        state
+            .jobs_store
+            .register_worker_with_portable_sources(
+                RegisterWorker {
+                    worker_id: "imported-h3-worker".into(),
+                    gpu_id: "mlx".into(),
+                    gpu_name: None,
+                    capabilities: vec![WorkerCapability::Gpu, WorkerCapability::VideoGenerate],
+                    loaded_models: vec![],
+                    utilization: None,
+                },
+                Some("macos"),
+                Some(&claims),
+            )
+            .expect("worker advertises all imported bytes");
     }
 
     async fn create_project(app: &axum::Router) {
@@ -3507,7 +4036,8 @@ mod imported_minimax_h3_video_tests {
     async fn a_public_request_for_the_imported_h3_entry_enqueues_with_its_binding() {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
         let imported = imported_entry(&temp_dir, true);
-        let app = app_with(&temp_dir, Value::Object(imported.entry.clone()));
+        let (app, state) = app_and_state_with(&temp_dir, Value::Object(imported.entry.clone()));
+        register_imported_h3_worker(&state, &Value::Object(imported.entry.clone()));
         create_project(&app).await;
 
         let (status, job) = enqueue_t2v(&app).await;
@@ -3529,6 +4059,43 @@ mod imported_minimax_h3_video_tests {
         // The base partition's surface resolved the request: its 24 fps and its default canvas.
         assert_eq!(job["payload"]["fps"], 24);
         assert_eq!(job["payload"]["width"], 1344);
+        let binding =
+            sceneworks_core::jobs_store::JobsStore::new(test_settings(&temp_dir).jobs_db_path)
+                .portable_model_binding(job["id"].as_str().expect("job id"))
+                .expect("binding read")
+                .expect("portable binding persisted");
+        let binding: PortableJobBinding = serde_json::from_value(binding).expect("typed binding");
+        assert!(
+            !binding.routes.is_empty(),
+            "at least one native route is bound"
+        );
+        for route in binding.routes.values() {
+            let model = route
+                .models
+                .iter()
+                .find(|model| model.model_id == IMPORTED_ID)
+                .expect("imported model slot");
+            assert!(
+                model.checkpoint_plan.is_some(),
+                "trusted import plan is frozen"
+            );
+            assert!(
+                model
+                    .members
+                    .iter()
+                    .any(|member| member.role == ArtifactMemberRole::Primary
+                        && matches!(member.source, PortableSourceIdentity::Digest { .. })),
+                "local primary is bound by exact bytes"
+            );
+            assert!(
+                model
+                    .members
+                    .iter()
+                    .any(|member| member.role == ArtifactMemberRole::CoRequisite
+                        && matches!(member.source, PortableSourceIdentity::Revision { .. })),
+                "publisher companions remain pinned revisions"
+            );
+        }
     }
 
     #[tokio::test]

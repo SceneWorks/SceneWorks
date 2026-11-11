@@ -99,6 +99,11 @@ where
     let canonical_target = conversion_root.join(target_name);
     let _locks = ConversionFinalizeLocks::acquire(&lock_root, &canonical_target)?;
 
+    // A portable route leases its private snapshot only until this job ends. Converted layouts
+    // can borrow components through absolute links, so copy those components into the staged
+    // install while the lease is held, before publishing or stamping its receipt.
+    materialize_portable_conversion_links(temp_dir, data_dir)?;
+
     // Move any stale install aside instead of destroying it, so a later failure can restore it. No
     // sweep runs here: another process may have a live recovery source. Stranded backups are handled
     // only by the exclusive startup lifecycle pass.
@@ -125,12 +130,152 @@ where
     Ok(())
 }
 
+fn materialize_portable_conversion_links(temp_dir: &Path, data_dir: &Path) -> WorkerResult<()> {
+    let cache_root = data_dir.join("models/portable-attempts");
+    if !cache_root.exists() {
+        return Ok(());
+    }
+    let cache_root = std::fs::canonicalize(cache_root)?;
+
+    fn copy_borrowed(
+        source: &Path,
+        destination: &Path,
+        cache_root: &Path,
+        active: &mut Vec<PathBuf>,
+    ) -> WorkerResult<()> {
+        let canonical = std::fs::canonicalize(source)?;
+        if !canonical.starts_with(cache_root) {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Portable conversion source {} escaped its private snapshot",
+                source.display()
+            )));
+        }
+        if canonical.is_dir() {
+            if active.contains(&canonical) {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "Portable conversion source {} contains a directory cycle",
+                    source.display()
+                )));
+            }
+            active.push(canonical.clone());
+            std::fs::create_dir(destination)?;
+            for entry in std::fs::read_dir(&canonical)? {
+                let entry = entry?;
+                copy_borrowed(
+                    &entry.path(),
+                    &destination.join(entry.file_name()),
+                    cache_root,
+                    active,
+                )?;
+            }
+            active.pop();
+        } else if canonical.is_file() {
+            std::fs::copy(canonical, destination)?;
+        } else {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Portable conversion source {} is neither a file nor a directory",
+                source.display()
+            )));
+        }
+        Ok(())
+    }
+
+    fn visit(directory: &Path, cache_root: &Path) -> WorkerResult<()> {
+        for entry in std::fs::read_dir(directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() {
+                let target = std::fs::canonicalize(&path)?;
+                if target.starts_with(cache_root) {
+                    let replacement = path.with_file_name(format!(
+                        ".portable-copy-{}",
+                        Uuid::new_v4()
+                    ));
+                    if let Err(error) =
+                        copy_borrowed(&target, &replacement, cache_root, &mut Vec::new())
+                    {
+                        let _ = if replacement.is_dir() {
+                            std::fs::remove_dir_all(&replacement)
+                        } else {
+                            std::fs::remove_file(&replacement)
+                        };
+                        return Err(error);
+                    }
+                    if cfg!(windows) && target.is_dir() {
+                        std::fs::remove_dir(&path)?;
+                    } else {
+                        std::fs::remove_file(&path)?;
+                    }
+                    std::fs::rename(replacement, path)?;
+                }
+            } else if metadata.is_dir() {
+                visit(&path, cache_root)?;
+            }
+        }
+        Ok(())
+    }
+
+    visit(temp_dir, &cache_root)
+}
+
 /// Cross-platform: the conversion locks are taken on every backend, so this module is NOT gated on
 /// macOS the way the converter tests below are.
 #[cfg(test)]
 mod conversion_lock_tests {
     use super::*;
     use fs2::FileExt as _;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn converted_install_survives_portable_snapshot_prune() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("data dir");
+        let data_dir = root.path();
+        let bundle = data_dir.join("models/portable-attempts/route/bundle");
+        std::fs::create_dir_all(bundle.join("text_encoder")).unwrap();
+        std::fs::write(bundle.join("dit.safetensors"), b"dit bytes").unwrap();
+        std::fs::write(bundle.join("text_encoder/weights.safetensors"), b"encoder bytes").unwrap();
+        let conversion_root = data_dir.join("models/mlx");
+        std::fs::create_dir_all(&conversion_root).unwrap();
+        let staged = conversion_root.join("staged");
+        std::fs::create_dir(&staged).unwrap();
+        symlink(bundle.join("dit.safetensors"), staged.join("dit.safetensors")).unwrap();
+        symlink(bundle.join("text_encoder"), staged.join("text_encoder")).unwrap();
+        let stable_source = data_dir.join("stable.safetensors");
+        std::fs::write(&stable_source, b"stable bytes").unwrap();
+        symlink(&stable_source, staged.join("stable.safetensors")).unwrap();
+        let installed = conversion_root.join("converted");
+
+        finalize_converted_dir(&staged, &installed, data_dir)
+            .await
+            .expect("publish converted install");
+        write_produced_artifact_receipt(&installed, "job", "repo/source", "converted")
+            .expect("stamp converted install");
+        std::fs::remove_dir_all(data_dir.join("models/portable-attempts/route"))
+            .expect("prune private cache");
+
+        assert_eq!(std::fs::read(installed.join("dit.safetensors")).unwrap(), b"dit bytes");
+        assert_eq!(
+            std::fs::read(installed.join("text_encoder/weights.safetensors")).unwrap(),
+            b"encoder bytes"
+        );
+        assert!(!std::fs::symlink_metadata(installed.join("dit.safetensors"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!std::fs::symlink_metadata(installed.join("text_encoder"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(std::fs::symlink_metadata(installed.join("stable.safetensors"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        verify_produced_artifact_receipt(&installed, "job", "repo/source", "converted")
+            .expect("receipt remains valid after prune");
+    }
 
     /// sc-22738: released conversion locks must be free IMMEDIATELY, even while a descriptor this
     /// process handed to a child still references the same open file description. `flock(2)` locks

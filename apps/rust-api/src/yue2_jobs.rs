@@ -894,12 +894,16 @@ pub(crate) async fn create_yue2_jobs(
 ///   and a commercial declaration can only be added, never withdrawn.
 /// * A replay without a block must not name a symbolic-song model: the generic audio route
 ///   refuses those, and so does its replay.
+///
+/// Returns whether this replay was server-canonicalized: `true` exactly when a YuE2 block was
+/// revalidated and its manifest carrier re-resolved and stamped from the live catalog. The
+/// caller may treat that carrier as a fresh canonical selection.
 pub(crate) async fn canonicalize_replayed_audio_payload(
     state: &AppState,
     persisted: &JsonObject,
     merged: &mut JsonObject,
     retry: bool,
-) -> Result<(), ApiError> {
+) -> Result<bool, ApiError> {
     let block_of = |payload: &JsonObject| {
         payload
             .get(yue2::PAYLOAD_KEY)
@@ -997,7 +1001,7 @@ pub(crate) async fn canonicalize_replayed_audio_payload(
             };
             let commercial = declared(persisted) || declared(merged);
             merged.insert("commercialUse".to_owned(), json!(commercial));
-            Ok(())
+            Ok(true)
         }
         (None, None) => {
             let model = merged
@@ -1010,7 +1014,7 @@ pub(crate) async fn canonicalize_replayed_audio_payload(
             if let Some(stored) = merged.get("modelManifestEntry") {
                 refuse_symbolic_song_on_audio_route(&model, stored)?;
             }
-            Ok(())
+            Ok(false)
         }
     }
 }

@@ -187,10 +187,15 @@ async fn moss_duplicate_revalidates_merged_controls_and_resets_inherited_mode() 
     let _hf = isolate_hf_cache();
     let temp = tempfile::tempdir().unwrap();
     setup(&temp);
-    let app = create_app(test_settings(&temp)).unwrap();
+    let (app, state) = create_app_with_state(test_settings(&temp)).unwrap();
     let (_, project) = crate::tests::support::create_project(app.clone(), &"MOSS").await;
     let (status,job)=request(app.clone(),"POST","/api/v1/image/jobs",json!({"projectId":project["id"],"model":"moss_image_sft","prompt":"subject","advanced":{"mossImage":{"acceleration":"off"}}})).await;
     assert_eq!(status, StatusCode::CREATED, "{job}");
+    let original_binding = state
+        .jobs_store
+        .portable_model_binding(job["id"].as_str().unwrap())
+        .unwrap()
+        .expect("original binding");
     let route = format!("/api/v1/jobs/{}/duplicate", job["id"].as_str().unwrap());
     let (status,body)=request(app.clone(),"POST",&route,json!({"payloadChanges":{"advanced":{"mossImage":{"acceleration":"full_fp32"},"schedulerShift":5}}})).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
@@ -202,10 +207,78 @@ async fn moss_duplicate_revalidates_merged_controls_and_resets_inherited_mode() 
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
+    let duplicate_binding = state
+        .jobs_store
+        .portable_model_binding(body["id"].as_str().unwrap())
+        .unwrap()
+        .expect("new model binding");
+    assert_ne!(duplicate_binding, original_binding);
+    assert_eq!(
+        duplicate_binding["authoredOptions"]["model"],
+        "moss_image_base"
+    );
     assert_eq!(
         body["payload"]["advanced"]["mossImage"]["acceleration"],
         "off"
     );
+    // Caller-supplied source metadata cannot authorize a missing accelerator component.
+    let (status, refused) = request(
+        app,
+        "POST",
+        &route,
+        json!({"payloadChanges":{
+            "model":"moss_image_base",
+            "modelManifestEntry":{"id":"forged", "downloads":[{"repo":"attacker/model"}]},
+            "advanced":{"mossImage":{"acceleration":"unmerged_bf16"}}
+        }}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+}
+
+#[tokio::test]
+async fn moss_prompt_only_duplicate_keeps_frozen_source_after_catalog_drift() {
+    let _hf = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    setup(&temp);
+    let (app, state) = create_app_with_state(test_settings(&temp)).unwrap();
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"MOSS").await;
+    let (status, original) = request(
+        app,
+        "POST",
+        "/api/v1/image/jobs",
+        json!({"projectId":project["id"], "model":"moss_image_sft", "prompt":"first"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    let original_id = original["id"].as_str().unwrap();
+    let frozen = state
+        .jobs_store
+        .portable_model_binding(original_id)
+        .unwrap()
+        .expect("original binding");
+
+    let manifest_path = temp.path().join("config/manifests/builtin.models.jsonc");
+    let mut catalog: Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    catalog["models"][0]["downloads"][0]["revision"] = json!("1".repeat(40));
+    std::fs::write(manifest_path, catalog.to_string()).unwrap();
+    let (reloaded, reloaded_state) = create_app_with_state(test_settings(&temp)).unwrap();
+    let (status, duplicate) = request(
+        reloaded,
+        "POST",
+        &format!("/api/v1/jobs/{original_id}/duplicate"),
+        json!({"payloadChanges":{"prompt":"second"}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{duplicate}");
+    assert_eq!(duplicate["payload"]["prompt"], "second");
+    let replayed = reloaded_state
+        .jobs_store
+        .portable_model_binding(duplicate["id"].as_str().unwrap())
+        .unwrap()
+        .expect("replayed binding");
+    assert_eq!(replayed, frozen);
 }
 
 #[tokio::test]
@@ -403,26 +476,17 @@ async fn moss_edit_candle_enqueue_requires_exact_package_and_is_actually_claimab
         assert!(!downloads
             .iter()
             .any(|row| row["repo"] == "lodestones/MOSS-Image-SFT-8-steps-dmd"));
-        state
-            .jobs_store
-            .register_worker(sceneworks_core::jobs_store::RegisterWorker {
-                worker_id: "candle-edit-fixture".into(),
-                gpu_id: "0".into(),
-                gpu_name: None,
-                capabilities: vec![
-                    WorkerCapability::Gpu,
-                    WorkerCapability::ImageGenerate,
-                    WorkerCapability::ImageEdit,
-                    WorkerCapability::Unknown("candle".into()),
-                ],
-                loaded_models: vec![],
-                utilization: None,
-            })
-            .unwrap();
+        claim_job_as_worker_on_route(
+            &app,
+            job["id"].as_str().unwrap(),
+            "candle-edit-fixture",
+            &["gpu", "image_generate", "image_edit", "candle"],
+            TestPortableRoute::CandleLinux,
+        )
+        .await;
         let claimed = state
             .jobs_store
-            .claim_next_job("candle-edit-fixture")
-            .unwrap()
+            .get_job(job["id"].as_str().unwrap())
             .expect("Candle worker claims typed edit");
         assert_eq!(claimed.id, job["id"].as_str().unwrap());
         assert_eq!(claimed.payload["referenceAssetIds"], json!([asset["id"]]));
@@ -510,10 +574,17 @@ async fn assert_moss_edit_replay_transitions(action: &str) {
     let manifest_path = temp.path().join("config/manifests/builtin.models.jsonc");
     let mut manifest: Value =
         serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    let flux2_q4_download = sceneworks_core::builtin_manifests::builtin_model_entries()
+        .iter()
+        .find(|model| model["id"] == "flux2_dev")
+        .and_then(|model| model["downloads"].as_array())
+        .and_then(|downloads| downloads.iter().find(|row| row["variant"] == "q4"))
+        .expect("shipped FLUX.2 Dev q4 download")
+        .clone();
     manifest["models"].as_array_mut().unwrap().push(json!({
         "id":"flux2_dev", "name":"FLUX.2 Dev", "type":"image", "family":"flux2",
         "adapter":"flux2_diffusers", "capabilities":["text_to_image","edit_image"],
-        "downloads":[], "paths":{}, "defaults":{"resolution":"512x512","count":1},
+        "downloads":[flux2_q4_download], "paths":{}, "defaults":{"resolution":"512x512","count":1},
         "limits":{"minDimension":16,"maxDimension":4096,"requiresDimensionsMultipleOf":16}, "ui":{}
     }));
     std::fs::write(&manifest_path, manifest.to_string()).unwrap();
@@ -569,6 +640,32 @@ async fn assert_moss_edit_replay_transitions(action: &str) {
                 "server must preserve authored options or insert defaults"
             );
             let route = format!("/api/v1/jobs/{}/{action}", original["id"].as_str().unwrap());
+            if action == "retry" {
+                let (status, replayed) = request(
+                    app.clone(),
+                    "POST",
+                    &route,
+                    json!({"payloadChanges":{"prompt":"a brighter blue cup"}}),
+                )
+                .await;
+                assert_eq!(status, StatusCode::CREATED, "{replayed}");
+                assert_eq!(replayed["payload"]["advanced"]["mossImageEdit"], *options);
+                for changes in [
+                    json!({"model":"flux2_dev"}),
+                    json!({"mode":"text_to_image","referenceAssetIds":[]}),
+                ] {
+                    let (status, rejected) = request(
+                        app.clone(),
+                        "POST",
+                        &route,
+                        json!({"payloadChanges":changes}),
+                    )
+                    .await;
+                    assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+                    assert_eq!(rejected["code"], "model_artifact_incomplete");
+                }
+                continue;
+            }
             let (status, switched) = request(
                 app.clone(),
                 "POST",
@@ -698,7 +795,7 @@ async fn assert_moss_edit_replay_transitions(action: &str) {
 }
 
 #[tokio::test]
-async fn moss_edit_retry_clears_only_inherited_options_when_leaving_moss_edit() {
+async fn moss_edit_retry_preserves_options_and_rejects_source_changes() {
     assert_moss_edit_replay_transitions("retry").await;
 }
 
@@ -763,7 +860,7 @@ async fn moss_edit_mcp_round_trip(reference_count: usize) {
         .await
         .unwrap();
     });
-    let client = rmcp::model::ClientInfo::default()
+    let client = rmcp::model::ClientConfig::default()
         .serve(StreamableHttpClientTransport::from_config(
             StreamableHttpClientTransportConfig::with_uri(format!("http://{addr}/mcp")),
         ))
@@ -1161,7 +1258,7 @@ async fn moss_advanced_owned_npy_mcp_rest_and_portable_reacquisition_preserve_na
         .await
         .unwrap();
     });
-    let client = rmcp::model::ClientInfo::default()
+    let client = rmcp::model::ClientConfig::default()
         .serve(StreamableHttpClientTransport::from_config(
             StreamableHttpClientTransportConfig::with_uri(format!("http://{address}/mcp")),
         ))
@@ -1421,11 +1518,12 @@ async fn water_bottle_edit_survives_api_enqueue_and_candle_claim_with_its_refere
     let (status, job) = request(app.clone(), "POST", "/api/v1/image/jobs", body.clone()).await;
     assert_eq!(status, StatusCode::CREATED, "{job}");
     assert_eq!(job["type"], "image_edit");
-    claim_job_as_worker(
+    claim_job_as_worker_on_route(
         &app,
         job["id"].as_str().unwrap(),
         "bottle-recorder",
         &["gpu", "image_edit", "candle"],
+        TestPortableRoute::CandleLinux,
     )
     .await;
     let claimed = state
@@ -1681,7 +1779,7 @@ async fn moss_consumer_mcp_to_real_api_persists_ordered_slots_without_rendering(
             .await
             .unwrap();
         });
-        let client = rmcp::model::ClientInfo::default()
+        let client = rmcp::model::ClientConfig::default()
             .serve(StreamableHttpClientTransport::from_config(
                 StreamableHttpClientTransportConfig::with_uri(format!("http://{addr}/mcp")),
             ))

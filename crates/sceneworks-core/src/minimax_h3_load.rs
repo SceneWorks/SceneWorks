@@ -45,7 +45,8 @@ pub struct H3SourceAuthority {
 
 #[derive(Debug)]
 struct H3SourceLeases {
-    _source: crate::file_lock::FileLock,
+    _source: Option<crate::file_lock::FileLock>,
+    _portable: Option<std::sync::Arc<crate::file_lock::FileLock>>,
     _derivative: Option<crate::model_artifacts::resolved_cache::ResolvedCacheLease>,
 }
 
@@ -75,7 +76,25 @@ impl H3SourceAuthority {
         derivative: Option<crate::model_artifacts::resolved_cache::ResolvedCacheLease>,
     ) -> Self {
         self._leases = Some(std::sync::Arc::new(H3SourceLeases {
-            _source: source,
+            _source: Some(source),
+            _portable: None,
+            _derivative: derivative,
+        }));
+        self
+    }
+
+    /// Retain a guard-verified portable checkpoint snapshot through native loading, including
+    /// spawned readers that outlive a canceled async owner. The worker's pre-loader guard proved
+    /// the immutable layer bytes and holds this same exclusive attempt lease; no local plan-store
+    /// source lock or second full-file hash is required for the leased copy.
+    pub fn with_portable_lease(
+        mut self,
+        portable: std::sync::Arc<crate::file_lock::FileLock>,
+        derivative: Option<crate::model_artifacts::resolved_cache::ResolvedCacheLease>,
+    ) -> Self {
+        self._leases = Some(std::sync::Arc::new(H3SourceLeases {
+            _source: None,
+            _portable: Some(portable),
             _derivative: derivative,
         }));
         self
@@ -472,6 +491,29 @@ fn members(dir: &Path) -> Result<Vec<PathBuf>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portable_source_lease_outlives_a_canceled_h3_preparation_owner() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("dit.safetensors");
+        let lock_path = temp.path().join("attempt.lock");
+        std::fs::write(&file, b"frozen dit bytes").unwrap();
+        let guard_lease =
+            std::sync::Arc::new(crate::file_lock::FileLock::open_exclusive(&lock_path).unwrap());
+        let authority = authority_over(&file).with_portable_lease(guard_lease.clone(), None);
+        drop(guard_lease);
+        let spawned_reader = authority.clone();
+        drop(authority);
+
+        assert!(
+            crate::file_lock::FileLock::try_open_exclusive(&lock_path).is_err(),
+            "the clone must retain the private attempt lease after its async owner drops"
+        );
+        spawned_reader.validate().unwrap();
+        drop(spawned_reader);
+        crate::file_lock::FileLock::try_open_exclusive(&lock_path)
+            .expect("the final H3 reader releases the private attempt lease");
+    }
 
     fn authority_over(file: &Path) -> H3SourceAuthority {
         let seal = PinnedWeightsFile::pin(file).unwrap();

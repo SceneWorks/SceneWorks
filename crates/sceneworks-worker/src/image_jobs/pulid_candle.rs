@@ -355,7 +355,16 @@ pub(super) async fn generate_candle_pulid_stream(
         reference_id,
         project_path,
     )?;
-    let (adapter, eva, face_dir) = ensure_pulid_candle_weights(api, settings, job).await?;
+    let mut _portable_face_lease = None;
+    let (adapter, eva, face_dir) =
+        if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
+            let (adapter, eva, face_dir, lease) =
+                crate::portable_aux_sources::bound_pulid_weights(&request.advanced)?;
+            _portable_face_lease = Some(lease);
+            (adapter, eva, face_dir)
+        } else {
+            ensure_pulid_candle_weights(api, settings, job).await?
+        };
 
     // Identity-likeness scoring (epic 4406, sc-4411 plain With-Character): the candle PuLID-FLUX lane
     // serves the single-identity `character_image` path (one identity image per seed) and has no

@@ -1,5 +1,32 @@
 use super::*;
 
+pub(crate) struct AuthenticatedWorkerClaims {
+    pub(crate) claims: Vec<sceneworks_core::model_artifacts::portable_binding::PortableSourceClaim>,
+    pub(crate) seen_at: std::time::Instant,
+}
+
+pub(crate) fn presented_worker_proof(
+    state: &AppState,
+    worker_id: &str,
+    extra: &sceneworks_core::contracts::ExtraFields,
+) -> Result<bool, ApiError> {
+    use subtle::ConstantTimeEq;
+    let Some(supplied) = extra.get("portableProofKey").and_then(Value::as_str) else {
+        return Ok(false);
+    };
+    let expected = sceneworks_core::worker_proof::derive_worker_key(
+        &state.portable_worker_proof_master,
+        worker_id,
+    )
+    .map_err(|_| ApiError::bad_request("Invalid worker source capability"))?;
+    if supplied.len() != expected.len()
+        || !bool::from(supplied.as_bytes().ct_eq(expected.as_bytes()))
+    {
+        return Err(ApiError::bad_request("Invalid worker source capability"));
+    }
+    Ok(true)
+}
+
 pub(crate) async fn queue_summary(
     State(state): State<AppState>,
 ) -> Result<Json<QueueSummary>, ApiError> {
@@ -163,17 +190,42 @@ pub(crate) async fn register_worker(
     State(state): State<AppState>,
     ApiJson(payload): ApiJson<WorkerRegisterRequest>,
 ) -> Result<Json<WorkerSnapshot>, ApiError> {
+    let worker_id = payload.worker_id.clone();
+    let keyed = presented_worker_proof(&state, &worker_id, &payload.extra)?;
+    let mut authenticated = state.authenticated_worker_claims.lock().await;
+    if !keyed && authenticated.contains_key(&worker_id) {
+        return Err(ApiError::bad_request("Worker source proof is required"));
+    }
+    let submitted_claims = payload.portable_source_claims.clone().unwrap_or_default();
     let worker = store_call(state.clone(), move |store, _timeout| {
-        store.register_worker(RegisterWorker {
-            worker_id: payload.worker_id,
-            gpu_id: payload.gpu_id,
-            gpu_name: payload.gpu_name,
-            capabilities: payload.capabilities,
-            loaded_models: payload.loaded_models,
-            utilization: payload.utilization,
-        })
+        let worker = store.register_worker_with_portable_sources(
+            RegisterWorker {
+                worker_id: payload.worker_id,
+                gpu_id: payload.gpu_id,
+                gpu_name: payload.gpu_name,
+                capabilities: payload.capabilities,
+                loaded_models: payload.loaded_models,
+                utilization: payload.utilization,
+            },
+            payload.platform.as_deref(),
+            payload.portable_source_claims.as_deref(),
+        )?;
+        if keyed {
+            store.set_worker_source_proof_authenticated(&worker.id, true)?;
+        }
+        Ok(worker)
     })
     .await?;
+    if keyed {
+        authenticated.insert(
+            worker_id,
+            AuthenticatedWorkerClaims {
+                claims: submitted_claims,
+                seen_at: std::time::Instant::now(),
+            },
+        );
+    }
+    drop(authenticated);
     publish(&state, "worker.updated", &worker);
     publish_queue(&state).await?;
     Ok(Json(worker))
@@ -184,17 +236,45 @@ pub(crate) async fn heartbeat_worker(
     Path(worker_id): Path<String>,
     ApiJson(payload): ApiJson<WorkerHeartbeatRequest>,
 ) -> Result<Json<WorkerSnapshot>, ApiError> {
+    let keyed = presented_worker_proof(&state, &worker_id, &payload.extra)?;
+    let mut authenticated = state.authenticated_worker_claims.lock().await;
+    if !keyed && authenticated.contains_key(&worker_id) {
+        return Err(ApiError::bad_request("Worker source proof is required"));
+    }
+    let authenticated_worker_id = worker_id.clone();
+    let stored_worker_id = worker_id.clone();
+    let submitted_claims = payload.portable_source_claims.clone();
     let outcome = store_call(state.clone(), move |store, _timeout| {
-        store.heartbeat_worker(WorkerHeartbeat {
-            worker_id,
-            status: payload.status,
-            current_job_id: payload.current_job_id,
-            loaded_models: payload.loaded_models,
-            utilization: payload.utilization,
-            status_reason: payload.status_reason,
-        })
+        let outcome = store.heartbeat_worker_with_portable_sources(
+            WorkerHeartbeat {
+                worker_id,
+                status: payload.status,
+                current_job_id: payload.current_job_id,
+                loaded_models: payload.loaded_models,
+                utilization: payload.utilization,
+                status_reason: payload.status_reason,
+            },
+            payload.portable_source_claims.as_deref(),
+        )?;
+        if keyed {
+            store.set_worker_source_proof_authenticated(&stored_worker_id, true)?;
+        }
+        Ok(outcome)
     })
     .await?;
+    if keyed {
+        let prior = authenticated.remove(&authenticated_worker_id);
+        authenticated.insert(
+            authenticated_worker_id,
+            AuthenticatedWorkerClaims {
+                claims: submitted_claims
+                    .or_else(|| prior.map(|entry| entry.claims))
+                    .unwrap_or_default(),
+                seen_at: std::time::Instant::now(),
+            },
+        );
+    }
+    drop(authenticated);
     // An idle heartbeat from a restarted worker terminates the job its previous
     // incarnation was running. Announce that job, exactly as `handle_stale_sweep`
     // does for the time-based sweep (sc-18182): the web client is SSE-driven and does
@@ -219,6 +299,100 @@ pub(crate) async fn heartbeat_worker(
     }
     publish(&state, "worker.updated", &outcome.worker);
     Ok(Json(outcome.worker))
+}
+
+pub(crate) async fn portable_source_challenges(
+    State(state): State<AppState>,
+    Path(worker_id): Path<String>,
+    ApiJson(probe): ApiJson<PortableSourceChallengeAccess>,
+) -> Result<Json<Vec<crate::portable_admission::PortableSourceChallenge>>, ApiError> {
+    verify_worker_source_capability(&state, &worker_id, &probe.capability)?;
+    if !state
+        .authenticated_worker_claims
+        .lock()
+        .await
+        .contains_key(&worker_id)
+    {
+        return Err(ApiError::bad_request("Worker source proof is required"));
+    }
+    state
+        .jobs_store
+        .get_worker(&worker_id)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    Ok(Json(
+        crate::portable_admission::pending_portable_source_challenges(&state, &worker_id),
+    ))
+}
+
+fn verify_worker_source_capability(
+    state: &AppState,
+    worker_id: &str,
+    supplied: &str,
+) -> Result<(), ApiError> {
+    use subtle::ConstantTimeEq;
+    let expected = sceneworks_core::worker_proof::derive_worker_key(
+        &state.portable_worker_proof_master,
+        worker_id,
+    )
+    .map_err(|_| ApiError::bad_request("Invalid worker source capability"))?;
+    if expected.len() != supplied.len()
+        || !bool::from(expected.as_bytes().ct_eq(supplied.as_bytes()))
+    {
+        return Err(ApiError::bad_request("Invalid worker source capability"));
+    }
+    Ok(())
+}
+
+pub(crate) async fn publish_portable_source_proof(
+    State(state): State<AppState>,
+    Path(worker_id): Path<String>,
+    ApiJson(proof): ApiJson<PortableSourceChallengeProof>,
+) -> Result<Json<Value>, ApiError> {
+    use subtle::ConstantTimeEq;
+    verify_worker_source_capability(&state, &worker_id, &proof.capability)?;
+    if !state
+        .authenticated_worker_claims
+        .lock()
+        .await
+        .contains_key(&worker_id)
+    {
+        return Err(ApiError::bad_request("Worker source proof is required"));
+    }
+    let mut pending = state.portable_source_challenges.lock();
+    if let Some(challenge) = pending.get_mut(&proof.id).filter(|challenge| {
+        challenge.allowed_worker_ids.contains(&worker_id)
+            && challenge
+                .expires_at
+                .is_some_and(|until| until > std::time::Instant::now())
+    }) {
+        if let Ok(expected) =
+            sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(
+                &challenge.files,
+            )
+        {
+            if expected.len() == proof.ledger_sha256.len()
+                && bool::from(expected.as_bytes().ct_eq(proof.ledger_sha256.as_bytes()))
+            {
+                challenge.proved_worker_ids.insert(worker_id);
+            }
+        }
+    }
+    // A valid worker key receives no source-matching oracle; success and mismatch look identical.
+    Ok(Json(json!({"ok":true})))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PortableSourceChallengeAccess {
+    capability: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PortableSourceChallengeProof {
+    id: String,
+    capability: String,
+    ledger_sha256: String,
 }
 
 /// The supervisor reports a worker child that terminated abnormally — killed by an

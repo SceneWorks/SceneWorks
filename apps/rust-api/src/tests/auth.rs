@@ -125,6 +125,143 @@ async fn access_token_is_enforced_on_protected_routes() {
 }
 
 #[tokio::test]
+async fn worker_source_challenges_require_a_distinct_worker_key_and_route_scope() {
+    use crate::portable_admission::PortableSourceChallenge;
+    use sceneworks_core::model_artifacts::portable_binding::{
+        portable_file_ledger_sha256, PortableArtifactFile,
+    };
+    use std::collections::BTreeSet;
+    use std::time::{Duration, Instant};
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut settings = test_settings(&temp);
+    settings.access_token = "ordinary-api-token".to_owned();
+    let master =
+        sceneworks_core::worker_proof::load_or_create_master(&settings.credentials_dir).unwrap();
+    let key = sceneworks_core::worker_proof::derive_worker_key(&master, "proof-worker").unwrap();
+    let (app, state) = crate::create_app_with_state(settings).unwrap();
+    let auth = &[("x-sceneworks-token", "ordinary-api-token")];
+    let register = json!({
+        "workerId":"proof-worker","gpuId":"cpu","platform":std::env::consts::OS,
+        "capabilities":[],"loadedModels":[],"portableProofKey":key
+    });
+    assert_eq!(
+        request_with_headers(
+            app.clone(),
+            "POST",
+            "/api/v1/workers/register",
+            register,
+            auth
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    let file = PortableArtifactFile {
+        relative_path: "private-model.safetensors".into(),
+        size_bytes: 3,
+        sha256: format!("sha256:{}", "a".repeat(64)),
+    };
+    let ledger = portable_file_ledger_sha256(std::slice::from_ref(&file)).unwrap();
+    state.portable_source_challenges.lock().insert(
+        "probe-1".to_owned(),
+        PortableSourceChallenge {
+            id: "probe-1".to_owned(),
+            source_id: "logical-source".to_owned(),
+            files: vec![file],
+            expires_at: Some(Instant::now() + Duration::from_secs(30)),
+            proved_worker_ids: BTreeSet::new(),
+            allowed_worker_ids: BTreeSet::from(["proof-worker".to_owned()]),
+        },
+    );
+    let path = "/api/v1/workers/proof-worker/portable-source-challenges";
+    let (denied, body) = request_with_headers(
+        app.clone(),
+        "POST",
+        path,
+        json!({"capability":"b".repeat(64)}),
+        auth,
+    )
+    .await;
+    assert_eq!(denied, StatusCode::BAD_REQUEST);
+    assert!(body.to_string().find("private-model").is_none());
+    let (ok, body) =
+        request_with_headers(app.clone(), "POST", path, json!({"capability":key}), auth).await;
+    assert_eq!(ok, StatusCode::OK);
+    assert_eq!(
+        body[0]["files"][0]["relativePath"],
+        "private-model.safetensors"
+    );
+    let other_key =
+        sceneworks_core::worker_proof::derive_worker_key(&master, "other-worker").unwrap();
+    assert_eq!(
+        request_with_headers(
+            app.clone(),
+            "POST",
+            "/api/v1/workers/register",
+            json!({"workerId":"other-worker","gpuId":"cpu","platform":std::env::consts::OS,
+            "capabilities":[],"loadedModels":[],"portableProofKey":other_key}),
+            auth
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (other_status, other_body) = request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/other-worker/portable-source-challenges",
+        json!({"capability":other_key}),
+        auth,
+    )
+    .await;
+    assert_eq!(other_status, StatusCode::OK);
+    assert_eq!(other_body, json!([]));
+
+    let proof = "/api/v1/workers/proof-worker/portable-source-proof";
+    assert_eq!(request_with_headers(app.clone(), "POST", proof,
+        json!({"id":"probe-1","capability":key,"ledgerSha256":format!("sha256:{}", "b".repeat(64))}), auth).await.0, StatusCode::OK);
+    assert!(state.portable_source_challenges.lock()["probe-1"]
+        .proved_worker_ids
+        .is_empty());
+    assert_eq!(
+        request_with_headers(
+            app.clone(),
+            "POST",
+            proof,
+            json!({"id":"probe-1","capability":key,"ledgerSha256":ledger}),
+            auth
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert!(state.portable_source_challenges.lock()["probe-1"]
+        .proved_worker_ids
+        .contains("proof-worker"));
+
+    let (spoof, _) = request_with_headers(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({"workerId":"proof-worker","gpuId":"cpu","capabilities":[],"loadedModels":[]}),
+        auth,
+    )
+    .await;
+    assert_eq!(spoof, StatusCode::BAD_REQUEST);
+    let (spoof_claim, _) = request_with_headers(
+        app,
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({"workerId":"proof-worker","portableModelBindingVersion":2}),
+        auth,
+    )
+    .await;
+    assert_eq!(spoof_claim, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn public_health_withholds_host_paths_when_a_token_is_configured() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
 

@@ -75,6 +75,10 @@ fn installed_export(data_dir: &Path, subdir: &str) -> Option<PathBuf> {
         .then_some(dir)
 }
 
+pub(crate) fn iris_depth_parent_export_dir(data_dir: &Path) -> Option<PathBuf> {
+    installed_export(data_dir, DEPTH_SUBDIR)
+}
+
 /// The generation backbone directory (`config.yaml` + `model.safetensors` at the snapshot root).
 fn installed_backbone(data_dir: &Path) -> Option<PathBuf> {
     let dir = pinned_snapshot(data_dir, UPSTREAM_WEIGHTS_REPO, UPSTREAM_WEIGHTS_REVISION)?;
@@ -86,7 +90,7 @@ fn installed_backbone(data_dir: &Path) -> Option<PathBuf> {
 
 /// The generation install's Qwen3-VL text encoder snapshot (its pinned `text_encoder`
 /// co-requisite), when installed.
-fn installed_generation_text_encoder(data_dir: &Path) -> Option<PathBuf> {
+pub(crate) fn installed_generation_text_encoder(data_dir: &Path) -> Option<PathBuf> {
     let entry = crate::training_jobs::builtin_model_manifest_entry("iris_3b")?;
     let download = entry
         .get("downloads")?
@@ -460,10 +464,41 @@ pub fn iris_task_training_unavailable(
 
 /// Resolve (and integrity-check) what a task trainer loads. Blocking: a restoration run hashes the
 /// three training resources against their pins.
+#[cfg(test)]
 pub(crate) fn task_load_inputs(
     settings: &crate::Settings,
     objective: IrisObjective,
     config: &sceneworks_core::training::TrainingConfig,
+) -> Result<TaskLoadInputs, String> {
+    task_load_inputs_bound(settings, objective, config, None)
+}
+
+fn bound_depth_parent_conditioning(paths: &Value) -> Result<(String, WeightsSource), String> {
+    let path = paths
+        .get("iris_depth_parent")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .ok_or("portable Iris depth parent conditioning is not bound")?;
+    if path.join(EMPTY_PROMPT_FILE).is_file() {
+        Ok((
+            depth_train::EMPTY_PROMPT_COMPONENT.to_owned(),
+            WeightsSource::File(path.join(EMPTY_PROMPT_FILE)),
+        ))
+    } else if path.join("config.json").is_file() {
+        Ok((
+            gen_core_iris::TEXT_ENCODER_COMPONENT.to_owned(),
+            WeightsSource::Dir(path),
+        ))
+    } else {
+        Err("portable Iris depth parent conditioning has no recognized frozen source".to_owned())
+    }
+}
+
+pub(crate) fn task_load_inputs_bound(
+    settings: &crate::Settings,
+    objective: IrisObjective,
+    config: &sceneworks_core::training::TrainingConfig,
+    bound_aux_paths: Option<&Value>,
 ) -> Result<TaskLoadInputs, String> {
     let data_dir = &settings.data_dir;
     if let Some(refusal) = iris_task_training_unavailable(data_dir, objective, config) {
@@ -475,22 +510,27 @@ pub(crate) fn task_load_inputs(
         IrisObjective::Depth => {
             if depth_init(config).ok() == Some(DEPTH_INIT_PARENT) {
                 let backbone = installed_backbone(data_dir).expect("checked above");
-                match installed_export(data_dir, DEPTH_SUBDIR) {
-                    // Prefer the shipped conditioning: no text encoder at all.
-                    Some(export) => {
-                        components.insert(
-                            depth_train::EMPTY_PROMPT_COMPONENT.to_owned(),
-                            WeightsSource::File(export.join(EMPTY_PROMPT_FILE)),
-                        );
-                    }
-                    // Else encode `""` once with the generation install's text encoder.
-                    None => {
-                        let encoder =
-                            installed_generation_text_encoder(data_dir).expect("checked above");
-                        components.insert(
-                            gen_core_iris::TEXT_ENCODER_COMPONENT.to_owned(),
-                            WeightsSource::Dir(encoder),
-                        );
+                if let Some(paths) = bound_aux_paths {
+                    let (component_id, source) = bound_depth_parent_conditioning(paths)?;
+                    components.insert(component_id, source);
+                } else {
+                    match installed_export(data_dir, DEPTH_SUBDIR) {
+                        // Prefer the shipped conditioning: no text encoder at all.
+                        Some(export) => {
+                            components.insert(
+                                depth_train::EMPTY_PROMPT_COMPONENT.to_owned(),
+                                WeightsSource::File(export.join(EMPTY_PROMPT_FILE)),
+                            );
+                        }
+                        // Else encode `""` once with the generation install's text encoder.
+                        None => {
+                            let encoder =
+                                installed_generation_text_encoder(data_dir).expect("checked above");
+                            components.insert(
+                                gen_core_iris::TEXT_ENCODER_COMPONENT.to_owned(),
+                                WeightsSource::Dir(encoder),
+                            );
+                        }
                     }
                 }
                 backbone
@@ -827,6 +867,26 @@ pub fn iris_task_dataset_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frozen_depth_parent_conditioning_selects_only_its_bound_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let export = temp.path().join("depth");
+        let encoder = temp.path().join("encoder");
+        std::fs::create_dir_all(&export).unwrap();
+        std::fs::create_dir_all(&encoder).unwrap();
+        std::fs::write(export.join(EMPTY_PROMPT_FILE), b"states").unwrap();
+        std::fs::write(encoder.join("config.json"), b"{}").unwrap();
+        let (id, source) =
+            bound_depth_parent_conditioning(&json!({"iris_depth_parent":export})).unwrap();
+        assert_eq!(id, depth_train::EMPTY_PROMPT_COMPONENT);
+        assert!(matches!(source, WeightsSource::File(_)));
+        let (id, source) =
+            bound_depth_parent_conditioning(&json!({"iris_depth_parent":encoder})).unwrap();
+        assert_eq!(id, gen_core_iris::TEXT_ENCODER_COMPONENT);
+        assert!(matches!(source, WeightsSource::Dir(_)));
+        assert!(bound_depth_parent_conditioning(&json!({})).is_err());
+    }
 
     fn write_npy(path: &Path, h: usize, w: usize, f: impl Fn(usize, usize) -> f32) {
         let mut header =
