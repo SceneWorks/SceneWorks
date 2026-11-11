@@ -58399,6 +58399,7 @@
       "gated": false,
       "id": "realvisxl_lightning",
       "image": {
+        "supportsHiresFix": false,
         "supportsSchedulerShift": false
       },
       "limits": {

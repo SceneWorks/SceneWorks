@@ -8,7 +8,7 @@ use serde_json::{Map, Value};
 mod spec;
 #[cfg(test)]
 pub(crate) use spec::GeneratorRoute;
-pub use spec::{ModelSpec, RoutePolicy};
+pub use spec::{supports_hires_fix, ModelSpec, RoutePolicy};
 #[allow(dead_code)]
 // Build-time parser validates the serialized policy; runtime reads that projection.
 mod memory_route_policy;

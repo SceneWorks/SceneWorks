@@ -9629,8 +9629,10 @@
       "id": "realvisxl_lightning",
       "name": "RealVisXL Lightning (fast photoreal SDXL)",
       "family": "sdxl",
-      // This native route has no flow-schedule Shift parameter.
-      "image": { "supportsSchedulerShift": false },
+      // This native route has no flow-schedule Shift parameter. The Lightning distillation is
+      // baked into the weights, so the checkpoint cannot run Hires.fix's img2img second pass
+      // whatever its default step count.
+      "image": { "supportsSchedulerShift": false, "supportsHiresFix": false },
       "type": "image",
       "adapter": "sdxl_diffusers",
       // Few-step distilled sibling of RealVisXL_V5.0 (sc-6075). A STANDALONE checkpoint

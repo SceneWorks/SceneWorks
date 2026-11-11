@@ -2070,6 +2070,10 @@
                 "type": "boolean",
                 "description": "Does the native provider consume a schedule-shift override? The control remains visible independently of the scheduler menu. False disables it and the API refuses an override. A blank value retains the native grid; explicit overrides must be finite and positive."
               },
+              "supportsHiresFix": {
+                "type": "boolean",
+                "description": "Does the checkpoint accept Hires.fix's img2img second pass? False for a few-step distilled checkpoint whose baked-in schedule cannot re-noise and denoise a partial pass (RealVisXL Lightning). ABSENT MEANS TRUE. A product fact of the checkpoint, not an author choice: user.models.jsonc cannot change it. When false, Image Studio disables Hires.fix and the API refuses a Hires.fix request for the model."
+              },
               "supportsCfgInterval": {
                 "type": "boolean",
                 "description": "Does the engine gate classifier-free guidance to a model-time interval `advanced.cfgInterval: [start, end]` (0 <= start < end <= 1; model time runs from 1 = noise to 0 = clean) (Iris-3B, sc-25681)? ABSENT MEANS FALSE: the API refuses an interval for a model that does not declare it, and refuses any interval at guidance 1.0, where it would have no effect."
