@@ -13551,7 +13551,10 @@ fn interleave_job_validation_bounds_prompt_images_and_assets() {
 #[tokio::test]
 async fn worker_heartbeat_interrupts_previous_active_job_through_http() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    // Admission captures the job's pinned source metadata; the offline fixture answers it, so the
+    // test neither calls huggingface.co nor reads another test's metadata endpoint from the env.
+    let (app, _) =
+        jobs_fixture_app_with_pinned_metadata(test_settings(&temp_dir)).expect("app creates");
     request(
         app.clone(),
         "POST",
