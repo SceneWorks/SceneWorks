@@ -3886,6 +3886,7 @@ fn seed_minimax_packed_text_encoder(data_dir: &std::path::Path, tier: &str) {
 
 #[tokio::test]
 async fn minimax_h3_tier_download_fetches_one_partition_plus_the_whole_shared_floor() {
+    let _env = isolate_hf_cache();
     // sc-19078 — the on-demand tier fetch, per entry and per tier. `SceneWorks/minimax-h3-mlx` is
     // 240.7 GB in total, so a tier install must pull exactly ONE TIER: q8 here is 70.6 GB of DiT
     // against 240.7 GB for the repo. The co-requisites are the weights FLOOR and must be queued
@@ -5264,6 +5265,7 @@ async fn mmaudio_repo_rename_requires_the_exact_confined_current_snapshot() {
 
 #[tokio::test]
 async fn model_download_job_forwards_pinned_revision_for_co_requisite() {
+    let _env = isolate_hf_cache();
     // chatterbox_tts is registered and its compiled row pins its primary download, so the 'primary
     // declares no revision' half cannot be authored for it. The planner rule is model-agnostic, so
     // the same row shape is authored under an unregistered id.

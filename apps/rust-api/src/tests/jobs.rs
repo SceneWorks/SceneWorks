@@ -8104,6 +8104,7 @@ async fn create_audio_job_maps_the_full_yue_control_set() {
 /// on a model that does not declare them, and the controls YuE does not read are refused on YuE.
 #[tokio::test]
 async fn create_audio_job_rejects_invalid_yue_requests() {
+    let _env = isolate_hf_cache();
     let (_temp_dir, app, project_id) = yue_audio_app().await;
     let lyrics = "[verse]\nla la la";
     let cases: Vec<(&str, Value, &str)> = vec![
@@ -15707,6 +15708,7 @@ async fn qwen_image_2_1_edit_validates_the_whole_ordered_conditioning_list() {
 /// from a single sigma grid point.
 #[tokio::test]
 async fn video_steps_under_the_post_preset_models_hard_floor_is_rejected() {
+    let _env = isolate_hf_cache();
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
@@ -15919,6 +15921,7 @@ async fn video_steps_under_the_post_preset_models_hard_floor_is_rejected() {
 /// platform-dependent. Nothing about the step-menu contract changed; only the id it is asserted on.
 #[tokio::test]
 async fn video_steps_off_the_post_preset_models_exact_menu_is_rejected() {
+    let _env = isolate_hf_cache();
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");

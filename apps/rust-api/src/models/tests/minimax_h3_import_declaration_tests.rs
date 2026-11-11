@@ -87,6 +87,7 @@ fn seed_registered_h3_component(
 
 #[tokio::test]
 async fn explicit_three_partitions_are_queued_with_persisted_catalog_fields() {
+    let _env = isolate_hf_cache();
     let temp = tempfile::tempdir().unwrap();
     let app = app(&temp);
     for (partition, base) in [
