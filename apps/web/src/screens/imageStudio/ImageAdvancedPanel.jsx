@@ -5,7 +5,7 @@ import React from "react";
 import { AdvancedSection } from "../../components/AdvancedSection.jsx";
 import { minStepsForModel } from "../../videoModelLimits.js";
 import { showTransparencyToggle, transparencyPromptSuggestion, TRANSPARENCY_PROMPT_HINT } from "../../qwenAlpha.js";
-import { CAPTION_OVERFLOW_LABELS } from "./samplingControls.js";
+import { CAPTION_OVERFLOW_LABELS, H3_IMAGE_LCM_FIELDS, H3_IMAGE_SAMPLER_LABELS } from "./samplingControls.js";
 import { upscaleEngineHasSoftness, upscaleEngineIsRestoration, upscaleFactorsForEngine } from "../../upscaleEngines.js";
 import { irisRestoreControls } from "../../irisRestore.js";
 import { IrisRestoreControls } from "../../components/IrisRestoreControls.jsx";
@@ -59,6 +59,10 @@ export function ImageAdvancedPanel({
   captionOverflowChoices,
   setCaptionOverflow,
   outgoingCaptionOverflow,
+  showH3ImageSampler,
+  h3ImageSampler,
+  setH3ImageSampler,
+  h3ImageSamplerError,
   supportsTextStyle,
   textStyleGainConfig,
   setTextStyleGain,
@@ -277,6 +281,45 @@ export function ImageAdvancedPanel({
                     ))}
                   </select>
                 </label>
+              ) : null}
+              {/* SW-7106: MiniMax-H3-Image's sampler. Euler is the released deterministic step;
+                  LCM re-noises each step's clean estimate with a noise scale ramping from start
+                  to end, optionally clipped. Shown only for a model that declares it. */}
+              {showH3ImageSampler ? (
+                <>
+                  <label>
+                    Sampler
+                    <select
+                      aria-label="MiniMax-H3-Image sampler"
+                      onChange={(event) => setH3ImageSampler((current) => ({ ...current, sampler: event.target.value }))}
+                      value={h3ImageSampler.sampler}
+                    >
+                      {Object.entries(H3_IMAGE_SAMPLER_LABELS).map(([value, label]) => (
+                        <option key={value} value={value}>{label}</option>
+                      ))}
+                    </select>
+                  </label>
+                  {h3ImageSampler.sampler === "lcm" ? (
+                    <>
+                      {H3_IMAGE_LCM_FIELDS.map(({ key, label, min, max, step }) => (
+                        <label key={key}>
+                          {label}
+                          <input
+                            max={max}
+                            min={min}
+                            onChange={(event) => setH3ImageSampler((current) => ({ ...current, [key]: event.target.value }))}
+                            step={step}
+                            type="number"
+                            value={h3ImageSampler[key]}
+                          />
+                        </label>
+                      ))}
+                      {h3ImageSamplerError ? (
+                        <span className="field-hint" role="alert">{h3ImageSamplerError}</span>
+                      ) : null}
+                    </>
+                  ) : null}
+                </>
               ) : null}
               {supportsTextStyle ? (
                 <label className="text-style-gain">

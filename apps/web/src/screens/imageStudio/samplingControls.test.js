@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { promptBatchSize, resolveCfgInterval } from "./samplingControls.js";
+import {
+  h3ImageSamplerDefaults,
+  h3ImageSamplerFromRecipe,
+  promptBatchSize,
+  resolveCfgInterval,
+  resolveH3ImageSampler,
+} from "./samplingControls.js";
 
 // sc-25681: Image Studio's Iris-only sampling controls.
 describe("samplingControls", () => {
@@ -36,5 +42,41 @@ describe("samplingControls", () => {
     expect(promptBatchSize(iris, 4)).toBe(2);
     expect(promptBatchSize(iris, 8)).toBe(1);
     expect(promptBatchSize(plain, 1)).toBe(1);
+  });
+});
+
+// SW-7106: MiniMax-H3-Image's sampler control.
+describe("MiniMax-H3-Image sampler", () => {
+  const h3 = { image: { supportsH3ImageSampler: true } };
+  const lcm = { ...h3ImageSamplerDefaults(), sampler: "lcm" };
+
+  it("defaults to Euler with the LCM fields at 1.1 / 0.9 / 0", () => {
+    expect(h3ImageSamplerDefaults()).toEqual({ sampler: "euler", sNoise: 1.1, sNoiseEnd: 0.9, noiseClipStd: 0 });
+  });
+
+  it("sends no block for Euler or for a model without the control", () => {
+    expect(resolveH3ImageSampler({ model: h3, options: h3ImageSamplerDefaults() })).toEqual({ block: null, error: null });
+    expect(resolveH3ImageSampler({ model: { image: {} }, options: lcm })).toEqual({ block: null, error: null });
+  });
+
+  it("sends LCM's numeric fields and names the first out-of-range one", () => {
+    expect(resolveH3ImageSampler({ model: h3, options: { ...lcm, sNoise: "1.25", noiseClipStd: "2" } }).block).toEqual({
+      sampler: "lcm", sNoise: 1.25, sNoiseEnd: 0.9, noiseClipStd: 2,
+    });
+    for (const [patch, label] of [
+      [{ sNoise: "0" }, "Noise scale start must be between 0.01 and 2."],
+      [{ sNoise: "" }, "Noise scale start must be between 0.01 and 2."],
+      [{ sNoiseEnd: "-0.1" }, "Noise scale end must be between 0 and 2."],
+      [{ noiseClipStd: "4.5" }, "Noise clip (std, 0 = off) must be between 0 and 4."],
+    ]) {
+      expect(resolveH3ImageSampler({ model: h3, options: { ...lcm, ...patch } })).toEqual({ block: null, error: label });
+    }
+  });
+
+  it("restores a recorded block, with the engine's defaults for omitted LCM fields", () => {
+    expect(h3ImageSamplerFromRecipe(undefined)).toEqual(h3ImageSamplerDefaults());
+    expect(h3ImageSamplerFromRecipe({ sampler: "lcm", sNoise: 1.3 })).toEqual({
+      sampler: "lcm", sNoise: 1.3, sNoiseEnd: 1.3, noiseClipStd: 0,
+    });
   });
 });

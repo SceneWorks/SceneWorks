@@ -9,6 +9,7 @@ import { noPresetId } from "../../presetUtils.js";
 import { quantizeTier } from "../../quantTier.js";
 import { finiteRecipeNumber, recipeImageDimensionIntent, recipeLoraSelection, recipeResolution } from "../../recipeFields.js";
 import { irisControlsFromRecord } from "../../irisRestore.js";
+import { h3ImageSamplerFromRecipe } from "./samplingControls.js";
 
 // Pure launch normalization: absence stays absent; repeated writes resolve in their
 // original order (ordinary MOSS settings intentionally override generic knobs).
@@ -152,6 +153,8 @@ export function recipeToStudioPatch(launchRequest, { model, recipeMode, mossEdit
   // sc-25681: the recorded CFG interval / caption-overflow policy (absent = the model's own).
   values.cfgInterval = rawSettings.cfgInterval?.join?.(", ") ?? "";
   values.captionOverflow = rawSettings.captionOverflow ?? "default";
+  // SW-7106: the recorded MiniMax-H3-Image sampler (absent = Euler, the default).
+  values.h3ImageSampler = h3ImageSamplerFromRecipe(rawSettings.h3ImageSampler);
   // sc-25681: an image of a native prompt batch reopens the whole batch.
   const batch = replayPromptBatch;
   const replayBatch = !(replayMossEdit && rawSettings.mossImageAdvanced) && Array.isArray(batch) && batch.length > 1;

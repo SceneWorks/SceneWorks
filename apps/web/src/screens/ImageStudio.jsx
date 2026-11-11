@@ -120,7 +120,7 @@ import { finiteNumberOrUndefined, findModelEditLora, loraIsInstalled, serializeL
 import { PresetStackPreview, useGenerationStudio, useQuantTierPicker, useSavePreset } from "../components/generationStudio.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { useBatchPromptState } from "./imageStudio/useBatchPromptState.js";
-import { resolveCfgInterval } from "./imageStudio/samplingControls.js";
+import { h3ImageSamplerDefaults, resolveCfgInterval, resolveH3ImageSampler, supportsH3ImageSampler } from "./imageStudio/samplingControls.js";
 import { usePidState, useStrictControlState } from "./imageStudio/useImageControlState.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { imageBatchValidation, imageGenerateValidation } from "../imageStudioValidation.js";
@@ -563,6 +563,8 @@ export function ImageStudio() {
   // overflow policy ("default" = the checkpoint's own), for a model that declares them (Iris-3B).
   const [cfgInterval, setCfgInterval] = useState(saved.cfgInterval ?? "");
   const [captionOverflow, setCaptionOverflow] = useState(saved.captionOverflow ?? "default");
+  // SW-7106: MiniMax-H3-Image's sampler (Euler default, or LCM with its noise-scale ramp + clip).
+  const [h3ImageSampler, setH3ImageSampler] = useState(() => ({ ...h3ImageSamplerDefaults(), ...saved.h3ImageSampler }));
   // Guidance method (epic 7434). "cfg" is the engine-standard no-op default; the
   // picker only surfaces alternatives a model advertises on the active backend
   // (CFG++ on the SDXL family / MLX). Rides `advanced.guidanceMethod`.
@@ -1543,6 +1545,11 @@ export function ImageStudio() {
     guidanceOverride,
   });
   const captionOverflowChoices = selectedModel?.image?.captionOverflowPolicies ?? [];
+  const showH3ImageSampler = supportsH3ImageSampler(selectedModel);
+  const { block: outgoingH3ImageSampler, error: h3ImageSamplerError } = resolveH3ImageSampler({
+    model: selectedModel,
+    options: h3ImageSampler,
+  });
   const outgoingCaptionOverflow = captionOverflowChoices.includes(captionOverflow)
     ? captionOverflow
     : "default";
@@ -1610,6 +1617,7 @@ export function ImageStudio() {
     setSchedulerShift(mossEdit ? 5 : null);
     setCfgInterval("");
     setCaptionOverflow("default");
+    setH3ImageSampler(h3ImageSamplerDefaults());
     setGuidanceMethod(
       preferredOption(guidanceMethodDefaultFromModel(selectedModel), guidanceMethodOptions, [], { empty: "default" }),
     );
@@ -1920,6 +1928,7 @@ export function ImageStudio() {
   setSchedulerShift,
   setCfgInterval,
   setCaptionOverflow,
+  setH3ImageSampler,
   setBatchMode,
   setBatchPromptsText,
   setGuidanceMethod,
@@ -2286,6 +2295,7 @@ export function ImageStudio() {
     schedulerShiftExplicit,
     cfgInterval,
     captionOverflow,
+    h3ImageSampler,
     guidanceMethod,
     steps: stepsOverride,
     guidanceScale: guidanceOverride,
@@ -2333,6 +2343,7 @@ export function ImageStudio() {
     if (decoderCapabilitiesPending) return "Waiting for engine capabilities before using the restored decoder.";
     if (dimensionsInvalid || hiresFixTargetInvalid) return hiresFixTargetMessage || dimensionError || "Width and height must each be between 256 and 4096.";
     if (cfgIntervalError) return cfgIntervalError;
+    if (h3ImageSamplerError) return h3ImageSamplerError;
     if (macActiveModeBlock) return macActiveModeBlock.text;
     const validity = kind === "batch" ? batchValidity : generateValidity;
     if (!validity.ready) return validity.surfaced[0]?.message || "Complete the required fields before generating.";
@@ -2548,6 +2559,7 @@ export function ImageStudio() {
       supportsSchedulerShift,
       cfgInterval: resolvedCfgInterval,
       captionOverflow: outgoingCaptionOverflow,
+      h3ImageSampler: outgoingH3ImageSampler,
       stepsOverride: stepsFixed ? "" : stepsOverride,
       // Same rule for the guidance axis (sc-15299): a CFG-free engine never receives a scale, so
       // the override is blanked before it reaches the builder and `advanced.guidanceScale` is
@@ -3444,7 +3456,8 @@ export function ImageStudio() {
 
             setSampler={setSampler}
             sampler={sampler}
-            samplerOptions={samplerOptions}
+            // SW-7106: MiniMax-H3-Image picks its sampler through its own control, not the menu.
+            samplerOptions={showH3ImageSampler ? [] : samplerOptions}
 
             setScheduler={setScheduler}
             scheduler={scheduler}
@@ -3468,6 +3481,10 @@ export function ImageStudio() {
             captionOverflowChoices={captionOverflowChoices}
             setCaptionOverflow={setCaptionOverflow}
             outgoingCaptionOverflow={outgoingCaptionOverflow}
+            showH3ImageSampler={showH3ImageSampler}
+            h3ImageSampler={h3ImageSampler}
+            setH3ImageSampler={setH3ImageSampler}
+            h3ImageSamplerError={h3ImageSamplerError}
             supportsTextStyle={supportsTextStyle}
             textStyleGainConfig={textStyleGainConfig}
             setTextStyleGain={setTextStyleGain}

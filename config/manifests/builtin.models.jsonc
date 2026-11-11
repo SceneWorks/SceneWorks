@@ -26605,7 +26605,9 @@
       // No classifier-free guidance and no negative prompt (`gen_core::h3_image` refuses both), so
       // Image Studio hides those controls rather than offering knobs the engine refuses. The six
       // sigmas are fixed (`pdd_config.json`, never shifted), so there is no scheduler shift either.
-      "image": { "supportsGuidance": false, "supportsNegativePrompt": false, "supportsSchedulerShift": false, "maxPromptTokens": 4096 },
+      // `supportsH3ImageSampler` (SW-7106): Image Studio offers the released Euler step (default)
+      // or ComfyUI's LCM re-noise step through `advanced.h3ImageSampler`.
+      "image": { "supportsGuidance": false, "supportsNegativePrompt": false, "supportsSchedulerShift": false, "supportsH3ImageSampler": true, "maxPromptTokens": 4096 },
       // E23 — the licence gate. MiniMax-H3-Image ships under its OWN agreement (the MiniMax-H3-Image
       // Community License Agreement, dated November 10, 2026), which is MiniMax-H3's text with the
       // model renamed and the date moved EXCEPT §IV.1 (a 1 million USD annualized-revenue threshold,
@@ -26796,7 +26798,8 @@
         "maxReferenceAssets": 0,
         "hardMinSteps": 6,
         "hardMaxSteps": 6,
-        // One fixed velocity-Euler schedule; no sampler or scheduler menu.
+        // One fixed six-sigma schedule; no generic sampler or scheduler menu. The sampler (Euler or
+        // LCM) is chosen through `image.supportsH3ImageSampler` / `advanced.h3ImageSampler` (SW-7106).
         "samplers": ["default"],
         "schedulers": ["default"]
       },

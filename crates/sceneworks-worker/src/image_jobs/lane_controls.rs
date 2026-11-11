@@ -12,7 +12,7 @@ use gen_core::{AdapterApplyReport, AdapterKind, AdapterSpec, Capabilities, Capti
 use sceneworks_core::contracts::JsonObject;
 use sceneworks_core::image_request::ImageRequest;
 use sceneworks_core::image_sampling_controls::{
-    self as controls, CaptionOverflow, CAPTION_OVERFLOW_KEY, CFG_INTERVAL_KEY,
+    self as controls, CaptionOverflow, CAPTION_OVERFLOW_KEY, CFG_INTERVAL_KEY, H3_IMAGE_SAMPLER_KEY,
 };
 use serde_json::{json, Value};
 
@@ -35,6 +35,8 @@ pub(crate) const PREFIX_KV_CACHE_KEY: &str = super::PREFIX_KV_CACHE_RESULT_KEY;
 pub(crate) struct LaneRequestControls {
     pub(crate) cfg_interval: Option<(f32, f32)>,
     pub(crate) caption_overflow: Option<CaptionOverflowPolicy>,
+    /// MiniMax-H3-Image's sampler block (SW-7106), from `advanced.h3ImageSampler`.
+    pub(crate) h3_image_sampler: Option<gen_core::h3_image::H3ImageSampler>,
 }
 
 fn engine_policy(policy: CaptionOverflow) -> CaptionOverflowPolicy {
@@ -51,6 +53,7 @@ fn engine_policy(policy: CaptionOverflow) -> CaptionOverflowPolicy {
 ///
 /// * `advanced.cfgInterval` — needs `supports_cfg_interval`, and guidance != 1.0;
 /// * `advanced.captionOverflow` — needs `supports_caption_overflow_policy`;
+/// * `advanced.h3ImageSampler` — validated, and needs `supports_h3_image_sampler`;
 /// * `advanced.schedulerShift` — validated (> 0) for a model that declares the shift axis;
 /// * a non-empty negative prompt on a model declaring `image.negativePromptRequiresGuidance` at
 ///   guidance 1.0 (the engine refuses it; sc-25679 dropped it, sc-25681 refuses it like the API).
@@ -65,6 +68,8 @@ pub(crate) fn resolve_lane_request_controls(
     let cfg_interval = controls::requested_cfg_interval(&request.advanced).map_err(refuse)?;
     let caption_overflow =
         controls::requested_caption_overflow(&request.advanced).map_err(refuse)?;
+    let h3_image_sampler =
+        controls::requested_h3_image_sampler(&request.advanced).map_err(refuse)?;
     if controls::supports_scheduler_shift(&request.model_manifest_entry) {
         controls::requested_scheduler_shift(&request.advanced).map_err(refuse)?;
     }
@@ -76,6 +81,11 @@ pub(crate) fn resolve_lane_request_controls(
     if caption_overflow.is_some() && !caps.supports_caption_overflow_policy {
         return Err(refuse(format!(
             "the engine does not honour a caption-overflow policy (advanced.{CAPTION_OVERFLOW_KEY})"
+        )));
+    }
+    if h3_image_sampler.is_some() && !caps.supports_h3_image_sampler {
+        return Err(refuse(format!(
+            "the engine does not honour the MiniMax-H3-Image sampler (advanced.{H3_IMAGE_SAMPLER_KEY})"
         )));
     }
     let cfg_off = controls::cfg_off(guidance.map(f64::from), &request.model_manifest_entry);
@@ -97,6 +107,7 @@ pub(crate) fn resolve_lane_request_controls(
     Ok(LaneRequestControls {
         cfg_interval,
         caption_overflow: caption_overflow.map(engine_policy),
+        h3_image_sampler,
     })
 }
 
@@ -510,6 +521,7 @@ mod tests {
             LaneRequestControls {
                 cfg_interval: Some((0.25, 0.75)),
                 caption_overflow: Some(CaptionOverflowPolicy::Error),
+                h3_image_sampler: None,
             }
         );
         let none = resolve_lane_request_controls(
@@ -604,6 +616,91 @@ mod tests {
             resolve_lane_request_controls(&request, &honouring(), Some(1.0), Some("blurry"))
                 .is_ok()
         );
+    }
+
+    /// SW-7106: `advanced.h3ImageSampler` maps onto `GenerationRequest::h3_image_sampler` for an
+    /// engine that honours it, omitted LCM parameters take ComfyUI's defaults, and an invalid
+    /// value or an engine without the sampler is a typed refusal before load.
+    #[test]
+    fn the_h3_image_sampler_block_maps_onto_the_engine_sampler() {
+        use gen_core::h3_image::H3ImageSampler;
+        let h3 = Capabilities {
+            supports_h3_image_sampler: true,
+            ..Default::default()
+        };
+        let resolve = |advanced: Value, caps: &Capabilities| {
+            resolve_lane_request_controls(&request(advanced, "", json!({})), caps, None, None)
+                .map(|controls| controls.h3_image_sampler)
+        };
+        assert_eq!(resolve(json!({}), &h3).unwrap(), None);
+        assert_eq!(
+            resolve(json!({ "h3ImageSampler": { "sampler": "euler" } }), &h3).unwrap(),
+            Some(H3ImageSampler::Euler)
+        );
+        assert_eq!(
+            resolve(
+                json!({ "h3ImageSampler": {
+                    "sampler": "lcm", "sNoise": 1.1, "sNoiseEnd": 0.9, "noiseClipStd": 2.5
+                } }),
+                &h3
+            )
+            .unwrap(),
+            Some(H3ImageSampler::Lcm {
+                s_noise: 1.1,
+                s_noise_end: 0.9,
+                noise_clip_std: 2.5,
+            })
+        );
+        assert_eq!(
+            resolve(json!({ "h3ImageSampler": { "sampler": "lcm" } }), &h3).unwrap(),
+            Some(H3ImageSampler::lcm_default())
+        );
+        for (advanced, fragment) in [
+            (
+                json!({ "h3ImageSampler": { "sampler": "lcm", "sNoise": 0 } }),
+                "sNoise 0 must be greater than 0",
+            ),
+            (
+                json!({ "h3ImageSampler": { "sampler": "lcm", "sNoiseEnd": -0.1 } }),
+                "sNoiseEnd -0.1 must be 0 or greater",
+            ),
+            (
+                json!({ "h3ImageSampler": { "sampler": "lcm", "noiseClipStd": -1 } }),
+                "noiseClipStd -1 must be 0 (off) or greater",
+            ),
+            (
+                json!({ "h3ImageSampler": { "sampler": "lcm", "sNoise": 1e300 } }),
+                "must be finite",
+            ),
+            (
+                json!({ "h3ImageSampler": { "sampler": "dpm" } }),
+                "not a MiniMax",
+            ),
+            (
+                json!({ "h3ImageSampler": { "sampler": "euler", "sNoise": 1.1 } }),
+                "only to the LCM",
+            ),
+            (
+                json!({ "sampler": "euler", "h3ImageSampler": { "sampler": "lcm" } }),
+                "disagrees",
+            ),
+        ] {
+            match resolve(advanced.clone(), &h3) {
+                Err(WorkerError::InvalidPayload(message)) => {
+                    assert!(message.contains(fragment), "{advanced}: {message}")
+                }
+                other => panic!("{advanced}: expected a typed refusal, got {other:?}"),
+            }
+        }
+        match resolve(
+            json!({ "h3ImageSampler": { "sampler": "lcm" } }),
+            &Capabilities::default(),
+        ) {
+            Err(WorkerError::InvalidPayload(message)) => {
+                assert!(message.contains("does not honour"), "{message}")
+            }
+            other => panic!("expected a typed refusal, got {other:?}"),
+        }
     }
 
     #[test]

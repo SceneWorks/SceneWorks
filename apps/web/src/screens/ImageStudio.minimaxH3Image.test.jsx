@@ -151,6 +151,87 @@ describe("ImageStudio — MiniMax-H3-Image (SW-7100)", () => {
   });
 });
 
+describe("ImageStudio — MiniMax-H3-Image sampler (SW-7106)", () => {
+  let container;
+  let root;
+  const OTHER = installed("qwen_image_2_1_turbo");
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context, { open = true } = {}) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+    if (open) await click(document.body.querySelector(".advanced-section-toggle"));
+    await act(async () => {});
+  }
+
+  const samplerSelect = () => container.querySelector('select[aria-label="MiniMax-H3-Image sampler"]');
+
+  it("sits in the collapsed Advanced section, defaulting to Euler with no LCM fields", async () => {
+    await render(baseContext(), { open: false });
+    expect(samplerSelect()).toBeNull();
+    await click(document.body.querySelector(".advanced-section-toggle"));
+    expect(samplerSelect().value).toBe("euler");
+    expect([...samplerSelect().options].map((option) => option.textContent)).toEqual([
+      "Euler (official)",
+      "LCM (stochastic re-noise)",
+    ]);
+    expect(field(container, "Noise scale start")).toBeUndefined();
+  });
+
+  it("reveals the LCM fields at their defaults and sends the block with the job", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-h3-lcm" }));
+    await render(baseContext({ createImageJob }));
+    await act(async () => setSelect(samplerSelect(), "lcm"));
+    expect(field(container, "Noise scale start").value).toBe("1.1");
+    expect(field(container, "Noise scale end").value).toBe("0.9");
+    expect(field(container, "Noise clip (std, 0 = off)").value).toBe("0");
+    await act(async () => setInput(field(container, "Noise clip (std, 0 = off)"), "1.5"));
+    await act(async () => setTextarea(container.querySelector('textarea[aria-label="Prompt"]'), "a harbour at dawn"));
+    await click(generateButton());
+    expect(createImageJob.mock.calls[0][0].advanced.h3ImageSampler).toEqual({
+      sampler: "lcm",
+      sNoise: 1.1,
+      sNoiseEnd: 0.9,
+      noiseClipStd: 1.5,
+    });
+  });
+
+  it("sends no block for Euler and refuses an out-of-range LCM value before submitting", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-h3" }));
+    await render(baseContext({ createImageJob }));
+    await act(async () => setTextarea(container.querySelector('textarea[aria-label="Prompt"]'), "a harbour at dawn"));
+    await click(generateButton());
+    expect(createImageJob.mock.calls[0][0].advanced?.h3ImageSampler).toBeUndefined();
+    await act(async () => setSelect(samplerSelect(), "lcm"));
+    await act(async () => setInput(field(container, "Noise scale start"), "0"));
+    expect(container.textContent).toContain("Noise scale start must be between 0.01 and 2.");
+    await click(generateButton());
+    expect(createImageJob).toHaveBeenCalledTimes(1);
+  });
+
+  it("is hidden for every other model", async () => {
+    await render(baseContext({ imageModels: [OTHER], models: [OTHER] }));
+    expect(samplerSelect()).toBeNull();
+    expect(field(container, "Noise scale start")).toBeUndefined();
+  });
+});
+
 describe("MiniMax-H3-Image geometry and steps are this model's alone (SW-7100)", () => {
   const other = installed("qwen_image_2_1_turbo");
   const plain = { id: "plain", limits: { resolutions: ["1024x1024"] } };

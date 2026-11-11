@@ -274,6 +274,7 @@ pub(super) fn render_on_surface(
         output_channels: surface.output_channels,
         cfg_interval: surface.controls.cfg_interval,
         caption_overflow: surface.controls.caption_overflow,
+        h3_image_sampler: surface.controls.h3_image_sampler,
         preview,
         cancel: cancel.clone(),
         ..Default::default()

@@ -37,6 +37,9 @@ export function buildImageJobAdvanced(state) {
     // caption-overflow policy (`"default"` = the checkpoint's own).
     cfgInterval,
     captionOverflow,
+    // SW-7106: MiniMax-H3-Image's sampler block, already resolved by the studio (null for Euler,
+    // the engine default, and for every other model).
+    h3ImageSampler,
     // Step / guidance overrides.
     stepsOverride,
     guidanceOverride,
@@ -176,6 +179,8 @@ export function buildImageJobAdvanced(state) {
       : {}),
     // Caption-overflow policy (sc-25681): "default" (the checkpoint's own) is omitted.
     ...(captionOverflow && captionOverflow !== "default" ? { captionOverflow } : {}),
+    // MiniMax-H3-Image sampler (SW-7106): only a non-default (LCM) block rides the payload.
+    ...(h3ImageSampler ? { h3ImageSampler } : {}),
     // Step / guidance overrides — empty string means "use the model
     // default", which the worker reads off MODEL_TARGETS.
     ...(effectiveSteps !== "" && Number.isFinite(Number(effectiveSteps))

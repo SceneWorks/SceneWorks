@@ -223,3 +223,75 @@ async fn minimax_h3_image_expansion_is_licence_gated_and_carries_its_entry_and_r
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{other}");
 }
+
+/// SW-7106: the job door keeps MiniMax-H3-Image's sampler block on the payload the worker reads,
+/// and refuses an invalid block by its wire field before a job exists.
+#[tokio::test]
+async fn minimax_h3_image_sampler_block_rides_the_job_and_invalid_values_are_refused() {
+    let _hf = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("config/manifests");
+    single_model_manifest(&config, "minimax_h3_image", "MiniMaxAI/MiniMax-H3-Image");
+    let entry = shipped_entry();
+    std::fs::write(
+        config.join("builtin.models.jsonc"),
+        json!({ "schemaVersion": 1, "models": [entry.clone()] }).to_string(),
+    )
+    .unwrap();
+    let settings = test_settings(&temp);
+    let ack_path =
+        sceneworks_core::license_acknowledgments::acknowledgments_file(&settings.config_dir);
+    sceneworks_core::license_acknowledgments::record_acknowledgment(
+        &ack_path,
+        &entry,
+        "test",
+        "2026-11-10T00:00:00Z",
+    )
+    .unwrap();
+    let app = create_app(settings).unwrap();
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"H3 Image").await;
+    let job = |sampler: Value| {
+        json!({
+            "projectId": project["id"], "model": "minimax_h3_image", "prompt": "a lighthouse",
+            "width": 2048, "height": 2048, "advanced": { "h3ImageSampler": sampler },
+        })
+    };
+
+    let lcm = json!({ "sampler": "lcm", "sNoise": 1.1, "sNoiseEnd": 0.9, "noiseClipStd": 0 });
+    let (status, created) =
+        request(app.clone(), "POST", "/api/v1/image/jobs", job(lcm.clone())).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["payload"]["advanced"]["h3ImageSampler"], lcm);
+
+    for (sampler, fragment) in [
+        (
+            json!({ "sampler": "lcm", "sNoise": 0 }),
+            "sNoise 0 must be greater than 0",
+        ),
+        (
+            json!({ "sampler": "lcm", "sNoiseEnd": -1 }),
+            "sNoiseEnd -1 must be 0 or greater",
+        ),
+        (
+            json!({ "sampler": "lcm", "noiseClipStd": -0.5 }),
+            "noiseClipStd -0.5 must be 0 (off)",
+        ),
+        (
+            json!({ "sampler": "heun" }),
+            "not a MiniMax-H3-Image sampler",
+        ),
+    ] {
+        let (status, refused) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            job(sampler.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{sampler}: {refused}");
+        assert!(
+            refused.to_string().contains(fragment),
+            "{sampler}: {refused}"
+        );
+    }
+}

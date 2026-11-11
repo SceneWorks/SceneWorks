@@ -405,6 +405,7 @@ smuggled under a scalar key.
 | `schedulerShift` | `Scalar` | Time-shift (mu) for the curated schedule. |
 | `cfgInterval` | `NumberPair` | Classifier-free-guidance interval `[start, end]` in model time (Iris-3B). Any other shape is dropped. |
 | `captionOverflow` | `Scalar` | Caption-overflow policy (`warn` / `error` / `silent`) for an over-long prompt (Iris-3B). |
+| `h3ImageSampler` | `H3ImageSampler` | MiniMax-H3-Image's sampler: `{"sampler": "lcm", "sNoise", "sNoiseEnd", "noiseClipStd"}` (or `{"sampler": "euler"}`), validated as one closed object; a malformed or unknown member drops the block. |
 | `steps` | `Scalar` | Step-count override. |
 | `guidanceScale` | `Scalar` | Guidance override. |
 | `guidanceMethod` | `Scalar` | Guidance method (CFG / CFG++). |

@@ -558,6 +558,8 @@ function sampleValueFor(key) {
       return [{ steps: 4, guidance: 3.5, loras: [] }];
     case "structuredPrompt":
       return { intent: "a lighthouse" };
+    case "h3ImageSampler":
+      return { sampler: "lcm", sNoise: 1.1, sNoiseEnd: 0.9, noiseClipStd: 0 };
     case "veda":
       return {
         enabled: true,

@@ -24,3 +24,51 @@ export function resolveCfgInterval({ model, text, guidanceOverride }) {
 // Prompts per native prompt-batch job (sc-25681, `image.maxPromptBatchImages`): 1 = one job each.
 export const promptBatchSize = (model, count) =>
   Math.max(1, Math.floor((model?.image?.maxPromptBatchImages || 1) / Math.max(1, count)));
+
+// SW-7106: MiniMax-H3-Image's sampler (`image.supportsH3ImageSampler`). Euler is the released
+// deterministic step and the default; LCM is ComfyUI's stochastic re-noise step, whose noise scale
+// ramps from `sNoise` (step 0) to `sNoiseEnd` (last step), with optional noise clipping.
+export const H3_IMAGE_SAMPLER_LABELS = {
+  euler: "Euler (official)",
+  lcm: "LCM (stochastic re-noise)",
+};
+
+export const H3_IMAGE_LCM_FIELDS = [
+  { key: "sNoise", label: "Noise scale start", min: 0.01, max: 2, step: 0.01 },
+  { key: "sNoiseEnd", label: "Noise scale end", min: 0, max: 2, step: 0.01 },
+  { key: "noiseClipStd", label: "Noise clip (std, 0 = off)", min: 0, max: 4, step: 0.1 },
+];
+
+export const h3ImageSamplerDefaults = () => ({ sampler: "euler", sNoise: 1.1, sNoiseEnd: 0.9, noiseClipStd: 0 });
+
+export const supportsH3ImageSampler = (model) => Boolean(model?.image?.supportsH3ImageSampler);
+
+// The `advanced.h3ImageSampler` block to send: null for a model without the control or for Euler
+// (the engine default, omitted so a default recipe stays byte-identical); `error` names the first
+// LCM field outside its range.
+export function resolveH3ImageSampler({ model, options }) {
+  if (!supportsH3ImageSampler(model) || options?.sampler !== "lcm") return { block: null, error: null };
+  const block = { sampler: "lcm" };
+  for (const { key, label, min, max } of H3_IMAGE_LCM_FIELDS) {
+    const raw = options[key];
+    const value = raw === "" || raw == null ? Number.NaN : Number(raw);
+    if (!(Number.isFinite(value) && value >= min && value <= max)) {
+      return { block: null, error: `${label} must be between ${min} and ${max}.` };
+    }
+    block[key] = value;
+  }
+  return { block, error: null };
+}
+
+// A recorded `advanced.h3ImageSampler` (recipe replay) as the control state; absent ⇒ Euler.
+export function h3ImageSamplerFromRecipe(recorded) {
+  const defaults = h3ImageSamplerDefaults();
+  if (recorded?.sampler !== "lcm") return defaults;
+  return {
+    ...defaults,
+    sampler: "lcm",
+    sNoise: recorded.sNoise ?? 1,
+    sNoiseEnd: recorded.sNoiseEnd ?? recorded.sNoise ?? 1,
+    noiseClipStd: recorded.noiseClipStd ?? 0,
+  };
+}

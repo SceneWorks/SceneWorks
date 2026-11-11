@@ -6,6 +6,7 @@
 //! | `schedulerShift` | `scheduler_shift` | `supportsSchedulerShift` (an axis without a scheduler menu) |
 //! | `cfgInterval` (`[lo, hi]`) | `cfg_interval` | `supportsCfgInterval` |
 //! | `captionOverflow` (`warn` / `error` / `silent`) | `caption_overflow` | `captionOverflowPolicies` |
+//! | `h3ImageSampler` (`{sampler, sNoise, sNoiseEnd, noiseClipStd}`) | `h3_image_sampler` | `supportsH3ImageSampler` |
 //!
 //! Plus the CFG-bound negative prompt (`image.negativePromptRequiresGuidance`, sc-25679): the
 //! negative prompt is the CFG unconditional, so a non-empty one at guidance exactly 1.0 does
@@ -28,6 +29,8 @@ pub const CFG_INTERVAL_KEY: &str = "cfgInterval";
 pub const CAPTION_OVERFLOW_KEY: &str = "captionOverflow";
 /// `advanced` key of the schedule shift (shared with the scheduler-menu models).
 pub const SCHEDULER_SHIFT_KEY: &str = "schedulerShift";
+/// `advanced` key of MiniMax-H3-Image's sampler block (SW-7106).
+pub const H3_IMAGE_SAMPLER_KEY: &str = "h3ImageSampler";
 
 /// What a text encoder with a fixed caption budget does with a prompt that tokenizes past it. The
 /// spellings are upstream Iris-3B's `text_encoder.on_caption_overflow` vocabulary (and gen-core's
@@ -87,6 +90,11 @@ pub fn supports_cfg_interval(model_manifest_entry: &JsonObject) -> bool {
 /// `image.negativePromptRequiresGuidance` (sc-25679). ABSENT MEANS FALSE.
 pub fn negative_prompt_requires_guidance(model_manifest_entry: &JsonObject) -> bool {
     declares(model_manifest_entry, "negativePromptRequiresGuidance")
+}
+
+/// `image.supportsH3ImageSampler` (SW-7106). ABSENT MEANS FALSE.
+pub fn supports_h3_image_sampler(model_manifest_entry: &JsonObject) -> bool {
+    declares(model_manifest_entry, "supportsH3ImageSampler")
 }
 
 /// `image.captionOverflowPolicies`: the policies the model offers, or empty when it declares none.
@@ -180,6 +188,108 @@ pub fn requested_scheduler_shift(advanced: &JsonObject) -> Result<Option<f32>, S
     Ok(Some(shift as f32))
 }
 
+/// `advanced.h3ImageSampler`, typed (SW-7106). Absent or `null` ⇒ `Ok(None)` (the engine runs the
+/// sampler `advanced.sampler` names, Euler by default). Otherwise an object
+/// `{"sampler": "euler"}` or `{"sampler": "lcm", "sNoise"?, "sNoiseEnd"?, "noiseClipStd"?}`: an
+/// omitted LCM parameter takes ComfyUI's default (`sNoise` 1, `sNoiseEnd` = `sNoise`,
+/// `noiseClipStd` 0 = off), and the values must satisfy the engine's own rules (finite,
+/// `sNoise > 0`, `sNoiseEnd >= 0`, `noiseClipStd >= 0`). An unknown field, an LCM parameter on
+/// Euler, or an `advanced.sampler` name that disagrees is a typed error naming the field.
+pub fn requested_h3_image_sampler(
+    advanced: &JsonObject,
+) -> Result<Option<gen_core::h3_image::H3ImageSampler>, String> {
+    use gen_core::h3_image::{H3ImageSampler, LCM_NOISE_CLIP_STD_DEFAULT, LCM_S_NOISE_DEFAULT};
+    const PARAMS: [&str; 3] = ["sNoise", "sNoiseEnd", "noiseClipStd"];
+    let key = H3_IMAGE_SAMPLER_KEY;
+    let Some(value) = advanced.get(key).filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let block = value
+        .as_object()
+        .ok_or_else(|| format!("advanced.{key} must be an object, got {value}"))?;
+    if let Some(unknown) = block
+        .keys()
+        .find(|field| *field != "sampler" && !PARAMS.contains(&field.as_str()))
+    {
+        return Err(format!(
+            "advanced.{key}.{unknown} is not a sampler field (use sampler, {})",
+            PARAMS.join(", ")
+        ));
+    }
+    let param = |field: &str| -> Result<Option<f32>, String> {
+        match block.get(field).filter(|value| !value.is_null()) {
+            None => Ok(None),
+            Some(value) => value
+                .as_f64()
+                .map(|number| Some(number as f32))
+                .ok_or_else(|| format!("advanced.{key}.{field} must be a number, got {value}")),
+        }
+    };
+    let name = block
+        .get("sampler")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .ok_or_else(|| format!("advanced.{key}.sampler must be \"euler\" or \"lcm\""))?;
+    let sampler = match name {
+        "euler" => {
+            if let Some(field) = PARAMS.iter().find(|field| block.contains_key(**field)) {
+                return Err(format!(
+                    "advanced.{key}.{field} applies only to the LCM sampler, not Euler"
+                ));
+            }
+            H3ImageSampler::Euler
+        }
+        "lcm" => {
+            let s_noise = param("sNoise")?.unwrap_or(LCM_S_NOISE_DEFAULT);
+            H3ImageSampler::Lcm {
+                s_noise,
+                s_noise_end: param("sNoiseEnd")?.unwrap_or(s_noise),
+                noise_clip_std: param("noiseClipStd")?.unwrap_or(LCM_NOISE_CLIP_STD_DEFAULT),
+            }
+        }
+        other => {
+            return Err(format!(
+                "advanced.{key}.sampler \"{other}\" is not a MiniMax-H3-Image sampler (use euler \
+                 or lcm)"
+            ))
+        }
+    };
+    // The engine's own rules, reported under the wire field names.
+    sampler.validate().map_err(|refusal| {
+        use gen_core::h3_image::H3ImageRefusal as Refusal;
+        let (field, value, rule) = match refusal {
+            Refusal::SamplerNonFinite { field, value } => (
+                match field {
+                    "s_noise" => "sNoise",
+                    "s_noise_end" => "sNoiseEnd",
+                    _ => "noiseClipStd",
+                },
+                value,
+                "must be finite",
+            ),
+            Refusal::SamplerNoiseScale { value } => ("sNoise", value, "must be greater than 0"),
+            Refusal::SamplerNoiseScaleEnd { value } => ("sNoiseEnd", value, "must be 0 or greater"),
+            Refusal::SamplerNoiseClip { value } => {
+                ("noiseClipStd", value, "must be 0 (off) or greater")
+            }
+            other => return format!("advanced.{key}: {other}"),
+        };
+        format!("advanced.{key}.{field} {value} {rule}")
+    })?;
+    if let Some(named) = advanced
+        .get("sampler")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|named| !named.is_empty() && *named != "default" && *named != sampler.name())
+    {
+        return Err(format!(
+            "advanced.sampler \"{named}\" disagrees with advanced.{key}.sampler \"{}\"",
+            sampler.name()
+        ));
+    }
+    Ok(Some(sampler))
+}
+
 /// The guidance a job resolves to: `advanced.guidanceScale` when sent (number or numeric string,
 /// the worker's `resolve_guidance` reading), else the model's `defaults.guidanceScale`.
 pub fn effective_guidance(advanced: &JsonObject, model_manifest_entry: &JsonObject) -> Option<f64> {
@@ -251,6 +361,16 @@ pub fn image_sampling_control_error(
                 )
             });
         }
+    }
+    match requested_h3_image_sampler(advanced) {
+        Err(message) => return Some(format!("{model}: {message}")),
+        Ok(Some(_)) if !supports_h3_image_sampler(model_manifest_entry) => {
+            return Some(format!(
+                "{model} does not offer the MiniMax-H3-Image sampler \
+                 (advanced.{H3_IMAGE_SAMPLER_KEY}); drop it"
+            ));
+        }
+        _ => {}
     }
     match requested_scheduler_shift(advanced) {
         Err(message) => return Some(format!("{model}: {message}")),
@@ -514,6 +634,56 @@ mod tests {
         );
         let underflow = object(json!({"schedulerShift":1e-100}));
         assert!(requested_scheduler_shift(&underflow).is_err());
+    }
+
+    /// SW-7106: only a model declaring `image.supportsH3ImageSampler` accepts the sampler block,
+    /// and an invalid one is refused at enqueue naming the wire field.
+    #[test]
+    fn the_h3_image_sampler_block_is_declared_and_validated() {
+        let h3 = object(
+            json!({ "id": "minimax_h3_image", "image": { "supportsH3ImageSampler": true } }),
+        );
+        assert!(supports_h3_image_sampler(&h3));
+        assert!(!supports_h3_image_sampler(&plain()));
+        let lcm = object(json!({ "h3ImageSampler": {
+            "sampler": "lcm", "sNoise": 1.1, "sNoiseEnd": 0.9, "noiseClipStd": 0
+        } }));
+        assert_eq!(
+            image_sampling_control_error("minimax_h3_image", &lcm, "", &h3),
+            None
+        );
+        let message = image_sampling_control_error("plain", &lcm, "", &plain()).unwrap();
+        assert!(
+            message.contains("does not offer the MiniMax-H3-Image sampler"),
+            "{message}"
+        );
+        for (block, fragment) in [
+            (json!("lcm"), "must be an object"),
+            (
+                json!({ "sampler": "lcm", "sNoise": -1 }),
+                "sNoise -1 must be greater than 0",
+            ),
+            (
+                json!({ "sampler": "lcm", "sNoise": "1.1" }),
+                "sNoise must be a number",
+            ),
+            (
+                json!({ "sampler": "lcm", "eta": 1 }),
+                "eta is not a sampler field",
+            ),
+            (json!({ "sNoise": 1 }), "sampler must be"),
+        ] {
+            let advanced = object(json!({ "h3ImageSampler": block }));
+            let message = image_sampling_control_error("minimax_h3_image", &advanced, "", &h3)
+                .unwrap_or_else(|| panic!("{advanced:?} must be refused"));
+            assert!(message.contains(fragment), "{advanced:?}: {message}");
+        }
+        // An omitted LCM end scale follows the start scale (ComfyUI's constant `s_noise`).
+        let constant = object(json!({ "h3ImageSampler": { "sampler": "lcm", "sNoise": 1.2 } }));
+        assert_eq!(
+            requested_h3_image_sampler(&constant).unwrap(),
+            Some(gen_core::h3_image::H3ImageSampler::lcm(1.2))
+        );
     }
 
     #[test]
