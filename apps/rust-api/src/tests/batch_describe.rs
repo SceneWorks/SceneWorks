@@ -345,6 +345,11 @@ async fn batch_describe_jobs_list_the_datasets_runs_newest_first() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{first}");
+    // Each payload item records the image's identity when it was described.
+    assert!(first["payload"]["items"][0]
+        .as_object()
+        .expect("payload item")
+        .contains_key("contentHash"));
     let (status, second) = request(app.clone(), "POST", &route, json!({})).await;
     assert_eq!(status, StatusCode::CREATED, "{second}");
     // A canceled run still lists: its stored descriptions are the user's work.

@@ -114,20 +114,36 @@ export function mergeDescribeRows(rows, items, datasetOrder = [], model = null) 
   );
 }
 
-// Rebuild the table from a dataset's earlier describe jobs, newest first, each `{ model, items }`.
-// Each image still in the dataset gets its newest successful result, or its newest flagged result
-// when no run described it. Results for images removed from the dataset are left out.
-export function restoreDescribeRows(runs, datasetOrder) {
-  const inDataset = new Set(datasetOrder);
+// Whether a stored result still describes the dataset image as it is now. `source` is the job's
+// payload entry for the item (its path and content hash when it was described). An image that was
+// cropped or repointed keeps its item id but gets new pixels, so its old result no longer applies.
+// Missing facts never disqualify a result: older jobs carry no hash, and some items no size.
+export function resultMatchesImage(item, source, image) {
+  if (!image) return false;
+  if (source?.contentHash && image.contentHash) return source.contentHash === image.contentHash;
+  const describedPath = source?.relativePath ?? item?.imagePath;
+  if (describedPath && image.path && describedPath !== image.path) return false;
+  if (item?.width && item?.height && image.width && image.height) {
+    return item.width === image.width && item.height === image.height;
+  }
+  return true;
+}
+
+// Rebuild the table from a dataset's earlier describe jobs, newest first, each `{ model, items,
+// sources }` (`sources`: the job's payload entries by item id). Each current dataset image gets
+// its newest successful result for its current pixels, or its newest flagged one when no run
+// described it. Results for removed or changed images are left out.
+export function restoreDescribeRows(runs, datasetItems) {
+  const images = new Map((datasetItems ?? []).map((image) => [image.id, image]));
   const restored = new Map();
   for (const run of runs ?? []) {
     for (const item of run?.items ?? []) {
-      if (!item?.itemId || !inDataset.has(item.itemId)) continue;
+      if (!item?.itemId || !resultMatchesImage(item, run.sources?.get(item.itemId), images.get(item.itemId))) continue;
       const current = restored.get(item.itemId);
       if (!current || (current.failed && !item.failed)) restored.set(item.itemId, rowFromResultItem(item, run.model));
     }
   }
-  return mergeDescribeRows([...restored.values()], [], datasetOrder);
+  return mergeDescribeRows([...restored.values()], [], (datasetItems ?? []).map((image) => image.id));
 }
 
 // The saved global prompt batch a new save would collide with: same name, ignoring case and
@@ -198,10 +214,10 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   } = useAppContext();
   const projectId = activeProject?.id;
   const datasetOrder = useMemo(() => (dataset?.items ?? []).map((item) => item.id), [dataset]);
-  // The order the restore reads, without re-running the restore when the parent passes a new
+  // The images the restore checks, without re-running the restore when the parent passes a new
   // dataset object for the same dataset (that would replace rows the user is editing).
-  const datasetOrderRef = useRef(datasetOrder);
-  datasetOrderRef.current = datasetOrder;
+  const datasetItemsRef = useRef(dataset?.items ?? []);
+  datasetItemsRef.current = dataset?.items ?? [];
 
   const [modelId, setModelId] = useState(VISION_CAPTION_MODEL_ID);
   // Each model's default instruction and limit, by repo: `{ prompt, maxChars }`.
@@ -386,7 +402,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
     }
     const controller = new AbortController();
     const { signal } = controller;
-    const order = datasetOrderRef.current;
+    const datasetItems = datasetItemsRef.current;
     setRestoring(true);
     (async () => {
       try {
@@ -396,23 +412,34 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
         );
         const jobsNewestFirst = Array.isArray(listed) ? listed : [];
         const active = jobsNewestFirst.find((entry) => !terminalStatuses.has(entry?.status)) ?? null;
-        // Read the active job first (its count seeds polling), then older runs until every image
-        // has a successful result.
-        const ordered = active ? [active, ...jobsNewestFirst.filter((entry) => entry !== active)] : jobsNewestFirst;
-        const missing = new Set(order);
+        // Read runs newest first, so a newer result always wins. Stop once every image has a
+        // current successful result, but never before the active job is read (its count seeds
+        // polling).
+        const images = new Map(datasetItems.map((image) => [image.id, image]));
+        const missing = new Set(images.keys());
         const runs = [];
         let activeCount = 0;
-        for (const entry of ordered) {
-          if (entry !== active && !missing.size) break;
+        let activeRead = !active;
+        for (const entry of jobsNewestFirst) {
+          if (activeRead && !missing.size) break;
           const items = [];
           const count = await readItemPages(entry.id, 0, (page) => items.push(...page), signal);
-          if (entry === active) activeCount = count;
-          for (const item of items) if (item?.itemId && !item.failed) missing.delete(item.itemId);
-          runs.push({ position: jobsNewestFirst.indexOf(entry), model: entry.result?.model ?? entry.payload?.model ?? null, items });
+          if (entry === active) {
+            activeCount = count;
+            activeRead = true;
+          }
+          const sources = new Map(
+            (Array.isArray(entry.payload?.items) ? entry.payload.items : []).map((source) => [source?.itemId, source]),
+          );
+          for (const item of items) {
+            if (item?.itemId && !item.failed && resultMatchesImage(item, sources.get(item.itemId), images.get(item.itemId))) {
+              missing.delete(item.itemId);
+            }
+          }
+          runs.push({ model: entry.result?.model ?? entry.payload?.model ?? null, items, sources });
         }
         if (signal.aborted) return;
-        runs.sort((left, right) => left.position - right.position);
-        const restored = restoreDescribeRows(runs, order);
+        const restored = restoreDescribeRows(runs, datasetItems);
         setRows(restored);
         if (active) {
           itemsRead.current = { jobId: active.id, count: activeCount };
@@ -435,7 +462,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
       }
     })();
     return () => controller.abort();
-    // Restores once per dataset; the order is read through a ref (see datasetOrderRef).
+    // Restores once per dataset; the images are read through a ref (see datasetItemsRef).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dataset?.id, projectId, token]);
 

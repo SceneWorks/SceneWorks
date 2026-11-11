@@ -751,6 +751,57 @@ describe("DatasetPromptBatchDialog", () => {
     expect(button("Open in Image Studio")).toBeTruthy();
   });
 
+  it("reads every run newer than a still-running older job before stopping", async () => {
+    // Older job_1 (A, B) is still running; job_mid re-ran A; job_new (newest) re-ran C.
+    trainingApi.listBatchDescribeJobs.mockResolvedValue([
+      { id: "job_new", status: "completed", result: { processedCount: 1, itemCount: 1 } },
+      { id: "job_mid", status: "completed", result: { processedCount: 1, itemCount: 1 } },
+      { id: "job_1", status: "running", result: { processedCount: 2, itemCount: 3 } },
+    ]);
+    serveStoredRuns({
+      job_new: [described("item_c", 300, 400, { description: "Newest c." })],
+      job_mid: [described("item_a", 300, 400, { description: "Re-run a." })],
+      job_1: [described("item_a", 300, 400, { description: "Old a." }), described("item_b", 400, 300, { description: "Old b." })],
+    });
+    await render();
+    expect(rowText("item_a")).toBe("Re-run a.");
+    expect(rowText("item_b")).toBe("Old b.");
+    expect(rowText("item_c")).toBe("Newest c.");
+    expect(button("Cancel")).toBeTruthy();
+  });
+
+  it("drops a restored result whose image was cropped or repointed since", async () => {
+    const changed = {
+      ...dataset,
+      items: [
+        { id: "item_a", path: "images/item_a.png", contentHash: "hash-a" },
+        { id: "item_b", path: "images/item_b_cropped.png", width: 300, height: 300 },
+        { id: "item_c", path: "images/item_c.png", contentHash: "hash-c2" },
+      ],
+    };
+    trainingApi.listBatchDescribeJobs.mockResolvedValue([
+      {
+        id: "job_old",
+        status: "completed",
+        payload: {
+          items: [
+            { itemId: "item_a", relativePath: "images/item_a.png", contentHash: "hash-a" },
+            // An older job without hashes: the path tells item_b changed.
+            { itemId: "item_b", relativePath: "images/item_b.png" },
+            { itemId: "item_c", relativePath: "images/item_c.png", contentHash: "hash-c1" },
+          ],
+        },
+        result: { processedCount: 3, itemCount: 3 },
+      },
+    ]);
+    serveStoredRuns({
+      job_old: [described("item_a", 300, 400), described("item_b", 400, 300), described("item_c", 300, 400)],
+    });
+    await render({ dataset: changed });
+    expect([...document.body.querySelectorAll(".dataset-prompt-batch-row")].map((row) => row.dataset.itemId)).toEqual(["item_a"]);
+    expect(button("Describe remaining (2)")).toBeTruthy();
+  });
+
   it("asks before closing with unsaved edits", async () => {
     const onClose = vi.fn();
     await render({ onClose });

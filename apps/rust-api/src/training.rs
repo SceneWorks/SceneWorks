@@ -1633,6 +1633,9 @@ fn batch_describe_items(
                 "imagePath": dataset_root.join(&item.path).display().to_string(),
                 "relativePath": item.path,
                 "assetId": item.asset_id,
+                // The image's identity when it was described, so a reopened dialog can tell a
+                // result for these pixels from one for an image cropped or repointed since.
+                "contentHash": item.content_hash,
             })
         })
         .collect();
