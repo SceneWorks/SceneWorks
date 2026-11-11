@@ -565,7 +565,71 @@ fn collect_source_claims(settings: &Settings, mut publish: impl FnMut(PortableSo
             }
         }
     }
+    external_lora_source_claims(settings, &mut publish);
     registered_digest_source_claims(settings, publish);
+}
+
+/// Advertise the operator's externally scanned ComfyUI LoRAs (SW-7030, review
+/// 4531591689). The API's `lora_catalog` publishes these synthetic `external_…`
+/// rows as installed, so portable admission requires a registered digest claim
+/// for exactly that id; the scan is shared with the API through
+/// `sceneworks_core::external_loras`, so both sides assign the same id to the
+/// same file. Each candidate is confined through
+/// `normalize_app_managed_lora_path` before its bytes are hashed, exactly like
+/// manifest-backed adapters. This runs regardless of `config_dir`: external
+/// roots come from the process environment, never from a manifest.
+fn external_lora_source_claims(settings: &Settings, publish: &mut impl FnMut(PortableSourceClaim)) {
+    if settings.external_model_roots.is_empty() {
+        return;
+    }
+    let mut claims = Vec::new();
+    for (id, path) in external_lora_entries(settings) {
+        let Ok(confined) = crate::paths::normalize_app_managed_lora_path(settings, &path) else {
+            continue;
+        };
+        append_registered_claim(&mut claims, "lora", &id, None, &confined);
+    }
+    for claim in claims {
+        publish(claim);
+    }
+}
+
+/// The `(id, path)` pairs the shared external-LoRA scan assigns on this worker.
+fn external_lora_entries(settings: &Settings) -> Vec<(String, PathBuf)> {
+    let mut cache = sceneworks_core::external_loras::ExternalLoraCache::default();
+    sceneworks_core::external_loras::scan_external_loras(&settings.external_model_roots, &mut cache)
+        .into_iter()
+        .filter_map(|row| {
+            let id = row.get("id")?.as_str()?.to_owned();
+            let path = row.pointer("/source/path")?.as_str()?.to_owned();
+            Some((id, PathBuf::from(path)))
+        })
+        .collect()
+}
+
+/// Resolve an `external_…` LoRA id to this worker's confined copy of the exact
+/// frozen bytes, or `None` when the id is not external, is not present under
+/// the configured roots, or its bytes differ from the frozen ledger.
+pub(crate) fn registered_external_lora_path(
+    settings: &Settings,
+    id: &str,
+    frozen_files: &[PortableArtifactFile],
+) -> WorkerResult<Option<PathBuf>> {
+    if !id.starts_with(sceneworks_core::external_loras::EXTERNAL_ID_PREFIX) {
+        return Ok(None);
+    }
+    for (entry_id, path) in external_lora_entries(settings) {
+        if entry_id != id {
+            continue;
+        }
+        let Ok(confined) = crate::paths::normalize_app_managed_lora_path(settings, &path) else {
+            continue;
+        };
+        if capture_registered_files(&confined).is_ok_and(|files| files == frozen_files) {
+            return Ok(Some(confined));
+        }
+    }
+    Ok(None)
 }
 
 fn selected_text_encoder_root_and_files(
@@ -2716,6 +2780,73 @@ mod tests {
                 "the installed builtin auxiliary is advertised without the 30-minute rescan"
             );
         });
+    }
+
+    #[test]
+    fn external_lora_is_advertised_and_rebound_by_exact_worker_bytes() {
+        // SW-7030 (review 4531591689): an externally scanned ComfyUI LoRA gets a
+        // synthetic `external_…` catalog row from the API, so the worker must
+        // advertise the matching registered digest claim and rebind it by exact
+        // bytes under its own configured root.
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().join("ComfyUI/models");
+        let adapter = root.join("loras/Wan/detailz-wan.safetensors");
+        std::fs::create_dir_all(adapter.parent().unwrap()).unwrap();
+        let header = serde_json::json!({
+            "diffusion_model.blocks.0.cross_attn.k.lora_down.weight":
+                {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]},
+            "diffusion_model.blocks.0.cross_attn.k.lora_up.weight":
+                {"dtype": "F32", "shape": [1], "data_offsets": [4, 8]},
+        });
+        let header_bytes = serde_json::to_vec(&header).unwrap();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(header_bytes.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&header_bytes);
+        bytes.extend_from_slice(&[0_u8; 8]);
+        std::fs::write(&adapter, &bytes).unwrap();
+
+        let mut settings = Settings::for_test(temp.path().join("worker-data"));
+        settings.external_model_roots = vec![root];
+        let entries = external_lora_entries(&settings);
+        assert_eq!(entries.len(), 1, "the shared scan finds the adapter");
+        let (id, _) = entries.into_iter().next().unwrap();
+        assert!(id.starts_with("external_"), "synthetic id: {id}");
+
+        let frozen = capture_registered_files(&adapter).unwrap();
+        // Scope to the external-LoRA pass: the full inventory also hashes any
+        // real weights installed on the host for unrelated static sources.
+        let mut claims = Vec::new();
+        external_lora_source_claims(&settings, &mut |claim| claims.push(claim));
+        let ledger =
+            sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(
+                &frozen,
+            )
+            .unwrap();
+        let expected_claim = sceneworks_core::portable_sources::registered_digest_claim_id(
+            "lora", &id, None, &ledger,
+        )
+        .unwrap();
+        assert!(
+            claims
+                .iter()
+                .any(|claim| claim.source_id == expected_claim && claim.files == frozen),
+            "the external LoRA is advertised with its exact byte ledger"
+        );
+        let resolved = registered_external_lora_path(&settings, &id, &frozen)
+            .unwrap()
+            .expect("matching bytes resolve");
+        assert!(resolved.ends_with("detailz-wan.safetensors"));
+
+        // Altered bytes no longer match the frozen ledger.
+        let mut altered = bytes.clone();
+        altered.extend_from_slice(b"tampered");
+        std::fs::write(&adapter, altered).unwrap();
+        assert!(
+            registered_external_lora_path(&settings, &id, &frozen)
+                .unwrap()
+                .is_none(),
+            "substituted bytes must not rebind"
+        );
     }
 
     #[test]

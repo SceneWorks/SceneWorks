@@ -3277,6 +3277,13 @@ fn worker_lora_catalog_member_path(
                 .ok_or_else(|| invalid_binding("registered character LoRA bytes are unavailable"))
         });
     }
+    if id.starts_with(sceneworks_core::external_loras::EXTERNAL_ID_PREFIX) {
+        return crate::portable_source_claims::registered_external_lora_path(
+            settings,
+            id,
+            &member.files,
+        );
+    }
     if let Some(global) =
         worker_catalog_member_path(settings, "user.loras.jsonc", "loras", id, None, member)?
     {
