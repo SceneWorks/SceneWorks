@@ -493,12 +493,12 @@ fn replay_from_frozen_policy(
     )? {
         let key = format!("{backend}:{platform}");
         let Some(route) = frozen.routes.get(&key) else {
-            if requested_gpu == "auto" {
-                // Initial admission may have frozen only routes with a worker able to prove the
-                // complete local Digest closure. A newly eligible route cannot expand replay.
-                continue;
-            }
-            return Err(incomplete(format!("replay route {key} was not frozen")));
+            // Initial admission may have frozen only routes with a worker able to prove the
+            // complete local Digest closure. A newly eligible route cannot expand replay,
+            // and an explicit GPU id selects a backend, not a platform: intersect the
+            // enumerated platforms with the frozen routes for that backend and reject
+            // only when no compatible route remains (the empty check below).
+            continue;
         };
         if route.models.len() != entries.len() {
             return Err(incomplete("replay model carrier count changed"));
@@ -2971,8 +2971,24 @@ async fn verify_produced_local_source_offloaded(
 }
 
 fn allowed_local_roots(state: &AppState) -> Vec<PathBuf> {
-    std::iter::once(state.settings.data_dir.clone())
-        .chain(state.settings.external_model_roots.iter().cloned())
+    allowed_local_roots_for(
+        &state.settings.data_dir,
+        &state.settings.external_model_roots,
+    )
+}
+
+fn allowed_local_roots_for(data_dir: &Path, external_model_roots: &[PathBuf]) -> Vec<PathBuf> {
+    // The configured Hugging Face cache is a managed root in its own right: it
+    // commonly lives outside `data_dir` (the default `~/.cache/huggingface/hub`),
+    // and installed HF-backed LoRAs and non-default text encoders resolve their
+    // installed paths into it. The worker's `allowed_model_roots` already
+    // authorizes it; capture must agree or those installed sources are refused
+    // as "outside every managed root" (SW-7030, review 4533400131).
+    std::iter::once(data_dir.to_path_buf())
+        .chain(std::iter::once(
+            sceneworks_core::hf_home::huggingface_hub_cache_dir(data_dir),
+        ))
+        .chain(external_model_roots.iter().cloned())
         .collect()
 }
 
@@ -3586,6 +3602,22 @@ mod tests {
             error.contains("outside every managed root"),
             "escaping link must stay refused: {error}"
         );
+    }
+
+    #[test]
+    fn allowed_local_roots_include_data_hf_cache_and_external_roots() {
+        // SW-7030 (review 4533400131): the configured HF cache is a managed
+        // capture root even when it lives outside the data dir.
+        let data_dir = PathBuf::from("/srv/sceneworks/data");
+        let external = vec![PathBuf::from("/mnt/comfyui/models")];
+        let roots = allowed_local_roots_for(&data_dir, &external);
+        assert!(roots.contains(&data_dir));
+        assert!(
+            roots.contains(&sceneworks_core::hf_home::huggingface_hub_cache_dir(
+                &data_dir
+            ))
+        );
+        assert!(roots.contains(&PathBuf::from("/mnt/comfyui/models")));
     }
 
     #[test]

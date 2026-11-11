@@ -587,7 +587,7 @@ fn external_lora_source_claims(settings: &Settings, publish: &mut impl FnMut(Por
         let Ok(confined) = crate::paths::normalize_app_managed_lora_path(settings, &path) else {
             continue;
         };
-        append_registered_claim(&mut claims, "lora", &id, None, &confined);
+        append_registered_claim(settings, &mut claims, "lora", &id, None, &confined);
     }
     for claim in claims {
         publish(claim);
@@ -625,7 +625,10 @@ pub(crate) fn registered_external_lora_path(
         let Ok(confined) = crate::paths::normalize_app_managed_lora_path(settings, &path) else {
             continue;
         };
-        if capture_registered_files(&confined).is_ok_and(|files| files == frozen_files) {
+        let roots = crate::paths::allowed_model_roots(settings).unwrap_or_default();
+        if capture_registered_files_with_roots(&confined, &roots)
+            .is_ok_and(|files| files == frozen_files)
+        {
             return Ok(Some(confined));
         }
     }
@@ -765,7 +768,7 @@ fn registered_digest_source_claims(
             continue;
         };
         for path in builtin_lora_source_paths(settings, &lora) {
-            append_registered_claim(&mut claims, "lora", id, None, &path);
+            append_registered_claim(settings, &mut claims, "lora", id, None, &path);
             for claim in claims.drain(..) {
                 publish(claim);
             }
@@ -786,7 +789,7 @@ fn registered_digest_source_claims(
                 continue;
             };
             if let Ok(path) = normalize_catalog_lora_path(settings, &manifest, &path) {
-                append_registered_claim(&mut claims, "lora", id, None, &path);
+                append_registered_claim(settings, &mut claims, "lora", id, None, &path);
             }
             for claim in claims.drain(..) {
                 publish(claim);
@@ -811,7 +814,7 @@ fn registered_digest_source_claims(
                     continue;
                 };
                 if let Some(path) = character_lora_copy_path(settings, project_path, link) {
-                    append_registered_claim(&mut claims, "lora", id, None, &path);
+                    append_registered_claim(settings, &mut claims, "lora", id, None, &path);
                 }
                 for claim in claims.drain(..) {
                     publish(claim);
@@ -827,7 +830,7 @@ fn registered_digest_source_claims(
             let Some(path) = control_overlay_entry_file(settings, &manifest, &overlay) else {
                 continue;
             };
-            append_registered_claim(&mut claims, "control", id, None, &path);
+            append_registered_claim(settings, &mut claims, "control", id, None, &path);
             for claim in claims.drain(..) {
                 publish(claim);
             }
@@ -1343,20 +1346,29 @@ pub(crate) fn registered_builtin_lora_path(
 }
 
 fn append_registered_claim(
+    settings: &Settings,
     claims: &mut Vec<PortableSourceClaim>,
     kind: &str,
     model_id: &str,
     component_id: Option<&str>,
     selected: &Path,
 ) {
-    let Ok(files) = capture_registered_files(selected) else {
+    let roots = crate::paths::allowed_model_roots(settings).unwrap_or_default();
+    let Ok(files) = capture_registered_files_with_roots(selected, &roots) else {
         return;
     };
     append_registered_claim_files(claims, kind, model_id, component_id, files);
 }
 
 pub(crate) fn capture_registered_files(selected: &Path) -> WorkerResult<Vec<PortableArtifactFile>> {
-    let mut files = capture_files(selected)?;
+    capture_registered_files_with_roots(selected, &[])
+}
+
+pub(crate) fn capture_registered_files_with_roots(
+    selected: &Path,
+    allowed_roots: &[PathBuf],
+) -> WorkerResult<Vec<PortableArtifactFile>> {
+    let mut files = capture_files_with_roots(selected, allowed_roots)?;
     if selected.is_dir() {
         files.retain(|file| {
             !matches!(
@@ -1612,7 +1624,8 @@ pub(crate) fn capture_selected_source(
     } else {
         PortableSourceProvenance::OperatorOverride
     };
-    let files = capture_files(&selected)?;
+    let roots = crate::paths::allowed_model_roots(settings).unwrap_or_default();
+    let files = capture_files_with_roots(&selected, &roots)?;
     let claim = PortableSourceClaim::new(source_id, provenance, files)
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
     Ok(Some((claim, selected)))
@@ -1628,8 +1641,18 @@ fn capture_flux2_borrowed_files(
         return Ok(None);
     }
     let mut files = Vec::new();
+    let canonical_root = std::fs::canonicalize(selected).map_err(WorkerError::Io)?;
     for component in ["vae", "text_encoder", "tokenizer"] {
-        capture_tree(selected, &selected.join(component), &mut files)?;
+        let allowed = vec![canonical_root.clone()];
+        let mut visited = std::collections::HashSet::from([canonical_root.clone()]);
+        capture_tree(
+            selected,
+            &selected.join(component),
+            &allowed,
+            &mut visited,
+            &mut files,
+            0,
+        )?;
     }
     files.sort();
     if files.is_empty() {
@@ -1639,6 +1662,21 @@ fn capture_flux2_borrowed_files(
 }
 
 fn capture_files(selected: &Path) -> WorkerResult<Vec<PortableArtifactFile>> {
+    capture_files_with_roots(selected, &[])
+}
+
+/// Capture a registered source's file ledger, following directory links the
+/// way API admission capture does (SW-7030, review 4533400138): a linked
+/// directory (e.g. `text_encoder/` pointing at shared components elsewhere
+/// under the data dir) keeps its logical relative path, while confinement and
+/// hashing resolve through the canonical target. A link whose target escapes
+/// every allowed root — the canonical tree root plus any caller-supplied
+/// managed roots — is refused, and canonical directories are visited once so
+/// link cycles cannot recurse forever.
+fn capture_files_with_roots(
+    selected: &Path,
+    allowed_roots: &[PathBuf],
+) -> WorkerResult<Vec<PortableArtifactFile>> {
     let mut found = Vec::new();
     if selected.is_file() {
         let name = selected.file_name().ok_or_else(|| {
@@ -1646,7 +1684,14 @@ fn capture_files(selected: &Path) -> WorkerResult<Vec<PortableArtifactFile>> {
         })?;
         capture_one(selected, PathBuf::from(name), &mut found)?;
     } else if selected.is_dir() {
-        capture_tree(selected, selected, &mut found)?;
+        let canonical_root = std::fs::canonicalize(selected).map_err(WorkerError::Io)?;
+        let mut allowed: Vec<PathBuf> = allowed_roots
+            .iter()
+            .filter_map(|root| std::fs::canonicalize(root).ok())
+            .collect();
+        allowed.push(canonical_root.clone());
+        let mut visited = std::collections::HashSet::from([canonical_root]);
+        capture_tree(selected, selected, &allowed, &mut visited, &mut found, 0)?;
     } else {
         return Err(WorkerError::InvalidPayload(
             "auxiliary source is unavailable".to_owned(),
@@ -1661,22 +1706,41 @@ fn capture_files(selected: &Path) -> WorkerResult<Vec<PortableArtifactFile>> {
     Ok(found)
 }
 
+const MAX_CAPTURE_DEPTH: usize = 16;
+
 fn capture_tree(
     root: &Path,
     current: &Path,
+    allowed: &[PathBuf],
+    visited: &mut std::collections::HashSet<PathBuf>,
     found: &mut Vec<PortableArtifactFile>,
+    depth: usize,
 ) -> WorkerResult<()> {
-    for entry in std::fs::read_dir(current).map_err(WorkerError::Io)? {
-        let path = entry.map_err(WorkerError::Io)?.path();
-        let metadata = std::fs::symlink_metadata(&path).map_err(WorkerError::Io)?;
-        if metadata.is_dir() {
-            capture_tree(root, &path, found)?;
-        } else if metadata.is_file() || metadata.file_type().is_symlink() && path.is_file() {
+    if depth > MAX_CAPTURE_DEPTH {
+        return Err(WorkerError::InvalidPayload(
+            "auxiliary source tree is too deep".to_owned(),
+        ));
+    }
+    let canonical_current = std::fs::canonicalize(current).map_err(WorkerError::Io)?;
+    for entry in std::fs::read_dir(&canonical_current).map_err(WorkerError::Io)? {
+        let entry = entry.map_err(WorkerError::Io)?;
+        let path = current.join(entry.file_name());
+        let canonical = std::fs::canonicalize(&path).map_err(WorkerError::Io)?;
+        if canonical.is_dir() {
+            if !allowed.iter().any(|root| canonical.starts_with(root)) {
+                return Err(WorkerError::InvalidPayload(
+                    "auxiliary source link escapes its managed roots".to_owned(),
+                ));
+            }
+            if visited.insert(canonical) {
+                capture_tree(root, &path, allowed, visited, found, depth + 1)?;
+            }
+        } else if canonical.is_file() {
             let relative = path
                 .strip_prefix(root)
                 .expect("traversed path is inside root")
                 .to_path_buf();
-            capture_one(&path, relative, found)?;
+            capture_one(&canonical, relative, found)?;
         } else {
             return Err(WorkerError::InvalidPayload(
                 "auxiliary source contains a non-file entry".to_owned(),
@@ -2847,6 +2911,42 @@ mod tests {
                 .is_none(),
             "substituted bytes must not rebind"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registered_directory_model_traverses_linked_directories_within_managed_roots() {
+        // SW-7030 (review 4533400138): a registered local directory model whose
+        // `text_encoder/` is a symlink to shared components elsewhere under the
+        // data dir must still produce its exact file ledger, with logical
+        // relative paths, while a link escaping every managed root is refused.
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let shared = data.join("models/shared/text_encoder");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("model.safetensors"), b"encoder bytes").unwrap();
+        let model = data.join("models/local/demo");
+        std::fs::create_dir_all(&model).unwrap();
+        std::fs::write(model.join("dit.safetensors"), b"dit bytes").unwrap();
+        symlink(&shared, model.join("text_encoder")).unwrap();
+
+        let settings = Settings::for_test(data.clone());
+        let roots = crate::paths::allowed_model_roots(&settings).unwrap();
+        let files = capture_registered_files_with_roots(&model, &roots).unwrap();
+        let relatives: Vec<PathBuf> = files
+            .iter()
+            .map(|file| file.relative_path.clone())
+            .collect();
+        assert!(relatives.contains(&PathBuf::from("dit.safetensors")));
+        assert!(relatives.contains(&PathBuf::from("text_encoder/model.safetensors")));
+
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.safetensors"), b"secret").unwrap();
+        symlink(&outside, model.join("escaped")).unwrap();
+        assert!(capture_registered_files_with_roots(&model, &roots).is_err());
     }
 
     #[test]
