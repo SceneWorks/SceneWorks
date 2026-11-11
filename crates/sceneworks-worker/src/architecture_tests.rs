@@ -449,7 +449,7 @@ fn real_image_job_modules_import_the_json_macro_they_invoke() {
 // ## Why an inventory rather than a flat prohibition
 //
 // The prohibition is not true today and writing it as one would produce either a red tree or a
-// vacuous scan. Nine family allow-lists exist at this commit, every one of them with a reason that
+// vacuous scan. Six family allow-lists exist at this commit, every one of them with a reason that
 // is a fact about a real deployment or a real crate graph rather than about laziness. So the guard
 // is shaped the way `crate::candle_preview_wiring_tests` is: an explicit inventory of what is
 // known and recorded, a directory-wide sweep for everything that is not, a non-vacuity floor so a
@@ -468,7 +468,8 @@ fn real_image_job_modules_import_the_json_macro_they_invoke() {
 // outputs). A gate for a family that vocabulary does not yet contain is invisible to it. That hole
 // is closed as far as source text can close it by
 // `the_family_token_vocabulary_covers_every_family_the_live_tables_name`, which fails the moment a
-// new family reaches any of the three live tables without reaching the vocabulary.
+// new family reaches either of the two live const tables, or the checked-in native import facts the
+// derived `IMPORT_SUPPORTED_FAMILIES` is built from, without reaching the vocabulary.
 //
 // A second hole is not closable from source text at all, and is stated rather than papered over: a
 // constant naming exactly ONE token, and that token an AMBIGUOUS one, is not judged a family
@@ -568,11 +569,12 @@ const RECORDED_FAMILY_ALLOW_LISTS: &[(&str, &str, &str)] = &[
          `CheckpointAdapterRegistration::base_compatibility` declares the base-snapshot dependency \
          and which families satisfy it, but carries no builtin catalog MODEL ID or tier — and an id \
          plus a tier is exactly what building the base's requirement closure through \
-         `selected_resident_base_closure_for_row` needs. NOT DERIVABLE here for a second reason the plan \
-         tables do not have: this one lives in the pre-loader guard, which compiles on EVERY build, \
-         while the adapter registry is cfg-gated to macOS-or-candle (see IMPORT_SUPPORTED_FAMILIES) \
-         — a derived list would be empty on the candle-off build and silently return every imported \
-         checkpoint to the source library. Pinned in BOTH directions against \
+         `selected_resident_base_closure_for_row` needs. The checked-in native import facts \
+         (`config/engine-capabilities/capabilities.{mlx,candle}.json` `imports[]`) that \
+         `IMPORT_SUPPORTED_FAMILIES` is now derived from carry family, source shape and provider id \
+         but no resident base model id or tier either, and no typed `ModelSpec` declares itself the \
+         resident base for a family's imports, so there is no typed source to derive this pairing \
+         from: it is product data that names which shipped install an import borrows. Pinned in BOTH directions against \
          CHECKPOINT_PLAN_RESIDENT_BASE_TIERS + CHECKPOINT_PLAN_FAMILY_COMPONENT_RESOLVERS, and \
          against each family resolver's own repo/tier constants, by \
          `the_guard_resident_base_table_mirrors_the_checkpoint_plan_family_tables`, so a family \
@@ -587,45 +589,11 @@ const RECORDED_FAMILY_ALLOW_LISTS: &[(&str, &str, &str)] = &[
          admits no import; widening it changes which manifest entries a memory audit measures.",
     ),
     (
-        "../sceneworks-core/src/base_weights.rs",
-        "IMPORT_SUPPORTED_FAMILIES",
-        "NOT DERIVABLE at this commit. The adapter registry is \
-         `gen_core::ProviderRegistry::checkpoint_adapters`, and `sceneworks-core` already depends on \
-         `sceneworks-gen-core`, but the populated runtime registry is composed in the worker, not \
-         in gen-core or core. That worker composition is cfg-gated to macOS-or-candle: on the candle-off build `inference_runtime::media()` is EMPTY, so a \
-         derived list would refuse every import there. And the registry binds at least six families \
-         against this list's four (`flux2`, `krea_2`, `mage-flow`, `sdxl`), so deriving would \
-         silently WIDEN what import accepts.",
-    ),
-    (
         "../sceneworks-core/src/checkpoint_inspector.rs",
         "MULTI_EXPERT_FAMILIES",
         "Checkpoint truth the adapter cannot carry: it is what makes `refine_multi_expert_role` \
          provably ADDITIVE, so no other family's already-compiled plan can change. An adapter is \
          resolved from the family this list helps determine, so deriving it from one is circular.",
-    ),
-    (
-        "../sceneworks-core/src/jobs_store/routing/catalog.rs",
-        "MLX_ROUTED_FAMILIES",
-        "Catalog routing authority in core, which cannot depend on the worker-owned populated \
-         runtime registry (see IMPORT_SUPPORTED_FAMILIES). Pinned against the import gate by \
-         `mlx_routed_families_agree_with_import_supported_families`, so the two cannot drift.",
-    ),
-    (
-        "../sceneworks-core/src/jobs_store/routing/catalog.rs",
-        "CANDLE_ROUTED_FAMILIES",
-        "The candle twin of MLX_ROUTED_FAMILIES, same reason, same parity assertion.",
-    ),
-    (
-        "../sceneworks-core/src/jobs_store/routing/catalog.rs",
-        "EXPECTED_MLX_ROUTED_FAMILIES",
-        "A `#[cfg(test)]` fixture that pins MLX_ROUTED_FAMILIES by value. Not a production gate; it \
-         exists so a silent edit to the production list is red.",
-    ),
-    (
-        "../sceneworks-core/src/jobs_store/routing/catalog.rs",
-        "EXPECTED_CANDLE_ROUTED_FAMILIES",
-        "The candle twin of EXPECTED_MLX_ROUTED_FAMILIES.",
     ),
 ];
 
@@ -634,10 +602,6 @@ const LIVE_FAMILY_TABLES: &[(&str, &str)] = &[
     (
         "src/image_jobs/checkpoint_plan.rs",
         "CHECKPOINT_PLAN_BESPOKE_PLAN_SOURCED_FAMILIES",
-    ),
-    (
-        "../sceneworks-core/src/base_weights.rs",
-        "IMPORT_SUPPORTED_FAMILIES",
     ),
     (
         "../sceneworks-core/src/checkpoint_inspector.rs",
@@ -1065,6 +1029,44 @@ fn the_family_token_vocabulary_covers_every_family_the_live_tables_name() {
                  allow-list sweep is blind to every gate written for it."
             );
         }
+    }
+
+    // The import gate and the test-only MLX/Candle routed-family fixtures are no longer const
+    // slices the sweep can read: they are derived at runtime from the checked-in native import
+    // facts. Check the vocabulary against that typed source directly — every family a native
+    // import route registers, and the derived import gate itself.
+    let mut derived: BTreeSet<String> = BTreeSet::new();
+    for facts in [
+        include_str!("../../../config/engine-capabilities/capabilities.mlx.json"),
+        include_str!("../../../config/engine-capabilities/capabilities.candle.json"),
+    ] {
+        let facts: serde_json::Value =
+            serde_json::from_str(facts).expect("native import facts parse");
+        for route in facts["imports"].as_array().expect("native import routes") {
+            derived.insert(
+                route["family"]
+                    .as_str()
+                    .expect("import route names a family")
+                    .to_owned(),
+            );
+        }
+    }
+    derived.extend(
+        sceneworks_core::base_weights::IMPORT_SUPPORTED_FAMILIES
+            .iter()
+            .map(|family| (*family).to_owned()),
+    );
+    assert!(
+        derived.len() >= 2,
+        "the native import facts named {derived:?} — the derived-source read is broken"
+    );
+    for family in derived {
+        assert!(
+            vocabulary.contains(family.as_str()),
+            "the native import facts (and so the derived IMPORT_SUPPORTED_FAMILIES) name the \
+             family {family:?}, which CHECKPOINT_PLAN_FAMILY_TOKENS does not carry. Add it there, \
+             or the family allow-list sweep is blind to every gate written for it."
+        );
     }
 }
 
