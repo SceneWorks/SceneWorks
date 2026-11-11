@@ -3,7 +3,7 @@
 
 mod auth;
 mod browser_fixture;
-mod catalog;
+pub(crate) mod catalog;
 mod checkpoint_library;
 mod compression;
 mod dataset_catalogs;

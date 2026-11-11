@@ -3795,7 +3795,7 @@ fn minimax_h3_manifest() -> String {
 /// shards in `present`. Files are real (not blob symlinks) so the fixture is portable; the blob-level
 /// semantics are covered by the unix-gated `variant_delete_tests`.
 #[cfg(test)]
-fn seed_minimax_partition(
+pub(crate) fn seed_minimax_partition(
     snapshot: &std::path::Path,
     tier: &str,
     partition: &str,
@@ -3821,7 +3821,7 @@ fn seed_minimax_partition(
 }
 
 #[cfg(test)]
-const MINIMAX_SHARDS: [&str; 2] = [
+pub(crate) const MINIMAX_SHARDS: [&str; 2] = [
     "diffusion_pytorch_model-00001-of-00002.safetensors",
     "diffusion_pytorch_model-00002-of-00002.safetensors",
 ];
