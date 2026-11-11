@@ -4651,7 +4651,10 @@ async fn terminal_side_effect_recovery_backoff_prevents_poison_batch_starvation(
             worker_id: "recovery-fairness-worker".to_owned(),
             gpu_id: "gpu-0".to_owned(),
             gpu_name: Some("Test GPU".to_owned()),
-            capabilities: vec![WorkerCapability::ImageGenerate],
+            // Terminal side-effect recovery is job-type agnostic; a model-free placeholder keeps
+            // this fixture on the versionless claim it has always used (an unbound model job is
+            // unclaimable for every protocol version).
+            capabilities: vec![WorkerCapability::Placeholder],
             loaded_models: Vec::new(),
             utilization: None,
         })
@@ -4661,7 +4664,7 @@ async fn terminal_side_effect_recovery_backoff_prevents_poison_batch_starvation(
         state
             .jobs_store
             .create_job(CreateJob {
-                job_type: JobType::ImageGenerate,
+                job_type: JobType::Placeholder,
                 project_id: None,
                 project_name: None,
                 payload: serde_json::Map::new(),

@@ -135,7 +135,6 @@ fn private_portable_binding_roundtrips_nested_plan_context_for_claim() {
         Some(("cpu", std::env::consts::OS)),
         &[claim],
         false,
-        false,
     )
     .unwrap());
 }
@@ -177,29 +176,76 @@ fn historical_unbound_model_jobs_cannot_reach_versionless_claims() {
         .unwrap()
         .clone();
     let person_full = store.create_job(person_full).unwrap();
-    let connection = store.open_connection().unwrap();
-    assert!(!candidate_matches_portable_worker_sources(
-        &connection,
-        &image.id,
-        None,
-        &[],
-        false,
-        false
-    )
-    .unwrap());
-    assert!(candidate_matches_portable_worker_sources(
-        &connection,
-        &download.id,
-        None,
-        &[],
-        false,
-        false,
-    )
-    .unwrap());
+    // `1` is a JSON number, not the boolean the claim gate's `model_free_job` requires, so these
+    // rows are model jobs: the upgrade batch must offer them rather than leave them unclaimable.
+    let mut numeric_dry_run = request();
+    numeric_dry_run.job_type = JobType::LoraTrain;
+    numeric_dry_run.payload = json!({"model":"example", "dryRun": 1})
+        .as_object()
+        .unwrap()
+        .clone();
+    let numeric_dry_run = store.create_job(numeric_dry_run).unwrap();
+    let mut numeric_preview = request();
+    numeric_preview.job_type = JobType::PersonDetect;
+    numeric_preview.payload = json!({"preview": 1, "videoAssetId": "clip-1"})
+        .as_object()
+        .unwrap()
+        .clone();
+    let numeric_preview = store.create_job(numeric_preview).unwrap();
+    let mut boolean_dry_run = request();
+    boolean_dry_run.job_type = JobType::LoraTrain;
+    boolean_dry_run.payload = json!({"model":"example", "dryRun": true})
+        .as_object()
+        .unwrap()
+        .clone();
+    store.create_job(boolean_dry_run).unwrap();
+    for (job, model_free) in [
+        (&numeric_dry_run, false),
+        (&numeric_preview, false),
+        (&image, false),
+        (&download, true),
+    ] {
+        assert_eq!(
+            crate::model_artifacts::portable_binding::model_free_job(&job.job_type, &job.payload),
+            model_free
+        );
+    }
+
+    // Drive the real versionless claim entry point (no portable version, backend or platform),
+    // exactly what a claim that omits `portableModelBindingVersion` reaches. The unbound image job
+    // is older and FIFO-first, yet only the model-free download may be returned.
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "versionless".into(),
+            gpu_id: "gpu-0".into(),
+            gpu_name: None,
+            capabilities: vec![
+                crate::contracts::WorkerCapability::ImageGenerate,
+                crate::contracts::WorkerCapability::ModelDownload,
+            ],
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .unwrap();
+    let claimed = store.claim_next_job("versionless").unwrap();
+    assert_eq!(claimed.map(|job| job.id), Some(download.id.clone()));
+    assert_eq!(store.claim_next_job("versionless").unwrap(), None);
+    assert_eq!(
+        store.get_job(&image.id).unwrap().status,
+        JobStatus::Queued,
+        "an unbound historical model job stays queued for the API upgrade"
+    );
+
     let queued = store.unbound_queued_model_jobs(8).unwrap();
     assert_eq!(
         queued.iter().map(|job| &job.id).collect::<Vec<_>>(),
-        vec![&image.id, &training.id, &person_full.id]
+        vec![
+            &image.id,
+            &training.id,
+            &person_full.id,
+            &numeric_dry_run.id,
+            &numeric_preview.id
+        ]
     );
 }
 
@@ -241,7 +287,6 @@ fn historical_binding_install_is_atomic_and_refuses_a_changed_job() {
         Some(("cpu", std::env::consts::OS)),
         &[],
         false,
-        false,
     )
     .unwrap());
     assert!(!candidate_matches_portable_worker_sources(
@@ -249,7 +294,6 @@ fn historical_binding_install_is_atomic_and_refuses_a_changed_job() {
         &original.id,
         None,
         &[],
-        false,
         false,
     )
     .unwrap());
@@ -271,13 +315,17 @@ fn unauthenticated_historical_carrier_fails_before_claim() {
         .clone();
     let original = store.create_job(request).unwrap();
     let failed = store
-        .fail_historical_unbound_queued_job(&original)
+        .fail_historical_unbound_queued_job(&original, "source bytes changed")
         .unwrap()
         .unwrap();
     assert_eq!(failed.status, JobStatus::Failed);
+    assert_eq!(
+        failed.error.as_deref(),
+        Some("Historical model source could not be verified: source bytes changed")
+    );
     assert!(store.unbound_queued_model_jobs(8).unwrap().is_empty());
     assert!(store
-        .fail_historical_unbound_queued_job(&original)
+        .fail_historical_unbound_queued_job(&original, "source bytes changed")
         .unwrap()
         .is_none());
 }
@@ -360,21 +408,15 @@ fn claim_requires_one_worker_with_primary_digest_and_auxiliary_claim() {
         .unwrap());
     let connection = store.open_connection().unwrap();
     let route = Some(("cpu", std::env::consts::OS));
-    assert!(!candidate_matches_portable_worker_sources(
-        &connection,
-        &job.id,
-        route,
-        &[],
-        false,
-        false
-    )
-    .unwrap());
+    assert!(
+        !candidate_matches_portable_worker_sources(&connection, &job.id, route, &[], false,)
+            .unwrap()
+    );
     assert!(!candidate_matches_portable_worker_sources(
         &connection,
         &job.id,
         route,
         std::slice::from_ref(&digest_claim),
-        false,
         false,
     )
     .unwrap());
@@ -384,7 +426,6 @@ fn claim_requires_one_worker_with_primary_digest_and_auxiliary_claim() {
         route,
         std::slice::from_ref(&auxiliary_claim),
         false,
-        false,
     )
     .unwrap());
     assert!(candidate_matches_portable_worker_sources(
@@ -392,7 +433,6 @@ fn claim_requires_one_worker_with_primary_digest_and_auxiliary_claim() {
         &job.id,
         route,
         &[digest_claim, auxiliary_claim],
-        false,
         false,
     )
     .unwrap());
@@ -479,7 +519,6 @@ fn local_utility_digest_requires_keyed_worker_even_when_raw_kind_is_missing_or_s
         route,
         std::slice::from_ref(&claim),
         false,
-        false,
     )
     .unwrap());
     assert!(candidate_matches_portable_worker_sources(
@@ -488,7 +527,6 @@ fn local_utility_digest_requires_keyed_worker_even_when_raw_kind_is_missing_or_s
         route,
         std::slice::from_ref(&claim),
         true,
-        false,
     )
     .unwrap());
     let unkeyed = store.get_worker("unkeyed").unwrap();

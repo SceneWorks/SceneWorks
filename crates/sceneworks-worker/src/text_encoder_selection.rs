@@ -391,8 +391,8 @@ pub(crate) fn portable_registered_source_paths(
     let library = sceneworks_core::hf_home::model_source_library(&settings.data_dir);
     let user_manifest = settings.config_dir.join("manifests/user.models.jsonc");
     if let Ok(raw) = std::fs::read_to_string(user_manifest) {
-        if let Ok(value) =
-            serde_json::from_str::<Value>(&sceneworks_core::jsonc::strip_jsonc_comments(&raw))
+        // Shared normalizer: a future-version user manifest contributes no encoder sources.
+        if let Ok(value) = sceneworks_core::model_manifest_version::parse_user_model_manifest(&raw)
         {
             for model in value
                 .get("models")

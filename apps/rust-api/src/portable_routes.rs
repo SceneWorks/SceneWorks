@@ -1178,7 +1178,15 @@ fn entries_support_route(
         {
             return !downloads.is_empty();
         }
-        if let Some(spec) = sceneworks_core::registry::builtin_model_spec(id) {
+        // A registered model's native route table is authoritative when the registry declares
+        // one. Today the registry derives routes only for the native image lane: every audio,
+        // video, vector and utility spec (and two bespoke image lanes) has an EMPTY table, which
+        // means "routing not owned by the registry", not "no backend". The native claim predicate
+        // above already decided the backend for the job, so an empty table keeps the catalog
+        // support flags instead of vetoing every route.
+        if let Some(spec) =
+            sceneworks_core::registry::builtin_model_spec(id).filter(|spec| !spec.routes.is_empty())
+        {
             return spec.routes.contains_key(backend);
         }
         let key = if backend == "mlx" {

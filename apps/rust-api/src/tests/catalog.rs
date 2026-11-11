@@ -1610,6 +1610,11 @@ async fn lora_download_endpoint_queues_hf_download_for_builtin_lora() {
 
 #[tokio::test]
 async fn model_and_lora_routes_match_manifest_behavior() {
+    // The catalog half asserts how the catalog merges a builtin row with a lenient user override
+    // (unknown keys kept, sc-12338). A REGISTERED builtin's override is limited to author choices by
+    // design (APPREG-6: an override cannot inject locators or policy), so that merge is exercised on
+    // an unregistered builtin row. The job half needs a native route, which only a registered id
+    // has, so it runs the registered z_image (a guidance model: the client negative prompt applies).
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
@@ -1629,7 +1634,14 @@ async fn model_and_lora_routes_match_manifest_behavior() {
               "schemaVersion": 1,
               "models": [
                 {
-                  "id": "z_image_turbo",
+                  "id": "z_image",
+                  "name": "Z-Image (registered; row content is not authority)",
+                  "family": "z-image",
+                  "type": "image",
+                  "downloads": []
+                },
+                {
+                  "id": "catalog_route_fixture",
                   "name": "Base Model",
                   "family": "z-image",
                   "type": "image",
@@ -1657,7 +1669,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
               "schemaVersion": 1,
               "models": [
                 {
-                  "id": "z_image_turbo",
+                  "id": "catalog_route_fixture",
                   "name": "User Model",
                   "ui": { "label": "User" },
                   "customPluginMetadata": { "vendorKey": "preserved" }
@@ -1708,7 +1720,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
                   "id": "cinematic",
                   "name": "Cinematic",
                   "workflow": "text_to_image",
-                  "model": "z_image_turbo",
+                  "model": "z_image",
                   "defaults": { "count": 4, "resolution": "1280x720", "negativePrompt": "flat lighting" },
                   "prompt": { "suffix": "cinematic lighting" },
                   "loras": [{ "id": "style-lora", "weight": 0.5 }]
@@ -1756,6 +1768,23 @@ async fn model_and_lora_routes_match_manifest_behavior() {
                         ),
                     },
                 ]
+            } else if repository.starts_with("SceneWorks/") || repository.starts_with("Tongyi-MAI/")
+            {
+                // The job half of this test runs the REGISTERED z_image_turbo (only a registered id
+                // has a native route); answer its pinned publisher metadata offline.
+                selectors
+                    .iter()
+                    .map(|selector| {
+                        sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile {
+                            relative_path: selector.replace('*', "weights.safetensors").into(),
+                            size_bytes: 7,
+                            sha256: format!(
+                                "sha256:{}",
+                                sceneworks_core::hashing::sha256_bytes(b"fixture")
+                            ),
+                        }
+                    })
+                    .collect()
             } else {
                 Vec::new()
             }
@@ -1861,7 +1890,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         .find(|preset| preset["id"] == "legacy_edit")
         .expect("legacy edit preset");
     assert_eq!(legacy_edit["workflow"], "edit_image");
-    assert_eq!(legacy_edit["model"], "z_image_turbo");
+    assert_eq!(legacy_edit["model"], "catalog_route_fixture");
     assert_eq!(legacy_edit["loras"][0]["id"], "style-lora");
     assert_eq!(
         legacy_edit["appliedDefaults"]["notes"][0],
@@ -1869,7 +1898,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     );
     assert_eq!(
         legacy_edit["appliedDefaults"]["notes"][1],
-        "model defaulted to z_image_turbo for legacy preset"
+        "model defaulted to catalog_route_fixture for legacy preset"
     );
     assert_eq!(
         legacy_edit["appliedDefaults"]["notes"][2],
@@ -1905,7 +1934,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         json!({
             "projectId": project_id,
             "prompt": "city at night",
-            "model": "z_image_turbo",
+            "model": "z_image",
             // Client render settings that DIFFER from the preset's declared
             // defaults (count 2 / 1280x720 / "flat lighting") — the studio seeds
             // the form from the preset but the user can override, so these
@@ -1940,7 +1969,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         image_job["payload"]["loras"][0]["source"]["path"],
         "loras/style.safetensors"
     );
-    assert_eq!(image_job["payload"]["model"], "z_image_turbo");
+    assert_eq!(image_job["payload"]["model"], "z_image");
     assert_eq!(
         image_job["payload"]["modelManifestEntry"]["catalogScope"],
         "builtin"
@@ -1973,7 +2002,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         json!({
             "projectId": project_id,
             "prompt": "city with selected lora",
-            "model": "z_image_turbo",
+            "model": "z_image",
             "count": 1,
             "width": 512,
             "height": 512,
@@ -2026,12 +2055,12 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(preset_model_job["payload"]["model"], "z_image_turbo");
+    assert_eq!(preset_model_job["payload"]["model"], "z_image");
 
     let (status, job) = request(
         app.clone(),
         "POST",
-        "/api/v1/models/z_image_turbo/download",
+        "/api/v1/models/catalog_route_fixture/download",
         json!({ "requestedGpu": "" }),
     )
     .await;
@@ -2048,7 +2077,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     let (status, deleted_overlay) = request(
         app.clone(),
         "DELETE",
-        "/api/v1/models/z_image_turbo?permanent=true",
+        "/api/v1/models/catalog_route_fixture?permanent=true",
         Value::Null,
     )
     .await;
@@ -2062,7 +2091,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         .as_array()
         .expect("models array")
         .iter()
-        .find(|model| model["id"] == "z_image_turbo")
+        .find(|model| model["id"] == "catalog_route_fixture")
         .expect("protected builtin remains after overlay deletion");
     assert_eq!(restored_builtin["name"], "Base Model");
     assert_eq!(restored_builtin["catalogScope"], "builtin");
@@ -2265,7 +2294,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
               "schemaVersion": 1,
               "models": [
                 {
-                  "id": "z_image_turbo",
+                  "id": "catalog_route_fixture",
                   "name": "Base Model",
                   "family": "z-image",
                   "type": "image",
@@ -3012,6 +3041,9 @@ async fn downloadable_model_catalog_uses_huggingface_cache_install_state() {
 
 #[tokio::test]
 async fn downloadable_model_catalog_flags_incomplete_huggingface_snapshots() {
+    // The subject is the catalog's diffusers-snapshot completeness heuristic over a manifest row's
+    // unpinned HF repo. A registered id's row comes from the compiled registry (its own pinned
+    // downloads), so the fixture row is authored under an unregistered id.
     let _env = isolate_hf_cache(); // resolve the HF cache under the tempdir, never a dev's real cache (sc-13835)
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -3023,7 +3055,7 @@ async fn downloadable_model_catalog_flags_incomplete_huggingface_snapshots() {
             {
               "schemaVersion": 1,
               "models": [{
-                "id": "sdxl",
+                "id": "sdxl_snapshot_fixture",
                 "name": "SDXL",
                 "type": "image",
                 "family": "sdxl",
@@ -3085,7 +3117,7 @@ async fn downloadable_model_catalog_flags_incomplete_huggingface_snapshots() {
     let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(models[0]["id"], "sdxl");
+    assert_eq!(models[0]["id"], "sdxl_snapshot_fixture");
     assert_eq!(models[0]["installState"], "missing");
     assert_eq!(models[0]["cacheState"], "incomplete");
     assert_eq!(models[0]["repairAvailable"], true);
@@ -3100,6 +3132,9 @@ async fn downloadable_model_catalog_flags_incomplete_huggingface_snapshots() {
 
 #[tokio::test]
 async fn downloadable_model_catalog_ignores_absent_optional_diffusers_components() {
+    // The subject is the catalog's diffusers-snapshot completeness heuristic over a manifest row's
+    // unpinned HF repo. A registered id's row comes from the compiled registry (its own pinned
+    // downloads), so the fixture row is authored under an unregistered id.
     // Chroma's model_index.json declares `feature_extractor` and `image_encoder`
     // as `[null, null]` — diffusers' sentinel for optional components the pipeline
     // doesn't use, which have no files on disk by design. The health check must
@@ -3116,7 +3151,7 @@ async fn downloadable_model_catalog_ignores_absent_optional_diffusers_components
             {
               "schemaVersion": 1,
               "models": [{
-                "id": "chroma1_base",
+                "id": "chroma_snapshot_fixture",
                 "name": "Chroma1-Base",
                 "type": "image",
                 "family": "chroma",
@@ -3189,7 +3224,7 @@ async fn downloadable_model_catalog_ignores_absent_optional_diffusers_components
     let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(models[0]["id"], "chroma1_base");
+    assert_eq!(models[0]["id"], "chroma_snapshot_fixture");
     assert_eq!(models[0]["installState"], "installed");
     assert_eq!(models[0]["cacheState"], "complete");
     assert_eq!(models[0]["repairAvailable"], false);
@@ -3198,6 +3233,9 @@ async fn downloadable_model_catalog_ignores_absent_optional_diffusers_components
 
 #[tokio::test]
 async fn downloadable_model_catalog_treats_processor_components_as_weightless() {
+    // The subject is the catalog's diffusers-snapshot completeness heuristic over a manifest row's
+    // unpinned HF repo. A registered id's row comes from the compiled registry (its own pinned
+    // downloads), so the fixture row is authored under an unregistered id.
     // Qwen-Image-Edit-2511's model_index.json declares a `processor`
     // (Qwen2VLProcessor) — a transformers preprocessing wrapper that carries no
     // model weights and ships `preprocessor_config.json` instead of `config.json`.
@@ -3215,7 +3253,7 @@ async fn downloadable_model_catalog_treats_processor_components_as_weightless() 
             {
               "schemaVersion": 1,
               "models": [{
-                "id": "qwen_image_edit_2511",
+                "id": "qwen_edit_snapshot_fixture",
                 "name": "Qwen-Image-Edit-2511",
                 "type": "image",
                 "family": "qwen-image",
@@ -3290,7 +3328,7 @@ async fn downloadable_model_catalog_treats_processor_components_as_weightless() 
     let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(models[0]["id"], "qwen_image_edit_2511");
+    assert_eq!(models[0]["id"], "qwen_edit_snapshot_fixture");
     assert_eq!(models[0]["installState"], "installed");
     assert_eq!(models[0]["cacheState"], "complete");
     assert_eq!(models[0]["repairAvailable"], false);
@@ -3757,7 +3795,7 @@ fn minimax_h3_manifest() -> String {
 /// shards in `present`. Files are real (not blob symlinks) so the fixture is portable; the blob-level
 /// semantics are covered by the unix-gated `variant_delete_tests`.
 #[cfg(test)]
-fn seed_minimax_partition(
+pub(crate) fn seed_minimax_partition(
     snapshot: &std::path::Path,
     tier: &str,
     partition: &str,
@@ -3783,7 +3821,7 @@ fn seed_minimax_partition(
 }
 
 #[cfg(test)]
-const MINIMAX_SHARDS: [&str; 2] = [
+pub(crate) const MINIMAX_SHARDS: [&str; 2] = [
     "diffusion_pytorch_model-00001-of-00002.safetensors",
     "diffusion_pytorch_model-00002-of-00002.safetensors",
 ];
@@ -3795,10 +3833,6 @@ fn seed_minimax_shared_floor(data_dir: &std::path::Path) {
     let snapshot =
         data_dir.join("cache/huggingface/hub/models--MiniMaxAI--MiniMax-H3/snapshots/939557dc");
     for (dir, files) in [
-        (
-            "text_encoder",
-            vec!["config.json", "model.safetensors.index.json"],
-        ),
         ("vae", vec!["config.json"]),
         ("audio_vae", vec!["config.json"]),
         // sc-19573 — the two paths the loader opens that the catalog used to omit.
@@ -3813,6 +3847,28 @@ fn seed_minimax_shared_floor(data_dir: &std::path::Path) {
         for file in files {
             std::fs::write(component.join(file), "{}").expect("component file writes");
         }
+    }
+    // The dense bf16 encoder is the REGISTERED macOS row's whole declared file list (the compiled
+    // registry, not a config-dir fixture, owns minimax_h3's downloads).
+    let encoder = sceneworks_core::builtin_manifests::builtin_model_entry("minimax_h3")
+        .expect("minimax_h3 is registered")["downloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| {
+            row["componentId"] == "text_encoder"
+                && row["variant"] == "bf16"
+                && row["repo"] == "MiniMaxAI/MiniMax-H3"
+                && row["platforms"]
+                    .as_array()
+                    .is_some_and(|platforms| platforms.contains(&json!("macos")))
+        })
+        .expect("the registered macOS bf16 encoder row")
+        .clone();
+    for file in encoder["files"].as_array().unwrap() {
+        let path = snapshot.join(file.as_str().unwrap());
+        std::fs::create_dir_all(path.parent().unwrap()).expect("encoder dir creates");
+        std::fs::write(path, "{}").expect("encoder file writes");
     }
 }
 
@@ -3857,7 +3913,7 @@ async fn minimax_h3_tier_download_fetches_one_partition_plus_the_whole_shared_fl
         app.clone(),
         "POST",
         "/api/v1/models/minimax_h3/download",
-        json!({ "requestedGpu": "auto", "variant": "q8" }),
+        json!({ "requestedGpu": "auto", "variant": "q8", "licenseAcknowledged": true }),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
@@ -3866,8 +3922,19 @@ async fn minimax_h3_tier_download_fetches_one_partition_plus_the_whole_shared_fl
     assert_eq!(primary["payload"]["repo"], "SceneWorks/minimax-h3-mlx");
     assert_eq!(primary["payload"]["variant"], "q8");
     assert_eq!(primary["payload"]["files"], json!(["q8/transformer/*"]));
+    // minimax_h3 is registered, so its downloads (and their pins) come from the compiled registry,
+    // not the config-dir fixture: the tier fetch carries the registered row's own pin.
+    let registered_pin = sceneworks_core::builtin_manifests::builtin_model_entry("minimax_h3")
+        .expect("minimax_h3 is registered")["downloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["files"] == json!(["q8/transformer/*"]))
+        .expect("the registered q8 transformer row")["revision"]
+        .clone();
+    assert!(registered_pin.as_str().is_some_and(|pin| pin.len() == 40));
     assert_eq!(
-        primary["payload"]["revision"], "f22bc294f46894584645aec59a513ee411450c96",
+        primary["payload"]["revision"], registered_pin,
         "the tier fetch is pinned, never main"
     );
 
@@ -3885,10 +3952,19 @@ async fn minimax_h3_tier_download_fetches_one_partition_plus_the_whole_shared_fl
         .iter()
         .map(|job| job["payload"]["files"].to_string())
         .collect::<Vec<_>>();
+    // The registered row also declares the soft, tier-agnostic Veda predictor co-requisite, which
+    // an install queues beside the floor (the config-dir fixture never declared it).
     assert_eq!(
         download_jobs.len(),
-        7,
-        "primary + sibling partition + packed TE + four tier-agnostic floor rows: {queued:?}"
+        8,
+        "primary + sibling partition + packed TE + four tier-agnostic floor rows + the Veda \
+         predictor: {queued:?}"
+    );
+    assert!(
+        queued
+            .iter()
+            .any(|files| files.contains("veda_8nfe_600step_preview")),
+        "{queued:?}"
     );
     assert!(
         queued
@@ -4123,27 +4199,48 @@ async fn minimax_h3_missing_bf16_encoder_is_repairable_beside_complete_q4() {
                 app.clone(),
                 "POST",
                 "/api/v1/models/minimax_h3/download",
-                json!({"variant": "bf16"}),
+                json!({"variant": "bf16", "licenseAcknowledged": true}),
             )
             .await;
             assert_eq!(status, StatusCode::CREATED, "{primary}");
             assert_eq!(primary["payload"]["files"], json!(["bf16/transformer/*"]));
             let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
             let downloads = jobs.as_array().unwrap();
+            // Plus the registered row's soft Veda predictor co-requisite (see the tier test above).
             assert_eq!(
                 downloads.len(),
-                7,
-                "primary, sibling, encoder, and four shared components"
+                8,
+                "primary, sibling, encoder, four shared components, and the Veda predictor"
             );
-            assert!(downloads
-                .iter()
-                .any(|job| job["payload"]["repo"] == "MiniMaxAI/MiniMax-H3"
-                    && job["payload"]["revision"] == "939557dc319dd91227e30195a763f272ba7f8765"
-                    && job["payload"]["files"]
-                        == json!([
-                            "text_encoder/config.json",
-                            "text_encoder/model.safetensors.index.json"
-                        ])));
+            assert!(downloads.iter().any(|job| job["payload"]["files"]
+                .to_string()
+                .contains("veda_8nfe_600step_preview")));
+            // The bf16 encoder row is the REGISTERED row's (the compiled registry, not the
+            // config-dir fixture, owns minimax_h3's downloads).
+            let registered_te =
+                sceneworks_core::builtin_manifests::builtin_model_entry("minimax_h3")
+                    .expect("minimax_h3 is registered")["downloads"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|row| {
+                        row["componentId"] == "text_encoder"
+                            && row["variant"] == "bf16"
+                            && row["repo"] == "MiniMaxAI/MiniMax-H3"
+                            && row["platforms"]
+                                .as_array()
+                                .is_some_and(|platforms| platforms.contains(&json!("macos")))
+                    })
+                    .expect("the registered macOS bf16 encoder row")
+                    .clone();
+            assert!(
+                downloads
+                    .iter()
+                    .any(|job| job["payload"]["repo"] == "MiniMaxAI/MiniMax-H3"
+                        && job["payload"]["revision"] == registered_te["revision"]
+                        && job["payload"]["files"] == registered_te["files"]),
+                "{downloads:#?}"
+            );
             assert!(downloads.iter().all(|job| {
                 let files = job["payload"]["files"].to_string();
                 !files.contains("q4/") && !files.contains("q8/")
@@ -5167,6 +5264,9 @@ async fn mmaudio_repo_rename_requires_the_exact_confined_current_snapshot() {
 
 #[tokio::test]
 async fn model_download_job_forwards_pinned_revision_for_co_requisite() {
+    // chatterbox_tts is registered and its compiled row pins its primary download, so the 'primary
+    // declares no revision' half cannot be authored for it. The planner rule is model-agnostic, so
+    // the same row shape is authored under an unregistered id.
     // sc-13541: a co-requisite whose weight the runtime resolves via a pinned-SHA `hf_get_pinned`
     // (chatterbox_tts's ve/perth) must have its `revision` forwarded to the download job, so the worker
     // fetches that exact commit into `snapshots/<sha>/` — where the resolver reads offline. The planner
@@ -5183,7 +5283,7 @@ async fn model_download_job_forwards_pinned_revision_for_co_requisite() {
             {
               "schemaVersion": 1,
               "models": [{
-                "id": "chatterbox_tts",
+                "id": "pinned_corequisite_fixture",
                 "name": "Chatterbox",
                 "type": "audio",
                 "family": "chatterbox",
@@ -5203,7 +5303,7 @@ async fn model_download_job_forwards_pinned_revision_for_co_requisite() {
     let (status, primary) = request(
         app.clone(),
         "POST",
-        "/api/v1/models/chatterbox_tts/download",
+        "/api/v1/models/pinned_corequisite_fixture/download",
         json!({ "requestedGpu": "auto" }),
     )
     .await;
@@ -6438,17 +6538,15 @@ fn builtin_manifest_registers_the_wan_vace_fun_model() {
     // the wan-video adapter, ONLY the validated replace_person capability (no generic T2V/I2V on
     // this control checkpoint), the diffusers-conversion download repo (NOT the raw VideoX-Fun
     // alibaba-pai repo, which does not load), an MLX block, and NO Torch GGUF quantization.
-    let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../config/manifests/builtin.models.jsonc");
-    let raw = std::fs::read_to_string(&manifest_path).expect("read builtin.models.jsonc");
-    let manifest: Value =
-        serde_json::from_str(&strip_jsonc_comments(&raw)).expect("parse builtin.models.jsonc");
-    let model = manifest["models"]
-        .as_array()
-        .expect("models array")
-        .iter()
-        .find(|entry| entry["id"] == "wan_2_2_vace_fun_14b")
-        .expect("wan_2_2_vace_fun_14b is registered in the catalog");
+    // APPREG-4: memory facts live in the registry evidence store, not the hand-authored
+    // manifest, so read the shipped entry the way every consumer does (registry projection plus
+    // evidence), not the raw product file.
+    let model = Value::Object(
+        sceneworks_core::builtin_manifests::builtin_model_entry("wan_2_2_vace_fun_14b")
+            .expect("wan_2_2_vace_fun_14b is registered in the catalog")
+            .clone(),
+    );
+    let model = &model;
     assert_eq!(model["type"], "video");
     assert_eq!(model["family"], "wan-video");
     assert_eq!(model["adapter"], "wan_video");
@@ -9149,16 +9247,18 @@ async fn fetching_job_replays_require_current_receipts_for_every_source_type() {
     }
     let (status, _) = request(app.clone(), "PUT", ack, Value::Null).await;
     assert_eq!(status, StatusCode::OK);
-    let path = config_dir.join("builtin.models.jsonc");
-    let source = std::fs::read_to_string(&path).unwrap();
-    std::fs::write(
-        &path,
-        source.replace(
-            "https://huggingface.co/MiniMaxAI/MiniMax-H3",
-            "https://example.org/new-license",
+    // minimax_h3's terms come from the compiled registry, so they change only with a release; a
+    // config-dir edit cannot change them. Recreate the state a release leaves behind: the stored
+    // acceptance names the previous terms.
+    super::yue2_catalog::age_stored_license_acceptance(
+        &temp,
+        "minimax_h3",
+        &Value::Object(
+            sceneworks_core::builtin_manifests::builtin_model_entry("minimax_h3")
+                .expect("minimax_h3 is registered")
+                .clone(),
         ),
-    )
-    .unwrap();
+    );
     let changed = create_app(settings).unwrap();
     for (kind, id) in &jobs {
         for operation in ["retry", "duplicate"] {

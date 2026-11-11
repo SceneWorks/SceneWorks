@@ -857,6 +857,52 @@ async fn typed_http_admission_freezes_catalog_authority_before_asset_persistence
         .portable_model_binding(claimed_id)
         .unwrap()
         .is_some());
+    // Review finding 4: substituted or missing imported bytes at CLAIM time fail the historical
+    // carrier with the reason instead of leaving it queued as "no route provable yet".
+    for substituted in [true, false] {
+        let carrier = state
+            .jobs_store
+            .create_job(crate::CreateJob {
+                job_type: queued.job_type.clone(),
+                project_id: queued.project_id.clone(),
+                project_name: None,
+                payload: queued.payload.clone(),
+                requested_gpu: queued.requested_gpu.clone(),
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+                initial_status: None,
+            })
+            .unwrap();
+        let bytes = std::fs::read(&source).unwrap();
+        if substituted {
+            std::fs::write(&source, vec![b'X'; bytes.len()]).unwrap();
+        } else {
+            std::fs::remove_file(&source).unwrap();
+        }
+        let (status, claim) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs/claim",
+            portable_test_worker_claim("authority-mlx-worker", TestPortableRoute::MlxMacos),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{claim}");
+        assert_ne!(claim["job"]["id"], json!(carrier.id), "{claim}");
+        let failed = state.jobs_store.get_job(&carrier.id).unwrap();
+        assert_eq!(
+            failed.status,
+            crate::JobStatus::Failed,
+            "substituted={substituted}: {failed:?}"
+        );
+        assert!(
+            failed.error.as_deref().is_some_and(
+                |error| error.starts_with("Historical model source could not be verified")
+            ),
+            "substituted={substituted}: {failed:?}"
+        );
+        std::fs::write(&source, bytes).unwrap();
+    }
     let old_carrier = state
         .jobs_store
         .create_job(crate::CreateJob {

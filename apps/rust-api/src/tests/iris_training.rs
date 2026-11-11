@@ -833,23 +833,12 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
             "{key} is not snapshotted: {stored:#}"
         );
     }
-    let mut builtin: Value = serde_json::from_str(&crate::strip_jsonc_comments(include_str!(
-        "../../../../config/manifests/builtin.models.jsonc"
-    )))
-    .unwrap();
-    let engine = builtin["models"]
-        .as_array_mut()
-        .unwrap()
-        .iter_mut()
-        .find(|model| model["id"] == "iris_3b")
+    // The export follows its engine's CURRENT surface rather than a snapshot (the keys above are not
+    // stored). iris_3b is registered, so its surface is the compiled registry row; a config-dir
+    // rewrite of that row can no longer stand in for "the engine changed later". The live
+    // derivation is therefore asserted against the registered engine row itself, from a fresh app.
+    let engine = sceneworks_core::builtin_manifests::builtin_model_entry("iris_3b")
         .expect("the builtin iris_3b entry");
-    engine["loraCompatibility"] =
-        json!({ "families": ["iris", "later_family"], "types": ["lora"] });
-    std::fs::write(
-        manifests.join("builtin.models.jsonc"),
-        serde_json::to_vec_pretty(&builtin).unwrap(),
-    )
-    .unwrap();
     let later_app = create_training_fixture_app(settings.clone()).unwrap();
     let (_, models) = request(later_app, "GET", "/api/v1/models", Value::Null).await;
     let later = models
@@ -860,10 +849,12 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
         .expect("the export is still a catalog model")
         .clone();
     assert_eq!(
-        later["loraCompatibility"]["families"],
-        json!(["iris", "later_family"]),
+        later["loraCompatibility"]["families"], engine["loraCompatibility"]["families"],
         "{later:#}"
     );
+    assert!(later["loraCompatibility"]["families"]
+        .as_array()
+        .is_some_and(|families| families.contains(&json!("iris"))));
 
     // Generate it: the job runs `iris_3b` on the export, with the generation install's entry (its
     // text-encoder co-requisite) and the user's pick kept for provenance.
@@ -1076,6 +1067,52 @@ async fn iris_full_export_registers_and_generates_through_the_iris_engine() {
         .unwrap();
     assert!(private_binding.is_none());
     std::fs::write(&user_catalog_path, original_user_catalog).unwrap();
+
+    // Review finding 4: a historical carrier whose produced bytes are substituted or missing at
+    // CLAIM time fails with the reason. It must not stay queued forever as "no route provable yet".
+    for substituted in [true, false] {
+        let carrier = jobs_store
+            .create_job(crate::CreateJob {
+                job_type: original.job_type.clone(),
+                project_id: original.project_id.clone(),
+                project_name: None,
+                payload: original.payload.clone(),
+                requested_gpu: original.requested_gpu.clone(),
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+                initial_status: None,
+            })
+            .unwrap();
+        let bytes = std::fs::read(&trained_file).unwrap();
+        if substituted {
+            std::fs::write(&trained_file, vec![b'X'; bytes.len()]).unwrap();
+        } else {
+            std::fs::remove_file(&trained_file).unwrap();
+        }
+        let (status, claim) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs/claim",
+            portable_test_worker_claim("test-iris-source-worker", TestPortableRoute::MlxMacos),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{claim}");
+        assert_ne!(claim["job"]["id"], json!(carrier.id), "{claim}");
+        let failed = jobs_store.get_job(&carrier.id).unwrap();
+        assert_eq!(
+            failed.status,
+            crate::JobStatus::Failed,
+            "substituted={substituted}: {failed:?}"
+        );
+        assert!(
+            failed.error.as_deref().is_some_and(
+                |error| error.starts_with("Historical model source could not be verified")
+            ),
+            "substituted={substituted}: {failed:?}"
+        );
+        std::fs::write(&trained_file, bytes).unwrap();
+    }
 
     // A client-authored `checkpointModelId` naming something that is not a trained checkpoint of
     // `model` is dropped: `model`'s own manifest is what resolves.
