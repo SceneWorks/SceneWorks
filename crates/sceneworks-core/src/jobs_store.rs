@@ -1670,6 +1670,38 @@ impl JobsStore {
         Ok(jobs)
     }
 
+    /// A dataset's batch describe jobs, newest first, so the Create Prompt Batch dialog can rebuild
+    /// its table from the results those jobs stored. Every retained job counts, including canceled,
+    /// interrupted and cleared ones: clearing hides a job from the queue, but its stored
+    /// descriptions are still the user's work.
+    pub fn list_dataset_batch_describe_jobs(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        limit: u32,
+    ) -> JobsStoreResult<Vec<JobSnapshot>> {
+        let connection = self.open_connection()?;
+        let limit = limit.clamp(1, MAX_LISTED_JOBS);
+        let mut statement = connection.prepare(
+            "select * from jobs
+              where type = ?1
+                and project_id = ?2
+                and json_extract(payload_json, '$.datasetId') = ?3
+              order by created_at desc, rowid desc
+              limit ?4",
+        )?;
+        let jobs = collect_jobs(statement.query_map(
+            params![
+                JobType::DatasetBatchDescribe.as_str(),
+                project_id,
+                dataset_id,
+                limit
+            ],
+            row_to_job,
+        )?)?;
+        Ok(jobs)
+    }
+
     pub fn get_job(&self, job_id: &str) -> JobsStoreResult<JobSnapshot> {
         // Read-only single-SELECT: no write mutex, relies on WAL reader isolation
         // (sc-8950 / F-148 — see list_jobs for the full rationale).

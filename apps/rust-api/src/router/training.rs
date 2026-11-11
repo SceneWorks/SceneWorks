@@ -98,7 +98,7 @@ pub(super) fn routes() -> Router<AppState> {
         )
         .route(
             "/api/v1/projects/:project_id/training/datasets/:dataset_id/batch-describe-jobs",
-            post(create_training_dataset_batch_describe_job),
+            get(list_training_dataset_batch_describe_jobs).post(create_training_dataset_batch_describe_job),
         )
         .route(
             "/api/v1/projects/:project_id/training/datasets/:dataset_id/subject-mask-jobs",

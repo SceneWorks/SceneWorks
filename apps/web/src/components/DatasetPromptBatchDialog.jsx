@@ -30,6 +30,10 @@ import { ValidationSummary, invalidProps } from "../validation/Validation.jsx";
 //
 // Polling survives a dropped request: each read is retried with a bounded backoff, and if it still
 // fails the dialog stops monitoring without losing the job or the rows, and offers to resume.
+//
+// The table is rebuilt from the dataset's earlier describe jobs whenever the dialog opens, so closing
+// it, saving, or a restart that interrupts a run never loses finished descriptions: each image gets
+// its newest successful result, and a job that is still running is monitored again.
 
 // The describers the job accepts: catalog id (install state) and the repo the job's `model` names.
 export const DESCRIBE_MODELS = [
@@ -110,6 +114,34 @@ export function mergeDescribeRows(rows, items, datasetOrder = [], model = null) 
   );
 }
 
+// Rebuild the table from a dataset's earlier describe jobs, newest first, each `{ model, items }`.
+// Each image still in the dataset gets its newest successful result, or its newest flagged result
+// when no run described it. Results for images removed from the dataset are left out.
+export function restoreDescribeRows(runs, datasetOrder) {
+  const inDataset = new Set(datasetOrder);
+  const restored = new Map();
+  for (const run of runs ?? []) {
+    for (const item of run?.items ?? []) {
+      if (!item?.itemId || !inDataset.has(item.itemId)) continue;
+      const current = restored.get(item.itemId);
+      if (!current || (current.failed && !item.failed)) restored.set(item.itemId, rowFromResultItem(item, run.model));
+    }
+  }
+  return mergeDescribeRows([...restored.values()], [], datasetOrder);
+}
+
+// The saved global prompt batch a new save would collide with: same name, ignoring case and
+// surrounding spaces. Saving again under that name replaces it instead of failing.
+export function promptBatchNamed(batches, name) {
+  const wanted = name.trim().toLowerCase();
+  if (!wanted) return null;
+  return (
+    (batches ?? []).find(
+      (batch) => (batch?.scope ?? "global") === "global" && String(batch?.name ?? "").trim().toLowerCase() === wanted,
+    ) ?? null
+  );
+}
+
 // The describer recorded for a saved batch: the one model every included row was described with,
 // "mixed" when rows came from runs with different models (each `sourceImages` entry then names its
 // own), or null when no row recorded one. A single string keeps `source.model` the same shape it
@@ -159,11 +191,17 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
     createModelDownloadJob,
     jobAction,
     setActiveView,
+    promptBatches = [],
     createPromptBatch,
+    updatePromptBatch,
     sendPromptBatchToImage,
   } = useAppContext();
   const projectId = activeProject?.id;
   const datasetOrder = useMemo(() => (dataset?.items ?? []).map((item) => item.id), [dataset]);
+  // The order the restore reads, without re-running the restore when the parent passes a new
+  // dataset object for the same dataset (that would replace rows the user is editing).
+  const datasetOrderRef = useRef(datasetOrder);
+  datasetOrderRef.current = datasetOrder;
 
   const [modelId, setModelId] = useState(VISION_CAPTION_MODEL_ID);
   // Each model's default instruction and limit, by repo: `{ prompt, maxChars }`.
@@ -188,6 +226,8 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   const [submitting, setSubmitting] = useState(false);
   // Why monitoring stopped while the job was still active (its reads kept failing), or "".
   const [monitorError, setMonitorError] = useState("");
+  // True until the earlier runs' results are loaded into the table; runs stay blocked meanwhile.
+  const [restoring, setRestoring] = useState(true);
   const monitoringRef = useRef(false);
   // How many of a job's stored items the table already holds, so polling reads only new ones.
   const itemsRead = useRef({ jobId: null, count: 0 });
@@ -269,16 +309,22 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
 
   // Read the job's stored items from `from` on, page by page, merging them into the table. Returns
   // how many items have been read in all.
-  const readItems = useCallback(async (jobId, from, model, signal) => {
+  const readItemPages = useCallback(async (jobId, from, onItems, signal) => {
     let offset = from;
     for (;;) {
       const page = await withRetries(() => jobsApi.resultItems(jobId, token, { offset }, { signal }), signal);
       const items = Array.isArray(page?.items) ? page.items : [];
-      if (items.length) setRows((current) => mergeDescribeRows(current, items, datasetOrder, model));
+      if (items.length) onItems(items);
       offset += items.length;
       if (!items.length || page?.nextOffset == null) return offset;
     }
-  }, [datasetOrder, token]);
+  }, [token]);
+
+  const readItems = useCallback(
+    (jobId, from, model, signal) =>
+      readItemPages(jobId, from, (items) => setRows((current) => mergeDescribeRows(current, items, datasetOrder, model)), signal),
+    [datasetOrder, readItemPages],
+  );
 
   const pollJob = useCallback(async (jobId, signal) => {
     for (;;) {
@@ -331,6 +377,67 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   function resumeMonitoring() {
     if (job?.id && running) monitor(job.id);
   }
+
+  // Rebuild the table from this dataset's earlier describe jobs, and monitor one still running.
+  useEffect(() => {
+    if (!dataset?.id || !projectId) {
+      setRestoring(false);
+      return undefined;
+    }
+    const controller = new AbortController();
+    const { signal } = controller;
+    const order = datasetOrderRef.current;
+    setRestoring(true);
+    (async () => {
+      try {
+        const listed = await withRetries(
+          () => trainingApi.listBatchDescribeJobs(projectId, dataset.id, token, { signal }),
+          signal,
+        );
+        const jobsNewestFirst = Array.isArray(listed) ? listed : [];
+        const active = jobsNewestFirst.find((entry) => !terminalStatuses.has(entry?.status)) ?? null;
+        // Read the active job first (its count seeds polling), then older runs until every image
+        // has a successful result.
+        const ordered = active ? [active, ...jobsNewestFirst.filter((entry) => entry !== active)] : jobsNewestFirst;
+        const missing = new Set(order);
+        const runs = [];
+        let activeCount = 0;
+        for (const entry of ordered) {
+          if (entry !== active && !missing.size) break;
+          const items = [];
+          const count = await readItemPages(entry.id, 0, (page) => items.push(...page), signal);
+          if (entry === active) activeCount = count;
+          for (const item of items) if (item?.itemId && !item.failed) missing.delete(item.itemId);
+          runs.push({ position: jobsNewestFirst.indexOf(entry), model: entry.result?.model ?? entry.payload?.model ?? null, items });
+        }
+        if (signal.aborted) return;
+        runs.sort((left, right) => left.position - right.position);
+        const restored = restoreDescribeRows(runs, order);
+        setRows(restored);
+        if (active) {
+          itemsRead.current = { jobId: active.id, count: activeCount };
+          setJob(active);
+          monitor(active.id);
+        } else if (restored.length) {
+          const last = jobsNewestFirst[0];
+          const stopped =
+            last && last.status !== "completed"
+              ? ` The last run stopped (${last.status}) after ${last.result?.processedCount ?? 0} of ${last.result?.itemCount ?? "?"} images.`
+              : "";
+          setRunMessage(`Restored ${restored.length} described ${restored.length === 1 ? "image" : "images"} from earlier runs.${stopped}`);
+        }
+      } catch (error) {
+        if (!isAbortError(error) && !signal.aborted) {
+          setRunError(errorMessage(error, "Could not load the results of earlier runs."));
+        }
+      } finally {
+        if (!signal.aborted) setRestoring(false);
+      }
+    })();
+    return () => controller.abort();
+    // Restores once per dataset; the order is read through a ref (see datasetOrderRef).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dataset?.id, projectId, token]);
 
   // Start a describe job: every image (`itemIds` null), or exactly `itemIds`. `confirmFirst`, when
   // given, runs first and can decline. Ignored while a start is already in flight or a job runs.
@@ -419,18 +526,49 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   const payload = () => promptBatchPayload({ rows, name: batchName, dataset });
   const usableCount = useMemo(() => rows.length - formatPromptBatch(rows).skipped.length, [rows]);
 
+  // Save the batch. A saved batch with the same name is replaced after a confirm, so saving again
+  // (after describing more images) updates it instead of failing on the name.
   async function save() {
     if (saving || !usableCount || !batchName.trim() || typeof createPromptBatch !== "function") return;
     setSaving(true);
     setSaveError("");
     try {
-      const created = await createPromptBatch(payload());
-      setSavedBatch(created ?? null);
+      const body = payload();
+      const existing = typeof updatePromptBatch === "function" ? promptBatchNamed(promptBatches, body.name) : null;
+      if (existing) {
+        const replace = await appConfirm({
+          title: `Replace “${existing.name}”?`,
+          message: `A prompt batch named “${existing.name}” already exists. Replace its prompts with these ${body.prompts.length}, or keep it and change the name.`,
+          confirmLabel: "Replace",
+          cancelLabel: "Keep it",
+          tone: "danger",
+        });
+        if (!replace) return;
+        setSavedBatch((await updatePromptBatch(existing.id, body, "global")) ?? null);
+      } else {
+        setSavedBatch((await createPromptBatch(body)) ?? null);
+      }
     } catch (error) {
       setSaveError(errorMessage(error, "Could not save the prompt batch."));
     } finally {
       setSaving(false);
     }
+  }
+
+  // Closing keeps described images (the next open restores them) but not edits made here, so
+  // unsaved edits are confirmed first.
+  async function requestClose() {
+    if (rows.some((row) => row.edited) && !savedBatch) {
+      const close = await appConfirm({
+        title: "Close without saving your edits?",
+        message: "Described images come back when you reopen this dialog, but fields you edited are kept only in a saved prompt batch.",
+        confirmLabel: "Close",
+        cancelLabel: "Keep editing",
+        tone: "danger",
+      });
+      if (!close) return;
+    }
+    onClose();
   }
 
   async function exportJson() {
@@ -454,16 +592,16 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
   // A job is starting or active: run controls and the inputs it was started from are locked.
   const busy = running || submitting;
   const runBlocked =
-    busy || dirty || !selectedAvailable || defaultPrompt === null || !datasetOrder.length || !promptValidation.ready;
+    busy || restoring || dirty || !selectedAvailable || defaultPrompt === null || !datasetOrder.length || !promptValidation.ready;
 
   return (
-    <Modal className="dataset-caption-modal dataset-prompt-batch-modal" labelledBy="dataset-prompt-batch-title" onClose={onClose}>
+    <Modal className="dataset-caption-modal dataset-prompt-batch-modal" labelledBy="dataset-prompt-batch-title" onClose={requestClose}>
       <header className="dataset-caption-head">
         <div>
           <p className="eyebrow">{dataset?.name ?? "Dataset"}</p>
           <h2 id="dataset-prompt-batch-title">Create Prompt Batch from Dataset</h2>
         </div>
-        <button className="modal-close" onClick={onClose} type="button">
+        <button className="modal-close" onClick={requestClose} type="button">
           Close
         </button>
       </header>
@@ -562,6 +700,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
             </button>
           </div>
         ) : null}
+        {restoring ? <p className="dataset-caption-mode-note" role="status">Loading results of earlier runs…</p> : null}
         {runError ? <p className="inline-warning" role="alert">{runError}</p> : null}
         {runMessage ? <p className="dataset-caption-mode-note" role="status">{runMessage}</p> : null}
 
@@ -613,56 +752,62 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
           </div>
         ) : null}
 
-        {rows.length ? (
-          <label>
-            Prompt batch name
-            <input onChange={(event) => setBatchName(event.target.value)} value={batchName} />
-          </label>
-        ) : null}
-        {saveError ? <p className="inline-warning" role="alert">{saveError}</p> : null}
-        {savedBatch ? (
-          <p className="dataset-caption-mode-note" role="status">
-            Saved “{savedBatch.name}” with {savedBatch.prompts?.length ?? 0} prompts.
-          </p>
-        ) : null}
       </div>
 
-      <footer className="dataset-caption-footer">
-        <span className="dataset-prompt-batch-footer-actions">
-          {running ? (
-            <button className="secondary-action" onClick={cancel} type="button">
-              Cancel
+      {/* Outside the scrolling table, so the name and the save outcome are always in view. */}
+      <div className="dataset-prompt-batch-bottom">
+        {rows.length ? (
+          <div className="dataset-prompt-batch-save">
+            <label>
+              Prompt batch name
+              <input onChange={(event) => setBatchName(event.target.value)} value={batchName} />
+            </label>
+            {saveError ? <p className="inline-warning" role="alert">{saveError}</p> : null}
+            {savedBatch ? (
+              <p className="dataset-caption-mode-note" role="status">
+                Saved “{savedBatch.name}” with {savedBatch.prompts?.length ?? 0} prompts.
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+
+        <footer className="dataset-caption-footer">
+          <span className="dataset-prompt-batch-footer-actions">
+            {running ? (
+              <button className="secondary-action" onClick={cancel} type="button">
+                Cancel
+              </button>
+            ) : null}
+            <button className="secondary-action" disabled={!usableCount || running} onClick={exportJson} type="button">
+              Export .json
             </button>
-          ) : null}
-          <button className="secondary-action" disabled={!usableCount || running} onClick={exportJson} type="button">
-            Export .json
-          </button>
-        </span>
-        <span className="dataset-prompt-batch-footer-actions">
-          {savedBatch ? (
-            <button className="primary-action" onClick={openInImageStudio} type="button">
-              Open in Image Studio
+          </span>
+          <span className="dataset-prompt-batch-footer-actions">
+            {savedBatch ? (
+              <button className="primary-action" onClick={openInImageStudio} type="button">
+                Open in Image Studio
+              </button>
+            ) : (
+              <button
+                className="secondary-action"
+                disabled={!usableCount || running || saving || !batchName.trim()}
+                onClick={save}
+                type="button"
+              >
+                {saving ? "Saving…" : "Save prompt batch"}
+              </button>
+            )}
+            {rows.length && remainingIds.length ? (
+              <button className="secondary-action" disabled={runBlocked} onClick={() => submit(remainingIds)} type="button">
+                Describe remaining ({remainingIds.length})
+              </button>
+            ) : null}
+            <button className="primary-action" disabled={runBlocked} onClick={describeAll} type="button">
+              {running && !rerunItemId ? "Describing…" : rows.length ? "Describe all again" : "Describe images"}
             </button>
-          ) : (
-            <button
-              className="secondary-action"
-              disabled={!usableCount || running || saving || !batchName.trim()}
-              onClick={save}
-              type="button"
-            >
-              {saving ? "Saving…" : "Save prompt batch"}
-            </button>
-          )}
-          {rows.length && remainingIds.length ? (
-            <button className="secondary-action" disabled={runBlocked} onClick={() => submit(remainingIds)} type="button">
-              Describe remaining ({remainingIds.length})
-            </button>
-          ) : null}
-          <button className="primary-action" disabled={runBlocked} onClick={describeAll} type="button">
-            {running && !rerunItemId ? "Describing…" : rows.length ? "Describe all again" : "Describe images"}
-          </button>
-        </span>
-      </footer>
+          </span>
+        </footer>
+      </div>
     </Modal>
   );
 }

@@ -1526,6 +1526,27 @@ pub(crate) async fn create_training_dataset_batch_describe_job(
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
+/// The most describe jobs one dataset's history lists. Each "Describe" click, re-run and "Describe
+/// remaining" is one job, so this covers far more history than the dialog needs to rebuild a table.
+const MAX_LISTED_BATCH_DESCRIBE_JOBS: u32 = 200;
+
+/// A dataset's batch describe jobs, newest first. The Create Prompt Batch dialog reads their
+/// stored result items to rebuild its table when it reopens, after a restart included.
+pub(crate) async fn list_training_dataset_batch_describe_jobs(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id)): Path<(String, String)>,
+) -> Result<Json<Vec<JobSnapshot>>, ApiError> {
+    let jobs = store_call(state, move |store, _timeout| {
+        store.list_dataset_batch_describe_jobs(
+            &project_id,
+            &dataset_id,
+            MAX_LISTED_BATCH_DESCRIBE_JOBS,
+        )
+    })
+    .await?;
+    Ok(Json(public_job_snapshots(jobs)))
+}
+
 /// Validate a batch describe request: the model (absent means the Vision Captioner; JoyCaption is
 /// the other accepted describer) and the instruction length, which depends on the model (JoyCaption
 /// takes one prompt of at most 4,000 characters, so its instruction is capped lower). Returns the

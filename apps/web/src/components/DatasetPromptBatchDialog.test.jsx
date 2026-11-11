@@ -8,6 +8,7 @@ vi.mock("../api/trainingResources.js", () => ({
   trainingApi: {
     defaultDescribePrompt: vi.fn(),
     batchDescribeJobs: vi.fn(),
+    listBatchDescribeJobs: vi.fn(),
     describePromptPresets: vi.fn(),
     describePromptPreset: vi.fn(),
   },
@@ -127,6 +128,8 @@ describe("DatasetPromptBatchDialog", () => {
       .mockReset()
       .mockImplementation(async (_token, _options, model) => ({ model, ...DEFAULTS[model || VISION_CAPTION_MODEL_REPO] }));
     trainingApi.batchDescribeJobs.mockReset().mockResolvedValue({ id: "job_1", status: "queued", progress: 0 });
+    // No earlier runs unless a test lists some.
+    trainingApi.listBatchDescribeJobs.mockReset().mockResolvedValue([]);
     // A tiny in-memory preset store standing in for the server catalog.
     presetStore = [{ id: "default", name: "Default", prompt: DEFAULT_PROMPT, scope: "builtin", builtin: true }];
     trainingApi.describePromptPresets.mockReset().mockImplementation(async (_token, options = {}, model = "") => {
@@ -167,7 +170,9 @@ describe("DatasetPromptBatchDialog", () => {
       createModelDownloadJob: vi.fn(async () => ({ id: "dl_1" })),
       jobAction: vi.fn(async () => ({})),
       setActiveView: vi.fn(),
+      promptBatches: [],
       createPromptBatch: vi.fn(async (payload) => ({ id: "film_prints_prompts", ...payload })),
+      updatePromptBatch: vi.fn(async (id, payload) => ({ id, ...payload })),
       sendPromptBatchToImage: vi.fn(),
     };
   });
@@ -665,5 +670,98 @@ describe("DatasetPromptBatchDialog", () => {
     await render({ dirty: true });
     expect(document.body.textContent).toContain("Save the dataset first");
     expect(button("Describe images").disabled).toBe(true);
+  });
+  // Earlier runs stored per job: `{ [jobId]: items }`, served by jobsApi.resultItems.
+  function serveStoredRuns(byJob) {
+    jobsApi.resultItems.mockReset().mockImplementation(async (jobId, _token, { offset = 0 } = {}) => {
+      const items = byJob[jobId] ?? [];
+      return { items: items.slice(offset), total: items.length, nextOffset: null };
+    });
+  }
+  function rowText(itemId) {
+    return document.body.querySelector(`[data-item-id="${itemId}"] textarea`)?.value;
+  }
+
+  it("restores earlier runs on open: newest success per image, interrupted run reported", async () => {
+    trainingApi.listBatchDescribeJobs.mockResolvedValue([
+      // Newest: interrupted by a restart after one image; item_b was flagged.
+      { id: "job_new", status: "interrupted", result: { processedCount: 2, itemCount: 3, model: JOY_REPO } },
+      { id: "job_old", status: "completed", result: { processedCount: 3, itemCount: 3, model: VISION_CAPTION_MODEL_REPO } },
+    ]);
+    serveStoredRuns({
+      job_new: [
+        described("item_a", 300, 400, { description: "Newest a." }),
+        described("item_b", 400, 300, { failed: true, error: "Bad reply." }),
+      ],
+      job_old: [
+        described("item_a", 300, 400, { description: "Old a." }),
+        described("item_b", 400, 300, { description: "Old b." }),
+        described("item_gone", 400, 300, { description: "Removed from the dataset." }),
+      ],
+    });
+    await render();
+    const rows = [...document.body.querySelectorAll(".dataset-prompt-batch-row")].map((row) => row.dataset.itemId);
+    expect(rows).toEqual(["item_a", "item_b"]);
+    expect(rowText("item_a")).toBe("Newest a.");
+    // The newer run flagged item_b; the older success is kept instead.
+    expect(rowText("item_b")).toBe("Old b.");
+    expect(document.body.textContent).toContain("Restored 2 described images from earlier runs.");
+    expect(document.body.textContent).toContain("The last run stopped (interrupted) after 2 of 3 images.");
+    expect(button("Describe remaining (1)")).toBeTruthy();
+    await click(button("Save prompt batch"));
+    await settle();
+    const payload = context.createPromptBatch.mock.calls[0][0];
+    expect(payload.sourceImages.map((image) => [image.itemId, image.model])).toEqual([
+      ["item_a", JOY_REPO],
+      ["item_b", VISION_CAPTION_MODEL_REPO],
+    ]);
+  });
+
+  it("resumes monitoring a run that is still going when the dialog reopens", async () => {
+    trainingApi.listBatchDescribeJobs.mockResolvedValue([
+      { id: "job_1", status: "running", progress: 0.3, result: { processedCount: 1, itemCount: 3, model: VISION_CAPTION_MODEL_REPO } },
+    ]);
+    storedItems = [described("item_a", 300, 400)];
+    await render();
+    expect(rowText("item_a")).toContain("(item_a)");
+    expect(button("Cancel")).toBeTruthy();
+    await act(async () => nextPoll(snapshot("completed", [described("item_a", 300, 400), described("item_b", 400, 300)], { progress: 1 })));
+    await settle();
+    expect([...document.body.querySelectorAll(".dataset-prompt-batch-row")].map((row) => row.dataset.itemId)).toEqual([
+      "item_a",
+      "item_b",
+    ]);
+    // The resumed poll read only the item it had not seen.
+    expect(jobsApi.resultItems.mock.calls.at(-1)[2]).toEqual({ offset: 1 });
+  });
+
+  it("replaces a saved batch with the same name after a confirm instead of failing", async () => {
+    context.promptBatches = [{ id: "film_prints_prompts", name: "Film Prints Prompts ", scope: "global", prompts: ["old"] }];
+    await render();
+    await runWith([described("item_a", 300, 400)]);
+    appConfirm.mockResolvedValueOnce(false);
+    await click(button("Save prompt batch"));
+    await settle();
+    expect(context.updatePromptBatch).not.toHaveBeenCalled();
+    expect(context.createPromptBatch).not.toHaveBeenCalled();
+    await click(button("Save prompt batch"));
+    await settle();
+    expect(context.createPromptBatch).not.toHaveBeenCalled();
+    expect(context.updatePromptBatch).toHaveBeenCalledWith("film_prints_prompts", expect.objectContaining({ name: "Film prints prompts" }), "global");
+    expect(button("Open in Image Studio")).toBeTruthy();
+  });
+
+  it("asks before closing with unsaved edits", async () => {
+    const onClose = vi.fn();
+    await render({ onClose });
+    await runWith([described("item_a", 300, 400)]);
+    await act(async () => setText(document.body.querySelector('[data-item-id="item_a"] textarea'), "Edited."));
+    appConfirm.mockResolvedValueOnce(false);
+    await click(button("Close"));
+    await settle();
+    expect(onClose).not.toHaveBeenCalled();
+    await click(button("Close"));
+    await settle();
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });

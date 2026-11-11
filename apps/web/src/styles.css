@@ -19303,3 +19303,10 @@ pre.yue2-abc,
 
 .appearance-bar .style-axis-control, .appearance-bar .compact-selector { width: 100%; min-width: 0; }
 .appearance-bar .compact-selector-pill { width: 100%; min-width: 0; }
+
+/* Create Prompt Batch: batch name and save outcome, pinned between the scrolling table and the footer. */
+.dataset-prompt-batch-bottom,
+.dataset-prompt-batch-save {
+  display: grid;
+  gap: 8px;
+}
