@@ -742,8 +742,9 @@ impl RuntimeSourceGuard {
     }
 }
 
-/// Private content-addressed bundle used only for digest-backed local sources. The exclusive
-/// lock remains held through dispatch, including loader reads, and prevents cooperative eviction.
+/// Private content-addressed bundle used only for digest-backed local sources. The shared route
+/// lease remains held through dispatch, including loader reads, and prevents cooperative eviction
+/// (which needs the lease exclusively); other attempts on the same route read concurrently.
 #[derive(Debug)]
 struct PortableAttemptSnapshot {
     _lease: std::sync::Arc<FileLock>,
@@ -1155,24 +1156,41 @@ fn prepare_portable_snapshot(
     ensure_private_directory(&cache_root)?;
     create_private_directory(&parent)?;
     ensure_private_directory(&parent)?;
+    // Readers share the route lease for as long as they use the bundle; an evictor needs it
+    // exclusively, so it never removes a bundle an attempt is reading. A published bundle is
+    // immutable, so concurrent attempts on one route (GPUs sharing `data_dir`) read it at once.
     let lease = std::sync::Arc::new(
-        FileLock::open_exclusive(&parent.join(".lease")).map_err(WorkerError::Io)?,
+        FileLock::shared(
+            sceneworks_core::file_lock::open_regular_lock_file(&parent.join(".lease"))
+                .map_err(WorkerError::Io)?,
+        )
+        .map_err(WorkerError::Io)?,
     );
     let snapshot = PortableAttemptSnapshot {
         _lease: lease.clone(),
     };
-    // A crashed first materialization leaves only a uniquely named staging tree; it never
-    // becomes a load candidate. The route lock makes cleanup exclusive with another writer.
-    for entry in std::fs::read_dir(&parent).map_err(WorkerError::Io)? {
-        let entry = entry.map_err(WorkerError::Io)?;
-        if entry.file_name().to_string_lossy().starts_with("staging-") {
-            remove_private_snapshot(&entry.path()).map_err(WorkerError::Io)?;
-        }
-    }
     let published = parent.join("bundle");
-    let needs_copy = !published.exists();
+    // Materialization is exclusive: one writer builds the staging tree and publishes it by
+    // rename, so a reader only ever sees a complete, verified bundle or none. The writer lock is
+    // held only until publication, never through dispatch.
+    let materializing = if published.exists() {
+        None
+    } else {
+        let writer =
+            FileLock::open_exclusive(&parent.join(".materialize")).map_err(WorkerError::Io)?;
+        (!published.exists()).then_some(writer)
+    };
+    let needs_copy = materializing.is_some();
     let staging = parent.join(format!("staging-{}", uuid::Uuid::new_v4()));
     if needs_copy {
+        // A crashed first materialization leaves only a uniquely named staging tree; it never
+        // becomes a load candidate. The writer lock makes cleanup exclusive with another writer.
+        for entry in std::fs::read_dir(&parent).map_err(WorkerError::Io)? {
+            let entry = entry.map_err(WorkerError::Io)?;
+            if entry.file_name().to_string_lossy().starts_with("staging-") {
+                remove_private_snapshot(&entry.path()).map_err(WorkerError::Io)?;
+            }
+        }
         create_private_directory(&staging)?;
     }
     let mut allowed_roots = crate::paths::allowed_model_roots(settings)?;
@@ -1356,7 +1374,11 @@ fn prepare_portable_snapshot(
             }
             Ok(())
         })?;
+        // Freeze before other writers or readers can observe the bundle as published by this
+        // writer; later readers only re-verify it.
+        freeze_private_snapshot(&published)?;
     }
+    drop(materializing);
     private_tree_bytes(&published)?;
     // Copy-then-verify closes the race where the original changes after the first source check.
     // The loader receives only these verified, private paths, never the original locator.
@@ -5462,6 +5484,76 @@ mod tests {
             8
         );
         drop(active);
+    }
+
+    /// A published route bundle is immutable, so a second attempt on the same frozen route (a
+    /// second GPU worker sharing `data_dir`) reads it while the first attempt still holds its
+    /// lease. Eviction stays excluded for as long as any attempt reads the bundle.
+    #[test]
+    fn published_route_bundle_serves_a_second_attempt_while_the_first_reads_it() {
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let model = data.join("models/imports/demo/model.safetensors");
+        std::fs::create_dir_all(model.parent().unwrap()).unwrap();
+        std::fs::write(&model, b"model").unwrap();
+        let settings = settings(data);
+        let payload =
+            json!({"modelManifestEntry":{"id":"m", "downloads":[], "paths":{"model":model}}})
+                .as_object()
+                .unwrap()
+                .clone();
+        let binding = PortableRouteBinding::new(
+            "cpu",
+            std::env::consts::OS,
+            vec![local_binding("modelManifestEntry", "m", &model, None)],
+        )
+        .unwrap();
+        let selected = |guard: &RuntimeSourceGuard| {
+            guard.dispatch_payload()["modelManifestEntry"]["paths"]["model"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let first = RuntimeSourceGuard::begin_with_binding(
+            &JobType::ImageGenerate,
+            &payload,
+            &settings,
+            Some(&binding),
+        )
+        .unwrap();
+        let first_path = selected(&first);
+        let root = settings.data_dir.join("models/portable-attempts");
+        assert!(Path::new(&first_path).starts_with(&root));
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        {
+            let (payload, settings, binding) = (payload.clone(), settings.clone(), binding.clone());
+            std::thread::spawn(move || {
+                let second = RuntimeSourceGuard::begin_with_binding(
+                    &JobType::ImageGenerate,
+                    &payload,
+                    &settings,
+                    Some(&binding),
+                )
+                .map(|guard| selected(&guard));
+                let _ = sender.send(second);
+            });
+        }
+        let second_path = receiver
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the second attempt must not wait for the first attempt's read lease")
+            .unwrap();
+        assert_eq!(second_path, first_path, "both attempts read one bundle");
+
+        // While the first attempt reads the bundle, an evictor cannot take it.
+        let entry = Path::new(&first_path)
+            .ancestors()
+            .find(|path| path.parent() == Some(root.as_path()))
+            .unwrap()
+            .to_path_buf();
+        assert!(FileLock::try_open_exclusive(&entry.join(".lease")).is_err());
+        drop(first);
+        assert!(FileLock::try_open_exclusive(&entry.join(".lease")).is_ok());
     }
 
     #[test]
