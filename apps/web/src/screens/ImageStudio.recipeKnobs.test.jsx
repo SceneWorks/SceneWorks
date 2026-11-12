@@ -432,6 +432,26 @@ describe("a replayed recipe reaches every allow-listed control", () => {
     },
   );
 
+  describe("asset-edit launch naming a FLUX.3 model the catalog has not delivered yet", () => {
+    const source = { ...FLUX3_REFERENCE, id: "new-c", displayName: "new-c" };
+    const studioLaunch = { id: "late-source", view: "Image", mode: "edit_image", model: FLUX3.id, assetId: source.id };
+    const contextFor = (models) => baseContext({ assets: [source], selectedAsset: source, studioLaunch,
+      imageModels: models, models, createImageJob: vi.fn(async () => ({ id: "late-source-job" })) });
+
+    it("binds the source as the ordered reference once the model resolves to FLUX.3", async () => {
+      await render(contextFor([OTHER_MODEL]));
+      await render(contextFor([OTHER_MODEL, FLUX3]));
+      expect(persistedStudioSettings().referenceAssetIds).toEqual([source.id]);
+      expect(persistedStudioSettings().flux3ReferenceSlots).toHaveLength(1);
+    });
+
+    it("binds nothing when the model resolves to a non-FLUX.3 family", async () => {
+      await render(contextFor([OTHER_MODEL]));
+      await render(contextFor([OTHER_MODEL, { ...FLUX3, family: "flux2", ui: {} }]));
+      expect(persistedStudioSettings().flux3ReferenceSlots ?? []).toHaveLength(0);
+    });
+  });
+
   it.each([[null, null], [null, 768], [16, 48]])("persists scoped recipe axes %s / %s across a real studio unmount and hydration", async (width, height) => {
     const model = REAL_FLUX3_MODELS[0];
     const createImageJob = vi.fn(async () => ({ id: "hydrated-intent" }));
@@ -800,6 +820,40 @@ describe("a replayed recipe reaches every allow-listed control", () => {
       await render({ ...context, imageModels: [other], models: [other] });
       expect(persistedStudioSettings().flux3ReferenceSlots ?? []).toHaveLength(0);
       expect(persistedStudioSettings().orderedCharacterReferences ?? false).toBe(false);
+    });
+
+    it("ends a late-catalog replay in the same Studio state as a loaded-catalog replay", async () => {
+      const state = async (late) => {
+        const createImageJob = vi.fn(async () => ({ id: late ? "late-state" : "loaded-state" }));
+        const context = contextFor(createImageJob, late ? { imageModels: [], models: [] } : { imageModels: [FLUX3], models: [FLUX3] });
+        await render(context);
+        if (late) await render({ ...context, imageModels: [FLUX3], models: [FLUX3] });
+        const persisted = persistedStudioSettings();
+        await click(buttonByText("Generate"));
+        const payload = createImageJob.mock.calls[0][0];
+        return { mode: persisted.mode, intent: persisted.referenceDimensionIntent,
+          references: persisted.referenceAssetIds, payload: {
+            mode: payload.mode, referenceAssetIds: payload.referenceAssetIds, height: payload.height,
+            hasWidth: Object.hasOwn(payload, "width"), ids: payload.advanced.flux3_reference_ids } };
+      };
+      const loaded = await state(false);
+      expect(loaded.intent).toMatchObject({ mode: "edit_image", width: null, height: 768 });
+      expect(loaded.payload).toMatchObject({ mode: "edit_image", hasWidth: false, height: 768 });
+      await unmountRoot(root, container);
+      window.localStorage.clear();
+      ({ container, root } = mountRoot());
+      expect(await state(true)).toEqual(loaded);
+    });
+
+    it("lets a user mode change made while the catalog loads win over the deferred restore", async () => {
+      const createImageJob = vi.fn(async () => ({ id: "user-wins" }));
+      // The recipe's model is missing from a partially loaded catalog, so its replay stays pending.
+      const context = contextFor(createImageJob, { imageModels: [OTHER_MODEL], models: [OTHER_MODEL] });
+      await render(context);
+      await click(buttonByText("With character"));
+      expect(persistedStudioSettings().mode).toBe("character_image");
+      await render({ ...context, imageModels: [OTHER_MODEL, FLUX3], models: [OTHER_MODEL, FLUX3] });
+      expect(persistedStudioSettings().mode).toBe("character_image");
     });
 
     it("restores them identically when the catalog is already loaded", async () => {
