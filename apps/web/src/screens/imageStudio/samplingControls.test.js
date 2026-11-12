@@ -77,6 +77,27 @@ describe("MiniMax-H3-Image sampler", () => {
     }
   });
 
+  it("accepts a bound that came back through the worker's f32 record, and still refuses a real overshoot", () => {
+    // The worker records each scale as f32: a UI 0.01 replays as 0.009999999776482582.
+    const f32 = (value) => Math.fround(value);
+    expect(f32(0.01)).toBe(0.009999999776482582);
+    const replayed = { ...lcm, sNoise: f32(0.01), sNoiseEnd: f32(2), noiseClipStd: f32(4) };
+    expect(resolveH3ImageSampler({ model: h3, options: replayed })).toEqual({
+      block: { sampler: "lcm", sNoise: f32(0.01), sNoiseEnd: 2, noiseClipStd: 4 },
+      error: null,
+    });
+    // A max bound that is not exact in f32 still admits its own f32 round trip.
+    expect(resolveH3ImageSampler({ model: h3, options: { ...lcm, sNoiseEnd: f32(1.9), sNoise: f32(0.11) } }).error).toBeNull();
+    for (const [patch, label] of [
+      [{ sNoise: 0.0099 }, "Noise scale start must be between 0.01 and 2."],
+      [{ sNoise: 2.0001 }, "Noise scale start must be between 0.01 and 2."],
+      [{ sNoiseEnd: -0.0001 }, "Noise scale end must be between 0 and 2."],
+      [{ noiseClipStd: 4.0001 }, "Noise clip (std, 0 = off) must be between 0 and 4."],
+    ]) {
+      expect(resolveH3ImageSampler({ model: h3, options: { ...lcm, ...patch } })).toEqual({ block: null, error: label });
+    }
+  });
+
   it("restores a recorded block, with the engine's defaults for omitted LCM fields", () => {
     expect(h3ImageSamplerFromRecipe({ sampler: "euler" }).sampler).toBe("euler");
     // A complete block restores as recorded.

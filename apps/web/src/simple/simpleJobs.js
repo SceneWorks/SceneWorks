@@ -234,7 +234,8 @@ export function buildSimpleImageRequest({
   // Only claim img2img on the text path AND on a model that advertises it — the flag is
   // what makes buildImageJobAdvanced emit `advanced.strength`, so claiming it for a model
   // without the capability would send a knob the engine has no use for.
-  const img2imgActive = !editing && supportsImg2img && Boolean(referenceAssetId);
+  const armedReferenceId = simpleSentArmedReferenceId({ mode, model, supportsImg2img, referenceAssetId });
+  const img2imgActive = !editing && armedReferenceId != null;
   // Krea-style managed image-edit LoRA (epic 10871, sc-11069). Krea 2's edit lane REJECTS a run
   // without an `image_edit`-role LoRA — "without it the source-image conditioning is inert" — so
   // an edit payload that omits it fails in the worker, not the UI. The advanced studio already
@@ -253,7 +254,7 @@ export function buildSimpleImageRequest({
   return buildImageJobRequest({
     ...IMAGE_DEFAULTS,
     loras,
-    sourceAssetId: editing && !mossEdit ? referenceAssetId || null : null,
+    sourceAssetId: editing ? armedReferenceId : null,
     supportsImg2img: img2imgActive,
     img2imgReferenceAssetId: img2imgActive ? referenceAssetId : null,
     img2imgStrength,
@@ -375,13 +376,32 @@ export function buildSimpleAudioRequest({ model, prompt, mode, voice, durationSe
 // conditions on — the armed reference then the extras, for a model with the ordered surface — so
 // the rewrite's `<imageN>` numbering names the pictures actually sent. A model without that surface
 // sends at most its one armed reference, and so does the rewriter.
+//
+// A model without that surface gets the armed reference only when the request actually SENDS it
+// ([`simpleSentArmedReferenceId`], the one gate `buildSimpleImageRequest` routes through): a
+// reference retained from another model on a model with no img2img (MiniMax-H3-Image) is dropped
+// by Generate, so the rewriter must not pick its edit workflow for it either.
 export function simpleRewriteReferenceIds({
   supportsOrderedReferences,
   orderedReferenceIds = [],
   referenceAssetId = null,
+  mode = "text_to_image",
+  model = "",
+  supportsImg2img = false,
 }) {
   if (supportsOrderedReferences) return [...orderedReferenceIds];
-  return referenceAssetId ? [referenceAssetId] : [];
+  const armed = simpleSentArmedReferenceId({ mode, model, supportsImg2img, referenceAssetId });
+  return armed ? [armed] : [];
+}
+
+// The ONE armed reference a Simple image request sends, or null: the edit source on the edit tab
+// (except a MOSS edit, which sends its references as the ordered list), and on the text tab only
+// for a model that advertises img2img. Shared by the request builder and the rewriter's reference
+// list so the two cannot disagree about which picture the render conditions on.
+export function simpleSentArmedReferenceId({ mode, model, supportsImg2img = false, referenceAssetId = null }) {
+  if (!referenceAssetId) return null;
+  if (mode === "edit_image") return isMossEdit(model, mode) ? null : referenceAssetId;
+  return supportsImg2img ? referenceAssetId : null;
 }
 
 // Does this model get Simple's NATIVE-ENVELOPE surface (sc-24114)? — the model's own variation

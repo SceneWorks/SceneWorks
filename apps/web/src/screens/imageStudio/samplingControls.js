@@ -47,6 +47,12 @@ export const supportsH3ImageSampler = (model) => Boolean(model?.image?.supportsH
 // The `advanced.h3ImageSampler` block to send: null for a model without the control. Both samplers
 // are sent explicitly (the job record shows what ran, and a selected recipe preset's server-side
 // expansion can never replace the user's choice). Euler is `{sampler: "euler"}`. `error` names the first LCM field out of range.
+// The bounds compare in f32: the worker records each scale as an f32, so a replayed 0.01 comes back
+// as 0.009999999776482582 and must still sit inside [0.01, …] — while a truly out-of-range value,
+// which differs at f32 precision, is still refused.
+const withinF32Bounds = (value, min, max) =>
+  Math.fround(value) >= Math.fround(min) && Math.fround(value) <= Math.fround(max);
+
 export function resolveH3ImageSampler({ model, options }) {
   if (!supportsH3ImageSampler(model)) return { block: null, error: null };
   if (options?.sampler === "euler") return { block: { sampler: "euler" }, error: null };
@@ -54,7 +60,7 @@ export function resolveH3ImageSampler({ model, options }) {
   for (const { key, label, min, max } of H3_IMAGE_LCM_FIELDS) {
     const raw = options[key];
     const value = raw === "" || raw == null ? Number.NaN : Number(raw);
-    if (!(Number.isFinite(value) && value >= min && value <= max)) {
+    if (!(Number.isFinite(value) && withinF32Bounds(value, min, max))) {
       return { block: null, error: `${label} must be between ${min} and ${max}.` };
     }
     block[key] = value;

@@ -29,6 +29,13 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     if provider == SUPRA2_ID {
         return candle_supra2::run(request);
     }
+    // SW-7100: MiniMax-H3-Image dispatches above the shared gates as well. Its arm validates the
+    // still geometry, the plain overlay, the tier and the catalog pins itself
+    // (`protocol::validate_minimax_h3_image_plan`, `protocol::minimax_h3_image_inputs`) before any
+    // weight is read, and loads the worker's staged-component spec rather than one tier root.
+    if provider == MINIMAX_H3_IMAGE_ID {
+        return candle_minimax_h3_image::run(request);
+    }
     // sc-22736: the Wan 2.2 family and SCAIL-2 dispatch ABOVE the shared still gate, like LTX-2.5 —
     // they are VIDEO arms, and `validate_still_geometry` would refuse the multi-frame geometry they
     // exist to measure. The four ids are spelled HERE, as consts, rather than asked of the module:

@@ -363,8 +363,15 @@ export function SimpleImageStudio() {
   // on (up to the model's cap), so its `<imageN>` numbering names the pictures actually sent.
   const qwenRewriteReferenceIds = useMemo(
     () =>
-      simpleRewriteReferenceIds({ supportsOrderedReferences, orderedReferenceIds, referenceAssetId }),
-    [supportsOrderedReferences, orderedReferenceIds, referenceAssetId],
+      simpleRewriteReferenceIds({
+        supportsOrderedReferences,
+        orderedReferenceIds,
+        referenceAssetId,
+        mode,
+        model,
+        supportsImg2img,
+      }),
+    [supportsOrderedReferences, orderedReferenceIds, referenceAssetId, mode, model, supportsImg2img],
   );
   const qwenRewriteModel = useMemo(() => {
     if (!qwenRewriterAppliesTo(selectedModel)) return null;

@@ -7,6 +7,7 @@ import {
   parseResolutionPair,
   referenceStrengthFor,
   simpleRewriteReferenceIds,
+  simpleSentArmedReferenceId,
   simpleNativeControls,
   simpleRewriteResolutionTarget,
 } from "./simpleJobs.js";
@@ -445,9 +446,26 @@ describe("simpleRewriteReferenceIds", () => {
       }),
     ).toEqual(["a", "b", "c"]);
     expect(
-      simpleRewriteReferenceIds({ supportsOrderedReferences: false, referenceAssetId: "a" }),
+      simpleRewriteReferenceIds({ supportsOrderedReferences: false, referenceAssetId: "a", supportsImg2img: true }),
+    ).toEqual(["a"]);
+    expect(
+      simpleRewriteReferenceIds({ supportsOrderedReferences: false, referenceAssetId: "a", mode: "edit_image" }),
     ).toEqual(["a"]);
     expect(simpleRewriteReferenceIds({ supportsOrderedReferences: false })).toEqual([]);
+  });
+
+  // PR #3377 review: after a switch to MiniMax-H3-Image (no `ui.img2img`) with a reference retained
+  // from another model, Generate drops the reference, so the prompt expander must not see it either.
+  // *Mutation that reds this:* returning `[referenceAssetId]` without the img2img gate.
+  it("hands the rewriter no reference that Generate would drop", () => {
+    const h3 = { id: "minimax_h3_image", ui: {} };
+    const supportsImg2img = Boolean(h3.ui.img2img);
+    const inputs = { mode: "text_to_image", model: h3.id, supportsImg2img, referenceAssetId: "kept" };
+    expect(simpleRewriteReferenceIds({ supportsOrderedReferences: false, ...inputs })).toEqual([]);
+    expect(simpleSentArmedReferenceId(inputs)).toBeNull();
+    const request = buildSimpleImageRequest({ ...inputs, prompt: "a lighthouse", resolution: "1024x1024", count: 1 });
+    expect(request.sourceAssetId ?? null).toBeNull();
+    expect(JSON.stringify(request)).not.toContain("kept");
   });
 });
 
