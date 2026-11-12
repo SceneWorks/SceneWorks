@@ -7047,8 +7047,16 @@ async fn retry_and_duplicate_gate_a_merged_imported_shape_the_create_path_refuse
     assert_eq!(status, StatusCode::CREATED, "{replayed}");
 }
 
+/// Run once per worker host shape whatever OS runs the test: imported Krea pose is served by the
+/// MLX/macOS worker and by the Candle worker on Linux and Windows (a Candle-required API).
 #[tokio::test]
 async fn imported_pose_overlay_uses_the_server_projected_base() {
+    for (backend, platform) in [("mlx", "macos"), ("candle", "linux"), ("candle", "windows")] {
+        imported_pose_overlay_uses_the_server_projected_base_on(backend, platform).await;
+    }
+}
+
+async fn imported_pose_overlay_uses_the_server_projected_base_on(backend: &str, platform: &str) {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     // The registry admits an imported source only from a managed root, bound to a worker that
     // serves that exact source (see `register_imported_fixture_worker`).
@@ -7090,13 +7098,8 @@ async fn imported_pose_overlay_uses_the_server_projected_base() {
     )
     .unwrap();
     let mut settings = test_settings(&temp_dir);
-    settings.candle_required = cfg!(not(target_os = "macos"));
+    settings.candle_required = backend == "candle";
     let (app, state) = pinned_jobs_fixture_app_with_state(settings).expect("app creates");
-    let (backend, platform) = if cfg!(target_os = "macos") {
-        ("mlx", "macos")
-    } else {
-        ("candle", "linux")
-    };
     register_imported_fixture_worker(&state, "user_krea", &model_path, backend, platform);
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Fine-tune poses").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -7110,7 +7113,10 @@ async fn imported_pose_overlay_uses_the_server_projected_base() {
             "advanced":{"poses":[{"id":"pose-1","keypoints":[]}],
                 "controlWeights":{"overlayId":overlay_id}}
         })).await;
-        assert_eq!(status, expected, "{overlay_id}: {response}");
+        assert_eq!(
+            status, expected,
+            "{backend}/{platform} {overlay_id}: {response}"
+        );
         if status == StatusCode::CREATED {
             assert_eq!(
                 response["payload"]["modelManifestEntry"]["ui"]["controlOverlayBaseModel"],

@@ -1067,6 +1067,7 @@ pub(crate) async fn wait_for_prompt_refine_job(app: &axum::Router) -> String {
 pub(crate) enum TestPortableRoute {
     MlxMacos,
     CandleLinux,
+    CandleWindows,
 }
 
 impl TestPortableRoute {
@@ -1074,6 +1075,7 @@ impl TestPortableRoute {
         match self {
             Self::MlxMacos => ("mlx", "macos", "mlx"),
             Self::CandleLinux => ("candle", "linux", "0"),
+            Self::CandleWindows => ("candle", "windows", "0"),
         }
     }
 }

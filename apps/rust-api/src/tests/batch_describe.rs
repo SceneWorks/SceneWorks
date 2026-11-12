@@ -245,8 +245,23 @@ async fn batch_describe_accepts_joycaption_with_its_own_prompt_limit() {
 /// SW-7082: the describe worker appends each finished image to `/result-items` (its progress
 /// result carries only counts), and the dialog pages them back in dataset order. Only the owning
 /// worker may append, and a canceled job still serves the images it finished.
+///
+/// The describer is served on both native lanes (typed_registry_contract_tests pins the
+/// `dataset_batch_describe` cells), so the claim runs once per worker host shape whatever OS
+/// runs the test: the MLX/macOS worker and the Candle worker on Linux and Windows. A Candle
+/// worker advertises its `candle` lane capability, as the shipped Candle worker does.
 #[tokio::test]
 async fn batch_describe_items_are_appended_by_the_owner_and_paged_back_in_order() {
+    for (route, lane) in [
+        (TestPortableRoute::MlxMacos, "mlx"),
+        (TestPortableRoute::CandleLinux, "candle"),
+        (TestPortableRoute::CandleWindows, "candle"),
+    ] {
+        batch_describe_items_round_trip_on(route, lane).await;
+    }
+}
+
+async fn batch_describe_items_round_trip_on(worker_route: TestPortableRoute, lane: &str) {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let (app, project_id, dataset_id, item_ids, _, state) = dataset_fixture(&temp_dir).await;
     let route =
@@ -255,7 +270,15 @@ async fn batch_describe_items_are_appended_by_the_owner_and_paged_back_in_order(
     assert_eq!(status, StatusCode::CREATED, "{job}");
     let job_id = job["id"].as_str().expect("job id").to_owned();
     const WORKER: &str = "test-describe-worker";
-    claim_job_as_worker(&app, &state, &job_id, WORKER, &["gpu", "prompt_refine"]).await;
+    bind_inserted_test_job(&state, &job_id, worker_route);
+    claim_job_as_worker_on_route(
+        &app,
+        &job_id,
+        WORKER,
+        &["gpu", "prompt_refine", lane],
+        worker_route,
+    )
+    .await;
 
     let items_route = format!("/api/v1/jobs/{job_id}/result-items");
     let item = |index: usize| {
