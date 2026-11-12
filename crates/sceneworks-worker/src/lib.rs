@@ -854,8 +854,8 @@ mod voiceclone_smoke;
 // #[ignore]d real-weight smokes that drive `crate::inference_runtime::load(id)` + ONE generation while sampling the MLX
 // process-global memory counters (mlx_rs::memory::{reset_peak_memory, get_active_memory, get_peak_memory})
 // generator_cache.rs already publishes — producing measured resident + peak footprint per (model, tier)
-// to calibrate the sc-8509 RAM→tier suggestion (apps/web/src/tierSuggestion.js) and backfill the sc-8508
-// manifest footprint fields.
+// to calibrate the sc-8509 RAM→tier suggestion (computed by `sceneworks_core::memory_guidance` and served
+// as the catalog's `memoryGuidance`) and backfill the sc-8508 per-download footprint fields it reads.
 #[cfg(all(test, target_os = "macos"))]
 mod footprint_measure;
 // FLUX 3 Image Klein on the Candle/CUDA lane (sc-26243): the off-macOS half of the footprint campaign.
