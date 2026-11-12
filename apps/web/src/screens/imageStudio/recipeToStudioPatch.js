@@ -51,7 +51,9 @@ export function recipeToStudioPatch(launchRequest, { model, models = [], recipeM
   const replayMossEdit = isMossEdit(recipe.model ?? model, nextMode);
   flags.mossEditReplay = replayMossEdit !== mossEditActive;
   const resolutionFromRecipe = recipeResolution(recipe);
-  values.referenceDimensionIntent = dimensionIntent
+  // While the model is unresolved the intent stays out of Studio state: ImageStudio clears an
+  // intent whose model/mode does not match, so the deferred replay stores it with the final mode.
+  values.referenceDimensionIntent = dimensionIntent && !flux3Pending
     ? { ...dimensionIntent, model: recipe.model, mode: nextMode } : null;
   // A launch replaces stale custom sides, including when either requested axis was omitted.
   values.widthOverride = dimensionIntent?.width ?? "";

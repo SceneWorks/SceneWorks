@@ -432,6 +432,77 @@ describe("a replayed recipe reaches every allow-listed control", () => {
     },
   );
 
+  describe("asset-edit launch naming a FLUX.3 model the catalog has not delivered yet", () => {
+    const source = { ...FLUX3_REFERENCE, id: "new-c", displayName: "new-c" };
+    const studioLaunch = { id: "late-source", view: "Image", mode: "edit_image", model: FLUX3.id, assetId: source.id };
+    const contextFor = (models) => baseContext({ assets: [source], selectedAsset: source, studioLaunch,
+      imageModels: models, models, createImageJob: vi.fn(async () => ({ id: "late-source-job" })) });
+
+    it("binds the source as the ordered reference once the model resolves to FLUX.3", async () => {
+      await render(contextFor([OTHER_MODEL]));
+      await render(contextFor([OTHER_MODEL, FLUX3]));
+      expect(persistedStudioSettings().referenceAssetIds).toEqual([source.id]);
+      expect(persistedStudioSettings().flux3ReferenceSlots).toHaveLength(1);
+    });
+
+    // Two edit-capable fallbacks, so a user can pick a model while the target is still missing.
+    const FALLBACK_A = FLUX2_DEV;
+    const FALLBACK_B = { ...FLUX2_DEV, id: "flux2_alt", name: "FLUX.2 Alt" };
+    const pickerWith = (id) => [...document.body.querySelectorAll("select")]
+      .find((node) => [...node.options].some((option) => option.value === id));
+    const loaded = [FALLBACK_A, FALLBACK_B];
+
+    it("re-selects the launch target after the automatic fallback model was shown", async () => {
+      await render(contextFor(loaded));
+      expect(persistedStudioSettings().model).toBe(FALLBACK_A.id);
+      await render(contextFor([...loaded, FLUX3]));
+      expect(persistedStudioSettings().model).toBe(FLUX3.id);
+      expect(persistedStudioSettings().referenceAssetIds).toEqual([source.id]);
+    });
+
+    it("keeps a model the user picked while the catalog loads and binds nothing", async () => {
+      await render(contextFor(loaded));
+      await editControl(pickerWith(FALLBACK_B.id), FALLBACK_B.id);
+      expect(persistedStudioSettings().model).toBe(FALLBACK_B.id);
+      await render(contextFor([...loaded, FLUX3]));
+      expect(persistedStudioSettings().model).toBe(FALLBACK_B.id);
+      expect(persistedStudioSettings().flux3ReferenceSlots ?? []).toHaveLength(0);
+    });
+
+    it("keeps a mode the user picked while the catalog loads and binds nothing", async () => {
+      await render(contextFor(loaded));
+      await click(buttonByText("Text"));
+      expect(persistedStudioSettings().mode).toBe("text_to_image");
+      await render(contextFor([...loaded, FLUX3]));
+      expect(persistedStudioSettings().mode).toBe("text_to_image");
+      expect(persistedStudioSettings().model).not.toBe(FLUX3.id);
+      expect(persistedStudioSettings().flux3ReferenceSlots ?? []).toHaveLength(0);
+    });
+
+    it("keeps a source the user picked while the catalog loads and binds nothing", async () => {
+      const other = { ...FLUX3_REFERENCE, id: "user-picked", displayName: "user-picked" };
+      const withAssets = (models) => ({ ...contextFor(models), assets: [source, other] });
+      await render(withAssets(loaded));
+      // Drive the real source picker: Change -> pick the other asset -> Use Selection.
+      await click(buttonByText("Change"));
+      const tile = [...document.body.querySelectorAll("*")]
+        .filter((node) => node.children.length < 2 && node.textContent.trim() === other.displayName).at(0);
+      await click(tile);
+      await click(buttonByText("Use Selection"));
+      await render(withAssets([...loaded, FLUX3]));
+      expect(persistedStudioSettings().model).not.toBe(FLUX3.id);
+      expect(persistedStudioSettings().flux3ReferenceSlots ?? []).toHaveLength(0);
+      expect(persistedStudioSettings().referenceAssetIds ?? []).not.toContain(source.id);
+      console.log("DIALOG", document.body.innerText?.slice(0, 600), [...document.body.querySelectorAll("button")].map((b) => b.textContent.trim()).join("|"));
+    });
+
+    it("binds nothing when the model resolves to a non-FLUX.3 family", async () => {
+      await render(contextFor([OTHER_MODEL]));
+      await render(contextFor([OTHER_MODEL, { ...FLUX3, family: "flux2", ui: {} }]));
+      expect(persistedStudioSettings().flux3ReferenceSlots ?? []).toHaveLength(0);
+    });
+  });
+
   it.each([[null, null], [null, 768], [16, 48]])("persists scoped recipe axes %s / %s across a real studio unmount and hydration", async (width, height) => {
     const model = REAL_FLUX3_MODELS[0];
     const createImageJob = vi.fn(async () => ({ id: "hydrated-intent" }));
@@ -800,6 +871,40 @@ describe("a replayed recipe reaches every allow-listed control", () => {
       await render({ ...context, imageModels: [other], models: [other] });
       expect(persistedStudioSettings().flux3ReferenceSlots ?? []).toHaveLength(0);
       expect(persistedStudioSettings().orderedCharacterReferences ?? false).toBe(false);
+    });
+
+    it("ends a late-catalog replay in the same Studio state as a loaded-catalog replay", async () => {
+      const state = async (late) => {
+        const createImageJob = vi.fn(async () => ({ id: late ? "late-state" : "loaded-state" }));
+        const context = contextFor(createImageJob, late ? { imageModels: [], models: [] } : { imageModels: [FLUX3], models: [FLUX3] });
+        await render(context);
+        if (late) await render({ ...context, imageModels: [FLUX3], models: [FLUX3] });
+        const persisted = persistedStudioSettings();
+        await click(buttonByText("Generate"));
+        const payload = createImageJob.mock.calls[0][0];
+        return { mode: persisted.mode, intent: persisted.referenceDimensionIntent,
+          references: persisted.referenceAssetIds, payload: {
+            mode: payload.mode, referenceAssetIds: payload.referenceAssetIds, height: payload.height,
+            hasWidth: Object.hasOwn(payload, "width"), ids: payload.advanced.flux3_reference_ids } };
+      };
+      const loaded = await state(false);
+      expect(loaded.intent).toMatchObject({ mode: "edit_image", width: null, height: 768 });
+      expect(loaded.payload).toMatchObject({ mode: "edit_image", hasWidth: false, height: 768 });
+      await unmountRoot(root, container);
+      window.localStorage.clear();
+      ({ container, root } = mountRoot());
+      expect(await state(true)).toEqual(loaded);
+    });
+
+    it("lets a user mode change made while the catalog loads win over the deferred restore", async () => {
+      const createImageJob = vi.fn(async () => ({ id: "user-wins" }));
+      // The recipe's model is missing from a partially loaded catalog, so its replay stays pending.
+      const context = contextFor(createImageJob, { imageModels: [OTHER_MODEL], models: [OTHER_MODEL] });
+      await render(context);
+      await click(buttonByText("With character"));
+      expect(persistedStudioSettings().mode).toBe("character_image");
+      await render({ ...context, imageModels: [OTHER_MODEL, FLUX3], models: [OTHER_MODEL, FLUX3] });
+      expect(persistedStudioSettings().mode).toBe("character_image");
     });
 
     it("restores them identically when the catalog is already loaded", async () => {

@@ -803,7 +803,10 @@ export function ImageStudio() {
         setReferenceAssetIds([selectedAssetEditableSourceId]);
         setFlux3ReferenceSlots(reconcileLayoutReferences([], [selectedAssetEditableSourceId]));
       } else if (launchTargetPending) {
-        pendingFlux3Binding.current = { launchId: launchRequest.id, targetId: launchTargetId, sourceId: selectedAssetEditableSourceId };
+        pendingFlux3Binding.current = {
+          launchId: launchRequest.id, targetId: launchTargetId, sourceId: selectedAssetEditableSourceId,
+          mode: normalizeImageMode(launchRequest.mode),
+        };
       }
     }
     // launchTargetsFlux3 / launchTargetPending are read at launch time; the pending binding below
@@ -812,12 +815,23 @@ export function ImageStudio() {
   }, [launchRequest, selectedAsset?.id, selectedAssetEditableSourceId, changeSourceAssetId]);
   useEffect(() => {
     const pending = pendingFlux3Binding.current;
-    if (!pending || launchTargetPending) return;
+    if (!pending) return;
+    // The first model other than the launch's target is the automatic fallback while the target is
+    // missing from the catalog; a later different model is the user's choice.
+    if (launchTargetPending) {
+      if (model === pending.targetId) pending.seenTarget = true;
+      else if (pending.seenTarget && pending.snapModel === undefined) pending.snapModel = model;
+      return;
+    }
     pendingFlux3Binding.current = null;
     if (launchRequest?.id !== pending.launchId || !launchTargetsFlux3) return;
+    // A user change of model, mode or source after the launch wins over the deferred binding.
+    if ((model !== pending.targetId && model !== pending.snapModel) ||
+        mode !== pending.mode || sourceAssetId !== pending.sourceId) return;
+    setModel(pending.targetId);
     setReferenceAssetIds([pending.sourceId]);
     setFlux3ReferenceSlots(reconcileLayoutReferences([], [pending.sourceId]));
-  }, [launchTargetPending, launchTargetsFlux3, launchRequest?.id]);
+  }, [launchTargetPending, launchTargetsFlux3, launchRequest?.id, model, mode, sourceAssetId]);
 
   // Mac UI gating (sc-3486): on a Mac in MLX-required mode, hide torch-only models from the
   // picker so the user can't select something that would only error. Inert elsewhere.
@@ -1882,6 +1896,8 @@ export function ImageStudio() {
   useImageRecipeReplay({
     model,
     models,
+    mode,
+    referenceAssetIds,
     launchRequest,
   setRecipeTierRequest,
   setFlux3Layout,
