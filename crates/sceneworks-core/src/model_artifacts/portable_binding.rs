@@ -15,6 +15,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const PORTABLE_MODEL_BINDING_VERSION: u32 = 2;
+/// Typed heartbeat refusal: the API holds no claim vector proven under this worker's key in its
+/// current process (it restarted), so the worker must republish its whole inventory. The API never
+/// substitutes the claims its database retained from an earlier process.
+pub const PORTABLE_SOURCE_CLAIMS_REQUIRED_CODE: &str = "portable_source_claims_required";
 const MAX_NON_LFS_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_HF_TREE_PAGES: usize = 10_000;
 

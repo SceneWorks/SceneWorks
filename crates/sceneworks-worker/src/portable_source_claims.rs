@@ -520,6 +520,20 @@ pub(crate) fn pending_inventory_claims(worker_id: &str) -> Option<(u64, Vec<Port
     inventory.pending(worker_id)
 }
 
+/// The API refused a heartbeat with `PORTABLE_SOURCE_CLAIMS_REQUIRED_CODE` (it restarted and holds
+/// no claims proven under this worker's key). Forget this worker's acknowledgment and return the
+/// whole current claim vector — empty included — for an explicit republication.
+pub(crate) fn inventory_claims_for_republication(
+    worker_id: &str,
+) -> (u64, Vec<PortableSourceClaim>) {
+    let mut inventory = pending_inventory()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    inventory.rebuild_claims();
+    inventory.reset_worker(worker_id);
+    (inventory.generation, inventory.claims.clone())
+}
+
 pub(crate) fn mark_inventory_published(worker_id: &str, generation: u64) {
     pending_inventory()
         .lock()

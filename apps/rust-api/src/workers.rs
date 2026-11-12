@@ -241,6 +241,17 @@ pub(crate) async fn heartbeat_worker(
     if !keyed && authenticated.contains_key(&worker_id) {
         return Err(ApiError::bad_request("Worker source proof is required"));
     }
+    // A keyed worker this process has not seen (the API restarted while the worker kept running)
+    // omits claims once it has acknowledged its inventory generation. Its database claims were
+    // proven to an earlier process, so they are not trusted here; nor is an empty vector, which
+    // would silently fail every local utility proof. Ask for a full republication instead.
+    if keyed && payload.portable_source_claims.is_none() && !authenticated.contains_key(&worker_id)
+    {
+        return Err(ApiError::model_artifact_conflict(
+            "Worker source claims must be republished to this API process",
+            sceneworks_core::model_artifacts::portable_binding::PORTABLE_SOURCE_CLAIMS_REQUIRED_CODE,
+        ));
+    }
     let authenticated_worker_id = worker_id.clone();
     let stored_worker_id = worker_id.clone();
     let submitted_claims = payload.portable_source_claims.clone();

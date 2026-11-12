@@ -2062,21 +2062,31 @@ pub(crate) async fn heartbeat_with_reason(
     // Capture the label before `status` is moved into the request, for the log line.
     let status_label = status.as_str().to_owned();
     portable_source_claims::refresh_background_inventory(settings.clone());
-    let portable_claims = portable_source_claims::pending_inventory_claims(&settings.worker_id);
-    let outcome: WorkerResult<WorkerSnapshot> = api
-        .post_json(
-            &format!("/api/v1/workers/{}/heartbeat", settings.worker_id),
-            &WorkerHeartbeatRequest {
-                status,
-                current_job_id: current_job_id.map(str::to_owned),
-                loaded_models: Vec::new(),
-                utilization: gpu_utilization(&settings.gpu_id).await,
-                status_reason,
-                portable_source_claims: portable_claims.as_ref().map(|(_, claims)| claims.clone()),
-                extra: portable_worker_proof_extra(settings),
-            },
-        )
-        .await;
+    let mut portable_claims = portable_source_claims::pending_inventory_claims(&settings.worker_id);
+    let mut request = WorkerHeartbeatRequest {
+        status,
+        current_job_id: current_job_id.map(str::to_owned),
+        loaded_models: Vec::new(),
+        utilization: gpu_utilization(&settings.gpu_id).await,
+        status_reason,
+        portable_source_claims: portable_claims.as_ref().map(|(_, claims)| claims.clone()),
+        extra: portable_worker_proof_extra(settings),
+    };
+    let path = format!("/api/v1/workers/{}/heartbeat", settings.worker_id);
+    let mut outcome: WorkerResult<WorkerSnapshot> = api.post_json(&path, &request).await;
+    // A restarted API holds no claims proven under this worker's key: republish the whole
+    // inventory once, in this same heartbeat, instead of waiting for it to change.
+    if matches!(
+        &outcome,
+        Err(WorkerError::Api { code: Some(code), .. })
+            if code == sceneworks_core::model_artifacts::portable_binding::PORTABLE_SOURCE_CLAIMS_REQUIRED_CODE
+    ) {
+        let (generation, claims) =
+            portable_source_claims::inventory_claims_for_republication(&settings.worker_id);
+        request.portable_source_claims = Some(claims.clone());
+        portable_claims = Some((generation, claims));
+        outcome = api.post_json(&path, &request).await;
+    }
     match outcome {
         Ok(_) => {
             if let Some((generation, _)) = portable_claims {

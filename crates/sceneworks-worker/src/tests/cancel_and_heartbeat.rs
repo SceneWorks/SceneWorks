@@ -1578,3 +1578,74 @@ async fn stream_supervisor_keeps_result_completed_during_cancel_poll() {
     assert_eq!(result.expect("task joined"), 7);
     assert!(state.progress.lock().expect("progress").is_empty());
 }
+
+/// A restarted API refuses a keyed heartbeat that omits claims with
+/// `PORTABLE_SOURCE_CLAIMS_REQUIRED_CODE`. The worker must republish its WHOLE current claim vector
+/// in the same heartbeat (an empty one included, and even though it already acknowledged that
+/// inventory generation) rather than surfacing an error or waiting for the inventory to change.
+#[tokio::test]
+async fn heartbeat_republishes_the_full_inventory_when_the_api_requires_it() {
+    use sceneworks_core::model_artifacts::portable_binding::PORTABLE_SOURCE_CLAIMS_REQUIRED_CODE;
+    type Bodies = std::sync::Arc<std::sync::Mutex<Vec<Value>>>;
+    async fn heartbeat_route(State(bodies): State<Bodies>, Json(body): Json<Value>) -> Response {
+        let first = {
+            let mut bodies = bodies.lock().unwrap();
+            bodies.push(body);
+            bodies.len() == 1
+        };
+        if first {
+            (
+                AxumStatusCode::CONFLICT,
+                Json(json!({
+                    "detail": "Worker source claims must be republished to this API process",
+                    "code": PORTABLE_SOURCE_CLAIMS_REQUIRED_CODE
+                })),
+            )
+                .into_response()
+        } else {
+            Json(worker_snapshot_json("republish-worker")).into_response()
+        }
+    }
+    let bodies: Bodies = Default::default();
+    let app = Router::new()
+        .route(
+            "/api/v1/workers/:worker_id/heartbeat",
+            post(heartbeat_route),
+        )
+        .with_state(bodies.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener binds");
+    let address = listener.local_addr().expect("listener has address");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("stub serves");
+    });
+    let base_url = format!("http://{address}");
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    settings.worker_id = "republish-worker".to_owned();
+    let api = ApiClient::new(&settings);
+    // The worker already published and acknowledged its current inventory generation.
+    let (generation, _) =
+        crate::portable_source_claims::inventory_claims_for_republication(&settings.worker_id);
+    crate::portable_source_claims::mark_inventory_published(&settings.worker_id, generation);
+
+    crate::heartbeat(&api, &settings, sceneworks_core::contracts::WorkerStatus::Idle, None)
+        .await
+        .expect("the heartbeat succeeds after republishing");
+
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2, "one refusal, one republication: {bodies:?}");
+    assert!(
+        bodies[0]
+            .get("portableSourceClaims")
+            .is_none_or(Value::is_null),
+        "the acknowledged generation is not resent unprompted: {}",
+        bodies[0]
+    );
+    assert!(
+        bodies[1]["portableSourceClaims"].is_array(),
+        "the republication carries the whole claim vector: {}",
+        bodies[1]
+    );
+}
