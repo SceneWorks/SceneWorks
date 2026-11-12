@@ -581,7 +581,199 @@ def test_cached_snapshots_are_isolated_between_callers():
     assert "mutation-probe" not in snapshots()
 
 
-def assert_snapshot(label: str, normalized_value: Any) -> None:
+# Registered builtins (SW-7031): a registered id's row comes from the compiled registry, with
+# the measured memory facts of config/manifests/registry/evidence.json projected into it. Those
+# facts change whenever evidence is re-measured, so no snapshot may freeze them. They are checked
+# against the store (same fields, same values, nothing extra) and then replaced by a marker;
+# every product field stays frozen. A registered row is frozen once, in the model manifest
+# response and the unredacted worker claim; every other job snapshot folds its embedded copy to
+# a marker after asserting it equals that catalog row modulo the public job redaction.
+REGISTRY_DIR = ROOT / "config" / "manifests" / "registry"
+REGISTRY_EVIDENCE_MARKER = "<registry-evidence>"
+MANIFEST_CARRIER_RE = re.compile(r"ManifestEntr(?:y|ies)$")
+
+
+@lru_cache(maxsize=None)
+def registry_evidence() -> dict[str, Any]:
+    return json.loads((REGISTRY_DIR / "evidence.json").read_text(encoding="utf-8"))
+
+
+@lru_cache(maxsize=None)
+def registered_builtin_products() -> dict[str, Any]:
+    specs = json.loads((REGISTRY_DIR / "specs.json").read_text(encoding="utf-8"))
+    return {model_id: spec["product"] for model_id, spec in specs.items()}
+
+
+@lru_cache(maxsize=None)
+def registry_evidence_fields() -> dict[str, frozenset[str]]:
+    """Every field name the evidence store projects, per location, read from the store itself
+    so a newly measured field is covered without editing this harness. An unknown location
+    raises: the registry's projection would need a matching rule here."""
+    fields: dict[str, set[str]] = {"model": set(), "mlx": set(), "candle": set(), "footprint": set()}
+    for record in registry_evidence().values():
+        for location, values in record.items():
+            if location == "downloads":
+                for download in values:
+                    fields["footprint"].update(download["footprint"])
+            else:
+                fields[location].update(values)
+    return {location: frozenset(names) for location, names in fields.items()}
+
+
+def _mask_evidence_fields(target: dict, measured: dict, names: frozenset[str], where: str) -> None:
+    present = {name: target[name] for name in names if name in target}
+    assert present == measured, (
+        f"{where}: projected memory evidence {present!r} does not match the evidence store {measured!r}"
+    )
+    for name in measured:
+        target[name] = REGISTRY_EVIDENCE_MARKER
+
+
+def mask_registry_evidence(entry: dict) -> None:
+    """Replace a model row's evidence-projected values with a marker, in place, after asserting
+    the row carries exactly the store's fields and values (none at all for an id the store does
+    not measure). Also covers a catalog row's `variants[].footprint`, a copy of its download's."""
+    model_id = entry.get("id")
+    record = registry_evidence().get(model_id, {})
+    names = registry_evidence_fields()
+    _mask_evidence_fields(entry, record.get("model", {}), names["model"], f"{model_id}")
+    for backend in ("mlx", "candle"):
+        block = entry.get(backend)
+        if isinstance(block, dict):
+            _mask_evidence_fields(block, record.get(backend, {}), names[backend], f"{model_id}.{backend}")
+        else:
+            assert backend not in record, f"{model_id}: evidence for absent {backend} block"
+    downloads = entry.get("downloads") or []
+    measured_by_index: dict[int, dict] = {}
+    for measured in record.get("downloads", []):
+        identity = {key: value for key, value in measured.items() if key != "footprint"}
+        matches = [
+            index
+            for index, download in enumerate(downloads)
+            if all(download.get(key) == value for key, value in identity.items())
+        ]
+        assert len(matches) == 1, f"{model_id}: evidence download {identity!r} matched {matches!r}"
+        measured_by_index[matches[0]] = measured["footprint"]
+    for variant in entry.get("variants") or []:
+        footprint = variant.get("footprint")
+        if footprint is None:
+            continue
+        owners = [index for index, download in enumerate(downloads) if download.get("variant") == variant.get("variant")]
+        assert len(owners) == 1, f"{model_id}: variant {variant.get('variant')!r} has owners {owners!r}"
+        assert footprint == downloads[owners[0]].get("footprint"), f"{model_id}: variant footprint drifted from its download"
+        _mask_evidence_fields(
+            footprint, measured_by_index.get(owners[0], {}), names["footprint"], f"{model_id}.variants"
+        )
+    for index, download in enumerate(downloads):
+        footprint = download.get("footprint")
+        if isinstance(footprint, dict):
+            _mask_evidence_fields(
+                footprint, measured_by_index.get(index, {}), names["footprint"], f"{model_id}.downloads[{index}]"
+            )
+        else:
+            assert index not in measured_by_index, f"{model_id}: measured download {index} has no footprint"
+
+
+def _strip_public_locators(value: Any) -> Any:
+    """The public job redaction as it applies to a catalog row: `paths` blocks and `path`
+    strings never reach a public job payload (apps/rust-api/src/job_redaction.rs)."""
+    if isinstance(value, dict):
+        return {
+            key: _strip_public_locators(item)
+            for key, item in value.items()
+            if key != "paths" and not (key.lower() == "path" and isinstance(item, str))
+        }
+    if isinstance(value, list):
+        return [_strip_public_locators(item) for item in value]
+    return value
+
+
+def fold_registered_entries(value: Any, catalog: dict[str, dict], *, freeze: bool) -> Any:
+    """Return `value` with every embedded registered-builtin manifest entry checked against
+    the catalog row for its id. `freeze=False` (public job payloads) replaces the entry with a
+    marker after asserting it equals the row modulo the public redaction; `freeze=True` (the
+    unredacted worker claim) keeps it, evidence masked, after asserting it equals the row."""
+    products = registered_builtin_products()
+
+    def fold_entry(entry: Any, where: str) -> Any:
+        if not isinstance(entry, dict) or entry.get("id") not in products:
+            return walk(entry, where)
+        model_id = entry["id"]
+        required = set(products[model_id]) - ({"paths"} if not freeze else set())
+        assert required <= set(entry), f"{where}: product fields {sorted(required - set(entry))} are missing"
+        row = catalog.get(model_id)
+        if row is None:
+            # A runtime-injected entry (an auxiliary detector, a job's own video model) that
+            # this harness's catalog does not list: this snapshot is its only frozen copy.
+            masked = copy.deepcopy(entry)
+            mask_registry_evidence(masked)
+            return masked
+        assert set(entry) <= set(row), f"{where}: keys {sorted(set(entry) - set(row))} are not catalog fields"
+        expected = {key: row[key] for key in entry}
+        if not freeze:
+            expected = _strip_public_locators(expected)
+        diffs = diff_values(expected, entry, where)
+        assert not diffs, f"{where}: embedded {model_id} entry differs from its catalog row:\n" + "\n".join(diffs)
+        if not freeze:
+            return f"<registered-model-entry:{model_id}>"
+        masked = copy.deepcopy(entry)
+        mask_registry_evidence(masked)
+        return masked
+
+    def walk(item: Any, where: str) -> Any:
+        if isinstance(item, dict):
+            folded = {}
+            for key, child in item.items():
+                child_where = f"{where}.{key}"
+                if MANIFEST_CARRIER_RE.search(key) and isinstance(child, list):
+                    folded[key] = [fold_entry(entry, f"{child_where}[{i}]") for i, entry in enumerate(child)]
+                elif MANIFEST_CARRIER_RE.search(key):
+                    folded[key] = fold_entry(child, child_where)
+                else:
+                    folded[key] = walk(child, child_where)
+            return folded
+        if isinstance(item, list):
+            return [walk(child, f"{where}[{i}]") for i, child in enumerate(item)]
+        return item
+
+    return walk(value, "$")
+
+
+def contains_registered_entry(value: Any) -> bool:
+    products = registered_builtin_products()
+    if isinstance(value, dict):
+        for key, child in value.items():
+            entries = child if isinstance(child, list) else [child]
+            if MANIFEST_CARRIER_RE.search(key) and any(
+                isinstance(entry, dict) and entry.get("id") in products for entry in entries
+            ):
+                return True
+            if contains_registered_entry(child):
+                return True
+    elif isinstance(value, list):
+        return any(contains_registered_entry(child) for child in value)
+    return False
+
+
+def normalized_catalog(runtime: ContractRuntime) -> dict[str, dict]:
+    response = runtime.request("GET", "/api/v1/models")
+    assert response.status_code == 200, f"{runtime.name} model catalog failed: {response.body}"
+    rows = normalize_contract(response.body, runtime.roots)
+    return {row["id"]: row for row in rows}
+
+
+def assert_snapshot(
+    label: str,
+    normalized_value: Any,
+    *,
+    runtime: ContractRuntime | None = None,
+    freeze_registered_entries: bool = False,
+) -> None:
+    if contains_registered_entry(normalized_value):
+        assert runtime is not None, f"{label} embeds a registered model entry; pass the runtime it came from"
+        normalized_value = fold_registered_entries(
+            normalized_value, normalized_catalog(runtime), freeze=freeze_registered_entries
+        )
     if UPDATE_SNAPSHOTS:
         UPDATED_SNAPSHOTS[label] = normalized_value
         return
@@ -607,6 +799,7 @@ def assert_response_contract(
     *,
     expected_status: int | None = None,
     snapshot: bool = False,
+    freeze_registered_entries: bool = False,
 ) -> Any:
     assert baseline_response.status_code == candidate_response.status_code, (
         f"{label} status drifted: baseline {baseline_response.status_code}, candidate {candidate_response.status_code}"
@@ -625,7 +818,12 @@ def assert_response_contract(
         candidate_response.body,
     )
     if snapshot:
-        assert_snapshot(label, normalized)
+        assert_snapshot(
+            label,
+            normalized,
+            runtime=baseline_runtime,
+            freeze_registered_entries=freeze_registered_entries,
+        )
     return normalized
 
 def db_counts(project_path: Path) -> dict[str, int]:
@@ -989,6 +1187,8 @@ def test_system_manifest_and_http_contracts(contract_runtimes):
                 }, mlx_host_state
             else:
                 assert mlx_host_state == {}, mlx_host_state
+            for model in normalized:
+                mask_registry_evidence(model)
             assert_snapshot(label, normalized)
 
     cors_headers = {
@@ -1483,7 +1683,7 @@ def test_character_test_job_contracts(contract_runtimes):
         event_sets[0],
         event_sets[1],
     )
-    assert_snapshot("character test job SSE events", normalized_events)
+    assert_snapshot("character test job SSE events", normalized_events, runtime=baseline_runtime)
 
 
 def test_timeline_and_worker_job_creation_contracts(contract_runtimes):
@@ -1800,7 +2000,17 @@ def test_job_state_transition_contracts(contract_runtimes):
         runtime.request("POST", "/api/v1/jobs/claim", json_payload=envelope["claim"])
         for runtime, envelope in zip(contract_runtimes, envelopes)
     ]
-    assert_response_contract("job claim response", baseline_runtime, candidate_runtime, claimed_jobs[0], claimed_jobs[1], expected_status=200, snapshot=True)
+    assert_response_contract(
+        "job claim response",
+        baseline_runtime,
+        candidate_runtime,
+        claimed_jobs[0],
+        claimed_jobs[1],
+        expected_status=200,
+        snapshot=True,
+        # The worker-facing claim is the one unredacted copy of the registered entry.
+        freeze_registered_entries=True,
+    )
 
     busy_workers = [
         runtime.request(
@@ -1880,7 +2090,12 @@ def test_concurrent_claim_contracts(contract_runtimes):
     baseline_runtime, candidate_runtime = contract_runtimes
     claims = [concurrent_claim_result(runtime) for runtime in contract_runtimes]
     normalized_claims = assert_runtime_consistency("concurrent claim response set", baseline_runtime, candidate_runtime, claims[0], claims[1])
-    assert_snapshot("concurrent claim response set", normalized_claims)
+    assert_snapshot(
+        "concurrent claim response set",
+        normalized_claims,
+        runtime=baseline_runtime,
+        freeze_registered_entries=True,
+    )
     for runtime_claims in claims:
         assert sum(1 for claim in runtime_claims if claim["job"] is not None) == 1
         assert sum(1 for claim in runtime_claims if claim["job"] is None) == 1
