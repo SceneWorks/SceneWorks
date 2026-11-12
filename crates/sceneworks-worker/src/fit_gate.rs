@@ -41,11 +41,15 @@ pub(crate) const LEGACY_UNIFIED_FALLBACK_RESERVE_GB: f64 =
 /// Dedicated-VRAM allocator/context slack. The operating system does not consume this pool, so this
 /// is different in kind from MLX's foreign resident demand even when historical numbers happened to
 /// be similar.
+///
+/// Declared in `sceneworks_core::memory_anchor` so the catalog's memory guidance quotes the same
+/// slack; this is the worker's read of it, not a second declaration.
 #[cfg_attr(
     any(target_os = "macos", not(feature = "backend-candle")),
     allow(dead_code)
 )]
-pub(crate) const DEDICATED_VRAM_ALLOCATOR_SLACK_GB: f64 = 2.0;
+pub(crate) const DEDICATED_VRAM_ALLOCATOR_SLACK_GB: f64 =
+    sceneworks_core::memory_anchor::DEDICATED_VRAM_ALLOCATOR_SLACK_GB;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MemoryReserveKind {

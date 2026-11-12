@@ -27,11 +27,13 @@ fn catalog() -> Result<Value, Box<dyn std::error::Error>> {
             true,
             None,
         );
+        let minimax_h3_turbo = sceneworks_core::video_request::is_minimax_h3_model(id);
         if moss_edit {
             added_capabilities.insert(id.to_owned(), json!(["edit_image"]));
         }
         let object = model.as_object_mut().ok_or("model must be an object")?;
         object.insert("supportsLastOnlyImageToVideo".into(), json!(last_only));
+        object.insert("supportsMinimaxH3Turbo".into(), json!(minimax_h3_turbo));
         if moss_edit {
             let capabilities = object
                 .get_mut("capabilities")
@@ -44,6 +46,7 @@ fn catalog() -> Result<Value, Box<dyn std::error::Error>> {
         object.insert("candleSupport".into(), candle);
         sceneworks_core::preview_support::apply_to_model_entry(object);
         sceneworks_core::decoder_support::apply_to_model_entry(object);
+        sceneworks_core::memory_guidance::apply_to_model_entry(object);
     }
     models.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
     let output: Value = json!({
@@ -71,8 +74,14 @@ mod tests {
         use serde_json::Value;
         match (actual, expected) {
             // The browser serializes 1.0 as 1. Compare JSON numeric meaning across that boundary.
+            // serde_json's default float parser is not correctly rounded, so a non-integral
+            // fixture value (the served memory-guidance thresholds) can read back one ULP away.
             (Value::Number(a), Value::Number(b)) => {
-                assert_eq!(a.as_f64(), b.as_f64(), "{path}");
+                let (a, b) = (a.as_f64().unwrap(), b.as_f64().unwrap());
+                assert!(
+                    a == b || (a - b).abs() <= f64::EPSILON * a.abs().max(b.abs()),
+                    "{path}: {a} != {b}"
+                );
             }
             (Value::Object(a), Value::Object(b)) => {
                 assert_eq!(a.len(), b.len(), "{path}: object fields");

@@ -1531,7 +1531,16 @@ pub(super) fn apply_model_catalog_size_fields(
             Value::Bool(download_size_estimated),
         );
     }
-    refresh_variant_download_sizes(model)
+    refresh_variant_download_sizes(model)?;
+    // SW-7032: the API owns every tier-suggestion / host-floor / resolution memory number the
+    // web shows. Computed last, after the variant, convert-tier, runtime-tier and size
+    // projections it reads; a platform-cleanup tombstone has no tier surface to guide.
+    if let Some(object) = model.as_object_mut() {
+        if object.get("platformCleanupOnly").and_then(Value::as_bool) != Some(true) {
+            sceneworks_core::memory_guidance::apply_to_model_entry(object);
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn apply_model_catalog_entry(
@@ -1767,6 +1776,15 @@ pub(super) fn apply_last_only_video_capability(object: &mut JsonObject) {
     object.insert(
         "supportsLastOnlyImageToVideo".to_owned(),
         Value::Bool(accepts_last_only),
+    );
+    // SW-7032: the MiniMax-H3 turbo adapter surface is the server's own H3 predicate (typed
+    // family for a registered builtin, legacy id prefix otherwise), served so the web does not
+    // restate it.
+    object.insert(
+        "supportsMinimaxH3Turbo".to_owned(),
+        Value::Bool(sceneworks_core::video_request::is_minimax_h3_model(
+            object.get("id").and_then(Value::as_str).unwrap_or_default(),
+        )),
     );
 }
 
@@ -2223,6 +2241,7 @@ pub(super) async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec
         if let Some(object) = model.as_object_mut() {
             apply_imported_provider_surface(object);
             apply_imported_lora_advertisement(object);
+            sceneworks_core::memory_guidance::apply_to_model_entry(object);
         }
     }
     models.extend(external);

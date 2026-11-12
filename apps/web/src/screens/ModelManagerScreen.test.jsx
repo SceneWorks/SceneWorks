@@ -2,6 +2,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { click, setSelect } from "../testUtils/dom.js";
+import { servedCatalogFacts, servedGuidance } from "../testUtils/servedCatalogFacts.js";
 
 // Existing terms-bound server store; localStorage alone is deliberately insufficient.
 const { serverAcks } = vi.hoisted(() => ({ serverAcks: new Set() }));
@@ -164,6 +165,7 @@ const INSTALLED_LICENSED_MODEL = {
 // reachability — this fixture puts the acknowledgment gate on the tier panel.
 const LICENSE_ACK_TIERED_MODEL = {
   ...LICENSE_ACK_ONLY_MODEL,
+  memoryGuidance: servedCatalogFacts("minimax_h3").memoryGuidance,
   hasVariantMatrix: true,
   variants: [
     { variant: "bf16", installed: false, installState: "missing", cacheState: "missing", downloadSizeBytes: 75120439132 },
@@ -1668,6 +1670,8 @@ describe("ModelManagerScreen remote memory gating (REST)", () => {
     installState: "installed",
     mlxConversionState: "needs_conversion",
     mlx: { minMemoryGb: 64 },
+    // The API serves the lane's entry floor (SW-7032).
+    memoryGuidance: servedGuidance({}, { mlx: { blanketGb: 64, entryFloorGb: 64 } }),
     ui: { description: "Heavy MLX model." },
   };
 
@@ -1797,6 +1801,12 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
         downloadSizeBytes: tier.downloadGb * GB,
         footprint: { diskSizeBytes: tier.diskGb * GB, residentMemoryBytes: null, peakMemoryBytes: null },
       })),
+      // What the API serves for these footprints (SW-7032): each MLX tier's estimated peak (disk +
+      // the 14 GiB transient) over the 0.9 unified budget; no Candle evidence, so no Candle bound.
+      memoryGuidance: servedGuidance({
+        mlx: { bf16: (24 + 14) / 0.9, q8: (18 + 14) / 0.9, q4: (4 + 14) / 0.9 },
+        candle: { bf16: null, q8: null, q4: null },
+      }),
       ui: { description: "Matrix model." },
     };
   }
@@ -1895,6 +1905,7 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
     hostMemoryGb = memory;
     await render([{ ...matrixModel(), id: "sdxl", name: "SDXL",
       candle: { measured: false, minMemoryGb: 12, vramGbByTier: { q4: 12, q8: 16, bf16: 24 } },
+      memoryGuidance: servedCatalogFacts("sdxl").memoryGuidance,
     }]);
     const q4 = tierRows().find((row) => row.querySelector(".model-tier-label").textContent.includes("Q4"));
     expect(q4.textContent).toContain("Q4 optimized ~5.4 GiB");
@@ -1909,6 +1920,11 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
     const model = {
       ...matrixModel(),
       candle: { vramGbByTier: { q4: 6, q8: 10, bf16: 20 } },
+      // Each served Candle bound is the tier's peak plus the 2 GB allocator slack.
+      memoryGuidance: servedGuidance({
+        mlx: { bf16: (24 + 14) / 0.9, q8: (18 + 14) / 0.9, q4: (4 + 14) / 0.9 },
+        candle: { bf16: 22, q8: 12, q4: 8 },
+      }),
     };
     await render([model]);
     const suggested = tierRows().find((row) =>

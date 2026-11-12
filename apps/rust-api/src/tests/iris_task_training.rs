@@ -514,8 +514,17 @@ async fn depth_training_registers_a_selectable_depth_model() {
     assert_eq!(model["irisTask"], "depth");
     assert_eq!(model["trainedCheckpoint"]["task"], "depth");
     assert_eq!(model["installState"], "installed", "{model:#}");
+    // SW-7032: the measured lane facts come from the evidence store through the projection with
+    // their recorded values; the declared parameters stay product data.
+    let depth_admission = json!({
+        "measured": false,
+        "referenceModelPixels": 524288,
+        "extrapolationFactor": 1.5,
+        "mlx": {"residentGb": 6.5, "referencePeakGb": 9.4},
+        "candle": {"residentGb": 7.2, "referencePeakGb": 8.4}
+    });
     assert_eq!(
-        model["depth"]["admission"]["measured"], false,
+        model["depth"]["admission"], depth_admission,
         "the depth engine's admission declaration is overlaid: {model:#}"
     );
     advertise_trained_source(&app, &model_id, &export, "image_depth").await;
@@ -545,8 +554,8 @@ async fn depth_training_registers_a_selectable_depth_model() {
     let stored = stored_payload(&app, depth_job["id"].as_str().unwrap()).await;
     assert_eq!(carrier_ids(&stored), vec![model_id.clone()], "{stored:#}");
     assert_eq!(
-        stored["modelManifestEntries"][0]["depth"]["admission"]["measured"],
-        false
+        stored["modelManifestEntries"][0]["depth"]["admission"],
+        depth_admission
     );
     let (status, refused) = request(
         app.clone(),

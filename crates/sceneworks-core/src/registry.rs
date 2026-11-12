@@ -93,6 +93,12 @@ impl ModelSpec {
                 Value::Object(self.model_evidence.clone()),
             );
         }
+        if !self.depth_evidence.is_empty() {
+            facts.insert(
+                "depth".to_owned(),
+                Value::Object(self.depth_evidence.clone()),
+            );
+        }
         if !self.download_evidence.is_empty() {
             facts.insert(
                 "downloads".to_owned(),

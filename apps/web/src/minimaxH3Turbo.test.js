@@ -27,8 +27,9 @@ const accelerator = (id, steps, schedulerShift, extra = {}) => ({
   ...extra,
 });
 
-const MINIMAX = { id: "minimax_h3" };
-const MINIMAX_REF = { id: "minimax_h3_ref" };
+// The catalog route serves the server's H3 verdict (`supportsMinimaxH3Turbo`, SW-7032).
+const MINIMAX = { id: "minimax_h3", supportsMinimaxH3Turbo: true };
+const MINIMAX_REF = { id: "minimax_h3_ref", supportsMinimaxH3Turbo: true };
 
 describe("minimaxH3Turbo", () => {
   it("claims an accelerator only when it also declares a usable recipe", () => {
@@ -68,6 +69,8 @@ describe("minimaxH3Turbo", () => {
     expect(modelIsMinimaxH3(MINIMAX)).toBe(true);
     expect(modelIsMinimaxH3(MINIMAX_REF)).toBe(true);
     expect(modelIsMinimaxH3({ id: "mochi_1" })).toBe(false);
+    // An id alone is not the server's verdict (SW-7032).
+    expect(modelIsMinimaxH3({ id: "minimax_h3" })).toBe(false);
     expect(modelIsMinimaxH3(undefined)).toBe(false);
   });
 

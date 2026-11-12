@@ -1,7 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { buildImageJobRequest } from "./imageJobRequest.js";
-import { mossDefaults, mossWireOptions, mossComponentState, mossSeededRecipeReplay } from "./mossImage.js";
+import { mossAccelerationAvailable, mossDefaults, mossWireOptions, mossComponentState, mossSeededRecipeReplay } from "./mossImage.js";
+import candidate from "./testUtils/catalogBaseline/candidate-catalog.json";
 const state = (more = {}) => ({ model: "moss_image_sft", mode: "text_to_image", promptToSend: '日本語 <tag> {"items": [{"yxyx": [0,0,1,1]}]}', resolution: "1024x1024", width: 1024, height: 1024, count: 2, seed: "42", posePayload: [], referenceAssetIds: [], loras: [], sampler: "default", scheduler: "default", schedulerShift: 5, supportsSchedulerShift: true, guidanceOverride: 3, stepsOverride: 50, guidanceMethod: "cfg", negativePrompt: "", flashAttn: true, ...more });
+// SW-7032: the 8-step control is offered by the served catalog fact (the package the checkbox selects
+// is a declared conditional purpose of the entry), never by a model-id literal.
+describe("MOSS 8-step acceleration availability", () => {
+  const purposes = (id) => {
+    const entry = candidate.models.find((model) => model.id === id);
+    return Object.fromEntries((entry.conditionalComponents ?? []).flatMap((component) =>
+      (component.requiredFor ?? []).map((purpose) => [purpose, { installState: "missing" }])));
+  };
+  it("follows the declared package, not the checkpoint id", () => {
+    expect(mossAccelerationAvailable({ id: "moss_image_sft", conditionalPurposes: purposes("moss_image_sft") })).toBe(true);
+    expect(mossAccelerationAvailable({ id: "moss_image_base", conditionalPurposes: purposes("moss_image_base") })).toBe(false);
+    expect(mossAccelerationAvailable({ id: "moss_image_sft" })).toBe(false);
+    expect(mossAccelerationAvailable({ id: "imported_moss", conditionalPurposes: { moss_dmd_unmerged_bf16: {} } })).toBe(true);
+  });
+});
 describe("MOSS product transport", () => {
  it("preserves exact multilingual/tag/JSON prompt and explicit OFF for normal/batch", () => { const input=state(), normal=buildImageJobRequest(input); expect(buildImageJobRequest({...input})).toEqual(normal); expect(normal.prompt).toBe(input.promptToSend); expect(normal.advanced.mossImage).toEqual(mossDefaults()); expect(normal.advanced.steps).toBe(50); });
  it.each(["unmerged_bf16", "full_fp32"])("transports %s without incompatible hidden controls", (acceleration) => { const result=buildImageJobRequest(state({mossImage:{acceleration,uncond_skip_layers:[],training_shift:1,slg:{layers:[22],scale:1,start:0,stop:1}},mossDmdSteps:6})); expect(result.advanced.mossImage).toEqual({acceleration,max_sequence_length:4096}); expect(result.advanced.steps).toBe(6); for(const key of ["sampler","scheduler","guidanceScale","schedulerShift","guidanceMethod"]) expect(result.advanced).not.toHaveProperty(key); });

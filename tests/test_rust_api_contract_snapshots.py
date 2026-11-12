@@ -609,12 +609,23 @@ def registry_evidence_fields() -> dict[str, frozenset[str]]:
     """Every field name the evidence store projects, per location, read from the store itself
     so a newly measured field is covered without editing this harness. An unknown location
     raises: the registry's projection would need a matching rule here."""
-    fields: dict[str, set[str]] = {"model": set(), "mlx": set(), "candle": set(), "footprint": set()}
+    fields: dict[str, set[str]] = {
+        "model": set(), "mlx": set(), "candle": set(), "footprint": set(),
+        "depth.admission": set(), "depth.admission.lane": set(),
+    }
     for record in registry_evidence().values():
         for location, values in record.items():
             if location == "downloads":
                 for download in values:
                     fields["footprint"].update(download["footprint"])
+            elif location == "depth":
+                # SW-7032: a depth job's measured admission facts (`depth.admission`).
+                assert set(values) == {"admission"}, f"unknown depth evidence {sorted(values)!r}"
+                for name, value in values["admission"].items():
+                    if isinstance(value, dict):
+                        fields["depth.admission.lane"].update(value)
+                    else:
+                        fields["depth.admission"].add(name)
             else:
                 fields[location].update(values)
     return {location: frozenset(names) for location, names in fields.items()}
@@ -643,6 +654,27 @@ def mask_registry_evidence(entry: dict) -> None:
             _mask_evidence_fields(block, record.get(backend, {}), names[backend], f"{model_id}.{backend}")
         else:
             assert backend not in record, f"{model_id}: evidence for absent {backend} block"
+    admission = (entry.get("depth") or {}).get("admission")
+    measured_admission = record.get("depth", {}).get("admission", {})
+    if isinstance(admission, dict):
+        _mask_evidence_fields(
+            admission,
+            {k: v for k, v in measured_admission.items() if not isinstance(v, dict)},
+            names["depth.admission"],
+            f"{model_id}.depth.admission",
+        )
+        for backend in ("mlx", "candle"):
+            lane = admission.get(backend)
+            if isinstance(lane, dict):
+                _mask_evidence_fields(
+                    lane, measured_admission.get(backend, {}), names["depth.admission.lane"],
+                    f"{model_id}.depth.admission.{backend}",
+                )
+            else:
+                assert backend not in measured_admission, f"{model_id}: depth evidence for absent {backend} lane"
+    else:
+        assert not measured_admission, f"{model_id}: depth evidence for absent depth.admission"
+    mask_memory_guidance(entry)
     downloads = entry.get("downloads") or []
     measured_by_index: dict[int, dict] = {}
     for measured in record.get("downloads", []):
@@ -672,6 +704,30 @@ def mask_registry_evidence(entry: dict) -> None:
             )
         else:
             assert index not in measured_by_index, f"{model_id}: measured download {index} has no footprint"
+
+
+MEMORY_GUIDANCE_LANE_KEYS = frozenset(
+    {"suggestion", "tiers", "blanketGb", "entryFloorGb", "uncalibrated", "resolutionMinHostGb"}
+)
+
+
+def mask_memory_guidance(entry: dict) -> None:
+    """A catalog row's `memoryGuidance` (SW-7032) is computed from the row's evidence-projected
+    memory facts and the API's tier-suggestion policy, so its values move whenever evidence is
+    re-measured. Freeze its lane shape (both lanes, each lane's fields) and replace the values with
+    a marker; the values are pinned by the Rust guidance tests and the native catalog fixture."""
+    guidance = entry.get("memoryGuidance")
+    if guidance is None:
+        return
+    assert set(guidance) == {"mlx", "candle"}, f"{entry.get('id')}: memoryGuidance lanes {sorted(guidance)!r}"
+    masked = {}
+    for lane, fields in guidance.items():
+        extra = set(fields) - MEMORY_GUIDANCE_LANE_KEYS - ({"endpointEstimate"} if lane == "candle" else set())
+        assert MEMORY_GUIDANCE_LANE_KEYS <= set(fields) and not extra, (
+            f"{entry.get('id')}.memoryGuidance.{lane}: fields {sorted(fields)!r}"
+        )
+        masked[lane] = {field: REGISTRY_EVIDENCE_MARKER for field in sorted(fields)}
+    entry["memoryGuidance"] = masked
 
 
 def _strip_public_locators(value: Any) -> Any:

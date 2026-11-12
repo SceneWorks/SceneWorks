@@ -10,12 +10,9 @@
 export const REFERENCE_IMAGE_RESIZE_MODES = ["match", "max", "diffusers"];
 export const LEGACY_REFERENCE_IMAGE_RESIZE_MODE = "diffusers";
 
-/** Whether a catalog entry renders through MiniMax-H3 (stock `minimax_h3*` or an imported H3). */
+/** Whether a catalog entry renders through MiniMax-H3 (stock or imported): its typed product family. */
 export function isMinimaxH3Entry(entry) {
-  return Boolean(
-    (typeof entry?.id === "string" && entry.id.startsWith("minimax_h3")) ||
-      entry?.family === "minimax-h3",
-  );
+  return entry?.family === "minimax-h3";
 }
 
 /**

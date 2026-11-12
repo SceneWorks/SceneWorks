@@ -17,6 +17,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { click } from "./testUtils/dom.js";
 import { QWEN_IMAGE_2_1_MODEL_IDS, qwenRewriterAppliesTo } from "./constants.js";
 import { projectBuiltinMemoryEvidence } from "../../../scripts/lib/builtin-memory-evidence.mjs";
+// The API-served facts (memory guidance) the route adds to the projected entry (SW-7032).
+import { servedCatalogFacts } from "./testUtils/servedCatalogFacts.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "../../..");
@@ -36,6 +38,7 @@ function catalogModel(entry) {
   const { downloads, ...rest } = entry;
   return {
     ...rest,
+    ...servedCatalogFacts(entry.id),
     installState: "missing",
     installed: false,
     downloadable: true,

@@ -13696,6 +13696,19 @@
     ]
   },
   "iris_3b_depth": {
+    "depth": {
+      "admission": {
+        "measured": false,
+        "mlx": {
+          "residentGb": 6.5,
+          "referencePeakGb": 9.4
+        },
+        "candle": {
+          "residentGb": 7.2,
+          "referencePeakGb": 8.4
+        }
+      }
+    },
     "mlx": {
       "minMemoryGb": 16
     },
