@@ -1380,6 +1380,25 @@ mod residual {
                 ),
             ));
         }
+        // The dataset batch describer routes by the capability of its `model` (SW-7083): the
+        // Vision Captioner by `prompt_refine`, JoyCaption (keyed on its repository, as the API
+        // sends it) by `training_caption`.
+        for (capability, model) in [
+            ("model:vision_captioner", "vision_caption_qwen3vl_8b"),
+            (
+                "model:joycaption",
+                crate::dataset_batch_describe::JOYCAPTION_REPO,
+            ),
+        ] {
+            probes.push((
+                format!("gpuJobTypes/dataset_batch_describe/{capability}"),
+                job(
+                    JobType::DatasetBatchDescribe,
+                    model,
+                    json!({ "datasetId": "probe" }),
+                ),
+            ));
+        }
         for spec in crate::registry::builtin_model_specs() {
             for (mode, payload) in [
                 (
@@ -1741,6 +1760,13 @@ fn former_matrix_cells_keep_their_two_lane_answers() {
     }
     // terminal_vector_install_is_projected_from_native_worker_capabilities
     add("gpuJobTypes/vector_generate/image_to_svg".into(), BOTH);
+    // SW-7082/SW-7083: the dataset batch describer is served on both lanes by either describer.
+    for capability in ["model:vision_captioner", "model:joycaption"] {
+        add(
+            format!("gpuJobTypes/dataset_batch_describe/{capability}"),
+            BOTH,
+        );
+    }
 
     let lanes = residual::Lanes::new();
     let cells = residual::all_cells(&lanes);
