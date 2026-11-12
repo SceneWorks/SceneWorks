@@ -49,6 +49,7 @@ vi.mock("../videoStudioValidation.js", async (importOriginal) => {
 
 import { AppContext } from "../context/AppContext.js";
 import { VideoStudio } from "./VideoStudio.jsx";
+import { servedCatalogFacts } from "../testUtils/servedCatalogFacts.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MANIFEST_PATH = resolve(HERE, "../../../../config/manifests/builtin.models.jsonc");
@@ -61,7 +62,7 @@ const shipped = (id) => {
   if (!entry) throw new Error(`manifest has no model ${id}`);
   // The catalog serves the manifest entry plus install state; the studio only renders installed,
   // usable models, so the fixture adds exactly what the route adds.
-  return { ...entry, installState: "installed", usable: true };
+  return { ...entry, ...servedCatalogFacts(id), installState: "installed", usable: true };
 };
 
 const MINIMAX = shipped("minimax_h3");
@@ -535,7 +536,8 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
 
   for (const override of [{ minimaxH3Partition: "ref2va" }, { family: "other" }, { baseModel: "minimax_h3_ref" }, { minimaxH3Partition: undefined }, { importSourceShape: undefined }, { importPlan: { checkpointId: " " } }]) {
     it(`does not widen last-only support for mismatched catalog declarations ${JSON.stringify(override)}`, async () => {
-      const entry = { ...MINIMAX, id: "other-model", family: "minimax-h3", baseModel: "minimax_h3", importSourceShape: "transformer_directory", importPlan: { checkpointId: "checkpoint" }, minimaxH3Partition: "fl2va", ...override };
+      // The API's verdict for a mismatched declaration is not last-only (SW-7032 serves it).
+      const entry = { ...MINIMAX, id: "other-model", family: "minimax-h3", baseModel: "minimax_h3", importSourceShape: "transformer_directory", importPlan: { checkpointId: "checkpoint" }, minimaxH3Partition: "fl2va", supportsLastOnlyImageToVideo: false, ...override };
       window.localStorage.setItem("sceneworks-studio-video-project_1", JSON.stringify({ mode: "image_to_video", model: entry.id, sourceAssetId: "", lastFrameAssetId: "last" }));
       await render(baseContext({ videoModels: [entry], assets: [asset("last", "image", "last")] }));
       expect(fieldLabelled("Last frame")).toBeFalsy();

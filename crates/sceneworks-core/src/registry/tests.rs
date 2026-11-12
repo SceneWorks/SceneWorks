@@ -103,6 +103,56 @@ fn every_builtin_memory_fact_is_projected_from_validated_evidence() {
     assert!(super::evidence::validate_evidence_document(&ambiguous.to_string(), &raw).is_err());
 }
 
+/// SW-7032: the depth job's measured admission facts live in the evidence store, keyed verbatim
+/// under `depth.admission`; the product row keeps only its declared parameters, and the effective
+/// projection restores the recorded values unchanged.
+#[test]
+fn depth_admission_measurements_project_from_the_evidence_store() {
+    let raw: Value = serde_json::from_str(&product_json()).unwrap();
+    let product = raw["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == "iris_3b_depth")
+        .unwrap();
+    assert_eq!(
+        product["depth"],
+        json!({"admission": {"referenceModelPixels": 524288, "extrapolationFactor": 1.5}})
+    );
+    let expected = json!({"admission": {
+        "measured": false,
+        "referenceModelPixels": 524288,
+        "extrapolationFactor": 1.5,
+        "mlx": {"residentGb": 6.5, "referencePeakGb": 9.4},
+        "candle": {"residentGb": 7.2, "referencePeakGb": 8.4}
+    }});
+    let spec = builtin_model_spec("iris_3b_depth").unwrap();
+    assert_eq!(spec.project(None)["depth"], expected);
+    let effective = crate::builtin_manifests::builtin_model_entry("iris_3b_depth").unwrap();
+    assert_eq!(effective["depth"], expected);
+    let evidence: Value = serde_json::from_str(EVIDENCE).unwrap();
+    for (field, value) in [
+        ("/admission/measured", json!(1)),
+        ("/admission/mlx/peakGb", json!(9.4)),
+        ("/admission/candle/residentGb", json!(-1.0)),
+        ("/admission/referenceModelPixels", json!(524288)),
+    ] {
+        let mut malformed = evidence.clone();
+        let mut target = &mut malformed["iris_3b_depth"]["depth"];
+        for segment in field.trim_start_matches('/').split('/') {
+            target = &mut target[segment];
+        }
+        *target = value;
+        assert!(
+            super::evidence::validate_evidence_document(&malformed.to_string(), &raw).is_err(),
+            "{field}"
+        );
+    }
+    let mut orphan = evidence.clone();
+    orphan["flux_schnell"]["depth"] = evidence["iris_3b_depth"]["depth"].clone();
+    assert!(super::evidence::validate_evidence_document(&orphan.to_string(), &raw).is_err());
+}
+
 #[test]
 fn both_shipping_routes_and_the_v1_compatibility_projection_are_preserved() {
     let spec = builtin_model_spec("flux_schnell").unwrap();

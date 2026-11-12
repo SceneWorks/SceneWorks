@@ -518,6 +518,12 @@ async fn ltx_eros_legacy_install_is_cleanup_only_and_reclaimable_off_macos() {
         enriched.get("variants").is_none(),
         "size enrichment must not resurrect the variants projection on a tombstone"
     );
+    assert!(
+        enriched
+            .get(sceneworks_core::memory_guidance::FIELD)
+            .is_none(),
+        "a cleanup tombstone has no tier surface to guide"
+    );
 
     let primary_repo = "TenStrip/LTX2.3-10Eros";
     let adapter_repo = "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments";

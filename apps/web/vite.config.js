@@ -8,7 +8,6 @@ import precompressPlugin from "./vite-plugin-precompress.js";
 import bundleReportPlugin from "./vite-plugin-bundle-report.js";
 import themeInitPlugin from "./vite-plugin-theme-init.js";
 import editorGuidesPlugin from "./vite-plugin-editor-guides.js";
-import { loadSdxlCudaMemoryProjection } from "./sdxl-cuda-memory-projection.js";
 
 // Expose the product version (kept in lockstep across the repo's package.json /
 // tauri.conf.json by scripts/sync-version.mjs) to the frontend as a build-time
@@ -30,7 +29,7 @@ const bundleBudgets = JSON.parse(
 const licensesDir = fileURLToPath(new URL("../desktop/licenses", import.meta.url));
 const webRoot = fileURLToPath(new URL(".", import.meta.url));
 
-export default defineConfig(({ command }) => ({
+export default defineConfig(() => ({
   // Generate the pre-paint /theme-init.js from src/accents.js at dev/build time
   // (single source of truth for the accent-id list). See vite-plugin-theme-init.js.
   plugins: [
@@ -44,7 +43,6 @@ export default defineConfig(({ command }) => ({
   // the specific key keeps it lint-safe (no bare global) under no-undef.
   define: {
     "import.meta.env.VITE_APP_VERSION": JSON.stringify(pkg.version),
-    "import.meta.env.VITE_SDXL_CUDA_MEMORY_ENDPOINTS": JSON.stringify(JSON.stringify(loadSdxlCudaMemoryProjection(undefined, { required: command === "build" }))),
   },
   // react-konva pulls its own react-reconciler; without deduping, Vite's dep
   // optimizer can hand it a second React copy, tripping "Invalid hook call /

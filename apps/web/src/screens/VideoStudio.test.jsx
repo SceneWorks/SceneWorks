@@ -18,6 +18,7 @@ vi.mock("../api.js", async (importOriginal) => {
 
 import { AppContext } from "../context/AppContext.js";
 import { VideoStudio } from "./VideoStudio.jsx";
+import { servedGuidance } from "../testUtils/servedCatalogFacts.js";
 
 const LTX = {
   id: "ltx_2_3",
@@ -1475,6 +1476,11 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
       variant: tier,
       installState: installed.includes(tier) ? "installed" : "missing",
     })),
+    // The API's served guidance for a fixture with no memory evidence: no bound on any tier.
+    memoryGuidance: servedGuidance({
+      mlx: { bf16: null, q8: null, q4: null },
+      candle: { bf16: null, q8: null, q4: null },
+    }),
     macSupport: {
       supported: true,
       features: { videoModes: { text_to_video: true } },

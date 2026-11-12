@@ -193,6 +193,11 @@ pub fn assemble(
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default();
+        let depth_evidence = raw_evidence
+            .get("depth")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
         let download_evidence = raw_evidence
             .get("downloads")
             .and_then(Value::as_array)
@@ -316,6 +321,7 @@ pub fn assemble(
                     evidence: lanes,
                     model_evidence,
                     download_evidence,
+                    depth_evidence,
                 },
             )
             .is_some()

@@ -344,7 +344,9 @@ fn default_review_plan(draft_id: &str, shots: &[Shot]) -> Value {
                     "maxAnswerSeconds": 30,
                     "maxStartupSeconds": 120,
                     "maxNewTokens": 192,
-                    "maxMemoryGb": 16.0
+                    // The review's own declared memory budget default (`film_review`), served to the
+                    // film-review form through this draft rather than restated in the web.
+                    "maxMemoryGb": crate::film_review::DEFAULT_MAX_MEMORY_GB
                 },
                 "shots": questions,
                 "uncertainBelow": 0.5
@@ -476,6 +478,28 @@ mod tests {
     use crate::film_plan::{
         validate_plan_against_pack, validate_plan_structure, validate_reference_pack,
     };
+
+    /// SW-7032: the film-review form reads its memory budget default from the draft's served
+    /// review plan, and a plan the form submits without one (never served) takes the server's own
+    /// `film_review::DEFAULT_MAX_MEMORY_GB`.
+    #[test]
+    fn the_review_memory_budget_default_is_served_and_applied_by_the_server() {
+        let served = default_review_plan("film_1", &[]);
+        assert_eq!(
+            served["limits"]["maxMemoryGb"],
+            json!(crate::film_review::DEFAULT_MAX_MEMORY_GB)
+        );
+        let mut unserved = served.clone();
+        unserved["limits"]
+            .as_object_mut()
+            .unwrap()
+            .remove("maxMemoryGb");
+        let parsed: crate::film_review::ReviewPlan = serde_json::from_value(unserved).unwrap();
+        assert_eq!(
+            parsed.limits.max_memory_gb,
+            crate::film_review::DEFAULT_MAX_MEMORY_GB
+        );
+    }
 
     #[test]
     fn manual_draft_defaults_to_prompt_refiner_and_needs_no_reference_roles() {

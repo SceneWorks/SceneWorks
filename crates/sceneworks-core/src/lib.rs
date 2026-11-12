@@ -64,6 +64,7 @@ pub mod media_process;
 pub mod memory_anchor;
 pub mod memory_calibration;
 pub mod memory_contracts;
+pub mod memory_guidance;
 pub mod minimax_h3_codec;
 pub mod minimax_h3_import;
 pub mod minimax_h3_load;

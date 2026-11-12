@@ -2838,6 +2838,24 @@
         },
         "supported": false
       },
+      "memoryGuidance": {
+        "candle": {
+          "blanketGb": "<registry-evidence>",
+          "entryFloorGb": "<registry-evidence>",
+          "resolutionMinHostGb": "<registry-evidence>",
+          "suggestion": "<registry-evidence>",
+          "tiers": "<registry-evidence>",
+          "uncalibrated": "<registry-evidence>"
+        },
+        "mlx": {
+          "blanketGb": "<registry-evidence>",
+          "entryFloorGb": "<registry-evidence>",
+          "resolutionMinHostGb": "<registry-evidence>",
+          "suggestion": "<registry-evidence>",
+          "tiers": "<registry-evidence>",
+          "uncalibrated": "<registry-evidence>"
+        }
+      },
       "missingRequiredFiles": [],
       "modelAvailability": "missing",
       "modelResolution": {
@@ -2854,6 +2872,7 @@
       "removable": true,
       "repairAvailable": false,
       "supportsLastOnlyImageToVideo": false,
+      "supportsMinimaxH3Turbo": false,
       "type": "image",
       "ui": {
         "label": "User"
@@ -3024,6 +3043,24 @@
         },
         "supported": true
       },
+      "memoryGuidance": {
+        "candle": {
+          "blanketGb": "<registry-evidence>",
+          "entryFloorGb": "<registry-evidence>",
+          "resolutionMinHostGb": "<registry-evidence>",
+          "suggestion": "<registry-evidence>",
+          "tiers": "<registry-evidence>",
+          "uncalibrated": "<registry-evidence>"
+        },
+        "mlx": {
+          "blanketGb": "<registry-evidence>",
+          "entryFloorGb": "<registry-evidence>",
+          "resolutionMinHostGb": "<registry-evidence>",
+          "suggestion": "<registry-evidence>",
+          "tiers": "<registry-evidence>",
+          "uncalibrated": "<registry-evidence>"
+        }
+      },
       "missingRequiredFiles": [],
       "mlx": {
         "calibrations": "<registry-evidence>",
@@ -3079,6 +3116,7 @@
       "removable": false,
       "repairAvailable": false,
       "supportsLastOnlyImageToVideo": false,
+      "supportsMinimaxH3Turbo": false,
       "type": "image",
       "ui": {
         "controlModes": [

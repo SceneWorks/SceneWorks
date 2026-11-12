@@ -30,6 +30,7 @@ import { CREATE_JOB_DEFINITIONS, makeCreateJob } from "../createJob.js";
 import { AppContext } from "../context/AppContext.js";
 import { recipeFromWorkflowShare } from "../workflowShare.js";
 import { VideoStudio } from "./VideoStudio.jsx";
+import { servedCatalogFacts } from "../testUtils/servedCatalogFacts.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MANIFESTS = resolve(HERE, "../../../../config/manifests");
@@ -41,7 +42,7 @@ const readManifest = (file, key) => {
 const shippedModel = (id) => {
   const entry = readManifest("builtin.models.jsonc", "models").find((model) => model.id === id);
   if (!entry) throw new Error(`manifest has no model ${id}`);
-  return { ...entry, installState: "installed", usable: true };
+  return { ...entry, ...servedCatalogFacts(id), installState: "installed", usable: true };
 };
 /// The shipped LoRA entry as the catalog route serves it: the manifest entry plus the install state
 /// `normalize_lora_entry` probes. `installedPath` matters — an uninstalled adapter is filtered out

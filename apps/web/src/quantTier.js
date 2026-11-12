@@ -180,8 +180,8 @@ export function isSelectableTier(tier) {
 // caller that knows nothing about worker capabilities behaving exactly as before.
 //
 // Extracted so the THREE readers of this rule share one spelling — `installedTiers`, `allPossibleTiers`,
-// and (sc-15400) `registryTierEvidence`'s per-tier memory floor, which must not size a host against a tier
-// that host cannot serve.
+// and (sc-15400) the Simple Models floor label, which must not size a host against a tier that host
+// cannot serve.
 export function tierHostEligible(tier, options = {}) {
   const { convRotEligible = true, nvfp4Eligible = true, fp8rEligible = false } = options;
   return (convRotEligible || !isConvRotTier(tier)) &&
@@ -477,4 +477,63 @@ export function defaultTierSelection(model, lastUsed, options = {}) {
     }
   }
   return tiers[0];
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Served memory guidance (SW-7032). The API owns every memory number behind the tier suggestion,
+// the per-tier over-budget flag, the host floor labels and the high-resolution gate: it serves them
+// as host-independent thresholds on `model.memoryGuidance.{mlx,candle}`
+// (`sceneworks_core::memory_guidance`). The web holds no headroom constant and does no memory
+// arithmetic; it compares a served threshold with its own host-memory probe and selects the rows of
+// the tiers it has installed.
+//
+// SUGGEST, NEVER WITHHOLD (epic 8506 decision 1): an unknown host reading or a null threshold always
+// fits. BEFORE THE API HAS SERVED GUIDANCE (no `memoryGuidance` on the entry — an older sidecar
+// during an app update), every reader is a no-op: no suggestion (so `defaultTierSelection` takes its
+// documented no-signal base), no over-budget flag, no floor label, and every resolution offered.
+// ---------------------------------------------------------------------------------------------------
+
+// The served guidance for `backend`'s lane (`"candle"` selects Candle; anything else is MLX), or null.
+export function memoryLane(model, backend) {
+  const lane = model?.memoryGuidance?.[backend === "candle" ? "candle" : "mlx"];
+  return lane && typeof lane === "object" ? lane : null;
+}
+
+// Whether a host with `hostMemoryGb` meets a served `minHostGb` threshold.
+export function hostMeets(minHostGb, hostMemoryGb) {
+  return (
+    hostMemoryGb == null ||
+    !Number.isFinite(hostMemoryGb) ||
+    typeof minHostGb !== "number" ||
+    hostMemoryGb >= minHostGb
+  );
+}
+
+// Whether `variant`'s tier fits `hostMemoryGb` on `options.backend` for `options.model`. Advisory:
+// every tier stays installable.
+export function tierFits(variant, hostMemoryGb, options = {}) {
+  const row = memoryLane(options.model, options.backend)?.tiers?.[variant?.variant];
+  return hostMeets(row?.minHostGb, hostMemoryGb);
+}
+
+// The suggested default download tier: the highest-fidelity declared tier (served order) that fits
+// `hostMemoryGb`, else the smallest declared tier so there is always a suggestion. Null when the model
+// has no quant matrix or the API has not served guidance. Never affects installability.
+export function suggestTier(model, hostMemoryGb, options = {}) {
+  const served = memoryLane(model, options.backend)?.suggestion;
+  if (!model?.hasVariantMatrix || !Array.isArray(model.variants) || !Array.isArray(served)) {
+    return null;
+  }
+  const declared = new Set(model.variants.map((variant) => variant?.variant));
+  const order = served.filter((entry) => declared.has(entry?.tier));
+  if (order.length === 0) {
+    return null;
+  }
+  return (order.find((entry) => hostMeets(entry.minHostGb, hostMemoryGb)) ?? order[order.length - 1]).tier;
+}
+
+// The served measured-endpoint guidance for `tier` on `backend`, or null.
+export function endpointEstimate(model, tier, backend) {
+  const estimate = memoryLane(model, backend)?.endpointEstimate;
+  return estimate && estimate.tier === tier ? estimate : null;
 }

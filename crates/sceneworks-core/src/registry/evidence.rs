@@ -32,6 +32,9 @@ const DOWNLOAD_IDENTITY: &[&str] = &[
     "platforms",
 ];
 const MEASURED_FOOTPRINT: &[&str] = &["residentMemoryBytes", "peakMemoryBytes", "measuredPixels"];
+/// Measured per-lane facts of a depth job's admission declaration (`depth.admission.<lane>`).
+/// The declared `referenceModelPixels` / `extrapolationFactor` stay product data.
+const DEPTH_ADMISSION_LANE_FIELDS: &[&str] = &["residentGb", "referencePeakGb"];
 
 static EVIDENCE: LazyLock<BTreeMap<String, Value>> = LazyLock::new(|| {
     serde_json::from_str(include_str!(
@@ -87,6 +90,33 @@ pub(crate) fn project_memory_evidence(model: &mut Value, evidence: &Value) -> Re
                         .expect("validated backend evidence")
                         .clone(),
                 );
+            }
+            "depth" => {
+                let admission = model
+                    .pointer_mut("/depth/admission")
+                    .and_then(Value::as_object_mut)
+                    .ok_or_else(|| format!("{id} has no depth.admission for evidence"))?;
+                let measured = fields["admission"]
+                    .as_object()
+                    .expect("validated depth admission evidence");
+                for (key, value) in measured {
+                    match value {
+                        Value::Object(lane) => {
+                            let target = admission
+                                .entry(key.clone())
+                                .or_insert_with(|| Value::Object(Default::default()));
+                            target
+                                .as_object_mut()
+                                .ok_or_else(|| {
+                                    format!("{id} depth.admission.{key} is not an object")
+                                })?
+                                .extend(lane.clone());
+                        }
+                        scalar => {
+                            admission.insert(key.clone(), scalar.clone());
+                        }
+                    }
+                }
             }
             "downloads" => {
                 let target = model
@@ -178,6 +208,7 @@ pub fn validate_evidence_document(contents: &str, manifest: &Value) -> Result<()
                     }
                 }
                 "mlx" | "candle" => validate_backend(id, location, fields, model)?,
+                "depth" => validate_depth(id, fields, model)?,
                 "downloads" => validate_downloads(id, fields, model)?,
                 _ => return Err(format!("{id} has unknown evidence location {location}")),
             }
@@ -211,6 +242,43 @@ fn validate_backend(id: &str, backend: &str, fields: &Value, model: &Value) -> R
         };
         if !valid {
             return Err(format!("{id}/{backend}.{name} has invalid value type"));
+        }
+    }
+    Ok(())
+}
+
+/// `depth.admission` evidence: the provenance flag and each lane's measured resident / reference
+/// peak. The product row must declare the admission it extends.
+fn validate_depth(id: &str, fields: &Value, model: &Value) -> Result<(), String> {
+    if !model
+        .pointer("/depth/admission")
+        .is_some_and(Value::is_object)
+    {
+        return Err(format!(
+            "{id} has depth evidence for absent depth.admission"
+        ));
+    }
+    let fields = fields
+        .as_object()
+        .filter(|fields| fields.len() == 1)
+        .and_then(|fields| fields.get("admission"))
+        .and_then(Value::as_object)
+        .filter(|admission| !admission.is_empty())
+        .ok_or_else(|| format!("{id} depth evidence must be one non-empty admission object"))?;
+    for (name, value) in fields {
+        let valid = match name.as_str() {
+            "measured" => value.is_boolean(),
+            "mlx" | "candle" => value.as_object().is_some_and(|lane| {
+                !lane.is_empty()
+                    && lane.iter().all(|(field, number)| {
+                        DEPTH_ADMISSION_LANE_FIELDS.contains(&field.as_str())
+                            && number.as_f64().is_some_and(|number| number > 0.0)
+                    })
+            }),
+            _ => false,
+        };
+        if !valid {
+            return Err(format!("{id} has invalid depth.admission.{name} evidence"));
         }
     }
     Ok(())

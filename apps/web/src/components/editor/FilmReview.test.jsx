@@ -68,7 +68,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-async function renderReview({ view = reviewView(), onChange = vi.fn(), select = vi.fn(), refresh = vi.fn() } = {}) {
+async function renderReview({ view = reviewView(), onChange = vi.fn(), select = vi.fn(), refresh = vi.fn(), current = draft() } = {}) {
   apiFetchMock.mockImplementation((path, _token, options = {}) => {
     if (path.endsWith("/film-runs")) return Promise.resolve([{ locator: { id: "run_1", draftId: "film_1" }, record: {} }]);
     if (path.endsWith("/film-runs/run_1/review") && !options.method) return Promise.resolve(view);
@@ -79,10 +79,16 @@ async function renderReview({ view = reviewView(), onChange = vi.fn(), select = 
   });
   root = createRoot(container);
   await act(async () => {
-    root.render(<FilmReview draft={draft()} onChange={onChange} projectId="project_1" refreshTimelines={refresh} setNotice={vi.fn()} setSelectedTimelineId={select} token="token" />);
+    root.render(<FilmReview draft={current} onChange={onChange} projectId="project_1" refreshTimelines={refresh} setNotice={vi.fn()} setSelectedTimelineId={select} token="token" />);
     await Promise.resolve(); await Promise.resolve();
   });
   return { onChange, select, refresh };
+}
+
+function memoryInput() {
+  return [...container.querySelectorAll("label")]
+    .find((label) => label.textContent.startsWith("Maximum memory (GB)"))
+    ?.querySelector("input");
 }
 
 async function renderReviewVisibility({ active, runLocatorId = "", runSnapshot = null, setNotice = vi.fn() }) {
@@ -231,6 +237,24 @@ describe("FilmReview", () => {
     expect(apiFetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/review\/decision$/), "token", expect.objectContaining({ method: "POST" }));
     await act(async () => { button("Repair from findings").click(); await Promise.resolve(); });
     expect(apiFetchMock).toHaveBeenCalledWith(expect.stringMatching(/\/review\/repair$/), "token", expect.objectContaining({ method: "POST" }));
+  });
+
+  // SW-7032: the review's memory budget default is the API's (`film_review::DEFAULT_MAX_MEMORY_GB`,
+  // served in the draft's review plan by `film_workspace::default_review_plan`). The form shows the
+  // served value and never invents one.
+  it("shows the API-served memory budget and follows a changed served value", async () => {
+    const served = (gb) => ({ ...draft(), reviewPlan: { schemaVersion: 1, shots: {}, limits: { maxMemoryGb: gb } } });
+    await renderReview({ current: served(24) });
+    expect(memoryInput().value).toBe("24");
+    await act(async () => { root.unmount(); });
+    await renderReview({ current: served(40) });
+    expect(memoryInput().value).toBe("40");
+  });
+
+  it("leaves an unserved memory budget empty and absent, so the server applies its default", async () => {
+    expect(normalizedPlan(draft()).limits).not.toHaveProperty("maxMemoryGb");
+    await renderReview();
+    expect(memoryInput().value).toBe("");
   });
 
   it("edits frame selection, finite limits, and per-shot questions in the draft", async () => {
