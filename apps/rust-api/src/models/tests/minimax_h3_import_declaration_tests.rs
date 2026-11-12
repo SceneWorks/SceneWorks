@@ -76,6 +76,16 @@ fn seed_registered_h3_component(
                 write(dir.join("tokenizer_config.json"), b"{}");
                 write(dir.join("tokenizer.json"), b"{}");
             }
+            // The CUDA row fetches the whole FL2VA audio-VAE directory: its constructor
+            // documents and the weights beside them.
+            "fl2va_audio_vae_config" => {
+                for name in
+                    sceneworks_core::mlx_tier_completeness::MINIMAX_H3_AUDIO_VAE_CONFIG_FILES
+                {
+                    write(dir.join(name), b"{}");
+                }
+                write(dir.join("model.safetensors"), b"weights");
+            }
             _ => {
                 write(dir.join("config.json"), b"{}");
                 write(dir.join("diffusion_pytorch_model.safetensors"), b"weights");
@@ -147,23 +157,31 @@ async fn explicit_three_partitions_are_queued_with_persisted_catalog_fields() {
             .iter()
             .find(|row| row["componentId"] == "import_transformer_config")
             .unwrap();
-        // The config row is provisioned from the registered base's own pinned rehost.
-        let base_pin = sceneworks_core::builtin_manifests::builtin_model_entry(base)
-            .expect("registered base")["downloads"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|row| row["repo"] == "SceneWorks/minimax-h3-mlx")
-            .expect("registered rehost row")["revision"]
-            .clone();
-        assert_eq!(config["revision"], base_pin);
+        // The config row is the architecture document of the registered base's own dense (bf16)
+        // primary as this host serves it: the rehost's `bf16/<partition>/` on macOS, upstream
+        // `transformer/` for the CUDA `minimax_h3` row.
+        let dense =
+            sceneworks_core::model_artifacts::artifact_selection::model_download_for_variant(
+                &registered_entry_for_api_host(base),
+                "bf16",
+            )
+            .expect("registered dense primary on this host");
+        let dense_dir = dense["files"][0]
+            .as_str()
+            .and_then(|file| file.strip_suffix("/*"))
+            .expect("dense primary is one component directory");
         assert_eq!(
-            config["files"],
-            json!([if partition == "ref2va" {
-                "bf16/transformer_ref/config.json"
+            (&config["repo"], &config["revision"]),
+            (&dense["repo"], &dense["revision"])
+        );
+        assert_eq!(config["files"], json!([format!("{dense_dir}/config.json")]));
+        assert!(
+            dense_dir.ends_with(if partition == "ref2va" {
+                "transformer_ref"
             } else {
-                "bf16/transformer/config.json"
-            }])
+                "transformer"
+            }),
+            "{partition}: {dense_dir}"
         );
         assert!(rows.iter().all(super::is_co_requisite_download));
         assert!(
@@ -537,13 +555,7 @@ async fn h3_card_repairs_only_the_missing_bound_component_not_the_imported_dit()
     // The selected base is REGISTERED: it authorizes exactly its compiled rows, so the import binds
     // the registered audio VAE and q4 packed encoder rows (a config-dir edit of the base can no
     // longer add resident rows for it). Each wildcard selector is materialized as two files.
-    let base = sceneworks_core::builtin_manifests::builtin_model_entry("minimax_h3")
-        .expect("registered base");
-    let host = if cfg!(target_os = "macos") {
-        "macos"
-    } else {
-        std::env::consts::OS
-    };
+    let base = registered_entry_for_api_host("minimax_h3");
     let registered_row = |component: &str, variant: Option<&str>| {
         base["downloads"]
             .as_array()
@@ -552,9 +564,6 @@ async fn h3_card_repairs_only_the_missing_bound_component_not_the_imported_dit()
             .find(|row| {
                 row["componentId"] == component
                     && variant.is_none_or(|variant| row["variant"] == variant)
-                    && row["platforms"]
-                        .as_array()
-                        .is_none_or(|platforms| platforms.contains(&json!(host)))
             })
             .unwrap_or_else(|| panic!("registered {component} row"))
             .clone()
@@ -964,21 +973,11 @@ async fn import_persists_a_complete_bf16_only_shared_closure_as_its_generation_d
     // and nothing for q4, so bf16 is the only complete shared closure.
     let base = sceneworks_core::builtin_manifests::builtin_model_entry("minimax_h3")
         .expect("registered base");
-    let encoder = base["downloads"]
+    let encoder = registered_entry_for_api_host("minimax_h3")["downloads"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|row| {
-            row["componentId"] == "text_encoder"
-                && row["variant"] == "bf16"
-                && row["platforms"].as_array().is_some_and(|platforms| {
-                    platforms.contains(&json!(if cfg!(target_os = "macos") {
-                        "macos"
-                    } else {
-                        std::env::consts::OS
-                    }))
-                })
-        })
+        .find(|row| row["componentId"] == "text_encoder" && row["variant"] == "bf16")
         .expect("the registered bf16 encoder row for this host")
         .clone();
     let revision = encoder["revision"].as_str().unwrap().to_owned();
@@ -990,7 +989,7 @@ async fn import_persists_a_complete_bf16_only_shared_closure_as_its_generation_d
         declaration.as_object().unwrap(),
         &Value::Object(base.clone()),
         Some("bf16"),
-        std::env::consts::OS,
+        API_HOST_OS,
     )
     .expect("the registered base has a bf16 import closure");
     for row in &closure {
@@ -1035,14 +1034,14 @@ async fn import_persists_a_complete_bf16_only_shared_closure_as_its_generation_d
         job["payload"]["manifestEntry"]["importComponentTier"],
         "bf16"
     );
-    assert_eq!(
-        job["payload"]["manifestEntry"]["downloads"][0]["variant"],
-        "bf16"
-    );
-    assert_eq!(
-        job["payload"]["manifestEntry"]["downloads"][0]["revision"],
-        revision
-    );
+    let bound_encoder = job["payload"]["manifestEntry"]["downloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["componentId"] == "text_encoder")
+        .expect("the import binds a text encoder");
+    assert_eq!(bound_encoder["variant"], "bf16");
+    assert_eq!(bound_encoder["revision"], revision);
     let mut surface = job["payload"]["manifestEntry"].as_object().unwrap().clone();
     super::apply_imported_video_support_surface(&mut surface);
     assert_eq!(

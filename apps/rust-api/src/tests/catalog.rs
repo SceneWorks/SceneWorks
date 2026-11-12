@@ -3801,8 +3801,14 @@ pub(crate) fn seed_minimax_partition(
     partition: &str,
     present: &[&str],
 ) {
-    let dir = snapshot.join(tier).join(partition);
-    std::fs::create_dir_all(&dir).expect("partition dir creates");
+    seed_minimax_partition_dir(&snapshot.join(tier).join(partition), present);
+}
+
+/// [`seed_minimax_partition`] at an explicit component directory: the CUDA `minimax_h3` dense row's
+/// upstream `transformer/` sits at the snapshot root rather than under a tier directory.
+#[cfg(test)]
+fn seed_minimax_partition_dir(dir: &std::path::Path, present: &[&str]) {
+    std::fs::create_dir_all(dir).expect("partition dir creates");
     std::fs::write(dir.join("config.json"), "{}").expect("config writes");
     std::fs::write(
         dir.join("diffusion_pytorch_model.safetensors.index.json"),
@@ -3848,10 +3854,35 @@ fn seed_minimax_shared_floor(data_dir: &std::path::Path) {
             std::fs::write(component.join(file), "{}").expect("component file writes");
         }
     }
-    // The dense bf16 encoder is the REGISTERED macOS row's whole declared file list (the compiled
-    // registry, not a config-dir fixture, owns minimax_h3's downloads).
-    let encoder = sceneworks_core::builtin_manifests::builtin_model_entry("minimax_h3")
-        .expect("minimax_h3 is registered")["downloads"]
+    // The dense bf16 encoder is the REGISTERED row this host serves (the compiled registry, not a
+    // config-dir fixture, owns minimax_h3's downloads): an explicit file list on macOS, the whole
+    // `text_encoder/` directory off macOS.
+    for file in registered_minimax_bf16_encoder()["files"]
+        .as_array()
+        .unwrap()
+    {
+        let file = file.as_str().unwrap();
+        let paths = match file.strip_suffix("/*") {
+            Some(dir) => [
+                "config.json",
+                "model.safetensors.index.json",
+                "model.safetensors",
+            ]
+            .map(|name| snapshot.join(dir).join(name))
+            .to_vec(),
+            None => vec![snapshot.join(file)],
+        };
+        for path in paths {
+            std::fs::create_dir_all(path.parent().unwrap()).expect("encoder dir creates");
+            std::fs::write(path, "{}").expect("encoder file writes");
+        }
+    }
+}
+
+/// `minimax_h3`'s registered dense bf16 text-encoder row as this host's catalog serves it.
+#[cfg(test)]
+fn registered_minimax_bf16_encoder() -> Value {
+    registered_entry_for_api_host("minimax_h3")["downloads"]
         .as_array()
         .unwrap()
         .iter()
@@ -3859,17 +3890,46 @@ fn seed_minimax_shared_floor(data_dir: &std::path::Path) {
             row["componentId"] == "text_encoder"
                 && row["variant"] == "bf16"
                 && row["repo"] == "MiniMaxAI/MiniMax-H3"
-                && row["platforms"]
-                    .as_array()
-                    .is_some_and(|platforms| platforms.contains(&json!("macos")))
         })
-        .expect("the registered macOS bf16 encoder row")
-        .clone();
-    for file in encoder["files"].as_array().unwrap() {
-        let path = snapshot.join(file.as_str().unwrap());
-        std::fs::create_dir_all(path.parent().unwrap()).expect("encoder dir creates");
-        std::fs::write(path, "{}").expect("encoder file writes");
-    }
+        .expect("the registered bf16 encoder row for this host")
+        .clone()
+}
+
+/// `model`'s REGISTERED `tier` primary as this host's catalog serves it (macOS: the rehost's
+/// `<tier>/<partition>/`; the CUDA `minimax_h3` bf16 row: upstream `transformer/`).
+#[cfg(test)]
+fn registered_minimax_primary(model: &str, tier: &str) -> Value {
+    sceneworks_core::model_artifacts::artifact_selection::model_download_for_variant(
+        &registered_entry_for_api_host(model),
+        tier,
+    )
+    .unwrap_or_else(|| panic!("{model} registers a {tier} primary on this host"))
+}
+
+/// Seed `model`'s registered `tier` primary partition into this module's fixture snapshot of the
+/// repository that row names, and return the seeded component directory.
+#[cfg(test)]
+fn seed_registered_minimax_primary(
+    data_dir: &std::path::Path,
+    model: &str,
+    tier: &str,
+) -> std::path::PathBuf {
+    let row = registered_minimax_primary(model, tier);
+    let snapshot = match row["repo"].as_str() {
+        Some("SceneWorks/minimax-h3-mlx") => {
+            "models--SceneWorks--minimax-h3-mlx/snapshots/f22bc294"
+        }
+        Some("MiniMaxAI/MiniMax-H3") => "models--MiniMaxAI--MiniMax-H3/snapshots/939557dc",
+        other => panic!("{model} {tier}: unexpected primary repository {other:?}"),
+    };
+    let dir = data_dir.join("cache/huggingface/hub").join(snapshot).join(
+        row["files"][0]
+            .as_str()
+            .and_then(|file| file.strip_suffix("/*"))
+            .expect("primary is one component directory"),
+    );
+    seed_minimax_partition_dir(&dir, &MINIMAX_SHARDS);
+    dir
 }
 
 /// Seed the PACKED per-tier text encoder (sc-19120) into the rehost snapshot. Tier-scoped, so a q4
@@ -4146,6 +4206,11 @@ async fn minimax_h3_missing_bf16_encoder_is_repairable_beside_complete_q4() {
             seed_minimax_partition(&snapshot, tier, partition, &MINIMAX_SHARDS);
         }
     }
+    // Each card's bf16 primary as this host registers it (off macOS `minimax_h3`'s is upstream
+    // `transformer/`, not the rehost partition above).
+    for id in ["minimax_h3", "minimax_h3_ref"] {
+        seed_registered_minimax_primary(&data_dir, id, "bf16");
+    }
     seed_minimax_shared_floor(&data_dir);
     seed_minimax_packed_text_encoder(&data_dir, "q4");
     let encoder = data_dir.join(
@@ -4179,10 +4244,24 @@ async fn minimax_h3_missing_bf16_encoder_is_repairable_beside_complete_q4() {
                 if repaired { "complete" } else { "incomplete" }
             );
             if !repaired {
-                for path in [
-                    "text_encoder/config.json",
-                    "text_encoder/model.safetensors.index.json",
-                ] {
+                // The registered encoder row names its documents (macOS) or its directory (CUDA).
+                let encoder = registered_minimax_bf16_encoder();
+                let required = encoder["files"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|path| {
+                        path.ends_with("/*")
+                            || [
+                                "text_encoder/config.json",
+                                "text_encoder/model.safetensors.index.json",
+                            ]
+                            .contains(path)
+                    })
+                    .collect::<Vec<_>>();
+                assert!(!required.is_empty(), "{encoder}");
+                for path in required {
                     let missing = json!(format!("MiniMaxAI/MiniMax-H3/{path}"));
                     assert!(tier("bf16")["missingRequiredFiles"]
                         .as_array()
@@ -4204,36 +4283,26 @@ async fn minimax_h3_missing_bf16_encoder_is_repairable_beside_complete_q4() {
             )
             .await;
             assert_eq!(status, StatusCode::CREATED, "{primary}");
-            assert_eq!(primary["payload"]["files"], json!(["bf16/transformer/*"]));
+            let registered_primary = registered_minimax_primary("minimax_h3", "bf16");
+            assert_eq!(primary["payload"]["repo"], registered_primary["repo"]);
+            assert_eq!(primary["payload"]["files"], registered_primary["files"]);
             let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
             let downloads = jobs.as_array().unwrap();
-            // Plus the registered row's soft Veda predictor co-requisite (see the tier test above).
-            assert_eq!(
-                downloads.len(),
-                8,
-                "primary, sibling, encoder, four shared components, and the Veda predictor"
-            );
+            // The primary plus every co-requisite this host's registered row declares for bf16:
+            // the encoder, the four shared components, the soft Veda predictor (see the tier test
+            // above) and, where that host's row co-requires it, the sibling partition.
+            let co_requisites =
+                sceneworks_core::model_artifacts::artifact_selection::model_co_requisite_downloads_for_variant(
+                    &registered_entry_for_api_host("minimax_h3"),
+                    Some("bf16"),
+                );
+            assert_eq!(downloads.len(), 1 + co_requisites.len(), "{downloads:#?}");
             assert!(downloads.iter().any(|job| job["payload"]["files"]
                 .to_string()
                 .contains("veda_8nfe_600step_preview")));
             // The bf16 encoder row is the REGISTERED row's (the compiled registry, not the
             // config-dir fixture, owns minimax_h3's downloads).
-            let registered_te =
-                sceneworks_core::builtin_manifests::builtin_model_entry("minimax_h3")
-                    .expect("minimax_h3 is registered")["downloads"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|row| {
-                        row["componentId"] == "text_encoder"
-                            && row["variant"] == "bf16"
-                            && row["repo"] == "MiniMaxAI/MiniMax-H3"
-                            && row["platforms"]
-                                .as_array()
-                                .is_some_and(|platforms| platforms.contains(&json!("macos")))
-                    })
-                    .expect("the registered macOS bf16 encoder row")
-                    .clone();
+            let registered_te = registered_minimax_bf16_encoder();
             assert!(
                 downloads
                     .iter()
@@ -4347,10 +4416,10 @@ async fn deleting_one_minimax_h3_entry_keeps_the_sibling_entrys_partitions() {
     let data_dir = temp_dir.path().join("data");
     let snapshot = data_dir
         .join("cache/huggingface/hub/models--SceneWorks--minimax-h3-mlx/snapshots/f22bc294");
-    // Both entries installed: `minimax_h3` at q4 + bf16, `minimax_h3_ref` at q4.
-    for tier in ["q4", "bf16"] {
-        seed_minimax_partition(&snapshot, tier, "transformer", &MINIMAX_SHARDS);
-    }
+    // Both entries installed: `minimax_h3` at q4 + bf16 (each at the primary this host registers),
+    // `minimax_h3_ref` at q4.
+    let deleted_partitions =
+        ["q4", "bf16"].map(|tier| seed_registered_minimax_primary(&data_dir, "minimax_h3", tier));
     seed_minimax_partition(&snapshot, "q4", "transformer_ref", &MINIMAX_SHARDS);
     seed_minimax_shared_floor(&data_dir);
     seed_minimax_packed_text_encoder(&data_dir, "q4");
@@ -4370,11 +4439,8 @@ async fn deleting_one_minimax_h3_entry_keeps_the_sibling_entrys_partitions() {
     assert_eq!(deleted["removedManifestEntry"], false);
 
     // The deleted entry's partitions are gone from EVERY tier…
-    for tier in ["q4", "bf16"] {
-        assert!(
-            !snapshot.join(tier).join("transformer").exists(),
-            "{tier}/transformer removed"
-        );
+    for partition in &deleted_partitions {
+        assert!(!partition.exists(), "{} removed", partition.display());
     }
     // …the sibling's partition survives, file for file…
     let sibling = snapshot.join("q4/transformer_ref");

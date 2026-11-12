@@ -597,6 +597,71 @@ async fn whole_model_delete_on_a_shared_repo_keeps_the_sibling_entrys_partitions
     assert!(repo.is_dir(), "shared repo cache survives a scoped delete");
 }
 
+/// A model whose host rows put primaries in TWO repositories reclaims every tier on a whole-model
+/// delete: the CUDA `minimax_h3` serves q4/q8 from the rehost and its dense bf16 tier as upstream
+/// `transformer/`. The upstream repository's shared component floor (co-requisites of both cards)
+/// and the sibling's own partition survive. Driven by the REGISTERED rows as a Linux host's catalog
+/// serves them, so a macOS run covers the off-macOS layout.
+#[tokio::test]
+async fn whole_model_delete_reclaims_a_primary_outside_the_default_repository() {
+    let _env = isolate_hf_cache();
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = tmp.path();
+    let _cache_root = fixture_cache_root(data_dir);
+    let linux_row = |id: &str| {
+        let mut entry = Value::Object(
+            sceneworks_core::builtin_manifests::builtin_model_entry(id)
+                .unwrap()
+                .clone(),
+        );
+        sceneworks_core::model_artifacts::artifact_selection::retain_downloads_for_os(
+            &mut entry, "linux",
+        );
+        entry
+    };
+    let base = linux_row("minimax_h3");
+    let catalog = vec![base.clone(), linux_row("minimax_h3_ref")];
+    let rehost =
+        fixture_repo_cache_path(data_dir, "SceneWorks/minimax-h3-mlx").join("snapshots/rev");
+    let upstream = fixture_repo_cache_path(data_dir, "MiniMaxAI/MiniMax-H3").join("snapshots/rev");
+    let seeded = [
+        rehost.join("q4/transformer/config.json"),
+        rehost.join("q4/transformer_ref/config.json"),
+        upstream.join("transformer/config.json"),
+        upstream.join("vae/config.json"),
+        upstream.join("text_encoder/config.json"),
+        upstream.join("tokenizer/tokenizer.json"),
+    ];
+    for path in &seeded {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"x").unwrap();
+    }
+    let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+    remove_whole_model_artifacts(
+        &catalog,
+        "minimax_h3",
+        &base,
+        data_dir,
+        &allowed_roots,
+        true,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        !rehost.join("q4/transformer").exists(),
+        "rehost q4 tier reclaimed"
+    );
+    assert!(
+        !upstream.join("transformer").exists(),
+        "upstream bf16 tier reclaimed"
+    );
+    for kept in &seeded[3..] {
+        assert!(kept.is_file(), "shared floor kept: {}", kept.display());
+    }
+    assert!(seeded[1].is_file(), "sibling partition kept");
+}
+
 /// sc-25682 (E4): the generation and depth TASK installs share `speridlabs/iris-3b`; deleting
 /// either entry removes only its own files and keeps the other task's, driven by the SHIPPED
 /// catalog entries.

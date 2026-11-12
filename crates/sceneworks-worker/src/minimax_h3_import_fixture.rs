@@ -579,8 +579,42 @@ pub fn stage_component_snapshots(data_dir: &Path) {
     // an import's architecture-config row (`import_config_download`) names `transformer/config.json`
     // in the shared snapshot; on macOS it names the rehost's `bf16/transformer/config.json` above.
     write_companion(&scratch_base.join("transformer"));
+    // Where this host's REGISTERED `fl2va_audio_vae_config` row fetches the whole `FL2VA/audio_vae/`
+    // directory (off macOS), an API-computed import closure declares it and the shared completeness
+    // predicate requires its weights beside the three constructor documents. A native lane drives
+    // this fixture's own document-only closure ([`component_downloads`]) through a real loader, and
+    // there an undeclared file beside the documents is an uncommitted acquisition, so it stays out.
+    if cfg!(not(native_lane)) && registered_fl2va_row_is_a_directory() {
+        write_safetensors(
+            &scratch_base.join("FL2VA/audio_vae/model.safetensors"),
+            &[("weight", "F16")],
+            0x2d,
+        );
+    }
     copy_missing(&scratch_base, &base);
     copy_missing(&scratch_tiers, &tiers);
+}
+
+/// Whether the registered `minimax_h3` FL2VA audio-VAE row, as this host's catalog serves it, names
+/// its whole directory rather than the three constructor documents.
+fn registered_fl2va_row_is_a_directory() -> bool {
+    let mut base = Value::Object(
+        sceneworks_core::builtin_manifests::builtin_model_entry("minimax_h3")
+            .expect("minimax_h3 is a registered builtin")
+            .clone(),
+    );
+    sceneworks_core::model_artifacts::artifact_selection::retain_downloads_for_os(
+        &mut base,
+        std::env::consts::OS,
+    );
+    base["downloads"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|row| row["componentId"] == "fl2va_audio_vae_config")
+        .flat_map(|row| row["files"].as_array().into_iter().flatten())
+        .filter_map(Value::as_str)
+        .any(|file| file.ends_with("/*"))
 }
 
 pub fn component_downloads(tier: &str, partition: &str) -> Vec<Value> {

@@ -314,6 +314,26 @@ fn register_authority_import_worker(state: &crate::AppState) {
     );
 }
 
+/// Whether `(repository, revision, selectors)` is exactly one of the REGISTERED realvisxl rows (any
+/// tier, any platform), as a route member asks the pinned publisher for it.
+fn registered_realvisxl_selection(repository: &str, revision: &str, selectors: &[String]) -> bool {
+    sceneworks_core::builtin_manifests::builtin_model_entry("realvisxl")
+        .expect("realvisxl is registered")["downloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| {
+            row["repo"] == repository
+                && row["revision"] == revision
+                && row["files"].as_array().is_some_and(|files| {
+                    files
+                        .iter()
+                        .map(Value::as_str)
+                        .eq(selectors.iter().map(|s| Some(s.as_str())))
+                })
+        })
+}
+
 fn register_authority_import_worker_from(state: &crate::AppState, source: &std::path::Path) {
     let bytes = std::fs::read(source).unwrap();
     let files = vec![PortableArtifactFile {
@@ -359,15 +379,18 @@ fn register_authority_import_worker_from(state: &crate::AppState, source: &std::
                 && selectors == [tile.files[0].to_owned()]
             {
                 vec![tile_file.clone()]
-            } else if repository == "SceneWorks/realvisxl-mlx"
-                && revision == "e40202d63baef826c7df95a639a811698c1178d2"
-                && selectors == ["q4/*".to_owned()]
-            {
-                vec![PortableArtifactFile {
-                    relative_path: "q4/model_index.json".into(),
-                    size_bytes: 1,
-                    sha256: format!("sha256:{}", sceneworks_core::hashing::sha256_bytes(b"x")),
-                }]
+            } else if registered_realvisxl_selection(repository, revision, selectors) {
+                // realvisxl is REGISTERED: every route's members are its compiled rows (the
+                // MLX tier directory everywhere, plus the CUDA tokenizer and VAE co-requisites
+                // a Candle route binds), so the publisher answers each of them.
+                selectors
+                    .iter()
+                    .map(|selector| PortableArtifactFile {
+                        relative_path: selector.replace('*', "model_index.json").into(),
+                        size_bytes: 1,
+                        sha256: format!("sha256:{}", sceneworks_core::hashing::sha256_bytes(b"x")),
+                    })
+                    .collect()
             } else {
                 Vec::new()
             }

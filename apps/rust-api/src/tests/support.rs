@@ -181,6 +181,27 @@ pub(crate) fn readiness_worker(
     }
 }
 
+/// The OS the production catalog, download and import paths filter a registered row's
+/// per-platform downloads by. Those paths read `std::env::consts::OS`, not the pinned
+/// [`Settings::host_os`] below, so a test that asserts a registered row's platform-dependent
+/// layout reads it through [`registered_entry_for_api_host`] rather than naming a platform.
+pub(crate) const API_HOST_OS: &str = std::env::consts::OS;
+
+/// A REGISTERED builtin row exactly as this host's catalog serves it: the compiled registry
+/// projection with its downloads retained for [`API_HOST_OS`].
+pub(crate) fn registered_entry_for_api_host(model_id: &str) -> Value {
+    let mut entry = Value::Object(
+        sceneworks_core::builtin_manifests::builtin_model_entry(model_id)
+            .unwrap_or_else(|| panic!("{model_id} is a registered builtin"))
+            .clone(),
+    );
+    sceneworks_core::model_artifacts::artifact_selection::retain_downloads_for_os(
+        &mut entry,
+        API_HOST_OS,
+    );
+    entry
+}
+
 pub(crate) fn test_settings(temp_dir: &tempfile::TempDir) -> Settings {
     Settings {
         app_version: "test".to_owned(),
