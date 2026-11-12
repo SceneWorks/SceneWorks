@@ -26560,6 +26560,283 @@
         }
       }
     },
+    // ── MiniMax-H3-Image (SW-7100, feature SW-F363) ─────────────────────────────────────────────
+    //
+    // `MiniMaxAI/MiniMax-H3-Image` @ 492fd8c4: the MiniMax-H3 transformer without its audio stream,
+    // distilled to a FIXED six-step sampler (one output head per step, `pdd_config.json`), over one
+    // packed `[text | image]` sequence decoded by its own 2-D ViT VAE. Engine id `minimax_h3_image`
+    // on both lanes (inference SW-7090 MLX, SW-7091 Candle; tiers SW-7093). Text-to-image only in
+    // this entry; reference editing (SW-7092), LoRAs (SW-7101) and the prompt expander (SW-7102)
+    // extend it later.
+    //
+    // ITS OWN FAMILY TOKEN, `minimax-h3-image`. The DiT shares H3's layer names, but its checkpoint
+    // is not an H3 video checkpoint (no audio stream, six per-step `pdd` heads, a 2-D VAE): H3's
+    // fine-tune import, checkpoint inspector and LoRA family must never classify it as `minimax-h3`.
+    //
+    // THE TEXT ENCODER IS H3's OWN DOWNLOAD. The repository's `text_encoder/` is byte-identical to
+    // MiniMax-H3's (and to Qwen/Qwen3-VL-32B-Instruct, 66,726,510,529 B both sides), and the engine
+    // reads it as the staged `text_encoder` component, never from this snapshot. The four
+    // `text_encoder` rows below are therefore H3's rows VERBATIM — same repos, same revisions, same
+    // files (the macOS bf16 shard-13 omission included), same platforms — so a cache that already
+    // holds MiniMax-H3's tier fetches no text-encoder byte, and
+    // `test_minimax_h3_image_text_encoder_rows_are_minimax_h3s` keeps the two row sets equal. This
+    // repository's own `text_encoder/` and its native `transformer/` / `vae/` copies are never
+    // fetched.
+    //
+    // TIERS. bf16 is upstream's `transformer_diffusers/` + `pdd_fused_heads.safetensors`. q8/q4 are
+    // the SW-7093 packs (`SceneWorks/minimax-h3-image-mlx/{q8,q4}/`), NOT YET PUBLISHED: they carry
+    // the null-SHA placeholder and `pendingArtifact` together (the sc-24112 pairing), so neither is
+    // offered for install and bf16 — the only installable tier — is the default. Their sizes are
+    // DERIVED, not measured: the bf16 DiT bytes scaled by MiniMax-H3's own published q8/q4 to bf16
+    // transformer ratio (the same packing policy, `gen_core_h3::h3_image_tier`), plus the dense
+    // 12,388,808 B heads file. The terminal item publishes them, pins the revision, drops the flag
+    // and replaces the derived sizes with the hosted byte totals.
+    //
+    // The DiT tier is staged as the `transformer_diffusers` component and the snapshot root (VAE,
+    // tokenizer) comes from the tier-agnostic rows; the worker builds that LoadSpec
+    // (`image_jobs::minimax_h3_image`).
+    {
+      "id": "minimax_h3_image",
+      "name": "MiniMax-H3-Image",
+      "family": "minimax-h3-image",
+      "type": "image",
+      "adapter": "minimax_h3_image",
+      "capabilities": ["text_to_image"],
+      // No classifier-free guidance and no negative prompt (`gen_core::h3_image` refuses both), so
+      // Image Studio hides those controls rather than offering knobs the engine refuses. The six
+      // sigmas are fixed (`pdd_config.json`, never shifted), so there is no scheduler shift either.
+      // `supportsH3ImageSampler` (SW-7106): Image Studio offers ComfyUI's LCM re-noise step (default, 1.1 / 0.9 / 0)
+      // or the released Euler step through `advanced.h3ImageSampler`.
+      "image": { "supportsGuidance": false, "supportsNegativePrompt": false, "supportsSchedulerShift": false, "supportsH3ImageSampler": true, "maxPromptTokens": 4096 },
+      // E23 — the licence gate. MiniMax-H3-Image ships under its OWN agreement (the MiniMax-H3-Image
+      // Community License Agreement, dated November 10, 2026), which is MiniMax-H3's text with the
+      // model renamed and the date moved EXCEPT §IV.1 (a 1 million USD annualized-revenue threshold,
+      // or any Hosted Service to third parties, instead of H3's 20 million). It is a PUBLIC repo, so
+      // there is no credential: `requiresLicenseAcknowledgment` raises the in-app acknowledgment
+      // (safeguard S1) and `licenseNotice` is the §V.2 notification (S2). The entry also names
+      // `MiniMaxAI/MiniMax-H3` and `SceneWorks/minimax-h3-mlx` (its text encoder), and every entry
+      // naming a gated repo must carry the flag.
+      "requiresLicenseAcknowledgment": true,
+      "licenseUrl": "https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/492fd8c4eca666f1085f57e30738c1e0d86b3439/LICENSE",
+      "licenseNotice": "MiniMax-H3-Image's weights, and the images they produce, are governed by the MiniMax-H3-Image Community License Agreement (dated November 10, 2026) — not by SceneWorks' own AGPL-3.0 licence, and not by the separate MiniMax H3 Community License that covers the MiniMax-H3 video model. The agreement grants a NON-TRANSFERABLE licence (§II) and defines a \"Licensee\" as whoever uses the model (§I.9), so it binds you directly; SceneWorks' own acceptance does not stand in for yours. Five of its terms decide whether and how you may use this model. (1) APPLICABLE TERRITORY (§I.3, §I.5, §V.4): use of the model, its derivatives and their Outputs is authorized only within the Applicable Territory, which is worldwide excluding the European Union, the United Kingdom, the Republic of Korea, and the United States of America. No written authorization from MiniMax for this model is recorded in SceneWorks; questions about your own use go to MiniMax. (2) ACCEPTABLE USE POLICY (§V.1 and Exhibit A): twenty prohibited uses, of which item 12 requires you to clearly and prominently disclose that content is machine-generated whenever you publish it to a public environment — SceneWorks does not write that disclosure into your files, so making it is yours to do. (3) ADDITIONAL COMMERCIAL TERMS (§IV.1): you must obtain separate prior written authorization from MiniMax, requested through https://platform.minimax.io/license, if the annualized revenue of you and your affiliates exceeds 1 million US dollars, or if you provide a Hosted Service to any third party — a much lower threshold than MiniMax-H3's. (4) ATTRIBUTION (§IV.2): a commercial product or service that uses the model must prominently display \"MiniMax-H3-Image\" on its user interface. (5) NO IMPROVING OTHER AI MODELS (§V.3): you may not use the Works or any of their Outputs or results to improve any other artificial intelligence model, other than MiniMax-H3-Image or its Model Derivatives. SceneWorks ships a LoRA trainer, dataset captioning and a training studio, so this is the restriction the product's own features are most likely to reach. The text encoder this model reads is the same Qwen3-VL-32B download MiniMax-H3 uses, under the Apache License 2.0. Read the full text under About → Licenses before downloading.",
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3-Image",
+          "revision": "492fd8c4eca666f1085f57e30738c1e0d86b3439",
+          "variant": "bf16",
+          "default": true,
+          "files": ["transformer_diffusers/*", "pdd_fused_heads.safetensors"],
+          // Hub tree at the pinned revision: transformer_diffusers/ 66,289,496,116 B (14 files)
+          // + pdd_fused_heads.safetensors 12,388,808 B.
+          "estimatedSizeBytes": 66301884924,
+          "footprint": { "diskSizeBytes": 66301884924, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-image-mlx",
+          "revision": "0000000000000000000000000000000000000000",
+          "pendingArtifact": true,
+          "variant": "q8",
+          "files": ["q8/transformer_diffusers/*", "q8/pdd_fused_heads.safetensors"],
+          // DERIVED (unpublished): 66,289,496,116 x 35,302,064,357 / 66,280,569,250 + 12,388,808.
+          "estimatedSizeBytes": 35319207753,
+          "footprint": { "diskSizeBytes": 35319207753, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-image-mlx",
+          "revision": "0000000000000000000000000000000000000000",
+          "pendingArtifact": true,
+          "variant": "q4",
+          "files": ["q4/transformer_diffusers/*", "q4/pdd_fused_heads.safetensors"],
+          // DERIVED (unpublished): 66,289,496,116 x 18,780,109,783 / 66,280,569,250 + 12,388,808.
+          "estimatedSizeBytes": 18795027953,
+          "footprint": { "diskSizeBytes": 18795027953, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // --- the tier-agnostic snapshot root: the 2-D VAE, the tokenizer the t2i prompt is encoded
+        // with, and the processor the edit route reads (SW-7092). Same pinned revision as the bf16
+        // DiT, so on a bf16 install the three land in the same snapshot directory as the DiT.
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3-Image",
+          "revision": "492fd8c4eca666f1085f57e30738c1e0d86b3439",
+          "coRequisite": true,
+          "componentId": "image_vae",
+          "subdir": "vae_diffusers",
+          "files": ["vae_diffusers/*"],
+          // Diffusers-converted VAE, all F32: config.json 1,975 B + weights 2,336,973,400 B.
+          "estimatedSizeBytes": 2336975375
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3-Image",
+          "revision": "492fd8c4eca666f1085f57e30738c1e0d86b3439",
+          "coRequisite": true,
+          "componentId": "tokenizer",
+          "subdir": "tokenizer",
+          "files": ["tokenizer/*"],
+          "estimatedSizeBytes": 11492078
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3-Image",
+          "revision": "492fd8c4eca666f1085f57e30738c1e0d86b3439",
+          "coRequisite": true,
+          "componentId": "processor",
+          "subdir": "processor",
+          "files": ["processor/*"],
+          "estimatedSizeBytes": 11498352
+        },
+        // --- MiniMax-H3's text encoder, row for row (see the header).
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q4",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "subdir": "q4/text_encoder",
+          "files": ["q4/text_encoder/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 18722713964
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q8",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "subdir": "q8/text_encoder",
+          "files": ["q8/text_encoder/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 33723765614
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "variant": "bf16",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "subdir": "text_encoder",
+          "files": [
+            "text_encoder/config.json",
+            "text_encoder/model.safetensors.index.json",
+            "text_encoder/tokenizer.json",
+            "text_encoder/tokenizer_config.json",
+            "text_encoder/vocab.json",
+            "text_encoder/merges.txt",
+            "text_encoder/chat_template.json",
+            "text_encoder/preprocessor_config.json",
+            "text_encoder/video_preprocessor_config.json",
+            "text_encoder/model-00001-of-00014.safetensors",
+            "text_encoder/model-00002-of-00014.safetensors",
+            "text_encoder/model-00003-of-00014.safetensors",
+            "text_encoder/model-00004-of-00014.safetensors",
+            "text_encoder/model-00005-of-00014.safetensors",
+            "text_encoder/model-00006-of-00014.safetensors",
+            "text_encoder/model-00007-of-00014.safetensors",
+            "text_encoder/model-00008-of-00014.safetensors",
+            "text_encoder/model-00009-of-00014.safetensors",
+            "text_encoder/model-00010-of-00014.safetensors",
+            "text_encoder/model-00011-of-00014.safetensors",
+            "text_encoder/model-00012-of-00014.safetensors",
+            "text_encoder/model-00014-of-00014.safetensors"
+          ],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 61850519945
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "variant": "bf16",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "subdir": "text_encoder",
+          "files": ["text_encoder/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 66726510529
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/MiniMaxAI/MiniMax-H3-Image"
+      },
+      "gated": false,
+      // E24 — prompt, size and seed. Steps are FIXED at six (`StepSupport::Exact([6])`) and guidance
+      // at the no-op 1.0, so both are declared rather than offered.
+      "defaults": {
+        "resolution": "2048x2048",
+        "steps": 6,
+        "guidanceScale": 1.0,
+        "count": 1,
+        "sampler": "default",
+        "scheduler": "default"
+      },
+      // E25 — this model's own size envelope. The engine accepts ANY positive size (it generates on
+      // a 32 px canvas of at least 4 MP and resizes back), so there is no stride; the presets are the
+      // upstream default (2048x2048) and the model card's published 16 MP aspect table, up to a
+      // 6272 px edge. The 4096 px blanket edge stays in force for every model that declares no
+      // `maxDimension`.
+      "limits": {
+        "resolutions": [
+          "2048x2048",
+          "4096x4096",
+          "4736x3552",
+          "3552x4736",
+          "5024x3360",
+          "3360x5024",
+          "5472x3072",
+          "3072x5472",
+          "6272x2688"
+        ],
+        "count": [1],
+        "minDimension": 16,
+        "maxDimension": 6272,
+        "maxReferenceAssets": 0,
+        "hardMinSteps": 6,
+        "hardMaxSteps": 6,
+        // One fixed six-sigma schedule; no generic sampler or scheduler menu. The sampler (Euler or
+        // LCM) is chosen through `image.supportsH3ImageSampler` / `advanced.h3ImageSampler` (SW-7106).
+        "samplers": ["default"],
+        "schedulers": ["default"]
+      },
+      // LoRAs are SW-7101; nothing is advertised until then.
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      // DERIVED floors, NOT measured (the terminal item measures them). Every phase is staged — the
+      // text encoder, the DiT and the VAE are each mapped, used and released in turn
+      // (`unconditionally_engages_staged_residency`) — so the floor is the largest single component
+      // plus 16 MP activations, not a sum: bf16 DiT 66.3 GB, q8 ~35.3 GB, q4 ~18.8 GB (each above its
+      // tier's text encoder: bf16 58.6 GB read, q8 33.7 GB, q4 18.7 GB), plus ~6 GB.
+      "mlx": {
+        "minMemoryGb": 73,
+        "minMemoryGbByTier": { "bf16": 73, "q8": 42, "q4": 25 }
+      },
+      "candle": {
+        "minMemoryGb": 73,
+        "minMemoryGbByTier": { "bf16": 73, "q8": 42, "q4": 25 },
+        "measured": false
+      },
+      "ui": {
+        "label": "MiniMax-H3-Image",
+        // §IV.2: "MiniMax-H3-Image", exactly — the H3 video entries' "MiniMax H3" does not satisfy it.
+        "attribution": "Powered by MiniMax-H3-Image",
+        "description": "MiniMax-H3-Image is MiniMax's open-weights text-to-image model: the MiniMax-H3 transformer without its audio stream, distilled to a fixed six-step sampler and decoded by its own image VAE. It renders large images natively — the published presets are about 16 megapixels each, up to 6272 px on the long edge (21:9) — and smaller sizes are generated at about 4 megapixels and resized back. Steps are fixed at six and there is no guidance scale and no negative prompt, so those controls are hidden. It reads the same Qwen3-VL-32B text encoder as MiniMax-H3: with MiniMax-H3 already installed, the text encoder is not downloaded again. It renders through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux. The bf16 tier is MiniMax's own upstream checkpoint; the Q8 and Q4 tiers are not published yet. Governed by the MiniMax-H3-Image Community License Agreement, which you must accept before downloading.",
+        "recommendedFor": ["text_to_image"],
+        "promptGuide": {
+          "title": "MiniMax-H3-Image Prompt Guide",
+          "path": "/prompt-guides/minimax-h3-image.md",
+          "sources": [
+            { "label": "MiniMax-H3-Image model card", "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3-Image" }
+          ]
+        }
+      }
+    },
     {
       "id": "instantid_face_stack",
       "name": "InstantID Face Analysis Stack",
@@ -27475,6 +27752,159 @@
           "sources": [
             { "label": "Qwen-Image-2.1-PE-I2I model card", "url": "https://huggingface.co/Qwen/Qwen-Image-2.1-PE-I2I" },
             { "label": "Qwen-Image-2.1 prompt rewriting (GitHub)", "url": "https://github.com/QwenLM/Qwen-Image-2.1#prompt-rewriting" }
+          ]
+        }
+      }
+    },
+    {
+      // MiniMax-H3-Image PROMPT EXPANDER (SW-7102, feature SW-F363).
+      //
+      // `MiniMaxAI/MiniMax-H3-Image-PE` @ 35603d4b is a fine-tune of Qwen3.8-27B (`qwen3_5`, 64
+      // layers, Qwen3-VL vision tower; 27,356,728,560 parameters read from the snapshot's tensor
+      // headers). It runs on the existing native TextLlm lane as the `prompt_refine` task
+      // `minimax_h3_image_expand`; the engine adapter is `core_llm::minimax_h3_image_pe`. It turns a
+      // short prompt (or an edit instruction plus its ordered `<Picture N>` references) into
+      // MiniMax-H3-Image's long caption and proposes an aspect ratio. The user reviews and accepts
+      // the expansion before it replaces the prompt, and accepts the size separately.
+      //
+      // THE PROMPTS ARE NEVER COPIED. The system and task prompts are MiniMax Materials. The worker
+      // reads them at run time from the UPSTREAM snapshot's `prompt/` directory and checks each file
+      // against `prompt/manifest.json` (itself pinned by SHA-256 in the engine). The `prompt` co-
+      // requisite below fetches exactly those five files, so every tier — including a converted one,
+      // which never carries `prompt/` — has them.
+      //
+      // TIERS. nvfp4 is MiniMax's published ModelOpt NVFP4 checkpoint (17,916,124,008 B of weights),
+      // which loads only on Blackwell CUDA (sm_120+), hence Windows/Linux only. bf16/q8/q4 are the
+      // SW-7099 conversions (`SceneWorks/minimax-h3-image-pe/{bf16,q8,q4}/`), NOT YET PUBLISHED: null
+      // SHA + `pendingArtifact`, so none is offered for install yet. Their sizes are DERIVED, not
+      // measured: 25,598,361,600 quantized decoder-projection parameters (the NVFP4 packed set) at 16 /
+      // 8.5 / 4.5 bits each, plus 1,758,366,960 dense parameters (embeddings, head, vision tower) at
+      // bf16, plus the 20,284,856 B of tokenizer and config sidecars. The terminal item publishes them,
+      // pins the revision, drops the flag and replaces the derived sizes with the hosted totals.
+      "id": "minimax_h3_image_pe",
+      "autoDownload": false,
+      "macOnly": false,
+      "minMemoryGb": 24,
+      "name": "MiniMax-H3-Image Prompt Expander",
+      "family": "minimax-h3-image-pe",
+      "type": "utility",
+      "adapter": "prompt-refine",
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3-Image-PE",
+          "revision": "35603d4b63949afa12cb098227fffefedf081afa",
+          "variant": "nvfp4",
+          "default": true,
+          "files": [
+            "config.json",
+            "generation_config.json",
+            "hf_quant_config.json",
+            "chat_template.jinja",
+            "processor_config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "model.safetensors.index.json",
+            "model-*.safetensors"
+          ],
+          "platforms": ["windows", "linux"],
+          // Hub tree at the pinned revision: these twelve files.
+          "estimatedSizeBytes": 17936408864,
+          "footprint": { "diskSizeBytes": 17936408864, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-image-pe",
+          "revision": "0000000000000000000000000000000000000000",
+          "pendingArtifact": true,
+          "variant": "bf16",
+          "files": ["bf16/*"],
+          // DERIVED (unpublished): 27,356,728,560 x 2 + 20,284,856.
+          "estimatedSizeBytes": 54733741976,
+          "footprint": { "diskSizeBytes": 54733741976, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-image-pe",
+          "revision": "0000000000000000000000000000000000000000",
+          "pendingArtifact": true,
+          "variant": "q8",
+          "files": ["q8/*"],
+          // DERIVED (unpublished): 25,598,361,600 x 8.5 / 8 + 1,758,366,960 x 2 + 20,284,856.
+          "estimatedSizeBytes": 30735277976,
+          "footprint": { "diskSizeBytes": 30735277976, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-image-pe",
+          "revision": "0000000000000000000000000000000000000000",
+          "pendingArtifact": true,
+          "variant": "q4",
+          "files": ["q4/*"],
+          // DERIVED (unpublished): 25,598,361,600 x 4.5 / 8 + 1,758,366,960 x 2 + 20,284,856.
+          "estimatedSizeBytes": 17936097176,
+          "footprint": { "diskSizeBytes": 17936097176, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // The prompt files, read at run time from the upstream snapshot for every tier.
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3-Image-PE",
+          "revision": "35603d4b63949afa12cb098227fffefedf081afa",
+          "coRequisite": true,
+          "componentId": "prompt",
+          "subdir": "prompt",
+          "files": [
+            "prompt/manifest.json",
+            "prompt/t2i/system_prompt.txt",
+            "prompt/t2i/task_prompt.txt",
+            "prompt/t2i/request_params.json",
+            "prompt/edit/task_prompt.txt"
+          ],
+          "estimatedSizeBytes": 56282
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/MiniMaxAI/MiniMax-H3-Image-PE"
+      },
+      // E23 — the licence gate. The expander is under the MiniMax-H3-Image Community License
+      // Agreement (its model card's `license_name`; the agreement's closing note names the
+      // prompt-enhancer model expressly). The repository ships no LICENSE file of its own, so the
+      // link is the agreement as published with MiniMax-H3-Image at its pinned revision.
+      "gated": false,
+      "requiresLicenseAcknowledgment": true,
+      "licenseUrl": "https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/492fd8c4eca666f1085f57e30738c1e0d86b3439/LICENSE",
+      "licenseNotice": "MiniMax-H3-Image-PE, MiniMax-H3-Image's prompt expander, is governed by the MiniMax-H3-Image Community License Agreement (dated November 10, 2026) — the same agreement as MiniMax-H3-Image, not SceneWorks' own AGPL-3.0 licence. Its weights and its prompt files are both MiniMax Materials; SceneWorks reads the prompts from MiniMax's own repository on your machine and never copies them. The agreement grants a NON-TRANSFERABLE licence (§II) and binds whoever uses the model (§I.9), so SceneWorks' own acceptance does not stand in for yours. (1) APPLICABLE TERRITORY (§I.3, §I.5, §V.4): use is authorized only within the Applicable Territory, which is worldwide excluding the European Union, the United Kingdom, the Republic of Korea, and the United States of America. No written authorization from MiniMax for this model is recorded in SceneWorks. (2) ACCEPTABLE USE POLICY (§V.1 and Exhibit A): twenty prohibited uses; item 12 requires you to clearly and prominently disclose that content is machine-generated whenever you publish it to a public environment. (3) ADDITIONAL COMMERCIAL TERMS (§IV.1): you must obtain separate prior written authorization from MiniMax, requested through https://platform.minimax.io/license, if the annualized revenue of you and your affiliates exceeds 1 million US dollars, or if you provide a Hosted Service to any third party. (4) ATTRIBUTION (§IV.2): a commercial product or service that uses the model must prominently display \"MiniMax-H3-Image\" on its user interface. (5) NO IMPROVING OTHER AI MODELS (§V.3): you may not use the Works or any of their Outputs or results — expanded prompts included — to improve any other artificial intelligence model, other than MiniMax-H3-Image or its Model Derivatives. The expander is an OPTIONAL download: MiniMax-H3-Image generates normally without it, and installing it only adds an Expand prompt action you choose to run. Read the full text under About → Licenses before downloading.",
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      // DERIVED floors, NOT measured: the tier's weights plus ~6 GB for the 4096-token decode, the
+      // prompt prefill and up to sixteen edit references through the vision tower — bf16 54.7 GB,
+      // q8 30.7 GB, q4 17.9 GB, nvfp4 17.9 GB (Candle only). The engine's own memory admission
+      // refuses a load that does not fit; the expander is staged out of memory before a
+      // MiniMax-H3-Image render loads.
+      "mlx": {
+        "minMemoryGb": 61,
+        "minMemoryGbByTier": { "bf16": 61, "q8": 37, "q4": 24 }
+      },
+      "candle": {
+        "minMemoryGb": 61,
+        "minMemoryGbByTier": { "bf16": 61, "q8": 37, "q4": 24, "nvfp4": 24 },
+        "measured": false
+      },
+      "ui": {
+        "label": "MiniMax-H3-Image Prompt Expander",
+        "attribution": "Powered by MiniMax-H3-Image",
+        "description": "Optional prompt expander for MiniMax-H3-Image. Turns a short prompt into the long caption the image model was trained on and proposes an aspect ratio; you review the expansion and accept it before it replaces your prompt, and the proposed size is only offered. MiniMax-H3-Image works fully without it. The published NVFP4 checkpoint needs a Blackwell NVIDIA GPU; the bf16, Q8 and Q4 tiers are not published yet. Governed by the MiniMax-H3-Image Community License Agreement, which you must accept before downloading.",
+        "recommendedFor": ["minimax_h3_image_prompt_expand"],
+        "promptGuide": {
+          "title": "MiniMax-H3-Image Prompt Guide",
+          "path": "/prompt-guides/minimax-h3-image.md",
+          "sources": [
+            { "label": "MiniMax-H3-Image-PE model card", "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3-Image-PE" }
           ]
         }
       }

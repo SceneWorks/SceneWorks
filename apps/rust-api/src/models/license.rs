@@ -208,6 +208,46 @@ pub(super) fn license_acknowledgment_index_for_selected(
     index
 }
 
+/// SW-7100 (E23): MiniMax-H3-Image is gated at RUN as well as at install. Its weights are fetched
+/// only through the acknowledgment gate, but a cache populated by another route (a shared HF cache,
+/// a copied data directory) would otherwise render with no acceptance on record, and the
+/// MiniMax-H3-Image agreement binds whoever uses the model (§I.9). Scoped to that family so no
+/// other model's existing run behaviour changes; the acceptance is the same terms-bound server
+/// record the download gate writes.
+pub(crate) async fn ensure_run_license_acknowledged(
+    state: &AppState,
+    entry: &JsonObject,
+) -> Result<(), ApiError> {
+    // SW-7102: the prompt expander is under the same agreement and is gated the same way.
+    if !matches!(
+        entry.get("family").and_then(Value::as_str),
+        Some(
+            sceneworks_core::model_family::MINIMAX_H3_IMAGE
+                | sceneworks_core::model_family::MINIMAX_H3_IMAGE_PE
+        )
+    ) {
+        return Ok(());
+    }
+    let entry = Value::Object(entry.clone());
+    if !model_requires_license_acknowledgment(&entry)
+        || crate::yue2_jobs::current_license_acknowledgment(state, &entry)
+            .await?
+            .is_some()
+    {
+        return Ok(());
+    }
+    let model_id = entry.get("id").and_then(Value::as_str).unwrap_or_default();
+    Err(ApiError {
+        status: StatusCode::FORBIDDEN,
+        detail: format!(
+            "'{model_id}' requires accepting its license before it can be used. Accept the license \
+             on the Models screen, then retry."
+        ),
+        code: Some(LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE),
+        context: None,
+    })
+}
+
 /// A conditional component a catalog entry declares as `blocked` (sc-22998).
 #[derive(Clone)]
 pub(crate) struct BlockedComponent {

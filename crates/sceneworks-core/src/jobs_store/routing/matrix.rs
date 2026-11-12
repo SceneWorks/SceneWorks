@@ -374,6 +374,8 @@ struct ManifestModel {
     #[serde(rename = "type", default)]
     model_type: String,
     #[serde(default)]
+    adapter: String,
+    #[serde(default)]
     capabilities: Vec<String>,
     #[serde(default)]
     downloads: Vec<ManifestDownload>,
@@ -2353,11 +2355,15 @@ fn precision_union(
     mlx: &RuntimeDescriptorFacts,
     candle: &RuntimeDescriptorFacts,
 ) -> Result<Vec<String>, String> {
+    // A text-LLM utility on the prompt-refine lane (SW-7102's MiniMax-H3-Image-PE) declares tier
+    // rows, but no generator descriptor carries them and no request names one: the worker loads the
+    // first installed tier the host can run. They are installs, not a routed precision axis.
+    let routed_variants = model.adapter != "prompt-refine";
     let mut tiers: BTreeSet<String> = model
         .downloads
         .iter()
         .map(|download| download.variant.as_str())
-        .filter(|variant| !variant.is_empty() && *variant != "training")
+        .filter(|variant| routed_variants && !variant.is_empty() && *variant != "training")
         .map(str::to_owned)
         .collect();
     for facts in [mlx, candle] {
@@ -2732,6 +2738,18 @@ fn utility_model_cells(
                 "model": "Qwen/Qwen-Image-2.1-PE-I2I",
                 "modelId": "qwen_image_2_1",
                 "imagePaths": ["probe"],
+            }),
+        )),
+        // MiniMax-H3-Image's prompt expander (SW-7102) on the same seam: `modelId` is the target
+        // image model, and the API forwards the expander's own catalog entry.
+        crate::contracts::MINIMAX_H3_IMAGE_PE_MODEL_ID => Some((
+            "prompt_refine:minimax_h3_image_expand",
+            JobType::PromptRefine,
+            json!({
+                "prompt": "probe",
+                "task": crate::contracts::MINIMAX_H3_IMAGE_EXPAND_TASK,
+                "workflow": "image",
+                "modelId": crate::contracts::MINIMAX_H3_IMAGE_MODEL_ID,
             }),
         )),
         "real_esrgan" => Some((

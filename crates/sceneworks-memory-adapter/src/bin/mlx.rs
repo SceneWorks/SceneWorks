@@ -143,6 +143,15 @@ mod mlx_supra2;
 /// this file; `mlx_supra2`'s tests bind it to the engine constant through `protocol`.
 const SUPRA2_PROVIDER: &str = "supra2_img";
 
+#[path = "mlx_minimax_h3_image.rs"]
+mod mlx_minimax_h3_image;
+
+/// MiniMax-H3-Image (SW-7100, feature SW-F363), served by `mlx_minimax_h3_image`: the
+/// `mlx-gen-minimax-h3::h3_image` registry id, which is also the catalog model id. Spelled here, as a
+/// const, because `scripts/stale-lane-report.mjs::adapterCapturableProviders` reads the dispatch arms
+/// off this file; `mlx_minimax_h3_image`'s tests bind it to the engine constant.
+const MINIMAX_H3_IMAGE_PROVIDER: &str = "minimax_h3_image";
+
 const EDGES: [u32; 7] = [768, 640, 512, 448, 384, 320, 256];
 const MAX_THRESHOLD: f64 = 3e-2;
 const MEAN_THRESHOLD: f64 = 3e-3;
@@ -3641,6 +3650,9 @@ fn run_with(
         // sc-24217: Supra2-IMG's total pipeline (text encoder + DiT + VAE, resident) at the
         // published request, over a bundle converted in a separate adapter process beforehand.
         SUPRA2_PROVIDER => mlx_supra2::run(request),
+        // SW-7100: MiniMax-H3-Image's staged text-to-image pipeline at the anchor still, loaded with
+        // the worker's staged components (the upstream root, the tier's DiT, H3's text encoder).
+        MINIMAX_H3_IMAGE_PROVIDER => mlx_minimax_h3_image::run(request),
         other => Err(format!(
             "MLX five-rung calibration does not implement provider {other:?}"
         )),

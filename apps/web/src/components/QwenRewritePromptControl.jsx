@@ -34,6 +34,32 @@ import { Icon } from "./Icons.jsx";
 
 // The worker fast-fails with "…snapshot is not cached…" when the checkpoint is absent. Prefer the
 // catalog install state when the entry is supplied; fall back to the message otherwise.
+//
+// SW-7102: MiniMax-H3-Image's prompt expander has the same three properties (an editable draft the
+// user accepts, a separate size offer, the workflow picked by the request), so it reuses this
+// control with its own `copy` and a `suggestedResolutionFor` that maps its proposed ratio onto the
+// image model's own size envelope.
+
+const QWEN_COPY = Object.freeze({
+  button: "Rewrite prompt",
+  editButton: "Rewrite edit instruction",
+  hint: "Qwen’s official rewriter turns a short brief into a long descriptive prompt and suggests an aspect ratio. You edit and accept the result — your prompt is not changed on its own.",
+  editHint: (count) =>
+    `Qwen’s official editing rewriter reads your ${count} reference${
+      count === 1 ? "" : "s"
+    } in order and rewrites the instruction. You edit and accept the result — your prompt is not changed on its own.`,
+  busy: "Rewriting…",
+  missing: (editing, modelName) =>
+    `The ${editing ? "editing" : "text-to-image"} rewriter isn’t installed. Qwen Image 2.1 generates normally without it — open the Models screen to download “${modelName}”.`,
+  failure: "Prompt rewriting failed.",
+  draftLabel: "Rewritten prompt — edit before applying",
+  suggestionLabel: "Suggested aspect ratio",
+  applyResolution: "Use this aspect ratio",
+  again: "Rewrite again",
+  defaultModelName: "Qwen Image 2.1 Prompt Rewriter",
+});
+
+const suggestedPreset = (suggestion) => suggestion?.resolution || "";
 
 export function QwenRewritePromptControl({
   prompt,
@@ -51,6 +77,10 @@ export function QwenRewritePromptControl({
   onApplyResolution,
   // The catalog entry for whichever rewriter this request will select.
   rewriteModel,
+  // The control's wording; Qwen's by default.
+  copy = QWEN_COPY,
+  // The size to offer for a reply's suggestion, as "WxH", or "" for none.
+  suggestedResolutionFor = suggestedPreset,
 }) {
   const [status, setStatus] = useState("idle"); // idle | loading | review | error
   // The suggestion, held as EDITABLE state. Seeded from the model's reply and then owned by the
@@ -98,7 +128,7 @@ export function QwenRewritePromptControl({
       if (err?.name === "AbortError") {
         return;
       }
-      setError(err?.message || "Prompt rewriting failed.");
+      setError(err?.message || copy.failure);
       setStatus("error");
     } finally {
       if (controllerRef.current === controller) {
@@ -107,11 +137,11 @@ export function QwenRewritePromptControl({
     }
   }
 
-  const modelName = rewriteModel?.name || "Qwen Image 2.1 Prompt Rewriter";
+  const modelName = rewriteModel?.name || copy.defaultModelName;
   // Offer the aspect change only when the reply actually named a preset. An edit rewrite that set
   // `ratioFollow` instead has no ratio to offer, and an unrecognised ratio was dropped worker-side
   // rather than guessed at — in both cases the prose is still worth having.
-  const suggestedResolution = suggestion?.resolution || "";
+  const suggestedResolution = suggestedResolutionFor(suggestion) || "";
   const ratioFollow = suggestion?.ratioFollow || "";
   const followsIndex = Number.isInteger(suggestion?.followsReferenceIndex)
     ? suggestion.followsReferenceIndex
@@ -126,29 +156,23 @@ export function QwenRewritePromptControl({
           onClick={handleRewrite}
           type="button"
         >
-          <Icon.Wand size={14} />{" "}
-          {editing ? "Rewrite edit instruction" : "Rewrite prompt"}
+          <Icon.Wand size={14} /> {editing ? copy.editButton : copy.button}
         </button>
       )}
       {status === "idle" ? (
         <p className="refine-hint">
-          {editing
-            ? `Qwen’s official editing rewriter reads your ${referenceAssetIds.length} reference${
-                referenceAssetIds.length === 1 ? "" : "s"
-              } in order and rewrites the instruction. You edit and accept the result — your prompt is not changed on its own.`
-            : "Qwen’s official rewriter turns a short brief into a long descriptive prompt and suggests an aspect ratio. You edit and accept the result — your prompt is not changed on its own."}
+          {editing ? copy.editHint(referenceAssetIds.length) : copy.hint}
         </p>
       ) : null}
       {busy ? (
         <p className="refine-status">
-          <Icon.Wand size={14} /> Rewriting…
+          <Icon.Wand size={14} /> {copy.busy}
         </p>
       ) : null}
 
       {status === "error" && modelMissing ? (
         <p className="refine-error" role="alert">
-          The {editing ? "editing" : "text-to-image"} rewriter isn’t installed. Qwen Image 2.1
-          generates normally without it — open the Models screen to download “{modelName}”.
+          {copy.missing(editing, modelName)}
         </p>
       ) : status === "error" ? (
         <p className="refine-error" role="alert">
@@ -159,7 +183,7 @@ export function QwenRewritePromptControl({
       {status === "review" ? (
         <div className="refine-review qwen-rewrite-review">
           <label className="refine-review-label" htmlFor="qwen-rewrite-draft">
-            Rewritten prompt — edit before applying
+            {copy.draftLabel}
           </label>
           {/* EDITABLE, unlike the generic refiner's read-only paragraph. This is the control the
               acceptance criteria name: the rewrite is a starting point the user adjusts, and their
@@ -174,7 +198,7 @@ export function QwenRewritePromptControl({
           {suggestedResolution ? (
             <div className="qwen-rewrite-aspect">
               <p className="qwen-rewrite-aspect-label">
-                Suggested aspect ratio: {suggestion?.whRatio}{" "}
+                {copy.suggestionLabel}: {suggestion?.whRatio}{" "}
                 <span className="qwen-rewrite-aspect-size">({suggestedResolution})</span>
               </p>
               {/* A SEPARATE accept. The prompt and the geometry are two decisions, and a user who
@@ -185,7 +209,7 @@ export function QwenRewritePromptControl({
                   onClick={() => onApplyResolution(suggestedResolution)}
                   type="button"
                 >
-                  Use this aspect ratio
+                  {copy.applyResolution}
                 </button>
               ) : null}
             </div>
@@ -212,7 +236,7 @@ export function QwenRewritePromptControl({
               Keep original
             </button>
             <button className="secondary-action" onClick={handleRewrite} type="button">
-              Rewrite again
+              {copy.again}
             </button>
           </div>
         </div>

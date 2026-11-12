@@ -401,6 +401,13 @@ pub(crate) fn resolve_weights_dir(
             explicit.as_deref(),
         )?));
     }
+    // MiniMax-H3-Image (SW-7100): a split-repo tier family whose tier directory is not the load
+    // root. The resolved directory is the TIER (bf16: the upstream snapshot root; q8/q4: the
+    // re-host's `{tier}/`); `attach_required_components` re-roots it and stages the DiT and
+    // MiniMax-H3's text encoder (`minimax_h3_image::attach_components`).
+    if super::minimax_h3_image::is_model(&request.model) {
+        return super::minimax_h3_image::resolve_weights_dir(request, settings);
+    }
     if let Some(dir) = resolve_model_path_dir(request, settings)? {
         converted_artifact_preflight(request, &dir)?;
         // Anima (epic 10512) is convert-at-install with a q4/q8/bf16 MATRIX: unlike other convert
@@ -750,7 +757,10 @@ pub(crate) fn tier_key_for_resolved_dir(
     manifest_entry: &JsonObject,
     dir: &Path,
 ) -> Option<&'static str> {
-    tier_key_from_resolved_dir(dir).or_else(|| split_repo_root_tier_key(manifest_entry, dir))
+    tier_key_from_resolved_dir(dir)
+        .or_else(|| split_repo_root_tier_key(manifest_entry, dir))
+        // MiniMax-H3-Image (SW-7100): its bf16 tier is the upstream snapshot ROOT (a SHA basename).
+        .or_else(|| super::minimax_h3_image::tier_of_dir(manifest_entry, dir))
 }
 
 /// Catalog ids whose tiers span repositories with a tier that is a whole snapshot root.

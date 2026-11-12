@@ -2325,6 +2325,14 @@ fn metadata_value_to_family(value: &str) -> Option<String> {
     if normalized.is_empty() {
         return None;
     }
+    // SW-7100: `minimax-h3-image` contains `minimax-h3`; the image family is its own identity and
+    // must be named before the H3 substring match below can claim it.
+    if normalized.contains("minimax-h3-image")
+        || normalized.contains("minimax_h3_image")
+        || normalized.contains("minimaxh3image")
+    {
+        return Some(crate::model_family::MINIMAX_H3_IMAGE.to_owned());
+    }
     if normalized == MINIMAX_H3_TRAINER_NETWORK_MODULE
         || normalized.contains("minimax-h3")
         || normalized.contains("minimax_h3")
@@ -4558,6 +4566,34 @@ mod tests {
         // string, the detected string, and the API's canonical form are one spelling.
         assert_eq!(canonical_lora_family("minimax-h3"), "minimax-h3");
         assert_eq!(normalize_model_family("minimax_h3"), "minimax-h3");
+    }
+
+    #[test]
+    fn minimax_h3_image_metadata_is_never_read_as_minimax_h3() {
+        // SW-7100: `minimax-h3-image` contains `minimax-h3`; the substring match must not claim it.
+        for label in [
+            "MiniMax-H3-Image",
+            "minimax_h3_image",
+            "MiniMaxAI/MiniMax-H3-Image",
+        ] {
+            assert_eq!(
+                metadata_value_to_family(label).as_deref(),
+                Some(crate::model_family::MINIMAX_H3_IMAGE),
+                "{label}"
+            );
+        }
+        assert_eq!(
+            metadata_value_to_family("MiniMaxAI/MiniMax-H3").as_deref(),
+            Some(crate::model_family::MINIMAX_H3)
+        );
+        assert_eq!(
+            canonical_lora_family("minimax_h3_image"),
+            "minimax-h3-image"
+        );
+        assert_ne!(
+            accepted_lora_families("minimax-h3-image"),
+            vec!["minimax-h3"]
+        );
     }
 
     #[test]

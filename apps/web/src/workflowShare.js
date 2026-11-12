@@ -287,6 +287,8 @@ export const ADVANCED_PREFILL = {
   // sc-25681 — Iris-3B's CFG interval and caption-overflow policy; both restore their controls.
   cfgInterval: { label: "Guidance interval", prefill: PREFILL_CONTROL },
   captionOverflow: { label: "Long prompts", prefill: PREFILL_CONTROL },
+  // SW-7106 — MiniMax-H3-Image's sampler block; restores its Sampler control.
+  h3ImageSampler: { label: "Sampler (MiniMax-H3-Image)", prefill: PREFILL_CONTROL },
   steps: { label: "Steps", prefill: PREFILL_CONTROL },
   guidanceScale: { label: "Guidance", prefill: PREFILL_CONTROL },
   guidanceMethod: { label: "Guidance method", prefill: PREFILL_CONTROL },

@@ -176,6 +176,7 @@ export const WORKFLOW_FIELDS_IN_FILE = Object.freeze([
   ["advanced.schedulerShift", L_SETTINGS],
   ["advanced.cfgInterval", L_SETTINGS],
   ["advanced.captionOverflow", L_SETTINGS],
+  ["advanced.h3ImageSampler", L_SETTINGS],
   ["advanced.steps", L_SETTINGS],
   ["advanced.guidanceScale", L_SETTINGS],
   ["advanced.guidanceMethod", L_SETTINGS],

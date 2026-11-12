@@ -1568,3 +1568,43 @@ fn experimental_sampling_preset_defaults_validate_native_float_semantics() {
         assert!(validate_recipe_preset_defaults(Some(&value)).is_err());
     }
 }
+
+/// A preset's `defaults.resolution` is judged by the size envelope its model generates at, so a
+/// MiniMax-H3-Image preset saves at every size the model renders (up to 6272), a size past that
+/// envelope is refused, and every model without a declared envelope keeps the 4096 ceiling.
+#[test]
+fn preset_resolution_follows_the_models_declared_size_envelope() {
+    use crate::recipe_presets::validate_recipe_preset_resolution;
+    let models = vec![
+        json!({ "id": "minimax_h3_image", "type": "image",
+                "limits": { "minDimension": 16, "maxDimension": 6272 } }),
+        json!({ "id": "plain_image", "type": "image" }),
+    ];
+    let preset = |model: Option<&str>, resolution: &str| {
+        let mut value = json!({ "defaults": { "resolution": resolution } });
+        if let Some(model) = model {
+            value["model"] = json!(model);
+        }
+        value
+    };
+    for resolution in ["4736x3552", "3552x4736", "6272x2688", "2048x2048"] {
+        assert!(
+            validate_recipe_preset_resolution(
+                &models,
+                &preset(Some("minimax_h3_image"), resolution)
+            )
+            .is_ok(),
+            "{resolution} is a declared MiniMax-H3-Image size"
+        );
+    }
+    let over =
+        validate_recipe_preset_resolution(&models, &preset(Some("minimax_h3_image"), "6400x4096"))
+            .expect_err("past the declared 6272 ceiling");
+    assert!(format!("{over:?}").contains("6272"), "{over:?}");
+    // Every other model, and a model-less general preset, keeps the blanket 256..=4096 bound.
+    for model in [Some("plain_image"), None] {
+        assert!(validate_recipe_preset_resolution(&models, &preset(model, "4096x4096")).is_ok());
+        assert!(validate_recipe_preset_resolution(&models, &preset(model, "4736x3552")).is_err());
+        assert!(validate_recipe_preset_resolution(&models, &preset(model, "128x128")).is_err());
+    }
+}

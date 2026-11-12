@@ -172,6 +172,9 @@ string_enum! {
         // sc-25907: the distilled Turbo checkpoint stamps its own id for the same reason — its
         // weights are not base's, so a replayed asset must say which of the two produced it.
         QwenImage21Turbo => "qwen_image_2_1_turbo",
+        // SW-7100: MiniMax-H3-Image stamps its own id — its weights, latent space and licence are
+        // its own, not MiniMax-H3's.
+        MinimaxH3Image => "minimax_h3_image",
         LensTurbo => "lens_turbo",
         SenseNovaU1 => "sensenova_u1",
         FluxDiffusers => "flux_diffusers",
@@ -749,6 +752,20 @@ string_enum! {
 
 /// Selects Qwen-Image 2.1's official structured prompt rewrite in API and worker payloads.
 pub const QWEN_IMAGE_REWRITE_TASK: &str = "qwen_image_rewrite";
+
+/// Selects MiniMax-H3-Image's prompt expansion (MiniMax-H3-Image-PE, SW-7102) in API and worker
+/// payloads.
+pub const MINIMAX_H3_IMAGE_EXPAND_TASK: &str = "minimax_h3_image_expand";
+
+/// Catalog id of MiniMax-H3-Image's prompt expander, the engine's `core_llm::minimax_h3_image_pe`
+/// model id.
+pub const MINIMAX_H3_IMAGE_PE_MODEL_ID: &str = "minimax_h3_image_pe";
+
+/// Catalog id of the image model the prompt expander serves.
+pub const MINIMAX_H3_IMAGE_MODEL_ID: &str = "minimax_h3_image";
+
+/// The most edit references one expansion may carry (`core_llm::minimax_h3_image_pe::MAX_REFERENCES`).
+pub const MINIMAX_H3_IMAGE_EXPAND_MAX_REFERENCES: usize = 16;
 
 /// Maximum number of images one Parquet materialization job may add.
 ///

@@ -2176,7 +2176,11 @@ mod tests {
             let manifest: Value =
                 serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(text)).unwrap();
             for model in manifest["models"].as_array().unwrap() {
-                if model["id"] == "supra2_img" || model["type"] != "image" {
+                // MiniMax-H3-Image (SW-7100) declares its own fixed six-step ceiling.
+                if model["id"] == "supra2_img"
+                    || model["id"] == "minimax_h3_image"
+                    || model["type"] != "image"
+                {
                     continue;
                 }
                 assert_eq!(

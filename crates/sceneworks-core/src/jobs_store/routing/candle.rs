@@ -14,8 +14,8 @@ use crate::jobs_store::routing::catalog::{
 };
 use crate::jobs_store::routing::mlx::{
     flux3_payload_tier, flux3_surface_eligible, instantid_mlx_eligible, iris_mlx_eligible,
-    pulid_flux_mlx_eligible, qwen_image_2_1_mlx_eligible, supra2_mlx_eligible,
-    upscale_job_is_mlx_eligible, video_upscale_job_is_mlx_eligible,
+    minimax_h3_image_mlx_eligible, pulid_flux_mlx_eligible, qwen_image_2_1_mlx_eligible,
+    supra2_mlx_eligible, upscale_job_is_mlx_eligible, video_upscale_job_is_mlx_eligible,
 };
 use crate::jobs_store::routing::{
     conditioned_reference_count, has_malformed_optional_nested_number, has_nonempty_array,
@@ -438,6 +438,9 @@ pub(crate) enum CandleImageRefusal {
     /// `quantTier`) or an enabled hires fix. Delegates to [`supra2_mlx_eligible`] so the two lanes
     /// refuse exactly the same list.
     Supra2Surface,
+    /// MiniMax-H3-Image (SW-7100): anything outside the text-to-image surface the MLX arm admits.
+    /// Delegates to [`minimax_h3_image_mlx_eligible`] so the two lanes refuse exactly the same list.
+    MinimaxH3ImageSurface,
 }
 
 impl CandleImageRefusal {
@@ -462,6 +465,9 @@ impl CandleImageRefusal {
                 "a carrier outside distilled FLUX 3's plain text-to-image surface"
             }
             Self::Supra2Surface => "a carrier outside Supra2-IMG's plain text-to-image surface",
+            Self::MinimaxH3ImageSurface => {
+                "a carrier outside MiniMax-H3-Image's text-to-image surface"
+            }
         }
     }
 }
@@ -509,6 +515,10 @@ const CANDLE_IMAGE_CHECKS: &[(CandleImageRefusal, CandleImageCheck)] = &[
     (
         CandleImageRefusal::Supra2Surface,
         candle_refuses_supra2_surface,
+    ),
+    (
+        CandleImageRefusal::MinimaxH3ImageSurface,
+        candle_refuses_minimax_h3_image_surface,
     ),
 ];
 
@@ -562,6 +572,11 @@ fn candle_image_quant_tier_refusal(model: &str, payload: &Map<String, Value>) ->
 /// reported by them.
 fn candle_refuses_supra2_surface(model: &str, payload: &Map<String, Value>) -> bool {
     model == "supra2_img" && !supra2_mlx_eligible(payload)
+}
+
+/// MiniMax-H3-Image (SW-7100): the candle lane serves exactly the MLX arm's text-to-image shape.
+fn candle_refuses_minimax_h3_image_surface(model: &str, payload: &Map<String, Value>) -> bool {
+    model == "minimax_h3_image" && !minimax_h3_image_mlx_eligible(payload)
 }
 
 /// sc-18475: the SANA specialized route above owns the only accepted reference shape. If the

@@ -950,7 +950,7 @@ pub(super) async fn generate_stream_using(
     } else {
         (quant, quant_bits)
     };
-    let raw_settings = mlx_raw_settings_for_bundle(
+    let mut raw_settings = mlx_raw_settings_for_bundle(
         request,
         Some(&weights_dir),
         &repo,
@@ -958,6 +958,7 @@ pub(super) async fn generate_stream_using(
         quant_bits,
         guidance.or(model_true_cfg),
     );
+    lane_controls::record_effective_h3_image_sampler(&mut raw_settings, &lane_controls);
 
     // Identity-likeness scoring (epic 4406, sc-4411 plain With-Character): the generic MLX lane serves
     // the remaining With-Character identity generators — Z-Image identity-init (`referenceAssetId` ⇒

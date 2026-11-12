@@ -154,6 +154,10 @@ export const MODEL_STORIES = {
   // Supra2-IMG (epic 24212): ported to MLX by sc-24213 and to Candle by sc-24214 — each backend's
   // cells are owned by the story that brought that lane through SceneWorks.
   supra2_img: { mlx: 24213, candle: 24214 },
+  // MiniMax-H3-Image (CodeGraph feature SW-F363): both lanes are brought through SceneWorks by ONE
+  // item, SW-7100, so its model cells are a paired claim (see `PAIRED_MODEL_STORIES`). CodeGraph
+  // keys carry no Shortcut number; the registry's integer is the item's number (SW-7100 -> 7100).
+  minimax_h3_image: { mlx: 7100, candle: 7100 },
   qwen_image_edit_2511: { mlx: 15460, candle: 15868 },
   qwen_image_edit_2511_lightning: { mlx: 15461, candle: 15871 },
   lens: { mlx: 15462, candle: 17489 },
@@ -240,6 +244,10 @@ export const FAMILY_STORIES = {
   // own the supra2_img cells, and one id may own only one thing. The Candle family twin is sc-24217,
   // the epic's terminal story that owns the one measurement campaign (memory included).
   24212: { mlx: 24212, candle: 24217 },
+  // MiniMax-H3-Image (feature SW-F363, group 363): the family's memory ladder is owned per backend
+  // by SW-7094 (MLX) and SW-7095 (Candle); SW-7100 owns the model cells. Nothing is measured: the
+  // terminal item SW-7104 runs the one anchor campaign.
+  363: { mlx: 7094, candle: 7095 },
 };
 
 /**
@@ -391,6 +399,7 @@ export function familyGroup(modelId) {
   if (modelId.startsWith("flux3")) return 26233;
   if (modelId === "moss_image_base" || modelId === "moss_image_sft") return 26323;
   if (modelId === "supra2_img") return 24212;
+  if (modelId === "minimax_h3_image") return 363;
   throw new Error(`no family story for ${modelId}`);
 }
 
@@ -436,7 +445,7 @@ export function modelStory(modelId, backend) {
  */
 // Explicit story-local dual-backend scope, never inferred from repeated ids. S6's two native
 // implementations are one SAME-model story; both backend receipts are still required separately.
-export const PAIRED_MODEL_STORIES = { flux3_klein_base: 26239 };
+export const PAIRED_MODEL_STORIES = { flux3_klein_base: 26239, minimax_h3_image: 7100 };
 
 // The approved MOSS backend stories each implement both exact variants and their family.
 // This declaration permits only these three claims per story, on its single native backend.

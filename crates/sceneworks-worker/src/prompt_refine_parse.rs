@@ -19,6 +19,24 @@ pub(super) struct RefineRequest {
     pub(super) weights_dir: PathBuf,
     pub(super) system: String,
     pub(super) user_message: String,
+    /// SW-7102: the engine-built MiniMax-H3-Image expansion request and what its reply is checked
+    /// against. `None` for every other task.
+    pub(super) h3_expand: Option<H3Expand>,
+}
+
+/// A MiniMax-H3-Image expansion: the request `core_llm::minimax_h3_image_pe` assembled from the
+/// model's verified prompt files, and the reply contract.
+pub(super) struct H3Expand {
+    pub(super) request: gen_core::core_llm::TextLlmRequest,
+    pub(super) reply: H3ExpandReply,
+}
+
+/// What an expansion reply is parsed against.
+pub(crate) struct H3ExpandReply {
+    pub(crate) workflow: crate::minimax_h3_image_prompt_expand::Workflow,
+    pub(crate) aspect: gen_core::core_llm::minimax_h3_image_pe::AspectSelection,
+    pub(crate) allowed_ratios: Vec<String>,
+    pub(crate) tier: Option<&'static str>,
 }
 
 pub(super) async fn parse_refine_request(
@@ -62,7 +80,9 @@ pub(super) async fn parse_refine_request(
     // BEFORE opening it — rejecting `..` traversal and any absolute path outside the app data dir / HF
     // hub cache. The order of `imagePaths` is preserved so the model reads the board in the order the
     // user assembled it. N is bounded API-side (`MAX_MOOD_BOARD_IMAGES`).
-    let image_refs: Vec<gen_core::core_llm::ImageRef> = if task.takes_reference_images() {
+    let image_refs: Vec<(gen_core::core_llm::ImageRef, (u32, u32))> = if task
+        .takes_reference_images()
+    {
         let paths: Vec<String> = match payload.get("imagePaths").and_then(Value::as_array) {
             Some(items) => items
                 .iter()
@@ -101,6 +121,16 @@ pub(super) async fn parse_refine_request(
                 paths.len()
             )));
         }
+        // SW-7102: the expander takes the image model's own reference cap, refused rather than
+        // truncated for the same reason — `<Picture N>` must name the render's N-th reference.
+        let expand_cap = sceneworks_core::contracts::MINIMAX_H3_IMAGE_EXPAND_MAX_REFERENCES;
+        if task == RefineTask::MiniMaxH3ImageExpand && paths.len() > expand_cap {
+            return Err(WorkerError::InvalidPayload(format!(
+                "MiniMax-H3-Image prompt expansion takes at most {expand_cap} reference images; \
+                 {} were sent.",
+                paths.len()
+            )));
+        }
         let safe_paths = paths
             .iter()
             .map(|path| normalize_app_managed_model_path(settings, path, "Vision reference image"))
@@ -108,7 +138,7 @@ pub(super) async fn parse_refine_request(
         crate::load_progress::spawn_blocking(move || {
             safe_paths
                 .iter()
-                .map(|path| load_caption_image_ref(path))
+                .map(|path| load_vision_reference(path))
                 .collect::<WorkerResult<Vec<_>>>()
         })
         .await
@@ -116,6 +146,10 @@ pub(super) async fn parse_refine_request(
     } else {
         Vec::new()
     };
+    // The expander labels each reference with its SOURCE ratio; every other task needs only the
+    // (downscaled) image.
+    let (mut image_refs, reference_sizes): (Vec<gen_core::core_llm::ImageRef>, Vec<(u32, u32)>) =
+        image_refs.into_iter().unzip();
     // More than one reference image switches the vision instruction to mood-board SYNTHESIS (one prompt
     // capturing the shared aesthetic) rather than describing a single picture.
     let multi_reference = image_refs.len() > 1;
@@ -134,6 +168,9 @@ pub(super) async fn parse_refine_request(
         // An explicit `payload.model` still wins, which is how the real-weight smoke pins a local
         // snapshot path — the same override the film planner uses.
         .unwrap_or_else(|| {
+            if task == RefineTask::MiniMaxH3ImageExpand {
+                return gen_core::core_llm::minimax_h3_image_pe::REPO.to_owned();
+            }
             qwen_rewriter
                 .map(|rewriter| rewriter.repo().to_owned())
                 .unwrap_or_else(|| DEFAULT_REFINE_MODEL.to_owned())
@@ -145,18 +182,13 @@ pub(super) async fn parse_refine_request(
         .get("modelId")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let thinking_mode = match (task, payload.get("thinkingMode").and_then(Value::as_str)) {
+    let mut thinking_mode = match (task, payload.get("thinkingMode").and_then(Value::as_str)) {
         (RefineTask::FilmPlan, Some("enabled")) => gen_core::core_llm::ThinkingMode::Enabled,
         (RefineTask::FilmPlan, Some("auto")) => gen_core::core_llm::ThinkingMode::Auto,
         (RefineTask::FilmPlan, _) => gen_core::core_llm::ThinkingMode::Disabled,
         _ => gen_core::core_llm::ThinkingMode::Auto,
     };
-    let thinking_mode_name = match thinking_mode {
-        gen_core::core_llm::ThinkingMode::Enabled => "enabled",
-        gen_core::core_llm::ThinkingMode::Auto => "auto",
-        gen_core::core_llm::ThinkingMode::Disabled => "disabled",
-    };
-    let max_new_tokens = resolve_max_new_tokens(payload, task, qwen_rewriter);
+    let mut max_new_tokens = resolve_max_new_tokens(payload, task, qwen_rewriter);
     // sc-20682: the job's compressed-KV opt-in (its payload's `kvCompression`, else the worker's
     // `SCENEWORKS_LLM_KV_COMPRESSION`, else off). The engine runs compressed only for a single
     // sequence on a model matching one of its two measured architectures (Llama-3.2-3B-Instruct,
@@ -170,7 +202,42 @@ pub(super) async fn parse_refine_request(
     // Resolved BEFORE the message match (it used to sit after it) because one task's system prompt
     // is not a compiled-in asset: the Qwen rewriters ship their published template inside the
     // snapshot as `system_prompt.txt`, so building their turn needs the model directory.
-    let weights_dir = resolve_app_managed_model_dir(settings, &model, "prompt-refine model path")?;
+    //
+    // SW-7102: the expander resolves its tier directory and its upstream `prompt/` snapshot from its
+    // own catalog entry (the API forwards it as `modelManifestEntry`); an explicit `payload.model`
+    // is a local snapshot override, as for the other refiners.
+    let expander_dirs = if task == RefineTask::MiniMaxH3ImageExpand {
+        if let Some(target) = target_model_id.as_deref() {
+            if !crate::minimax_h3_image_prompt_expand::is_expand_target_model(target) {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "The MiniMax-H3-Image prompt expander only applies to `{}`; this request \
+                     targets `{target}`.",
+                    sceneworks_core::contracts::MINIMAX_H3_IMAGE_MODEL_ID
+                )));
+            }
+        }
+        let entry = payload
+            .get("modelManifestEntry")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let override_dir = crate::payload::trimmed_string(payload.get("model"))
+            .map(|path| resolve_app_managed_model_dir(settings, path, "prompt-refine model path"))
+            .transpose()?;
+        Some(crate::minimax_h3_image_prompt_expand::resolve_dirs(
+            settings,
+            &entry,
+            crate::payload::trimmed_string(payload.get("peTier")),
+            override_dir,
+        )?)
+    } else {
+        None
+    };
+    let weights_dir = match &expander_dirs {
+        Some(dirs) => dirs.weights.clone(),
+        None => resolve_app_managed_model_dir(settings, &model, "prompt-refine model path")?,
+    };
+    let mut h3_expand = None;
 
     // Build the `(system, user)` chat text per task: the caption tasks swap Ideogram's caption system
     // prompt in for the rewrite rules, describe supplies the prose/tags describe asset, and the default
@@ -216,6 +283,45 @@ pub(super) async fn parse_refine_request(
                 original_prompt.clone(),
             )
         }
+        // SW-7102. The engine assembles the whole request from the model's own prompt files, read
+        // from the upstream snapshot and checked against `prompt/manifest.json`; nothing licensed
+        // is compiled in. An edit's references ride inside that request as `<Picture N>` parts,
+        // in order, each labelled with its source ratio.
+        RefineTask::MiniMaxH3ImageExpand => {
+            use crate::minimax_h3_image_prompt_expand as expand;
+            let dirs = expander_dirs
+                .as_ref()
+                .expect("the expand task always resolves its directories");
+            let files = expand::load_prompt_files(&dirs.prompt_root)?;
+            let aspect =
+                expand::aspect_selection(payload.get("aspectRatio").and_then(Value::as_str))?;
+            let references: Vec<_> = image_refs
+                .drain(..)
+                .zip(reference_sizes.iter().copied())
+                .map(|(image, size)| expand::edit_reference(image, size))
+                .collect();
+            let mut request =
+                expand::build_request(&files, &original_prompt, &references, &aspect)?;
+            // The published budget unless the payload overrides it.
+            if payload
+                .get("maxNewTokens")
+                .and_then(Value::as_u64)
+                .is_none_or(|value| value == 0)
+            {
+                max_new_tokens = request.max_new_tokens;
+            }
+            request.max_new_tokens = max_new_tokens;
+            h3_expand = Some(H3Expand {
+                request,
+                reply: H3ExpandReply {
+                    workflow: expand::Workflow::for_reference_count(references.len()),
+                    aspect,
+                    allowed_ratios: files.params().aspect_ratios.clone(),
+                    tier: dirs.tier,
+                },
+            });
+            (String::new(), String::new())
+        }
         RefineTask::Rewrite => {
             let guide = payload
                 .get("guide")
@@ -237,6 +343,16 @@ pub(super) async fn parse_refine_request(
             )
         }
     };
+    // The expansion runs the recipe's own reasoning mode (`enable_thinking` in its
+    // `request_params.json`), which the engine put on the request.
+    if let Some(expand) = &h3_expand {
+        thinking_mode = expand.request.thinking;
+    }
+    let thinking_mode_name = match thinking_mode {
+        gen_core::core_llm::ThinkingMode::Enabled => "enabled",
+        gen_core::core_llm::ThinkingMode::Auto => "auto",
+        gen_core::core_llm::ThinkingMode::Disabled => "disabled",
+    };
     Ok(RefineRequest {
         task,
         original_prompt,
@@ -255,5 +371,6 @@ pub(super) async fn parse_refine_request(
         weights_dir,
         system,
         user_message,
+        h3_expand,
     })
 }

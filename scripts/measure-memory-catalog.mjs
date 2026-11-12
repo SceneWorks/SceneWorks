@@ -220,9 +220,15 @@ export const SDXL_COMPONENTS = Object.freeze([
  * exactly the repositories `classifyAnchor` probes for the same cell — a component this lane never
  * opens is neither a `weights_missing` reason nor a `--download-missing` fetch.
  */
-export function requiredComponentsFor(family, backend) {
+export function requiredComponentsFor(family, backend, tier) {
   if (!Array.isArray(family?.components)) return [];
-  return family.components.filter((component) => (component.arms ?? [backend]).includes(backend));
+  // SW-7100: a component may also be scoped to `tiers` — MiniMax-H3-Image stages MiniMax-H3's text
+  // encoder from a DIFFERENT repository at bf16 than at q4/q8. Without a tier, every lane component.
+  return family.components.filter(
+    (component) =>
+      (component.arms ?? [backend]).includes(backend)
+      && (tier === undefined || (component.tiers ?? [tier]).includes(tier)),
+  );
 }
 
 /** The ONE upstream repository all three Iris-3B task routes load from (sc-25690). */
@@ -1446,6 +1452,40 @@ export const PROVIDER_FAMILIES = Object.freeze({
     // Dropping the base entry's candle-bf16 override is therefore not a tidy-up: it is the whole
     // difference between the two entries' artifact axes.
     variants: { minimax_h3_ref: { artifacts: undefined } },
+  },
+  // MiniMax-H3-Image (SW-7100, feature SW-F363). The load ROOT on every tier is the upstream
+  // `MiniMaxAI/MiniMax-H3-Image` snapshot (`vae_diffusers/`, `tokenizer/`), whose own
+  // `transformer_diffusers/` IS the bf16 tier — hence the flat bf16 override bound through the
+  // upstream env family. `q8`/`q4` are the `<tier>/` subdirs of the SceneWorks re-host, still
+  // `pendingArtifact` rows, which `resolveArtifactRoot` reports as `weights_missing` rather than
+  // probing. The text encoder is MiniMax-H3's OWN, at the same tier, from a different repository
+  // per tier — the worker's `image_jobs::minimax_h3_image::text_encoder_dir` — so it is a
+  // tier-scoped component whose env names the encoder directory itself. Both lanes load the same
+  // roots. The text encoder is probed as a directory only: the macOS bf16 row deliberately omits
+  // shard 13, so its own index would report a mirror the engine loads as incomplete.
+  minimax_h3_image: {
+    env: "MINIMAX_H3_IMAGE", repo: "SceneWorks/minimax-h3-image-mlx", arms: ["mlx", "candle"],
+    tiers: {
+      bf16: {
+        env: "MINIMAX_H3_IMAGE_UPSTREAM", repo: "MiniMaxAI/MiniMax-H3-Image", layout: "flat",
+        requiredTierFiles: ["transformer_diffusers/config.json"],
+      },
+    },
+    requiredTierFiles: ["transformer_diffusers/config.json"],
+    upstream: {
+      env: "MINIMAX_H3_IMAGE_UPSTREAM", repo: "MiniMaxAI/MiniMax-H3-Image",
+      requiredFiles: ["vae_diffusers/config.json", "tokenizer/tokenizer.json"],
+    },
+    components: [
+      {
+        env: "SCENEWORKS_MINIMAX_H3_IMAGE_COMPONENT_TEXT_ENCODER", repo: "SceneWorks/minimax-h3-mlx",
+        tiers: ["q4", "q8"], subdirByTier: { q4: "q4/text_encoder", q8: "q8/text_encoder" },
+      },
+      {
+        env: "SCENEWORKS_MINIMAX_H3_IMAGE_COMPONENT_TEXT_ENCODER", repo: "MiniMaxAI/MiniMax-H3",
+        tiers: ["bf16"], subdir: "text_encoder",
+      },
+    ],
   },
   // The harness prepares and binds the LTX-2.5 snapshot itself (`--ltx25-snapshot-root`), for
   // whichever lane the plan routes: BOTH engine ids below are served from the same public snapshot,
@@ -2808,12 +2848,21 @@ export async function classifyAnchor(key, planned, { models, backend, hubs, curr
   // sc-22738: only on the lane whose engine opens them (`requiredComponentsFor`). An MLX SDXL cell
   // was reported `weights_missing` for a CLIP-bigG / fp16-fix-VAE snapshot that `mlx-gen-sdxl`
   // never reads — it declares `required_components: &[]` and loads both out of its own tier root.
-  for (const component of requiredComponentsFor(family, backend)) {
+  for (const component of requiredComponentsFor(family, backend, parts.tier)) {
     const download = tierDownload(models, parts.modelId, component.repo, parts.tier);
-    const root = await firstExistingDirectory(hubs.map((hub) => snapshotPath(hub, component.repo, download.revision)));
-    row.roots.push({ label: `component ${component.env}`, path: root ?? snapshotPath(hubs[0], component.repo, download.revision) });
+    // SW-7100: `subdir` binds ONE folder of the component snapshot (MiniMax-H3's `<tier>/text_encoder`)
+    // rather than the snapshot itself, which is the directory the worker stages as the component.
+    const subdir = component.subdirByTier?.[parts.tier] ?? component.subdir;
+    const expected = snapshotPath(hubs[0], component.repo, download.revision, ...(subdir ? [subdir] : []));
+    const root = await firstExistingDirectory(
+      hubs.map((hub) => snapshotPath(hub, component.repo, download.revision, ...(subdir ? [subdir] : []))),
+    );
+    row.roots.push({ label: `component ${component.env}`, path: root ?? expected });
     if (!root) {
-      return { ...row, status: "weights_missing", reason: `no ${component.repo}@${download.revision.slice(0, 8)} snapshot on this host` };
+      return {
+        ...row, status: "weights_missing",
+        reason: `no ${component.repo}@${download.revision.slice(0, 8)}${subdir ? `/${subdir}` : ""} snapshot on this host`,
+      };
     }
     // sc-25690: a component that declares the `files` its engine opens in it by name is checked for
     // them and for every shard its own index names — a config-only or half-fetched text encoder is
@@ -3065,7 +3114,7 @@ export function anchorDownloadTargets(row, models, { families = PROVIDER_FAMILIE
   if (family.ltx25) repositories.push({ label: "ltx25 snapshot", repo: family.repo });
   else repositories.push({ label: "tier root", repo: familyArtifact(family, row.backend, row.tier).repo });
   if (family.upstream) repositories.push({ label: "upstream root", repo: family.upstream.repo });
-  for (const component of requiredComponentsFor(family, row.backend)) {
+  for (const component of requiredComponentsFor(family, row.backend, row.tier)) {
     repositories.push({ label: `component ${component.env}`, repo: component.repo });
   }
   if (family.components && !Array.isArray(family.components)) {

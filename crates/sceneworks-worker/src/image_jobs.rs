@@ -693,6 +693,13 @@ async fn run_image_generate_job_unexplained(
         ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
     let project_path = PathBuf::from(project.path);
     tokio::fs::create_dir_all(project_path.join("assets").join("images")).await?;
+    // SW-7102: MiniMax-H3-Image's prompt expander (a 27B text model) stays resident in the refine
+    // cache for its idle window after an expansion. Stage it out before the image model loads, so
+    // the expansion the user just accepted never shares memory with the render it feeds.
+    #[cfg(native_lane)]
+    if minimax_h3_image::is_model(&request.model) {
+        crate::refine_model_cache::evict_resident_refiner().await?;
+    }
 
     // sc-8091: when the Image Studio "Upscale" toggle is on, each generated image also yields a
     // second "(Nx upscaled)" asset, so the generation set expects twice as many images. The inline
@@ -2849,6 +2856,11 @@ mod iris;
 // real-weight worker renders (the MLX arm on macOS, the production Candle job on CUDA).
 #[cfg(native_lane)]
 mod supra2;
+
+// MiniMax-H3-Image (SW-7100): tier resolution and component staging for `minimax_h3_image` (the
+// tier's DiT plus MiniMax-H3's own text encoder) on both native lanes.
+#[cfg(native_lane)]
+pub(crate) mod minimax_h3_image;
 
 // The generic image lane's request controls beyond the positional knobs (CFG interval,
 // caption-overflow policy, CFG-bound negative prompt) and the per-image provenance facts (engine

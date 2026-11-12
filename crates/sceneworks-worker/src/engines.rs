@@ -269,6 +269,19 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 3.0,
         adapter_label: "mlx_supra2",
     },
+    // MiniMax-H3-Image (SW-7100, feature SW-F363) — `mlx-gen-minimax-h3` and
+    // `candle-gen-minimax-h3` register `minimax_h3_image`. The weights dir is the resolved TIER
+    // directory, re-rooted on the upstream snapshot with the tier's DiT and MiniMax-H3's text encoder
+    // staged by `image_jobs::minimax_h3_image`. Six steps is the only count the distilled sampler
+    // has (`gen_core::h3_image::FIXED_STEPS`); guidance is the no-op 1.0 (no CFG).
+    ModelRow {
+        sceneworks_id: "minimax_h3_image",
+        engine_id: "minimax_h3_image",
+        default_repo: "MiniMaxAI/MiniMax-H3-Image",
+        default_steps: 6,
+        default_guidance: 1.0,
+        adapter_label: "mlx_minimax_h3_image",
+    },
     // Qwen-Image-Edit (sc-3397) — the three base edit ids all resolve to the engine's
     // single `qwen_image_edit` model (Reference/MultiReference, true CFG, LoRA/LoKr, Q4/Q8);
     // `qwen_image_edit`/`_2509` alias to the 2511 weights (Python MODEL_TARGETS, sc-2160).
@@ -1807,6 +1820,7 @@ mod tests {
         "flux3_klein_base",
         "iris_3b",
         "supra2_img",
+        "minimax_h3_image",
         "moss_image_base",
         "moss_image_sft",
         "mage_flow_base",
@@ -1946,6 +1960,10 @@ mod tests {
             // Supra2-IMG (sc-24213) renders exactly one 256x256 geometry (min = max =
             // gen_core_checkpoint::supra2::IMAGE_SIZE), so its only legal stride is the whole edge.
             "supra2_img" => 256,
+            // MiniMax-H3-Image (SW-7100) accepts ANY positive size: it generates on its own 32 px
+            // canvas and resizes back (`gen_core::h3_image::generation_canvas`), so the request
+            // carries no lattice.
+            "minimax_h3_image" => 1,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
             "bernini" => p::wan::config::SIZE_MULTIPLE_14B,
@@ -2002,6 +2020,10 @@ mod tests {
             // Supra2-IMG (sc-24213) renders exactly one 256x256 geometry (min = max =
             // gen_core_checkpoint::supra2::IMAGE_SIZE), so its only legal stride is the whole edge.
             "supra2_img" => 256,
+            // MiniMax-H3-Image (SW-7100) accepts ANY positive size: it generates on its own 32 px
+            // canvas and resizes back (`gen_core::h3_image::generation_canvas`), so the request
+            // carries no lattice.
+            "minimax_h3_image" => 1,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
             "bernini" => p::wan::config::SIZE_MULTIPLE_14B,
@@ -2263,6 +2285,7 @@ mod tests {
             ("flux3_klein", 16),
             ("flux3_klein_base", 16),
             ("supra2_img", 256),
+            ("minimax_h3_image", 1),
             ("z_image_turbo", 16),
             ("bernini", 16),
         ];

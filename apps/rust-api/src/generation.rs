@@ -303,6 +303,7 @@ pub(crate) async fn create_image_job(
     if let Some(entry) = model_manifest_entry.as_object() {
         sceneworks_core::image_request::validate_image_request_payload(&job_payload, entry)
             .map_err(ApiError::bad_request)?;
+        crate::models::ensure_run_license_acknowledged(&state, entry).await?;
         let (default_width, default_height) =
             image_default_resolution(entry).unwrap_or((1024, 1024));
         // Preserve omitted sides through storage/retry. The worker derives their actual canvas
@@ -2077,6 +2078,22 @@ pub(crate) async fn apply_recipe_preset_to_image_payload(
                         .or_insert_with(|| steps.clone());
                 }
             }
+        }
+    }
+    // SW-7106: a preset's MiniMax-H3-Image sampler survives headless expansion onto the preset's
+    // own model. A caller's explicit block wins, and another model never inherits it.
+    if let Some(sampler) = preset.get("defaults").and_then(|d| d.get("h3ImageSampler")) {
+        let same_model = preset.get("model").and_then(Value::as_str)
+            == job_payload.get("model").and_then(Value::as_str);
+        if same_model {
+            let advanced = job_payload
+                .entry("advanced".to_owned())
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .ok_or_else(|| ApiError::bad_request("advanced must be an object"))?;
+            advanced
+                .entry(sceneworks_core::image_sampling_controls::H3_IMAGE_SAMPLER_KEY.to_owned())
+                .or_insert_with(|| sampler.clone());
         }
     }
     // Render defaults (count/resolution/negativePrompt) are intentionally NOT

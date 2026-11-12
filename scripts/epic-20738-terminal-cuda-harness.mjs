@@ -200,7 +200,7 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 // preserve main's honest evidence re-record and its pinned digest.
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "95cde218e352097d3e314d0f9bb5891a219f9c01b84965c6af4abc56ac591d82";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "af802a78822a8844b8a47e487de5314dabddc93267bce9fd2744acf4342d632e";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 

@@ -13792,6 +13792,9 @@ fn engine_engages_staged_residency_is_derived_from_the_registered_capability() {
         // FLUX 3 Image Klein (sc-26234): the same staged shape — tower, drop, then DiT + AE.
         "flux3_klein",
         "flux3_klein_base",
+        // MiniMax-H3-Image (SW-7100): text encoder, then DiT, then VAE, never co-resident
+        // (the descriptor sets unconditionally_engages_staged_residency).
+        "minimax_h3_image",
         "z_image",
         "z_image_control",
         "z_image_turbo",

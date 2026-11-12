@@ -952,6 +952,670 @@ mod supra2_tests {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// MiniMax-H3-Image (SW-7100, feature SW-F363): the shared half of the `mlx_minimax_h3_image` /
+// `candle_minimax_h3_image` arms.
+// ---------------------------------------------------------------------------------------------
+
+/// The registry id both engines register (`mlx-gen-minimax-h3::h3_image::model::IMAGE_MODEL_ID`,
+/// `candle-gen-minimax-h3::image_model::IMAGE_MODEL_ID`), which is also the catalog model id.
+pub const MINIMAX_H3_IMAGE_PROVIDER: &str = "minimax_h3_image";
+/// The upstream snapshot that is the load ROOT on every tier (`vae_diffusers/`, `tokenizer/`), and
+/// whose own `transformer_diffusers/` IS the bf16 tier — the worker's `load_root`.
+pub const MINIMAX_H3_IMAGE_UPSTREAM_REPOSITORY: &str = "MiniMaxAI/MiniMax-H3-Image";
+/// The packed `q8/` / `q4/` DiT re-host. Both tiers are `pendingArtifact` downloads until the
+/// feature's terminal upload pins them; a capture refuses an unpublished tier by name.
+pub const MINIMAX_H3_IMAGE_REPOSITORY: &str = "SceneWorks/minimax-h3-image-mlx";
+/// The staged DiT component (a packed tier's `transformer_diffusers/`).
+pub const MINIMAX_H3_IMAGE_DIT_COMPONENT: &str = "transformer_diffusers";
+/// The staged text-encoder component (MiniMax-H3's own tier directory).
+pub const MINIMAX_H3_IMAGE_TEXT_ENCODER_COMPONENT: &str = "text_encoder";
+/// The tiers the catalog declares.
+pub const MINIMAX_H3_IMAGE_TIERS: [&str; 3] = ["bf16", "q8", "q4"];
+/// The anchor geometry edge (a square still). The engine generates it on its default 4 MP canvas
+/// and resizes back, exactly as a production request of this size renders.
+pub const MINIMAX_H3_IMAGE_EDGE: u32 = 1024;
+/// The fixed seed every MiniMax-H3-Image capture renders at.
+pub const MINIMAX_H3_IMAGE_SEED: u64 = 7100;
+/// The only step count the distilled sampler supports.
+pub const MINIMAX_H3_IMAGE_STEPS: u32 = gen_core::h3_image::FIXED_STEPS;
+/// The prompt every MiniMax-H3-Image capture renders.
+pub const MINIMAX_H3_IMAGE_PROMPT: &str =
+    "a portrait of a person in a sunlit studio, editorial photograph";
+
+/// The env family one lane's MiniMax-H3-Image arm reads. Each arm spells its own names out,
+/// because the catalog runner's env-name binding test reads them off each lane's own sources.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MinimaxH3ImageEnvs {
+    pub upstream_repository_env: &'static str,
+    pub upstream_revision_env: &'static str,
+    pub upstream_root_env: &'static str,
+    pub tier_repository_env: &'static str,
+    pub tier_revision_env: &'static str,
+    pub tier_root_env: &'static str,
+    pub text_encoder_env: &'static str,
+}
+
+/// The fixture a lane's MiniMax-H3-Image plan row must name for `tier`.
+pub fn minimax_h3_image_fixture(lane: &str, tier: &str) -> String {
+    format!(
+        "minimax-h3-image-{lane}-{tier}-{MINIMAX_H3_IMAGE_EDGE}-seed{MINIMAX_H3_IMAGE_SEED}-step{MINIMAX_H3_IMAGE_STEPS}"
+    )
+}
+
+/// What a MiniMax-H3-Image capture must agree with BEFORE any environment variable or weight is
+/// read: the provider, text-to-image, a declared tier, the square still, no overlay, eager
+/// materialization (the worker's load shape), the lane's own fixture, and the identity the lane
+/// names (`expected_fingerprint`: the engine constant on Candle, the adapter-owned label on MLX,
+/// whose production contract publishes none). Returns `(width, height, tier)`.
+pub fn validate_minimax_h3_image_plan(
+    request: &Value,
+    lane: &str,
+    expected_fingerprint: &str,
+) -> Result<(u32, u32, &'static str), String> {
+    let label = format!("{MINIMAX_H3_IMAGE_PROVIDER} calibration");
+    validate_still_geometry(request, &label)?;
+    validate_plain_overlay_target(request, "the minimax_h3_image staged text-to-image path")?;
+    let provider = planned_str(request, "/target/provider")?;
+    if provider != MINIMAX_H3_IMAGE_PROVIDER {
+        return Err(format!(
+            "the MiniMax-H3-Image arm measures {MINIMAX_H3_IMAGE_PROVIDER}, not {provider:?}"
+        ));
+    }
+    let mode = planned_str(request, "/target/mode")?;
+    if mode != "text_to_image" {
+        return Err(format!(
+            "{MINIMAX_H3_IMAGE_PROVIDER} is text-to-image only in the catalog; no {mode:?} route is \
+             shipped to measure"
+        ));
+    }
+    let planned_tier = planned_str(request, "/target/tier")?;
+    let tier = MINIMAX_H3_IMAGE_TIERS
+        .into_iter()
+        .find(|tier| *tier == planned_tier)
+        .ok_or_else(|| {
+            format!("{MINIMAX_H3_IMAGE_PROVIDER} declares no {planned_tier:?} tier to measure")
+        })?;
+    match planned(request)?.get("loadShape").and_then(Value::as_str) {
+        Some(LOAD_SHAPE_EAGER) => {}
+        other => {
+            return Err(format!(
+                "{MINIMAX_H3_IMAGE_PROVIDER} anchors are eager (planned.loadShape {other:?}); the \
+                 worker loads this route with eager materialization"
+            ))
+        }
+    }
+    let (width, height) = target_geometry(request)?;
+    if (width, height) != (MINIMAX_H3_IMAGE_EDGE, MINIMAX_H3_IMAGE_EDGE) {
+        return Err(format!(
+            "the {MINIMAX_H3_IMAGE_PROVIDER} anchor is {MINIMAX_H3_IMAGE_EDGE}x{MINIMAX_H3_IMAGE_EDGE}, \
+             not {width}x{height}"
+        ));
+    }
+    let fixture = planned_str(request, "/fixture")?;
+    let expected_fixture = minimax_h3_image_fixture(lane, tier);
+    if fixture != expected_fixture {
+        return Err(format!(
+            "planned.fixture {fixture:?} is not the {lane} {tier} MiniMax-H3-Image capture: \
+             expected {expected_fixture:?}"
+        ));
+    }
+    let fingerprint = planned_str(request, "/calibrationFingerprint")?;
+    if fingerprint != expected_fingerprint {
+        return Err(format!(
+            "planned.calibrationFingerprint {fingerprint:?} is not the {lane} MiniMax-H3-Image \
+             identity {expected_fingerprint:?}"
+        ));
+    }
+    Ok((width, height, tier))
+}
+
+/// The shipped catalog entry, narrowed to this host's platform rows exactly as the worker narrows
+/// it, so the repositories and revisions a capture binds are the catalog's (never constants here).
+pub fn minimax_h3_image_catalog_entry() -> Result<Value, String> {
+    let manifest = sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+        .map_err(|error| format!("read the builtin model manifest: {error}"))?;
+    let mut entry = manifest
+        .get("models")
+        .and_then(Value::as_array)
+        .and_then(|models| {
+            models.iter().find(|model| {
+                model.get("id").and_then(Value::as_str) == Some(MINIMAX_H3_IMAGE_PROVIDER)
+            })
+        })
+        .cloned()
+        .ok_or_else(|| format!("the builtin manifest declares no {MINIMAX_H3_IMAGE_PROVIDER}"))?;
+    sceneworks_core::model_artifacts::artifact_selection::retain_downloads_for_os(
+        &mut entry,
+        std::env::consts::OS,
+    );
+    Ok(entry)
+}
+
+fn minimax_h3_image_row_identity(row: &Value) -> Result<(&str, &str), String> {
+    Ok((
+        row.get("repo")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "a minimax_h3_image catalog row declares no repo".to_owned())?,
+        row.get("revision")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "a minimax_h3_image catalog row declares no revision".to_owned())?,
+    ))
+}
+
+fn minimax_h3_image_co_requisite<'a>(
+    entry: &'a Value,
+    component: &str,
+    tier: Option<&str>,
+) -> Option<&'a Value> {
+    entry
+        .get("downloads")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|row| {
+            row.get("coRequisite").and_then(Value::as_bool) == Some(true)
+                && row.get("componentId").and_then(Value::as_str) == Some(component)
+                && tier.is_none_or(|tier| {
+                    row.get("variant")
+                        .and_then(Value::as_str)
+                        .is_some_and(|variant| variant.eq_ignore_ascii_case(tier))
+                })
+        })
+}
+
+/// One artifact triple an operator hands the arm.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MinimaxH3ImageArtifact {
+    pub repository: String,
+    pub revision: String,
+    pub root: PathBuf,
+}
+
+/// The validated inputs of one MiniMax-H3-Image capture — exactly the directories the worker's
+/// `image_jobs::minimax_h3_image::attach_components` stages.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MinimaxH3ImageInputs {
+    pub tier: &'static str,
+    /// The canonical upstream snapshot root (the load root).
+    pub upstream: MinimaxH3ImageArtifact,
+    /// The packed tier's identity and its canonical `transformer_diffusers/` directory; `None` for
+    /// bf16, whose DiT is the upstream root's own.
+    pub dit: Option<(MinimaxH3ImageArtifact, PathBuf)>,
+    /// The canonical MiniMax-H3 text-encoder directory for this tier.
+    pub text_encoder: PathBuf,
+}
+
+impl MinimaxH3ImageInputs {
+    /// The record's artifact block: the artifact that carries this tier's DiT.
+    pub fn artifact_json(&self) -> Value {
+        let artifact = self.dit.as_ref().map_or(&self.upstream, |(dit, _)| dit);
+        json!({
+            "repository": artifact.repository,
+            "resolvedRevision": artifact.revision,
+            "variant": self.tier,
+        })
+    }
+
+    pub fn loadability_fingerprint(&self) -> String {
+        let artifact = self.dit.as_ref().map_or(&self.upstream, |(dit, _)| dit);
+        format!(
+            "{}@{}:{}+{}@{}",
+            artifact.repository,
+            artifact.revision,
+            self.tier,
+            self.upstream.repository,
+            self.upstream.revision
+        )
+    }
+}
+
+/// Resolve and validate a lane's MiniMax-H3-Image inputs for `tier` from its env family. The tier
+/// env family is read only for a packed tier: bf16 loads the upstream root's own DiT.
+pub fn minimax_h3_image_inputs(
+    envs: MinimaxH3ImageEnvs,
+    tier: &'static str,
+) -> Result<MinimaxH3ImageInputs, String> {
+    let entry = minimax_h3_image_catalog_entry()?;
+    // Refused by name BEFORE any env read when the catalog has not published a packed tier.
+    if tier != "bf16" {
+        minimax_h3_image_published_tier_row(&entry, tier)?;
+    }
+    let upstream = MinimaxH3ImageArtifact {
+        repository: required_env(envs.upstream_repository_env)?,
+        revision: required_env(envs.upstream_revision_env)?,
+        root: PathBuf::from(required_env(envs.upstream_root_env)?),
+    };
+    let packed = if tier == "bf16" {
+        None
+    } else {
+        Some(MinimaxH3ImageArtifact {
+            repository: required_env(envs.tier_repository_env)?,
+            revision: required_env(envs.tier_revision_env)?,
+            root: PathBuf::from(required_env(envs.tier_root_env)?),
+        })
+    };
+    let text_encoder = PathBuf::from(required_env(envs.text_encoder_env)?);
+    minimax_h3_image_inputs_at(&entry, tier, upstream, packed, text_encoder)
+}
+
+/// The installable primary row for a packed `tier`, or a refusal naming why there is none.
+fn minimax_h3_image_published_tier_row(entry: &Value, tier: &str) -> Result<Value, String> {
+    use sceneworks_core::model_artifacts::artifact_selection::{
+        is_pending_artifact_download, model_download_for_variant,
+    };
+    match model_download_for_variant(entry, tier) {
+        Some(row) if is_pending_artifact_download(&row) => Err(format!(
+            "{MINIMAX_H3_IMAGE_PROVIDER} tier {tier} is a pendingArtifact download (not published \
+             yet), so there is no artifact to measure"
+        )),
+        Some(row) => Ok(row),
+        None => Err(format!(
+            "{MINIMAX_H3_IMAGE_PROVIDER} declares no {tier} download on this platform"
+        )),
+    }
+}
+
+/// The env-free half of [`minimax_h3_image_inputs`]: every root at exactly the repository and
+/// revision the catalog pins for it, canonicalized, with the files the worker checks present.
+pub fn minimax_h3_image_inputs_at(
+    entry: &Value,
+    tier: &'static str,
+    upstream: MinimaxH3ImageArtifact,
+    packed: Option<MinimaxH3ImageArtifact>,
+    text_encoder: PathBuf,
+) -> Result<MinimaxH3ImageInputs, String> {
+    let canonical = |path: &Path, label: &str| {
+        std::fs::canonicalize(path).map_err(|error| {
+            format!(
+                "canonicalize the {MINIMAX_H3_IMAGE_PROVIDER} {label} {}: {error}",
+                path.display()
+            )
+        })
+    };
+    let require_file = |root: &Path, file: &str, label: &str| {
+        if root.join(file).is_file() {
+            Ok(())
+        } else {
+            Err(format!(
+                "the {MINIMAX_H3_IMAGE_PROVIDER} {label} {} has no {file}",
+                root.display()
+            ))
+        }
+    };
+    let pinned_revision = |row: &Value, artifact: &MinimaxH3ImageArtifact, label: &str| {
+        let (repo, revision) = minimax_h3_image_row_identity(row)?;
+        validate_artifact_identity(&artifact.repository, &artifact.revision, repo)?;
+        if artifact.revision != revision {
+            return Err(format!(
+                "the {MINIMAX_H3_IMAGE_PROVIDER} {label} is {}@{}, not the catalog pin {repo}@{revision}",
+                artifact.repository, artifact.revision
+            ));
+        }
+        Ok(())
+    };
+
+    // The load root: the tier-agnostic `image_vae` co-requisite's snapshot.
+    let root_row = minimax_h3_image_co_requisite(entry, "image_vae", None).ok_or_else(|| {
+        format!("{MINIMAX_H3_IMAGE_PROVIDER} declares no `image_vae` co-requisite")
+    })?;
+    pinned_revision(root_row, &upstream, "upstream snapshot")?;
+    validate_artifact_identity(
+        &upstream.repository,
+        &upstream.revision,
+        MINIMAX_H3_IMAGE_UPSTREAM_REPOSITORY,
+    )?;
+    let upstream_root = canonical(&upstream.root, "upstream snapshot")?;
+    validate_huggingface_revision_root(
+        &upstream_root,
+        &upstream.repository,
+        &upstream.revision,
+        MINIMAX_H3_IMAGE_UPSTREAM_REPOSITORY,
+    )?;
+    require_file(
+        &upstream_root,
+        "vae_diffusers/config.json",
+        "upstream snapshot",
+    )?;
+    require_file(
+        &upstream_root,
+        "tokenizer/tokenizer.json",
+        "upstream snapshot",
+    )?;
+    let upstream = MinimaxH3ImageArtifact {
+        root: upstream_root,
+        ..upstream
+    };
+
+    let dit = match (tier, packed) {
+        ("bf16", None) => {
+            require_file(
+                &upstream.root,
+                "transformer_diffusers/config.json",
+                "bf16 tier root",
+            )?;
+            None
+        }
+        ("bf16", Some(_)) => {
+            return Err(format!(
+                "{MINIMAX_H3_IMAGE_PROVIDER} bf16 loads the upstream root's own DiT; a packed tier \
+                 root must not be staged for it"
+            ))
+        }
+        (tier, None) => {
+            return Err(format!(
+                "{MINIMAX_H3_IMAGE_PROVIDER} {tier} needs its packed tier root"
+            ))
+        }
+        (tier, Some(packed)) => {
+            let row = minimax_h3_image_published_tier_row(entry, tier)?;
+            pinned_revision(&row, &packed, "packed tier root")?;
+            validate_artifact_identity(
+                &packed.repository,
+                &packed.revision,
+                MINIMAX_H3_IMAGE_REPOSITORY,
+            )?;
+            let root = canonical(&packed.root, "packed tier root")?;
+            validate_huggingface_snapshot_root(
+                &root,
+                &packed.repository,
+                &packed.revision,
+                tier,
+                MINIMAX_H3_IMAGE_REPOSITORY,
+            )?;
+            let dit_dir = root.join(MINIMAX_H3_IMAGE_DIT_COMPONENT);
+            require_file(&dit_dir, "config.json", "packed DiT")?;
+            Some((MinimaxH3ImageArtifact { root, ..packed }, dit_dir))
+        }
+    };
+
+    // MiniMax-H3's text encoder at the SAME tier, from its tier-scoped co-requisite row.
+    let te_row =
+        minimax_h3_image_co_requisite(entry, MINIMAX_H3_IMAGE_TEXT_ENCODER_COMPONENT, Some(tier))
+            .ok_or_else(|| {
+            format!("{MINIMAX_H3_IMAGE_PROVIDER} declares no {tier} `text_encoder` co-requisite")
+        })?;
+    let (te_repo, te_revision) = minimax_h3_image_row_identity(te_row)?;
+    let te_subdir = te_row
+        .get("subdir")
+        .and_then(Value::as_str)
+        .unwrap_or(MINIMAX_H3_IMAGE_TEXT_ENCODER_COMPONENT);
+    let text_encoder = canonical(&text_encoder, "text encoder")?;
+    validate_huggingface_snapshot_subpath(
+        &text_encoder,
+        te_repo,
+        te_revision,
+        &te_subdir.split('/').collect::<Vec<_>>(),
+        te_repo,
+    )
+    .map_err(|error| {
+        format!("the {MINIMAX_H3_IMAGE_PROVIDER} {tier} text encoder is not {te_repo}@{te_revision}/{te_subdir}: {error}")
+    })?;
+    require_file(&text_encoder, "config.json", "text encoder")?;
+
+    Ok(MinimaxH3ImageInputs {
+        tier,
+        upstream,
+        dit,
+        text_encoder,
+    })
+}
+
+/// The spec the worker builds (`attach_components` over its resident, eager base spec): the
+/// upstream root as `weights`, the tier's quant, MiniMax-H3's text encoder, and — packed tiers
+/// only — the tier's DiT.
+pub fn minimax_h3_image_load_spec(inputs: &MinimaxH3ImageInputs) -> gen_core::LoadSpec {
+    let mut spec =
+        gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(inputs.upstream.root.clone()))
+            .with_offload_policy(gen_core::OffloadPolicy::Resident)
+            .with_load_shape(gen_core::LoadShape::EagerMaterialization)
+            .with_component(
+                MINIMAX_H3_IMAGE_TEXT_ENCODER_COMPONENT,
+                gen_core::WeightsSource::Dir(inputs.text_encoder.clone()),
+            );
+    match inputs.tier {
+        "q8" => spec = spec.with_quant(gen_core::Quant::Q8),
+        "q4" => spec = spec.with_quant(gen_core::Quant::Q4),
+        _ => {}
+    }
+    if let Some((_, dit)) = &inputs.dit {
+        spec = spec.with_component(
+            MINIMAX_H3_IMAGE_DIT_COMPONENT,
+            gen_core::WeightsSource::Dir(dit.clone()),
+        );
+    }
+    spec
+}
+
+/// The one planned request every MiniMax-H3-Image capture renders: the anchor still, six steps,
+/// the no-op guidance 1.0, no negative prompt, no references.
+pub fn minimax_h3_image_capture_request() -> gen_core::GenerationRequest {
+    gen_core::GenerationRequest {
+        prompt: MINIMAX_H3_IMAGE_PROMPT.to_owned(),
+        width: MINIMAX_H3_IMAGE_EDGE,
+        height: MINIMAX_H3_IMAGE_EDGE,
+        count: 1,
+        seed: Some(MINIMAX_H3_IMAGE_SEED),
+        steps: Some(MINIMAX_H3_IMAGE_STEPS),
+        guidance: Some(gen_core::h3_image::FIXED_GUIDANCE),
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod minimax_h3_image_tests {
+    use super::*;
+
+    fn planned(lane: &str, tier: &str, fingerprint: &str) -> Value {
+        json!({
+            "planned": {
+                "backend": lane,
+                "loadShape": LOAD_SHAPE_EAGER,
+                "calibrationFingerprint": fingerprint,
+                "fixture": minimax_h3_image_fixture(lane, tier),
+                "target": {
+                    "provider": MINIMAX_H3_IMAGE_PROVIDER,
+                    "mode": "text_to_image",
+                    "tier": tier,
+                    "overlay": "none",
+                    "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
+                },
+            },
+        })
+    }
+
+    /// The constants are the engine's and the catalog's own.
+    #[test]
+    fn the_fixture_and_request_are_the_engines_fixed_contract() {
+        assert_eq!(
+            minimax_h3_image_fixture("mlx", "bf16"),
+            "minimax-h3-image-mlx-bf16-1024-seed7100-step6"
+        );
+        let request = minimax_h3_image_capture_request();
+        gen_core::h3_image::validate_request(
+            request.width,
+            request.height,
+            None,
+            request.steps.unwrap(),
+            request.guidance,
+            request.negative_prompt.is_some(),
+            0,
+        )
+        .expect("the capture request passes the engine's own request contract");
+        let entry = minimax_h3_image_catalog_entry().unwrap();
+        assert_eq!(entry["defaults"]["steps"], json!(MINIMAX_H3_IMAGE_STEPS));
+    }
+
+    /// *Mutation that reds this:* drop any one check from `validate_minimax_h3_image_plan`.
+    #[test]
+    fn a_plan_row_outside_the_arm_is_refused_before_any_weight_work() {
+        for lane in ["mlx", "candle"] {
+            for tier in MINIMAX_H3_IMAGE_TIERS {
+                assert_eq!(
+                    validate_minimax_h3_image_plan(&planned(lane, tier, "id"), lane, "id"),
+                    Ok((1024, 1024, tier))
+                );
+            }
+            for (pointer, value, needle) in [
+                (
+                    "/planned/target/provider",
+                    json!("minimax_h3"),
+                    "measures minimax_h3_image",
+                ),
+                (
+                    "/planned/target/mode",
+                    json!("edit_image"),
+                    "text-to-image only",
+                ),
+                ("/planned/target/tier", json!("fp8r"), "no \"fp8r\" tier"),
+                ("/planned/target/overlay", json!("lora"), "overlay"),
+                (
+                    "/planned/target/geometry/width",
+                    json!(2048),
+                    "not 2048x1024",
+                ),
+                ("/planned/target/geometry/frames", json!(2), "frames"),
+                (
+                    "/planned/loadShape",
+                    json!("deferred_materialization"),
+                    "eager",
+                ),
+                (
+                    "/planned/fixture",
+                    json!("minimax-h3-image-x"),
+                    "planned.fixture",
+                ),
+                (
+                    "/planned/calibrationFingerprint",
+                    json!("other"),
+                    "calibrationFingerprint",
+                ),
+            ] {
+                let mut bad = planned(lane, "bf16", "id");
+                *bad.pointer_mut(pointer).unwrap() = value;
+                let error = validate_minimax_h3_image_plan(&bad, lane, "id").expect_err(pointer);
+                assert!(error.contains(needle), "{pointer}: {error}");
+            }
+            let other = if lane == "mlx" { "candle" } else { "mlx" };
+            validate_minimax_h3_image_plan(&planned(other, "bf16", "id"), lane, "id")
+                .expect_err("the other lane's fixture");
+        }
+    }
+
+    fn snapshot(base: &Path, repo: &str, revision: &str) -> PathBuf {
+        let dir = base
+            .join(format!("models--{}", repo.replace('/', "--")))
+            .join("snapshots")
+            .join(revision);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn touch(path: PathBuf) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"{}").unwrap();
+    }
+
+    /// bf16 binds the catalog's pinned upstream root and the same-tier H3 text encoder, stages no
+    /// DiT component and no quant — the worker's `attach_components` spec. A packed tier is refused
+    /// by name while the catalog row is a `pendingArtifact`, and accepted once it is published.
+    #[test]
+    fn the_inputs_bind_the_catalog_pins_and_the_spec_is_the_workers() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut entry = minimax_h3_image_catalog_entry().unwrap();
+        let root_row = minimax_h3_image_co_requisite(&entry, "image_vae", None).unwrap();
+        let (repo, revision) = minimax_h3_image_row_identity(root_row).unwrap();
+        let (repo, revision) = (repo.to_owned(), revision.to_owned());
+        assert_eq!(repo, MINIMAX_H3_IMAGE_UPSTREAM_REPOSITORY);
+        let root = snapshot(temporary.path(), &repo, &revision);
+        for file in [
+            "transformer_diffusers/config.json",
+            "vae_diffusers/config.json",
+            "tokenizer/tokenizer.json",
+        ] {
+            touch(root.join(file));
+        }
+        let te_dir = |entry: &Value, tier: &str| {
+            let row = minimax_h3_image_co_requisite(entry, "text_encoder", Some(tier)).unwrap();
+            let (repo, revision) = minimax_h3_image_row_identity(row).unwrap();
+            let dir =
+                snapshot(temporary.path(), repo, revision).join(row["subdir"].as_str().unwrap());
+            touch(dir.join("config.json"));
+            dir
+        };
+        let upstream = MinimaxH3ImageArtifact {
+            repository: repo.clone(),
+            revision: revision.clone(),
+            root: root.clone(),
+        };
+        let bf16_te = te_dir(&entry, "bf16");
+        let inputs =
+            minimax_h3_image_inputs_at(&entry, "bf16", upstream.clone(), None, bf16_te.clone())
+                .unwrap();
+        let spec = minimax_h3_image_load_spec(&inputs);
+        assert_eq!(
+            spec.weights,
+            gen_core::WeightsSource::Dir(std::fs::canonicalize(&root).unwrap())
+        );
+        assert_eq!(spec.quantize, None);
+        assert_eq!(
+            spec.components.get(MINIMAX_H3_IMAGE_TEXT_ENCODER_COMPONENT),
+            Some(&gen_core::WeightsSource::Dir(
+                std::fs::canonicalize(&bf16_te).unwrap()
+            ))
+        );
+        assert!(!spec.components.contains_key(MINIMAX_H3_IMAGE_DIT_COMPONENT));
+        assert_eq!(spec.offload_policy, gen_core::OffloadPolicy::Resident);
+        assert_eq!(spec.load_shape, gen_core::LoadShape::EagerMaterialization);
+
+        // A wrong revision for the upstream root is refused by the catalog pin.
+        let mut stale = upstream.clone();
+        stale.revision = "1".repeat(40);
+        assert!(minimax_h3_image_inputs_at(&entry, "bf16", stale, None, bf16_te).is_err());
+
+        // q8 is pending in the shipped catalog: refused by name.
+        let packed_rev = "2".repeat(40);
+        let packed = MinimaxH3ImageArtifact {
+            repository: MINIMAX_H3_IMAGE_REPOSITORY.to_owned(),
+            revision: packed_rev.clone(),
+            root: snapshot(temporary.path(), MINIMAX_H3_IMAGE_REPOSITORY, &packed_rev).join("q8"),
+        };
+        touch(packed.root.join("transformer_diffusers/config.json"));
+        let q8_te = te_dir(&entry, "q8");
+        let pending = minimax_h3_image_inputs_at(
+            &entry,
+            "q8",
+            upstream.clone(),
+            Some(packed.clone()),
+            q8_te.clone(),
+        )
+        .expect_err("a pendingArtifact tier");
+        assert!(pending.contains("pendingArtifact"), "{pending}");
+
+        // Published, the packed tier stages its DiT, the same-tier text encoder and its quant.
+        for row in entry["downloads"].as_array_mut().unwrap() {
+            if row.get("pendingArtifact").is_some() {
+                row.as_object_mut().unwrap().remove("pendingArtifact");
+                row["revision"] = json!(packed_rev);
+            }
+        }
+        let inputs =
+            minimax_h3_image_inputs_at(&entry, "q8", upstream, Some(packed.clone()), q8_te)
+                .unwrap();
+        let spec = minimax_h3_image_load_spec(&inputs);
+        assert_eq!(spec.quantize, Some(gen_core::Quant::Q8));
+        assert_eq!(
+            spec.components.get(MINIMAX_H3_IMAGE_DIT_COMPONENT),
+            Some(&gen_core::WeightsSource::Dir(
+                std::fs::canonicalize(packed.root.join("transformer_diffusers")).unwrap()
+            ))
+        );
+        assert_eq!(
+            inputs.artifact_json()["repository"],
+            MINIMAX_H3_IMAGE_REPOSITORY
+        );
+    }
+}
+
 /// The six Mage-Flow variant rehosts (sc-22733). Unlike every other image family in this file, a
 /// Mage variant repository ships the DiT ALONE: `<snapshot>/<tier>/transformer/`. The text encoder
 /// and the VAE are bit-identical across all six variants and are hosted ONCE in

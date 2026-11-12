@@ -1524,6 +1524,8 @@ pub(super) fn candle_adapter_label(model: &str) -> &'static str {
         "moss_image_base" | "moss_image_sft" => moss_adapter_label(model, "candle"),
         // Supra2-IMG (sc-24214): the off-Mac sibling of the `mlx_supra2` MODEL_TABLE label.
         "supra2_img" => "candle_supra2",
+        // MiniMax-H3-Image (SW-7100): the off-Mac sibling of the `mlx_minimax_h3_image` label.
+        "minimax_h3_image" => "candle_minimax_h3_image",
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => "candle_chroma",
         "lens" | "lens_turbo" => "candle_lens",
         "kolors" => "candle_kolors",

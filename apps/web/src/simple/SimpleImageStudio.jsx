@@ -42,6 +42,7 @@ import {
 } from "../resolutionOverride.js";
 import { minStepsForModel } from "../videoModelLimits.js";
 import {
+  fixedStepsForModel,
   maxStepsForModel,
   nativeResolutionHint,
   negativePromptInertAtGuidance,
@@ -50,13 +51,17 @@ import {
 } from "../samplerOptions.js";
 import { QwenRewritePromptControl } from "../components/QwenRewritePromptControl.jsx";
 import {
+  h3ImageExpanderAppliesTo,
+  MINIMAX_H3_IMAGE_PE_MODEL_ID,
   qwenRewriterAppliesTo,
   QWEN_REWRITE_I2I_MODEL_ID,
   QWEN_REWRITE_T2I_MODEL_ID,
 } from "../constants.js";
+import { H3_IMAGE_EXPAND_COPY, h3ImageProposedResolution } from "../minimaxH3ImageExpand.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
 import { useStudioState } from "./useStudioState.js";
 import { useSimpleLoras } from "./useSimpleLoras.js";
+import { ModelAttribution } from "../components/ModelAttribution.jsx";
 import { SimpleLoraField, promptWithKeyword } from "./SimpleLoraField.jsx";
 import { SimpleLoraSheet } from "./SimpleLoraSheet.jsx";
 import {
@@ -102,6 +107,7 @@ export function SimpleImageStudio() {
     jobs = [],
     createLoraDownloadJob,
     qwenRewritePrompt,
+    h3ImageExpandPrompt,
     activeProject,
     characters = [],
     importAsset,
@@ -134,6 +140,7 @@ export function SimpleImageStudio() {
     false,
   );
   const [qwenRewriteOpen, setQwenRewriteOpen] = useStudioState("image", "qwenRewriteOpen", false);
+  const [h3ExpandOpen, setH3ExpandOpen] = useStudioState("image", "h3ExpandOpen", false);
   // sc-24113 — the controls Simple did not expose. Every one is STICKY like the rest of this shell
   // and lives behind a disclosure that is COLLAPSED by default, so the reduced surface stays
   // reduced for someone who never opens it.
@@ -356,8 +363,15 @@ export function SimpleImageStudio() {
   // on (up to the model's cap), so its `<imageN>` numbering names the pictures actually sent.
   const qwenRewriteReferenceIds = useMemo(
     () =>
-      simpleRewriteReferenceIds({ supportsOrderedReferences, orderedReferenceIds, referenceAssetId }),
-    [supportsOrderedReferences, orderedReferenceIds, referenceAssetId],
+      simpleRewriteReferenceIds({
+        supportsOrderedReferences,
+        orderedReferenceIds,
+        referenceAssetId,
+        mode,
+        model,
+        supportsImg2img,
+      }),
+    [supportsOrderedReferences, orderedReferenceIds, referenceAssetId, mode, model, supportsImg2img],
   );
   const qwenRewriteModel = useMemo(() => {
     if (!qwenRewriterAppliesTo(selectedModel)) return null;
@@ -370,6 +384,35 @@ export function SimpleImageStudio() {
     Boolean(qwenRewriteModel) &&
     qwenRewriteModel.installState !== "missing" &&
     typeof qwenRewritePrompt === "function";
+  // SW-7102 — MiniMax-H3-Image's optional prompt expander, under the same gates as the Qwen
+  // rewriter: installed or absent, user-started, reviewed before it replaces the prompt.
+  const h3ExpandModel = useMemo(
+    () =>
+      h3ImageExpanderAppliesTo(selectedModel)
+        ? catalogModels.find((entry) => entry.id === MINIMAX_H3_IMAGE_PE_MODEL_ID) ?? null
+        : null,
+    [catalogModels, selectedModel],
+  );
+  const h3ExpandAvailable =
+    Boolean(h3ExpandModel) &&
+    h3ExpandModel.installState !== "missing" &&
+    typeof h3ImageExpandPrompt === "function";
+  // Accept a rewriter's or expander's offered size. sc-24114: never silently ignored — a preset the
+  // chips offer is selected, anything else lands as the free size in the (opened) Advanced fold,
+  // like the classic studio.
+  const applySuggestedResolution = (value) => {
+    const target = simpleRewriteResolutionTarget(value, { resolutions, nativeControls });
+    if (!target) return;
+    if (target.resolution) {
+      setResolution(target.resolution);
+      setWidthOverride("");
+      setHeightOverride("");
+      return;
+    }
+    setWidthOverride(target.widthOverride);
+    setHeightOverride(target.heightOverride);
+    setAdvancedOpen(true);
+  };
   const referenceUsable = mode === "edit_image" || supportsImg2img;
 
   // Krea-style managed image-edit LoRA (epic 10871, sc-11069): Krea 2's edit lane requires an
@@ -476,7 +519,8 @@ export function SimpleImageStudio() {
         // The advanced fold's knobs. Empty string means "the model default", exactly as the full
         // studio's overrides do, so an untouched control adds nothing to the payload.
         // Sent only for a model that shows the fold, so a sticky value never leaks elsewhere.
-        steps: nativeControls ? steps : "",
+        // SW-7100: a fixed step count has no control, so a sticky value is never sent either.
+        steps: nativeControls && fixedStepsForModel(selectedModel) == null ? steps : "",
         seed: nativeControls ? seed : "",
         negativePrompt:
           nativeControls && supportsNegativePrompt && !negativePromptCfgOff ? negativePrompt : "",
@@ -580,26 +624,31 @@ export function SimpleImageStudio() {
           <QwenRewritePromptControl
             modelId={model}
             onApply={setPrompt}
-            onApplyResolution={(value) => {
-              // sc-24114: never silently ignored — a preset the chips offer is selected, anything
-              // else lands as the free size in the (opened) Advanced fold, like the classic studio.
-              const target = simpleRewriteResolutionTarget(value, { resolutions, nativeControls });
-              if (!target) return;
-              if (target.resolution) {
-                setResolution(target.resolution);
-                setWidthOverride("");
-                setHeightOverride("");
-                return;
-              }
-              setWidthOverride(target.widthOverride);
-              setHeightOverride(target.heightOverride);
-              setAdvancedOpen(true);
-            }}
+            onApplyResolution={applySuggestedResolution}
             projectId={activeProject?.id ?? ""}
             prompt={prompt}
             referenceAssetIds={qwenRewriteReferenceIds}
             rewriteModel={qwenRewriteModel}
             rewritePrompt={qwenRewritePrompt}
+          />
+        ) : null}
+        {/* SW-7102 — MiniMax-H3-Image's prompt expander: the same review-and-accept control, its
+            expansion in an editable box with Apply / Keep original, its proposed size a separate
+            offer. Absent unless the expander is installed. */}
+        {h3ExpandAvailable && h3ExpandOpen ? (
+          <QwenRewritePromptControl
+            copy={H3_IMAGE_EXPAND_COPY}
+            modelId={model}
+            onApply={setPrompt}
+            onApplyResolution={applySuggestedResolution}
+            projectId={activeProject?.id ?? ""}
+            prompt={prompt}
+            referenceAssetIds={qwenRewriteReferenceIds}
+            rewriteModel={h3ExpandModel}
+            rewritePrompt={h3ImageExpandPrompt}
+            suggestedResolutionFor={(suggestion) =>
+              h3ImageProposedResolution(suggestion?.whRatio, selectedModel, resolution)
+            }
           />
         ) : null}
         {refineOpen ? (
@@ -634,6 +683,22 @@ export function SimpleImageStudio() {
           onChange={setReferenceAssetId}
           required={mode === "edit_image"}
         />}
+        {h3ExpandAvailable ? (
+          <button
+            className={h3ExpandOpen ? "su-tile active" : "su-tile"}
+            onClick={() => {
+              setRefineOpen(false);
+              setH3ExpandOpen((open) => !open);
+            }}
+            type="button"
+          >
+            <span className="su-tile-head">
+              <Icon.Sparkle size={15} />
+              Expand prompt
+            </span>
+            <span className="su-tile-sub">MiniMax-H3-Image's own expander, plus a proposed size</span>
+          </button>
+        ) : null}
         {qwenRewriteAvailable ? (
           <button
             className={qwenRewriteOpen ? "su-tile active" : "su-tile"}
@@ -680,6 +745,9 @@ export function SimpleImageStudio() {
           />
           {/* sc-17162 — see the note in `studioParts.jsx`. `ui.description` had one reader in the
               whole app (the advanced Models card), so Simple identified a model by NAME ALONE. */}
+          {/* Licence-required attribution (MiniMax-H3-Image §IV.2, SW-7100) — the same manifest
+              field Video Studio renders; Simple users must see it too. */}
+          <ModelAttribution model={selectedModel} />
           <ModelDescription model={selectedModel} />
           <SheetSelect
             kind="grid"
@@ -816,7 +884,7 @@ export function SimpleImageStudio() {
               ) : null}
             </div>
           ) : null}
-          <div className="su-field">
+          {fixedStepsForModel(selectedModel) == null ? <div className="su-field">
             <label htmlFor="su-image-steps">Steps</label>
             <input
               className="su-input"
@@ -829,7 +897,7 @@ export function SimpleImageStudio() {
               type="number"
               value={steps}
             />
-          </div>
+          </div> : null}
           <div className="su-field">
             <label htmlFor="su-image-seed">Seed</label>
             <input

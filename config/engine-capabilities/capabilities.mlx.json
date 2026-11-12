@@ -1,7 +1,7 @@
 {
   "backend": "mlx",
   "generatedFrom": {
-    "inferenceRevision": "0b80ec518c4b514f04b8a39703aa56cf395da278",
+    "inferenceRevision": "bc7b8fd53e9dcd43ba57e2663ab27bd7e9f1ab96",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "engines": [
@@ -894,6 +894,11 @@
     {
       "id": "minimax_h3",
       "modality": "video",
+      "supportsPreview": false
+    },
+    {
+      "id": "minimax_h3_image",
+      "modality": "image",
       "supportsPreview": false
     },
     {
@@ -8939,6 +8944,46 @@
           "structurallyNotApplicableRungs": [
             "bounded_attention"
           ],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "minimax_h3_image",
+      "composed": false,
+      "selectorDigest": "sha256:d8a563d34a93d4937591ed7ff79d73d3c8dcf39332ddc7853f92c2926853c9a8",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
         }
       ]

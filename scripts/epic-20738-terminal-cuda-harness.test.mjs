@@ -253,7 +253,7 @@ test("current and legacy Illustrious download selectors fail closed independentl
   // the real subject of this test and did NOT move — which is the point of asserting them beside the
   // digest.
   assert.equal(current.downloadEvidenceSha256,
-    "95cde218e352097d3e314d0f9bb5891a219f9c01b84965c6af4abc56ac591d82");
+    "af802a78822a8844b8a47e487de5314dabddc93267bce9fd2744acf4342d632e");
   assert.equal(current.artifactExpectedFiles["illustrious-v1-q4"].length, 19);
   assert.equal(current.artifactExpectedFiles["illustrious-v2-q4"].length, 19);
 

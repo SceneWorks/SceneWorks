@@ -27,6 +27,7 @@ mod jobs;
 mod load_progress_acceptance;
 mod mcp;
 mod media;
+mod minimax_h3_image_jobs;
 mod model_cache;
 mod model_library;
 mod moss_image;

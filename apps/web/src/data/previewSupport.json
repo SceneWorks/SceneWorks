@@ -150,6 +150,10 @@
       "candle": false,
       "mlx": false
     },
+    "minimax_h3_image": {
+      "candle": false,
+      "mlx": false
+    },
     "mmaudio_large_44k": {
       "candle": false
     },

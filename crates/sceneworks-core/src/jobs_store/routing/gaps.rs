@@ -1054,6 +1054,22 @@ pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> Unsuppo
             ),
             Some("sc-24214"),
         ),
+        CandleImageRefusal::MinimaxH3ImageSurface => UnsupportedReason::new(
+            Some(model),
+            "MiniMax-H3-Image request outside text-to-image",
+            &format!(
+                "MiniMax-H3-Image serves text-to-image only so far — no source/reference/mask, \
+                 controls, poses, user LoRA, multi-phase schedule or hires fix, on either backend. \
+                 This request (mode {mode:?}) carries one of those, so it is refused rather than \
+                 rendered with the carrier silently dropped.{remediation}{also}",
+                remediation = if also.is_empty() {
+                    " Re-submit as plain text_to_image without it and the same prompt routes."
+                } else {
+                    ""
+                }
+            ),
+            Some("SW-7100"),
+        ),
         CandleImageRefusal::QuantTier => {
             let bits = candle_requested_quant_bits(payload).unwrap_or_default();
             if matches!(model, "chroma1_base" | "chroma1_flash" | "chroma1_hd")
@@ -1233,6 +1249,14 @@ pub(crate) fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedRea
             "PuLID-FLUX without a character reference",
             "PuLID-FLUX runs on MLX for character_image with a referenceAssetId (the reference face drives the identity injection); a non-character / reference-less job has no PuLID-FLUX path.",
             None,
+        ),
+        // SW-7100: MiniMax-H3-Image is text-to-image only so far. Mirrors
+        // `minimax_h3_image_mlx_eligible`.
+        "minimax_h3_image" => UnsupportedReason::new(
+            Some(model),
+            "MiniMax-H3-Image request outside text-to-image",
+            "MiniMax-H3-Image renders text-to-image only so far: no source, reference, mask, control, pose, user LoRA, multi-phase schedule or hires fix.",
+            Some("SW-7100"),
         ),
         // Kolors (epic 3090) runs its full surface on MLX now — T2I (sc-3875), img2img (sc-4765),
         // the IP-Adapter-Plus reference (sc-4767) and the strict-pose tier (sc-4766 / engine sc-5012)
