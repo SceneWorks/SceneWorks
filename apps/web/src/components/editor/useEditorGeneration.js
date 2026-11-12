@@ -9,7 +9,7 @@ import {
   tierQuantize,
 } from "../../quantTier.js";
 import { serializeLora, buildStudioPresetPayload } from "../../presetUtils.js";
-import { WAN_A14B_LIGHTNING_MODEL_IDS } from "../../constants.js";
+import { wanLightningAvailable } from "../../modelEligibility.js";
 import { useGenerationStudio } from "../generationStudio.jsx";
 import { loadStudioSettings, useStudioSettingsWriter } from "../../hooks/useStudioSettings.js";
 import { MOTIONS, DEFAULT_MOTION } from "./editorUtils.js";
@@ -156,7 +156,7 @@ export function useEditorGeneration({ context }) {
     }
     return availableTiers.includes(EDITOR_DEFAULT_TIER) ? EDITOR_DEFAULT_TIER : availableTiers[0];
   }, [availableTiers, quantTier]);
-  const showLightning = WAN_A14B_LIGHTNING_MODEL_IDS.has(model);
+  const showLightning = wanLightningAvailable(selectedModel);
   const lightningActive = showLightning && lightning;
 
   // Re-clamp the discrete selects to the current model's menus when the model changes,

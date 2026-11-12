@@ -3329,9 +3329,14 @@ fn worker_catalog_member_path_at(
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(invalid_binding("worker catalog is unavailable")),
     };
-    let parsed: serde_json::Value =
+    let parsed: serde_json::Value = if collection == "models" {
+        // Shared normalizer: a future-version model manifest is refused, never read as current.
+        sceneworks_core::model_manifest_version::parse_user_model_manifest(&raw)
+            .map_err(|_| invalid_binding("worker model catalog version is unsupported"))?
+    } else {
         serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(&raw))
-            .map_err(|_| invalid_binding("worker catalog is invalid"))?;
+            .map_err(|_| invalid_binding("worker catalog is invalid"))?
+    };
     let matches = parsed
         .get(collection)
         .and_then(serde_json::Value::as_array)
@@ -4072,6 +4077,49 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
+
+    /// Review finding 7: the worker's model-catalog binding reader refuses a future-version
+    /// `user.models.jsonc` instead of resolving members from it as if it were current.
+    #[test]
+    fn worker_model_catalog_reader_refuses_a_future_manifest_version() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut settings = Settings::for_test(temp.path().join("worker"));
+        settings.config_dir = temp.path().join("worker-config");
+        let manifest = settings.config_dir.join("manifests/user.models.jsonc");
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        let model = temp.path().join("model.safetensors");
+        std::fs::write(&model, b"weights").unwrap();
+        let files = vec![
+            sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile {
+                relative_path: "model.safetensors".into(),
+                size_bytes: 7,
+                sha256: format!("sha256:{:x}", Sha256::digest(b"weights")),
+            },
+        ];
+        let member = PortableArtifactMember {
+            role: ArtifactMemberRole::Primary,
+            component_id: None,
+            source: PortableSourceIdentity::Digest {
+                sha256: portable_closure_sha256(&files).unwrap(),
+            },
+            tier: None,
+            files,
+        };
+        // The same catalog at the current version resolves cleanly (no matching row); the
+        // future version is refused before any row is interpreted.
+        for (version, refused) in [(2, false), (3, true)] {
+            std::fs::write(
+                &manifest,
+                json!({"schemaVersion":version,"models":[{"id":"other","modelPath":model}]})
+                    .to_string(),
+            )
+            .unwrap();
+            let resolved = worker_catalog_member_path_at(
+                &settings, &manifest, "models", "later", None, &member,
+            );
+            assert_eq!(resolved.is_err(), refused, "schemaVersion {version}");
+        }
+    }
 
     // FILE-UNIQUE fixture identities, deliberately. Some of these tests install the PROCESS-WIDE
     // local-tier preference overlay, and the overlay is keyed on `(repository, revision)` — so a

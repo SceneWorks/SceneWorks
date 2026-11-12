@@ -240,6 +240,342 @@ fn payload_model_entries(payload: &JsonObject) -> Result<Vec<(String, &Value)>, 
     Ok(entries)
 }
 
+/// A pre-registry job may be rebound only from its persisted, server-stamped source carrier.
+/// Local paths are locators, not identity: a moved root is allowed, while a changed publisher,
+/// import plan, producer, component declaration or model id is not. A path-only user entry has
+/// no immutable byte authority and remains unbound.
+pub(crate) async fn validate_historical_source_carrier(
+    state: &AppState,
+    original: &JsonObject,
+    current: &JsonObject,
+) -> Result<(), ApiError> {
+    let old = payload_model_entries(original)?;
+    let new = payload_model_entries(current)?;
+    if old.is_empty() || old.len() != new.len() {
+        return Err(ApiError::bad_request(
+            "This historical job has no portable source binding. Upgrade its manifest before retrying.",
+        ));
+    }
+    for ((old_slot, old_entry), (new_slot, new_entry)) in old.iter().zip(new.iter()) {
+        if old_slot != new_slot
+            || historical_source_identity(old_entry) != historical_source_identity(new_entry)
+        {
+            return Err(incomplete(format!(
+                "historical model source {old_slot} differs from its original declaration"
+            )));
+        }
+        let old_entry = old_entry
+            .as_object()
+            .ok_or_else(|| incomplete("historical model source is not an object"))?;
+        let new_entry = new_entry
+            .as_object()
+            .ok_or_else(|| incomplete("current model source is not an object"))?;
+        let plan = old_entry.get("importPlan").and_then(Value::as_object);
+        let pinned_plan = plan.is_some_and(|plan| {
+            ["checkpointId", "planId", "semanticDigest"]
+                .into_iter()
+                .all(|key| {
+                    plan.get(key)
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| !s.is_empty())
+                })
+        });
+        let produced = old_entry
+            .get("provenance")
+            .and_then(|value| value.get("trainingJobId"))
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.is_empty());
+        let pinned = |download: &Value| {
+            download
+                .get("repo")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.is_empty())
+                && download
+                    .get("revision")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| {
+                        s.len() == 40 && s.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+        };
+        // A registered builtin's `paths` are the install locations of its own pinned downloads
+        // (`${HF_CACHE}/<repo>`), not a second local authority: its bytes are bound by those
+        // pinned revisions. Only a user/imported row's paths name bytes with no publisher.
+        let registered_builtin = |entry: &JsonObject| {
+            entry.get("catalogScope").and_then(Value::as_str) == Some("builtin")
+                && entry
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| sceneworks_core::registry::builtin_model_spec(id).is_some())
+        };
+        let install_locators_are_pinned =
+            registered_builtin(old_entry) && registered_builtin(new_entry);
+        let pinned_download = (old_entry.get("download").is_some_and(pinned)
+            || old_entry
+                .get("downloads")
+                .and_then(Value::as_array)
+                .is_some_and(|downloads| !downloads.is_empty() && downloads.iter().all(pinned)))
+            && !["modelPath", "installedPath"]
+                .into_iter()
+                .any(|key| old_entry.get(key).is_some_and(|value| !value.is_null()))
+            && (install_locators_are_pinned || old_entry.get("paths").is_none_or(Value::is_null))
+            && old_entry
+                .get("components")
+                .and_then(Value::as_array)
+                .is_none_or(|components| {
+                    components
+                        .iter()
+                        .all(|component| component.get("path").is_none_or(Value::is_null))
+                });
+        if !pinned_plan && !produced && !pinned_download {
+            return Err(incomplete(format!(
+                "historical model source {old_slot} has no immutable byte authority"
+            )));
+        }
+        if pinned_plan {
+            let plan = plan.expect("pinned plan has its source declaration");
+            let checkpoint_id = plan["checkpointId"].as_str().unwrap();
+            let data_dir = state.settings.data_dir.clone();
+            let checkpoint_id = checkpoint_id.to_owned();
+            let resolved = tokio::task::spawn_blocking(move || {
+                sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir)
+                    .resolve(&checkpoint_id)
+            })
+            .await
+            .map_err(|error| incomplete(format!("historical import verification failed: {error}")))?
+            .map_err(|error| incomplete(format!("historical import bytes are invalid: {error}")))?;
+            if resolved.plan.plan_id != plan["planId"].as_str().unwrap()
+                || resolved.record.plan.semantic_digest != plan["semanticDigest"].as_str().unwrap()
+            {
+                return Err(incomplete(
+                    "historical import plan differs from its source declaration",
+                ));
+            }
+            let provenance =
+                sceneworks_core::model_artifacts::provenance::resolved_model_provenance(
+                    &state.settings.data_dir,
+                    new_entry,
+                )
+                .map_err(|error| {
+                    incomplete(format!("historical import plan is invalid: {error}"))
+                })?;
+            if provenance.is_none() {
+                return Err(incomplete(
+                    "historical import plan has no validated provenance",
+                ));
+            }
+            crate::ensure_expected_imported_model_reference(
+                state,
+                original,
+                &Value::Object(new_entry.clone()),
+            )?;
+        }
+        if produced && !pinned_plan {
+            // A produced (trained or converted) source has no publisher to re-fetch from: its
+            // authority is the producer receipt over the exact local bytes. Verify those bytes
+            // now, so a substituted or missing output fails the job instead of waiting forever
+            // for a route that can never be proven.
+            let source = ["modelPath", "installedPath"]
+                .into_iter()
+                .find_map(|key| new_entry.get(key).and_then(Value::as_str))
+                .or_else(|| {
+                    new_entry
+                        .get("paths")
+                        .and_then(|paths| paths.get("model"))
+                        .and_then(Value::as_str)
+                })
+                .ok_or_else(|| {
+                    incomplete(format!(
+                        "historical model source {old_slot} has no local producer output"
+                    ))
+                })?;
+            verify_produced_local_source_offloaded(
+                state,
+                &Value::Object(new_entry.clone()),
+                Path::new(source),
+            )
+            .await
+            .map_err(|error| {
+                incomplete(format!(
+                    "historical model source {old_slot} bytes are missing or changed: {}",
+                    error.detail
+                ))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// The source identity of one model carrier: what names the bytes and the producer, never how
+/// the catalog presents them. Display text, UI copy, defaults, limits, capabilities, tags,
+/// visibility, license display text and memory evidence may change between releases (or through
+/// a presentation-only user override) without changing which bytes a job loads, so they are not
+/// compared. Local paths are locators: only their presence is identity, never their value.
+pub(crate) fn historical_source_identity(entry: &Value) -> Value {
+    const SCALARS: [&str; 10] = [
+        "id",
+        "type",
+        "family",
+        "adapter",
+        "baseModel",
+        "catalogScope",
+        "importSourceShape",
+        "importQuantFormat",
+        "minimaxH3Partition",
+        "quantization",
+    ];
+    // `path` here is a file inside the pinned repository (a swapped weight file is a different
+    // source), not a host locator.
+    const DOWNLOAD: [&str; 13] = [
+        "provider",
+        "repo",
+        "revision",
+        "files",
+        "path",
+        "variant",
+        "subdir",
+        "subfolder",
+        "componentId",
+        "expectedSha256",
+        "expectedSizeBytes",
+        "weightsSha256",
+        "localDerivation",
+    ];
+    fn pick(value: &Value, keys: &[&str]) -> Value {
+        let Some(object) = value.as_object() else {
+            return value.clone();
+        };
+        Value::Object(
+            keys.iter()
+                .filter_map(|key| Some(((*key).to_owned(), object.get(*key)?.clone())))
+                .collect(),
+        )
+    }
+    fn locator() -> Value {
+        Value::String("<locator>".to_owned())
+    }
+    let Some(entry) = entry.as_object() else {
+        return Value::Null;
+    };
+    let mut identity = JsonObject::new();
+    for key in SCALARS {
+        if let Some(value) = entry.get(key) {
+            identity.insert(key.to_owned(), value.clone());
+        }
+    }
+    if let Some(download) = entry.get("download") {
+        identity.insert("download".to_owned(), pick(download, &DOWNLOAD));
+    }
+    for key in ["downloads", "conditionalComponents"] {
+        if let Some(downloads) = entry.get(key) {
+            let projected = match downloads.as_array() {
+                Some(rows) => Value::Array(rows.iter().map(|row| pick(row, &DOWNLOAD)).collect()),
+                None => downloads.clone(),
+            };
+            identity.insert(key.to_owned(), projected);
+        }
+    }
+    if let Some(files) = entry.get("files") {
+        identity.insert("files".to_owned(), files.clone());
+    }
+    if let Some(components) = entry.get("components") {
+        let projected = match components.as_array() {
+            Some(rows) => Value::Array(
+                rows.iter()
+                    .map(|row| match row.as_object() {
+                        Some(component) => Value::Object(
+                            component
+                                .iter()
+                                .filter(|(key, _)| {
+                                    !matches!(
+                                        key.as_str(),
+                                        "name" | "label" | "description" | "displayName"
+                                    )
+                                })
+                                .map(|(key, value)| {
+                                    let value = if key == "path" {
+                                        locator()
+                                    } else {
+                                        value.clone()
+                                    };
+                                    (key.clone(), value)
+                                })
+                                .collect(),
+                        ),
+                        None => row.clone(),
+                    })
+                    .collect(),
+            ),
+            None => components.clone(),
+        };
+        identity.insert("components".to_owned(), projected);
+    }
+    if let Some(source) = entry.get("source") {
+        let mut projected = pick(source, &["provider", "repo", "revision", "variant"]);
+        if source.get("path").is_some() {
+            projected["path"] = locator();
+        }
+        identity.insert("source".to_owned(), projected);
+    }
+    if let Some(plan) = entry.get("importPlan") {
+        identity.insert(
+            "importPlan".to_owned(),
+            pick(plan, &["checkpointId", "planId", "semanticDigest"]),
+        );
+    }
+    if let Some(producer) = entry
+        .get("provenance")
+        .and_then(|provenance| provenance.get("trainingJobId"))
+    {
+        identity.insert(
+            "provenance".to_owned(),
+            serde_json::json!({"trainingJobId": producer}),
+        );
+    }
+    if let Some(trained) = entry.get("trainedCheckpoint") {
+        identity.insert(
+            "trainedCheckpoint".to_owned(),
+            pick(
+                trained,
+                &[
+                    "modelId",
+                    "engineModel",
+                    "family",
+                    "task",
+                    "baseModel",
+                    "layout",
+                ],
+            ),
+        );
+    }
+    if let Some(encoder) = entry.get("resolvedTextEncoder") {
+        // The authored encoder choice and its source kind are identity; the resolved path is a
+        // locator re-derived from this host's catalog, and its bytes are captured separately.
+        identity.insert(
+            "resolvedTextEncoder".to_owned(),
+            pick(encoder, &["selectionId", "sourceKind"]),
+        );
+    }
+    if let Some(paths) = entry.get("paths") {
+        let projected = match paths {
+            Value::Object(paths) => Value::Object(
+                paths
+                    .iter()
+                    .filter(|(_, value)| !value.is_null())
+                    .map(|(key, _)| (key.clone(), locator()))
+                    .collect(),
+            ),
+            _ => Value::Null,
+        };
+        identity.insert("paths".to_owned(), projected);
+    }
+    for key in ["modelPath", "installedPath"] {
+        if entry.get(key).is_some_and(|value| !value.is_null()) {
+            identity.insert(key.to_owned(), locator());
+        }
+    }
+    Value::Object(identity)
+}
+
 /// Bind source-affecting authored choices. Prompt, seed and render controls remain in the
 /// canonical job payload and may change on an explicitly duplicated job without changing the
 /// frozen source. Model/variant/decoder/adapter choices cannot silently change that source.
@@ -791,7 +1127,7 @@ async fn capture_portable_model_binding_inner(
             }
         }
     }
-    if model_free_job(job_type, payload) {
+    if sceneworks_core::model_artifacts::portable_binding::model_free_job(job_type, payload) {
         return Ok(None);
     }
     let entries = payload_model_entries(payload)?;
@@ -1062,43 +1398,6 @@ fn conversion_claim_tier_rank(
 
 fn incomplete(message: impl Into<String>) -> ApiError {
     ApiError::model_artifact_conflict(message.into(), "model_artifact_incomplete")
-}
-
-fn model_free_job(job_type: &JobType, payload: &JsonObject) -> bool {
-    matches!(
-        job_type,
-        JobType::Placeholder
-            | JobType::FrameExtract
-            | JobType::TimelineExport
-            | JobType::DatasetParquetImport
-            | JobType::ModelImport
-            | JobType::LoraImport
-            | JobType::ModelDownload
-            | JobType::LoraDownload
-    ) || matches!(job_type, JobType::LoraTrain | JobType::ControlTraining)
-        && payload.get("dryRun").and_then(Value::as_bool) == Some(true)
-        || matches!(job_type, JobType::TrainingCaption)
-            && payload.get("mode").and_then(Value::as_str) == Some("triggerOnly")
-        // A procedural person preview (`preview: true`) runs the CPU utility worker's
-        // placeholder path — `media_jobs` loads no model bytes for it (the detector and
-        // segmenter are the real, non-preview run). The request still CARRIES the utility
-        // catalog entries, so freezing their revision closure would bind a job whose
-        // frozen sources the worker's binding-aware guard then dutifully downloads
-        // (multi-GB) before running a handler that never opens them. Mirrors the
-        // worker-side split (`person_job_is_preview` / `required_capability`): a preview
-        // job freezes no binding at all, and the worker guard resolves its carried
-        // entries exactly as an unbound job does (a missing model stays an on-demand
-        // install, never a preview blocker).
-        || matches!(job_type, JobType::PersonDetect | JobType::PersonTrack)
-            && payload.get("preview").and_then(Value::as_bool) == Some(true)
-        || matches!(job_type, JobType::CatalogAnalysis)
-            && [
-                "structuredAnalysisEnabled",
-                "visionAnalysisEnabled",
-                "semanticEmbeddingsEnabled",
-            ]
-            .into_iter()
-            .all(|key| payload.get(key).and_then(Value::as_bool) == Some(false))
 }
 
 struct TrainingBaseSelection {
@@ -2534,6 +2833,13 @@ async fn resolve_trusted_pinned_files(
     selectors: &[String],
 ) -> Result<Vec<PortableArtifactFile>, ApiError> {
     #[cfg(test)]
+    {
+        let gate = state.test_hooks.pinned_metadata_gate.lock().clone();
+        if let Some(mut gate) = gate {
+            let _ = gate.wait_for(|open| *open).await;
+        }
+    }
+    #[cfg(test)]
     if let Some(fixture) = state.test_hooks.pinned_metadata_override.lock().clone() {
         return Ok(fixture(repo, revision, selectors));
     }
@@ -3172,7 +3478,189 @@ async fn capture_selected_request_overlays_offloaded(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sceneworks_core::model_artifacts::portable_binding::model_free_job;
     use serde_json::json;
+
+    /// SW-7031 AC4 / Codex 4541859826: presentation is not source identity. A rename, UI copy,
+    /// defaults, limits, capabilities, tags, visibility, license display text or memory evidence
+    /// change must still bind an unchanged historical source; the authored text encoder stays
+    /// compared by its selection, not its host path.
+    #[tokio::test]
+    async fn historical_identity_ignores_presentation_but_not_source() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, state) = crate::create_app_with_state(crate::tests::support::test_settings(&root))
+            .expect("test API state");
+        let old = json!({"modelManifestEntry":{
+            "id":"example", "family":"flux", "type":"image", "catalogScope":"builtin",
+            "name":"Example", "ui":{"label":"Example","description":"old copy"},
+            "defaults":{"steps":20,"resolution":"1024x1024"}, "limits":{"count":[1,2]},
+            "capabilities":["text_to_image"], "tags":["old"], "hidden":false,
+            "licenseNotice":"old notice",
+            "mlx":{"minMemoryGb":24},
+            "downloads":[{"provider":"huggingface","repo":"owner/model","revision":"a".repeat(40),
+                "files":["model.safetensors"],"estimatedSizeBytes":10,"footprint":{"peakMemoryBytes":1}}],
+            "resolvedTextEncoder":{"selectionId":"encoder-a","sourceKind":"directory","path":"/root-a/te"}
+        }})
+        .as_object()
+        .unwrap()
+        .clone();
+        let mut presentation = old.clone();
+        {
+            let entry = presentation.get_mut("modelManifestEntry").unwrap();
+            entry["name"] = json!("Renamed example");
+            entry["ui"] = json!({"label":"Renamed","description":"new copy"});
+            entry["defaults"] = json!({"steps":8,"resolution":"768x768"});
+            entry["limits"] = json!({"count":[1]});
+            entry["capabilities"] = json!(["text_to_image", "image_to_image"]);
+            entry["tags"] = json!(["new"]);
+            entry["hidden"] = json!(true);
+            entry["licenseNotice"] = json!("new notice");
+            entry["mlx"] = json!({"minMemoryGb":32});
+            entry["downloads"][0]["estimatedSizeBytes"] = json!(11);
+            entry["downloads"][0]["footprint"] = json!({"peakMemoryBytes":2});
+            entry["resolvedTextEncoder"]["path"] = json!("/root-b/te");
+        }
+        assert_eq!(
+            historical_source_identity(&old["modelManifestEntry"]),
+            historical_source_identity(&presentation["modelManifestEntry"])
+        );
+        validate_historical_source_carrier(&state, &old, &presentation)
+            .await
+            .expect("presentation-only edits keep the historical source");
+
+        for (pointer, replacement) in [
+            ("/downloads/0/revision", json!("b".repeat(40))),
+            ("/downloads/0/files", json!(["other.safetensors"])),
+            ("/resolvedTextEncoder/selectionId", json!("encoder-b")),
+            ("/family", json!("other_family")),
+            ("/baseModel", json!("replacement-base")),
+        ] {
+            let mut changed = old.clone();
+            let entry = changed.get_mut("modelManifestEntry").unwrap();
+            if let Some(slot) = entry.pointer_mut(pointer) {
+                *slot = replacement;
+            } else {
+                entry[pointer.trim_start_matches('/')] = replacement;
+            }
+            assert!(
+                validate_historical_source_carrier(&state, &old, &changed)
+                    .await
+                    .is_err(),
+                "{pointer} is source identity"
+            );
+        }
+        let mut dropped_encoder = old.clone();
+        dropped_encoder
+            .get_mut("modelManifestEntry")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("resolvedTextEncoder");
+        assert!(
+            validate_historical_source_carrier(&state, &old, &dropped_encoder)
+                .await
+                .is_err(),
+            "an authored encoder must not be silently dropped"
+        );
+    }
+
+    /// A builtin carrier stamped by the pre-registry code (memory evidence inline on the entry,
+    /// older presentation) must bind against today's registry projection of the same pinned
+    /// source. Its `paths` are install locators of that pinned download, not a local authority.
+    #[tokio::test]
+    async fn stamped_builtin_carrier_binds_against_the_current_registry_projection() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, state) = crate::create_app_with_state(crate::tests::support::test_settings(&root))
+            .expect("test API state");
+        let mut current = json!({"model":"z_image_turbo","mode":"text_to_image","prompt":"p"})
+            .as_object()
+            .unwrap()
+            .clone();
+        crate::jobs::canonicalize_image_model_payload(
+            &state,
+            &JobType::ImageGenerate,
+            &mut current,
+        )
+        .await
+        .expect("builtin canonicalizes");
+        assert!(
+            current["modelManifestEntry"].get("paths").is_some(),
+            "the shipped builtin carries install locators: {}",
+            current["modelManifestEntry"]
+        );
+        validate_historical_source_carrier(&state, &current, &current)
+            .await
+            .expect("today's stamped builtin binds");
+        let mut pre_registry = current.clone();
+        {
+            let entry = pre_registry.get_mut("modelManifestEntry").unwrap();
+            entry["name"] = json!("Z-Image Turbo (old name)");
+            entry["defaults"]["steps"] = json!(4);
+            entry["mlx"]["minMemoryGb"] = json!(40);
+            entry["mlx"]["calibrations"] = json!([{"abi":3}]);
+            entry["candle"]["supportsSequentialOffload"] = json!(true);
+            entry["downloads"][0]["footprint"]["residentMemoryBytes"] = json!(5776463496_u64);
+        }
+        validate_historical_source_carrier(&state, &pre_registry, &current)
+            .await
+            .expect("a pre-registry stamp of the same pinned builtin binds");
+        let mut replaced = pre_registry.clone();
+        replaced.get_mut("modelManifestEntry").unwrap()["downloads"][0]["revision"] =
+            json!("c".repeat(40));
+        assert!(
+            validate_historical_source_carrier(&state, &replaced, &current)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn historical_carrier_allows_root_move_but_not_catalog_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let (_, state) = crate::create_app_with_state(crate::tests::support::test_settings(&root))
+            .expect("test API state");
+        let old = json!({"modelManifestEntry":{
+            "id":"example", "family":"flux", "type":"image",
+            "download":{"repo":"owner/model", "revision":"a".repeat(40)},
+            "files":["model.safetensors"]
+        }})
+        .as_object()
+        .unwrap()
+        .clone();
+        validate_historical_source_carrier(&state, &old, &old)
+            .await
+            .unwrap();
+        let mut replaced = old.clone();
+        replaced.get_mut("modelManifestEntry").unwrap()["download"]["revision"] =
+            json!("b".repeat(40));
+        assert!(validate_historical_source_carrier(&state, &old, &replaced)
+            .await
+            .is_err());
+        let mut swapped_file = old.clone();
+        swapped_file.get_mut("modelManifestEntry").unwrap()["download"]["path"] =
+            json!("other-weights.safetensors");
+        assert!(
+            validate_historical_source_carrier(&state, &old, &swapped_file)
+                .await
+                .is_err()
+        );
+        let mut path_only = old.clone();
+        path_only.get_mut("modelManifestEntry").unwrap()["download"] = Value::Null;
+        path_only.get_mut("modelManifestEntry").unwrap()["paths"] =
+            json!({"model":"/root-a/model.safetensors"});
+        let mut moved = path_only.clone();
+        moved.get_mut("modelManifestEntry").unwrap()["paths"] =
+            json!({"model":"/root-b/model.safetensors"});
+        assert_eq!(
+            historical_source_identity(&path_only["modelManifestEntry"]),
+            historical_source_identity(&moved["modelManifestEntry"])
+        );
+        assert!(
+            validate_historical_source_carrier(&state, &path_only, &moved)
+                .await
+                .is_err()
+        );
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn installed_hash_does_not_block_unrelated_request_task() {

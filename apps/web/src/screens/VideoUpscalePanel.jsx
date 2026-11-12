@@ -6,7 +6,7 @@
 import React, { useMemo, useState } from "react";
 
 import { VideoSourcePickerField } from "../components/AssetPicker.jsx";
-import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
+import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../modelEligibility.js";
 
 // SeedVR2 is the only Mac engine (no torch path). 7B (sc-5197) / int8 (sc-5198) are
 // tracked engine follow-ups, so the variant is fixed to 3B here.

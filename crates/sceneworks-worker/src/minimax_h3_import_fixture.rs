@@ -429,8 +429,36 @@ pub fn stage_managed_minimax_h3_import_source_with_tier(
     }
 }
 
-pub const SHARED_REVISION: &str = "1111111111111111111111111111111111111111";
-pub const TIER_REVISION: &str = "2222222222222222222222222222222222222222";
+/// The revision the REGISTERED `minimax_h3` base pins `repo` at. The import API derives an import's
+/// component closure from the compiled base row, so the synthetic components are staged and
+/// declared at exactly the registered pins; a fixture-only revision would name a snapshot the
+/// server-computed closure never asks for.
+fn registered_component_revision(repo: &str) -> &'static str {
+    let rows = sceneworks_core::builtin_manifests::builtin_model_entry("minimax_h3")
+        .expect("minimax_h3 is a registered builtin")["downloads"]
+        .as_array()
+        .expect("registered minimax_h3 downloads");
+    let mut revisions = rows
+        .iter()
+        .filter(|row| row["repo"] == repo)
+        .filter_map(|row| row["revision"].as_str());
+    let revision = revisions.next().expect("registered component repository");
+    assert!(
+        revisions.all(|other| other == revision),
+        "{repo}: the registered base pins one revision per component repository"
+    );
+    revision
+}
+
+/// `MiniMaxAI/MiniMax-H3`'s registered pin: the shared tokenizer, VAEs and bf16 encoder.
+pub fn shared_revision() -> &'static str {
+    registered_component_revision("MiniMaxAI/MiniMax-H3")
+}
+
+/// `SceneWorks/minimax-h3-mlx`'s registered pin: the tiered encoders and companion DiTs.
+pub fn tier_revision() -> &'static str {
+    registered_component_revision("SceneWorks/minimax-h3-mlx")
+}
 
 /// The same source-content capture fresh managed/linked imports perform. Use only at explicit
 /// fixture construction/recompilation, never in a render helper (which would bless drift).
@@ -467,12 +495,12 @@ pub fn captured_component_context(
 /// operator tier/base scratch trees a test happened to stage first. Mutating or asserting against
 /// any other root no longer describes the committed components.
 pub fn shared_component_snapshot(data_dir: &Path) -> PathBuf {
-    component_snapshot(data_dir, "MiniMaxAI/MiniMax-H3", SHARED_REVISION)
+    component_snapshot(data_dir, "MiniMaxAI/MiniMax-H3", shared_revision())
 }
 
 /// The tiered component snapshot root (the `SceneWorks/minimax-h3-mlx` rehost) an import binds.
 pub fn tier_component_snapshot(data_dir: &Path) -> PathBuf {
-    component_snapshot(data_dir, "SceneWorks/minimax-h3-mlx", TIER_REVISION)
+    component_snapshot(data_dir, "SceneWorks/minimax-h3-mlx", tier_revision())
 }
 
 fn component_snapshot(data_dir: &Path, repo: &str, revision: &str) -> PathBuf {
@@ -516,12 +544,12 @@ pub fn stage_component_snapshots(data_dir: &Path) {
         .repository_root("MiniMaxAI/MiniMax-H3")
         .unwrap()
         .join("snapshots")
-        .join(SHARED_REVISION);
+        .join(shared_revision());
     let tiers = library
         .repository_root("SceneWorks/minimax-h3-mlx")
         .unwrap()
         .join("snapshots")
-        .join(TIER_REVISION);
+        .join(tier_revision());
     fn copy_missing(source: &Path, target: &Path) {
         std::fs::create_dir_all(target).unwrap();
         for entry in std::fs::read_dir(source).unwrap() {
@@ -547,8 +575,46 @@ pub fn stage_component_snapshots(data_dir: &Path) {
         write_companion(&scratch_tiers.join(tier).join("transformer_ref"));
         write_companion(&scratch_tiers.join(tier).join("transformer"));
     }
+    // Off macOS the registered base's dense primary is `MiniMaxAI/MiniMax-H3` `transformer/*`, so
+    // an import's architecture-config row (`import_config_download`) names `transformer/config.json`
+    // in the shared snapshot; on macOS it names the rehost's `bf16/transformer/config.json` above.
+    write_companion(&scratch_base.join("transformer"));
+    // Where this host's REGISTERED `fl2va_audio_vae_config` row fetches the whole `FL2VA/audio_vae/`
+    // directory (off macOS), an API-computed import closure declares it and the shared completeness
+    // predicate requires its weights beside the three constructor documents. A native lane drives
+    // this fixture's own document-only closure ([`component_downloads`]) through a real loader, and
+    // there an undeclared file beside the documents is an uncommitted acquisition, so it stays out.
+    if cfg!(not(native_lane)) && registered_fl2va_row_is_a_directory() {
+        write_safetensors(
+            &scratch_base.join("FL2VA/audio_vae/model.safetensors"),
+            &[("weight", "F16")],
+            0x2d,
+        );
+    }
     copy_missing(&scratch_base, &base);
     copy_missing(&scratch_tiers, &tiers);
+}
+
+/// Whether the registered `minimax_h3` FL2VA audio-VAE row, as this host's catalog serves it, names
+/// its whole directory rather than the three constructor documents.
+fn registered_fl2va_row_is_a_directory() -> bool {
+    let mut base = Value::Object(
+        sceneworks_core::builtin_manifests::builtin_model_entry("minimax_h3")
+            .expect("minimax_h3 is a registered builtin")
+            .clone(),
+    );
+    sceneworks_core::model_artifacts::artifact_selection::retain_downloads_for_os(
+        &mut base,
+        std::env::consts::OS,
+    );
+    base["downloads"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|row| row["componentId"] == "fl2va_audio_vae_config")
+        .flat_map(|row| row["files"].as_array().into_iter().flatten())
+        .filter_map(Value::as_str)
+        .any(|file| file.ends_with("/*"))
 }
 
 pub fn component_downloads(tier: &str, partition: &str) -> Vec<Value> {
@@ -559,14 +625,14 @@ pub fn component_downloads(tier: &str, partition: &str) -> Vec<Value> {
         ("audio_vae", "audio_vae"),
         ("fl2va_audio_vae_config", "FL2VA/audio_vae"),
     ] {
-        rows.push(json!({"provider":"huggingface","repo":"MiniMaxAI/MiniMax-H3","revision":SHARED_REVISION,"coRequisite":true,"componentId":id,"subdir":dir,"files":if id == "fl2va_audio_vae_config" { json!(["FL2VA/audio_vae/config.json","FL2VA/audio_vae/config.yaml","FL2VA/audio_vae/metadata.json"]) } else { json!([format!("{dir}/*")]) }}));
+        rows.push(json!({"provider":"huggingface","repo":"MiniMaxAI/MiniMax-H3","revision":shared_revision(),"coRequisite":true,"componentId":id,"subdir":dir,"files":if id == "fl2va_audio_vae_config" { json!(["FL2VA/audio_vae/config.json","FL2VA/audio_vae/config.yaml","FL2VA/audio_vae/metadata.json"]) } else { json!([format!("{dir}/*")]) }}));
     }
     let encoder = if tier == "bf16" {
         "text_encoder".to_owned()
     } else {
         format!("{tier}/text_encoder")
     };
-    rows.push(json!({"provider":"huggingface","repo":if tier == "bf16" { "MiniMaxAI/MiniMax-H3" } else { "SceneWorks/minimax-h3-mlx" },"revision":if tier == "bf16" {SHARED_REVISION} else {TIER_REVISION},"coRequisite":true,"variant":tier,"componentId":"text_encoder","subdir":encoder,"files":[format!("{encoder}/*")]}));
+    rows.push(json!({"provider":"huggingface","repo":if tier == "bf16" { "MiniMaxAI/MiniMax-H3" } else { "SceneWorks/minimax-h3-mlx" },"revision":if tier == "bf16" {shared_revision()} else {tier_revision()},"coRequisite":true,"variant":tier,"componentId":"text_encoder","subdir":encoder,"files":[format!("{encoder}/*")]}));
     if partition != "hybrid" {
         let companion = if partition == "ref2va" {
             "transformer"
@@ -574,7 +640,7 @@ pub fn component_downloads(tier: &str, partition: &str) -> Vec<Value> {
             "transformer_ref"
         };
         let dir = format!("{tier}/{companion}");
-        rows.push(json!({"provider":"huggingface","repo":"SceneWorks/minimax-h3-mlx","revision":TIER_REVISION,"coRequisite":true,"variant":tier,"subdir":dir,"files":[format!("{dir}/*")]}));
+        rows.push(json!({"provider":"huggingface","repo":"SceneWorks/minimax-h3-mlx","revision":tier_revision(),"coRequisite":true,"variant":tier,"subdir":dir,"files":[format!("{dir}/*")]}));
     }
     rows
 }
@@ -593,8 +659,8 @@ pub fn write_companion(dir: &Path) {
 #[cfg(all(test, target_os = "macos"))]
 pub fn install_fixture_snapshots(hub: &Path, tiers: &Path, base: &Path) {
     for (repo, revision, source) in [
-        ("models--MiniMaxAI--MiniMax-H3", SHARED_REVISION, base),
-        ("models--SceneWorks--minimax-h3-mlx", TIER_REVISION, tiers),
+        ("models--MiniMaxAI--MiniMax-H3", shared_revision(), base),
+        ("models--SceneWorks--minimax-h3-mlx", tier_revision(), tiers),
     ] {
         let snapshot = hub.join(repo).join("snapshots").join(revision);
         std::fs::create_dir_all(&snapshot).unwrap();

@@ -1261,7 +1261,7 @@ pub(crate) fn training_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
         .and_then(|target| target.get("kernel"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if !MLX_ROUTED_TRAINING_KERNELS.contains(&kernel) {
+    if !MLX_ROUTED_TRAINING_KERNELS.contains(kernel) {
         return false;
     }
     if kernel == "moss_image_lora" {

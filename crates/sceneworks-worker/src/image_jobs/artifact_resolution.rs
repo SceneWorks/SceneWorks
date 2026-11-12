@@ -536,7 +536,7 @@ pub(crate) fn resolve_weights_dir(
     // HF snapshot (diffusers layout: `transformer/` + `vae/` + `text_encoder/`) — NOT the MLX-packed
     // `SceneWorks/Sana_1600M_1024px_mlx` turnkey the macOS/MLX path loads (which has no diffusers tree
     // the candle pipeline can read) and NOT a `q4/q8/bf16` tier subdir. So resolve the diffusers repo's
-    // snapshot ROOT directly, BYPASSING the `STANDARD_TIER_MODELS` `standard_tier_subdir` descent below
+    // snapshot ROOT directly, BYPASSING the `standard_tier_subdir` descent below
     // (`sana_1600m` is registered there for the MLX turnkey, which would otherwise append a nonexistent
     // `q4/` to the diffusers root). The whole-repo download (manifest windows/linux entry, empty files
     // list) provisions this snapshot; an unfetched repo surfaces as a loud "snapshot not found" load
@@ -553,7 +553,7 @@ pub(crate) fn resolve_weights_dir(
     // the `candle-gen-sana` Sprint pipeline loads the WHOLE `Efficient-Large-Model/
     // Sana_Sprint_1.6B_1024px_diffusers` HF snapshot (same diffusers layout: `transformer/` + `vae/` +
     // `text_encoder/`), NOT the MLX-packed turnkey and NOT a `q4/q8/bf16` tier subdir. Resolve the
-    // diffusers repo's snapshot ROOT directly, BYPASSING the `STANDARD_TIER_MODELS` descent below
+    // diffusers repo's snapshot ROOT directly, BYPASSING the `standard_tier_subdir` descent below
     // (`sana_sprint_1600m` is registered there for the MLX turnkey, which would otherwise append a
     // nonexistent `q4/`). macOS never compiles this branch (it keeps the MLX turnkey path).
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -576,8 +576,8 @@ pub(crate) fn resolve_weights_dir(
     // Catalog-wide quant-matrix models (sc-8513, epic 8506) ship as SceneWorks pre-quantized
     // turnkeys with self-contained `q4/` (default) + `q8/` + `bf16/` subdirs (replacing any
     // install-time convert); point the engine at the chosen tier's subdir rather than the repo root.
-    // FLUX.2-dev was the pilot; the rollout registers each model in [`STANDARD_TIER_MODELS`] OR (the
-    // sc-8508 manifest-driven form) flags `mlx.standardTierLayout: true` in its catalog entry.
+    // FLUX.2-dev was the pilot; each builtin's compiled product now declares
+    // `mlx.standardTierLayout: true` when this resolver applies.
     // Qwen-Image 2.1 (sc-24112) — a SPLIT-REPO tier layout, and the reason it cannot use
     // `standard_tier_subdir`: that resolver descends into `<root>/<tier>/` of ONE repo, and 2.1's
     // three tiers do not live in one repo. bf16 IS the released upstream snapshot at its own root
@@ -607,8 +607,7 @@ pub(crate) fn resolve_weights_dir(
     // Catalog-wide quant-matrix models (sc-8513, epic 8506) ship as SceneWorks pre-quantized
     // turnkeys with self-contained `q4/` (default) + `q8/` + `bf16/` subdirs (replacing any
     // install-time convert); point the engine at the chosen tier's subdir rather than the repo root.
-    // FLUX.2-dev was the pilot; the rollout registers each model in [`STANDARD_TIER_MODELS`] OR (the
-    // sc-8508 manifest-driven form) flags `mlx.standardTierLayout: true` in its catalog entry.
+    // The compiled product's `mlx.standardTierLayout` flag selects this resolver.
     if uses_standard_tier_layout(request) {
         return Ok(snapshot.map(|root| standard_tier_subdir(&root, request)));
     }
@@ -753,9 +752,53 @@ pub(crate) fn tier_key_for_resolved_dir(
     tier_key_from_resolved_dir(dir).or_else(|| split_repo_root_tier_key(manifest_entry, dir))
 }
 
-/// Catalog ids whose tiers span repositories with a tier that is a whole snapshot root.
+/// A dense snapshot root and packed q4/q8 subtrees in another repository require the root-tier
+/// resolver. This is read from the compiled product downloads rather than a model-ID list.
 #[cfg(native_lane)]
-const SPLIT_REPO_TIER_MODELS: &[&str] = sceneworks_core::jobs_store::QWEN_IMAGE_2_1_MODEL_IDS;
+fn has_split_repo_root_tiers(model_id: &str) -> bool {
+    let Some(spec) = sceneworks_core::registry::builtin_model_spec(model_id) else {
+        return false;
+    };
+    let Some(downloads) = spec
+        .product
+        .fields
+        .get("downloads")
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+    let tier = |name: &str, root: bool| {
+        downloads.iter().find(|row| {
+            row.get("variant").and_then(Value::as_str) == Some(name)
+                && row
+                    .get("files")
+                    .and_then(Value::as_array)
+                    .is_some_and(|files| {
+                        if root {
+                            files.is_empty()
+                        } else {
+                            files.contains(&Value::from(format!("{name}/*")))
+                        }
+                    })
+        })
+    };
+    let (Some(dense), Some(q4), Some(q8)) =
+        (tier("bf16", true), tier("q4", false), tier("q8", false))
+    else {
+        return false;
+    };
+    q4["repo"] == q8["repo"] && dense["repo"] != q4["repo"]
+}
+
+#[cfg(all(test, native_lane))]
+#[test]
+fn split_repo_root_layout_follows_compiled_download_shapes() {
+    assert!(has_split_repo_root_tiers("qwen_image_2_1"));
+    assert!(has_split_repo_root_tiers("qwen_image_2_1_turbo"));
+    assert!(!has_split_repo_root_tiers("flux3_klein"));
+    assert!(!has_split_repo_root_tiers("qwen_image"));
+    assert!(!has_split_repo_root_tiers("unregistered_model"));
+}
 
 #[cfg(native_lane)]
 pub(super) fn split_repo_root_tier_key(
@@ -766,7 +809,7 @@ pub(super) fn split_repo_root_tier_key(
         is_pending_artifact_download, model_download_for_variant,
     };
     let model_id = manifest_entry.get("id").and_then(Value::as_str)?;
-    if !SPLIT_REPO_TIER_MODELS.contains(&model_id) {
+    if !has_split_repo_root_tiers(model_id) {
         return None;
     }
     let revision = dir.file_name()?.to_str()?;
@@ -1063,93 +1106,6 @@ pub(crate) fn resolved_mlx_artifact_provenance(
     }
     Ok(None)
 }
-
-/// Models that ship the standard SceneWorks quant-matrix turnkey layout: self-contained `q4/`
-/// (manifest default) + `q8/` + `bf16/` subdirs, each a complete `from_snapshot`-loadable tree
-/// (packed or dense `transformer/` + the dense text encoder(s)/VAE/tokenizer). Registering a model
-/// here routes it through [`standard_tier_subdir`] (sc-8513, epic 8506) — the generalization of the
-/// FLUX.2-dev pilot's bespoke resolver. Legacy turnkeys with non-standard defaults/variants
-/// (Ideogram q4-only, Krea q8-default, Boogu per-variant + on-demand bf16) keep their own resolvers
-/// above.
-///
-/// sc-8508 makes this catalog-driven: [`uses_standard_tier_layout`] also honors a manifest
-/// `mlx.standardTierLayout: true` flag, so a NEW quant-matrix model can opt in from the manifest
-/// alone. This registry remains the zero-manifest-change path for every already-wired model.
-pub(super) const STANDARD_TIER_MODELS: &[&str] = &[
-    "flux2_dev",
-    "sd3_5_large",
-    "sd3_5_large_turbo",
-    "sd3_5_medium",
-    // Z-Image (sc-8670, Group-B pilot): turbo + base ship the standard q4/q8/bf16 turnkey; the
-    // edit id reuses the turbo turnkey (engine_id z_image_turbo, same repo).
-    "z_image_turbo",
-    "z_image",
-    "z_image_edit",
-    // FLUX.2-klein (sc-8711): the two distilled weight variants ship the standard q4/q8/bf16
-    // turnkey, but with a DENSE bf16 Qwen3 text encoder in every tier (only the transformer is
-    // packed) — so they additionally carry its `mlx.denseTextEncoderTier` declaration, which forces the load
-    // Quant to None so the dense TE is never re-quantized. `_true_v2` stays on its install-time
-    // single-file→diffusers convert (candle-only) and is not a turnkey yet.
-    "flux2_klein_9b",
-    "flux2_klein_9b_kv",
-    // Qwen-Image (sc-8669, Group-B): base T2I + the two Edit-2511 ids ship the standard
-    // q4/q8/bf16 turnkey. Like FLUX.2-klein only the transformer is packed (the Qwen2.5-VL text
-    // encoder is skip_quantization, the VAE is all-conv), so the TE/VAE stay dense bf16 in every
-    // tier — but, UNLIKE klein, the qwen loader never quantizes the TE regardless of the load
-    // Quant, so these do NOT declare `mlx.denseTextEncoderTier`: the q4/q8 load-quant is a harmless
-    // no-op on the already-packed transformer, and the bf16 tier resolves to Quant::None anyway.
-    // `qwen_image_edit_2511` + `_2511_lightning` share one repo (same Edit-2511 checkpoint).
-    "qwen_image",
-    "qwen_image_edit_2511",
-    "qwen_image_edit_2511_lightning",
-    // FLUX.1 (sc-8669, Group-B): schnell + dev ship the standard q4/q8/bf16 turnkey. FLUX quantizes
-    // all four components (DiT transformer + CLIP + T5 + VAE attention), so the TE is packed too —
-    // hence no `mlx.denseTextEncoderTier`. The pinned Candle descriptor advertises no load-time
-    // quants and rejects a nonempty `LoadSpec.quantize`; its loader packed-detects q4/q8 directly
-    // from the selected directory while the worker records that resolved tier separately. Replaces
-    // the gated BFL download + install-time quantize.
-    "flux_schnell",
-    "flux_dev",
-    // PuLID-FLUX (sc-9947, epic 8506): the MLX lane's FLUX.1-dev backbone now loads from the SAME
-    // `SceneWorks/flux1-dev-mlx` q4/q8/bf16 turnkey as base `flux_dev` (its bespoke `pulid.rs` resolver
-    // calls `standard_tier_subdir` directly; `mlx-gen-pulid` delegates the backbone to `load_flux1`, which
-    // packed-detects the tier). Registering it here makes `uses_standard_tier_layout` true for that
-    // resolver. The candle (Windows/Linux) PuLID lane keeps the upstream dense BFL backbone and never
-    // reaches the base tier path, so this is inert there (epic-9083 covers the candle packed lane).
-    "pulid_flux_dev",
-    // Lens / Lens-Turbo (sc-9092, epic 9083 gap #3): the SceneWorks re-hosted `SceneWorks/lens-mlx` /
-    // `SceneWorks/lens-turbo-mlx` turnkeys are standard q4/q8/bf16 tiers (their manifests already flag
-    // `mlx.standardTierLayout: true`, so `uses_standard_tier_layout` was already true via the manifest —
-    // registering them here is the zero-manifest-change form + documents the candle-lane opt-in). As of
-    // the candle-gen packed-load rollout (sc-8799) the candle Lens loader packed-detects the SAME
-    // turnkey subdir the macOS path loads, so the ad-hoc `candle_lens_repo` (a separate bf16 diffusers
-    // rehost) is retired and both lanes resolve Lens through `standard_tier_subdir`. Lens is the lone
-    // candle family that ALSO advertises `supported_quants` (Q4/Q8) today, so `resolve_quant` engages on
-    // its candle lane; ideogram/boogu/krea keep their legacy per-family subdir resolvers (non-standard
-    // q4-default / per-variant / q8-default layouts) and are NOT registered here.
-    "lens",
-    "lens_turbo",
-    // SANA + SANA-Sprint (sc-8489/sc-8513, epic 8506): the `SceneWorks/Sana_1600M_1024px_mlx` /
-    // `Sana_Sprint_1.6B_1024px_mlx` turnkeys ship standard q4/q8/bf16 tiers. mlx-gen #653 packs the
-    // Linear-DiT transformer + the Gemma-2 CHI TE and packed-detects on load; the DC-AE VAE stays
-    // dense in every tier. Unlike the dense-TE klein class, the q4/q8 load-quant is an accepted no-op
-    // on the already-packed weights and bf16 resolves to Quant::None — so these do
-    // NOT need a `mlx.denseTextEncoderTier` declaration (only `flux2_klein_9b` / `_kv` carry that flag;
-    // the "NOT" was dropped by a rename, which left this block contradicting its own UNLIKE clause two
-    // lines above). The SANA descriptor now advertises supported_quants
-    // Q4/Q8 (mlx-gen #654), so `supports_quant()` is true and they flow through the same
-    // resolve_quant + reconcile path as every other matrix model (no more no-quant special case).
-    "sana_1600m",
-    "sana_sprint_1600m",
-    // Kolors (sc-9946, epic 8506): the `SceneWorks/kolors-mlx` turnkey ships standard q4/q8/bf16
-    // tiers. mlx-gen #659 packs the SDXL-style UNet + the ChatGLM3-6B `ChatGlmLinear` projections
-    // and packed-detects on load; the SDXL VAE stays dense in every tier. Unlike the dense-TE klein
-    // class, the ChatGLM3 TE is packed, so the q4/q8 load-quant is an accepted no-op on the
-    // already-packed weights and bf16 resolves to Quant::None — no
-    // `mlx.denseTextEncoderTier` declaration. The kolors descriptor already advertises supported_quants Q4/Q8,
-    // so it flows through the same resolve_quant + reconcile path as every other matrix model.
-    "kolors",
-];
 
 // The paragraph that used to sit here documented `DENSE_TE_TIER_MODELS` — a const that had already
 // moved to `tier_resolver.rs` and is DELETED entirely by sc-15799, so its doc block was orphaned onto

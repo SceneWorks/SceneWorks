@@ -873,6 +873,8 @@ const WAN_MOE_MODEL = {
   name: "Wan 2.2 T2V A14B",
   type: "video",
   family: "wan-video",
+  capabilities: ["text_to_video"],
+  loraCompatibility: { sizeClass: "14b" },
   installState: "ready",
   ui: { description: "Wan A14B MoE video model." },
 };

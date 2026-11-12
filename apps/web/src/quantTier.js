@@ -1,3 +1,4 @@
+import { isFlux3ImageModel } from "./modelEligibility.js";
 // Generation-time quant-tier selection (sc-8515, epic 8506). When a user has MORE THAN ONE
 // quant tier of a model INSTALLED, the studio lets them toggle which tier generates, for A/B
 // comparison. This module derives the picker's options from the model's per-variant install
@@ -77,7 +78,7 @@ export function isFp8rTier(tier) {
 export function nativeTierEligibility(model, workers = []) {
   const has = (cap) => workers.some((worker) => worker?.status !== "offline" &&
     Array.isArray(worker?.capabilities) && worker.capabilities.includes(cap));
-  const flux3 = model?.id === "flux3_klein" || model?.id === "flux3_klein_base";
+  const flux3 = isFlux3ImageModel(model);
   return {
     convRotEligible: has("int8_convrot"),
     nvfp4Eligible: has(flux3 ? "flux3_nvfp4" : "nvfp4"),
@@ -179,7 +180,7 @@ export function isSelectableTier(tier) {
 // caller that knows nothing about worker capabilities behaving exactly as before.
 //
 // Extracted so the THREE readers of this rule share one spelling — `installedTiers`, `allPossibleTiers`,
-// and (sc-15400) `tierSuggestion`'s per-tier memory floor, which must not size a host against a tier
+// and (sc-15400) `registryTierEvidence`'s per-tier memory floor, which must not size a host against a tier
 // that host cannot serve.
 export function tierHostEligible(tier, options = {}) {
   const { convRotEligible = true, nvfp4Eligible = true, fp8rEligible = false } = options;

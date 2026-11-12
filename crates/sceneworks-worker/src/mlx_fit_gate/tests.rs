@@ -387,9 +387,10 @@ fn ltx_video_tier_assertion_mismatch_fails_closed() {
 /// nobody measured simply contributes nothing here and is priced analytically at admission.
 #[test]
 fn shipped_qwen_bindings_are_producible_by_the_production_deferred_route() {
-    let raw = include_str!("../../../../config/manifests/builtin.models.jsonc");
-    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
-        .expect("builtin model manifest parses");
+    let manifest: Value =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("builtin model manifest parses")
+            .clone();
     let Some(qwen) = manifest["models"]
         .as_array()
         .and_then(|models| models.iter().find(|model| model["id"] == "qwen_image"))
@@ -488,9 +489,10 @@ fn shipped_qwen_bindings_are_producible_by_the_production_deferred_route() {
 #[test]
 #[cfg(target_os = "macos")]
 fn every_shipped_audited_mlx_binding_has_a_producible_production_load_shape() {
-    let raw = include_str!("../../../../config/manifests/builtin.models.jsonc");
-    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
-        .expect("builtin model manifest parses");
+    let manifest: Value =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("builtin model manifest parses")
+            .clone();
     let models = manifest["models"].as_array().expect("models array");
 
     let mut audited: Vec<String> = Vec::new();
@@ -594,10 +596,10 @@ fn every_shipped_audited_mlx_binding_has_a_producible_production_load_shape() {
 
 #[test]
 fn shipped_decode_quality_corpus_is_exact_and_drives_the_physical_planner() {
-    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
-        include_str!("../../../../config/manifests/builtin.models.jsonc"),
-    ))
-    .expect("builtin.models.jsonc parses");
+    let manifest: Value =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("builtin model manifest parses")
+            .clone();
     let models = manifest["models"].as_array().expect("manifest models");
     // Which routes ship a P9 corpus, and the family each resolves through. The per-model
     // (rows, admitted) pair that used to sit here, and the 69/69 total below it, were populations
@@ -880,9 +882,10 @@ fn every_planned_mlx_lane_resolves_a_weights_free_provider_contract() {
 /// closure.
 #[test]
 fn shipped_qwen_manifest_and_packaged_evidence_agree_at_their_captured_closure() {
-    let raw = include_str!("../../../../config/manifests/builtin.models.jsonc");
-    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
-        .expect("builtin.models.jsonc parses");
+    let manifest: Value =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("builtin model manifest parses")
+            .clone();
     let entry = manifest
         .get("models")
         .and_then(Value::as_array)
@@ -1101,9 +1104,10 @@ fn shipped_qwen_manifest_and_packaged_evidence_agree_at_their_captured_closure()
 /// it with.
 #[test]
 fn shipped_krea_manifest_and_packaged_evidence_agree_at_their_captured_closure() {
-    let raw = include_str!("../../../../config/manifests/builtin.models.jsonc");
-    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
-        .expect("builtin.models.jsonc parses");
+    let manifest: Value =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("builtin model manifest parses")
+            .clone();
     // sc-22512 (E8): the entry and its opt-in are LOOKED UP, not required. A catalog that has
     // retired `krea_2_turbo`, or that ships it with no `mlx.calibrations` block, is a model
     // nobody measured on this lane — there is nothing to grade currency against, so the harness
@@ -1246,9 +1250,10 @@ fn qwen_real_install_selects_a_verified_rung_and_renders() {
     };
 
     // The SHIPPED manifest entry, not a fixture: the opt-in under test is the one that ships.
-    let raw = include_str!("../../../../config/manifests/builtin.models.jsonc");
-    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
-        .expect("builtin.models.jsonc parses");
+    let manifest: Value =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("builtin model manifest parses")
+            .clone();
     let entry = manifest
         .get("models")
         .and_then(Value::as_array)
@@ -1392,9 +1397,10 @@ fn qwen_real_install_selects_a_verified_rung_and_renders() {
 /// encode a mechanism that does not exist.
 #[test]
 fn shipped_z_image_manifest_admits_the_accepted_mlx_ladder_floor() {
-    let raw = include_str!("../../../../config/manifests/builtin.models.jsonc");
-    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
-        .expect("builtin model manifest parses");
+    let manifest: Value =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("builtin model manifest parses")
+            .clone();
     // sc-22512 (E8): the entry and its opt-in are LOOKED UP, not required. A catalog without
     // `z_image_turbo`, or one shipping it with no exact MLX bindings, is a lane nobody measured
     // — there is no accepted floor to admit — so the harness withholds its question. A PRESENT
@@ -2168,9 +2174,10 @@ fn fixture_closure_digest() -> String {
 /// callers SKIP the comparison rather than failing. A PRESENT but split or malformed opt-in
 /// still fails: that is contradictory data, not missing data.
 fn shipped_mlx_declared_closure_digest(model_id: &str) -> Option<String> {
-    let raw = include_str!("../../../../config/manifests/builtin.models.jsonc");
-    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
-        .expect("builtin model manifest parses");
+    let manifest: Value =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("builtin model manifest parses")
+            .clone();
     let declared = manifest["models"]
         .as_array()
         .and_then(|models| models.iter().find(|model| model["id"] == model_id))
@@ -9371,10 +9378,10 @@ fn source_bound_resident_only_cells_from_inventory(
 #[cfg(target_os = "macos")]
 #[test]
 fn shipped_resident_only_mlx_estimate_band_audit_uses_the_production_budget_path() {
-    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
-        include_str!("../../../../config/manifests/builtin.models.jsonc"),
-    ))
-    .expect("builtin.models.jsonc parses");
+    let manifest: Value =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("builtin model manifest parses")
+            .clone();
     let models = manifest["models"].as_array().expect("manifest models");
     let classifications =
         source_bound_manifest_classifications(models).expect("source-bound classifications");
@@ -9655,10 +9662,10 @@ fn shipped_resident_only_mlx_estimate_band_audit_uses_the_production_budget_path
 #[cfg(target_os = "macos")]
 #[test]
 fn resident_only_audit_rejects_impossible_control_routes_and_keeps_real_ones() {
-    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
-        include_str!("../../../../config/manifests/builtin.models.jsonc"),
-    ))
-    .expect("builtin.models.jsonc parses");
+    let manifest: Value =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("builtin model manifest parses")
+            .clone();
     let models = manifest["models"].as_array().expect("manifest models");
     for fake in [
         "chroma1_base",
@@ -9726,10 +9733,10 @@ fn resident_only_audit_rejects_impossible_control_routes_and_keeps_real_ones() {
 #[cfg(target_os = "macos")]
 #[test]
 fn resident_only_audit_inventory_rejects_duplicate_and_zero_cell_drop_mutations() {
-    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
-        include_str!("../../../../config/manifests/builtin.models.jsonc"),
-    ))
-    .expect("builtin.models.jsonc parses");
+    let manifest: Value =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("builtin model manifest parses")
+            .clone();
     let models = manifest["models"].as_array().expect("manifest models");
     let classifications =
         source_bound_manifest_classifications(models).expect("source classifications");
@@ -9801,10 +9808,10 @@ fn resident_only_audit_inventory_rejects_duplicate_and_zero_cell_drop_mutations(
 #[cfg(target_os = "macos")]
 #[test]
 fn resident_only_audit_exclusions_reject_pulid_and_mage_scope_mutations() {
-    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
-        include_str!("../../../../config/manifests/builtin.models.jsonc"),
-    ))
-    .expect("builtin.models.jsonc parses");
+    let manifest: Value =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("builtin model manifest parses")
+            .clone();
     let models = manifest["models"].as_array().expect("manifest models");
     let classifications =
         source_bound_manifest_classifications(models).expect("source classifications");
@@ -11086,10 +11093,10 @@ fn installed_sensenova_infographic_request_is_admitted_and_renders() {
     } else {
         "sensenova_u1_8b"
     };
-    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
-        include_str!("../../../../config/manifests/builtin.models.jsonc"),
-    ))
-    .unwrap();
+    let manifest: Value =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("builtin model manifest parses")
+            .clone();
     let entry = manifest["models"]
         .as_array()
         .unwrap()
@@ -11252,10 +11259,10 @@ fn installed_sensenova_infographic_request_is_admitted_and_renders() {
 #[ignore = "requires installed Flux2 Dev bf16 metadata; no tensors are loaded"]
 fn installed_flux2_dev_request_uses_the_staged_ladder() {
     let root = std::env::var_os("FLUX2_DEV_DIR").expect("FLUX2_DEV_DIR");
-    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
-        include_str!("../../../../config/manifests/builtin.models.jsonc"),
-    ))
-    .unwrap();
+    let manifest: Value =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("builtin model manifest parses")
+            .clone();
     let entry = manifest["models"]
         .as_array()
         .unwrap()
@@ -14403,10 +14410,10 @@ fn reported_q4_requests_credit_the_implemented_memory_ladder() {
     let prompt = std::env::var("SC23584_PROMPT")
             .unwrap_or_else(|_| "A cinematic frame of a woman in a red raincoat holding a red umbrella standing in the middle of a neon street on a rainy night".to_owned());
     let negative_prompt = std::env::var("SC23584_NEGATIVE_PROMPT").unwrap_or_default();
-    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
-        include_str!("../../../../config/manifests/builtin.models.jsonc"),
-    ))
-    .unwrap();
+    let manifest: Value =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("builtin model manifest parses")
+            .clone();
     let hub = std::env::var_os("HF_HUB_CACHE")
         .map(PathBuf::from)
         .unwrap_or_else(|| {

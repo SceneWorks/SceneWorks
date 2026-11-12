@@ -13,6 +13,37 @@ fn setup(temp: &tempfile::TempDir) {
     .unwrap();
 }
 
+/// The download response's status for the component under test. The real registered row lists the
+/// mode's whole DMD closure, so the dataspace is no longer necessarily the first component.
+fn dataspace_status(response: &Value) -> Value {
+    response["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|component| component["componentId"] == "moss-dmd-dataspace")
+        .unwrap_or_else(|| panic!("the dataspace component is reported: {response}"))["status"]
+        .clone()
+}
+
+/// The DMD acceleration closure of the REAL registered `moss_image_sft` row. The registry owns a
+/// registered builtin's components (APPREG-1), so the config-dir `setup` row's single dataspace
+/// component no longer describes the closure: bf16 also needs the DMD LoRA and time embedding, and
+/// fp32 the DMD transformer. Seed every DMD component except `except` at its frozen revision.
+fn seed_moss_dmd_closure(temp: &tempfile::TempDir, except: Option<&str>) {
+    let entry = sceneworks_core::builtin_manifests::builtin_model_entry("moss_image_sft")
+        .expect("moss_image_sft is registered");
+    for component in entry["conditionalComponents"].as_array().unwrap() {
+        let dmd = component["requiredFor"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|purpose| purpose.as_str().is_some_and(|p| p.starts_with("moss_dmd_")));
+        if dmd && component["componentId"].as_str() != except {
+            super::yue2_catalog::seed_snapshot(temp, component);
+        }
+    }
+}
+
 #[tokio::test]
 async fn moss_edit_catalog_projection_tracks_actual_backend_even_with_a_shared_snapshot_cache() {
     let _hf = isolate_hf_cache();
@@ -71,6 +102,8 @@ async fn moss_component_download_repairs_wrong_revision_and_skips_exact_cached_r
     let mut sibling = selected.clone();
     sibling["revision"] = json!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     super::yue2_catalog::seed_snapshot(&temp, &sibling);
+    // The rest of each mode's DMD closure is already exact, so only the dataspace is the subject.
+    seed_moss_dmd_closure(&temp, Some("moss-dmd-dataspace"));
     let app = create_app(test_settings(&temp)).unwrap();
     for mode in ["unmerged_bf16", "full_fp32"] {
         let route = format!(
@@ -89,7 +122,7 @@ async fn moss_component_download_repairs_wrong_revision_and_skips_exact_cached_r
         for key in ["repo", "revision", "files"] {
             assert_eq!(jobs[0]["payload"][key], selected[key], "{response}");
         }
-        assert_eq!(response["components"][0]["status"], "queued");
+        assert_eq!(dataspace_status(&response), "queued", "{response}");
     }
     super::yue2_catalog::seed_snapshot(&temp, &selected);
     for mode in ["unmerged_bf16", "full_fp32"] {
@@ -108,7 +141,7 @@ async fn moss_component_download_repairs_wrong_revision_and_skips_exact_cached_r
             response["jobs"].as_array().unwrap().is_empty(),
             "{response}"
         );
-        assert_eq!(response["components"][0]["status"], "installed");
+        assert_eq!(dataspace_status(&response), "installed", "{response}");
     }
 }
 #[tokio::test]
@@ -292,6 +325,7 @@ async fn moss_bare_dmd_real_enqueue_and_replay_keep_omitted_generic_controls_omi
         &temp,
         &json!({"repo":"lodestones/MOSS-Image-SFT-8-steps-dmd","revision":"5ff314b4c1470876b114b810146085db8a181a6e","files":["dataspace.safetensors"]}),
     );
+    seed_moss_dmd_closure(&temp, None);
     let app = create_app(test_settings(&temp)).unwrap();
     let (_, project) = crate::tests::support::create_project(app.clone(), &"MOSS").await;
     for mode in ["unmerged_bf16", "full_fp32"] {
@@ -340,6 +374,7 @@ async fn moss_post_preset_expansion_and_retry_use_the_same_canonical_validator()
         &temp,
         &json!({"repo":"lodestones/MOSS-Image-SFT-8-steps-dmd","revision":"5ff314b4c1470876b114b810146085db8a181a6e","files":["dataspace.safetensors"]}),
     );
+    seed_moss_dmd_closure(&temp, None);
     let app = create_app(test_settings(&temp)).unwrap();
     let (_, project) = crate::tests::support::create_project(app.clone(), &"MOSS presets").await;
     for mode in ["unmerged_bf16", "full_fp32"] {
@@ -1347,6 +1382,7 @@ async fn assert_moss_shared_asset_usage_policy(parent_removed_after_decode: bool
     }).unwrap();
     claim_job_as_worker(
         &app,
+        &state,
         &job.id,
         "policy-publisher",
         &[
@@ -1928,6 +1964,7 @@ async fn terminal_image_side_effect_failure_preserves_published_assets_until_ide
         .unwrap();
     claim_job_as_worker(
         &app,
+        &state,
         &job.id,
         "terminal-publisher",
         &[

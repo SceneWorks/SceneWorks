@@ -20,7 +20,7 @@ import {
   suggestTier,
   tierFits,
   variantFootprintBytes,
-} from "./tierSuggestion.js";
+} from "./registryTierEvidence.js";
 
 const GB = 1024 * 1024 * 1024;
 

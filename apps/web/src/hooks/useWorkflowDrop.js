@@ -577,6 +577,7 @@ export function useWorkflowDrop({
       sourceAssetId: pickedSourceAssetId(current.report, fixes.inputPicks) || null,
       tensorPicks: fixes.inputPicks,
       assets,
+      models,
     });
     const outcome = await launchRecipe({
       recipe,

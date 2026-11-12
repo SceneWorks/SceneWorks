@@ -29,18 +29,25 @@ import {
   lightestInstallableTier,
   suggestTier,
   tierFits,
-} from "./tierSuggestion.js";
+} from "./registryTierEvidence.js";
 import { needsLabel } from "./simple/SimpleModelManager.jsx";
+import { projectBuiltinMemoryEvidence } from "../../../scripts/lib/builtin-memory-evidence.mjs";
 
-// The SHIPPED catalog, parsed from the exact bytes the product embeds (same loader shape as
-// imageAxesParity.test.js). Used by the sc-24109 suite at the bottom so its model object is derived
-// from `builtin.models.jsonc` rather than hand-written.
+// The shipped catalog projects product facts from the manifest and memory facts from the evidence
+// store. Use that same projection for the catalog-shaped fixtures below.
 const MANIFEST_PATH = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../../config/manifests/builtin.models.jsonc",
 );
+const EVIDENCE_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../config/manifests/registry/evidence.json",
+);
 const manifestById = new Map(
-  JSON5.parse(readFileSync(MANIFEST_PATH, "utf8")).models.map((model) => [model.id, model]),
+  projectBuiltinMemoryEvidence(
+    JSON5.parse(readFileSync(MANIFEST_PATH, "utf8")),
+    JSON.parse(readFileSync(EVIDENCE_PATH, "utf8")),
+  ).models.map((model) => [model.id, model]),
 );
 
 // Build a /models-shaped model with a variant matrix. `installed` is the set of tier keys whose
@@ -897,13 +904,13 @@ describe("qwen_image_2_1 tier surface", () => {
 });
 
 // sc-24112 review — the per-tier floors reach the Model Manager's fit questions, driven off the
-// SHIPPED catalog entry rather than hand-typed numbers. Before, no production caller passed a tier
+// SHIPPED catalog projection rather than hand-typed numbers. Before, no production caller passed a tier
 // to `blanketFloorGb`, so every surface quoted the whole model's scalar at a user who could only
 // ever run q4, and a Candle tier with no measured row read as "fits" on any host.
 describe("qwen_image_2_1 per-tier memory floors in the Model Manager", () => {
   const entry = manifestById.get("qwen_image_2_1");
-  // Catalog-shaped: the manifest `mlx`/`candle` blocks pass through verbatim, and each tier row
-  // carries its footprint and download size, exactly as the /models projection emits them.
+  // Catalog-shaped: the product manifest's `mlx`/`candle` blocks receive their measured evidence,
+  // and each tier row carries its footprint and download size as the /models projection emits them.
   // `pendingPacked` re-imposes the sc-24112 PENDING shape on q8/q4; the shipped entry is published.
   function catalogModel({ pendingPacked = false } = {}) {
     return {
@@ -1035,7 +1042,7 @@ describe("bound H3 imported component precision (sc-26686 review)", () => {
 
 describe("FLUX 3 native format capability and installed artifacts", () => {
   const worker = (capabilities, status = "online") => ({ capabilities, status });
-  const model = { id: "flux3_klein", hasVariantMatrix: true, variants: [
+  const model = { id: "flux3_klein", family: "flux3", type: "image", hasVariantMatrix: true, variants: [
     { variant: "q4", installState: "installed" },
     { variant: "fp8r", installState: "installed" },
     { variant: "nvfp4", installState: "missing" },
@@ -1053,7 +1060,8 @@ describe("FLUX 3 native format capability and installed artifacts", () => {
       { tier: "fp8r", label: "FP8R (candle, sm_89+)", disabled: false },
     ]);
     expect(nativeTierEligibility({ id: "flux2_dev" }, [worker(["nvfp4"]) ]).nvfp4Eligible).toBe(true);
-    expect(nativeTierEligibility({ id: "flux3_klein_base" }, [worker(["nvfp4"]) ]).nvfp4Eligible).toBe(false);
+    expect(nativeTierEligibility({ id: "flux3_klein_base", family: "flux3", type: "image" }, [worker(["nvfp4"]) ]).nvfp4Eligible).toBe(false);
+    expect(nativeTierEligibility({ id: "flux3_pup", family: "flux3", type: "utility" }, [worker(["nvfp4"]) ]).nvfp4Eligible).toBe(true);
   });
   it("does not invent unavailable base derivations or alias FP8R to affine quantization", () => {
     const base = { ...model, id: "flux3_klein_base", variants: [{ variant: "bf16", installState: "missing" }] };

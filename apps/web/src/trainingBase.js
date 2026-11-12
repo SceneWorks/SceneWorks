@@ -1,5 +1,5 @@
 // Resolve which tier of a model's catalog entry is its LoRA-TRAINING base (sc-8966). Pure +
-// unit-testable, deliberately separate from TrainingStudio.jsx (mirrors tierSuggestion.js /
+// unit-testable, deliberately separate from TrainingStudio.jsx (mirrors registryTierEvidence.js /
 // quantTier.js) so the readiness gate + install offer share one source of truth.
 //
 // A quant-matrix base can ship MLX *inference* tiers (q4/q8/bf16) AND, independently, a base used for

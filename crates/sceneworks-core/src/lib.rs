@@ -71,6 +71,7 @@ pub mod mlx_tier_completeness;
 pub mod model_artifacts;
 pub mod model_facts;
 pub mod model_family;
+pub mod model_manifest_version;
 pub mod model_usage_policy;
 pub mod moss_image;
 pub mod moss_image_advanced;

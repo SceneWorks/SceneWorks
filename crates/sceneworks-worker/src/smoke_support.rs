@@ -550,7 +550,7 @@ pub(crate) fn flux3_fit_receipt(
                 "measuredPeakBytes": measured_peak_bytes,
                 "declaredMinMemoryBytes": declared_bytes,
                 "declaredMinSource": format!(
-                    "config/manifests/builtin.models.jsonc#models[id={model}].{lane}.minMemoryGbByTier.{tier}"
+                    "config/manifests/registry/evidence.json#{model}/{lane}/minMemoryGbByTier/{tier}"
                 ),
                 "lowestFitBytes": measured_peak_bytes.max(declared_bytes),
                 "basis": format!(

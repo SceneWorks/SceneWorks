@@ -140,6 +140,215 @@ fn private_portable_binding_roundtrips_nested_plan_context_for_claim() {
 }
 
 #[test]
+fn historical_unbound_model_jobs_cannot_reach_versionless_claims() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = JobsStore::new(temp.path().join("jobs.db"));
+    store.initialize().unwrap();
+    let mut image = request();
+    image.job_type = JobType::ImageGenerate;
+    image.payload = json!({"model":"example", "modelManifestEntry":{"id":"example"}})
+        .as_object()
+        .unwrap()
+        .clone();
+    let image = store.create_job(image).unwrap();
+    let download = store.create_job(request()).unwrap();
+    let mut training = request();
+    training.job_type = JobType::LoraTrain;
+    training.payload = json!({"model":"example"}).as_object().unwrap().clone();
+    let training = store.create_job(training).unwrap();
+    // Model-free person previews (`preview: true`) have no model bytes and no SAM3 paths;
+    // `unbound_queued_model_jobs` must match `model_free_job` and exclude them so the
+    // historical upgrade pass never selects and fails a newly queued preview. Non-preview
+    // person jobs still carry model bytes and DO enter the upgrade batch.
+    for job_type in [JobType::PersonDetect, JobType::PersonTrack] {
+        let mut preview = request();
+        preview.job_type = job_type;
+        preview.payload = json!({"preview": true, "videoAssetId": "clip-1"})
+            .as_object()
+            .unwrap()
+            .clone();
+        store.create_job(preview).unwrap();
+    }
+    let mut person_full = request();
+    person_full.job_type = JobType::PersonTrack;
+    person_full.payload = json!({"preview": false, "videoAssetId": "clip-1"})
+        .as_object()
+        .unwrap()
+        .clone();
+    let person_full = store.create_job(person_full).unwrap();
+    // `1` is a JSON number, not the boolean the claim gate's `model_free_job` requires, so these
+    // rows are model jobs: the upgrade batch must offer them rather than leave them unclaimable.
+    let mut numeric_dry_run = request();
+    numeric_dry_run.job_type = JobType::LoraTrain;
+    numeric_dry_run.payload = json!({"model":"example", "dryRun": 1})
+        .as_object()
+        .unwrap()
+        .clone();
+    let numeric_dry_run = store.create_job(numeric_dry_run).unwrap();
+    let mut numeric_preview = request();
+    numeric_preview.job_type = JobType::PersonDetect;
+    numeric_preview.payload = json!({"preview": 1, "videoAssetId": "clip-1"})
+        .as_object()
+        .unwrap()
+        .clone();
+    let numeric_preview = store.create_job(numeric_preview).unwrap();
+    let mut boolean_dry_run = request();
+    boolean_dry_run.job_type = JobType::LoraTrain;
+    boolean_dry_run.payload = json!({"model":"example", "dryRun": true})
+        .as_object()
+        .unwrap()
+        .clone();
+    store.create_job(boolean_dry_run).unwrap();
+    for (job, model_free) in [
+        (&numeric_dry_run, false),
+        (&numeric_preview, false),
+        (&image, false),
+        (&download, true),
+    ] {
+        assert_eq!(
+            crate::model_artifacts::portable_binding::model_free_job(&job.job_type, &job.payload),
+            model_free
+        );
+    }
+
+    // Drive the real versionless claim entry point (no portable version, backend or platform),
+    // exactly what a claim that omits `portableModelBindingVersion` reaches. The unbound image job
+    // is older and FIFO-first, yet only the model-free download may be returned.
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "versionless".into(),
+            gpu_id: "gpu-0".into(),
+            gpu_name: None,
+            capabilities: vec![
+                crate::contracts::WorkerCapability::ImageGenerate,
+                crate::contracts::WorkerCapability::ModelDownload,
+            ],
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .unwrap();
+    let claimed = store.claim_next_job("versionless").unwrap();
+    assert_eq!(claimed.map(|job| job.id), Some(download.id.clone()));
+    assert_eq!(store.claim_next_job("versionless").unwrap(), None);
+    assert_eq!(
+        store.get_job(&image.id).unwrap().status,
+        JobStatus::Queued,
+        "an unbound historical model job stays queued for the API upgrade"
+    );
+
+    let queued = store.unbound_queued_model_jobs(8).unwrap();
+    assert_eq!(
+        queued.iter().map(|job| &job.id).collect::<Vec<_>>(),
+        vec![
+            &image.id,
+            &training.id,
+            &person_full.id,
+            &numeric_dry_run.id,
+            &numeric_preview.id
+        ]
+    );
+}
+
+#[test]
+fn historical_binding_install_is_atomic_and_refuses_a_changed_job() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = JobsStore::new(temp.path().join("jobs.db"));
+    store.initialize().unwrap();
+    let mut request = request();
+    request.job_type = JobType::ImageGenerate;
+    request.payload = json!({"model":"example", "modelManifestEntry":{"id":"example"}})
+        .as_object()
+        .unwrap()
+        .clone();
+    let original = store.create_job(request).unwrap();
+    let mut canonical = original.payload.clone();
+    canonical.insert("prompt".into(), json!("canonical historical prompt"));
+    let frozen = binding();
+    assert!(store
+        .bind_historical_queued_job(&original, &canonical, &frozen)
+        .unwrap());
+    assert_eq!(
+        store.portable_model_binding(&original.id).unwrap(),
+        Some(frozen)
+    );
+    assert_eq!(store.get_job(&original.id).unwrap().payload, canonical);
+    let connection = store.open_connection().unwrap();
+    let (payload_revision, facts_revision): (i64, i64) = connection
+        .query_row(
+            "select payload_revision, claim_payload_revision from jobs where id = ?1",
+            [&original.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(payload_revision, facts_revision);
+    assert!(candidate_matches_portable_worker_sources(
+        &connection,
+        &original.id,
+        Some(("cpu", std::env::consts::OS)),
+        &[],
+        false,
+    )
+    .unwrap());
+    assert!(!candidate_matches_portable_worker_sources(
+        &connection,
+        &original.id,
+        None,
+        &[],
+        false,
+    )
+    .unwrap());
+    assert!(!store
+        .bind_historical_queued_job(&original, &original.payload, &binding())
+        .unwrap());
+}
+
+#[test]
+fn unauthenticated_historical_carrier_fails_before_claim() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = JobsStore::new(temp.path().join("jobs.db"));
+    store.initialize().unwrap();
+    let mut request = request();
+    request.job_type = JobType::ImageGenerate;
+    request.payload = json!({"model":"example", "modelManifestEntry":{"id":"example"}})
+        .as_object()
+        .unwrap()
+        .clone();
+    let original = store.create_job(request).unwrap();
+    let failed = store
+        .fail_historical_unbound_queued_job(&original, "source bytes changed")
+        .unwrap()
+        .unwrap();
+    assert_eq!(failed.status, JobStatus::Failed);
+    assert_eq!(
+        failed.error.as_deref(),
+        Some("Historical model source could not be verified: source bytes changed")
+    );
+    assert!(store.unbound_queued_model_jobs(8).unwrap().is_empty());
+    assert!(store
+        .fail_historical_unbound_queued_job(&original, "source bytes changed")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn unavailable_historical_source_rotates_without_starving_a_later_job() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = JobsStore::new(temp.path().join("jobs.db"));
+    store.initialize().unwrap();
+    let mut request = request();
+    request.job_type = JobType::ImageGenerate;
+    request.payload = json!({"model":"example", "modelManifestEntry":{"id":"example"}})
+        .as_object()
+        .unwrap()
+        .clone();
+    let first = store.create_job(request.clone()).unwrap();
+    let second = store.create_job(request).unwrap();
+    assert_eq!(store.unbound_queued_model_jobs(1).unwrap()[0].id, first.id);
+    store.defer_historical_queued_job(&first).unwrap();
+    assert_eq!(store.unbound_queued_model_jobs(1).unwrap()[0].id, second.id);
+}
+
+#[test]
 fn claim_requires_one_worker_with_primary_digest_and_auxiliary_claim() {
     use crate::model_artifacts::portable_binding::{
         portable_closure_sha256, registered_digest_member_claim_id,
@@ -190,13 +399,17 @@ fn claim_requires_one_worker_with_primary_digest_and_auxiliary_claim() {
     let frozen =
         serde_json::to_value(PortableJobBinding::new(original.authored_options, routes).unwrap())
             .unwrap();
-    let job = store
-        .create_job_with_portable_binding(request(), None, None, Some(&frozen))
-        .unwrap();
+    let mut legacy = request();
+    legacy.job_type = JobType::ImageGenerate;
+    let job = store.create_job(legacy).unwrap();
+    let original = store.get_job(&job.id).unwrap();
+    assert!(store
+        .bind_historical_queued_job(&original, &original.payload, &frozen)
+        .unwrap());
     let connection = store.open_connection().unwrap();
     let route = Some(("cpu", std::env::consts::OS));
     assert!(
-        !candidate_matches_portable_worker_sources(&connection, &job.id, route, &[], false)
+        !candidate_matches_portable_worker_sources(&connection, &job.id, route, &[], false,)
             .unwrap()
     );
     assert!(!candidate_matches_portable_worker_sources(

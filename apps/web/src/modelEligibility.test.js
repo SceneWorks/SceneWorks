@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import JSON5 from "json5";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
+import { DEFAULT_MAC_CAPABILITIES } from "./modelEligibility.js";
 import {
   AUDIO_MODES,
   VIDEO_MODES,
@@ -12,12 +12,16 @@ import {
   audioModelServesMode,
   audioModelUsable,
   characterModelUsable,
+  candleVideoTierPickerAvailable,
   documentModelUsable,
   generationModelsForType,
   downloadOffersFor,
   hasUsableModelFor,
   imageModelServesMode,
   imageModelUsable,
+  ltxIcLoraRequired,
+  hiresFixUnsupported,
+  isFlux3ImageModel,
   missingRequiredModels,
   poseModelUsable,
   supportedControlModes,
@@ -27,11 +31,79 @@ import {
   vectorModelAvailability,
   vectorModelServesMode,
   vectorModelUsable,
+  wanLightningAvailable,
+  wanPairedLoraAvailable,
 } from "./modelEligibility.js";
 import { VISION_CAPTION_MODEL_ID } from "./constants.js";
 import { fallbackModels } from "./testSupport/builtinModels.js";
 
 const caps = DEFAULT_MAC_CAPABILITIES; // gating off → Mac blocks are no-ops
+
+it("derives Wan A14B Lightning and paired-LoRA controls from shipped catalog facts", () => {
+  const expected = ["wan_2_2_i2v_14b", "wan_2_2_t2v_14b"];
+  expect(fallbackModels.filter(wanLightningAvailable).map((model) => model.id).sort()).toEqual(expected);
+  expect(fallbackModels.filter(wanPairedLoraAvailable).map((model) => model.id).sort()).toEqual(expected);
+  const imported = { ...fallbackModels.find((model) => model.id === expected[0]), importedSource: { ownershipMode: "managed" } };
+  expect(wanLightningAvailable(imported)).toBe(false);
+  expect(wanPairedLoraAvailable(imported)).toBe(false);
+});
+
+// The API serves only the download rows whose `platforms` include the host OS
+// (`retain_downloads_for_os`), and the Lightning distill pair is a macOS-only row. Availability
+// must not depend on that filtered list: the Candle worker fetches the pair on first use.
+it("serves the Wan A14B Lightning toggle on every platform's catalog", () => {
+  const forOs = (model, os) => {
+    const downloads = model.downloads ?? [];
+    if (!downloads.some((row) => row.platforms)) return model;
+    return { ...model, downloads: downloads.filter((row) => !row.platforms || row.platforms.includes(os)) };
+  };
+  for (const os of ["macos", "windows", "linux"]) {
+    const catalog = fallbackModels.map((model) => forOs(model, os));
+    expect(catalog.filter(wanLightningAvailable).map((model) => model.id).sort(), os)
+      .toEqual(["wan_2_2_i2v_14b", "wan_2_2_t2v_14b"]);
+    expect(catalog.filter(wanPairedLoraAvailable).map((model) => model.id).sort(), os)
+      .toEqual(["wan_2_2_i2v_14b", "wan_2_2_t2v_14b"]);
+  }
+  const t2v = fallbackModels.find((model) => model.id === "wan_2_2_t2v_14b");
+  expect(forOs(t2v, "windows").downloads.some((row) => row.repo === "lightx2v/Wan2.2-Lightning")).toBe(false);
+});
+
+it("requires IC-LoRA only for the shipped LTX generations and their clip modes", () => {
+  const expected = ["ltx_2_3", "ltx_2_3_eros", "ltx_2_5"];
+  expect(fallbackModels.filter((model) => ltxIcLoraRequired(model, "video_bridge")).map((model) => model.id).sort()).toEqual(expected);
+  const ltx = fallbackModels.find((model) => model.id === "ltx_2_3");
+  expect(ltxIcLoraRequired(ltx, "text_to_video")).toBe(false);
+  expect(ltxIcLoraRequired({ ...ltx, importedSource: { ownershipMode: "managed" } }, "video_bridge")).toBe(false);
+});
+
+it("derives the seven native Candle video tier pickers from shipped variant ladders", () => {
+  expect(fallbackModels.filter(candleVideoTierPickerAvailable).map((model) => model.id).sort()).toEqual([
+    "ltx_2_5", "minimax_h3", "minimax_h3_ref", "scail2_14b",
+    "wan_2_2", "wan_2_2_i2v_14b", "wan_2_2_t2v_14b",
+  ]);
+  const ltx25 = fallbackModels.find((model) => model.id === "ltx_2_5");
+  expect(candleVideoTierPickerAvailable({ ...ltx25, importedSource: { ownershipMode: "managed" } })).toBe(false);
+});
+
+it("excludes Hires.fix only through the typed supportsHiresFix fact", () => {
+  const lightning = { id: "realvisxl_lightning", family: "sdxl", type: "image",
+    defaults: { steps: 5 }, image: { supportsHiresFix: false } };
+  expect(hiresFixUnsupported(lightning)).toBe(true);
+  // A user override of the default step count cannot re-enable Hires.fix.
+  expect(hiresFixUnsupported({ ...lightning, defaults: { steps: 30 } })).toBe(true);
+  // A 5-step SDXL entry without the fact (or with it true) is not excluded.
+  const fiveStep = { id: "other_sdxl", family: "sdxl", type: "image", defaults: { steps: 5 } };
+  expect(hiresFixUnsupported(fiveStep)).toBe(false);
+  expect(hiresFixUnsupported({ ...fiveStep, image: { supportsHiresFix: true } })).toBe(false);
+  expect(hiresFixUnsupported(undefined)).toBe(false);
+});
+
+it("detects the FLUX.3 image family by family and type, not by id", () => {
+  expect(isFlux3ImageModel({ id: "flux3_custom", family: "flux3", type: "image" })).toBe(true);
+  expect(isFlux3ImageModel({ id: "flux3_klein", family: "flux3", type: "video" })).toBe(false);
+  expect(isFlux3ImageModel({ id: "flux3_klein", family: "flux2", type: "image" })).toBe(false);
+  expect(isFlux3ImageModel(undefined)).toBe(false);
+});
 
 describe("modelEligibility predicates", () => {
   it("routes StarVector image_to_svg by backend and offers missing installs", () => {
@@ -685,7 +757,7 @@ describe("declared video capabilities are all offerable", () => {
   //
   // The fixture is what makes this a real check. On the host these tests run on there is no
   // off-Mac anything: `candleGatingActive` arrives from `GET /api/v1/capabilities/mac` and is
-  // false on a Mac, so every helper in candleGating.js is inert. Tagging the caps object with the
+  // false on a Mac, so every helper in modelEligibility.js is inert. Tagging the caps object with the
   // foreign platform is what runs the branch.
   it("an MLX-only video mode is not offered off-Mac, and is still offered on a Mac", () => {
     // The per-model block the API now emits, in the shape `model_candle_support` serializes.

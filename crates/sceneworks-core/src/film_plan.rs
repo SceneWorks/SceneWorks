@@ -2956,8 +2956,7 @@ pub fn plan_fps(plan: &ProductionPlan, entry: &Map<String, Value>) -> Option<u32
 // Model partitions (sc-23402)
 // ---------------------------------------------------------------------------------------------
 
-/// Families whose REFERENCE conditioning ships as a second catalog entry, as
-/// `(base model id, reference partition model id)`.
+/// Families whose REFERENCE conditioning ships as a second catalog entry.
 ///
 /// MiniMax-H3 is two 18.78 GB DiT checkpoints under one family: `minimax_h3` serves
 /// `text_to_video | image_to_video | first_last_frame` and declares `limits.maxReferenceAssets: 0`,
@@ -2968,16 +2967,37 @@ pub fn plan_fps(plan: &ProductionPlan, entry: &Map<String, Value>) -> Option<u32
 ///
 /// A plan therefore declares the FAMILY once — `model.id: "minimax_h3"` — and each shot resolves to
 /// the partition its own conditioning needs. The alternative, a per-shot model override, would let
-/// a plan mix unrelated families inside one sequence; this table cannot, because the only id it can
-/// ever produce is the declared model's own reference partition.
-const REFERENCE_PARTITIONS: &[(&str, &str)] = &[("minimax_h3", "minimax_h3_ref")];
-
+/// a plan mix unrelated families inside one sequence. The typed same-family sibling lookup below
+/// can only choose the declared model's own reference partition and fails closed if ambiguous.
 /// The reference partition of `model_id`, when its family has one.
 pub fn reference_partition_for(model_id: &str) -> Option<&'static str> {
-    REFERENCE_PARTITIONS
-        .iter()
-        .find(|(base, _)| *base == model_id)
-        .map(|(_, reference)| *reference)
+    let base = crate::registry::builtin_model_spec(model_id)?;
+    if base.product.model_type != "video"
+        || !model_has_video_operation(base, "text_to_video")
+        || model_has_video_operation(base, "reference_to_video")
+    {
+        return None;
+    }
+    let mut references = crate::registry::builtin_model_specs().filter(|candidate| {
+        candidate.product.model_type == "video"
+            && candidate.product.id != base.product.id
+            && candidate.product.family == base.product.family
+            && model_has_video_operation(candidate, "reference_to_video")
+            && !model_has_video_operation(candidate, "text_to_video")
+    });
+    let reference = references.next()?;
+    references
+        .next()
+        .is_none()
+        .then_some(reference.product.id.as_str())
+}
+
+fn model_has_video_operation(spec: &crate::registry::ModelSpec, operation: &str) -> bool {
+    spec.product
+        .fields
+        .get("capabilities")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|modes| modes.iter().any(|mode| mode == operation))
 }
 
 /// Whether `model_id` IS a family's reference partition — the half of the split that conditions on
@@ -2988,9 +3008,13 @@ pub fn reference_partition_for(model_id: &str) -> Option<&'static str> {
 /// reference-only knobs (`referenceImageShortEdge`): a base-partition request has no reference to
 /// size, so the knob must not appear on it at all.
 pub fn is_reference_partition_id(model_id: &str) -> bool {
-    REFERENCE_PARTITIONS
-        .iter()
-        .any(|(_, reference)| *reference == model_id)
+    let Some(reference) = crate::registry::builtin_model_spec(model_id) else {
+        return false;
+    };
+    crate::registry::builtin_model_specs().any(|base| {
+        base.product.family == reference.product.family
+            && reference_partition_for(&base.product.id) == Some(model_id)
+    })
 }
 
 /// Which catalog entry one shot renders through, and why.
@@ -6783,6 +6807,16 @@ mod tests {
     fn every_shipped_speech_model_is_accepted_and_the_default_is_one_of_them() {
         assert!(SOUND_SYNTHESIS_MODELS.contains(&DEFAULT_SOUND_SYNTHESIS_MODEL));
         for model in SOUND_SYNTHESIS_MODELS {
+            let spec = crate::registry::builtin_model_spec(model).expect("shipped speech model");
+            assert_eq!(spec.product.model_type, "audio");
+            assert!(
+                spec.provider_routes
+                    .get("candle")
+                    .is_some_and(|providers| providers.iter().any(|provider| provider.kind
+                        == "audio_generator"
+                        && provider.id == *model)),
+                "{model} must have a native speech generator"
+            );
             let findings = sound_findings(json!([
                 { "role": "line", "kind": "dialogue", "text": "hi", "model": model },
             ]));

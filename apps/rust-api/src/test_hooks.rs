@@ -24,6 +24,9 @@ pub(crate) struct TestHooks {
     pub(crate) model_size_estimate_disabled_override: Arc<Mutex<Option<bool>>>,
     pub(crate) video_platform_override: Arc<Mutex<Option<&'static str>>>,
     pub(crate) pinned_metadata_override: Arc<Mutex<Option<PinnedMetadataFixture>>>,
+    /// Hold every pinned publisher metadata lookup until the watched value is `true`: a stalled
+    /// Hugging Face answer, without a network endpoint or a real wait.
+    pub(crate) pinned_metadata_gate: Arc<Mutex<Option<tokio::sync::watch::Receiver<bool>>>>,
     /// Freeze synthetic mutable repository refs in route tests without contacting Hugging Face.
     pub(crate) dynamic_hf_revision_override: Arc<Mutex<Option<DynamicHfRevisionFixture>>>,
     /// Deterministic catalog scheduler seams. Production has no hook fields or

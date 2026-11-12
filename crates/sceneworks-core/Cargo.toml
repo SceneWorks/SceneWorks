@@ -105,6 +105,7 @@ rustix = { version = "1", features = ["fs"] }
 [build-dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+jsonschema = "0.28"
 
 [dev-dependencies]
 # Adversarial PNG fixtures choose compression explicitly, independent of the workspace's

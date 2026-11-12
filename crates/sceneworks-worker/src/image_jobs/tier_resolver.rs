@@ -1,6 +1,5 @@
 #[cfg(target_os = "macos")]
 use super::artifact_resolution::is_anima_model;
-use super::artifact_resolution::STANDARD_TIER_MODELS;
 use super::ImageRequest;
 use crate::Path;
 use crate::PathBuf;
@@ -15,19 +14,20 @@ use crate::Value;
 // a TE that sc-8711/sc-9362 deliberately kept dense.
 
 /// Whether a request's model ships the standard SceneWorks quant-matrix turnkey layout (sc-8508):
-/// true when it is registered in [`STANDARD_TIER_MODELS`] OR its manifest entry declares
-/// `mlx.standardTierLayout: true`. The manifest flag is the first-class, catalog-driven form of the
-/// hardcoded registry (epic 8506) — a new quant-matrix model can opt in from the manifest alone,
-/// while the registry keeps every already-wired model working with zero manifest change.
+/// true when the compiled product declares `mlx.standardTierLayout: true`. Imported requests
+/// retain their own manifest flag because they have no builtin spec.
 #[cfg(native_lane)]
 pub(super) fn uses_standard_tier_layout(request: &ImageRequest) -> bool {
-    STANDARD_TIER_MODELS.contains(&request.model.as_str())
-        || request
-            .model_manifest_entry
-            .get("mlx")
-            .and_then(|mlx| mlx.get("standardTierLayout"))
+    let flag = |mlx: Option<&Value>| {
+        mlx.and_then(|mlx| mlx.get("standardTierLayout"))
             .and_then(Value::as_bool)
             .unwrap_or(false)
+    };
+    if let Some(spec) = sceneworks_core::registry::builtin_model_spec(&request.model) {
+        flag(spec.product.fields.get("mlx"))
+    } else {
+        flag(request.model_manifest_entry.get("mlx"))
+    }
 }
 
 /// Whether a standard-tier request keeps a DENSE bf16 text encoder in every tier (sc-8508): true iff its

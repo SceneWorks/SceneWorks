@@ -78,10 +78,6 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 COPY crates ./crates
 COPY apps/rust-api ./apps/rust-api
 COPY apps/rust-worker ./apps/rust-worker
-# `sceneworks-core::jobs_store::routing::matrix` mechanically digests the owning web request/gate
-# sources with production `include_str!`s. Copy the source root (not a hand-maintained file list) so a
-# newly added authoritative seam cannot compile in a checkout but disappear from Docker builds.
-COPY apps/web/src ./apps/web/src
 COPY apps/web/content-security-policy.txt ./apps/web/content-security-policy.txt
 # Copied purely to satisfy workspace membership (the desktop crate is in the
 # workspace but is not built into either image).
@@ -91,6 +87,10 @@ COPY apps/desktop/build.rs ./apps/desktop/build.rs
 # so the API can seed an empty config dir, which means they must exist in the
 # build context (not just the runtime bind mount) or the compile can't read them.
 COPY config ./config
+# `crates/sceneworks-core/build.rs` validates the product manifest against the
+# JSON Schema at compile time, so the schema tree must be in the Rust build
+# context just like `config` above.
+COPY packages/schemas ./packages/schemas
 # Same constraint, second source (sc-16080): `sceneworks-core` embeds generated calibration
 # evidence and video-curve inputs via `include_str!`, and those embeds are NOT test-gated, so a
 # release build of the API cannot compile without them.
@@ -265,14 +265,13 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 COPY crates ./crates
 COPY apps/rust-api ./apps/rust-api
 COPY apps/rust-worker ./apps/rust-worker
-# Keep the Candle builder on the same fail-closed compile-time matrix inputs as the plain builder.
-COPY apps/web/src ./apps/web/src
 COPY apps/web/content-security-policy.txt ./apps/web/content-security-policy.txt
 # Workspace-membership only (not built into this image).
 COPY apps/desktop/Cargo.toml ./apps/desktop/Cargo.toml
 COPY apps/desktop/build.rs ./apps/desktop/build.rs
 # The builtin catalog, embedded via include_str! by sceneworks-core (see above).
 COPY config ./config
+COPY packages/schemas ./packages/schemas
 # Generated calibration inputs embedded by sceneworks-core (see the ordinary builder above, which
 # also records why `docs/calibration/<campaign>/` is a directory COPY and `docs/generated/` is not).
 COPY docs/generated/memory-calibration-evidence.json ./docs/generated/

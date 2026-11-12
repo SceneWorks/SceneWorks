@@ -61,14 +61,16 @@ function offState(overrides = {}) {
   };
 }
 
+const flux3 = (id) => ({ id, family: "flux3", type: "image" });
+
 describe("buildImageJobAdvanced", () => {
-  it.each(["flux3_klein", "flux3_klein_base"])("emits original nondefault layout and ordered attachment ids for %s", (model) => {
+  it.each(["flux3_klein", "flux3_klein_base", "flux3_custom"])("emits original nondefault layout and ordered attachment ids for %s", (model) => {
     const flux3Layout = { version: 1, boxes: [
       { id: "placement", desc: '猫 "vase"', bbox: [0, -0.123456789012345, 1, 1] },
       { id: "remove", desc: "remove vase", from: "ref_image_1", reference_id: "second", src_bbox: [0, 0, 1, 1], tgt_bbox: null },
     ] };
     const flux3ReferenceIds = ["first", "second"];
-    const advanced = buildImageJobAdvanced(offState({ model, flux3Layout, flux3ReferenceIds }));
+    const advanced = buildImageJobAdvanced(offState({ model, selectedModel: flux3(model), flux3Layout, flux3ReferenceIds }));
     expect(advanced.flux3_layout).toBe(flux3Layout);
     expect(advanced.flux3_reference_ids).toEqual(flux3ReferenceIds);
     expect(advanced).not.toHaveProperty("strength");
@@ -77,11 +79,12 @@ describe("buildImageJobAdvanced", () => {
   it("omits layout defaults and prevents stale layout leaking to unsupported models", () => {
     const flux3Layout = { version: 1, boxes: [{ id: "placement", desc: "vase", bbox: [0, 0, 1, 1] }] };
     for (const model of ["flux2_dev", "flux3_unreleased", undefined]) {
-      const advanced = buildImageJobAdvanced(offState({ model, flux3Layout, flux3ReferenceIds: ["slot"] }));
+      const selectedModel = model ? { id: model, family: model === "flux2_dev" ? "flux2" : "other", type: "image" } : undefined;
+      const advanced = buildImageJobAdvanced(offState({ model, selectedModel, flux3Layout, flux3ReferenceIds: ["slot"] }));
       expect(advanced).not.toHaveProperty("flux3_layout");
       expect(advanced).not.toHaveProperty("flux3_reference_ids");
     }
-    expect(buildImageJobAdvanced(offState({ model: "flux3_klein", flux3Layout: { version: 1, boxes: [] } })))
+    expect(buildImageJobAdvanced(offState({ model: "flux3_klein", selectedModel: flux3("flux3_klein"), flux3Layout: { version: 1, boxes: [] } })))
       .toEqual({ resolution: "1024x1024" });
   });
   it("emits only the always-present keys when every optional knob is at its default", () => {

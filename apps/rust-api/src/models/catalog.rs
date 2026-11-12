@@ -1,6 +1,15 @@
 use super::*;
 
+/// Import request types are an API policy, not the builtin catalog's model-type vocabulary.
+/// A builtin vector model does not provide a generic vector checkpoint import path.
 pub(super) const ALLOWED_MODEL_TYPES: &[&str] = &["image", "video", "audio", "utility"];
+
+#[cfg(test)]
+#[test]
+fn import_type_vocabulary_remains_separate_from_builtin_types() {
+    assert_eq!(ALLOWED_MODEL_TYPES, ["image", "video", "audio", "utility"]);
+    assert!(!ALLOWED_MODEL_TYPES.contains(&"vector"));
+}
 pub(crate) const MODEL_CATALOG_PROBE_CONCURRENCY: usize = 16;
 pub(super) static MODEL_CATALOG_PROBE_PERMITS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
     std::sync::OnceLock::new();
@@ -2020,18 +2029,25 @@ pub(crate) fn merge_model_entries_with_registry(
     builtin: Vec<Value>,
     user: Vec<Value>,
 ) -> Vec<Value> {
+    let builtin_ids: std::collections::HashSet<String> = builtin
+        .iter()
+        .filter_map(|entry| entry.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect();
     let mut merged = merge_entries_by_id(builtin, user.clone());
     for entry in &mut merged {
-        let Some(id) = entry.get("id").and_then(Value::as_str) else {
+        let Some(id) = entry.get("id").and_then(Value::as_str).map(str::to_owned) else {
             continue;
         };
-        let Some(spec) = sceneworks_core::registry::builtin_model_spec(id) else {
-            continue;
-        };
-        let user_entry = user
-            .iter()
-            .find(|candidate| candidate.get("id").and_then(Value::as_str) == Some(id));
-        *entry = spec.project(user_entry);
+        if let Some(spec) = sceneworks_core::registry::builtin_model_spec(&id) {
+            let user_entry = user
+                .iter()
+                .find(|candidate| candidate.get("id").and_then(Value::as_str) == Some(id.as_str()));
+            *entry = spec.project(user_entry);
+        }
+        if builtin_ids.contains(&id) {
+            sceneworks_core::registry::project_builtin_memory_evidence(entry)
+                .expect("validated builtin memory evidence projection");
+        }
     }
     merged
 }

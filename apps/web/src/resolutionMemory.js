@@ -3,7 +3,7 @@
 // pixels of 1024², so its single-pass VAE-decode + attention transient is far larger than the ≤1536²
 // set the model's `minMemoryGb` visibility floor was calibrated for — a 48 GB Mac that runs 1536²
 // fine OOMs at 2048². This module is the pure, unit-testable gate the studios use to hide a high-res
-// bucket a host can't fit, MIRRORING the quant-tier gate (tierSuggestion.js): budget an estimated
+// bucket a host can't fit, MIRRORING the registry quant-tier selector: budget an estimated
 // PEAK against the host's unified/GPU memory with headroom, and NEVER withhold on missing data.
 //
 // SCOPE — three deliberate no-ops keep this from touching anything the story doesn't:
@@ -29,7 +29,11 @@
 // the peak to this module's 1536² baseline before using it. Missing/stale/cross-lane evidence falls back
 // to the lane blanket; it is never permission to borrow another backend's number.
 
-import { installedTierPeakEvidence, MEMORY_HEADROOM_FRACTION } from "./tierSuggestion.js";
+import {
+  blanketFloorGb,
+  installedTierPeakEvidence,
+  MEMORY_HEADROOM_FRACTION,
+} from "./registryTierEvidence.js";
 
 // The historical resolution ceiling (pixels). Every bucket at/below this was shipped before sc-13959
 // and stays unconditionally offered (SCOPE note 1). 1536×1536 = 2,359,296 px ≈ 2.36 MP.
@@ -76,9 +80,7 @@ function floorGb(model, backend, tier) {
       return normalized;
     }
   }
-  const block = backend === "candle" ? model?.candle : model?.mlx;
-  const gb = block?.minMemoryGb;
-  return typeof gb === "number" && Number.isFinite(gb) && gb > 0 ? gb : null;
+  return blanketFloorGb(model, backend);
 }
 
 // Predicted PEAK memory (GB) a generation at `resolution` needs for `model` on `backend`, or null when

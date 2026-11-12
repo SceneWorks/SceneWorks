@@ -24,7 +24,7 @@
 
 // `status` values of `POST /api/v1/workflows/inspect`. Both keys are always present in the body,
 // so a reader branches on `status` rather than on the absence of `workflow`.
-import { isFlux3ReferenceRequest } from "./resolutionOverride.js";
+import { isFlux3ImageModel } from "./modelEligibility.js";
 import { reacquireMossTensors } from "./mossImageAdvanced.js";
 export const WORKFLOW_STATUS_WORKFLOW = "workflow";
 export const WORKFLOW_STATUS_NO_WORKFLOW = "no_workflow";
@@ -510,7 +510,7 @@ export function workflowReplaySeed(share) {
 export function recipeFromWorkflowShare(
   share,
   report = null,
-  { substituteModelId = null, referenceAssetIds = [], sourceAssetId = null, tensorPicks = {}, assets = [] } = {},
+  { substituteModelId = null, referenceAssetIds = [], sourceAssetId = null, tensorPicks = {}, assets = [], models = [] } = {},
 ) {
   if (!share) {
     return null;
@@ -605,8 +605,13 @@ export function recipeFromWorkflowShare(
   }
   // A shared reference workflow carries authored OPTIONAL axes, not output geometry. Keep this
   // as UI launch intent: only the worker may write flux3ReferenceEditing provenance/facts.
+  // A model the local list has not delivered yet keeps the authored intent; Image Studio applies
+  // it only while the live selected model is a FLUX.3 image model.
+  const resolvedTarget = models.find((entry) => entry.id === modelId);
+  const targetMayBeFlux3 = resolvedTarget ? isFlux3ImageModel(resolvedTarget) : Boolean(modelId);
   if (share.sceneworksWorkflow === "image" && share.inputs?.some(({ kind }) =>
-    isFlux3ReferenceRequest(modelId, kind === "reference" ? references : kind === "source" ? [sourceAssetId] : []))) {
+    targetMayBeFlux3 && (kind === "reference" ? references : kind === "source" ? [sourceAssetId] : [])
+      .some((id) => typeof id === "string" && id.trim()))) {
     recipe.uiDimensionIntent = {
       width: Number.isInteger(width) && width > 0 ? width : null,
       height: Number.isInteger(height) && height > 0 ? height : null,

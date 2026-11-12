@@ -2790,6 +2790,8 @@ const ROUTING_SOURCES = Object.freeze({
   routingCatalog: "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
   routingCandle: "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
   routingMlx: "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
+  routePolicy: "config/manifests/registry/route-policy.json",
+  registrySpecs: "config/manifests/registry/specs.json",
 });
 
 let routedCatalogLanesPromise;
@@ -2825,10 +2827,12 @@ function lanesOf(routed, modelId) {
 let routeLaneTiersPromise;
 /** The registry's per-lane tier FLOOR, from the generator's own parser — never a second spelling. */
 function routeLaneTiers() {
-  routeLaneTiersPromise ??= readFile(
-    path.join(ROOT, "crates/sceneworks-worker/src/memory_route_registry.rs"),
-    "utf8",
-  ).then(parseRouteRegistryLaneTiers);
+  routeLaneTiersPromise ??= Promise.all([
+    readFile(path.join(ROOT, "crates/sceneworks-worker/src/memory_route_registry.rs"), "utf8"),
+    readFile(path.join(ROOT, "config/manifests/registry/memory-route-policy.json"), "utf8"),
+  ]).then(([registrySource, policySource]) =>
+    parseRouteRegistryLaneTiers(registrySource, policySource),
+  );
   return routeLaneTiersPromise;
 }
 
@@ -7410,9 +7414,10 @@ async function withStubCli(stub, body) {
  */
 async function fakePlanRoot(anchors, models) {
   const root = await mkdtemp(path.join(tmpdir(), "catalog-root-"));
-  await mkdir(path.join(root, "config", "manifests"), { recursive: true });
+  await mkdir(path.join(root, "config", "manifests", "registry"), { recursive: true });
   await writeFile(path.join(root, "config", "memory-calibration-plan.json"), JSON.stringify({ anchors }));
   await writeFile(path.join(root, "config", "manifests", "builtin.models.jsonc"), JSON.stringify({ models }));
+  await writeFile(path.join(root, "config", "manifests", "registry", "evidence.json"), "{}");
   const lanes = Object.keys(anchors).map((key) => {
     const parts = anchorParts(key);
     return `${parts.modelId}:${parts.backend}`;

@@ -413,9 +413,11 @@ fn sdxl_explicit_staging_preserves_independent_bounded_compositions() {
 
 #[test]
 fn sdxl_staged_estimates_preserve_geometry_and_charge_actual_adapter_bytes() {
-    let raw = include_str!("../../../../config/manifests/builtin.models.jsonc");
+    // The production projection: product rows with their typed memory evidence (SW-7031).
     let catalog: Value =
-        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw)).unwrap();
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .unwrap()
+            .clone();
     let manifest = catalog["models"]
         .as_array()
         .unwrap()
@@ -1661,13 +1663,10 @@ fn ideogram_probe_contract(
 
 #[test]
 fn chroma_structural_rows_are_complete_differentiated_and_unmeasured() {
-    let source = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-        .iter()
-        .find(|(name, _)| *name == "builtin.models.jsonc")
-        .map(|(_, source)| *source)
-        .expect("embedded model manifest");
-    let stripped = sceneworks_core::jsonc::strip_jsonc_comments(source);
-    let root: Value = serde_json::from_str(&stripped).expect("model manifest parses");
+    // The production projection: product rows with their typed memory evidence (SW-7031).
+    let root: Value = sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+        .expect("embedded model manifest")
+        .clone();
     for model_id in ["chroma1_hd", "chroma1_base", "chroma1_flash"] {
         let model = root["models"]
             .as_array()
@@ -2379,13 +2378,10 @@ fn sd35_receipts_refuse_crossed_physical_adapter_context_and_no_fit() {
 
 #[test]
 fn sd35_manifest_declares_only_exact_resident_and_staged_cells() {
-    let source = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-        .iter()
-        .find(|(name, _)| *name == "builtin.models.jsonc")
-        .map(|(_, source)| *source)
-        .expect("embedded model manifest");
-    let stripped = sceneworks_core::jsonc::strip_jsonc_comments(source);
-    let root: Value = serde_json::from_str(&stripped).expect("model manifest parses");
+    // The production projection: product rows with their typed memory evidence (SW-7031).
+    let root: Value = sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+        .expect("embedded model manifest")
+        .clone();
     for provider in ["sd3_5_large", "sd3_5_large_turbo", "sd3_5_medium"] {
         let model = root["models"]
             .as_array()
@@ -3075,13 +3071,10 @@ fn mage_numeric_tiers_bind_only_the_active_q4_precision_floors() {
 
 #[test]
 fn mage_manifests_declare_unverified_capabilities_without_calibrations() {
-    let source = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-        .iter()
-        .find(|(name, _)| *name == "builtin.models.jsonc")
-        .map(|(_, source)| *source)
-        .expect("embedded model manifest");
-    let stripped = sceneworks_core::jsonc::strip_jsonc_comments(source);
-    let root: Value = serde_json::from_str(&stripped).expect("model manifest parses");
+    // The production projection: product rows with their typed memory evidence (SW-7031).
+    let root: Value = sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+        .expect("embedded model manifest")
+        .clone();
     let models = root["models"].as_array().expect("models array");
 
     for model_id in [
@@ -3192,13 +3185,10 @@ fn character_identity_and_control_bindings_require_the_canonical_exact_keys() {
 
 #[test]
 fn flux1_base_bindings_are_current_selectable_and_overlay_free() {
-    let source = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-        .iter()
-        .find(|(name, _)| *name == "builtin.models.jsonc")
-        .map(|(_, source)| *source)
-        .expect("embedded model manifest");
-    let stripped = sceneworks_core::jsonc::strip_jsonc_comments(source);
-    let root: Value = serde_json::from_str(&stripped).expect("model manifest parses");
+    // The production projection: product rows with their typed memory evidence (SW-7031).
+    let root: Value = sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+        .expect("embedded model manifest")
+        .clone();
     let models = root["models"].as_array().expect("models array");
     let geometry = MemoryGeometry {
         width: 1024,
@@ -3271,13 +3261,10 @@ fn flux1_base_bindings_are_current_selectable_and_overlay_free() {
 
 #[test]
 fn flux2_dev_v2_bindings_stay_historical_but_cannot_enter_the_v3_selector() {
-    let source = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-        .iter()
-        .find(|(name, _)| *name == "builtin.models.jsonc")
-        .map(|(_, source)| *source)
-        .expect("embedded model manifest");
-    let stripped = sceneworks_core::jsonc::strip_jsonc_comments(source);
-    let root: Value = serde_json::from_str(&stripped).expect("model manifest parses");
+    // The production projection: product rows with their typed memory evidence (SW-7031).
+    let root: Value = sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+        .expect("embedded model manifest")
+        .clone();
     let model = root["models"]
         .as_array()
         .expect("models array")

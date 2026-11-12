@@ -24,7 +24,7 @@ import {
   installedFloorHostGb,
   lightestInstallableTier,
   sdxlCudaMemoryEstimate,
-} from "../tierSuggestion.js";
+} from "../registryTierEvidence.js";
 import { nativeTierEligibility } from "../quantTier.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
 
@@ -309,7 +309,7 @@ function importedCheckpointLabel(model) {
 //
 // THREE THINGS THE NUMBER MUST GET RIGHT, all one-directional (getting them wrong UNDER-states a
 // requirement, and the user downloads a model that then OOMs). The arithmetic for all three lives in
-// `tierSuggestion.installedFloorHostGb` / `declaredFloorHostGb`; this function composes wording only.
+// `registryTierEvidence.installedFloorHostGb` / `declaredFloorHostGb`; this function composes wording only.
 //
 // A. HEADROOM, PER LANE. A declared peak is a RAW high-water mark, and the two lanes convert it to a host
 //    size differently: MLX budgets `peak <= host × MEMORY_HEADROOM_FRACTION` (`tierFits`, the resolution
@@ -319,7 +319,7 @@ function importedCheckpointLabel(model) {
 //
 // B. LANE. `footprint.peakMemoryBytes` is an Apple unified-memory measurement and `candle.vramGbByTier`
 //    is a discrete-VRAM one; they are not interchangeable in either direction (see the lane note in
-//    tierSuggestion.js). So the row reads the ACTIVE backend's evidence only. When the candle lane has
+//    registryTierEvidence.js). So the row reads the ACTIVE backend's evidence only. When the candle lane has
 //    none, the row says nothing rather than borrowing the MLX figure — `qwen_image` declares mlx 50
 //    against candle 56, so the MLX number is not even reliably the conservative one.
 //

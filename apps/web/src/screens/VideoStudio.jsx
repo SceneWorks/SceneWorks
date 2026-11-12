@@ -17,7 +17,7 @@ import { useVideoReferences } from "./videoStudio/useVideoReferences.js";
 import { useVideoExecutionTier } from "./videoStudio/useVideoExecutionTier.js";
 import { useLtx25Controls } from "./videoStudio/useLtx25Controls.js";
 import { useVideoModelSelection } from "./videoStudio/useVideoModelSelection.js";
-import { DEFAULT_MOTION, ltxVideoModelId, ltx25VideoModelId, ltxIcLoraModelIds, ltxIcLoraRequiredModes, MAX_SCAIL2_REFERENCE_CHARACTERS } from "./videoStudio/videoTierHelpers.js";
+import { DEFAULT_MOTION, ltxVideoModelId, ltx25VideoModelId, MAX_SCAIL2_REFERENCE_CHARACTERS } from "./videoStudio/videoTierHelpers.js";
 
 import { useSamplerControls } from "../hooks/useSamplerControls.js";
 import { VedaOutcome } from "../components/VedaOutcome.jsx";
@@ -40,8 +40,8 @@ import { videoGenerateValidation } from "../videoStudioValidation.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
 
-import { PROMPT_REFINE_MODEL_ID, WAN_A14B_LIGHTNING_MODEL_IDS } from "../constants.js";
-import { DEFAULT_MAC_CAPABILITIES } from "../macGating.js";
+import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
+import { DEFAULT_MAC_CAPABILITIES, ltxIcLoraRequired, wanLightningAvailable } from "../modelEligibility.js";
 
 import { loadStudioSettings } from "../hooks/useStudioSettings.js";
 
@@ -253,7 +253,7 @@ export function VideoStudio() {
   // advertise the paired contract yet, so a normal catalog remains on the existing single picker
   // until the final inference-main pin makes the capability truthful.
   const scail2MultiReferenceEnabled =
-    model === "scail2_14b" && selectedModel?.ui?.scail2MultiReference === true;
+    selectedModel?.family === "scail2" && selectedModel?.type === "video" && selectedModel?.ui?.scail2MultiReference === true;
 
   // Prompt guide for the selected model; fall back to the generic video guide
   // when a model declares none, so the button is always useful (sc-1817).
@@ -356,7 +356,7 @@ export function VideoStudio() {
   // 5B and every non-Wan engine ignore `advanced.lightning`, so hide the control there
   // (sc-10048, epic 10043). When it's shown and on, the worker governs steps/guidance with the
   // 4-step recipe, so the manual Steps/Guidance inputs are disabled to reflect that.
-  const showLightning = WAN_A14B_LIGHTNING_MODEL_IDS.has(selectedModel?.id);
+  const showLightning = wanLightningAvailable(selectedModel);
   const lightningActive = showLightning && lightning;
   // Clip-conditioning strength (`advanced.videoConditioningStrength`). The LTX/Wan IC-LoRA clip
   // modes always honor it, so those two modes show it for whichever model serves them. The
@@ -562,7 +562,7 @@ export function VideoStudio() {
 
   const { samplerOptions, schedulerOptions, showSchedulerPicker } = useSamplerControls(selectedModel, activeBackend, { sampler, scheduler, setSampler, setScheduler });
 
-  const requiresLtxIcLora = ltxIcLoraModelIds.has(selectedModel?.id) && ltxIcLoraRequiredModes.has(mode);
+  const requiresLtxIcLora = ltxIcLoraRequired(selectedModel, mode);
   const hasLtxIcLora = selectedLoras.some((lora) => loraLooksLikeIcLora(lora));
 
   const {

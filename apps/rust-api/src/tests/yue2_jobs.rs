@@ -1390,6 +1390,9 @@ async fn usage_policies_survive_derivation_and_re_export() {
             initial_status: None,
         })
         .unwrap();
+    // Directly inserted, so it is a legacy unbound carrier: bind it the way the API's historical
+    // upgrade does before the portable claim (an unbound model job is unclaimable).
+    bind_inserted_test_job(&state, &edit.id, TestPortableRoute::MlxMacos);
     let claimed = claim(&app, WORKER).await;
     assert_eq!(claimed["id"], edit.id);
     let mut derived = audio_fact("asset_edit1");
@@ -1459,6 +1462,7 @@ async fn finish_generic_audio(
             initial_status: None,
         })
         .unwrap();
+    bind_inserted_test_job(state, &job.id, TestPortableRoute::MlxMacos);
     let claimed = claim(app, WORKER).await;
     assert_eq!(claimed["id"], job.id);
     finish(

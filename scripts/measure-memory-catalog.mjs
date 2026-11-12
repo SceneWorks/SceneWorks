@@ -83,6 +83,7 @@ import { spawn } from "node:child_process";
 import { readFile, writeFile, mkdir, cp, rm, realpath, stat, readdir, open } from "node:fs/promises";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { projectBuiltinMemoryEvidence, readBuiltinMemoryEvidence } from "./lib/builtin-memory-evidence.mjs";
 import { FLUX3_CHECKPOINTS, flux3Conversion as nativeFlux3Conversion, bindResourceCaseInputs } from "./lib/flux3-resource-contract.mjs";
 import { hashArtifactInventory, listCachedArtifactFiles } from "./hash-artifact-inventory.mjs";
 import { createHash } from "node:crypto";
@@ -1894,7 +1895,9 @@ export async function readPlan(root = ROOT) {
 
 export async function readManifestModels(root = ROOT) {
   const body = await readFile(path.join(root, MANIFEST_PATH), "utf8");
-  return JSON.parse(stripJsoncComments(body)).models;
+  const manifest = JSON.parse(stripJsoncComments(body));
+  const evidence = await readBuiltinMemoryEvidence(root);
+  return projectBuiltinMemoryEvidence(manifest, evidence).models;
 }
 
 export async function readDeclaredLanes(root = ROOT) {

@@ -192,6 +192,7 @@ pub(crate) async fn claim_job(
     {
         return Err(ApiError::bad_request("Worker source proof is required"));
     }
+    let historical_changed = upgrade_historical_queued_carriers(&state).await?;
     let mlx_required = state.settings.mlx_required;
     let enforce_unsupported = state.settings.mlx_enforce_unsupported;
     let candle_required = state.settings.candle_required;
@@ -324,6 +325,7 @@ pub(crate) async fn claim_job(
         publish(&state, "job.updated", job);
     }
     if response.is_some()
+        || historical_changed
         || !stale_sweep.workers.is_empty()
         || !stale_sweep.jobs.is_empty()
         || !stranded.is_empty()
@@ -344,6 +346,222 @@ pub(crate) async fn claim_job(
         portable_model_binding,
         extra: Default::default(),
     }))
+}
+
+/// Older queued jobs have no private portable ledger. Rebuild a small batch from their original
+/// immutable carrier before selecting a claim; the store independently excludes every unbound
+/// model-backed row from every claim, whatever protocol version (or none) the worker sends, so an
+/// unavailable source or a concurrent poll can never reach a worker.
+///
+/// The upgrade runs inside the claim request, whose worker gives the WHOLE request
+/// [`CONTROL_REQUEST_TIMEOUT`](sceneworks_core::network_policy::CONTROL_REQUEST_TIMEOUT), while one
+/// carrier's pinned publisher metadata lookup may take the API's much longer outbound timeout. So
+/// the batch shares [`HISTORICAL_UPGRADE_CLAIM_BUDGET`]: a carrier still unresolved when it runs out
+/// is deferred exactly like any other transient source failure (queued, unbound, so unclaimable),
+/// never failed, and the claim proceeds to runnable work. A later claim retries it.
+async fn upgrade_historical_queued_carriers(state: &AppState) -> Result<bool, ApiError> {
+    let deadline = tokio::time::Instant::now() + HISTORICAL_UPGRADE_CLAIM_BUDGET;
+    let originals =
+        store_call(state.clone(), |store, _| store.unbound_queued_model_jobs(8)).await?;
+    let mut changed = false;
+    for original in originals {
+        match tokio::time::timeout_at(deadline, upgrade_historical_carrier(state, &original)).await
+        {
+            Ok(upgraded) => changed |= upgraded?,
+            Err(_) => {
+                // Every write the abandoned upgrade could have reached is a single conditional store
+                // transaction, so the row is either untouched or already bound/failed; deferring
+                // only touches a row that is still queued and unbound.
+                defer_historical_carrier(state, &original).await?;
+                break;
+            }
+        }
+    }
+    Ok(changed)
+}
+
+/// The share of the worker's claim deadline that historical carrier upgrades may spend before the
+/// claim itself runs, leaving the rest for the claim transaction and the response.
+const HISTORICAL_UPGRADE_CLAIM_BUDGET: std::time::Duration = std::time::Duration::from_secs(
+    sceneworks_core::network_policy::CONTROL_REQUEST_TIMEOUT.as_secs() / 3,
+);
+
+/// Rebuild one historical carrier and bind, fail or defer it. `Ok(true)` when a row changed in a
+/// way the queue must publish.
+async fn upgrade_historical_carrier(
+    state: &AppState,
+    original: &JobSnapshot,
+) -> Result<bool, ApiError> {
+    let mut current = original.payload.clone();
+    let canonical = match original.job_type {
+        JobType::ImageGenerate | JobType::ImageEdit | JobType::ImageDetail => {
+            upgrade_historical_image_carrier(state, &original.job_type, &mut current).await
+        }
+        JobType::VideoGenerate
+        | JobType::VideoExtend
+        | JobType::VideoBridge
+        | JobType::PersonReplace => {
+            let model_id = current
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let entry = resolve_model_manifest_entry(state, model_id).await;
+            entry.map(|entry| {
+                current.insert("modelManifestEntry".to_owned(), entry);
+            })
+        }
+        // Every other model-backed carrier (audio, vector, conversion, training bases, fixed
+        // utilities and reference models) re-resolves each slot from the current catalog, so a
+        // same-ID replacement is compared like an image or video one instead of against itself.
+        _ => reresolve_historical_entries(state, &original.job_type, &mut current).await,
+    };
+    if let Err(error) = canonical {
+        if error.status == axum::http::StatusCode::BAD_REQUEST {
+            // The current catalog refuses this carrier outright (a removed model, a trained
+            // checkpoint whose output directory is gone, an unavailable authored choice): the
+            // same request would be refused at create/retry, so it can never run.
+            return fail_historical_carrier(state, original, error.detail).await;
+        }
+        // A disconnected library or other transient catalog resolution failure cannot
+        // establish a replacement. The row remains unbound and unclaimable for retry.
+        defer_historical_carrier(state, original).await?;
+        return Ok(false);
+    }
+    let authority = crate::portable_admission::validate_historical_source_carrier(
+        state,
+        &original.payload,
+        &current,
+    )
+    .await;
+    if let Err(conflict) = authority {
+        // An identity or byte conflict is permanent: the original declaration can never be
+        // satisfied again, so the job fails with the reason instead of waiting forever.
+        return fail_historical_carrier(state, original, conflict.detail).await;
+    }
+    let Some(binding) = crate::portable_admission::capture_portable_model_binding(
+        state,
+        &original.job_type,
+        &current,
+        &original.requested_gpu,
+    )
+    .await
+    .ok()
+    .flatten() else {
+        // The original authority, including its local bytes, was verified above, so a capture
+        // failure here is about proving a route now: no eligible worker has advertised the
+        // exact closure yet, proof capacity is busy, or pinned publisher metadata is
+        // unreachable. Leave the row unbound and unclaimable; a later poll retries it.
+        defer_historical_carrier(state, original).await?;
+        return Ok(false);
+    };
+    let binding = serde_json::to_value(binding)
+        .map_err(|error| ApiError::internal(format!("Serialize historical source: {error}")))?;
+    let original_for_store = original.clone();
+    store_call(state.clone(), move |store, _| {
+        store.bind_historical_queued_job(&original_for_store, &current, &binding)
+    })
+    .await
+}
+
+async fn fail_historical_carrier(
+    state: &AppState,
+    original: &JobSnapshot,
+    detail: String,
+) -> Result<bool, ApiError> {
+    let original_for_store = original.clone();
+    let failed = store_call(state.clone(), move |store, _| {
+        store.fail_historical_unbound_queued_job(&original_for_store, &detail)
+    })
+    .await?;
+    let changed = failed.is_some();
+    if let Some(failed) = failed {
+        publish(state, "job.updated", &failed);
+    }
+    Ok(changed)
+}
+
+async fn defer_historical_carrier(
+    state: &AppState,
+    original: &JobSnapshot,
+) -> Result<(), ApiError> {
+    let original_for_store = original.clone();
+    store_call(state.clone(), move |store, _| {
+        store.defer_historical_queued_job(&original_for_store)
+    })
+    .await
+}
+
+/// Rebuild an image carrier exactly as create/retry/duplicate do: the current catalog entry, then
+/// the server-owned resolution of the authored text-encoder choice. Without the second stamp a
+/// historical job that chose a non-default encoder could never match its original carrier.
+async fn upgrade_historical_image_carrier(
+    state: &AppState,
+    job_type: &JobType,
+    payload: &mut JsonObject,
+) -> Result<(), ApiError> {
+    let Some(mut entry) = canonicalize_image_model_payload(state, job_type, payload).await? else {
+        return Ok(());
+    };
+    if matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
+        let model_id = payload
+            .get("model")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ApiError::bad_request("model must be a string"))?
+            .to_owned();
+        resolve_selected_image_text_encoder(state, payload, &model_id, &mut entry).await?;
+        payload.insert("modelManifestEntry".to_owned(), entry);
+    }
+    Ok(())
+}
+
+/// Replace each model carrier slot of a non-image/video historical job with the current catalog's
+/// entry for the same id. A slot without an id has nothing to re-resolve; it becomes `null`, so the
+/// identity comparison refuses it rather than trusting the stored carrier (fail closed).
+async fn reresolve_historical_entries(
+    state: &AppState,
+    job_type: &JobType,
+    payload: &mut JsonObject,
+) -> Result<(), ApiError> {
+    async fn current_entry(
+        state: &AppState,
+        job_type: &JobType,
+        entry: &Value,
+    ) -> Result<Value, ApiError> {
+        let Some(id) = entry
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            return Ok(Value::Null);
+        };
+        validate_model_id(id)?;
+        if *job_type == JobType::VectorGenerate {
+            // Vector admission stamps the public catalog row (`create_vector_job`).
+            return Ok(crate::models::find_model_by_id(state, id)
+                .await?
+                .unwrap_or_else(|| json!({})));
+        }
+        resolve_model_manifest_entry(state, id).await
+    }
+    for key in ["modelManifestEntry", "baseModelManifestEntry"] {
+        if let Some(entry) = payload.get(key).filter(|entry| !entry.is_null()).cloned() {
+            let replacement = current_entry(state, job_type, &entry).await?;
+            payload.insert(key.to_owned(), replacement);
+        }
+    }
+    if let Some(entries) = payload
+        .get("modelManifestEntries")
+        .and_then(Value::as_array)
+        .cloned()
+    {
+        let mut rebuilt = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            rebuilt.push(current_entry(state, job_type, entry).await?);
+        }
+        payload.insert("modelManifestEntries".to_owned(), Value::Array(rebuilt));
+    }
+    Ok(())
 }
 
 /// Emit the macOS `mlx_unsupported` gap event (epic 3482 / sc-3484) as a structured JSON line
@@ -1506,6 +1724,18 @@ async fn validate_and_canonicalize_merged_generation_payload(
         && frozen_portable_binding.is_some()
         && crate::portable_admission::portable_authored_options(&merged)
             != crate::portable_admission::portable_authored_options(&persisted);
+    let historical_new_selection = !retry
+        && frozen_portable_binding.is_none()
+        && merged.get("model") != persisted.get("model");
+    let historical_same_selection = frozen_portable_binding.is_none()
+        && !historical_new_selection
+        && !sceneworks_core::model_artifacts::portable_binding::model_free_job(&job_type, &merged)
+        && crate::portable_admission::portable_authored_options(&merged)
+            == crate::portable_admission::portable_authored_options(&persisted);
+    if historical_same_selection {
+        crate::portable_admission::validate_historical_source_carrier(state, &persisted, &merged)
+            .await?;
+    }
     if frozen_portable_binding.is_some() {
         let license_acknowledged = merged
             .get(crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
@@ -1602,16 +1832,18 @@ async fn validate_and_canonicalize_merged_generation_payload(
         (Some(_), _) => return Err(ApiError::bad_request(
             "The model source changed since this job was admitted. Restore the original source bytes before replaying.",
         )),
+        (None, Some(_)) if historical_same_selection || historical_new_selection => {}
         (None, Some(_)) => return Err(ApiError::bad_request(
             "This historical job has no portable source binding. Upgrade its manifest before retrying.",
         )),
         (None, None) => {}
     }
-    let portable_binding = if fresh_portable_selection {
-        candidate
-    } else {
-        frozen_portable_binding
-    };
+    let portable_binding =
+        if fresh_portable_selection || historical_same_selection || historical_new_selection {
+            candidate
+        } else {
+            frozen_portable_binding
+        };
     Ok((
         merged,
         provenance,

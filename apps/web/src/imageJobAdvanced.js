@@ -2,7 +2,7 @@ import { isMossImage, isMossEdit, mossWireOptions, mossAccelerated, buildMossEdi
 import { buildStructuredPromptRecipe } from "./ideogramCaption.js";
 import { tierQuantize, isConvRotTier, isNvfp4Tier, isFp8rTier } from "./quantTier.js";
 import { modelSupportsAlphaOutput } from "./qwenAlpha.js";
-import { isFlux3LayoutModel } from "./flux3Layout.js";
+import { isFlux3ImageModel } from "./modelEligibility.js";
 
 // sc-8854 (F-052): pure builder for the Image Studio job's `advanced` payload. Extracted
 // verbatim from ImageStudio.submit() — the ~110-line object literal that assembled the
@@ -19,7 +19,6 @@ import { isFlux3LayoutModel } from "./flux3Layout.js";
 export function buildImageJobAdvanced(state) {
   const {
     resolution,
-    model,
     flux3Layout,
     flux3ReferenceIds,
     // Structured-prompt recipe round-trip (sc-6147).
@@ -132,7 +131,7 @@ export function buildImageJobAdvanced(state) {
     ...(moss ? { mossImage: mossWireOptions(state.mossImage) } : {}),
     ...(dmd && state.mossOrdinarySettings ? { mossOrdinarySettings: state.mossOrdinarySettings } : {}),
     resolution,
-    ...(isFlux3LayoutModel(model) && flux3Layout?.boxes?.length ? {
+    ...(isFlux3ImageModel(selectedModel) && flux3Layout?.boxes?.length ? {
       // Preserve the original document and current attachment order, never a rounded table.
       flux3_layout: flux3Layout,
       flux3_reference_ids: flux3ReferenceIds ?? [],

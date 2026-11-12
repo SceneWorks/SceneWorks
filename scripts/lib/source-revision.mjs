@@ -19,7 +19,7 @@
  *
  * A line is inert when it is blank, or when its first non-whitespace characters are the language's
  * line-comment marker AND it contains no `"`. The quote half is not decoration. Every parser in these generators
- * extracts DOUBLE-QUOTED STRING LITERALS (`EXPECTED_IMAGE_IDS`, `MODEL_TABLE` rows, the MLX
+ * extracts DOUBLE-QUOTED STRING LITERALS (`MODEL_TABLE` rows, the MLX
  * sequential-capability sweep, InstantID's dense Candle tier, the `candle-kernels` `rev = "…"` pin),
  * so a comment line with no `"` cannot contribute a parsed value — dropping it from the hash cannot
  * hide a semantic change. A commented-out line that DOES carry a literal keeps its quote, stays

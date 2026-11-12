@@ -254,14 +254,88 @@ fn authority_plan_fixture(settings: &Settings) -> (Value, Value) {
     )
 }
 
+#[tokio::test]
+async fn historical_import_carrier_requires_original_plan_and_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let settings = test_settings(&temp);
+    let (entry, _) = authority_plan_fixture(&settings);
+    let (_, state) = create_app_with_state(settings).unwrap();
+    let original = json!({"model":"actual_import", "modelManifestEntry":entry})
+        .as_object()
+        .unwrap()
+        .clone();
+    crate::portable_admission::validate_historical_source_carrier(&state, &original, &original)
+        .await
+        .expect("compiled import plan authenticates original bytes");
+
+    let mut replacement = original.clone();
+    replacement.get_mut("modelManifestEntry").unwrap()["importPlan"]["semanticDigest"] =
+        json!("b".repeat(64));
+    assert!(
+        crate::portable_admission::validate_historical_source_carrier(
+            &state,
+            &original,
+            &replacement
+        )
+        .await
+        .is_err()
+    );
+
+    let source = state
+        .settings
+        .data_dir
+        .join("authority-library/model.safetensors");
+    let bytes = std::fs::read(&source).unwrap();
+    std::fs::write(&source, vec![b'X'; bytes.len()]).unwrap();
+    assert!(
+        crate::portable_admission::validate_historical_source_carrier(&state, &original, &original)
+            .await
+            .is_err()
+    );
+    std::fs::remove_file(&source).unwrap();
+    assert!(
+        crate::portable_admission::validate_historical_source_carrier(&state, &original, &original)
+            .await
+            .is_err()
+    );
+    std::fs::write(&source, bytes).unwrap();
+    crate::portable_admission::validate_historical_source_carrier(&state, &original, &original)
+        .await
+        .expect("restored original bytes authenticate");
+}
+
 fn register_authority_import_worker(state: &crate::AppState) {
-    let bytes = std::fs::read(
-        state
+    register_authority_import_worker_from(
+        state,
+        &state
             .settings
             .data_dir
             .join("authority-library/model.safetensors"),
-    )
-    .unwrap();
+    );
+}
+
+/// Whether `(repository, revision, selectors)` is exactly one of the REGISTERED realvisxl rows (any
+/// tier, any platform), as a route member asks the pinned publisher for it.
+fn registered_realvisxl_selection(repository: &str, revision: &str, selectors: &[String]) -> bool {
+    sceneworks_core::builtin_manifests::builtin_model_entry("realvisxl")
+        .expect("realvisxl is registered")["downloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| {
+            row["repo"] == repository
+                && row["revision"] == revision
+                && row["files"].as_array().is_some_and(|files| {
+                    files
+                        .iter()
+                        .map(Value::as_str)
+                        .eq(selectors.iter().map(|s| Some(s.as_str())))
+                })
+        })
+}
+
+fn register_authority_import_worker_from(state: &crate::AppState, source: &std::path::Path) {
+    let bytes = std::fs::read(source).unwrap();
     let files = vec![PortableArtifactFile {
         relative_path: "artifact".into(),
         size_bytes: bytes.len() as u64,
@@ -305,15 +379,18 @@ fn register_authority_import_worker(state: &crate::AppState) {
                 && selectors == [tile.files[0].to_owned()]
             {
                 vec![tile_file.clone()]
-            } else if repository == "SceneWorks/realvisxl-mlx"
-                && revision == "e40202d63baef826c7df95a639a811698c1178d2"
-                && selectors == ["q4/*".to_owned()]
-            {
-                vec![PortableArtifactFile {
-                    relative_path: "q4/model_index.json".into(),
-                    size_bytes: 1,
-                    sha256: format!("sha256:{}", sceneworks_core::hashing::sha256_bytes(b"x")),
-                }]
+            } else if registered_realvisxl_selection(repository, revision, selectors) {
+                // realvisxl is REGISTERED: every route's members are its compiled rows (the
+                // MLX tier directory everywhere, plus the CUDA tokenizer and VAE co-requisites
+                // a Candle route binds), so the publisher answers each of them.
+                selectors
+                    .iter()
+                    .map(|selector| PortableArtifactFile {
+                        relative_path: selector.replace('*', "model_index.json").into(),
+                        size_bytes: 1,
+                        sha256: format!("sha256:{}", sceneworks_core::hashing::sha256_bytes(b"x")),
+                    })
+                    .collect()
             } else {
                 Vec::new()
             }
@@ -479,6 +556,16 @@ async fn raw_http_carriers_cannot_freeze_another_import_and_replays_keep_executi
         assert_eq!(state.jobs_store.model_provenance(id).unwrap(), None);
         assert!(asset.get("modelProvenance").is_none());
         assert!(asset["recipe"].get("modelProvenance").is_none());
+        if actual_model == "realvisxl" {
+            // Reopen a pre-ledger job with its original pinned publisher carrier intact.
+            let connection = rusqlite::Connection::open(&state.settings.jobs_db_path).unwrap();
+            connection
+                .execute(
+                    "update jobs set portable_model_binding_json = null where id = ?1",
+                    [id],
+                )
+                .unwrap();
+        }
         let (status, replay) = request(app.clone(), "POST", &format!("/api/v1/jobs/{id}/duplicate"), json!({"payloadChanges":{
             "modelManifestEntry":forged,"modelManifestEntries":[forged],"baseModelManifestEntry":forged,"modelProvenance":{"forged":true}}})).await;
         assert_eq!(status, StatusCode::CREATED, "{job_type}: {replay}");
@@ -491,6 +578,13 @@ async fn raw_http_carriers_cannot_freeze_another_import_and_replays_keep_executi
             );
         }
         let replay_id = replay["id"].as_str().unwrap();
+        if actual_model == "realvisxl" {
+            assert!(state
+                .jobs_store
+                .portable_model_binding(replay_id)
+                .unwrap()
+                .is_some());
+        }
         assert_eq!(
             replay["payload"],
             serde_json::to_value(crate::job_redaction::public_job_snapshot(
@@ -685,7 +779,7 @@ async fn typed_http_admission_freezes_catalog_authority_before_asset_persistence
         .create_project("Typed authority")
         .unwrap();
     let (status, created) = request(
-        app,
+        app.clone(),
         "POST",
         "/api/v1/image/jobs",
         json!({"projectId":project.id,
@@ -705,6 +799,184 @@ async fn typed_http_admission_freezes_catalog_authority_before_asset_persistence
         state.jobs_store.model_provenance(id).unwrap(),
         Some(trusted.clone())
     );
+    let source = state
+        .settings
+        .data_dir
+        .join("authority-library/model.safetensors");
+    let other_root = temp.path().join("other-worker-root");
+    std::fs::create_dir_all(&other_root).unwrap();
+    let copy = other_root.join("model.safetensors");
+    std::fs::copy(&source, &copy).unwrap();
+    let connection = rusqlite::Connection::open(&state.settings.jobs_db_path).unwrap();
+    let original_claims: String = connection
+        .query_row(
+            "select portable_source_claims_json from workers where id = 'authority-mlx-worker'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    register_authority_import_worker_from(&state, &copy);
+    let copied_claims: String = connection
+        .query_row(
+            "select portable_source_claims_json from workers where id = 'authority-mlx-worker'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(original_claims, copied_claims);
+    connection
+        .execute(
+            "update jobs set portable_model_binding_json = null where id = ?1",
+            [id],
+        )
+        .unwrap();
+    let (status, replay) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{id}/duplicate"),
+        json!({"payloadChanges":{}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replay}");
+    assert!(state
+        .jobs_store
+        .portable_model_binding(replay["id"].as_str().unwrap())
+        .unwrap()
+        .is_some());
+    let original_bytes = std::fs::read(&source).unwrap();
+    std::fs::write(&source, vec![b'X'; original_bytes.len()]).unwrap();
+    let (altered_status, altered) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{id}/duplicate"),
+        json!({"payloadChanges":{}}),
+    )
+    .await;
+    assert_eq!(altered_status, StatusCode::CONFLICT, "{altered}");
+    std::fs::remove_file(&source).unwrap();
+    let (missing_status, missing) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{id}/duplicate"),
+        json!({"payloadChanges":{}}),
+    )
+    .await;
+    assert_eq!(missing_status, StatusCode::CONFLICT, "{missing}");
+    std::fs::write(&source, original_bytes).unwrap();
+    let (claim_status, claimed) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        portable_test_worker_claim("authority-mlx-worker", TestPortableRoute::MlxMacos),
+    )
+    .await;
+    assert_eq!(claim_status, StatusCode::OK, "{claimed}");
+    let claimed_id = claimed["job"]["id"]
+        .as_str()
+        .expect("historical source job claimed");
+    assert!(claimed_id == id || claimed_id == replay["id"].as_str().unwrap());
+    assert!(state
+        .jobs_store
+        .portable_model_binding(claimed_id)
+        .unwrap()
+        .is_some());
+    // Review finding 4: substituted or missing imported bytes at CLAIM time fail the historical
+    // carrier with the reason instead of leaving it queued as "no route provable yet".
+    for substituted in [true, false] {
+        let carrier = state
+            .jobs_store
+            .create_job(crate::CreateJob {
+                job_type: queued.job_type.clone(),
+                project_id: queued.project_id.clone(),
+                project_name: None,
+                payload: queued.payload.clone(),
+                requested_gpu: queued.requested_gpu.clone(),
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+                initial_status: None,
+            })
+            .unwrap();
+        let bytes = std::fs::read(&source).unwrap();
+        if substituted {
+            std::fs::write(&source, vec![b'X'; bytes.len()]).unwrap();
+        } else {
+            std::fs::remove_file(&source).unwrap();
+        }
+        let (status, claim) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs/claim",
+            portable_test_worker_claim("authority-mlx-worker", TestPortableRoute::MlxMacos),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{claim}");
+        assert_ne!(claim["job"]["id"], json!(carrier.id), "{claim}");
+        let failed = state.jobs_store.get_job(&carrier.id).unwrap();
+        assert_eq!(
+            failed.status,
+            crate::JobStatus::Failed,
+            "substituted={substituted}: {failed:?}"
+        );
+        assert!(
+            failed.error.as_deref().is_some_and(
+                |error| error.starts_with("Historical model source could not be verified")
+            ),
+            "substituted={substituted}: {failed:?}"
+        );
+        std::fs::write(&source, bytes).unwrap();
+    }
+    let old_carrier = state
+        .jobs_store
+        .create_job(crate::CreateJob {
+            job_type: queued.job_type.clone(),
+            project_id: queued.project_id.clone(),
+            project_name: None,
+            payload: queued.payload.clone(),
+            requested_gpu: queued.requested_gpu.clone(),
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+            initial_status: None,
+        })
+        .unwrap();
+    let catalog_path = state
+        .settings
+        .config_dir
+        .join("manifests/builtin.models.jsonc");
+    let original_catalog = std::fs::read(&catalog_path).unwrap();
+    let mut replacement_catalog: Value = serde_json::from_slice(&original_catalog).unwrap();
+    replacement_catalog["models"][0]["baseModel"] = json!("replacement-base");
+    std::fs::write(&catalog_path, replacement_catalog.to_string()).unwrap();
+    let (replacement_status, replacement) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{}/duplicate", old_carrier.id),
+        json!({"payloadChanges":{}}),
+    )
+    .await;
+    assert_eq!(replacement_status, StatusCode::CONFLICT, "{replacement}");
+    let (replaced_claim_status, replaced_claim) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({"workerId":"authority-candle-worker",
+            "portableModelBindingVersion":sceneworks_core::model_artifacts::portable_binding::PORTABLE_MODEL_BINDING_VERSION,
+            "portableBackend":"candle", "portablePlatform":"windows"}),
+    )
+    .await;
+    assert_eq!(replaced_claim_status, StatusCode::OK, "{replaced_claim}");
+    assert_ne!(replaced_claim["job"]["id"], json!(old_carrier.id));
+    assert_eq!(
+        state.jobs_store.get_job(&old_carrier.id).unwrap().status,
+        crate::JobStatus::Failed
+    );
+    assert!(state
+        .jobs_store
+        .portable_model_binding(&old_carrier.id)
+        .unwrap()
+        .is_none());
+    std::fs::write(&catalog_path, original_catalog).unwrap();
     // Completion must retain admitted authority even if the source catalog changes/disappears.
     std::fs::remove_file(state.settings.data_dir.join("checkpoints/inventory.json")).unwrap();
     let asset = persist_authority_output(

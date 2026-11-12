@@ -86,6 +86,90 @@ fn install_then_disconnect_for_model(data_dir: &Path, repository: &str, model_id
     detached
 }
 
+/// A REGISTERED builtin's default primary row as an install requirement: its repository, pinned
+/// revision and variant, with each declared file pattern made concrete (`dir/*` becomes one weights
+/// file in `dir`). A registered id resolves through the compiled registry row, so a config-dir row
+/// cannot substitute another repository for it.
+fn registered_default_requirement(model_id: &str) -> ExternalArtifactRequirement {
+    let entry = Value::Object(
+        sceneworks_core::builtin_manifests::builtin_model_entry(model_id)
+            .expect("registered builtin")
+            .clone(),
+    );
+    let row = sceneworks_core::model_artifacts::artifact_selection::model_download(&entry)
+        .expect("registered default primary row");
+    let files = row["files"]
+        .as_array()
+        .expect("registered file closure")
+        .iter()
+        .map(|pattern| {
+            let pattern = pattern.as_str().expect("file pattern");
+            PathBuf::from(match pattern.strip_suffix("/*") {
+                Some(dir) => format!("{dir}/model.safetensors"),
+                None => pattern.to_owned(),
+            })
+        })
+        .collect();
+    ExternalArtifactRequirement {
+        repository: row["repo"].as_str().expect("registered repo").to_owned(),
+        revision: Some(
+            row["revision"]
+                .as_str()
+                .expect("registered revision")
+                .to_owned(),
+        ),
+        variant: row["variant"].as_str().unwrap_or("default").to_owned(),
+        files,
+        is_primary: true,
+    }
+}
+
+/// Install a registered builtin's default row into the isolated library (snapshot, receipt and
+/// binding), then disconnect the library.
+fn install_registered_then_disconnect(data_dir: &Path, model_id: &str) -> PathBuf {
+    let requirement = registered_default_requirement(model_id);
+    let revision = requirement.revision.clone().expect("pinned revision");
+    let hub = isolated_hub(data_dir);
+    let safe = sceneworks_core::hf_home::safe_repo_dir_name(&requirement.repository)
+        .expect("safe repo name");
+    let snapshot = hub
+        .join(format!("models--{safe}"))
+        .join("snapshots")
+        .join(&revision);
+    for file in &requirement.files {
+        let path = snapshot.join(file);
+        std::fs::create_dir_all(path.parent().expect("file parent")).expect("snapshot dir creates");
+        std::fs::write(path, b"weights").expect("weights write");
+    }
+    let managed = data_dir.join("models").join(
+        sceneworks_core::model_artifacts::artifact_selection::safe_download_dir(
+            &requirement.repository,
+        ),
+    );
+    std::fs::create_dir_all(&managed).expect("managed dir creates");
+    std::fs::write(
+        managed.join(".sceneworks-download-complete.json"),
+        serde_json::to_vec(&json!({
+            "receipts": [{
+                "repo": requirement.repository,
+                "modelId": model_id,
+                "variant": requirement.variant,
+                "resolvedFiles": requirement.files,
+                "snapshotRevision": revision,
+            }]
+        }))
+        .expect("receipt serializes"),
+    )
+    .expect("receipt writes");
+    ExternalLibraryBindingStore::new(data_dir)
+        .expect("binding store")
+        .bind_or_probe_validated(&hub, &[requirement])
+        .expect("library binds while connected");
+    let detached = data_dir.join("detached-library");
+    std::fs::rename(&hub, &detached).expect("library detaches");
+    detached
+}
+
 /// The walking skeleton, end to end at the wire: a submission whose model lives on a disconnected
 /// library is rejected with the typed 503 AND a typed context object naming the model and the
 /// expected library — everything the prompt needs, none of it parsed out of prose. Reconnecting
@@ -96,18 +180,13 @@ async fn a_disconnected_library_rejects_with_typed_context_and_a_reconnect_resum
     let _env = isolate_hf_cache();
     let settings = test_settings(&temp_dir);
     let data_dir = settings.data_dir.clone();
-    manifest_with_downloads(
-        &settings.config_dir.join("manifests"),
-        "qwen_image",
-        json!([{
-            "provider": "huggingface",
-            "repo": "owner/model",
-            "revision": REVISION,
-            "files": ["model.safetensors"],
-        }]),
-    );
+    // qwen_image is REGISTERED: admission resolves its compiled default row, so the library holds
+    // exactly that row (repository, pinned revision, variant and files).
     std::fs::create_dir_all(&data_dir).expect("data dir creates");
-    let detached = install_then_disconnect_for_model(&data_dir, "owner/model", "qwen_image");
+    let detached = install_registered_then_disconnect(&data_dir, "qwen_image");
+    let registered_name = sceneworks_core::builtin_manifests::builtin_model_entry("qwen_image")
+        .expect("registered builtin")["name"]
+        .clone();
     let app = create_training_fixture_app(settings).expect("app creates");
 
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Library Project").await;
@@ -137,7 +216,7 @@ async fn a_disconnected_library_rejects_with_typed_context_and_a_reconnect_resum
     let context = &body["context"];
     assert_eq!(context["availability"], "installed_external_unavailable");
     assert_eq!(context["modelId"], "qwen_image");
-    assert_eq!(context["modelName"], "qwen_image");
+    assert_eq!(context["modelName"], registered_name);
     assert!(
         context["configuredLibraryPath"]
             .as_str()

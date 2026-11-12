@@ -435,12 +435,12 @@ async fn check_managed_repair(missing_original: bool, publication_change: Option
             .join("diffusion_pytorch_model.safetensors"),
     )
     .unwrap();
-    let mut downloads = fixture::component_downloads("q4", "fl2va");
-    downloads.extend([
-        json!({"provider":"huggingface","repo":"fixture/base-config","revision":"3".repeat(40),"variant":"q4","default":true,"files":["transformer/config.json"]}),
-        json!({"provider":"huggingface","repo":"fixture/base-config","revision":"3".repeat(40),"variant":"bf16","files":["transformer/config.json"]}),
-    ]);
-    let base = json!({"id":"minimax_h3","family":"minimax-h3","type":"video","name":"Synthetic compatibility base","downloads":downloads});
+    // minimax_h3 is REGISTERED: the installed catalog lists it, and the repair's component closure
+    // and architecture-config row come from its compiled row, which the fixture staged at the
+    // registered pins.
+    let base = sceneworks_core::builtin_manifests::builtin_model_entry("minimax_h3")
+        .expect("registered base")
+        .clone();
     std::fs::write(
         settings.config_dir.join("manifests/builtin.models.jsonc"),
         json!({"schemaVersion":1,"models":[base]}).to_string(),
@@ -464,8 +464,8 @@ async fn check_managed_repair(missing_original: bool, publication_change: Option
         "ordinary create must still reject existing IDs: {duplicate}"
     );
     // Explicit acknowledgment models only this isolated synthetic API request. It is not user
-    // consent or authority for real source acquisition; every fixture closure is already local,
-    // the base config is source-owned, and the worker network endpoint is unroutable.
+    // consent or authority for real source acquisition; every fixture closure, including the base
+    // architecture config, is already local, and the worker network endpoint is unroutable.
     let (status, queued) = request(
         app.clone(),
         "POST",

@@ -3122,38 +3122,23 @@ fn training_text_encoder(engine_id: &str, weights_dir: &std::path::Path) -> Opti
     None
 }
 
-/// The shipped `builtin.models.jsonc` entry for `model_id`, parsed from the embedded manifest — the
+/// The shipped builtin entry for `model_id`, as the shared embedded catalog projects it — the
 /// source of truth for a base model's pinned `coRequisite` downloads (the app seeds its live catalog
-/// from these bytes). The training plan carries the base model id, not its manifest entry, so the trainer
-/// resolves components off this. `None` when the id is not a builtin model.
+/// from the same projection). The training plan carries the base model id, not its manifest entry,
+/// so the trainer resolves components off this. `None` when the id is not a builtin model.
 ///
 /// Compiled on every build (not just the macOS/candle trainer lanes): the pre-loader model-source
 /// guard resolves a plan-backed imported checkpoint's resident base model off this too
-/// (sc-22329), and the guard runs everywhere.
-///
-/// The parse is memoized because that guard call is on the PER-JOB path — including for imported
-/// jobs whose row is discarded moments later for missing receipts — where it would otherwise
-/// comment-strip and parse the whole embedded catalog every time. The bytes are a compile-time
-/// constant, so one parse can serve the process.
+/// (sc-22329), and the guard runs everywhere. The core accessor memoizes its parse, so this per-job
+/// call does not re-parse the catalog.
 pub(crate) fn builtin_model_manifest_entry(model_id: &str) -> Option<serde_json::Value> {
-    static MODELS: std::sync::OnceLock<Option<serde_json::Value>> = std::sync::OnceLock::new();
-    MODELS
-        .get_or_init(|| {
-            let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-                .iter()
-                .find(|(name, _)| *name == "builtin.models.jsonc")
-                .map(|(_, contents)| *contents)?;
-            serde_json::from_str::<serde_json::Value>(
-                &sceneworks_core::jsonc::strip_jsonc_comments(raw),
-            )
-            .ok()
-        })
-        .as_ref()?
-        .get("models")?
-        .as_array()?
-        .iter()
-        .find(|entry| entry.get("id").and_then(serde_json::Value::as_str) == Some(model_id))
+    // The shared, memoized production projection: product row plus its typed memory and download
+    // evidence (`config/manifests/registry/evidence.json`). The raw jsonc bytes no longer carry
+    // measured memory facts or download footprints (SW-7031), so reading them here would hand a
+    // consumer an entry with those facts silently missing.
+    sceneworks_core::builtin_manifests::builtin_model_entry(model_id)
         .cloned()
+        .map(serde_json::Value::Object)
 }
 
 /// Resolve a trainer's caller-staged components (epic 13657, sc-13682) from the base model's pinned
@@ -6746,31 +6731,10 @@ mod tests {
         assert_eq!(mapped.gradient_noise_gamma, 0.75);
     }
 
-    /// Every SceneWorks training kernel the worker can route, with a base model it accepts.
-    #[cfg(native_lane)]
-    const ROUTED_TRAINING_TARGETS: &[(&str, &str)] = &[
-        ("z_image_lora", "z_image_turbo"),
-        ("sdxl_lora", "sdxl"),
-        ("kolors_lora", "kolors"),
-        ("lens_lora", "lens"),
-        ("krea_lora", "krea_2_raw"),
-        ("krea_control", "krea_2_raw"),
-        ("sd3_lora", "sd3_5_large"),
-        ("sd3_lora", "sd3_5_medium"),
-        ("ltx_mlx_lora", "ltx_2_3"),
-        ("ltx_mlx_lora", "ltx_2_5"),
-        ("wan_lora", "wan_2_2"),
-        ("wan_moe_lora", "wan_2_2_t2v_14b"),
-        ("wan_moe_lora", "wan_2_2_i2v_14b"),
-        ("anima_lora", "anima_base"),
-        ("mage_flow_lora", "mage_flow_base"),
-    ];
-
     /// sc-24826/sc-24827 (epic 2123 E3/E5): the shared dry/real preflight admits weight noise and
-    /// gradient noise on every LoRA/LoKr trainer the active runtime registers (S2 put both on every
-    /// trainer, both backends), refuses them on a trainer that does not declare them (the Krea
-    /// control-branch trainer), refuses them with a full base fine-tune, and refuses out-of-range /
-    /// malformed values.
+    /// gradient noise on every target that advertises them and whose trainer is registered on this
+    /// backend, refuses them on the Krea control-branch trainer, refuses them with a full base
+    /// fine-tune, and refuses out-of-range / malformed values.
     #[cfg(native_lane)]
     #[test]
     fn preflight_gates_adapter_noise_on_the_trainer_descriptor() {
@@ -6793,10 +6757,36 @@ mod tests {
 
         let mut admitted = 0;
         let mut refused = 0;
-        for &(kernel, base) in ROUTED_TRAINING_TARGETS {
+        for target in sceneworks_core::training::builtin_training_targets()
+            .targets
+            .into_iter()
+            .filter(|target| {
+                sceneworks_core::training::target_supports_weight_noise(target)
+                    || sceneworks_core::training::target_supports_gradient_noise(target)
+                    || target.output_kind
+                        == sceneworks_core::training::TrainingOutputKind::ControlBranch
+            })
+        {
+            let kernel = target.kernel.as_str();
+            let base = target.base_model.as_str();
             let engine_id = engine_trainer_id_for(kernel, base).expect("routed kernel");
             let Some(descriptor) = crate::inference_runtime::trainer_descriptor(engine_id) else {
                 continue; // not registered on this backend (e.g. the candle-only Krea control trainer)
+            };
+            // The target defaults as this backend's API serves them: a Candle host projects them
+            // onto what its trainer executes (no checkpointing or previews for the dense trainers).
+            let mut defaults = target.defaults.clone();
+            if descriptor.backend == "candle" {
+                sceneworks_core::training::apply_candle_training_defaults(kernel, &mut defaults);
+            }
+            let target_plan = |network: &str, key: &str, technique_value: Value| {
+                let mut value = plan_json(dir.path(), kernel, base, network, &[&image]);
+                value["target"]["targetId"] = json!(target.id);
+                value["target"]["baseModelRepo"] = json!(target.base_model_repo);
+                value["config"] = serde_json::to_value(&defaults).expect("target defaults");
+                value["config"]["advanced"]["networkType"] = json!(network);
+                value["config"]["advanced"][key] = technique_value;
+                parse(value)
             };
             let network = if descriptor.supports_lora {
                 "lora"
@@ -6805,18 +6795,21 @@ mod tests {
             };
             // Off is always admitted — the gate must not refuse a plan that does not ask for it.
             for (key, _, _) in techniques.clone() {
-                validate_training_target_config(&plan(kernel, base, network, key, json!(0)))
+                validate_training_target_config(&target_plan(network, key, json!(0)))
                     .unwrap_or_else(|e| panic!("{kernel}/{base}: {key}=0 refused: {e}"));
             }
-            let adapter_trainer = descriptor.supports_lora || descriptor.supports_lokr;
+            let adapter_trainer = sceneworks_core::training::target_supports_weight_noise(&target)
+                && sceneworks_core::training::target_supports_gradient_noise(&target);
             assert_eq!(
-                descriptor.techniques.weight_noise && descriptor.techniques.gradient_noise,
-                adapter_trainer,
-                "{engine_id}: every LoRA/LoKr trainer declares both adapter-noise techniques; a \
-                 non-adapter trainer declares neither"
+                descriptor.techniques.weight_noise, adapter_trainer,
+                "{engine_id}: trainer weight-noise capability disagrees with the target"
+            );
+            assert_eq!(
+                descriptor.techniques.gradient_noise, adapter_trainer,
+                "{engine_id}: trainer gradient-noise capability disagrees with the target"
             );
             for (key, on, name) in techniques.clone() {
-                let request = plan(kernel, base, network, key, on);
+                let request = target_plan(network, key, on);
                 if adapter_trainer {
                     validate_training_target_config(&request)
                         .unwrap_or_else(|e| panic!("{kernel}/{base}: {name} refused: {e}"));
@@ -9666,7 +9659,7 @@ mod tests {
         let mut covered: BTreeSet<&str> = BTreeSet::new();
         for target in &registry.targets {
             let kernel = target.kernel.as_str();
-            if !MLX_ROUTED_TRAINING_KERNELS.contains(&kernel) {
+            if !MLX_ROUTED_TRAINING_KERNELS.contains(kernel) {
                 continue;
             }
             covered.insert(kernel);
@@ -9709,7 +9702,10 @@ mod tests {
             }
         }
 
-        let routed: BTreeSet<&str> = MLX_ROUTED_TRAINING_KERNELS.iter().copied().collect();
+        let routed: BTreeSet<&str> = MLX_ROUTED_TRAINING_KERNELS
+            .iter()
+            .map(String::as_str)
+            .collect();
         assert_eq!(
             covered, routed,
             "every MLX-routed training kernel must be reachable from at least one built-in \

@@ -26,8 +26,9 @@ import {
   suggestTier,
   tierFits,
   variantFootprintBytes,
-} from "./tierSuggestion.js";
+} from "./registryTierEvidence.js";
 import { isSelectableTier, tierHostEligible, tierQuantize } from "./quantTier.js";
+import { projectBuiltinMemoryEvidence } from "../../../scripts/lib/builtin-memory-evidence.mjs";
 import { needsLabel } from "./simple/SimpleModelManager.jsx";
 import { sdxlCudaMemoryEstimate } from "./sdxlCudaMemoryEndpoints.js";
 
@@ -50,6 +51,7 @@ import { sdxlCudaMemoryEstimate } from "./sdxlCudaMemoryEndpoints.js";
 // constants — never from a transcribed number — and the suite fails if it ever covers zero models.
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MANIFEST_PATH = resolve(HERE, "../../../config/manifests/builtin.models.jsonc");
+const EVIDENCE_PATH = resolve(HERE, "../../../config/manifests/registry/evidence.json");
 const BYTES_PER_GB = 1024 ** 3;
 
 // apps/rust-api/src/models.rs:4603 `is_supported_model_download`.
@@ -97,9 +99,13 @@ function catalogDownloadSizeBytes(manifestModel, download) {
 
 function loadManifestModels() {
   const parsed = JSON5.parse(readFileSync(MANIFEST_PATH, "utf8"));
-  const models = Array.isArray(parsed) ? parsed : parsed.models;
-  expect(Array.isArray(models), "manifest must expose a models array").toBe(true);
-  return models;
+  const manifest = Array.isArray(parsed) ? { models: parsed } : parsed;
+  expect(Array.isArray(manifest.models), "manifest must expose a models array").toBe(true);
+  // Measured memory facts moved to registry/evidence.json (SW-7031); the API
+  // projects them back onto the product manifest before serving the catalog,
+  // so this mirror applies the same shared projection the Node tooling uses.
+  const evidence = JSON.parse(readFileSync(EVIDENCE_PATH, "utf8"));
+  return projectBuiltinMemoryEvidence(manifest, evidence).models;
 }
 
 // Project a manifest entry into the CATALOG shape the web client actually receives, for the memory
@@ -129,7 +135,7 @@ function loadManifestModels() {
 // below simply cannot see. This file is this PR's central evidence, so its blind spots are written down
 // next to it rather than left to be rediscovered:
 //   * `downloadSizeBytes` WAS one of them, and its absence hid a real hole. `variantFootprintBytes`
-//     consumes it as its LAST-RESORT priority 4 (tierSuggestion.js:92-98, reached via
+//     consumes it as its LAST-RESORT priority 4 (registryTierEvidence.js, reached via
 //     `mlxEstimatedPeakGb`), and `krea_2_raw`/`krea_2_turbo` — the only two shipped matrix entries whose
 //     downloads carry NO `footprint` at all — reach the fill through exactly that leg. Without the field
 //     the mirror answered `needs 48 GB` (the `mlx.minMemoryGb` blanket) for all eight bf16-containing
@@ -1308,7 +1314,7 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
     expect(bf16Host, "bf16 must not inherit q8's figure").toBeGreaterThan(q8Host);
   });
 
-  it("enumerates the candle.measured === false entries the way tierSuggestion.js describes them", () => {
+  it("enumerates the candle.measured === false entries the way registryTierEvidence.js describes them", () => {
     // MINOR 4. `candle.measured === false` is the uncalibrated inventory; the subset that also
     // carries `vramGbByTier` is the set the rule is about. Membership is pinned by id so the prose
     // cannot drift from the catalog again. sc-16025 adds the Mage profiles to this set because

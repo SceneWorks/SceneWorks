@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { sdxlCudaMemoryEstimate } from "./sdxlCudaMemoryEndpoints.js";
-import { tierFits, installedFloorHostGb } from "./tierSuggestion.js";
+import { tierFits, installedFloorHostGb } from "./registryTierEvidence.js";
 import { needsLabel } from "./simple/SimpleModelManager.jsx";
 
 const projection = JSON.parse(import.meta.env.VITE_SDXL_CUDA_MEMORY_ENDPOINTS);

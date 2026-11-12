@@ -90,7 +90,6 @@ apps/rust-api/src/tests/import_repair.rs sceneworks_worker::Settings::from_env
 apps/rust-api/src/tests/import_repair.rs sceneworks_worker::WORKER_ENTRY_STACK_BYTES
 apps/rust-api/src/tests/import_repair.rs sceneworks_worker::minimax_h3_import_fixture
 apps/rust-api/src/tests/import_repair.rs sceneworks_worker::minimax_h3_import_fixture::ManagedMiniMaxH3Import
-apps/rust-api/src/tests/import_repair.rs sceneworks_worker::minimax_h3_import_fixture::component_downloads
 apps/rust-api/src/tests/import_repair.rs sceneworks_worker::minimax_h3_import_fixture::stage_managed_minimax_h3_import
 apps/rust-api/src/tests/import_repair.rs sceneworks_worker::run_worker_loop
 apps/rust-api/src/tests/import_repair.rs sceneworks_worker::seal_import_recovery_fixture
