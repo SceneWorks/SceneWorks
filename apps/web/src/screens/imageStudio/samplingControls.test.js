@@ -79,8 +79,20 @@ describe("MiniMax-H3-Image sampler", () => {
 
   it("restores a recorded block, with the engine's defaults for omitted LCM fields", () => {
     expect(h3ImageSamplerFromRecipe({ sampler: "euler" }).sampler).toBe("euler");
+    // A complete block restores as recorded.
+    expect(h3ImageSamplerFromRecipe({ sampler: "lcm", sNoise: 1.4, sNoiseEnd: 0.6, noiseClipStd: 2.5 })).toEqual({
+      sampler: "lcm", sNoise: 1.4, sNoiseEnd: 0.6, noiseClipStd: 2.5,
+    });
+    // A partial `{sampler: "lcm"}` ran 1.1 -> 0.9 and replays the same.
+    expect(h3ImageSamplerFromRecipe({ sampler: "lcm" })).toEqual({
+      sampler: "lcm", sNoise: 1.1, sNoiseEnd: 0.9, noiseClipStd: 0,
+    });
+    // A lone sNoise holds constant, the worker's rule.
     expect(h3ImageSamplerFromRecipe({ sampler: "lcm", sNoise: 1.3 })).toEqual({
       sampler: "lcm", sNoise: 1.3, sNoiseEnd: 1.3, noiseClipStd: 0,
+    });
+    expect(h3ImageSamplerFromRecipe({ sampler: "lcm", sNoiseEnd: 0.5 })).toEqual({
+      sampler: "lcm", sNoise: 1.1, sNoiseEnd: 0.5, noiseClipStd: 0,
     });
   });
 

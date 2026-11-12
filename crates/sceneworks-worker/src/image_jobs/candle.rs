@@ -1333,6 +1333,7 @@ async fn generate_candle_registry_stream_using(
         quant_bits,
         guidance.or(true_cfg),
     );
+    lane_controls::record_effective_h3_image_sampler(&mut raw_settings, &lane_controls);
     // The declared pixel-space activations beyond the one 1024² image the floors carry — a native
     // prompt batch's extra images (sc-25681) and an output above 1024² (sc-25684) — ride every
     // resident/sequential prediction below exactly like resident adapter bytes do:

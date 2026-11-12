@@ -441,7 +441,17 @@ test("explicit paired same-model ownership covers both backends and no other sco
 
 test("paired FLUX3 and composite MOSS ownership coexist without widening either scope", () => {
   const scope = buildStoryBackendScope();
-  assert.deepEqual(PAIRED_MODEL_STORIES, { flux3_klein_base: 26239 });
+  // The invariant, not the frozen set: FLUX3 base stays paired on its own story, and every paired
+  // declaration is a same-model story that owns exactly itself on both lanes and never a MOSS
+  // composite story or model.
+  assert.equal(PAIRED_MODEL_STORIES.flux3_klein_base, 26239);
+  for (const [modelId, story] of Object.entries(PAIRED_MODEL_STORIES)) {
+    assert.deepEqual(scope.get(story), {
+      backend: "paired", backends: ["mlx", "candle"], role: "model story", owner: modelId,
+    });
+    assert.ok(!modelId.startsWith("moss"), `${modelId} must not be a paired model story`);
+    assert.ok(COMPOSITE_STORY_OWNERSHIP.every((entry) => entry.story !== story));
+  }
   assert.deepEqual(COMPOSITE_STORY_OWNERSHIP, [
     { story: 26323, backend: "mlx", family: 26323, model_ids: ["moss_image_base", "moss_image_sft"] },
     { story: 26324, backend: "candle", family: 26323, model_ids: ["moss_image_base", "moss_image_sft"] },

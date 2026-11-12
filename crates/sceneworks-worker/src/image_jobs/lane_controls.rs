@@ -39,6 +39,34 @@ pub(crate) struct LaneRequestControls {
     pub(crate) h3_image_sampler: Option<gen_core::h3_image::H3ImageSampler>,
 }
 
+/// Record the sampler the render ACTUALLY runs under `advanced.h3ImageSampler` (SW-7106), even when
+/// the request omitted the block or sent a partial one, so "use this recipe" replays the same
+/// image. The key is worker-owned here: a request's own block, already validated, is replaced by
+/// the resolved (complete) one. Nothing is written when the engine runs no H3-Image sampler.
+pub(crate) fn record_effective_h3_image_sampler(
+    raw_settings: &mut JsonObject,
+    controls: &LaneRequestControls,
+) {
+    use gen_core::h3_image::H3ImageSampler;
+    let Some(sampler) = controls.h3_image_sampler else {
+        return;
+    };
+    let block = match sampler {
+        H3ImageSampler::Euler => json!({ "sampler": "euler" }),
+        H3ImageSampler::Lcm {
+            s_noise,
+            s_noise_end,
+            noise_clip_std,
+        } => json!({
+            "sampler": "lcm",
+            "sNoise": s_noise,
+            "sNoiseEnd": s_noise_end,
+            "noiseClipStd": noise_clip_std,
+        }),
+    };
+    raw_settings.insert(controls::H3_IMAGE_SAMPLER_KEY.to_owned(), block);
+}
+
 fn engine_policy(policy: CaptionOverflow) -> CaptionOverflowPolicy {
     match policy {
         CaptionOverflow::Warn => CaptionOverflowPolicy::Warn,
@@ -635,6 +663,37 @@ mod tests {
             resolve_lane_request_controls(&request, &honouring(), Some(1.0), Some("blurry"))
                 .is_ok()
         );
+    }
+
+    /// SW-7106: the asset records the sampler that ran, including when the request omitted the
+    /// block (it runs LCM 1.1 / 0.9 / 0) or sent a partial one, so a replay reproduces the image.
+    #[test]
+    fn the_effective_h3_image_sampler_is_recorded_even_when_the_request_omitted_it() {
+        let h3 = Capabilities {
+            supports_h3_image_sampler: true,
+            ..Default::default()
+        };
+        let recorded = |advanced: Value, caps: &Capabilities| {
+            let request = request(advanced, "", json!({}));
+            let controls = resolve_lane_request_controls(&request, caps, None, None).unwrap();
+            let mut raw = request.advanced.clone();
+            record_effective_h3_image_sampler(&mut raw, &controls);
+            raw.get("h3ImageSampler").cloned()
+        };
+        let lcm_default = json!({ "sampler": "lcm", "sNoise": 1.1f32, "sNoiseEnd": 0.9f32, "noiseClipStd": 0.0f32 });
+        assert_eq!(recorded(json!({}), &h3), Some(lcm_default.clone()));
+        assert_eq!(
+            recorded(json!({ "h3ImageSampler": { "sampler": "lcm" } }), &h3),
+            Some(lcm_default)
+        );
+        assert_eq!(
+            recorded(json!({ "h3ImageSampler": { "sampler": "euler" } }), &h3),
+            Some(json!({ "sampler": "euler" }))
+        );
+        // An engine without the sampler, or a request naming Euler through `advanced.sampler`,
+        // runs no H3-Image sampler, so nothing is recorded.
+        assert_eq!(recorded(json!({}), &Capabilities::default()), None);
+        assert_eq!(recorded(json!({ "sampler": "euler" }), &h3), None);
     }
 
     /// SW-7106: `advanced.h3ImageSampler` maps onto `GenerationRequest::h3_image_sampler` for an

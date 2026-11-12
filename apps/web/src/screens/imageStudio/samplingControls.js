@@ -62,17 +62,22 @@ export function resolveH3ImageSampler({ model, options }) {
   return { block, error: null };
 }
 
-// A recorded `advanced.h3ImageSampler` (recipe replay, saved preset) as the control state. A job or
-// preset recorded with no block ran before the LCM default existed, so it replays as Euler; the
-// LCM fields keep their defaults so switching the control to LCM starts from 1.1 / 0.9 / 0.
+// A recorded `advanced.h3ImageSampler` (recipe replay, saved preset) as the control state.
+// The worker records the EFFECTIVE sampler on every new asset, so a complete block restores as-is.
+// A partial block (an older or hand-written recipe) fills each missing field exactly as the worker's
+// `requested_h3_image_sampler` does, so replay runs what the original run did: sNoise 1.1; sNoiseEnd
+// 0.9 when sNoise is also omitted, else equal to the given sNoise (ComfyUI's constant scale);
+// noiseClipStd 0. Only a recipe with NO sampler block at all predates this feature recording it:
+// it ran Euler, so it replays as Euler, and the LCM fields keep their defaults (1.1 / 0.9 / 0) for
+// when the control is switched to LCM.
 export function h3ImageSamplerFromRecipe(recorded) {
   const defaults = h3ImageSamplerDefaults();
   if (recorded?.sampler !== "lcm") return { ...defaults, sampler: "euler" };
+  const sNoise = recorded.sNoise ?? defaults.sNoise;
   return {
-    ...defaults,
     sampler: "lcm",
-    sNoise: recorded.sNoise ?? 1,
-    sNoiseEnd: recorded.sNoiseEnd ?? recorded.sNoise ?? 1,
-    noiseClipStd: recorded.noiseClipStd ?? 0,
+    sNoise,
+    sNoiseEnd: recorded.sNoiseEnd ?? (recorded.sNoise == null ? defaults.sNoiseEnd : sNoise),
+    noiseClipStd: recorded.noiseClipStd ?? defaults.noiseClipStd,
   };
 }
