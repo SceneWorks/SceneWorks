@@ -12,6 +12,17 @@ pub(crate) type PinnedMetadataFixture = Arc<
         + Send
         + Sync,
 >;
+pub(crate) type PinnedMetadataRemote = Arc<
+    dyn Fn(
+            &str,
+            &str,
+            &[String],
+        ) -> Result<
+            Vec<sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile>,
+            String,
+        > + Send
+        + Sync,
+>;
 type DynamicHfRevisionFixture = fn(&str, &str) -> Option<&'static str>;
 
 #[derive(Default)]
@@ -24,6 +35,9 @@ pub(crate) struct TestHooks {
     pub(crate) model_size_estimate_disabled_override: Arc<Mutex<Option<bool>>>,
     pub(crate) video_platform_override: Arc<Mutex<Option<&'static str>>>,
     pub(crate) pinned_metadata_override: Arc<Mutex<Option<PinnedMetadataFixture>>>,
+    /// Stand-in for the Hugging Face pinned-metadata request only (the persisted trusted ledger
+    /// and the process cache still run in front of it): `Err` models an unreachable network.
+    pub(crate) pinned_metadata_remote: Arc<Mutex<Option<PinnedMetadataRemote>>>,
     /// Hold every pinned publisher metadata lookup until the watched value is `true`: a stalled
     /// Hugging Face answer, without a network endpoint or a real wait.
     pub(crate) pinned_metadata_gate: Arc<Mutex<Option<tokio::sync::watch::Receiver<bool>>>>,

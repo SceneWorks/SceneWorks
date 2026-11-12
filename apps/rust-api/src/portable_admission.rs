@@ -197,6 +197,56 @@ async fn wait_for_utility_source_proof(
 use sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256;
 
 const MAX_PINNED_METADATA_CACHE_ENTRIES: usize = 256;
+const TRUSTED_PINNED_LEDGER_VERSION: u32 = 1;
+
+/// The host's record of a pinned revision's file ledger as upstream reported it. Only a
+/// successful upstream resolution writes one; it is the trust root admission compares an
+/// installed copy's rehashed bytes against when upstream is not reachable.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TrustedPinnedLedger {
+    schema_version: u32,
+    base_url: String,
+    repo: String,
+    revision: String,
+    selectors: Vec<String>,
+    files: Vec<PortableArtifactFile>,
+}
+
+fn trusted_pinned_ledger_path(data_dir: &Path, key: &str) -> PathBuf {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(key.as_bytes());
+    data_dir
+        .join("cache")
+        .join("trusted-pinned-files")
+        .join(format!("{digest:x}.json"))
+}
+
+/// The recorded files for exactly this request, or `None` when nothing usable is recorded (absent,
+/// unreadable, another request's record, or files that are not a valid ledger).
+fn read_trusted_pinned_ledger(
+    path: &Path,
+    request: &TrustedPinnedLedger,
+) -> Option<Vec<PortableArtifactFile>> {
+    let body = std::fs::read(path).ok()?;
+    let recorded: TrustedPinnedLedger = serde_json::from_slice(&body).ok()?;
+    let same_request = TrustedPinnedLedger {
+        files: Vec::new(),
+        ..recorded.clone()
+    } == *request;
+    let valid = !recorded.files.is_empty()
+        && sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(
+            &recorded.files,
+        )
+        .is_ok();
+    (same_request && valid).then_some(recorded.files)
+}
+
+fn write_trusted_pinned_ledger(path: &Path, ledger: &TrustedPinnedLedger) -> std::io::Result<()> {
+    std::fs::create_dir_all(path.parent().expect("ledger path has a parent"))?;
+    let body = serde_json::to_vec_pretty(ledger).map_err(std::io::Error::other)?;
+    sceneworks_core::fsutil::write_atomic(path, &body)
+}
 static PINNED_METADATA_CACHE: OnceLock<Mutex<BTreeMap<String, Vec<PortableArtifactFile>>>> =
     OnceLock::new();
 
@@ -2824,8 +2874,12 @@ async fn capture_download_member(
 }
 
 /// A completed local receipt has no content hashes, so it never substitutes for the immutable
-/// upstream file proof. Successful pinned metadata is cacheable for this process: a commit and
-/// concrete file selectors cannot change without an upstream integrity failure.
+/// upstream file proof. Successful pinned metadata is cacheable: a commit and concrete file
+/// selectors cannot change without an upstream integrity failure. It is cached for this process
+/// and persisted as the host's trusted pinned-file ledger, so an installed source admitted once
+/// online is admitted again after a restart without network; the installed bytes are still
+/// rehashed against that ledger by the caller. A revision this host never recorded is refused
+/// with a typed error when upstream is unreachable.
 async fn resolve_trusted_pinned_files(
     state: &AppState,
     repo: &str,
@@ -2855,17 +2909,45 @@ async fn resolve_trusted_pinned_files(
     {
         return Ok(files);
     }
-    let credential = huggingface_token(state)?;
-    let files = resolve_pinned_hf_files(
-        &state.http_client,
-        &base_url,
-        credential.as_deref(),
-        repo,
-        revision,
-        selectors,
-    )
-    .await
-    .map_err(|error| incomplete(error.to_string()))?;
+    let ledger = TrustedPinnedLedger {
+        schema_version: TRUSTED_PINNED_LEDGER_VERSION,
+        base_url: base_url.clone(),
+        repo: repo.to_owned(),
+        revision: revision.to_owned(),
+        selectors: selectors.to_vec(),
+        files: Vec::new(),
+    };
+    let ledger_path = trusted_pinned_ledger_path(&state.settings.data_dir, &key);
+    let recorded = {
+        let (path, ledger) = (ledger_path.clone(), ledger.clone());
+        blocking_source_capture(move || Ok(read_trusted_pinned_ledger(&path, &ledger))).await?
+    };
+    let files = if let Some(files) = recorded {
+        files
+    } else {
+        let files = fetch_pinned_hf_files(state, &base_url, repo, revision, selectors)
+            .await
+            .map_err(|error| {
+                incomplete(format!(
+                    "{repo}@{revision} has no trusted file ledger on this host and its pinned \
+                     metadata could not be fetched: {error}"
+                ))
+            })?;
+        let ledger = TrustedPinnedLedger {
+            files: files.clone(),
+            ..ledger
+        };
+        blocking_source_capture(move || {
+            if let Err(error) = write_trusted_pinned_ledger(&ledger_path, &ledger) {
+                // The process cache still serves this run; only offline reuse after a restart
+                // is lost, and that refuses with a typed error rather than trusting less.
+                tracing::warn!(%error, "trusted pinned-file ledger could not be persisted");
+            }
+            Ok(())
+        })
+        .await?;
+        files
+    };
     let mut cache = cache
         .lock()
         .map_err(|_| ApiError::internal("Pinned metadata cache is poisoned"))?;
@@ -2874,6 +2956,32 @@ async fn resolve_trusted_pinned_files(
     }
     cache.insert(key, files.clone());
     Ok(files)
+}
+
+/// The one upstream request for a pinned revision's file ledger (tree listing plus remote hashes
+/// of non-LFS files).
+async fn fetch_pinned_hf_files(
+    state: &AppState,
+    base_url: &str,
+    repo: &str,
+    revision: &str,
+    selectors: &[String],
+) -> Result<Vec<PortableArtifactFile>, String> {
+    #[cfg(test)]
+    if let Some(remote) = state.test_hooks.pinned_metadata_remote.lock().clone() {
+        return remote(repo, revision, selectors);
+    }
+    let credential = huggingface_token(state).map_err(|error| error.detail)?;
+    resolve_pinned_hf_files(
+        &state.http_client,
+        base_url,
+        credential.as_deref(),
+        repo,
+        revision,
+        selectors,
+    )
+    .await
+    .map_err(|error| error.to_string())
 }
 
 fn required_download_string<'a>(download: &'a Value, key: &str) -> Result<&'a str, ApiError> {
@@ -3698,6 +3806,130 @@ mod tests {
             release.join().unwrap(),
             "a blocking content hash stalled the Tokio request task"
         );
+    }
+
+    /// A fresh API process has an empty process cache. Model the restart for one repository
+    /// without disturbing other tests' cache entries.
+    fn forget_process_pinned_metadata(repo: &str) {
+        let marker = format!("\0{repo}\0");
+        if let Some(cache) = PINNED_METADATA_CACHE.get() {
+            cache
+                .lock()
+                .unwrap()
+                .retain(|key, _| !key.contains(&marker));
+        }
+    }
+
+    /// Codex review of #3375 (finding A): an installed builtin admitted once online is admitted
+    /// again after an API restart with Hugging Face unreachable. The trusted file ledger recorded
+    /// from upstream is persisted; the installed bytes are still rehashed against it, so a
+    /// substituted install is refused; and a revision this host never recorded is refused with a
+    /// typed error, not admitted on the strength of a local receipt.
+    #[tokio::test]
+    async fn installed_pinned_source_is_admitted_offline_after_restart_from_the_trusted_ledger() {
+        let _hf_cache = crate::tests::support::isolate_hf_cache();
+        let root = tempfile::tempdir().unwrap();
+        let settings = crate::tests::support::test_settings(&root);
+        let (_, state) = crate::create_app_with_state(settings.clone()).expect("test API state");
+        let repo = "owner/offline-ledger-fixture";
+        let revision = "b".repeat(40);
+        let relative = "model.safetensors";
+        let snapshot =
+            sceneworks_core::hf_home::huggingface_repo_cache_path(&state.settings.data_dir, repo)
+                .unwrap()
+                .join("snapshots")
+                .join(&revision);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        let path = snapshot.join(relative);
+        std::fs::write(&path, b"trusted").unwrap();
+        let receipt_dir = state
+            .settings
+            .data_dir
+            .join("models")
+            .join(safe_download_dir(repo));
+        std::fs::create_dir_all(&receipt_dir).unwrap();
+        std::fs::write(
+            receipt_dir.join(".sceneworks-download-complete.json"),
+            json!({"repo":repo,"snapshotRevision":revision,"variant":"default",
+                "resolvedFiles":[relative]})
+            .to_string(),
+        )
+        .unwrap();
+        let trusted = PortableArtifactFile {
+            relative_path: relative.into(),
+            size_bytes: 7,
+            sha256: format!(
+                "sha256:{}",
+                sceneworks_core::hashing::sha256_bytes(b"trusted")
+            ),
+        };
+        let download = json!({"repo":repo,"revision":revision,"files":[relative]});
+
+        // Online: upstream supplies the trusted ledger.
+        let upstream = trusted.clone();
+        *state.test_hooks.pinned_metadata_remote.lock() =
+            Some(std::sync::Arc::new(move |_, _, _| {
+                Ok(vec![upstream.clone()])
+            }));
+        let online = capture_download_member(&state, &download, ArtifactMemberRole::Primary, None)
+            .await
+            .expect("online admission records the trusted ledger");
+        assert_eq!(online.files, vec![trusted.clone()]);
+        drop(state);
+
+        // Restart with the network unreachable: a new process state over the same data dir.
+        forget_process_pinned_metadata(repo);
+        let (_, state) = crate::create_app_with_state(settings).expect("restarted API state");
+        let remote_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls = remote_calls.clone();
+        *state.test_hooks.pinned_metadata_remote.lock() =
+            Some(std::sync::Arc::new(move |_, _, _| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err("network unreachable".to_owned())
+            }));
+        let offline = capture_download_member(&state, &download, ArtifactMemberRole::Primary, None)
+            .await
+            .expect("an installed source admitted before is admitted offline after a restart");
+        assert_eq!(offline, online);
+        assert_eq!(
+            remote_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the persisted trusted ledger answers without a network request"
+        );
+
+        // The installed bytes are still verified against the ledger.
+        std::fs::write(&path, b"changed").unwrap();
+        let error = capture_download_member(&state, &download, ArtifactMemberRole::Primary, None)
+            .await
+            .expect_err("a substituted install is refused offline");
+        assert!(error.detail.contains("files differ from the pinned source"));
+        std::fs::write(&path, b"trusted").unwrap();
+
+        // A revision with no recorded ledger is refused, typed and promptly, even when a local
+        // receipt names it: a receipt carries no content hashes and is never the trust root.
+        let unrecorded = "c".repeat(40);
+        std::fs::write(
+            receipt_dir.join(".sceneworks-download-complete.json"),
+            json!({"repo":repo,"snapshotRevision":unrecorded,"variant":"default",
+                "resolvedFiles":[relative]})
+            .to_string(),
+        )
+        .unwrap();
+        let error = capture_download_member(
+            &state,
+            &json!({"repo":repo,"revision":unrecorded,"files":[relative]}),
+            ArtifactMemberRole::Primary,
+            None,
+        )
+        .await
+        .expect_err("no trusted ledger and no network refuses the source");
+        assert_eq!(error.code, Some("model_artifact_incomplete"));
+        assert!(
+            error.detail.contains("network unreachable"),
+            "{}",
+            error.detail
+        );
+        assert_eq!(remote_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
