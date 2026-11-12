@@ -445,6 +445,57 @@ describe("a replayed recipe reaches every allow-listed control", () => {
       expect(persistedStudioSettings().flux3ReferenceSlots).toHaveLength(1);
     });
 
+    // Two edit-capable fallbacks, so a user can pick a model while the target is still missing.
+    const FALLBACK_A = FLUX2_DEV;
+    const FALLBACK_B = { ...FLUX2_DEV, id: "flux2_alt", name: "FLUX.2 Alt" };
+    const pickerWith = (id) => [...document.body.querySelectorAll("select")]
+      .find((node) => [...node.options].some((option) => option.value === id));
+    const loaded = [FALLBACK_A, FALLBACK_B];
+
+    it("re-selects the launch target after the automatic fallback model was shown", async () => {
+      await render(contextFor(loaded));
+      expect(persistedStudioSettings().model).toBe(FALLBACK_A.id);
+      await render(contextFor([...loaded, FLUX3]));
+      expect(persistedStudioSettings().model).toBe(FLUX3.id);
+      expect(persistedStudioSettings().referenceAssetIds).toEqual([source.id]);
+    });
+
+    it("keeps a model the user picked while the catalog loads and binds nothing", async () => {
+      await render(contextFor(loaded));
+      await editControl(pickerWith(FALLBACK_B.id), FALLBACK_B.id);
+      expect(persistedStudioSettings().model).toBe(FALLBACK_B.id);
+      await render(contextFor([...loaded, FLUX3]));
+      expect(persistedStudioSettings().model).toBe(FALLBACK_B.id);
+      expect(persistedStudioSettings().flux3ReferenceSlots ?? []).toHaveLength(0);
+    });
+
+    it("keeps a mode the user picked while the catalog loads and binds nothing", async () => {
+      await render(contextFor(loaded));
+      await click(buttonByText("Text"));
+      expect(persistedStudioSettings().mode).toBe("text_to_image");
+      await render(contextFor([...loaded, FLUX3]));
+      expect(persistedStudioSettings().mode).toBe("text_to_image");
+      expect(persistedStudioSettings().model).not.toBe(FLUX3.id);
+      expect(persistedStudioSettings().flux3ReferenceSlots ?? []).toHaveLength(0);
+    });
+
+    it("keeps a source the user picked while the catalog loads and binds nothing", async () => {
+      const other = { ...FLUX3_REFERENCE, id: "user-picked", displayName: "user-picked" };
+      const withAssets = (models) => ({ ...contextFor(models), assets: [source, other] });
+      await render(withAssets(loaded));
+      // Drive the real source picker: Change -> pick the other asset -> Use Selection.
+      await click(buttonByText("Change"));
+      const tile = [...document.body.querySelectorAll("*")]
+        .filter((node) => node.children.length < 2 && node.textContent.trim() === other.displayName).at(0);
+      await click(tile);
+      await click(buttonByText("Use Selection"));
+      await render(withAssets([...loaded, FLUX3]));
+      expect(persistedStudioSettings().model).not.toBe(FLUX3.id);
+      expect(persistedStudioSettings().flux3ReferenceSlots ?? []).toHaveLength(0);
+      expect(persistedStudioSettings().referenceAssetIds ?? []).not.toContain(source.id);
+      console.log("DIALOG", document.body.innerText?.slice(0, 600), [...document.body.querySelectorAll("button")].map((b) => b.textContent.trim()).join("|"));
+    });
+
     it("binds nothing when the model resolves to a non-FLUX.3 family", async () => {
       await render(contextFor([OTHER_MODEL]));
       await render(contextFor([OTHER_MODEL, { ...FLUX3, family: "flux2", ui: {} }]));
