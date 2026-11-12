@@ -57,7 +57,7 @@ import {
   seedsNegativeInMode,
 } from "../promptSeed.js";
 import { emptyCaption, injectStyleIntoCaption, serializeCaption, validateCaption } from "../ideogramCaption.js";
-import { buildImageJobRequest, composeImageJobPrompt, imageJobReferences } from "../imageJobRequest.js";
+import { buildImageJobRequest, composeImageJobPrompt, imageJobReferences, imageRewriteReferenceIds } from "../imageJobRequest.js";
 import { reconcileDecoderSelection } from "../imageDecoderSelection.js";
 import { usePoseLibrary, useUserPoseLoader, poseRecordToPayload, WORKFLOW_POSE_CATEGORY } from "../poseLibrary.js";
 
@@ -881,44 +881,6 @@ export function ImageStudio() {
     (id) => editImageAssets.find((asset) => asset.id === id)?.name ?? id,
     [editImageAssets],
   );
-  const qwenRewriteReferenceIds = useMemo(() => {
-    // The SAME ordered list the Generate button will send, so the rewrite sees what the render
-    // will. `referenceAssetIds` is the plural multi-reference picker; `referenceAssetId` /
-    // `sourceAssetId` are the single-reference and edit-source flows, which the engine treats as a
-    // one-reference edit.
-    if (mode === "edit_image" && referenceAssetIds.length) return referenceAssetIds;
-    const single = mode === "edit_image" ? sourceAssetId : referenceAssetId;
-    return single ? [single] : [];
-  }, [mode, referenceAssetIds, referenceAssetId, sourceAssetId]);
-  const qwenRewriteModel = useMemo(() => {
-    if (!qwenRewriterAppliesTo(selectedModel)) return undefined;
-    const id = qwenRewriteReferenceIds.length
-      ? QWEN_REWRITE_I2I_MODEL_ID
-      : QWEN_REWRITE_T2I_MODEL_ID;
-    return models.find((entry) => entry.id === id);
-  }, [models, selectedModel, qwenRewriteReferenceIds.length]);
-  // The tile renders ONLY when the matching rewriter is already installed. This is the acceptance
-  // criterion "direct prompting works with neither rewriter installed — no download, no prompt to
-  // install, no degraded path": with nothing installed there is no affordance at all, not a
-  // disabled button that nags.
-  const qwenRewriteAvailable =
-    Boolean(qwenRewriteModel) &&
-    qwenRewriteModel.installState !== "missing" &&
-    typeof qwenRewritePrompt === "function";
-  // SW-7102 — MiniMax-H3-Image's optional prompt expander. One checkpoint serves text-to-image and
-  // edit (references present, read as `<Picture N>` in the same order the render takes), and the
-  // tile renders only when it is installed, exactly like the Qwen rewriter above.
-  const h3ExpandModel = useMemo(
-    () =>
-      h3ImageExpanderAppliesTo(selectedModel)
-        ? models.find((entry) => entry.id === MINIMAX_H3_IMAGE_PE_MODEL_ID)
-        : undefined,
-    [models, selectedModel],
-  );
-  const h3ExpandAvailable =
-    Boolean(h3ExpandModel) &&
-    h3ExpandModel.installState !== "missing" &&
-    typeof h3ImageExpandPrompt === "function";
   const catalogTextEncoderOptions = selectedModel?.textEncoderOptions ?? [];
   // A replayed/saved authored id remains a real control value even if the refreshed catalog can no
   // longer advertise this surface. Keep it visible and submit it unchanged so the server rejects a
@@ -1443,6 +1405,24 @@ export function ImageStudio() {
     // ≤1536², so this is defensive), fall back to the declared list.
     return gated.length > 0 ? gated : declared;
   }, [selectedModel, unifiedMemoryGb, activeBackend, quantTier]);
+  // Accepting a size the prompt expander/rewriter proposes. Width/Height overrides outrank the
+  // Aspect preset, so a preset must clear them or the accepted size would silently not render; a
+  // size that is not a preset lands in the override fields instead (mirrors Simple Studio).
+  const handleApplyProposedSize = (value) => {
+    if (typeof value !== "string" || !value) return;
+    if (resolutionOptions.includes(value)) {
+      handleResolutionChange(value);
+      setWidthOverride("");
+      setHeightOverride("");
+      return;
+    }
+    const match = /^(\d+)x(\d+)$/.exec(value.trim());
+    if (!match) return;
+    setReferenceDimensionIntent(null);
+    setWidthOverride(match[1]);
+    setHeightOverride(match[2]);
+    setAdvancedOpen(true);
+  };
   // Reference-image auto-preset (sc-8109, epic 8102): when a captioning reference
   // image's natural dimensions become known, snap the resolution picker to whichever
   // option best matches its aspect ratio. The caption's bboxes are normalized 0–1000
@@ -1983,6 +1963,39 @@ export function ImageStudio() {
   const jobReferences = imageJobReferences({ model, mode, multiReference, orderedCharacterReferences, sourceWithMultiReference,
     editSecondPair, sourceAssetId, controlPreprocessSourceId, referenceAssetIds, referenceAssetId,
     supportsImg2img, img2imgReferenceAssetId });
+  // The pictures the render will condition on, taken from the SAME canonical references
+  // `buildImageJobRequest` emits (`jobReferences`), so a reference retained from another model on a
+  // model with no img2img (MiniMax-H3-Image text-to-image) is not offered to the expander either.
+  const qwenRewriteReferenceIds = imageRewriteReferenceIds(jobReferences, mode);
+  const qwenRewriteModel = useMemo(() => {
+    if (!qwenRewriterAppliesTo(selectedModel)) return undefined;
+    const id = qwenRewriteReferenceIds.length
+      ? QWEN_REWRITE_I2I_MODEL_ID
+      : QWEN_REWRITE_T2I_MODEL_ID;
+    return models.find((entry) => entry.id === id);
+  }, [models, selectedModel, qwenRewriteReferenceIds.length]);
+  // The tile renders ONLY when the matching rewriter is already installed. This is the acceptance
+  // criterion "direct prompting works with neither rewriter installed — no download, no prompt to
+  // install, no degraded path": with nothing installed there is no affordance at all, not a
+  // disabled button that nags.
+  const qwenRewriteAvailable =
+    Boolean(qwenRewriteModel) &&
+    qwenRewriteModel.installState !== "missing" &&
+    typeof qwenRewritePrompt === "function";
+  // SW-7102 — MiniMax-H3-Image's optional prompt expander. One checkpoint serves text-to-image and
+  // edit (references present, read as `<Picture N>` in the same order the render takes), and the
+  // tile renders only when it is installed, exactly like the Qwen rewriter above.
+  const h3ExpandModel = useMemo(
+    () =>
+      h3ImageExpanderAppliesTo(selectedModel)
+        ? models.find((entry) => entry.id === MINIMAX_H3_IMAGE_PE_MODEL_ID)
+        : undefined,
+    [models, selectedModel],
+  );
+  const h3ExpandAvailable =
+    Boolean(h3ExpandModel) &&
+    h3ExpandModel.installState !== "missing" &&
+    typeof h3ImageExpandPrompt === "function";
   const imageReference = useImageReferenceStatus({
     enabled: mode === "text_to_image" && supportsImg2img,
     assetId: img2imgReferenceAssetId,
@@ -2970,6 +2983,7 @@ export function ImageStudio() {
             model={model}
             refinePrompt={refinePrompt}
             handleResolutionChange={handleResolutionChange}
+            handleApplyProposedSize={handleApplyProposedSize}
             qwenRewriteReferenceIds={qwenRewriteReferenceIds}
             qwenRewriteModel={qwenRewriteModel}
             qwenRewritePrompt={qwenRewritePrompt}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildImageJobRequest, imageJobReferences } from "./imageJobRequest.js";
+import { buildImageJobRequest, imageJobReferences, imageRewriteReferenceIds } from "./imageJobRequest.js";
 import { serializeCaption } from "./ideogramCaption.js";
 
 // sc-11219 (F-031): the batch job-request builder used to be a hand-copied twin of the single
@@ -134,6 +134,19 @@ describe("buildImageJobRequest", () => {
     const state = img2imgPidState({ supportsImg2img: false, ...overrides });
     expect(imageJobReferences(state)).toEqual(expected);
     expect(buildImageJobRequest(state)).toMatchObject(expected);
+  });
+  it.each([
+    ["retained reference, model without img2img (H3-Image t2i)",
+      { referenceAssetId: "retained", supportsImg2img: false }, []],
+    ["retained reference, control source, t2i without img2img",
+      { referenceAssetId: "retained", controlPreprocessSourceId: "control" }, []],
+    ["img2img start image", { supportsImg2img: true }, ["start-image-asset"]],
+    ["single edit source", { mode: "edit_image", sourceAssetId: "source" }, ["source"]],
+    ["edit with ordered references",
+      { mode: "edit_image", multiReference: true, referenceAssetIds: ["first", "second"] }, ["first", "second"]],
+  ])("grounds the prompt expander in the sent references only: %s", (_label, overrides, expected) => {
+    const state = img2imgPidState({ supportsImg2img: false, ...overrides });
+    expect(imageRewriteReferenceIds(imageJobReferences(state), state.mode)).toEqual(expected);
   });
   it("emits Hires.fix only when enabled and preserves inherit semantics", () => {
     const enabled = buildImageJobRequest(

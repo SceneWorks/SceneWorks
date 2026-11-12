@@ -187,6 +187,59 @@ describe("Expand prompt in the advanced Image Studio (SW-7102)", () => {
     expect(aspect.value).toBe("2048x2048");
   });
 
+  // Width/Height overrides outrank the Aspect preset, so accepting a proposed size has to clear
+  // them (preset) or take them over (non-preset), or the render keeps the old override size.
+  async function expandThenUseSize(ratio, saved) {
+    window.localStorage.setItem(
+      "sceneworks-studio-image-project_1",
+      JSON.stringify({ model: "minimax_h3_image", ...saved }),
+    );
+    const value = context([H3_IMAGE, PE], {
+      h3ImageExpandPrompt: vi.fn(async () => ({
+        ...EXPANSION,
+        rewriteSuggestion: { ...EXPANSION.rewriteSuggestion, whRatio: ratio },
+      })),
+    });
+    await render(value);
+    await act(async () =>
+      setTextarea(container.querySelector('textarea[aria-label="Prompt"]'), "a lighthouse in fog"),
+    );
+    await click(buttonWithText(container, "Expand prompt"));
+    await click(buttonWithText(container.querySelector(".qwen-rewrite-control"), "Expand prompt"));
+    await act(async () => {});
+    await click(buttonWithText(container, "Use this size"));
+    await click(buttonWithText(document.body, "Generate"));
+    return value.createImageJob.mock.calls[0][0];
+  }
+
+  it("submits an accepted preset size even with Width/Height overrides set", async () => {
+    const job = await expandThenUseSize("16:9", { widthOverride: "2048", heightOverride: "2048" });
+    expect(job).toMatchObject({ width: 5472, height: 3072 });
+  });
+
+  it("writes an accepted non-preset size into the override fields", async () => {
+    const job = await expandThenUseSize("5:4", { widthOverride: "2048", heightOverride: "2048" });
+    expect(job).toMatchObject({ width: 2288, height: 1824 });
+  });
+
+  it("does not ground the expander in a reference retained from another model", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-image-project_1",
+      JSON.stringify({ model: "minimax_h3_image", referenceAssetId: "retained-asset" }),
+    );
+    const value = context([H3_IMAGE, PE]);
+    await render(value);
+    await act(async () =>
+      setTextarea(container.querySelector('textarea[aria-label="Prompt"]'), "a lighthouse in fog"),
+    );
+    await click(buttonWithText(container, "Expand prompt"));
+    await click(buttonWithText(container.querySelector(".qwen-rewrite-control"), "Expand prompt"));
+    await act(async () => {});
+    expect(value.h3ImageExpandPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceAssetIds: [] }),
+    );
+  });
+
   it("keeps the original prompt when the user declines the expansion", async () => {
     const value = context([H3_IMAGE, PE]);
     await render(value);

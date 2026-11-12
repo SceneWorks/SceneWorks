@@ -73,6 +73,17 @@ export function imageJobReferences({ model, mode, multiReference, orderedCharact
   };
 }
 
+// The ordered pictures a prompt rewriter/expander should be grounded in: exactly the references the
+// request emits (`imageJobReferences`), never hidden picker state. A control-preprocess source is
+// not an edit reference, so only the edit source counts for `sourceAssetId`.
+export function imageRewriteReferenceIds(references, mode) {
+  if (mode === "edit_image") {
+    if (references.referenceAssetIds?.length) return references.referenceAssetIds;
+    return references.sourceAssetId ? [references.sourceAssetId] : [];
+  }
+  return references.referenceAssetId ? [references.referenceAssetId] : [];
+}
+
 export function buildImageJobRequest(state) {
   const mossEdit = isMossEdit(state.model, state.mode);
   const mossReferences = mossEdit ? mossEditReferenceIds(state) : null;

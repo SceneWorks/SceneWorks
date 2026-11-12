@@ -104,6 +104,7 @@ export function ImagePromptComposer({
   model,
   refinePrompt,
   handleResolutionChange,
+  handleApplyProposedSize,
   qwenRewriteReferenceIds,
   qwenRewriteModel,
   qwenRewritePrompt,
@@ -593,7 +594,7 @@ export function ImagePromptComposer({
                       // The aspect suggestion lands on the SAME resolution control the Aspect menu
                       // drives, and only ever with a value that menu already offers — accepting it
                       // is indistinguishable from the user picking it by hand.
-                      onApplyResolution={handleResolutionChange}
+                      onApplyResolution={handleApplyProposedSize}
                       projectId={activeProject?.id ?? ""}
                       prompt={prompt}
                       // The ORDERED list the render will condition on. Same array, same order —
@@ -611,7 +612,7 @@ export function ImagePromptComposer({
                       copy={H3_IMAGE_EXPAND_COPY}
                       modelId={model}
                       onApply={setPromptFromUser}
-                      onApplyResolution={handleResolutionChange}
+                      onApplyResolution={handleApplyProposedSize}
                       projectId={activeProject?.id ?? ""}
                       prompt={prompt}
                       referenceAssetIds={qwenRewriteReferenceIds}
