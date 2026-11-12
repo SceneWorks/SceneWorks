@@ -25,9 +25,10 @@ export function resolveCfgInterval({ model, text, guidanceOverride }) {
 export const promptBatchSize = (model, count) =>
   Math.max(1, Math.floor((model?.image?.maxPromptBatchImages || 1) / Math.max(1, count)));
 
-// SW-7106: MiniMax-H3-Image's sampler (`image.supportsH3ImageSampler`). Euler is the released
-// deterministic step and the default; LCM is ComfyUI's stochastic re-noise step, whose noise scale
-// ramps from `sNoise` (step 0) to `sNoiseEnd` (last step), with optional noise clipping.
+// SW-7106: MiniMax-H3-Image's sampler (`image.supportsH3ImageSampler`). LCM is the default (decided
+// 2026-11-12): ComfyUI's stochastic re-noise step, whose noise scale ramps from `sNoise` (step 0)
+// to `sNoiseEnd` (last step), with optional noise clipping. Euler is the released deterministic
+// step and stays selectable.
 export const H3_IMAGE_SAMPLER_LABELS = {
   euler: "Euler (official)",
   lcm: "LCM (stochastic re-noise)",
@@ -39,16 +40,16 @@ export const H3_IMAGE_LCM_FIELDS = [
   { key: "noiseClipStd", label: "Noise clip (std, 0 = off)", min: 0, max: 4, step: 0.1 },
 ];
 
-export const h3ImageSamplerDefaults = () => ({ sampler: "euler", sNoise: 1.1, sNoiseEnd: 0.9, noiseClipStd: 0 });
+export const h3ImageSamplerDefaults = () => ({ sampler: "lcm", sNoise: 1.1, sNoiseEnd: 0.9, noiseClipStd: 0 });
 
 export const supportsH3ImageSampler = (model) => Boolean(model?.image?.supportsH3ImageSampler);
 
-// The `advanced.h3ImageSampler` block to send: null for a model without the control. Euler is sent
-// explicitly as `{sampler: "euler"}` so a selected recipe preset's server-side expansion can never
-// replace the user's Euler with the preset's LCM. `error` names the first LCM field out of range.
+// The `advanced.h3ImageSampler` block to send: null for a model without the control. Both samplers
+// are sent explicitly (the job record shows what ran, and a selected recipe preset's server-side
+// expansion can never replace the user's choice). Euler is `{sampler: "euler"}`. `error` names the first LCM field out of range.
 export function resolveH3ImageSampler({ model, options }) {
   if (!supportsH3ImageSampler(model)) return { block: null, error: null };
-  if (options?.sampler !== "lcm") return { block: { sampler: "euler" }, error: null };
+  if (options?.sampler === "euler") return { block: { sampler: "euler" }, error: null };
   const block = { sampler: "lcm" };
   for (const { key, label, min, max } of H3_IMAGE_LCM_FIELDS) {
     const raw = options[key];
@@ -61,10 +62,12 @@ export function resolveH3ImageSampler({ model, options }) {
   return { block, error: null };
 }
 
-// A recorded `advanced.h3ImageSampler` (recipe replay) as the control state; absent ⇒ Euler.
+// A recorded `advanced.h3ImageSampler` (recipe replay, saved preset) as the control state. A job or
+// preset recorded with no block ran before the LCM default existed, so it replays as Euler; the
+// LCM fields keep their defaults so switching the control to LCM starts from 1.1 / 0.9 / 0.
 export function h3ImageSamplerFromRecipe(recorded) {
   const defaults = h3ImageSamplerDefaults();
-  if (recorded?.sampler !== "lcm") return defaults;
+  if (recorded?.sampler !== "lcm") return { ...defaults, sampler: "euler" };
   return {
     ...defaults,
     sampler: "lcm",

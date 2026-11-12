@@ -31,6 +31,11 @@ pub const CAPTION_OVERFLOW_KEY: &str = "captionOverflow";
 pub const SCHEDULER_SHIFT_KEY: &str = "schedulerShift";
 /// `advanced` key of MiniMax-H3-Image's sampler block (SW-7106).
 pub const H3_IMAGE_SAMPLER_KEY: &str = "h3ImageSampler";
+/// MiniMax-H3-Image's default sampler, LCM with these noise scales (decided 2026-11-12). Image
+/// Studio sends them explicitly and the worker applies them to a request that omits the block.
+pub const H3_IMAGE_DEFAULT_S_NOISE: f32 = 1.1;
+pub const H3_IMAGE_DEFAULT_S_NOISE_END: f32 = 0.9;
+pub const H3_IMAGE_DEFAULT_NOISE_CLIP_STD: f32 = 0.0;
 
 /// What a text encoder with a fixed caption budget does with a prompt that tokenizes past it. The
 /// spellings are upstream Iris-3B's `text_encoder.on_caption_overflow` vocabulary (and gen-core's
@@ -189,7 +194,7 @@ pub fn requested_scheduler_shift(advanced: &JsonObject) -> Result<Option<f32>, S
 }
 
 /// `advanced.h3ImageSampler`, typed (SW-7106). Absent or `null` ⇒ `Ok(None)` (the engine runs the
-/// sampler `advanced.sampler` names, Euler by default). Otherwise an object
+/// sampler `advanced.sampler` names; the worker then applies the LCM default). Otherwise an object
 /// `{"sampler": "euler"}` or `{"sampler": "lcm", "sNoise"?, "sNoiseEnd"?, "noiseClipStd"?}`: an
 /// omitted LCM parameter takes ComfyUI's default (`sNoise` 1, `sNoiseEnd` = `sNoise`,
 /// `noiseClipStd` 0 = off), and the values must satisfy the engine's own rules (finite,

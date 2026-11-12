@@ -50,12 +50,16 @@ describe("MiniMax-H3-Image sampler", () => {
   const h3 = { image: { supportsH3ImageSampler: true } };
   const lcm = { ...h3ImageSamplerDefaults(), sampler: "lcm" };
 
-  it("defaults to Euler with the LCM fields at 1.1 / 0.9 / 0", () => {
-    expect(h3ImageSamplerDefaults()).toEqual({ sampler: "euler", sNoise: 1.1, sNoiseEnd: 0.9, noiseClipStd: 0 });
+  it("defaults to LCM with noise scale 1.1 / 0.9 and clip 0", () => {
+    expect(h3ImageSamplerDefaults()).toEqual({ sampler: "lcm", sNoise: 1.1, sNoiseEnd: 0.9, noiseClipStd: 0 });
   });
 
-  it("sends Euler explicitly, and no block for a model without the control", () => {
-    expect(resolveH3ImageSampler({ model: h3, options: h3ImageSamplerDefaults() })).toEqual({ block: { sampler: "euler" }, error: null });
+  it("sends the default LCM block explicitly, Euler as {sampler: euler}, and no block without the control", () => {
+    expect(resolveH3ImageSampler({ model: h3, options: h3ImageSamplerDefaults() })).toEqual({
+      block: { sampler: "lcm", sNoise: 1.1, sNoiseEnd: 0.9, noiseClipStd: 0 },
+      error: null,
+    });
+    expect(resolveH3ImageSampler({ model: h3, options: { ...h3ImageSamplerDefaults(), sampler: "euler" } })).toEqual({ block: { sampler: "euler" }, error: null });
     expect(resolveH3ImageSampler({ model: { image: {} }, options: lcm })).toEqual({ block: null, error: null });
   });
 
@@ -74,9 +78,16 @@ describe("MiniMax-H3-Image sampler", () => {
   });
 
   it("restores a recorded block, with the engine's defaults for omitted LCM fields", () => {
-    expect(h3ImageSamplerFromRecipe(undefined)).toEqual(h3ImageSamplerDefaults());
+    expect(h3ImageSamplerFromRecipe({ sampler: "euler" }).sampler).toBe("euler");
     expect(h3ImageSamplerFromRecipe({ sampler: "lcm", sNoise: 1.3 })).toEqual({
       sampler: "lcm", sNoise: 1.3, sNoiseEnd: 1.3, noiseClipStd: 0,
     });
+  });
+
+  it("replays a job or preset recorded with no block as Euler, which is how it ran", () => {
+    for (const recorded of [undefined, null, {}]) {
+      expect(h3ImageSamplerFromRecipe(recorded)).toEqual({ sampler: "euler", sNoise: 1.1, sNoiseEnd: 0.9, noiseClipStd: 0 });
+    }
+    expect(resolveH3ImageSampler({ model: h3, options: h3ImageSamplerFromRecipe(undefined) }).block).toEqual({ sampler: "euler" });
   });
 });

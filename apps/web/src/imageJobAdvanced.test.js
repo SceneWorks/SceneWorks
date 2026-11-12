@@ -474,7 +474,7 @@ describe("buildImageJobAdvanced — sc-25681 sampling controls", () => {
 });
 
 // SW-7106: MiniMax-H3-Image's sampler block rides `advanced.h3ImageSampler` only when the studio
-// resolved one (LCM); Euler and every other model send nothing.
+// resolved one (LCM or Euler); every other model sends nothing.
 describe("buildImageJobAdvanced — SW-7106 MiniMax-H3-Image sampler", () => {
   it("carries the resolved block verbatim and omits it otherwise", () => {
     const block = { sampler: "lcm", sNoise: 1.1, sNoiseEnd: 0.9, noiseClipStd: 0 };

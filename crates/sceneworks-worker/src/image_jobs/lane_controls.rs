@@ -88,6 +88,25 @@ pub(crate) fn resolve_lane_request_controls(
             "the engine does not honour the MiniMax-H3-Image sampler (advanced.{H3_IMAGE_SAMPLER_KEY})"
         )));
     }
+    // A request that omits the block (and names no other sampler) runs the MiniMax-H3-Image
+    // default, LCM 1.1 / 0.9 / 0, the same default the engine applies. An `advanced.sampler` of
+    // `euler` keeps meaning Euler.
+    let h3_image_sampler = h3_image_sampler.or_else(|| {
+        let named = request
+            .advanced
+            .get("sampler")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        if !caps.supports_h3_image_sampler || !(named.is_empty() || named == "default") {
+            return None;
+        }
+        Some(gen_core::h3_image::H3ImageSampler::Lcm {
+            s_noise: controls::H3_IMAGE_DEFAULT_S_NOISE,
+            s_noise_end: controls::H3_IMAGE_DEFAULT_S_NOISE_END,
+            noise_clip_std: controls::H3_IMAGE_DEFAULT_NOISE_CLIP_STD,
+        })
+    });
     let cfg_off = controls::cfg_off(guidance.map(f64::from), &request.model_manifest_entry);
     if cfg_off && cfg_interval.is_some() {
         return Err(refuse(format!(
@@ -632,7 +651,22 @@ mod tests {
             resolve_lane_request_controls(&request(advanced, "", json!({})), caps, None, None)
                 .map(|controls| controls.h3_image_sampler)
         };
-        assert_eq!(resolve(json!({}), &h3).unwrap(), None);
+        // An omitted block runs the H3-Image default (LCM 1.1 / 0.9 / 0) on an honouring engine,
+        // and nothing on an engine that does not offer the sampler.
+        assert_eq!(
+            resolve(json!({}), &h3).unwrap(),
+            Some(H3ImageSampler::Lcm {
+                s_noise: 1.1,
+                s_noise_end: 0.9,
+                noise_clip_std: 0.0,
+            })
+        );
+        assert_eq!(resolve(json!({}), &Capabilities::default()).unwrap(), None);
+        assert_eq!(
+            resolve(json!({ "sampler": "euler" }), &h3).unwrap(),
+            None,
+            "a request that names Euler through advanced.sampler stays Euler"
+        );
         assert_eq!(
             resolve(json!({ "h3ImageSampler": { "sampler": "euler" } }), &h3).unwrap(),
             Some(H3ImageSampler::Euler)

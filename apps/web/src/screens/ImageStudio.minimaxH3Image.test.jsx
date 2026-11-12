@@ -182,22 +182,47 @@ describe("ImageStudio — MiniMax-H3-Image sampler (SW-7106)", () => {
 
   const samplerSelect = () => container.querySelector('select[aria-label="MiniMax-H3-Image sampler"]');
 
-  it("sits in the collapsed Advanced section, defaulting to Euler with no LCM fields", async () => {
+  it("sits in the collapsed Advanced section, defaulting to LCM at 1.1 / 0.9 / 0", async () => {
     await render(baseContext(), { open: false });
     expect(samplerSelect()).toBeNull();
     await click(document.body.querySelector(".advanced-section-toggle"));
-    expect(samplerSelect().value).toBe("euler");
+    expect(samplerSelect().value).toBe("lcm");
     expect([...samplerSelect().options].map((option) => option.textContent)).toEqual([
       "Euler (official)",
       "LCM (stochastic re-noise)",
     ]);
-    expect(field(container, "Noise scale start")).toBeUndefined();
+    expect(field(container, "Noise scale start").value).toBe("1.1");
+    expect(field(container, "Noise scale end").value).toBe("0.9");
+    expect(field(container, "Noise clip (std, 0 = off)").value).toBe("0");
+  });
+
+  it("sends the default LCM block 1.1 / 0.9 / 0 with a new job", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-h3-default" }));
+    await render(baseContext({ createImageJob }));
+    await act(async () => setTextarea(container.querySelector('textarea[aria-label="Prompt"]'), "a harbour at dawn"));
+    await click(generateButton());
+    expect(createImageJob.mock.calls[0][0].advanced.h3ImageSampler).toEqual({
+      sampler: "lcm",
+      sNoise: 1.1,
+      sNoiseEnd: 0.9,
+      noiseClipStd: 0,
+    });
+  });
+
+  it("replays an old job recorded without the block as Euler", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-h3-old" }));
+    await render(baseContext({
+      createImageJob,
+      studioLaunch: { id: "reuse-old", view: "Image", recipe: { mode: "text_to_image", model: H3_IMAGE.id, prompt: "a cup", loras: [], normalizedSettings: {}, rawAdapterSettings: {} } },
+    }));
+    expect(samplerSelect().value).toBe("euler");
+    await click(generateButton());
+    expect(createImageJob.mock.calls[0][0].advanced.h3ImageSampler).toEqual({ sampler: "euler" });
   });
 
   it("reveals the LCM fields at their defaults and sends the block with the job", async () => {
     const createImageJob = vi.fn(async () => ({ id: "job-h3-lcm" }));
     await render(baseContext({ createImageJob }));
-    await act(async () => setSelect(samplerSelect(), "lcm"));
     expect(field(container, "Noise scale start").value).toBe("1.1");
     expect(field(container, "Noise scale end").value).toBe("0.9");
     expect(field(container, "Noise clip (std, 0 = off)").value).toBe("0");
@@ -215,6 +240,7 @@ describe("ImageStudio — MiniMax-H3-Image sampler (SW-7106)", () => {
   it("sends Euler explicitly and refuses an out-of-range LCM value before submitting", async () => {
     const createImageJob = vi.fn(async () => ({ id: "job-h3" }));
     await render(baseContext({ createImageJob }));
+    await act(async () => setSelect(samplerSelect(), "euler"));
     await act(async () => setTextarea(container.querySelector('textarea[aria-label="Prompt"]'), "a harbour at dawn"));
     await click(generateButton());
     expect(createImageJob.mock.calls[0][0].advanced.h3ImageSampler).toEqual({ sampler: "euler" });
@@ -229,7 +255,6 @@ describe("ImageStudio — MiniMax-H3-Image sampler (SW-7106)", () => {
     const buttonWithText = (text) => [...container.querySelectorAll("button")].find((b) => b.textContent.includes(text));
     const context = baseContext({ createImageJob: vi.fn(async () => ({ id: "job-h3-preset" })) });
     await render(context);
-    await act(async () => setSelect(samplerSelect(), "lcm"));
     await act(async () => setInput(container.querySelector('input[aria-label="Preset name"]'), "H3 LCM"));
     await click(buttonWithText("Save as preset"));
     await click([...container.querySelectorAll(".save-preset-scope-picker .compact-selector-item")].find((b) => b.textContent.includes("This project")));

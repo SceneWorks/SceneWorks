@@ -2076,7 +2076,7 @@
               },
               "supportsH3ImageSampler": {
                 "type": "boolean",
-                "description": "Does the engine take MiniMax-H3-Image's sampler block `advanced.h3ImageSampler` (SW-7106): `{\"sampler\": \"euler\"}` (the released velocity Euler step, the default) or `{\"sampler\": \"lcm\", \"sNoise\", \"sNoiseEnd\", \"noiseClipStd\"}` (ComfyUI's LCM re-noise step; sNoise > 0, sNoiseEnd >= 0, noiseClipStd >= 0 with 0 = off, all finite)? ABSENT MEANS FALSE: the API refuses the block for a model that does not declare it, and Image Studio shows its Sampler control only when it is true."
+                "description": "Does the engine take MiniMax-H3-Image's sampler block `advanced.h3ImageSampler` (SW-7106): `{\"sampler\": \"euler\"}` (the released velocity Euler step) or `{\"sampler\": \"lcm\", \"sNoise\", \"sNoiseEnd\", \"noiseClipStd\"}` (ComfyUI's LCM re-noise step, the default at 1.1 / 0.9 / 0; sNoise > 0, sNoiseEnd >= 0, noiseClipStd >= 0 with 0 = off, all finite)? ABSENT MEANS FALSE: the API refuses the block for a model that does not declare it, and Image Studio shows its Sampler control only when it is true."
               },
               "captionOverflowPolicies": {
                 "type": "array",
