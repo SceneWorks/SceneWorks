@@ -93,31 +93,6 @@ def write_updated_snapshots() -> None:
 atexit.register(write_updated_snapshots)
 
 
-def seed_local_fixture_model_sources(root: Path) -> None:
-    """Mirror the real `z_image_turbo` publisher pin into the synthetic manifest.
-
-    SW-7030: admission freezes a job's complete source closure at enqueue, and a
-    manifest entry with neither a pinned download nor a loadable local source is
-    refused (409 `model_artifact_incomplete`). The synthetic catalog's
-    `z_image_turbo` fixture carried `downloads: []`, which pre-SW-7030 admission
-    never inspected. This seeder rewrites that entry's downloads to the REAL
-    builtin's pinned turnkey (repo/revision/variant/files verbatim), so the
-    fixtures route and freeze exactly what a production z_image_turbo request
-    does — Revision members resolved from the publisher pin, no local source and
-    no producer receipt. The pinned metadata lookup reaches the Hugging Face
-    tree API exactly as the e2e smoke suite's z_image_turbo jobs already do
-    (same CI lane, network available); the returned per-file digests are
-    content hashes of an immutable revision, so the snapshots stay
-    deterministic across runs and machines."""
-    manifest_path = root / "config" / "manifests" / "builtin.models.jsonc"
-    text = manifest_path.read_text(encoding="utf-8")
-    old = '"downloads": [],\n              "paths": {},\n              "defaults": { "width": 1024, "height": 1024 },\n              "limits": {},\n              "loraCompatibility": { "families": ["z-image"] },\n              "ui": { "label": "Z-Image" }'
-    # The real builtin's pinned q4 turnkey (config/manifests/builtin.models.jsonc), verbatim.
-    new = '"downloads": [\n                {\n                  "provider": "huggingface",\n                  "repo": "SceneWorks/z-image-turbo-mlx",\n                  "revision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",\n                  "variant": "q4",\n                  "default": true,\n                  "files": ["q4/*"],\n                  "estimatedSizeBytes": 5909406487\n                }\n              ],\n              "paths": {},\n              "defaults": { "width": 1024, "height": 1024 },\n              "limits": {},\n              "loraCompatibility": { "families": ["z-image"] },\n              "ui": { "label": "Z-Image" }'
-    assert old in text, "the z_image_turbo fixture block drifted from this seeder"
-    manifest_path.write_text(text.replace(old, new), encoding="utf-8")
-
-
 # The portable binding contract version this harness's fake workers claim with (SW-7030).
 PORTABLE_MODEL_BINDING_VERSION = 2
 
@@ -245,18 +220,16 @@ def write_contract_manifests(config_dir: Path) -> None:
               "ui": { "label": "Base" }
             },
             {
+              // A REGISTERED builtin id: the compiled registry's row (with its typed
+              // evidence) replaces whatever this file says for it (SW-7031), so the row
+              // only places z_image_turbo in this catalog. It is the routed model the job
+              // contracts need; its fields here are deliberately minimal because none of
+              // them reach a response.
               "id": "z_image_turbo",
-              "name": "Z-Image Turbo",
+              "name": "Z-Image-Turbo",
               "family": "z-image",
               "type": "image",
-              "adapter": "z_image_diffusers",
-              "capabilities": ["text_to_image", "edit_image", "character_image"],
-              "downloads": [],
-              "paths": {},
-              "defaults": { "width": 1024, "height": 1024 },
-              "limits": {},
-              "loraCompatibility": { "families": ["z-image"] },
-              "ui": { "label": "Z-Image" }
+              "adapter": "z_image_diffusers"
             }
           ]
         }
@@ -317,7 +290,6 @@ class ServerApiHarness:
         self.root = root
         self.runtime = "rust"
         write_contract_manifests(root / "config")
-        seed_local_fixture_model_sources(root)
         # sc-19708: the catalog now reports the configured model-library root
         # (`modelResolution.configuredLibraryPath`). That root is environment-derived — the API
         # resolves HF_HUB_CACHE / HUGGINGFACE_HUB_CACHE / HF_HOME and otherwise falls back to the
@@ -999,6 +971,24 @@ def test_system_manifest_and_http_contracts(contract_runtimes):
                         "label": "Model encoder (default)",
                     }
                 ]
+            # z_image_turbo is a registered builtin, so its row is the registry's, which
+            # declares an `mlx` block. The catalog probes MLX install/conversion state for
+            # such a row only on macOS (off macOS only for candle-native converters,
+            # sc-20529), so these keys are host facts, not lane contract: assert the host
+            # split, then remove exactly them before comparing with the Linux snapshot.
+            mlx_host_state = {
+                key: turbo.pop(key)
+                for key in ("mlxConversionState", "mlxConvertedPath", "mlxInstallState")
+                if key in turbo
+            }
+            if sys.platform == "darwin":
+                assert mlx_host_state == {
+                    "mlxConversionState": "ready",
+                    "mlxConvertedPath": None,
+                    "mlxInstallState": "missing",
+                }, mlx_host_state
+            else:
+                assert mlx_host_state == {}, mlx_host_state
             assert_snapshot(label, normalized)
 
     cors_headers = {
@@ -1758,8 +1748,8 @@ def test_model_lora_and_image_job_contracts(contract_runtimes):
                 "prompt": "mist over hills",
                 # SW-7030: `base-model` is an unrouted synthetic id (neither MLX- nor
                 # candle-routed in the routing tables), so admission now fails it closed
-                # (400 "No native route..."); z_image_turbo is the routed fixture whose
-                # local source `seed_local_fixture_model_sources` stages.
+                # (400 "No native route..."); z_image_turbo is the routed registered
+                # builtin, so the job carries the registry's row and its pinned downloads.
                 "model": "z_image_turbo",
                 "seed": 101,
                 "requestedGpu": "auto",
