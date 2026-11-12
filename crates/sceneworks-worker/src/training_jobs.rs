@@ -6769,18 +6769,24 @@ mod tests {
         {
             let kernel = target.kernel.as_str();
             let base = target.base_model.as_str();
+            let engine_id = engine_trainer_id_for(kernel, base).expect("routed kernel");
+            let Some(descriptor) = crate::inference_runtime::trainer_descriptor(engine_id) else {
+                continue; // not registered on this backend (e.g. the candle-only Krea control trainer)
+            };
+            // The target defaults as this backend's API serves them: a Candle host projects them
+            // onto what its trainer executes (no checkpointing or previews for the dense trainers).
+            let mut defaults = target.defaults.clone();
+            if descriptor.backend == "candle" {
+                sceneworks_core::training::apply_candle_training_defaults(kernel, &mut defaults);
+            }
             let target_plan = |network: &str, key: &str, technique_value: Value| {
                 let mut value = plan_json(dir.path(), kernel, base, network, &[&image]);
                 value["target"]["targetId"] = json!(target.id);
                 value["target"]["baseModelRepo"] = json!(target.base_model_repo);
-                value["config"] = serde_json::to_value(&target.defaults).expect("target defaults");
+                value["config"] = serde_json::to_value(&defaults).expect("target defaults");
                 value["config"]["advanced"]["networkType"] = json!(network);
                 value["config"]["advanced"][key] = technique_value;
                 parse(value)
-            };
-            let engine_id = engine_trainer_id_for(kernel, base).expect("routed kernel");
-            let Some(descriptor) = crate::inference_runtime::trainer_descriptor(engine_id) else {
-                continue; // not registered on this backend (e.g. the candle-only Krea control trainer)
             };
             let network = if descriptor.supports_lora {
                 "lora"
