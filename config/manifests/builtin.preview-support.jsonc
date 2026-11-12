@@ -11,7 +11,7 @@
       "audioInferenceRevision": "354b41ccaccdc14afccff0d0fb1ae1b0be04836e"
     },
     "mlx": {
-      "inferenceRevision": "0b80ec518c4b514f04b8a39703aa56cf395da278"
+      "inferenceRevision": "bc7b8fd53e9dcd43ba57e2663ab27bd7e9f1ab96"
     }
   },
   "models": {
@@ -158,6 +158,9 @@
     },
     "mage_flow_turbo": {
       "candle": false,
+      "mlx": false
+    },
+    "minimax_h3_image": {
       "mlx": false
     },
     "mmaudio_large_44k": {
