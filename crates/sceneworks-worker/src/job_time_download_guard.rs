@@ -641,6 +641,14 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
     ),
     // The jobs database.
     ("rust-api", "server.rs", "jobs.db", CacheRole::Runtime),
+    // Trusted pinned-file ledgers: small JSON records of upstream (path, size, sha256) per pinned
+    // revision, so admission can verify an installed source offline. Never weight bytes.
+    (
+        "rust-api",
+        "portable_admission.rs",
+        "trusted-pinned-files",
+        CacheRole::Runtime,
+    ),
     // Upload-sweep helpers that forward a subdir parameter.
     (
         "rust-api",
