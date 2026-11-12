@@ -556,7 +556,7 @@ pub(crate) fn child_environment(
         env.insert("SCENEWORKS_ACCESS_TOKEN".to_owned(), access_token.clone());
     }
     if let Ok(Some(key)) = sceneworks_core::worker_proof::derived_key_from_master_env_or_file(
-        &settings.config_dir,
+        &settings.credentials_dir,
         &spec.worker_id,
     ) {
         env.insert("SCENEWORKS_WORKER_PROOF_KEY".to_owned(), key);

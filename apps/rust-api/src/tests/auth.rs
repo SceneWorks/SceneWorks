@@ -1,6 +1,27 @@
 //! rust-api auth tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
 
+/// An embedded test worker resolves the same directories as the API under test, inside the test's
+/// temp dir, so the proof key it derives comes from the master that API created and never from the
+/// developer's OS app-config directory.
+#[test]
+fn embedded_test_worker_shares_the_api_config_and_credential_store() {
+    let temp = tempfile::tempdir().unwrap();
+    let api = test_settings(&temp);
+    let worker = test_worker_settings("http://127.0.0.1:0".to_owned(), &api);
+    assert_eq!(worker.credentials_dir, api.credentials_dir);
+    assert_eq!(worker.config_dir, api.config_dir);
+    assert_eq!(worker.data_dir, api.data_dir);
+    for path in [
+        &worker.credentials_dir,
+        &worker.config_dir,
+        &worker.data_dir,
+    ] {
+        assert!(path.starts_with(temp.path()), "{}", path.display());
+    }
+    assert!(worker.credentials.is_empty() && worker.access_token.is_none());
+}
+
 #[test]
 fn access_tokens_are_compared_as_fixed_size_hashes() {
     use crate::auth::token_digest;

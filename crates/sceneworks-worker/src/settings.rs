@@ -10,6 +10,11 @@ pub struct Settings {
     /// disabled shared default rather than enabling or unbounding the cache.
     pub resolved_cache: sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy,
     pub config_dir: PathBuf,
+    /// The resolved credential store (download credentials and the worker-proof master).
+    /// Production resolves it once from `config_dir` with
+    /// [`sceneworks_core::credentials::credentials_dir`]; an embedding test pins it to the same
+    /// directory as the API it talks to, so neither side reaches the developer's OS profile.
+    pub credentials_dir: PathBuf,
     pub worker_id: String,
     pub gpu_id: String,
     pub is_child_worker: bool,
@@ -94,6 +99,7 @@ impl fmt::Debug for Settings {
         debug.field("resolved_cache", &self.resolved_cache);
         debug
             .field("config_dir", &self.config_dir)
+            .field("credentials_dir", &self.credentials_dir)
             .field("worker_id", &self.worker_id)
             .field("gpu_id", &self.gpu_id)
             .field("is_child_worker", &self.is_child_worker)
@@ -162,6 +168,7 @@ impl Settings {
             data_dir,
             resolved_cache: Default::default(),
             config_dir: PathBuf::new(),
+            credentials_dir: PathBuf::new(),
             worker_id: "worker".to_owned(),
             gpu_id: "cpu".to_owned(),
             is_child_worker: false,
@@ -173,6 +180,46 @@ impl Settings {
             credentials: Vec::new(),
             max_lora_url_bytes: 1,
             max_model_url_bytes: 1,
+            allow_private_lora_urls: false,
+            utility_workers: 1,
+            backend_mlx_enabled: false,
+            backend_candle_enabled: false,
+            external_model_roots: Vec::new(),
+            gpu_memory_limit_bytes: 0,
+            verified_plan_layers: None,
+            verified_revision_sources: Vec::new(),
+        }
+    }
+
+    /// Settings for a worker embedded in another crate's test, built WITHOUT reading the process
+    /// environment or any OS directory. The caller passes the directories of the API under test,
+    /// so the worker and the API resolve the same config root and the same credential store (the
+    /// worker-proof master included). Every network field is unroutable until the caller pins it.
+    #[cfg(feature = "test-support")]
+    pub fn hermetic_for_test(
+        api_url: String,
+        data_dir: PathBuf,
+        config_dir: PathBuf,
+        credentials_dir: PathBuf,
+    ) -> Self {
+        Self {
+            api_url,
+            access_token: None,
+            data_dir,
+            resolved_cache: Default::default(),
+            config_dir,
+            credentials_dir,
+            worker_id: "test-worker".to_owned(),
+            gpu_id: "cpu".to_owned(),
+            is_child_worker: false,
+            poll_seconds: 1,
+            heartbeat_seconds: 5,
+            shutdown_timeout_seconds: 10,
+            huggingface_base_url: "http://127.0.0.1:0".to_owned(),
+            huggingface_token: None,
+            credentials: Vec::new(),
+            max_lora_url_bytes: DEFAULT_MAX_LORA_URL_BYTES,
+            max_model_url_bytes: DEFAULT_MAX_MODEL_URL_BYTES,
             allow_private_lora_urls: false,
             utility_workers: 1,
             backend_mlx_enabled: false,
@@ -197,8 +244,8 @@ impl Settings {
         sceneworks_core::env_util::env_u64_any(&["SCENEWORKS_VIDEO_STALL_SECS"], 0, true)
             .map_err(WorkerError::InvalidPayload)?;
         let defaults = sceneworks_core::app_paths::AppPaths::platform_default();
-        let config_dir = env_path_or("SCENEWORKS_CONFIG_DIR", &defaults.config_dir);
-        let credentials_dir = sceneworks_core::credentials::credentials_dir(&config_dir);
+        let config_dir = env_path_or("SCENEWORKS_CONFIG_DIR", &default_config_dir(&defaults));
+        let credentials_dir = resolved_credentials_dir(&config_dir);
         Ok(Self {
             api_url: env_string("SCENEWORKS_API_URL", DEFAULT_API_URL),
             access_token: std::env::var("SCENEWORKS_ACCESS_TOKEN")
@@ -209,6 +256,7 @@ impl Settings {
             resolved_cache:
                 sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy::from_env_or_safe_default(),
             config_dir: config_dir.clone(),
+            credentials_dir: credentials_dir.clone(),
             worker_id: env_string("SCENEWORKS_WORKER_ID", "rust-utility-worker"),
             gpu_id: env_string("SCENEWORKS_GPU_ID", "cpu"),
             is_child_worker: sceneworks_core::env_util::env_flag("SCENEWORKS_WORKER_CHILD", false),
@@ -259,6 +307,48 @@ impl Settings {
             external_model_roots: sceneworks_core::external_roots::external_model_roots_from_env(),
         })
     }
+}
+
+/// The config root used when `SCENEWORKS_CONFIG_DIR` is unset: the OS app-config directory.
+#[cfg(not(test))]
+fn default_config_dir(defaults: &sceneworks_core::app_paths::AppPaths) -> PathBuf {
+    defaults.config_dir.clone()
+}
+
+/// This crate's unit tests never default to the developer's OS app-config directory: a test that
+/// does not pin `SCENEWORKS_CONFIG_DIR` gets one process-wide empty directory created by
+/// `tempfile`.
+#[cfg(test)]
+fn default_config_dir(_defaults: &sceneworks_core::app_paths::AppPaths) -> PathBuf {
+    static UNIT_CONFIG: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    UNIT_CONFIG
+        .get_or_init(|| {
+            tempfile::Builder::new()
+                .prefix("sceneworks-worker-unit-config-")
+                .tempdir()
+                .expect("unit-test config dir")
+        })
+        .path()
+        .to_path_buf()
+}
+
+/// The credential store for `config_dir`, resolved as production resolves it.
+#[cfg(not(test))]
+fn resolved_credentials_dir(config_dir: &std::path::Path) -> PathBuf {
+    sceneworks_core::credentials::credentials_dir(config_dir)
+}
+
+/// Unit tests resolve the store without the OS app-config default, so it follows the (hermetic)
+/// config root unless `SCENEWORKS_CREDENTIALS_DIR` pins it.
+#[cfg(test)]
+fn resolved_credentials_dir(config_dir: &std::path::Path) -> PathBuf {
+    sceneworks_core::credentials::resolve_credentials_dir(
+        std::env::var(sceneworks_core::credentials::CREDENTIALS_DIR_ENV)
+            .ok()
+            .as_deref(),
+        None,
+        config_dir,
+    )
 }
 
 pub(crate) use sceneworks_core::env_util::env_trimmed_string as env_string;
@@ -398,5 +488,36 @@ mod test_builder_contracts {
             !settings.resolved_cache_policy().enabled,
             "ambient cache enablement cannot override the field"
         );
+    }
+
+    /// A unit test that does not pin the config root never resolves the developer's OS
+    /// app-config directory, for either the config root or the credential store (which holds the
+    /// worker-proof master and download credentials).
+    #[test]
+    fn env_settings_never_default_to_the_os_config_directory() {
+        let _env = crate::test_env::EnvVars::set(&[
+            ("SCENEWORKS_CONFIG_DIR", ""),
+            (sceneworks_core::credentials::CREDENTIALS_DIR_ENV, ""),
+        ]);
+        let settings = Settings::try_from_env().expect("valid default settings");
+        if let Some(os) = sceneworks_core::app_paths::AppPaths::platform_default_checked() {
+            for (name, path) in [
+                ("config_dir", &settings.config_dir),
+                ("credentials_dir", &settings.credentials_dir),
+            ] {
+                assert!(
+                    !path.starts_with(&os.config_dir),
+                    "{name} {} resolves into the OS config dir {}",
+                    path.display(),
+                    os.config_dir.display()
+                );
+            }
+        }
+        assert!(settings
+            .config_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("sceneworks-worker-unit-config-")));
+        assert_eq!(settings.credentials_dir, settings.config_dir);
     }
 }

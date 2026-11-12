@@ -383,7 +383,7 @@ async fn adapter_import_cpu_contract() {
         assert!(registered.capabilities.contains(&WorkerCapability::Cpu));
         assert!(registered.capabilities.contains(&WorkerCapability::LoraImport));
         assert!(!registered.capabilities.contains(&WorkerCapability::Gpu));
-        let (status, claimed) = request(app.clone(), "POST", "/api/v1/jobs/claim", json!({"workerId":utility.worker_id})).await;
+        let (status, claimed) = request(app.clone(), "POST", "/api/v1/jobs/claim", with_test_worker_proof(json!({"workerId":utility.worker_id}), &settings, &utility.worker_id)).await;
         assert_eq!(status, StatusCode::OK, "{claimed}");
         assert_eq!(claimed["job"]["id"], job["id"]);
         assert_eq!(claimed["job"]["workerId"], utility.worker_id);
@@ -713,7 +713,11 @@ async fn pre_model_library_and_dispatch_cpu_contract(
             app.clone(),
             "POST",
             "/api/v1/jobs/claim",
-            portable_test_worker_claim(&worker.worker_id, TestPortableRoute::MlxMacos),
+            with_test_worker_proof(
+                portable_test_worker_claim(&worker.worker_id, TestPortableRoute::MlxMacos),
+                &settings,
+                &worker.worker_id,
+            ),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{claimed}");

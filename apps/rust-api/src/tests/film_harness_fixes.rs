@@ -1616,8 +1616,10 @@ async fn a_real_timeline_export_mixes_the_harness_four_track_sequence() {
         .expect("the API serves");
     });
     let data_dir = harness.temp_dir.path().join("data");
-    let mut worker_settings = sceneworks_worker::Settings::from_env();
-    worker_settings.api_url = format!("http://127.0.0.1:{port}");
+    let mut worker_settings = crate::tests::support::test_worker_settings(
+        format!("http://127.0.0.1:{port}"),
+        &harness.state.settings,
+    );
     worker_settings.access_token = None;
     worker_settings.data_dir = data_dir.clone();
     worker_settings.resolved_cache = Default::default();

@@ -97,8 +97,10 @@ fn read_master(path: &Path) -> io::Result<String> {
     }
 }
 
+/// `credentials_dir` is the caller's resolved credential store (production resolves it with
+/// [`crate::credentials::credentials_dir`]); this function never resolves an OS directory itself.
 pub fn worker_key_from_env_or_file(
-    config_dir: &Path,
+    credentials_dir: &Path,
     worker_id: &str,
 ) -> io::Result<Option<String>> {
     if let Some(value) = std::env::var("SCENEWORKS_WORKER_PROOF_KEY")
@@ -114,11 +116,12 @@ pub fn worker_key_from_env_or_file(
             "invalid worker proof key",
         ));
     }
-    derived_key_from_master_env_or_file(config_dir, worker_id)
+    derived_key_from_master_env_or_file(credentials_dir, worker_id)
 }
 
+/// Reads the master from `credentials_dir`, the caller's resolved credential store.
 pub fn derived_key_from_master_env_or_file(
-    config_dir: &Path,
+    credentials_dir: &Path,
     worker_id: &str,
 ) -> io::Result<Option<String>> {
     if let Some(master) = std::env::var("SCENEWORKS_WORKER_PROOF_MASTER")
@@ -128,7 +131,6 @@ pub fn derived_key_from_master_env_or_file(
     {
         return derive_worker_key(&master, worker_id).map(Some);
     }
-    let credentials_dir = crate::credentials::credentials_dir(config_dir);
     match read_master(&credentials_dir.join(MASTER_FILE)) {
         Ok(master) => derive_worker_key(&master, worker_id).map(Some),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),

@@ -569,8 +569,7 @@ pub(super) fn worker_settings(
     settings: &crate::Settings,
     gpu_id: String,
 ) -> sceneworks_worker::Settings {
-    let mut worker = sceneworks_worker::Settings::from_env();
-    worker.api_url = url;
+    let mut worker = crate::tests::support::test_worker_settings(url, settings);
     worker.access_token = None;
     worker.data_dir = settings.data_dir.clone();
     worker.resolved_cache = settings.resolved_cache.clone();

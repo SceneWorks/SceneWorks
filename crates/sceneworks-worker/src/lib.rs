@@ -51,7 +51,7 @@ use uuid::Uuid;
 
 fn portable_challenge_capability(settings: &Settings) -> Option<String> {
     sceneworks_core::worker_proof::worker_key_from_env_or_file(
-        &settings.config_dir,
+        &settings.credentials_dir,
         &settings.worker_id,
     )
     .ok()

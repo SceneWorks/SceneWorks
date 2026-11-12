@@ -58,8 +58,7 @@ fn seed_catalog_namespace(temp: &tempfile::TempDir, model: &Value) -> (PathBuf, 
 }
 
 fn worker_settings(api_url: String, api_settings: &crate::Settings) -> sceneworks_worker::Settings {
-    let mut worker = sceneworks_worker::Settings::from_env();
-    worker.api_url = api_url;
+    let mut worker = crate::tests::support::test_worker_settings(api_url, api_settings);
     worker.access_token = None;
     worker.data_dir = api_settings.data_dir.clone();
     worker.resolved_cache = sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy::from_env_or_safe_default();

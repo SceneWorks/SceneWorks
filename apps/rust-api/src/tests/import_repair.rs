@@ -55,8 +55,8 @@ async fn start_worker(app: axum::Router, settings: &crate::Settings) -> Runtime 
         .await
         .unwrap();
     });
-    let mut worker_settings = sceneworks_worker::Settings::from_env();
-    worker_settings.api_url = format!("http://{address}");
+    let mut worker_settings =
+        crate::tests::support::test_worker_settings(format!("http://{address}"), settings);
     worker_settings.access_token = None;
     worker_settings.data_dir = settings.data_dir.clone();
     worker_settings.config_dir = settings.config_dir.clone();

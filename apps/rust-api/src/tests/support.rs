@@ -202,6 +202,44 @@ pub(crate) fn registered_entry_for_api_host(model_id: &str) -> Value {
     entry
 }
 
+/// Settings for a real worker embedded in a test against the API built from `api_settings`.
+/// Built without reading the environment, so the worker never falls back to the developer's OS
+/// app-config directory: it shares the API's data dir, config dir and credential store, and the
+/// worker-proof key it presents is derived from the master that API created.
+pub(crate) fn test_worker_settings(
+    api_url: String,
+    api_settings: &Settings,
+) -> sceneworks_worker::Settings {
+    sceneworks_worker::Settings::hermetic_for_test(
+        api_url,
+        api_settings.data_dir.clone(),
+        api_settings.config_dir.clone(),
+        api_settings.credentials_dir.clone(),
+    )
+}
+
+/// The worker-proof key an embedded test worker presents (derived exactly as the worker derives
+/// it, from the API's credential store). A raw claim made on behalf of that worker must carry it,
+/// because the API requires the proof from every worker that registered with one.
+pub(crate) fn test_worker_proof_key(api_settings: &Settings, worker_id: &str) -> String {
+    sceneworks_core::worker_proof::worker_key_from_env_or_file(
+        &api_settings.credentials_dir,
+        worker_id,
+    )
+    .expect("worker proof key reads")
+    .expect("the API under test created its worker-proof master")
+}
+
+/// `body` with the embedded test worker's proof key added (see [`test_worker_proof_key`]).
+pub(crate) fn with_test_worker_proof(
+    mut body: Value,
+    api_settings: &Settings,
+    worker_id: &str,
+) -> Value {
+    body["portableProofKey"] = Value::String(test_worker_proof_key(api_settings, worker_id));
+    body
+}
+
 pub(crate) fn test_settings(temp_dir: &tempfile::TempDir) -> Settings {
     Settings {
         app_version: "test".to_owned(),
