@@ -3314,6 +3314,113 @@ async fn versionless_claim_never_reaches_an_unbound_historical_model_job() {
         .is_none());
 }
 
+/// Codex review (PR #3369, jobs.rs claim path): historical carrier migration runs inside the claim,
+/// and one stalled publisher metadata lookup used to hold every claim past the worker's 30-second
+/// request deadline. The migration now spends at most its claim budget: an unrelated runnable job is
+/// claimed within the deadline, the stalled carrier stays queued and unbound (never failed), and a
+/// later claim binds it once metadata answers. Paused time: the budget elapses without a real wait.
+#[tokio::test(start_paused = true)]
+async fn stalled_historical_metadata_never_delays_a_claim_past_its_deadline() {
+    let temp = tempfile::tempdir().unwrap();
+    let manifests = temp.path().join("config/manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+    std::fs::write(
+        manifests.join("user.models.jsonc"),
+        json!({"schemaVersion":2,"models":[{"id":"custom_tts","name":"Custom TTS","type":"audio",
+            "family":"kokoro","adapter":"kokoro","downloads":[{"provider":"huggingface",
+            "repo":"owner/custom-tts","revision":"a".repeat(40),"files":["model.safetensors"]}]}]})
+        .to_string(),
+    )
+    .unwrap();
+    let (app, state) = create_app_with_state(test_settings(&temp)).unwrap();
+    install_pinned_jobs_fixture_metadata(&state);
+    let (open_metadata, gate) = tokio::sync::watch::channel(false);
+    *state.test_hooks.pinned_metadata_gate.lock() = Some(gate);
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({"workerId":"budget-worker", "gpuId":"0", "gpuName":"Budget",
+            "capabilities":["gpu","audio_generate","model_download"], "loadedModels":[]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let create = |job_type: crate::JobType, payload: Value| crate::CreateJob {
+        job_type,
+        project_id: None,
+        project_name: None,
+        payload: payload.as_object().unwrap().clone(),
+        requested_gpu: "auto".into(),
+        source_job_id: None,
+        duplicate_of_job_id: None,
+        attempts: 1,
+        initial_status: None,
+    };
+    let entry = crate::models::resolve_model_manifest_entry(&state, "custom_tts")
+        .await
+        .unwrap();
+    // FIFO-first, and unbound: the claim must first try to migrate it.
+    let historical = state
+        .jobs_store
+        .create_job(create(
+            crate::JobType::AudioGenerate,
+            json!({"model":"custom_tts","text":"historical","modelManifestEntry":entry}),
+        ))
+        .unwrap();
+    let download = state
+        .jobs_store
+        .create_job(create(
+            crate::JobType::ModelDownload,
+            json!({"modelId":"custom_tts"}),
+        ))
+        .unwrap();
+
+    let claim = || {
+        request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs/claim",
+            json!({"workerId":"budget-worker"}),
+        )
+    };
+    let deadline = sceneworks_core::network_policy::CONTROL_REQUEST_TIMEOUT;
+    let started = tokio::time::Instant::now();
+    let (status, claimed) = tokio::time::timeout(deadline, claim())
+        .await
+        .expect("a stalled historical lookup must not hold the claim past the worker's deadline");
+    assert!(started.elapsed() < deadline, "{:?}", started.elapsed());
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    assert_eq!(claimed["job"]["id"], json!(download.id), "{claimed}");
+    let stalled = state.jobs_store.get_job(&historical.id).unwrap();
+    assert_eq!(stalled.status, crate::JobStatus::Queued, "{stalled:?}");
+    assert!(stalled.worker_id.is_none());
+    assert!(state
+        .jobs_store
+        .portable_model_binding(&historical.id)
+        .unwrap()
+        .is_none());
+
+    // Metadata answers, and the deferral window has passed: the next claim binds the carrier.
+    open_metadata.send(true).unwrap();
+    rusqlite::Connection::open(&state.settings.jobs_db_path)
+        .unwrap()
+        .execute(
+            "update jobs set historical_source_retry_after = 0 where id = ?1",
+            [&historical.id],
+        )
+        .unwrap();
+    let (status, claimed) = tokio::time::timeout(deadline, claim()).await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    assert!(
+        state
+            .jobs_store
+            .portable_model_binding(&historical.id)
+            .unwrap()
+            .is_some(),
+        "{claimed}"
+    );
+}
+
 /// SW-7031 AC4 (review finding 5): a non-image/video carrier is re-resolved from the current
 /// catalog. A same-ID replacement of a user audio model with another pinned revision fails the
 /// historical job before any fetch or load instead of being compared against itself.
@@ -13690,7 +13797,10 @@ async fn worker_heartbeat_without_an_interrupt_broadcasts_no_job_event() {
     // every few seconds must NOT publish job.updated/queue.updated. Getting this wrong would
     // put the whole queue on the SSE bus at heartbeat cadence.
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    let (app, state) = create_app_with_state(test_settings(&temp_dir)).expect("app creates");
+    // Admission captures the job's pinned source metadata; the offline fixture answers it, so the
+    // test neither calls huggingface.co nor reads another test's metadata endpoint from the env.
+    let (app, state) =
+        jobs_fixture_app_with_pinned_metadata(test_settings(&temp_dir)).expect("app creates");
 
     request(
         app.clone(),

@@ -2833,6 +2833,13 @@ async fn resolve_trusted_pinned_files(
     selectors: &[String],
 ) -> Result<Vec<PortableArtifactFile>, ApiError> {
     #[cfg(test)]
+    {
+        let gate = state.test_hooks.pinned_metadata_gate.lock().clone();
+        if let Some(mut gate) = gate {
+            let _ = gate.wait_for(|open| *open).await;
+        }
+    }
+    #[cfg(test)]
     if let Some(fixture) = state.test_hooks.pinned_metadata_override.lock().clone() {
         return Ok(fixture(repo, revision, selectors));
     }
