@@ -6275,3 +6275,73 @@ fn supra2_routes_to_candle_for_plain_text_to_image_only() {
         None
     );
 }
+
+/// SW-7100: a MiniMax-H3-Image text-to-image job routes to the Candle worker, tier carrier
+/// included, and the Candle lane refuses exactly the carriers the MLX arm refuses — named by the
+/// MiniMax-H3-Image check when no generic check owns them.
+#[test]
+fn minimax_h3_image_routes_to_candle_for_text_to_image() {
+    use crate::jobs_store::routing::gaps::classify_candle_image_gap;
+    use crate::jobs_store::routing::mlx::image_request_mlx_eligible;
+
+    assert!(CANDLE_ROUTED_MODELS.contains(&"minimax_h3_image"));
+    assert!(candle_family_serves_quant("minimax_h3_image"));
+    assert!(!candle_family_serves_lora("minimax_h3_image"));
+    let eligible =
+        |payload: Value| image_request_candle_eligible("minimax_h3_image", &object(payload));
+    let normalized = json!({
+        "model": "minimax_h3_image",
+        "mode": "text_to_image",
+        "sourceAssetId": null,
+        "referenceAssetId": null,
+        "maskAssetId": null,
+        "loras": [],
+        "hiresFix": { "enabled": false }
+    });
+    assert!(eligible(normalized));
+    assert!(eligible(
+        json!({ "model": "minimax_h3_image", "advanced": { "quantTier": "q4" } })
+    ));
+    let candle = gpu_worker(CANDLE_CAPS);
+    assert!(worker_supports_job(
+        &candle,
+        &image_generate_job(json!({ "model": "minimax_h3_image", "prompt": "a lighthouse" }))
+    ));
+    for refused in [
+        json!({ "mode": "edit_image", "sourceAssetId": "a" }),
+        json!({ "mode": "image_to_image", "sourceAssetId": "a" }),
+        json!({ "referenceAssetId": "a" }),
+        json!({ "referenceAssetIds": ["a"] }),
+        json!({ "maskAssetId": "a" }),
+        json!({ "controls": [{}] }),
+        json!({ "loras": [{ "id": "l", "weight": 0.8 }] }),
+        json!({ "hiresFix": { "enabled": true } }),
+    ] {
+        let mut payload = refused.clone();
+        payload["model"] = json!("minimax_h3_image");
+        assert!(!eligible(payload.clone()), "candle must refuse {refused}");
+        assert!(
+            !image_request_mlx_eligible("minimax_h3_image", &object(payload.clone())),
+            "the MLX lane refuses {refused} too"
+        );
+        assert!(
+            !worker_supports_job(&candle, &image_generate_job(payload.clone())),
+            "the candle worker must not claim {refused}"
+        );
+        let reason = classify_candle_image_gap(&object(payload));
+        assert!(
+            !reason.feature.contains("unsupported image model"),
+            "{refused}: {reason:?}"
+        );
+    }
+    for h3_only in [
+        json!({ "model": "minimax_h3_image", "controls": [{}] }),
+        json!({ "model": "minimax_h3_image", "hiresFix": { "enabled": true } }),
+    ] {
+        assert_eq!(
+            candle_image_first_refusal("minimax_h3_image", &object(h3_only.clone())),
+            Some(CandleImageRefusal::MinimaxH3ImageSurface),
+            "{h3_only}"
+        );
+    }
+}

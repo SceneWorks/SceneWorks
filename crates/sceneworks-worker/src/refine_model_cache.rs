@@ -193,8 +193,32 @@ async fn evict_resident_refiner_on(worker: &mpsc::Sender<RefineJob>) -> WorkerRe
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Make a stub model resident in the PROCESS-WIDE refine cache, the one the image route
+    /// stages out (SW-7102). Returns once the cache thread has installed it.
+    pub(crate) async fn seed_global_resident_stub() {
+        let (seed_tx, seed_rx) = tokio::sync::oneshot::channel();
+        refine_worker()
+            .send(Box::new(move |cache: &mut RefineModelCache| {
+                seed_stub_entry(cache);
+                seed_tx.send(()).expect("ack cache seed");
+            }))
+            .expect("seed the global refine cache");
+        seed_rx.await.expect("global cache seed ack");
+    }
+
+    /// Whether the process-wide refine cache holds a resident model.
+    pub(crate) async fn global_refiner_is_resident() -> bool {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        refine_worker()
+            .send(Box::new(move |cache: &mut RefineModelCache| {
+                reply_tx.send(!cache.is_empty()).expect("send cache state");
+            }))
+            .expect("query the global refine cache");
+        reply_rx.await.expect("global cache state")
+    }
 
     /// SW-7102: the explicit eviction drops the resident model on the cache's own thread and says
     /// so; a second call finds nothing resident.

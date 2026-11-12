@@ -391,3 +391,99 @@ async fn minimax_h3_image_sampler_survives_presets_duplicate_and_retry() {
         );
     }
 }
+
+/// E23 at install: downloading MiniMax-H3-Image and downloading its prompt expander each require
+/// that model's OWN accepted licence. Accepting one does not open the other, and nothing is queued
+/// by a refused request.
+#[tokio::test]
+async fn minimax_h3_image_and_its_expander_each_install_only_after_their_own_license_is_accepted() {
+    let _hf = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp = tempfile::tempdir().unwrap();
+    let config = temp.path().join("config/manifests");
+    single_model_manifest(&config, "minimax_h3_image", "MiniMaxAI/MiniMax-H3-Image");
+    let (image, expander) = (shipped_entry(), shipped_pe_entry());
+    std::fs::write(
+        config.join("builtin.models.jsonc"),
+        json!({ "schemaVersion": 1, "models": [image.clone(), expander.clone()] }).to_string(),
+    )
+    .unwrap();
+    let settings = test_settings(&temp);
+    let ack_path =
+        sceneworks_core::license_acknowledgments::acknowledgments_file(&settings.config_dir);
+    let app = create_app(settings).unwrap();
+    let download = |id: &str| format!("/api/v1/models/{id}/download");
+
+    for id in ["minimax_h3_image", "minimax_h3_image_pe"] {
+        for body in [
+            json!({ "requestedGpu": "auto" }),
+            json!({ "requestedGpu": "auto", "licenseAcknowledged": false }),
+        ] {
+            let (status, refused) = request(app.clone(), "POST", &download(id), body).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{id}: {refused}");
+            assert_eq!(
+                refused["code"], "license_acknowledgment_required",
+                "{id}: {refused}"
+            );
+        }
+    }
+    let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(jobs.as_array().unwrap().is_empty(), "{jobs}");
+
+    // The image model's acceptance is its own: the expander stays refused until its licence is
+    // accepted too.
+    sceneworks_core::license_acknowledgments::record_acknowledgment(
+        &ack_path,
+        &image,
+        "test",
+        "2026-11-10T00:00:00Z",
+    )
+    .unwrap();
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &download("minimax_h3_image"),
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["type"], "model_download");
+    let (status, refused) = request(
+        app.clone(),
+        "POST",
+        &download("minimax_h3_image_pe"),
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert_eq!(refused["code"], "license_acknowledgment_required");
+
+    // Accepting at the download door records the expander's own acceptance and passes the licence
+    // gate. Off-Mac the published NVFP4 tier installs; on macOS every expander tier is a converted
+    // SceneWorks tier that is not published yet (E28), so the next gate — not the licence — answers.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &download("minimax_h3_image_pe"),
+        json!({ "requestedGpu": "auto", "licenseAcknowledged": true }),
+    )
+    .await;
+    if cfg!(target_os = "macos") {
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{job}");
+        assert!(
+            job["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("not published yet")),
+            "{job}"
+        );
+    } else {
+        assert_eq!(status, StatusCode::CREATED, "{job}");
+        assert_eq!(job["type"], "model_download");
+    }
+    assert!(
+        sceneworks_core::license_acknowledgments::current_acknowledgment(&ack_path, &expander)
+            .unwrap()
+            .is_some(),
+        "the download door records the expander's acceptance"
+    );
+}
