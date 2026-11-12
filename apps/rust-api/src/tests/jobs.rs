@@ -7050,6 +7050,12 @@ async fn retry_and_duplicate_gate_a_merged_imported_shape_the_create_path_refuse
 #[tokio::test]
 async fn imported_pose_overlay_uses_the_server_projected_base() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    // The registry admits an imported source only from a managed root, bound to a worker that
+    // serves that exact source (see `register_imported_fixture_worker`).
+    let model_path = temp_dir.path().join("data/imported/user-krea.safetensors");
+    std::fs::create_dir_all(model_path.parent().expect("model parent"))
+        .expect("model directory creates");
+    std::fs::write(&model_path, b"fixture weights").expect("model source writes");
     let manifest_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
     write_empty_sibling_manifests(&manifest_dir);
@@ -7060,9 +7066,10 @@ async fn imported_pose_overlay_uses_the_server_projected_base() {
     .unwrap();
     std::fs::write(
         manifest_dir.join("user.models.jsonc"),
-        r#"{"schemaVersion":1,"models":[{"id":"user_krea","name":"User Krea",
-        "type":"image","family":"krea_2","importSourceShape":"transformer_file",
-        "paths":{"model":"/probe/user-krea.safetensors"}}]}"#,
+        json!({"schemaVersion":1,"models":[{"id":"user_krea","name":"User Krea",
+            "type":"image","family":"krea_2","importSourceShape":"transformer_file",
+            "paths":{"model":model_path}}]})
+        .to_string(),
     )
     .unwrap();
     let overlays: Vec<Value> = [("krea-pose", "krea_2_turbo"), ("foreign-pose", "flux2_dev")]
@@ -7084,7 +7091,13 @@ async fn imported_pose_overlay_uses_the_server_projected_base() {
     .unwrap();
     let mut settings = test_settings(&temp_dir);
     settings.candle_required = cfg!(not(target_os = "macos"));
-    let app = create_app(settings).expect("app creates");
+    let (app, state) = pinned_jobs_fixture_app_with_state(settings).expect("app creates");
+    let (backend, platform) = if cfg!(target_os = "macos") {
+        ("mlx", "macos")
+    } else {
+        ("candle", "linux")
+    };
+    register_imported_fixture_worker(&state, "user_krea", &model_path, backend, platform);
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Fine-tune poses").await;
     let project_id = project["id"].as_str().expect("project id");
     for (overlay_id, expected) in [

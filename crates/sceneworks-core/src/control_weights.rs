@@ -290,9 +290,18 @@ pub fn default_control_weight_for_request(
     if !poses || payload.get("mode").and_then(serde_json::Value::as_str) == Some("edit_image") {
         return None;
     }
+    // An imported fine-tune names its base explicitly, or carries the server-projected control
+    // base of its registered generate route (`ui.controlOverlayBaseModel`, set by the catalog's
+    // imported operation surface); a builtin row is its own base.
     let base_model = entry
         .get("baseModel")
         .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            entry
+                .get("ui")
+                .and_then(|ui| ui.get("controlOverlayBaseModel"))
+                .and_then(serde_json::Value::as_str)
+        })
         .unwrap_or(model_id);
     let engine = match base_model {
         "sdxl"
