@@ -287,6 +287,43 @@ fn generation_dtos_preserve_unset_carrier_encoding() {
 }
 
 #[test]
+fn image_and_video_jobs_accept_ten_loras_and_reject_eleven() {
+    for count in [10, 11] {
+        let loras: Vec<Value> = (0..count)
+            .map(|index| json!({ "id": format!("style_{index}"), "weight": 1.0 }))
+            .collect();
+        let image = serde_json::from_value(json!({
+            "projectId": "project-1",
+            "model": "z_image_turbo",
+            "mode": "text_to_image",
+            "prompt": "a lighthouse",
+            "loras": loras,
+        }))
+        .expect("image request parses");
+        let video = serde_json::from_value(json!({
+            "projectId": "project-1",
+            "model": "minimax_h3",
+            "mode": "text_to_video",
+            "prompt": "a lighthouse",
+            "loras": loras,
+        }))
+        .expect("video request parses");
+        for result in [
+            crate::validate_image_job(&image),
+            crate::validate_video_job(&video),
+        ] {
+            if count == 10 {
+                result.expect("ten LoRAs are accepted");
+            } else {
+                let error = result.expect_err("eleven LoRAs exceed the cap");
+                assert_eq!(error.status, StatusCode::BAD_REQUEST);
+                assert_eq!(error.detail, "loras must contain at most 10 entries");
+            }
+        }
+    }
+}
+
+#[test]
 fn vector_detail_default_allows_five_minutes_per_svg() {
     assert_eq!(
         crate::dto::VectorDetailBudget::default().max_wall_time_ms,
@@ -5653,6 +5690,86 @@ async fn post_preset_prompt_enhancement_uses_the_resolved_candle_route() {
 }
 
 #[tokio::test]
+async fn image_pose_settings_accept_whole_body_batches_and_preserve_coordinates() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    // Saved DWPose records include hands/face and full-precision coordinates; the bundled
+    // body-only poses alone are too small to reproduce the reported 64 KiB rejection.
+    let points =
+        |count| vec![json!([0.1234567890123456, 0.9876543210987654, 0.9876543210987654]); count];
+    let poses: Vec<Value> = (0..sceneworks_core::image_request::MAX_JOB_POSES)
+        .map(|index| {
+            json!({
+                "id": format!("saved-pose-{index}"),
+                "keypoints": points(18),
+                "hands": [points(21), points(21)],
+                "face": points(68),
+            })
+        })
+        .collect();
+    for count in [9, sceneworks_core::image_request::MAX_JOB_POSES] {
+        let advanced = json!({ "poses": poses[..count], "faceRestore": false, "steps": 9 });
+        assert!(serde_json::to_vec(&advanced).unwrap().len() > crate::MAX_ADVANCED_JSON_BYTES);
+        let (status, job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": "project-1",
+                "mode": "character_image",
+                "prompt": "a character in a pose",
+                "count": 1,
+                "advanced": advanced,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{job}");
+        assert_eq!(job["payload"]["advanced"]["poses"], advanced["poses"]);
+
+        let (status, duplicate) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{}/duplicate", job["id"].as_str().unwrap()),
+            json!({ "payloadChanges": {} }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{duplicate}");
+        assert_eq!(duplicate["payload"]["advanced"]["poses"], advanced["poses"]);
+    }
+}
+
+#[test]
+fn image_pose_settings_keep_settings_and_pose_data_independently_bounded() {
+    let refusal = |advanced: Value| {
+        crate::validate_image_prompt_extras("", advanced.as_object().unwrap())
+            .unwrap_err()
+            .detail
+    };
+    assert_eq!(
+        refusal(json!({ "poses": [], "blob": "a".repeat(64 * 1024) })),
+        "advanced settings must serialize to at most 65536 bytes"
+    );
+    // A non-array does not get a pose-data allowance.
+    assert_eq!(
+        refusal(json!({ "poses": "a".repeat(64 * 1024) })),
+        "advanced settings must serialize to at most 65536 bytes"
+    );
+    assert_eq!(
+        refusal(json!({ "poses": [{ "keypoints": [], "id": "a".repeat(1024 * 1024) }] })),
+        "pose data must serialize to at most 1048576 bytes; select fewer poses"
+    );
+    let over_count =
+        vec![json!({ "keypoints": [] }); sceneworks_core::image_request::MAX_JOB_POSES + 1];
+    assert_eq!(
+        refusal(json!({ "poses": over_count })),
+        "advanced.poses must contain at most 64 entries; each pose renders one image"
+    );
+    // Other generation types retain their existing total settings budget.
+    let oversized = json!({ "poses": [{ "keypoints": [], "id": "a".repeat(64 * 1024) }] });
+    assert!(crate::validate_prompt_extras("", oversized.as_object().unwrap()).is_err());
+}
+
+#[tokio::test]
 async fn create_image_job_enforces_the_pose_output_ceiling() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
@@ -5759,7 +5876,6 @@ async fn candle_required_rejects_unsupported_import_before_creating_a_job() {
     let app = create_app(settings).expect("app creates");
 
     for advanced in [
-        json!({ "poses": [{ "id": "pose-1", "keypoints": [] }] }),
         json!({ "controlImage": "control-1" }),
         json!({ "controlMode": "pose" }),
         json!({
@@ -6860,8 +6976,7 @@ async fn retry_and_duplicate_gate_a_merged_imported_shape_the_create_path_refuse
     )
     .expect("user manifest writes");
     let mut settings = test_settings(&temp_dir);
-    // Candle declares krea_2/transformer_file for `generate` but NOT for `pose`, so the plain
-    // request is admitted and the pose replay is the shape with no route.
+    // Candle serves imported pose jobs, while canny and incomplete control intent remain unsupported.
     settings.candle_required = true;
     let (app, state) = pinned_jobs_fixture_app_with_state(settings).expect("app creates");
     register_imported_fixture_worker(&state, "user_krea", &model_path, "candle", "linux");
@@ -6890,7 +7005,7 @@ async fn retry_and_duplicate_gate_a_merged_imported_shape_the_create_path_refuse
     let before = before.as_array().expect("jobs array").len();
 
     for advanced in [
-        json!({ "poses": [{ "id": "pose-1", "keypoints": [] }] }),
+        json!({ "poses": [{ "id": "pose-1", "keypoints": [] }], "controlMode": "canny" }),
         json!({ "controlImage": "control-1" }),
         json!({ "controlMode": "pose" }),
     ] {
@@ -6919,16 +7034,83 @@ async fn retry_and_duplicate_gate_a_merged_imported_shape_the_create_path_refuse
         "a refused retry/duplicate must not persist a job"
     );
 
-    // The gate must still pass a merged shape the create path accepts — a prompt-only replay keeps
-    // the admitted generate operation.
+    // A supported pose replay must pass the same admission as a newly created pose job.
     let (status, replayed) = request(
         app,
         "POST",
         &format!("/api/v1/jobs/{job_id}/duplicate"),
-        json!({ "payloadChanges": { "prompt": "fog over hills" } }),
+        json!({ "payloadChanges": { "prompt": "fog over hills", "advanced": {
+            "poses": [{ "id": "pose-1", "keypoints": [] }], "controlMode": "pose"
+        } } }),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{replayed}");
+}
+
+#[tokio::test]
+async fn imported_pose_overlay_uses_the_server_projected_base() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    write_empty_sibling_manifests(&manifest_dir);
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        r#"{"schemaVersion":1,"models":[]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        manifest_dir.join("user.models.jsonc"),
+        r#"{"schemaVersion":1,"models":[{"id":"user_krea","name":"User Krea",
+        "type":"image","family":"krea_2","importSourceShape":"transformer_file",
+        "paths":{"model":"/probe/user-krea.safetensors"}}]}"#,
+    )
+    .unwrap();
+    let overlays: Vec<Value> = [("krea-pose", "krea_2_turbo"), ("foreign-pose", "flux2_dev")]
+        .into_iter()
+        .map(|(id, base)| {
+            json!({
+                "id": id, "name": id, "baseModel": base,
+                "source": {"provider":"huggingface", "repo":"SceneWorks/krea2-pose-controlnet-beta",
+                    "revision":"cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac",
+                    "file":"control_step5000.safetensors"},
+                "files":["control_step5000.safetensors"]
+            })
+        })
+        .collect();
+    std::fs::write(
+        manifest_dir.join("builtin.control_overlays.jsonc"),
+        serde_json::to_vec(&json!({"schemaVersion":1,"controlOverlays":overlays})).unwrap(),
+    )
+    .unwrap();
+    let mut settings = test_settings(&temp_dir);
+    settings.candle_required = cfg!(not(target_os = "macos"));
+    let app = create_app(settings).expect("app creates");
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Fine-tune poses").await;
+    let project_id = project["id"].as_str().expect("project id");
+    for (overlay_id, expected) in [
+        ("krea-pose", StatusCode::CREATED),
+        ("foreign-pose", StatusCode::BAD_REQUEST),
+    ] {
+        let (status, response) = request(app.clone(), "POST", "/api/v1/image/jobs", json!({
+            "projectId":project_id, "model":"user_krea", "prompt":"a person", "count":1,
+            "modelManifestEntry":{"id":"user_krea", "ui":{"controlOverlayBaseModel":"flux2_dev"}},
+            "advanced":{"poses":[{"id":"pose-1","keypoints":[]}],
+                "controlWeights":{"overlayId":overlay_id}}
+        })).await;
+        assert_eq!(status, expected, "{overlay_id}: {response}");
+        if status == StatusCode::CREATED {
+            assert_eq!(
+                response["payload"]["modelManifestEntry"]["ui"]["controlOverlayBaseModel"],
+                "krea_2_turbo",
+                "{response}"
+            );
+            assert_eq!(
+                response["payload"]["advanced"]["controlWeights"]["revision"],
+                "cb3a0ac7590f5ec594a4eeb43b95ee1da0b5a0ac",
+                "{response}"
+            );
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]

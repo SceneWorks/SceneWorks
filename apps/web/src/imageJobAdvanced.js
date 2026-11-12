@@ -79,6 +79,7 @@ export function buildImageJobAdvanced(state) {
     // img2img reference-guided generation (epic 8588 slice A, sc-8593).
     supportsImg2img,
     img2imgReferenceAssetId,
+    imageReferenceDetails,
     img2imgStrength,
     // Krea "text style" tap-reweight gain (sc-11878).
     supportsTextStyle,
@@ -300,6 +301,9 @@ export function buildImageJobAdvanced(state) {
     ...(supportsImg2img && img2imgReferenceAssetId
       ? { strength: img2imgStrength }
       : {}),
+    // Display context survives deletion while the job waits in the queue.
+    ...(mode === "text_to_image" && supportsImg2img && img2imgReferenceAssetId && imageReferenceDetails?.assetId === img2imgReferenceAssetId
+      ? { imageReference: imageReferenceDetails } : {}),
     // Krea "text style" tap-reweight gain (sc-11878): emit advanced.textStyleGain only when the model
     // declares the control AND it's off the 1.0 no-op default — keeps existing recipes byte-identical.
     // The worker clamps to [0.25, 1.75]; candle-gen-krea reweights the Qwen3-VL taps (Krea-only).

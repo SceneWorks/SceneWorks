@@ -73,7 +73,8 @@ realistic subjects you don't need to say "photorealistic"; that's already the de
 ## Quality & Speed Notes
 
 - **Resolution:** use a native bucket (1024² / 768×1024 / 1024×768 / 1280×720 / 720×1280 / 1536²); width
-  and height must be multiples of 16. 1024² is the default.
+  and height must be multiples of 16. 1024² is the default. Hires.fix can refine the generated image
+  at up to 4096 pixels per side.
 - **Steps:** ~52 (Raw is undistilled — it needs the full step budget, unlike few-step Turbo).
 - **Guidance:** a real classifier-free-guidance scale; **~1.0** is the default and renders the most
   natural look. Note Krea's nominal 3.5 is defined differently from standard CFG — it is effectively

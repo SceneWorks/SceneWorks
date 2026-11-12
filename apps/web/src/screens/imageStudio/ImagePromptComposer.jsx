@@ -91,6 +91,7 @@ export function ImagePromptComposer({
   promptTool,
   togglePromptTool,
   img2imgReferenceAssetId,
+  imageReference = { active: false },
   changeImg2imgReferenceAssetId,
   img2imgStrengthConfig,
   setImg2imgStrength,
@@ -146,6 +147,21 @@ export function ImagePromptComposer({
               ) : null}
             </div>
           </div>
+
+          {imageReference.active ? (
+            <div className="prompt-tool-panel image-reference-summary" aria-label="Active image reference">
+              <div className="asset-picker-head">
+                <span><strong>Image reference: On</strong> · {imageReference.label} · strength {Number(img2imgStrength).toFixed(2)}</span>
+                <div className="asset-picker-actions">
+                  <button type="button" onClick={() => changeImg2imgReferenceAssetId("")}>Remove image reference</button>
+                  <button type="button" onClick={() => { if (promptTool !== "imageReference") togglePromptTool("imageReference"); }}>Reference settings</button>
+                </div>
+              </div>
+              {imageReference.error ? <p className="structured-error" role="alert">{imageReference.error}</p> : null}
+              {imageReference.pending ? <p role="status">Checking the reference image…</p> : null}
+              {imageReference.error ? <button type="button" onClick={imageReference.retry}>Retry reference check</button> : null}
+            </div>
+          ) : null}
 
           {batchMode ? (
             <div className="prompt-input-row batch">

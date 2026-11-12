@@ -10,6 +10,10 @@
 #   docker build -f docker/rust.Dockerfile --target rust-api-embed --build-arg BIN=sceneworks-rust-api .
 #   docker build -f docker/rust.Dockerfile --target rust-worker --build-arg BIN=sceneworks-rust-worker .
 
+# Immutable CUDA worker base for the RunPod target. Its source inputs are
+# checked by scripts/check-runpod-prebuilt-inputs.mjs before publication.
+ARG RUNPOD_PREBUILT_CANDLE_IMAGE=ghcr.io/sceneworks/sceneworks-runpod@sha256:36e0a3fc5bf6a25eb4eaead33e3d07cfb3c10c1db969ecf5955be9737d664d44
+
 # Production SPA bundle for the opt-in rust-api-embed target. The plain rust-api
 # target has no dependency on this stage, so it neither installs Node packages nor
 # embeds web assets. The license corpus is imported directly by the production UI.
@@ -211,7 +215,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # — the Windows host build uses schannel instead, so this only surfaces here.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates curl git build-essential pkg-config libssl-dev \
+        ca-certificates curl git build-essential pkg-config libssl-dev procps \
     && rm -rf /var/lib/apt/lists/*
 # Rust toolchain. The default rustup profile ships rustfmt+clippy; the COPY'd
 # rust-toolchain.toml (a pinned concrete version + those components) is what any
@@ -298,6 +302,12 @@ COPY docs/generated/qwen-candle-five-rung-sc-15817.json ./docs/generated/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \
+    set -eu; \
+    (while sleep 120; do \
+      date -u; free -m; df -h /app; \
+      ps -eo pid,etime,pcpu,pmem,rss,comm --sort=-rss | head -16; \
+    done) & monitor=$!; \
+    trap 'kill "$monitor" 2>/dev/null || true' EXIT; \
     cargo fetch --locked \
     && cargo build --locked --offline -p sceneworks-rust-worker --release \
         --features sceneworks-worker/backend-candle \
@@ -442,11 +452,15 @@ CMD ["sceneworks-rust-worker"]
 # disjoint capabilities, so generation cannot leak onto the utility lane and
 # downloads/imports/exports cannot occupy the GPU lane.
 #
-# Keep this runtime based on rust-worker-candle-base: it is the validated CUDA 12.9.1
-# + cuDNN 9 + onnxruntime-gpu image and already contains ffmpeg. Model Manager
-# downloads run through the worker's native in-process downloader; intentionally
-# do not install the retired Hugging Face CLI (sc-12227 / sc-12232).
-FROM rust-worker-candle-base AS runpod
+# This digest is the 0.11.1 worker built from source 703d8d884056de9752a2d415d408cc5209483ce9
+# by build-runpod-candle-base.yml (Actions run 42498547124). It contains the CUDA/Candle
+# worker and the validated CUDA 12.9.1 + cuDNN 9 + onnxruntime-gpu runtime. The
+# publication workflow rejects changes to its worker build inputs before this
+# stage is used; only the API/web and RunPod wrapper are rebuilt here. Refresh
+# the digest after a separately validated worker build when those inputs change.
+# Model Manager downloads use the native in-process path; do not install the retired Hugging Face CLI (sc-12227 / sc-12232).
+FROM ${RUNPOD_PREBUILT_CANDLE_IMAGE} AS runpod
+USER root
 
 COPY --from=embed-builder /out/sceneworks-rust-api /usr/local/bin/sceneworks-rust-api
 COPY docker/runpod-entrypoint.sh /usr/local/bin/sceneworks-runpod-entrypoint

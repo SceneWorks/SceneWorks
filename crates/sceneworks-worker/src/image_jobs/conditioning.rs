@@ -368,7 +368,10 @@ pub(crate) fn load_reference_image_with(
     // sidecar from reading an arbitrary file as the reference (sc-4278 / F-MLXW-14).
     let path = crate::safe_project_path(project_path, rel)?;
     let decoded = crate::image_decode::decode_image_any(&path).map_err(|error| {
-        WorkerError::InvalidPayload(format!("reference image {}: {error}", path.display()))
+        WorkerError::InvalidPayload(format!(
+            "reference asset {asset_id}: could not read image {}: {error}",
+            path.display()
+        ))
     })?;
     // sc-24113: how an alpha-carrying reference is flattened is the CALLER's choice, and the
     // default is upstream-parity truncation. See [`FlattenPolicy`] for why both answers are
@@ -440,7 +443,10 @@ pub(crate) fn load_reference_alpha(
         })?;
     let path = crate::safe_project_path(project_path, rel)?;
     let decoded = crate::image_decode::decode_image_any(&path).map_err(|error| {
-        WorkerError::InvalidPayload(format!("reference image {}: {error}", path.display()))
+        WorkerError::InvalidPayload(format!(
+            "reference asset {asset_id}: could not read image {}: {error}",
+            path.display()
+        ))
     })?;
     Ok(split_alpha(&decoded).1)
 }

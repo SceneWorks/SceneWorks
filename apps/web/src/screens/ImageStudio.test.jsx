@@ -114,6 +114,50 @@ describe("ImageStudio Save as Preset", () => {
     await act(async () => {}); // flush mount effects (pose loaders, etc.)
   }
 
+  it("opens a launched prompt batch in Batch mode with one prompt per image (SW-7085)", async () => {
+    const blocks = [
+      "[3:4]\nDescription: A woman, {{woman_1}}, stands.\nStyle: 1960s print",
+      "[16:9]\nDescription: A man, {{man_1}}, sits.\nLighting: Window light",
+    ];
+    await render(baseContext({
+      studioLaunch: {
+        id: "batch-launch",
+        view: "Image",
+        promptBatch: {
+          id: "film_prints_prompts",
+          name: "Film prints prompts",
+          scope: "global",
+          prompts: blocks,
+          variables: [{ key: "woman_1", values: [] }, { key: "man_1", values: [] }],
+        },
+      },
+    }));
+    expect(container.querySelector(".batch-toggle")?.getAttribute("aria-pressed")).toBe("true");
+    expect(container.querySelector("textarea.batch-prompts")?.value).toBe(blocks.join("\n---\n"));
+    expect(container.textContent).toContain("2 prompts");
+  });
+
+  it("keeps a launched batch of ONE multi-line prompt as one prompt (SW-7085 review)", async () => {
+    // A one-image dataset (or a run canceled after one image) saves a single block.
+    const block = "[3:4]\nDescription: A woman, {{woman_1}}, stands.\nStyle: 1960s print\nLighting: Window light";
+    await render(baseContext({
+      studioLaunch: {
+        id: "single-batch-launch",
+        view: "Image",
+        promptBatch: {
+          id: "one_print_prompts",
+          name: "One print prompts",
+          scope: "global",
+          prompts: [block],
+          variables: [{ key: "woman_1", values: [] }],
+        },
+      },
+    }));
+    expect(container.querySelector("textarea.batch-prompts")?.value).toBe(`${block}\n---`);
+    expect(container.textContent).toContain("1 prompt");
+    expect(container.textContent).not.toContain("4 prompts");
+  });
+
   it("previews and submits ratio batches at the largest closest model bucket", async () => {
     window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
       model: Z_IMAGE.id, count: 1, batchMode: true,

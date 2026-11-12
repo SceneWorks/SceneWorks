@@ -25,6 +25,7 @@ import {
   missingRequiredModels,
   poseModelUsable,
   supportedControlModes,
+  controlOverlayBaseModelFor,
   videoModelServesMode,
   videoModelUsable,
   visionCaptionModelUsable,
@@ -106,6 +107,16 @@ it("detects the FLUX.3 image family by family and type, not by id", () => {
 });
 
 describe("modelEligibility predicates", () => {
+  it("uses the provider's overlay catalog for imported Krea fine tunes", () => {
+    for (const id of ["kreamania", "sick_ollie"]) {
+      expect(controlOverlayBaseModelFor({ id, ui: {
+        controlOverlay: true, controlOverlayBaseModel: "krea_2_turbo",
+      } })).toBe("krea_2_turbo");
+    }
+    expect(controlOverlayBaseModelFor({ id: "krea_2_turbo", ui: { controlOverlay: true } }))
+      .toBe("krea_2_turbo");
+    expect(controlOverlayBaseModelFor({ id: "unrelated" })).toBeNull();
+  });
   it("routes StarVector image_to_svg by backend and offers missing installs", () => {
     const model = {
       id: "starvector_1b",

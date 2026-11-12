@@ -474,6 +474,28 @@
       }
     },
     {
+      "id": "krea_2_turbo_control",
+      "modality": "image",
+      "supportsPreview": true,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "perChannel",
+          "identity": "qwen-wan-z16-v1",
+          "channels": 16,
+          "contentHash": "fnv1a64:9f750a16272a301a"
+        }
+      }
+    },
+    {
       "id": "krea_2_turbo_edit",
       "modality": "image",
       "supportsPreview": true,
@@ -1330,6 +1352,24 @@
         "q4",
         "q8",
         "nvfp4"
+      ],
+      "supportsKvCache": false,
+      "supportsSequentialOffload": true,
+      "registryCached": true
+    },
+    {
+      "family": "krea_2",
+      "source": "transformer_file",
+      "operation": "pose",
+      "providerId": "krea_2_turbo_control",
+      "conditioning": [
+        "control"
+      ],
+      "supportsLora": true,
+      "supportsLokr": true,
+      "supportedQuants": [
+        "q4",
+        "q8"
       ],
       "supportsKvCache": false,
       "supportsSequentialOffload": true,
@@ -5865,7 +5905,7 @@
     },
     {
       "id": "krea_2_turbo_control",
-      "composed": true,
+      "composed": false,
       "selectorDigest": "sha256:060e239c3c91c29865fa82dd9c8110aaffd359bb551890865a26ec07ab026db2",
       "surfaces": [
         {

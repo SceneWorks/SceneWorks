@@ -579,6 +579,10 @@ mod face_likeness_compare_jobs;
 use face_likeness_compare_jobs::*;
 mod prompt_refine_jobs;
 use prompt_refine_jobs::*;
+// SW-7082 — the dataset prompt-batch describe job: a vision-language describer over a training
+// dataset's images, six description fields + pixel size per image, for Training Studio's prompt batch.
+mod batch_describe_jobs;
+use batch_describe_jobs::run_dataset_batch_describe_job;
 // Qwen-Image 2.1 (sc-24113, epic 24107). Two small, pure adapters kept OUT of the 4k-line
 // `image_jobs` / `prompt_refine_jobs` bodies on purpose:
 //

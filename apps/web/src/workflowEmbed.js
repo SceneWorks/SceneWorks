@@ -280,6 +280,7 @@ export const WORKFLOW_FIELDS_NOT_IN_FILE = Object.freeze([
   ["advanced.convRot", N_BUDGET],
   ["advanced.flashAttn", N_BUDGET],
   ["advanced.keypointCollectionId", N_LOCAL],
+  ["advanced.imageReference", "reference image names and local file paths"],
   ["advanced.controlImage", N_LOCAL],
   ["advanced.controlWeights", N_LOCAL],
   ["advanced.recipePresetId", N_LOCAL],

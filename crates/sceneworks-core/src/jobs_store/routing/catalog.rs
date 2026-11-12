@@ -1428,20 +1428,25 @@ pub fn imported_image_request_provider_eligible(
     let has_poses = has_nonempty_nested_array(payload, "advanced", "poses");
     let has_phases = has_nonempty_nested_array(payload, "advanced", "phases");
     let is_edit = payload.get("mode").and_then(Value::as_str) == Some("edit_image");
-    if has_nonempty_string(payload, "characterId")
+    let operation = imported_payload_operation(payload);
+    // On Krea strict-pose jobs the character id associates the result with Character Studio.
+    // The pose lane uses the single reference for likeness scoring, as the builtin lane does.
+    if (has_nonempty_string(payload, "characterId") && !(family == "krea_2" && operation == "pose"))
         || has_nonempty_string(payload, "characterLookId")
     {
         return false;
     }
 
-    let operation = imported_payload_operation(payload);
-    // Native NVFP4 is proven only on the Generate surface. The Candle Krea loader additionally
+    // Native NVFP4 supports Generate and Krea's native pose-control composition. The Candle loader
     // installs low-rank LoRA/LoKr adapters as residuals around packed Nvfp4Linear modules, so that
     // exact provider/source combination does not mutate the packed base. Other families retain the
     // fail-closed adapter guard until their native loaders prove the same contract. Unsupported Krea
     // adapter forms are rejected by the loader's typed validation.
     let native_nvfp4_adapters_supported = family == "krea_2" && backend == "candle";
-    if native_nvfp4 && (operation != "generate" || (has_loras && !native_nvfp4_adapters_supported))
+    let native_nvfp4_operation_supported = operation == "generate"
+        || (family == "krea_2" && backend == "candle" && operation == "pose");
+    if native_nvfp4
+        && (!native_nvfp4_operation_supported || (has_loras && !native_nvfp4_adapters_supported))
     {
         return false;
     }
@@ -2388,7 +2393,7 @@ mod tests {
     }
 
     #[test]
-    fn imported_kitchen_nvfp4_is_candle_generate_only() {
+    fn imported_kitchen_nvfp4_supports_candle_generation_and_character_pose() {
         let imported_id = "user_kreamania_variant7";
         let payload = |extra: serde_json::Value| {
             let mut value = serde_json::json!({
@@ -2428,9 +2433,25 @@ mod tests {
             &payload(serde_json::json!({"mode": "text_to_image"})),
             "mlx"
         ));
+        for extra in [
+            serde_json::json!({"advanced": {"poses": [{}], "quantTier": "nvfp4"}}),
+            serde_json::json!({"mode": "character_image", "characterId": "c", "referenceAssetId": "a",
+                "loras": [{"id":"character-adapter"}], "advanced": {"poses": [{}], "controlMode":"pose"}}),
+        ] {
+            assert!(imported_image_request_provider_eligible(
+                imported_id,
+                &payload(extra.clone()),
+                "candle"
+            ));
+            assert!(!imported_image_request_provider_eligible(
+                imported_id,
+                &payload(extra),
+                "mlx"
+            ));
+        }
         for unsupported in [
             serde_json::json!({"mode": "edit_image", "sourceAssetId": "asset-1"}),
-            serde_json::json!({"advanced": {"poses": [{}]}}),
+            serde_json::json!({"advanced": {"poses": [{}], "controlMode":"depth"}}),
             serde_json::json!({"advanced": {"quantTier": "q8"}}),
         ] {
             assert!(!imported_image_request_provider_eligible(

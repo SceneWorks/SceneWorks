@@ -3244,7 +3244,7 @@ fn collect_tensor_keys(header: &Value) -> Vec<String> {
 
 /// Maximum LoRAs per job (matches the worker's `MAX_JOB_LORAS` / Python
 /// `normalize_lora_specs`).
-pub const MAX_JOB_LORAS: usize = 5;
+pub const MAX_JOB_LORAS: usize = 10;
 
 /// Architecture families a model can load LoRAs from *in addition to* its own
 /// (Python `EXTRA_COMPATIBLE_LORA_FAMILIES`). Chroma is FLUX.1-derived and shares

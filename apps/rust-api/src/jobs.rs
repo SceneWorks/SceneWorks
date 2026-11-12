@@ -55,6 +55,47 @@ pub(crate) async fn get_job_metrics(
     ))
 }
 
+/// Worker → API append of a job's per-item results (SW-7082). Only the worker that owns the
+/// running job may write (409 otherwise, like progress); each item is capped at
+/// `MAX_JOB_RESULT_ITEM_BYTES`. Returns how many items the job now has.
+pub(crate) async fn append_job_result_items(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+    ApiJson(payload): ApiJson<JobResultItemsAppend>,
+) -> Result<Json<Value>, ApiError> {
+    let writes: Vec<JobResultItemWrite> = payload
+        .items
+        .into_iter()
+        .map(|body| JobResultItemWrite {
+            position: body.position,
+            item: body.item,
+        })
+        .collect();
+    let total = store_call(state, move |store, _timeout| {
+        store.append_job_result_items(&job_id, payload.worker_id.as_deref(), &writes)
+    })
+    .await?;
+    Ok(Json(json!({ "total": total })))
+}
+
+/// Read a page of a job's per-item results in order (SW-7082): `offset` (default 0) and `limit`
+/// (default 100, at most `MAX_JOB_RESULT_ITEMS_PAGE_LIMIT`); a page also stops at a byte budget.
+/// `nextOffset` is the next page's offset, or null at the end.
+pub(crate) async fn list_job_result_items(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+    Query(query): Query<JobResultItemsQuery>,
+) -> Result<Json<JobResultItemsPage>, ApiError> {
+    let offset = query.offset.unwrap_or(0);
+    let limit = query.limit.unwrap_or(100);
+    Ok(Json(
+        store_call(state, move |store, _timeout| {
+            store.list_job_result_items(&job_id, offset, limit)
+        })
+        .await?,
+    ))
+}
+
 /// Aggregate metrics feed powering the Generation Stats comparison charts
 /// (epic 10402). Newest first, filterable by job type / model / quant.
 pub(crate) async fn list_metrics(
@@ -1571,7 +1612,13 @@ async fn validate_and_canonicalize_merged_generation_payload(
     }
     if matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
         if let Some(advanced) = merged.get("advanced").and_then(Value::as_object) {
-            validate_image_pose_count(advanced)?;
+            validate_image_prompt_extras(
+                merged
+                    .get("negativePrompt")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                advanced,
+            )?;
         }
         // PRECEDENCE DIVERGENCE, deliberate: `create_image_job` resolves the control overlay AFTER
         // its LoRA gate, this boundary resolves it BEFORE. Acceptance is equivalent — the two read

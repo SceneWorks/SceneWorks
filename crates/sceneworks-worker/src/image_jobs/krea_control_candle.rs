@@ -188,7 +188,7 @@ fn krea_control_memory_spec(
     spec
 }
 
-/// Verify that the live request is inside sc-16013's exact rendered-device envelope: 1024² on sm_120,
+/// Verify that the live artifacts match sc-16013's rendered-device identity on sm_120:
 /// the pinned shipping base tier, and the pinned default control overlay. Custom/legacy artifacts and
 /// adapters may still run best-effort, but cannot inherit the calibrated hard-reject verdict.
 fn krea_control_runtime_evidence_verified(
@@ -198,10 +198,9 @@ fn krea_control_runtime_evidence_verified(
     base: &Path,
     control: &Path,
 ) -> bool {
-    if request.width != 1024
-        || request.height != 1024
-        || crate::gpu::cached_compute_cap() != Some(12.0)
-    {
+    // This establishes artifact/device identity, not geometry. The ladder separately grades the
+    // exact measured cell and resolution-aware estimates; rejecting other sizes here disabled both.
+    if crate::gpu::cached_compute_cap() != Some(12.0) {
         return false;
     }
     let Some(download) = request
@@ -874,8 +873,7 @@ pub(super) async fn generate_candle_krea_control_stream(
         // evidence probe. A zero here makes a current measured cell structurally ineligible.
         reference_count: crate::krea_control_fit::KREA_CONTROL_REFERENCE_COUNT,
     };
-    let runtime_evidence_verified = adapter_bytes == 0
-        && selected_text_encoder.is_none()
+    let runtime_evidence_verified = selected_text_encoder.is_none()
         && krea_control_runtime_evidence_verified(request, settings, tier, &base, &control);
 
     let raw_budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
@@ -1007,15 +1005,18 @@ pub(super) async fn generate_candle_krea_control_stream(
             tracing::warn!(
                 model = %request.model,
                 tier,
+                width = request.width,
+                height = request.height,
+                adapter_bytes,
                 offload_policy = ?offload_policy,
                 tile_vae_decode = tile,
                 chunk_attention = chunk,
                 branch_tier = ?branch_tier,
                 needed_gb,
                 available_gb,
-                "Krea control VRAM fit ladder: predicted peak exceeds free VRAM at every rung, but the \
-                 control-lane evidence is not current. Admitting best-effort with every speed-only rung \
-                 engaged rather than rejecting from stale evidence."
+                "Krea control VRAM fit ladder: no eligible measured or estimated strategy fits this \
+                 request. Using the bounded best-effort fallback; the logged calibration peak is not \
+                 a verified peak for this request's geometry and artifacts."
             );
             (offload_policy, tile, chunk)
         }

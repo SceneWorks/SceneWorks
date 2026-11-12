@@ -206,6 +206,21 @@ Before creating either ref, verify all of the following:
   `ARTIFACT_SIGNING_PROFILE` override them.
 - No `release/X.Y.Z` branch, `vX.Y.Z` tag, or GitHub Release already exists.
 - The checkout is clean and exactly matches `origin/release/next`.
+- The `Prepare release sidecars` workflow has succeeded on this exact
+  `release/next` commit. It starts on each push to that branch, including the
+  final version change. Its Windows job builds the CUDA sidecar on the warm
+  Windows runner; its Linux job retains the pin/compiler-keyed FlashAttention output across
+  candidate builds on `release/next`. Both jobs upload unsigned binaries and
+  SHA-256 receipts. The tag workflow refuses missing or mismatched artifacts;
+  it packages and signs them without recompiling Candle.
+
+```bash
+gh run list --workflow release-sidecars.yml --branch release/next --limit 5
+```
+
+Wait for a successful run whose head SHA equals `git rev-parse origin/release/next`.
+If the candidate changes, wait for the new push run. Do not tag while this input
+is missing or still running.
 
 ### 2. Create the branch and annotated tag
 
@@ -234,8 +249,9 @@ tag commit**, not with the tag-object SHA.
 
 The tag starts two independent workflows:
 
-- `.github/workflows/release.yml` builds macOS first, creates the draft, then
-  builds Windows and Linux and attaches their artifacts.
+- `.github/workflows/release.yml` builds macOS, packages the prepared Windows
+  and Linux sidecars into signed installers, then attaches their artifacts to
+  the draft after all three jobs succeed.
 - `.github/workflows/publish-runpod.yml` builds and publishes
   `ghcr.io/sceneworks/sceneworks-runpod:X.Y.Z` and `:latest`.
 

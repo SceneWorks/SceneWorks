@@ -37,7 +37,13 @@ fn mint_import_claim_capability(
     Ok(())
 }
 
+mod result_items;
 mod routing;
+
+pub use result_items::{
+    JobResultItemWrite, JobResultItemsPage, JOB_RESULT_ITEMS_PAGE_BYTES,
+    MAX_JOB_RESULT_ITEMS_PAGE_LIMIT, MAX_JOB_RESULT_ITEMS_PER_APPEND, MAX_JOB_RESULT_ITEM_BYTES,
+};
 
 // Re-export the moved routing/gating surface so the store's remaining SQL-coupled dispatch,
 // the `super::*` test modules below, and external consumers keep resolving these names through
@@ -275,6 +281,8 @@ pub enum JobsStoreError {
     /// legal pre-worker statuses (`queued` / `pending_caption`), e.g. a
     /// mid-lifecycle or terminal status. A programmer error, not user input.
     InvalidInitialStatus(String),
+    /// A job result item a worker tried to store is malformed or over its size limit (SW-7082).
+    InvalidResultItem(String),
 }
 
 /// Permit the existing retry freshness control while keeping the authorized source immutable.
@@ -338,6 +346,7 @@ impl std::fmt::Display for JobsStoreError {
                 formatter,
                 "A job can only be created in 'queued', 'pending_caption', or 'pending_workflow' status, not '{status}'."
             ),
+            Self::InvalidResultItem(detail) => write!(formatter, "{detail}"),
         }
     }
 }
@@ -1014,6 +1023,8 @@ impl JobsStore {
             "veda_execution_json",
             "text",
         )?;
+        // Per-item job results (SW-7082), kept out of the replaced-per-POST `result_json`.
+        transaction.execute_batch(result_items::RESULT_ITEMS_SCHEMA)?;
         backfill_claim_routing_facts(&transaction)?;
         transaction.commit()?;
         Ok(())
@@ -1096,6 +1107,14 @@ impl JobsStore {
             "delete from generation_metrics
               where not exists (select 1 from jobs where jobs.id = generation_metrics.job_id)",
             [],
+        )?;
+        // Per-item results are queue history owned by their job: they go with it.
+        transaction.execute(
+            &format!(
+                "delete from job_result_items where job_id in \
+                 (select id from jobs where {predicate})"
+            ),
+            params![cutoff],
         )?;
         let deleted = transaction.execute(
             &format!("delete from jobs where {predicate}"),
@@ -1913,6 +1932,48 @@ impl JobsStore {
               order by cast(requested.key as integer)",
         )?;
         let jobs = collect_jobs(statement.query_map(params![ids_json], row_to_job)?)?;
+        Ok(jobs)
+    }
+
+    /// A page of a dataset's batch describe jobs, newest first, so the Create Prompt Batch dialog
+    /// can rebuild its table from the results those jobs stored. Every retained job counts,
+    /// including canceled, interrupted and cleared ones: clearing hides a job from the queue, but
+    /// its stored descriptions are still the user's work. `unfinished` keeps only jobs not yet
+    /// in a terminal status, so a still-running job is found however many newer jobs exist.
+    pub fn list_dataset_batch_describe_jobs(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        unfinished: bool,
+        offset: u32,
+        limit: u32,
+    ) -> JobsStoreResult<Vec<JobSnapshot>> {
+        let connection = self.open_connection()?;
+        let limit = limit.clamp(1, MAX_LISTED_JOBS);
+        let status_filter = if unfinished {
+            format!("and status not in ({})", terminal_statuses_sql())
+        } else {
+            String::new()
+        };
+        let mut statement = connection.prepare(&format!(
+            "select * from jobs
+              where type = ?1
+                and project_id = ?2
+                and json_extract(payload_json, '$.datasetId') = ?3
+                {status_filter}
+              order by created_at desc, rowid desc
+              limit ?4 offset ?5"
+        ))?;
+        let jobs = collect_jobs(statement.query_map(
+            params![
+                JobType::DatasetBatchDescribe.as_str(),
+                project_id,
+                dataset_id,
+                limit,
+                offset
+            ],
+            row_to_job,
+        )?)?;
         Ok(jobs)
     }
 
@@ -4857,6 +4918,12 @@ fn derive_job_title(job_type: &JobType, payload: &Map<String, Value>) -> Option<
                 .to_owned();
             Some(format!("Subject Masks — {subject}"))
         }
+        JobType::DatasetBatchDescribe => {
+            let subject = first_str(payload, &["datasetName", "datasetId"])
+                .unwrap_or("(unnamed dataset)")
+                .to_owned();
+            Some(format!("Describe Dataset Images — {subject}"))
+        }
         JobType::FaceLikenessCompare => {
             // sc-4415: compare a candidate asset to a source identity reference. The candidate is the
             // user-facing subject of the row; fall back to a plain label when the payload omits it.
@@ -6010,6 +6077,16 @@ fn required_capability(job: &JobSnapshot) -> &str {
         // Dataset subject masks (sc-2126) run the same SAM3 checkpoint as smart-select, so they route
         // to any worker advertising `image_segment` instead of a capability of their own.
         JobType::DatasetSubjectMask => WorkerCapability::ImageSegment.as_str(),
+        // SW-7083: a JoyCaption describe job runs the JoyCaption captioner that serves
+        // `training_caption`, so it needs a worker that links that captioner.
+        JobType::DatasetBatchDescribe
+            if crate::dataset_batch_describe::payload_uses_joycaption(&job.payload) =>
+        {
+            WorkerCapability::TrainingCaption.as_str()
+        }
+        // SW-7082: the dataset batch describer runs the Vision Captioner on the native
+        // `core_llm::TextLlm` provider that serves `prompt_refine`, so it routes by that capability.
+        JobType::DatasetBatchDescribe => WorkerCapability::PromptRefine.as_str(),
         // A download that ends in a LOCAL DERIVATION (sc-22999: YuE2's q8 / q4 tiers) runs the
         // audio lane's snapshot preparer after the fetch, so only a worker that links the audio lane
         // may claim it. `audio_generate` is advertised exactly when that lane is linked

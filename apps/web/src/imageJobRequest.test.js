@@ -214,6 +214,15 @@ describe("buildImageJobRequest", () => {
     expect(request.referenceAssetId).toBe("start-image-asset");
   });
 
+  it("captures the reference name for queued-job errors only when it belongs to the emitted img2img input", () => {
+    const details = { assetId: "start-image-asset", name: "Portrait reference", filePath: "assets/uploads/portrait.jpg" };
+    const state = img2imgPidState({ imageReferenceDetails: details });
+    expect(buildImageJobRequest(state).advanced.imageReference).toEqual(details);
+    for (const overrides of [{ supportsImg2img: false }, { mode: "character_image" }, { img2imgReferenceAssetId: "other" }]) {
+      expect(buildImageJobRequest({ ...state, ...overrides }).advanced.imageReference).toBeUndefined();
+    }
+  });
+
   it("emits advanced.strength for the img2img trio (dropped by the drifted batch copy)", () => {
     const request = buildImageJobRequest(img2imgPidState());
     expect(request.advanced.strength).toBe(0.42);

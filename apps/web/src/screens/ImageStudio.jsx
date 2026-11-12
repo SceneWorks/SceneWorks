@@ -124,12 +124,14 @@ import { resolveCfgInterval } from "./imageStudio/samplingControls.js";
 import { usePidState, useStrictControlState } from "./imageStudio/useImageControlState.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { imageBatchValidation, imageGenerateValidation } from "../imageStudioValidation.js";
+import { useImageReferenceStatus } from "../hooks/useImageReferenceStatus.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
 import {
   downloadOffersFor,
   imageModelUsable,
   supportedControlModes,
+  controlOverlayBaseModelFor,
   visionCaptionModelUsable,
 } from "../modelEligibility.js";
 import { ControlPanel } from "../components/ControlPanel.jsx";
@@ -756,7 +758,7 @@ export function ImageStudio() {
     if (launchRequest?.view !== "Image") {
       return;
     }
-    if (launchRequest.recipe) {
+    if (launchRequest.recipe || launchRequest.promptBatch) {
       return;
     }
     const freshLaunch = nonRecipeLaunchIdRef.current !== launchRequest.id;
@@ -1010,7 +1012,7 @@ export function ImageStudio() {
   const controlScaleConfig = selectedModel?.ui?.controlScale ?? null;
   // Backbones whose pose control rides a registered trained overlay (sc-10165 B4) advertise
   // `ui.controlOverlay` (Krea 2 Turbo); the ControlPanel then shows a self-fetching overlay picker.
-  const controlOverlayBaseModel = selectedModel?.ui?.controlOverlay ? selectedModel.id : null;
+  const controlOverlayBaseModel = controlOverlayBaseModelFor(selectedModel);
   // The control type actually in effect: the user's pick when the backbone still supports it, else the
   // first supported mode. Decouples the gating (derived) from the raw state so a backbone switch that
   // strands an unsupported pick degrades gracefully even before the reset effect runs.
@@ -1882,6 +1884,16 @@ export function ImageStudio() {
     }
     setSelectedPresetId(launchRequest.presetId);
   }, [launchRequest, setSelectedPresetId]);
+  // SW-7085: a prompt-batch launch (Training Studio's "Create Prompt Batch from Dataset") loads the
+  // saved batch and switches the composer to Batch mode, leaving model and mode as they are.
+  useEffect(() => {
+    if (launchRequest?.view !== "Image" || !launchRequest.promptBatch) {
+      return;
+    }
+    handleLoadBatch(launchRequest.promptBatch);
+    setBatchMode(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [launchRequest?.id]);
   // A general-preset launch (epic 11949): toggle it into the stack without touching the model
   // or mode. The chip is available in every studio, so a Video-bound user can re-add it there.
   useEffect(() => {
@@ -1996,6 +2008,12 @@ export function ImageStudio() {
   const jobReferences = imageJobReferences({ selectedModel, mode, multiReference, orderedCharacterReferences, sourceWithMultiReference,
     editSecondPair, sourceAssetId, controlPreprocessSourceId, referenceAssetIds, referenceAssetId,
     supportsImg2img, img2imgReferenceAssetId });
+  const imageReference = useImageReferenceStatus({
+    enabled: mode === "text_to_image" && supportsImg2img,
+    assetId: img2imgReferenceAssetId,
+    projectId: activeProject?.id,
+    assets,
+  });
   const flux3LayoutAvailable = isFlux3ImageModel(selectedModel);
   const layoutAssetIds = orderedLayoutAssetIds(jobReferences);
   const layoutReferences = flux3LayoutAvailable
@@ -2546,6 +2564,7 @@ export function ImageStudio() {
       referenceAssetId: mossEdit ? undefined : referenceAssetId,
       supportsImg2img,
       img2imgReferenceAssetId,
+      imageReferenceDetails: imageReference.details,
       loras: buildLorasPayload(),
       upscaleEnabled,
       upscaleFactor,
@@ -2695,6 +2714,8 @@ export function ImageStudio() {
   const batchDraft = useMemo(
     () => ({
       activeProject,
+      imageReferenceError: imageReference.error,
+      imageReferencePending: imageReference.pending,
       batchStructuredExpandBlocked,
       batchTotal,
       missingKeys: batchMissingKeys,
@@ -2709,6 +2730,8 @@ export function ImageStudio() {
     }),
     [
       activeProject,
+      imageReference.error,
+      imageReference.pending,
       batchStructuredExpandBlocked,
       batchTotal,
       batchMissingKeys,
@@ -2741,6 +2764,8 @@ export function ImageStudio() {
   const generateDraft = useMemo(
     () => ({
       activeProject,
+      imageReferenceError: imageReference.error,
+      imageReferencePending: imageReference.pending,
       structuredActive,
       captionHasContent,
       tensorConditioning: mossEdit && Boolean(mossImageAdvanced.positive),
@@ -2775,6 +2800,8 @@ export function ImageStudio() {
     }),
     [
       activeProject,
+      imageReference.error,
+      imageReference.pending,
       structuredActive,
       captionHasContent,
       mossEdit, mossImageAdvanced,
@@ -2943,6 +2970,7 @@ export function ImageStudio() {
             promptTool={promptTool}
             togglePromptTool={togglePromptTool}
             img2imgReferenceAssetId={img2imgReferenceAssetId}
+            imageReference={imageReference}
             changeImg2imgReferenceAssetId={changeImg2imgReferenceAssetId}
             img2imgStrengthConfig={img2imgStrengthConfig}
             setImg2imgStrength={setImg2imgStrength}

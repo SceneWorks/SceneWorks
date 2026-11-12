@@ -14019,8 +14019,7 @@ fn production_residency_policies_materialize_each_provider_under_its_bound_shape
 }
 
 /// Candle's sc-12130 twin of the macOS registry sweep above. These are the generic generator ids that
-/// reach the Candle fit gate after route diversion. Krea edit is now true because sc-12129 landed;
-/// the bespoke pose-control provider is not a registered generator and remains outside this gate.
+/// reach the Candle fit gate after route diversion, including the registered Krea pose generator.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn candle_sequential_capability_is_derived_from_the_registered_descriptor() {
@@ -14035,13 +14034,13 @@ fn candle_sequential_capability_is_derived_from_the_registered_descriptor() {
         "krea_2_turbo",
         "krea_2_raw",
         "krea_2_edit",
+        "krea_2_turbo_control",
     ] {
         assert!(
             engine_supports_sequential(id),
             "{id}: wired Candle provider must advertise sequential residency"
         );
     }
-    assert!(!engine_supports_sequential("krea_2_turbo_control"));
 }
 
 #[test]

@@ -951,8 +951,10 @@ pub(super) fn apply_imported_provider_surface_for_lanes(
         return;
     };
 
+    let native_nvfp4 = sceneworks_core::jobs_store::imported_entry_source_codec(object)
+        == Some(sceneworks_core::checkpoint_weight_facts::NVFP4_CODEC_ID);
     let mlx_routes = sceneworks_core::jobs_store::imported_provider_routes("mlx", &family)
-        .filter(|route| route.source == source)
+        .filter(|route| !native_nvfp4 && route.source == source)
         .collect::<Vec<_>>();
     let id = object.get("id").and_then(Value::as_str).unwrap_or_default();
     let mac_support = if mlx_routes.is_empty() {
@@ -990,7 +992,7 @@ pub(super) fn apply_imported_provider_surface_for_lanes(
         ("candle", candle_lane_available),
     ]
     .into_iter()
-    .filter(|(_, available)| *available)
+    .filter(|(backend, available)| *available && (!native_nvfp4 || *backend == "candle"))
     .flat_map(|(backend, _)| {
         sceneworks_core::jobs_store::imported_provider_routes(backend, &family)
     })
@@ -1000,7 +1002,7 @@ pub(super) fn apply_imported_provider_surface_for_lanes(
         ("mlx", mlx_lane_available),
         ("candle", candle_lane_available),
     ] {
-        if available {
+        if available && (!native_nvfp4 || backend == "candle") {
             let backend_routes =
                 sceneworks_core::jobs_store::imported_provider_routes(backend, &family)
                     .filter(|route| route.source == source)
@@ -1110,6 +1112,16 @@ pub(super) fn project_imported_operation_surface(
     let pose = routes.iter().any(|route| {
         route.operation == "pose" && route.conditioning.iter().any(|kind| kind == "control")
     });
+    let control_base = pose
+        .then(|| {
+            routes
+                .iter()
+                .find(|route| route.operation == "generate")
+                .and_then(|route| {
+                    sceneworks_core::builtin_manifests::builtin_model_entry(&route.provider_id)
+                })
+        })
+        .flatten();
     let edit = routes.iter().any(|route| route.operation == "edit");
     let edit_multi_reference = routes.iter().any(|route| {
         route.operation == "edit"
@@ -1152,6 +1164,9 @@ pub(super) fn project_imported_operation_surface(
         *ui = json!({});
     }
     if let Some(ui) = ui.as_object_mut() {
+        for key in ["controlScale", "controlOverlay", "controlOverlayBaseModel"] {
+            ui.remove(key);
+        }
         if generates_reference {
             ui.insert("img2img".to_owned(), Value::Bool(true));
         } else {
@@ -1162,6 +1177,20 @@ pub(super) fn project_imported_operation_surface(
             ui.insert("poseLibrary".to_owned(), Value::Bool(true));
             ui.insert("poseControlScale".to_owned(), Value::Bool(true));
             ui.insert("controlModes".to_owned(), json!(["pose"]));
+            if let Some(base) = control_base {
+                if let Some(scale) = base.get("ui").and_then(|ui| ui.get("controlScale")) {
+                    ui.insert("controlScale".to_owned(), scale.clone());
+                }
+                if base
+                    .get("ui")
+                    .and_then(|ui| ui.get("controlOverlay"))
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                {
+                    ui.insert("controlOverlay".to_owned(), Value::Bool(true));
+                    ui.insert("controlOverlayBaseModel".to_owned(), base["id"].clone());
+                }
+            }
         } else {
             ui.remove("poseLibrary");
             ui.remove("poseControlScale");
@@ -2332,6 +2361,9 @@ pub(crate) async fn resolve_model_manifest_entry(
     }
     inject_converted_model_path(&mut entry, &state.settings.data_dir);
     if let Some(object) = entry.as_object_mut() {
+        // Job admission and overlay authorization consume this server-owned entry too.
+        // Reapply the same provider surface the catalog exposes instead of trusting client UI data.
+        apply_imported_provider_surface(object);
         // The worker receives the same descriptor-derived selection table and local pinned-file
         // availability as the catalog UI. This keeps enqueue validation and execution on one fact set.
         sceneworks_core::decoder_support::apply_to_model_entry(object);

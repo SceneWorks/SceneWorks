@@ -892,7 +892,7 @@ describe("SceneWorks app shell", () => {
     );
   });
 
-  it("fires a pose-library batch job from the Character Studio pose picker", async () => {
+  it.each(["instantid_realvisxl", "kreamania", "sick_ollie", "kreamania_nvfp4"])("fires a Character pose job using %s", async (modelId) => {
     const poseKeypoints = Array.from({ length: 18 }, (_, i) => [0.5, i / 18]);
     global.fetch = vi.fn(async () => ({
       ok: true,
@@ -939,6 +939,13 @@ describe("SceneWorks app shell", () => {
           type: "image",
           ui: { poseLibrary: true },
         },
+        ...["kreamania", "sick_ollie", "kreamania_nvfp4"].map((id) => ({
+          id, name: id, type: "image", family: "krea_2", catalogScope: "user",
+          ...(id.endsWith("nvfp4") ? { importQuantFormat: "nvfp4", runtimeQuantTiers: ["nvfp4"] } : {}),
+          ui: { poseLibrary: true, poseControlScale: true, controlModes: ["pose"],
+            controlScale: { default: 0.6, min: 0, max: 0.85, step: 0.05 },
+            controlOverlay: true, controlOverlayBaseModel: "krea_2_turbo" },
+        })),
       ],
       latestImageAssets: [],
       loras: [],
@@ -963,6 +970,21 @@ describe("SceneWorks app shell", () => {
       await Promise.resolve();
     });
 
+    const backbone = field(document.body.querySelector("#character-panel-poses"), "Backbone");
+    expect([...backbone.options].map((option) => option.value)).toEqual([
+      "instantid_realvisxl", "kreamania", "sick_ollie", "kreamania_nvfp4",
+    ]);
+    await changeField(backbone, modelId);
+    if (modelId !== "instantid_realvisxl") {
+      const scale = document.body.querySelector('input[aria-label="Pose lock strength"]');
+      expect(scale.value).toBe("0.6");
+      expect(scale.max).toBe("0.85");
+      expect(global.fetch.mock.calls.some(([url]) => {
+        const request = new URL(url, window.location.origin);
+        return request.pathname.endsWith("/control-overlays") && request.searchParams.get("baseModel") === "krea_2_turbo";
+      })).toBe(true);
+    }
+
     // The pose thumbnail loads from the library; select it.
     const poseButton = [...document.body.querySelectorAll("button")].find((button) =>
       (button.getAttribute("aria-label") ?? "").includes("pose Standing 01"),
@@ -985,12 +1007,13 @@ describe("SceneWorks app shell", () => {
     expect(createImageJob).toHaveBeenCalledWith(
       expect.objectContaining({
         mode: "character_image",
-        model: "instantid_realvisxl",
+        model: modelId,
         characterId: "char-1",
         referenceAssetId: "ref-1",
         count: 1,
         advanced: expect.objectContaining({
           ipAdapterScale: 0.8,
+          ...(modelId !== "instantid_realvisxl" ? { controlScale: 0.6 } : {}),
           poses: [{ id: "standing_01", keypoints: poseKeypoints }],
           faceRestore: false,
         }),
@@ -1149,10 +1172,14 @@ describe("SceneWorks app shell", () => {
       root.render(withAppContext(baseContext, <CharacterStudio />));
     });
 
-    const loraCheckbox = document.body.querySelector(".character-lora-picker input[type='checkbox']");
-    expect(loraCheckbox).toBeTruthy();
     await act(async () => {
-      loraCheckbox.click();
+      document.body.querySelector(".character-lora-picker .lora-add").click();
+    });
+    expect(document.body.querySelector(".character-lora-picker input[type='search']")).toBeTruthy();
+    const loraRow = document.body.querySelector(".character-lora-picker .lora-pick-row");
+    expect(loraRow.textContent).toContain("Kelsie");
+    await act(async () => {
+      loraRow.click();
     });
 
     const generateButton = [...document.body.querySelectorAll("button")].find((button) =>
@@ -1225,10 +1252,14 @@ describe("SceneWorks app shell", () => {
     await act(async () => {
       poseButton.click();
     });
-    const loraCheckbox = document.body.querySelector(".character-lora-picker input[type='checkbox']");
-    expect(loraCheckbox).toBeTruthy();
     await act(async () => {
-      loraCheckbox.click();
+      document.body.querySelector(".character-lora-picker .lora-add").click();
+    });
+    expect(document.body.querySelector(".character-lora-picker input[type='search']")).toBeTruthy();
+    const loraRow = document.body.querySelector(".character-lora-picker .lora-pick-row");
+    expect(loraRow.textContent).toContain("Kelsie");
+    await act(async () => {
+      loraRow.click();
     });
 
     const generateButton = [...document.body.querySelectorAll("button")].find((button) =>

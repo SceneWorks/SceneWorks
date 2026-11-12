@@ -1,11 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 
-import { cardinality, extractKeys, splitPromptLines } from "../../promptBatch.js";
-
-function batchTextFromPrompts(prompts) {
-  const list = Array.isArray(prompts) ? prompts : [];
-  return list.join(list.some((prompt) => prompt.includes("\n")) ? "\n---\n" : "\n");
-}
+import { cardinality, extractKeys, joinPromptLines, splitPromptLines } from "../../promptBatch.js";
 
 export function useBatchPromptState({
   saved,
@@ -40,7 +35,7 @@ export function useBatchPromptState({
   );
 
   const applyBatchContent = useCallback(({ prompts, variables, lastValues, name }) => {
-    setBatchPromptsText(batchTextFromPrompts(prompts));
+    setBatchPromptsText(joinPromptLines(prompts));
     const values = {};
     for (const variable of variables ?? []) {
       if (variable?.key) values[variable.key] = Array.isArray(variable.values) ? variable.values : [];

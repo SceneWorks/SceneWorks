@@ -1,3 +1,38 @@
+#[test]
+fn image_reference_errors_name_the_missing_image_and_recovery() {
+    let payload = serde_json::json!({
+        "mode": "text_to_image", "referenceAssetId": "asset-ref",
+        "advanced": { "imageReference": {
+            "assetId": "asset-ref", "name": "Portrait reference",
+            "filePath": "assets/uploads/portrait.jpg"
+        }}
+    });
+    let error =
+        || crate::WorkerError::InvalidPayload("reference asset asset-ref: Asset not found".into());
+    let explained =
+        super::explain_image_reference_error(payload.as_object().unwrap(), error()).to_string();
+    assert!(explained.contains("Image reference is on"));
+    assert!(explained.contains("Portrait reference"));
+    assert!(explained.contains("assets/uploads/portrait.jpg"));
+    assert!(explained.contains("Remove it or select another image"));
+    assert!(explained.contains("asset-ref: Asset not found"));
+
+    let mut legacy = payload.as_object().unwrap().clone();
+    legacy.remove("advanced");
+    let explained = super::explain_image_reference_error(&legacy, error()).to_string();
+    assert!(explained.contains("previously selected image"));
+    assert!(explained.contains("image-to-image generation"));
+
+    let unrelated = super::explain_image_reference_error(
+        payload.as_object().unwrap(),
+        crate::WorkerError::InvalidPayload("reference asset other-ref: Asset not found".into()),
+    );
+    assert_eq!(
+        unrelated.to_string(),
+        "reference asset other-ref: Asset not found"
+    );
+}
+
 #[cfg(target_os = "macos")]
 use super::adapter_id;
 #[cfg(native_lane)]
@@ -416,8 +451,6 @@ use super::krea_imported::krea_imported_available;
 use super::krea_imported::krea_imported_base_tier_complete;
 #[cfg(native_lane)]
 use super::krea_imported::krea_imported_conditioning;
-#[cfg(target_os = "macos")]
-use super::krea_imported::krea_imported_control_available;
 #[cfg(native_lane)]
 use super::krea_imported::krea_imported_img2img_requested;
 #[cfg(target_os = "macos")]
@@ -20828,34 +20861,72 @@ fn resolve_candle_image_route_sends_imported_single_file_krea_to_the_bespoke_lan
     let strict_pose = request(json!({
         "projectId": "p",
         "model": "kreamania_variant4",
+        "mode": "character_image",
+        "characterId": "character_1",
+        "referenceAssetId": "reference_1",
         "advanced": { "poses": [{ "id": "pose-1" }] },
         "modelManifestEntry": {
             "family": "krea_2",
             "modelPath": file.to_str().unwrap()
         }
     }));
-    // No candle route, and that is the truthful answer rather than a gap. `candle-gen-krea`
-    // registers exactly three imported `krea_2` TransformerFile operations — Generate, Edit and
-    // MultiPhase — and no Pose, so the descriptor probe behind `krea_imported_control_available`
-    // finds nothing and the ladder declines. The retired `KREA_IMPORTED_SUPPORTS_POSE_CONTROL`
-    // boolean used to answer `true` here without the engine backing it; declaring a lane is not the
-    // same as reaching one. The scheduler's imported-family mirror refuses the same shape, so a
-    // candle host never claims the job rather than stranding it. MLX, which does register the Pose
-    // provider, keeps its own coverage in the macOS route tests.
     assert_eq!(
         resolve_candle_image_route(&strict_pose, &settings),
-        None,
-        "candle registers no imported Krea pose provider, so the ladder must decline it"
+        Some(CandleImageRoute::KreaImportedControl),
+        "Character Studio's fine-tune pose job reaches the native control loader"
     );
+    let mut native_pose = strict_pose.clone();
+    native_pose
+        .model_manifest_entry
+        .insert("importQuantFormat".into(), json!("nvfp4"));
+    native_pose
+        .advanced
+        .insert("quantTier".into(), json!("nvfp4"));
+    assert!(super::krea_imported::krea_imported_control_available(
+        &native_pose,
+        &settings
+    ));
+    assert_eq!(
+        resolve_candle_image_route(&native_pose, &settings),
+        Some(CandleImageRoute::KreaImportedControl),
+        "native NVFP4 fine-tunes retain the Character Studio pose route"
+    );
+    let control = dir.path().join("control.safetensors");
+    let spec = super::krea_imported::imported_candle_control_load_spec(
+        &native_pose,
+        &file,
+        dir.path(),
+        &control,
+        Vec::new(),
+    )
+    .expect("native pose spec");
+    assert_eq!(
+        spec.quantize, None,
+        "native packing is detected from the source"
+    );
+    for (tier, expected) in [("q4", Quant::Q4), ("q8", Quant::Q8)] {
+        let mut dense_pose = strict_pose.clone();
+        dense_pose.advanced.insert("quantTier".into(), json!(tier));
+        let spec = super::krea_imported::imported_candle_control_load_spec(
+            &dense_pose,
+            &file,
+            dir.path(),
+            &control,
+            Vec::new(),
+        )
+        .expect("dense pose spec");
+        assert_eq!(
+            spec.quantize,
+            Some(expected),
+            "{tier} must reach the loader"
+        );
+    }
 }
 
-/// The imported Krea 2 lane accepts a plain txt2img job AND an img2img `referenceAssetId` (mode NOT
-/// `edit_image`, sc-14071 — reference-guided latent-init), while STILL rejecting every shape that needs
-/// t2i, img2img, adapters, edit, hires, and multi-phase follow the exact live provider registration
-/// on each backend. Pose is claimed by the plain imported predicate only on MLX — Candle registers
-/// no imported Pose operation on `krea_imported_available` and routes it through
-/// `krea_imported_control_available` instead. Base-tier-only shapes (mask, character, a non-edit
-/// reference set, a bare non-edit source) stay rejected on every backend.
+/// Imported Krea generation, reference-guided img2img, adapters, edit, hires, and multi-phase follow
+/// the exact live provider registration on each backend. Both native providers advertise Pose,
+/// dispatched through the more specific `krea_imported_control_available` route. Base-tier-only
+/// shapes (mask, character, a non-edit reference set, a bare non-edit source) remain rejected.
 #[cfg(native_lane)]
 #[test]
 fn krea_imported_available_backend_gates_loras_and_edit() {
@@ -20961,7 +21032,6 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
         "advanced": { "poses": [{ "id": "a" }] },
         "modelManifestEntry": base.clone()
     }));
-    #[cfg(target_os = "macos")]
     {
         assert!(
             krea_imported_available(&pose, &settings),
@@ -20992,18 +21062,9 @@ fn krea_imported_available_backend_gates_loras_and_edit() {
             !krea_imported_available(&unsupported_kind, &settings),
             "Krea Pose supports only the shared strict-control kinds registered for that engine"
         );
-        // `krea_imported_control_available` (the route-claim predicate) is already inside this
-        // macOS-only block, so it resolves without a second cfg attribute.
         assert!(
-            krea_imported_control_available(&pose, &settings),
+            super::krea_imported::krea_imported_control_available(&pose, &settings),
             "...and it is claimed by the pose-control route, not the plain per-image one"
-        );
-    }
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    {
-        assert!(
-            !krea_imported_available(&pose, &settings),
-            "a pose set is rejected on a backend without pose-control support"
         );
     }
 

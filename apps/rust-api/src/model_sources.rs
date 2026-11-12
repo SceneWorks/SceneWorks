@@ -45,7 +45,7 @@ enum PayloadModelRef {
 fn payload_reference_spec(job_type: &JobType) -> &'static [PayloadModelRef] {
     use PayloadModelRef::{CatalogId, Repository};
     match job_type {
-        JobType::PromptRefine => &[Repository("model")],
+        JobType::PromptRefine | JobType::DatasetBatchDescribe => &[Repository("model")],
         JobType::TrainingCaption => &[Repository("modelNameOrPath")],
         JobType::DatasetAnalysis => &[CatalogId("embedder")],
         JobType::LoraTrain | JobType::ControlTraining => &[CatalogId("baseModel")],

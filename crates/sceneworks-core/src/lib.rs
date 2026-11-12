@@ -17,6 +17,7 @@ pub mod contracts;
 pub mod control_weights;
 pub mod converted_artifacts;
 pub mod credentials;
+pub mod dataset_batch_describe;
 pub mod dataset_quality;
 pub mod decoder_support;
 pub mod depth_map;

@@ -39,9 +39,9 @@ use sceneworks_core::image_request::{
 use sceneworks_core::jobs_store::{
     candle_supported, mac_capabilities, mac_rust_supported, model_candle_support,
     model_mac_support, video_job_type_for_mode, video_request_is_claimable_by_any_lane, CreateJob,
-    DuplicateJob, DuplicatePortableBinding, JobsStore, JobsStoreError, MacCapabilities,
-    ProgressUpdate, RegisterWorker, RetryJob, RouteDecision, StaleSweep, UnsupportedReason,
-    WorkerHeartbeat, JOB_STATUSES, MAX_LISTED_JOBS,
+    DuplicateJob, DuplicatePortableBinding, JobResultItemWrite, JobResultItemsPage, JobsStore,
+    JobsStoreError, MacCapabilities, ProgressUpdate, RegisterWorker, RetryJob, RouteDecision,
+    StaleSweep, UnsupportedReason, WorkerHeartbeat, JOB_STATUSES, MAX_LISTED_JOBS,
 };
 use sceneworks_core::limits::{requested_steps, steps_limit_error};
 use sceneworks_core::lora_family::{
@@ -172,11 +172,12 @@ mod iris_training;
 mod training;
 use training::{
     batch_rename_training_dataset_items, create_training_dataset,
-    create_training_dataset_analysis_job, create_training_dataset_caption_job,
-    create_training_dataset_face_analysis_job, create_training_dataset_parquet_import_job,
-    create_training_dataset_subject_mask_job, create_training_dataset_upscale_job,
-    create_training_job, delete_training_dataset, finalize_training_dataset_parquet_import,
-    get_training_dataset, get_training_dataset_readiness, get_training_dataset_subject_masks,
+    create_training_dataset_analysis_job, create_training_dataset_batch_describe_job,
+    create_training_dataset_caption_job, create_training_dataset_face_analysis_job,
+    create_training_dataset_parquet_import_job, create_training_dataset_subject_mask_job,
+    create_training_dataset_upscale_job, create_training_job, delete_training_dataset,
+    finalize_training_dataset_parquet_import, get_training_dataset, get_training_dataset_readiness,
+    get_training_dataset_subject_masks, list_training_dataset_batch_describe_jobs,
     list_training_datasets, list_training_presets, list_training_targets,
     repoint_training_dataset_items, resolve_control_overlay_output_location,
     resolve_finetune_output_location, resolve_training_output_location,
@@ -198,8 +199,9 @@ use generation::{validate_interleave_job, validate_vqa_job};
 mod ideogram;
 mod jobs;
 use jobs::{
-    cancel_job, cancel_pending_jobs, claim_job, clear_job, clear_jobs, create_job, duplicate_job,
-    get_job, get_job_metrics, invalidate_model_catalog_for_terminal_jobs, list_jobs, list_metrics,
+    append_job_result_items, cancel_job, cancel_pending_jobs, claim_job, clear_job, clear_jobs,
+    create_job, duplicate_job, get_job, get_job_metrics,
+    invalidate_model_catalog_for_terminal_jobs, list_job_result_items, list_jobs, list_metrics,
     prioritize_jobs, retry_job, update_job_progress, upsert_job_metrics,
 };
 mod workers;
@@ -220,11 +222,12 @@ use dto::{
     CharacterLoraUpdateRequest, CharacterReferenceRequest, CharacterReferenceUpdateRequest,
     CharacterTestRequest, CharacterUpdateRequest, CharactersQuery,
     ConditionalComponentsDownloadRequest, CreateEventTicketRequest, DatasetAnalysisJobRequest,
-    DatasetEmbeddingsBody, DatasetFaceAnalysisJobRequest, DatasetFaceRecordsBody,
-    DatasetImageFixBody, DatasetParquetImportJobRequest, DatasetRepointBody,
-    DatasetSubjectMaskJobRequest, DatasetSubjectMasksBody, DatasetUpscaleJobRequest,
-    DirectoriesResponse, EventsQuery, FaceLikenessCompareRequest, FrameExtractRequest,
-    HealthResponse, HostCapabilitiesResponse, ImageJobRequest, InterleaveJobRequest, JobsQuery,
+    DatasetBatchDescribeJobRequest, DatasetEmbeddingsBody, DatasetFaceAnalysisJobRequest,
+    DatasetFaceRecordsBody, DatasetImageFixBody, DatasetParquetImportJobRequest,
+    DatasetRepointBody, DatasetSubjectMaskJobRequest, DatasetSubjectMasksBody,
+    DatasetUpscaleJobRequest, DescribePromptQuery, DirectoriesResponse, EventsQuery,
+    FaceLikenessCompareRequest, FrameExtractRequest, HealthResponse, HostCapabilitiesResponse,
+    ImageJobRequest, InterleaveJobRequest, JobResultItemsAppend, JobResultItemsQuery, JobsQuery,
     LoraCatalogItemQuery, LoraImportRequest, LoraUpdateRequest, LorasQuery, MetricsQuery,
     ModelConvertRequest, ModelDownloadRequest, ModelImportRequest, ModelImportSourceV1,
     OwnershipModeV1, PersonDetectionJobRequest, PersonTrackCorrectionsRequest,
@@ -290,6 +293,11 @@ use recipe_presets::{
     list_recipe_presets, preset_lora_id, preset_lora_weight, preset_prompt,
     recipe_preset_catalog_with, recipe_preset_loras, serialize_preset_lora,
     stamp_recipe_preset_used, update_recipe_preset,
+};
+mod describe_prompts;
+use describe_prompts::{
+    create_describe_prompt_preset, delete_describe_prompt_preset, get_default_describe_prompt,
+    list_describe_prompt_presets, update_describe_prompt_preset,
 };
 mod prompt_batches;
 use prompt_batches::{
@@ -479,7 +487,8 @@ const STALE_UPLOAD_SECONDS: u64 = 24 * 60 * 60;
 pub(crate) use sceneworks_core::MAX_PROMPT_CHARS;
 // sc-8884 (F-082): serialized-size ceiling for the free-form `advanced` object. It is a
 // pass-through bag threaded to the worker, so it has no per-key schema — bound its total
-// serialized size instead. 64 KiB is generous for legitimate advanced settings.
+// serialized size instead. Image pose coordinates have a separate bounded data budget in
+// `validate_image_prompt_extras`; the remaining settings still obey this ceiling.
 const MAX_ADVANCED_JSON_BYTES: usize = 64 * 1024;
 
 struct ApiJson<T>(T);

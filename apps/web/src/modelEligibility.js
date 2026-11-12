@@ -593,6 +593,12 @@ export function supportedControlModes(model) {
   return CONTROL_MODE_ORDER.filter((mode) => present.has(mode));
 }
 
+export function controlOverlayBaseModelFor(model) {
+  return model?.ui?.controlOverlay
+    ? model.ui.controlOverlayBaseModel || model.id
+    : null;
+}
+
 // Character Studio needs Angles OR Poses support.
 export function characterModelUsable(model, caps) {
   return angleModelUsable(model, caps) || poseModelUsable(model, caps);

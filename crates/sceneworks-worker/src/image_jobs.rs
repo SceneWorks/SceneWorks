@@ -205,7 +205,7 @@ const CANDLE_ADAPTER: &str = "candle_sdxl";
 // The web pickers enforce a lower user-selectable cap (presetUtils.MAX_USER_JOB_LORAS) that leaves
 // headroom for an auto-applied builtin within this total (sc-8936).
 #[cfg(native_lane)]
-const MAX_JOB_LORAS: usize = 5;
+const MAX_JOB_LORAS: usize = sceneworks_core::lora_family::MAX_JOB_LORAS;
 
 // The engine dispatch table + its `ModelRow`/`mlx_model` join moved to the all-targets
 // `engines` module (sc-3723); the two descriptor-duplicating flags it used to carry
@@ -556,7 +556,47 @@ pub(crate) async fn run_image_generate_job(
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
     let result = run_image_generate_job_unexplained(api, settings, job).await;
+    let result = result.map_err(|error| explain_image_reference_error(&job.payload, error));
     crate::converted_install::explain_job_result(settings, &job.payload, result).await
+}
+
+// A queued reference can disappear after Studio preflight. Preserve its purpose
+// and the captured name in the error the queue and worker log actually display.
+fn explain_image_reference_error(payload: &JsonObject, error: WorkerError) -> WorkerError {
+    let WorkerError::InvalidPayload(detail) = &error else {
+        return error;
+    };
+    if payload.get("mode").and_then(Value::as_str) != Some("text_to_image") {
+        return error;
+    }
+    let Some(id) = payload.get("referenceAssetId").and_then(Value::as_str) else {
+        return error;
+    };
+    if id.is_empty()
+        || !(detail.starts_with(&format!("reference asset {id}:"))
+            || detail == &format!("reference asset {id} has no media path"))
+    {
+        return error;
+    }
+    let captured = payload
+        .get("advanced")
+        .and_then(|advanced| advanced.get("imageReference"))
+        .filter(|reference| reference.get("assetId").and_then(Value::as_str) == Some(id));
+    let name = captured
+        .and_then(|reference| reference.get("name"))
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("previously selected image");
+    let path = captured
+        .and_then(|reference| reference.get("filePath"))
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty())
+        .map(|path| format!(" ({path})"))
+        .unwrap_or_default();
+    WorkerError::InvalidPayload(format!(
+        "Image reference is on, but \"{name}\"{path} could not be loaded for image-to-image generation. \
+         Remove it or select another image in Image reference before running again. Details: {detail}"
+    ))
 }
 
 async fn run_image_generate_job_unexplained(

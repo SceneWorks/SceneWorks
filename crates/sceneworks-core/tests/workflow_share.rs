@@ -98,6 +98,40 @@ fn golden_asset() -> Asset {
 }
 
 #[test]
+fn image_reference_diagnostic_context_stays_local_when_sharing() {
+    let payload = json!({
+        "model": "krea_2_turbo", "mode": "text_to_image",
+        "referenceAssetId": "asset-private-reference",
+        "advanced": {
+            "strength": 0.4,
+            "imageReference": {
+                "assetId": "asset-private-reference",
+                "projectId": "project-private",
+                "name": "Private reference name",
+                "filePath": "assets/uploads/private-reference.png"
+            }
+        }
+    });
+    let share = build_workflow_share(&golden_asset(), payload.as_object().unwrap());
+    let exported = serde_json::to_value(&share).unwrap();
+    assert_eq!(exported["advanced"]["strength"], json!(0.4));
+    assert!(exported["advanced"].get("imageReference").is_none());
+    let serialized = serde_json::to_string(&share).unwrap();
+    for local_detail in [
+        "asset-private-reference",
+        "project-private",
+        "Private reference name",
+        "assets/uploads/private-reference.png",
+    ] {
+        assert!(!serialized.contains(local_detail), "{serialized}");
+    }
+    assert!(share
+        .inputs
+        .iter()
+        .any(|input| input.kind == "reference" && input.count == 1));
+}
+
+#[test]
 fn moss_edit_export_counts_semantic_slots_and_never_deduplicates_the_vector() {
     use sceneworks_core::workflow_resolution::{
         build_resolution_report, CatalogEntry, StaticCatalogs,
@@ -1999,12 +2033,12 @@ fn no_real_request_is_truncated_by_the_collection_bounds() {
     assert_eq!(parsed.inputs.len(), 4);
 
     // 2. A Krea multi-phase recipe at the validators' own ceiling: 8 phases, each naming phase
-    //    LoRAs by index into a full 5-LoRA stack.
+    //    LoRAs by index into a full 10-LoRA stack.
     let mut krea = golden_payload();
     krea.insert("model".to_owned(), json!("krea_2_turbo"));
     krea.insert(
         "loras".to_owned(),
-        json!((0..5)
+        json!((0..sceneworks_core::lora_family::MAX_JOB_LORAS)
             .map(|index| json!({
                 "id": format!("lora_{index}"),
                 "name": format!("Foggy Coast {index}"),
@@ -2021,20 +2055,20 @@ fn no_real_request_is_truncated_by_the_collection_bounds() {
                 .map(|index| json!({
                     "steps": index + 2,
                     "guidance": 3.5,
-                    "loras": (0..5).map(|lora| json!({ "index": lora, "weight": 0.5 })).collect::<Vec<Value>>()
+                    "loras": (0..sceneworks_core::lora_family::MAX_JOB_LORAS).map(|lora| json!({ "index": lora, "weight": 0.5 })).collect::<Vec<Value>>()
                 }))
                 .collect::<Vec<Value>>(),
         }),
     );
     let krea_share = build_workflow_share(&golden_asset(), &krea);
-    assert_eq!(krea_share.loras.len(), 5, "{:?}", krea_share.loras);
+    assert_eq!(krea_share.loras.len(), 10, "{:?}", krea_share.loras);
     let phases = krea_share.advanced["phases"].as_array().expect("phases");
     assert_eq!(phases.len(), 8);
     for phase in phases {
         assert_eq!(
             phase["loras"].as_array().expect("phase loras").len(),
-            5,
-            "a phase's LoRA indices point into the job's own 5-LoRA stack and must all survive"
+            10,
+            "a phase's LoRA indices point into the job's own 10-LoRA stack and must all survive"
         );
     }
 
@@ -2106,13 +2140,13 @@ fn no_legitimate_envelope_comes_close_to_the_recording_ceiling() {
     let parsed = parse_workflow_share(&load_golden_fixture()).expect("the golden fixture parses");
     measure("the golden fixture on disk", &parsed);
 
-    // 2. A Krea multi-phase recipe at the validators' own ceiling: 8 phases, a full 5-LoRA stack,
+    // 2. A Krea multi-phase recipe at the validators' own ceiling: 8 phases, a full 10-LoRA stack,
     //    every phase naming every LoRA.
     let mut krea = golden_payload();
     krea.insert("model".to_owned(), json!("krea_2_turbo"));
     krea.insert(
         "loras".to_owned(),
-        json!((0..5)
+        json!((0..sceneworks_core::lora_family::MAX_JOB_LORAS)
             .map(|index| json!({
                 "id": format!("lora_{index}"),
                 "name": format!("Foggy Coast {index}"),
@@ -2132,7 +2166,7 @@ fn no_legitimate_envelope_comes_close_to_the_recording_ceiling() {
                 .map(|index| json!({
                     "steps": index + 2,
                     "guidance": 3.5,
-                    "loras": (0..5).map(|lora| json!({ "index": lora, "weight": 0.5 })).collect::<Vec<Value>>()
+                    "loras": (0..sceneworks_core::lora_family::MAX_JOB_LORAS).map(|lora| json!({ "index": lora, "weight": 0.5 })).collect::<Vec<Value>>()
                 }))
                 .collect::<Vec<Value>>(),
         }),
