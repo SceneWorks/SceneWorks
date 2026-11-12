@@ -7,7 +7,7 @@
   ],
   "generatedFrom": {
     "candle": {
-      "inferenceRevision": "198e4777f335df67d28e3929ec5102eb0f37b2b8",
+      "inferenceRevision": "bc7b8fd53e9dcd43ba57e2663ab27bd7e9f1ab96",
       "audioInferenceRevision": "354b41ccaccdc14afccff0d0fb1ae1b0be04836e"
     },
     "mlx": {
@@ -161,6 +161,7 @@
       "mlx": false
     },
     "minimax_h3_image": {
+      "candle": false,
       "mlx": false
     },
     "mmaudio_large_44k": {

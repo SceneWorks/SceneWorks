@@ -185,6 +185,7 @@ fn recipe_preset_finalize_for_write(
 ) -> Result<Value, ApiError> {
     let value = normalize_recipe_preset_for_write(value, scope, require_all)?;
     validate_recipe_preset_model_workflow(models, &value)?;
+    validate_recipe_preset_resolution(models, &value)?;
     validate_recipe_preset_lora_compatibility(models, loras, &value)?;
     Ok(value)
 }
@@ -816,9 +817,9 @@ pub(crate) fn validate_recipe_preset_defaults(value: Option<&Value>) -> Result<(
         .as_object()
         .ok_or_else(|| ApiError::bad_request("Recipe preset defaults must be an object"))?;
     if let Some(resolution) = object.get("resolution").and_then(Value::as_str) {
-        let (width, height) = parse_recipe_preset_resolution(resolution)?;
-        validate_dimension(width, "width", MAX_IMAGE_DIMENSION)?;
-        validate_dimension(height, "height", MAX_IMAGE_DIMENSION)?;
+        // The size BOUNDS depend on the preset's model, so [`validate_recipe_preset_resolution`]
+        // applies them at finalize time, where the model catalog is in hand. Here only the shape.
+        parse_recipe_preset_resolution(resolution)?;
     }
     // `aspect` is the general-preset ratio (e.g. "16:9"); the studio snaps it to the
     // active model's nearest supported resolution at apply time. Stored as W:H with both
@@ -914,6 +915,51 @@ fn recipe_preset_default_number(object: &JsonObject, key: &str) -> Option<f64> {
             .and_then(|text| text.trim().parse::<f64>().ok())
     })?;
     number.is_finite().then_some(number)
+}
+
+/// A preset's `defaults.resolution` against the size bounds its model generates at.
+///
+/// An image model that declares a size envelope (`limits.minDimension` / `maxDimension`, e.g.
+/// MiniMax-H3-Image's 16..=6272) is judged by [`sceneworks_core::image_limits::image_dimension_error`],
+/// the same function image generation calls, so a preset can be saved at every size the model can
+/// actually render and the two cannot drift. Every other model, and a general preset with no model,
+/// keeps the blanket 256..=[`MAX_IMAGE_DIMENSION`] bound.
+pub(crate) fn validate_recipe_preset_resolution(
+    models: &[Value],
+    preset: &Value,
+) -> Result<(), ApiError> {
+    let Some(resolution) = preset
+        .get("defaults")
+        .and_then(|defaults| defaults.get("resolution"))
+        .and_then(Value::as_str)
+    else {
+        return Ok(());
+    };
+    let (width, height) = parse_recipe_preset_resolution(resolution)?;
+    let model_id = preset.get("model").and_then(Value::as_str);
+    let image_entry = model_id.and_then(|id| {
+        models
+            .iter()
+            .find(|model| model.get("id").and_then(Value::as_str) == Some(id))
+            .filter(|model| model.get("type").and_then(Value::as_str) == Some("image"))
+            .and_then(Value::as_object)
+            .map(|entry| (id, entry))
+    });
+    if let Some((id, entry)) = image_entry {
+        return match sceneworks_core::image_limits::image_dimension_error(
+            id,
+            width,
+            height,
+            entry,
+            256,
+            MAX_IMAGE_DIMENSION,
+        ) {
+            Some(message) => Err(ApiError::bad_request(message)),
+            None => Ok(()),
+        };
+    }
+    validate_dimension(width, "width", MAX_IMAGE_DIMENSION)?;
+    validate_dimension(height, "height", MAX_IMAGE_DIMENSION)
 }
 
 pub(crate) fn validate_recipe_preset_model_workflow(
