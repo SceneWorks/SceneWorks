@@ -1721,7 +1721,7 @@ fn image_caption_request_carries_image_for_generate_but_resolves_json_only() {
 
     // The worker's resolution requirements: the request's output constraint ONLY, no vision filter.
     let mut reqs = ModelRequirements::default();
-    for constraint in request.constraint.iter().copied() {
+    for constraint in request.constraint.iter().cloned() {
         reqs = reqs.with_constraint(constraint);
     }
     assert!(
@@ -2081,7 +2081,7 @@ fn image_caption_examines_reference_image() {
                                                // which derives `vision:true` from the image block and would fail `select` on a Qwen-VL snapshot
                                                // before any load). This exercises the real production resolution path the sc-8113 validator runs.
     let mut reqs = ModelRequirements::default();
-    for constraint in request.constraint.iter().copied() {
+    for constraint in request.constraint.iter().cloned() {
         reqs = reqs.with_constraint(constraint);
     }
     let captioner = crate::inference_runtime::load_for_model_with(
@@ -2153,7 +2153,7 @@ fn image_caption_examines_reference_image_candle() {
                                                // Production resolution path: request output-constraint ONLY (no vision filter), exactly like the
                                                // mlx twin — `ModelRequirements::from_request` would derive `vision:true` and fail `select`.
     let mut reqs = ModelRequirements::default();
-    for constraint in request.constraint.iter().copied() {
+    for constraint in request.constraint.iter().cloned() {
         reqs = reqs.with_constraint(constraint);
     }
     let captioner = crate::inference_runtime::load_for_model_with(

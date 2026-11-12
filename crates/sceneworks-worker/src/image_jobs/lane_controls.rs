@@ -638,7 +638,7 @@ mod tests {
     }
 
     /// SW-7106: `advanced.h3ImageSampler` maps onto `GenerationRequest::h3_image_sampler` for an
-    /// engine that honours it, omitted LCM parameters take ComfyUI's defaults, and an invalid
+    /// engine that honours it, omitted LCM parameters take the engine defaults (1.1 / 0.9 / 0), and an invalid
     /// value or an engine without the sampler is a typed refusal before load.
     #[test]
     fn the_h3_image_sampler_block_maps_onto_the_engine_sampler() {

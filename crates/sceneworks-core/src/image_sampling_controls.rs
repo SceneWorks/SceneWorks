@@ -196,14 +196,16 @@ pub fn requested_scheduler_shift(advanced: &JsonObject) -> Result<Option<f32>, S
 /// `advanced.h3ImageSampler`, typed (SW-7106). Absent or `null` ⇒ `Ok(None)` (the engine runs the
 /// sampler `advanced.sampler` names; the worker then applies the LCM default). Otherwise an object
 /// `{"sampler": "euler"}` or `{"sampler": "lcm", "sNoise"?, "sNoiseEnd"?, "noiseClipStd"?}`: an
-/// omitted LCM parameter takes ComfyUI's default (`sNoise` 1, `sNoiseEnd` = `sNoise`,
-/// `noiseClipStd` 0 = off), and the values must satisfy the engine's own rules (finite,
+/// omitted LCM parameter takes the engine's H3-Image default (`sNoise` 1.1, `sNoiseEnd` 0.9,
+/// `noiseClipStd` 0 = off); a `sNoise` given without `sNoiseEnd` is held constant, and the values must satisfy the engine's own rules (finite,
 /// `sNoise > 0`, `sNoiseEnd >= 0`, `noiseClipStd >= 0`). An unknown field, an LCM parameter on
 /// Euler, or an `advanced.sampler` name that disagrees is a typed error naming the field.
 pub fn requested_h3_image_sampler(
     advanced: &JsonObject,
 ) -> Result<Option<gen_core::h3_image::H3ImageSampler>, String> {
-    use gen_core::h3_image::{H3ImageSampler, LCM_NOISE_CLIP_STD_DEFAULT, LCM_S_NOISE_DEFAULT};
+    use gen_core::h3_image::{
+        H3ImageSampler, LCM_NOISE_CLIP_STD_DEFAULT, LCM_S_NOISE_DEFAULT, LCM_S_NOISE_END_DEFAULT,
+    };
     const PARAMS: [&str; 3] = ["sNoise", "sNoiseEnd", "noiseClipStd"];
     let key = H3_IMAGE_SAMPLER_KEY;
     let Some(value) = advanced.get(key).filter(|value| !value.is_null()) else {
@@ -245,10 +247,17 @@ pub fn requested_h3_image_sampler(
             H3ImageSampler::Euler
         }
         "lcm" => {
-            let s_noise = param("sNoise")?.unwrap_or(LCM_S_NOISE_DEFAULT);
+            // With neither scale given, run the engine's 1.1 -> 0.9 ramp. A start scale given
+            // alone keeps ComfyUI's constant `s_noise` (the end follows the start).
+            let given_start = param("sNoise")?;
+            let s_noise = given_start.unwrap_or(LCM_S_NOISE_DEFAULT);
             H3ImageSampler::Lcm {
                 s_noise,
-                s_noise_end: param("sNoiseEnd")?.unwrap_or(s_noise),
+                s_noise_end: param("sNoiseEnd")?.unwrap_or(if given_start.is_some() {
+                    s_noise
+                } else {
+                    LCM_S_NOISE_END_DEFAULT
+                }),
                 noise_clip_std: param("noiseClipStd")?.unwrap_or(LCM_NOISE_CLIP_STD_DEFAULT),
             }
         }

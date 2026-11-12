@@ -418,8 +418,12 @@ mod tests {
                 r#"{"temperature": 1.0, "top_p": 0.95, "top_k": 20, "max_tokens": 4096,
                     "reasoning_effort": "xhigh",
                     "chat_template_kwargs": {"enable_thinking": true, "preserve_thinking": true},
-                    "response_format": {"json_schema": {"schema": {"properties": {
-                        "aspect_ratio": {"enum": ["1:1", "4:3", "16:9"]}}}}}}"#,
+                    "response_format": {"type": "json_schema", "json_schema": {"name": "t2i_reply",
+                        "strict": true, "schema": {"type": "object",
+                        "properties": {"expanded_caption": {"type": "string"},
+                            "aspect_ratio": {"type": "string", "enum": ["1:1", "4:3", "16:9"]}},
+                        "required": ["expanded_caption", "aspect_ratio"],
+                        "additionalProperties": false}}}}"#,
             ),
             ("prompt/edit/task_prompt.txt", "Synthetic edit task."),
         ];

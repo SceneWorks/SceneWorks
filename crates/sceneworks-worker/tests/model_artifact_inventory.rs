@@ -75,6 +75,7 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
             "crates/sceneworks-worker/src/image_jobs/krea_control_candle.rs",
             "crates/sceneworks-worker/src/image_jobs/krea_imported.rs",
             "crates/sceneworks-worker/src/image_jobs/mage_finetuned.rs",
+            "crates/sceneworks-worker/src/image_jobs/minimax_h3_image.rs",
             "crates/sceneworks-worker/src/image_jobs/moss.rs",
             "crates/sceneworks-worker/src/image_jobs/pid.rs",
             "crates/sceneworks-worker/src/image_jobs/pulid.rs",
@@ -158,6 +159,13 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
         categories: &[Category::CaptioningUtility, Category::Primary],
         resolution: Resolution::SharedContract {
             entrypoint: TypedResolverEntrypoint::ManagedModelPath,
+        },
+    },
+    ModelConsumerInventoryEntry {
+        source_files: &["crates/sceneworks-worker/src/minimax_h3_image_prompt_expand.rs"],
+        categories: &[Category::CaptioningUtility, Category::Primary],
+        resolution: Resolution::SharedContract {
+            entrypoint: TypedResolverEntrypoint::WorkerSnapshot,
         },
     },
     ModelConsumerInventoryEntry {
