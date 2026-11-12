@@ -90,7 +90,10 @@ export function normalizedPlan(draft) {
       maxAnswerSeconds: current.limits?.maxAnswerSeconds ?? 30,
       maxStartupSeconds: current.limits?.maxStartupSeconds ?? 120,
       maxNewTokens: current.limits?.maxNewTokens ?? 192,
-      maxMemoryGb: current.limits?.maxMemoryGb ?? 16,
+      // The memory budget default is the API's (`film_review::DEFAULT_MAX_MEMORY_GB`, served in the
+      // draft's review plan). Never invent one here: an unserved value stays absent, so the field
+      // reads empty and the server applies its own default to the submitted plan.
+      ...(Number.isFinite(current.limits?.maxMemoryGb) ? { maxMemoryGb: current.limits.maxMemoryGb } : {}),
     },
     shots,
     uncertainBelow: Number.isFinite(current.uncertainBelow) ? current.uncertainBelow : 0.5,
@@ -242,7 +245,7 @@ export function FilmReview({ active = true, draft, focusShotId = "", onChange, p
             ["maxSeconds", "Maximum seconds", 1], ["maxFramesPerShot", "Maximum frames per shot", 1],
             ["maxQuestionsPerShot", "Maximum questions per shot", 1], ["maxStartupSeconds", "Maximum model startup seconds", 1], ["maxAnswerSeconds", "Maximum answer seconds", 1],
             ["maxNewTokens", "Maximum answer tokens", 1], ["maxMemoryGb", "Maximum memory (GB)", 0.1],
-          ].map(([field, label, step]) => <label key={field}>{label}<input min={step} step={step} type="number" value={plan.limits[field]} onChange={(event) => changePlan((next) => { next.limits[field] = Number(event.target.value); })} /></label>)}
+          ].map(([field, label, step]) => <label key={field}>{label}<input min={step} step={step} type="number" value={plan.limits[field] ?? ""} onChange={(event) => changePlan((next) => { next.limits[field] = Number(event.target.value); })} /></label>)}
           <label>Uncertain below<input aria-label="Review uncertainty threshold" max="0.99" min="0" step="0.01" type="number" value={plan.uncertainBelow} onChange={(event) => changePlan((next) => { next.uncertainBelow = Number(event.target.value); })} /></label>
         </fieldset>
         {Object.entries(plan.shots).map(([shotId, spec]) => (

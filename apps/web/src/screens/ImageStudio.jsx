@@ -134,8 +134,7 @@ import {
 } from "../modelEligibility.js";
 import { ControlPanel } from "../components/ControlPanel.jsx";
 import { pidToggleVisible } from "../pidEligibility.js";
-import { allPossibleTiers, installedTiers, isBelowFloor, modelQualityFloor, nativeTierEligibility, tierPickerOptions } from "../quantTier.js";
-import { suggestTier } from "../registryTierEvidence.js";
+import { allPossibleTiers, installedTiers, isBelowFloor, modelQualityFloor, nativeTierEligibility, suggestTier, tierPickerOptions } from "../quantTier.js";
 import { useHostMemory } from "../hooks/useHostMemory.js";
 import { hostMemoryGbForBackend } from "../hostMemory.js";
 import { MAX_LISTED_JOBS, PROMPT_REFINE_MODEL_ID, qwenRewriterAppliesTo, QWEN_REWRITE_I2I_MODEL_ID, QWEN_REWRITE_T2I_MODEL_ID, VISION_CAPTION_MODEL_ID } from "../constants.js";

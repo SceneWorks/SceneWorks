@@ -244,6 +244,27 @@ pub fn retain_downloads_for_os(model: &mut Value, os: &str) {
     );
 }
 
+/// The declared size of one download row: the row's own `estimatedSizeBytes` /
+/// `downloadSizeBytes` / `sizeBytes` (in that order), then the same keys on the model as legacy
+/// fallback. The catalog's per-variant `downloadSizeBytes` and memory guidance both read this.
+pub fn manifest_download_size_bytes(model: &Value, download: &Value) -> Option<u64> {
+    const SIZE_FIELDS: [&str; 3] = ["estimatedSizeBytes", "downloadSizeBytes", "sizeBytes"];
+    SIZE_FIELDS
+        .iter()
+        .find_map(|field| {
+            download
+                .get(*field)
+                .and_then(crate::payload_util::json_size_to_u64)
+        })
+        .or_else(|| {
+            SIZE_FIELDS.iter().find_map(|field| {
+                model
+                    .get(*field)
+                    .and_then(crate::payload_util::json_size_to_u64)
+            })
+        })
+}
+
 /// The model's canonical (default-or-first) primary download entry.
 pub fn model_download(model: &Value) -> Option<Value> {
     let downloads = model.get("downloads")?.as_array()?;

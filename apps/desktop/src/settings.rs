@@ -260,7 +260,9 @@ pub struct AppSettings {
     /// unified-memory byte request. CUDA MOSS training resolves the same fraction against
     /// its actual selected device's total VRAM, independent of host RAM and other GPUs.
     /// This is not an OS process quota or a promise that every CUDA job honors it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Always serialized (`null` = no target) so the settings response carries the shell's own
+    /// default and the web never needs a fallback for it (SW-7032).
+    #[serde(default)]
     pub gpu_memory_limit_fraction: Option<f32>,
     /// App-owned resolved-model hot-cache policy. Nested serde defaults preserve upgrades from
     /// settings files written before the cache existed. Disabled by default.
@@ -2001,6 +2003,34 @@ fn get_gpu_info_blocking() -> GpuInfo {
 
 #[cfg(test)]
 mod tests {
+    /// SW-7032: the settings response always carries the GPU memory target, `null` when the user
+    /// set none (including a settings file written before the key existed), so the web can show
+    /// the served value instead of holding a default of its own.
+    #[test]
+    fn the_settings_response_always_carries_the_gpu_memory_target() {
+        let served = serde_json::to_value(super::AppSettings::default()).unwrap();
+        assert_eq!(
+            served.get("gpuMemoryLimitFraction"),
+            Some(&serde_json::Value::Null)
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, b"{}").unwrap();
+        let legacy = serde_json::to_value(super::read_settings_at(&path).unwrap()).unwrap();
+        assert_eq!(
+            legacy.get("gpuMemoryLimitFraction"),
+            Some(&serde_json::Value::Null)
+        );
+        let set = super::AppSettings {
+            gpu_memory_limit_fraction: Some(0.5),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(set).unwrap()["gpuMemoryLimitFraction"],
+            serde_json::json!(0.5)
+        );
+    }
+
     use super::*;
 
     #[test]

@@ -5448,13 +5448,13 @@
       // (7306 MiB = 7.13 GiB over the idle baseline, sc-25690 catalog rehearsal run 38403658578):
       // the gate compares against device-level free VRAM, which also counts the CUDA context, so
       // the backbone's tensor bytes alone (6.5) under-stated an input smaller than the reference.
+      // The measured facts (`measured` and each lane's `residentGb` / `referencePeakGb`) live in
+      // config/manifests/registry/evidence.json under `depth.admission` and are projected here;
+      // the reference geometry and extrapolation factor are declared parameters (SW-7032).
       "depth": {
         "admission": {
-          "measured": false,
           "referenceModelPixels": 524288,
-          "extrapolationFactor": 1.5,
-          "mlx": { "residentGb": 6.5, "referencePeakGb": 9.4 },
-          "candle": { "residentGb": 7.2, "referencePeakGb": 8.4 }
+          "extrapolationFactor": 1.5
         }
       },
       "mlx": {

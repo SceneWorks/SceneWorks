@@ -3,8 +3,7 @@ import { candleVideoTierPickerAvailable } from "../../modelEligibility.js";
 import { useCallback, useEffect, useMemo } from "react";
 import { useQuantTierPicker } from "../../components/generationStudio.jsx";
 import { videoModelServesMode } from "../../modelEligibility.js";
-import { allPossibleTiers, installedTiers, tierLabel, tierPickerOptions, tierQuantize } from "../../quantTier.js";
-import { suggestTier } from "../../registryTierEvidence.js";
+import { allPossibleTiers, installedTiers, suggestTier, tierLabel, tierPickerOptions, tierQuantize } from "../../quantTier.js";
 import { useHostMemory } from "../../hooks/useHostMemory.js";
 import { hostMemoryGbForBackend } from "../../hostMemory.js";
 

@@ -60,6 +60,20 @@ export function projectBuiltinMemoryEvidence(manifest, evidence) {
       Object.assign(target, structuredClone(measured));
     }
 
+    // Depth-job admission evidence (SW-7032): the provenance flag and each lane's measured
+    // resident / reference peak, merged into the product row's declared `depth.admission`.
+    if (Object.hasOwn(facts, "depth")) {
+      const admission = model.depth?.admission;
+      object(admission, `${modelId}.depth.admission`);
+      for (const [key, value] of Object.entries(object(object(facts.depth, `${modelId}.depth`).admission, `${modelId}.depth.admission evidence`))) {
+        if (value !== null && typeof value === "object") {
+          admission[key] = { ...(admission[key] ?? {}), ...structuredClone(value) };
+        } else {
+          admission[key] = value;
+        }
+      }
+    }
+
     if (!Object.hasOwn(facts, "downloads")) continue;
     if (!Array.isArray(facts.downloads)) {
       throw new Error(`${modelId}.downloads memory evidence must be an array`);

@@ -7,7 +7,6 @@ export const ModelCard = React.memo(function ModelCard({
   RETIRED_MODEL_CAPABILITIES,
   audioCapabilityChips,
   availabilityBadge,
-  blanketFloorGb,
   cacheBusyKey,
   cacheConvergenceStalled,
   cacheEligibilityBadge,
@@ -31,13 +30,13 @@ export const ModelCard = React.memo(function ModelCard({
   isTransitionalEntry,
   licenseAcknowledged,
   licenseComponentForModel,
-  lightestInstallableTier,
   linkedCorrection,
   linkedStatus,
   localCopiesEnabled,
   macCapabilities,
   macModelBlock,
   memoryBackend,
+  memoryLane,
   mlxStatusText,
   localCopies,
   cacheKnown,
@@ -95,7 +94,8 @@ export const ModelCard = React.memo(function ModelCard({
     // Conversion state is a platform capability supplied by the API, not a memory measurement.
     // Keep that control surface intact while guarding the MLX memory block by the active lane.
     const mlxState = cleanupOnly ? null : model.mlxConversionState;
-    const mlxMinGb = memoryBackend === "mlx" ? blanketFloorGb(model, "mlx", lightestInstallableTier(model)) : null;
+    // The API-served MLX entry floor (the lightest installable tier's declared floor).
+    const mlxMinGb = memoryBackend === "mlx" ? memoryLane(model, "mlx")?.entryFloorGb ?? null : null;
     const mlxEnoughMemory = unifiedMemoryGb == null || mlxMinGb == null || unifiedMemoryGb >= mlxMinGb;
     const convertJob = convertJobs.find((job) => !terminalStatuses.has(job.status));
     const failedConvert = convertJobs.find((job) => terminalStatuses.has(job.status) && job.status !== "completed");

@@ -29,6 +29,9 @@ pub struct ModelSpec {
     pub model_evidence: Map<String, Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub download_evidence: Vec<Map<String, Value>>,
+    /// Measured facts of a depth job's admission declaration (`depth.admission`).
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    pub depth_evidence: Map<String, Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -1535,7 +1535,7 @@
                 "type": "integer",
                 "minimum": 1,
                 "x-sceneworks-contract": "advisory",
-                "x-sceneworks-readers": [{ "path": "apps/web/src/screens/modelManager/ModelCard.jsx", "anchor": "blanketFloorGb(model, \"mlx\", lightestInstallableTier(model))" }],
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/memory_guidance.rs", "anchor": "fn blanket_floor_gb(" }, { "path": "apps/web/src/screens/modelManager/ModelCard.jsx", "anchor": "memoryLane(model, \"mlx\")?.entryFloorGb" }],
                 "description": "Minimum unified memory (GB) to run this model on MLX. Mirrors MlxVideoAdapter.estimate_requirements peak_gb."
               },
               "minMemoryGbByTier": {
@@ -1545,9 +1545,9 @@
                 "propertyNames": { "$ref": "#/$defs/quantVariantKey" },
                 "x-sceneworks-contract": "advisory",
                 "x-sceneworks-readers": [
-                  { "path": "apps/web/src/screens/modelManager/ModelCard.jsx", "anchor": "blanketFloorGb(model, \"mlx\", lightestInstallableTier(model))" },
-                  { "path": "apps/web/src/registryTierEvidence.js", "anchor": "tierFloorRowGb(options.model, options.backend, variant?.variant)" },
-                  { "path": "apps/web/src/registryTierEvidence.js", "anchor": "blanketFloorGb(model, backend, tier)" }
+                  { "path": "apps/web/src/screens/modelManager/ModelCard.jsx", "anchor": "memoryLane(model, \"mlx\")?.entryFloorGb" },
+                  { "path": "crates/sceneworks-core/src/memory_guidance.rs", "anchor": "fn tier_floor_row_gb(" },
+                  { "path": "crates/sceneworks-core/src/memory_guidance.rs", "anchor": "fn blanket_floor_gb(" }
                 ],
                 "description": "Per-tier form of minMemoryGb for a model whose installable tiers have genuinely different floors (sc-24112). SAME semantics as the scalar: an ALREADY-PADDED floor, never a raw peak, so no consumer adds headroom on top of it — which is exactly what distinguishes it from vramGbByTier's measured/estimated peak ladder. A tier with no row falls back to the scalar minMemoryGb, so the scalar must stay the conservative value for any tier key not listed (including nvfp4). The value may be DERIVED (parameter counts x dtype width plus a stated transient model); the entry's own comment must say which, because this key carries no evidence class of its own. Advisory on MLX: the Model Manager quotes it and the tier suggestion vetoes a tier whose row exceeds the host; no MLX runtime gate reads it (the MLX fit gate admits from the provider's own memory contract)."
               },
@@ -1556,8 +1556,8 @@
                 "exclusiveMinimum": 0,
                 "maximum": 1,
                 "x-sceneworks-contract": "advisory",
-                "x-sceneworks-readers": [{ "path": "apps/web/src/registryTierEvidence.js", "anchor": "measuredSiblingActiveDiskFraction" }],
-                "description": "Opt in only when every selectable MLX quant tier preserves the same load topology. This is the fraction of precision-dependent disk growth active at once (for example 0.5 when one of two equal experts is resident). The web estimator anchors an unmeasured tier at a smaller compatible sibling's measured peak and scales only the disk delta by this fraction. Absence keeps the calibrated dense fallback; a shared model id alone is not compatibility evidence."
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/memory_guidance.rs", "anchor": "measuredSiblingActiveDiskFraction" }],
+                "description": "Opt in only when every selectable MLX quant tier preserves the same load topology. This is the fraction of precision-dependent disk growth active at once (for example 0.5 when one of two equal experts is resident). The API's memory guidance (crates/sceneworks-core/src/memory_guidance.rs) anchors an unmeasured tier at a smaller compatible sibling's measured peak and scales only the disk delta by this fraction. Absence keeps the calibrated dense fallback; a shared model id alone is not compatibility evidence."
               },
               "memoryStrategyCapabilities": {
                 "$ref": "#/properties/models/items/properties/candle/properties/memoryStrategyCapabilities",
@@ -2029,12 +2029,12 @@
               "admission": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["measured", "referenceModelPixels", "extrapolationFactor", "mlx", "candle"],
+                "required": ["referenceModelPixels", "extrapolationFactor"],
                 "x-sceneworks-contract": "binding",
                 "x-sceneworks-readers": [
                   { "path": "crates/sceneworks-worker/src/depth_jobs.rs", "anchor": "entry.pointer(\"/depth/admission\")" }
                 ],
-                "description": "The depth job's DECLARED memory admission, read per lane before load: predicted peak = residentGb + (referencePeakGb - residentGb) x (model pixels / referenceModelPixels), the activation term padded by extrapolationFactor above the reference area. A request whose prediction exceeds the host budget is refused (never downscaled). measured=false until the epic-end campaign replaces it.",
+                "description": "The depth job's DECLARED memory admission, read per lane before load: predicted peak = residentGb + (referencePeakGb - residentGb) x (model pixels / referenceModelPixels), the activation term padded by extrapolationFactor above the reference area. A request whose prediction exceeds the host budget is refused (never downscaled). measured=false until the epic-end campaign replaces it. For a registered builtin the measured facts (measured, and each lane's residentGb / referencePeakGb) live in config/manifests/registry/evidence.json under depth.admission and are projected here; the product row declares only referenceModelPixels and extrapolationFactor (SW-7032).",
                 "properties": {
                   "measured": { "type": "boolean" },
                   "referenceModelPixels": { "type": "integer", "minimum": 1 },
@@ -2802,6 +2802,59 @@
                             ]
                           }
                         ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "depth": {
+                      "properties": {
+                        "admission": {
+                          "not": {
+                            "anyOf": [
+                              {
+                                "required": [
+                                  "measured"
+                                ]
+                              }
+                            ]
+                          },
+                          "properties": {
+                            "mlx": {
+                              "not": {
+                                "anyOf": [
+                                  {
+                                    "required": [
+                                      "residentGb"
+                                    ]
+                                  },
+                                  {
+                                    "required": [
+                                      "referencePeakGb"
+                                    ]
+                                  }
+                                ]
+                              }
+                            },
+                            "candle": {
+                              "not": {
+                                "anyOf": [
+                                  {
+                                    "required": [
+                                      "residentGb"
+                                    ]
+                                  },
+                                  {
+                                    "required": [
+                                      "referencePeakGb"
+                                    ]
+                                  }
+                                ]
+                              }
+                            }
+                          }
+                        }
                       }
                     }
                   }

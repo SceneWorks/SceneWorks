@@ -57,7 +57,8 @@ export function DeviceTab({
                     min={GPU_LIMIT_MIN_PERCENT}
                     max={100}
                     step={5}
-                    value={gpuLimitPercent}
+                    value={gpuLimitPercent ?? ""}
+                    disabled={gpuLimitPercent === null}
                     aria-label={macGpuMemory ? "GPU memory target for SceneWorks (percent of unified memory)" : "MOSS training GPU memory target (percent of selected GPU VRAM)"}
                     onChange={(event) => setGpuLimitPercent(Number(event.target.value))}
                     onMouseUp={(event) => commitGpuMemoryLimit(Number(event.target.value))}

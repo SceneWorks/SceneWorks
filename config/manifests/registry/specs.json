@@ -29367,6 +29367,19 @@
     }
   },
   "iris_3b_depth": {
+    "depthEvidence": {
+      "admission": {
+        "candle": {
+          "referencePeakGb": 8.4,
+          "residentGb": 7.2
+        },
+        "measured": false,
+        "mlx": {
+          "referencePeakGb": 9.4,
+          "residentGb": 6.5
+        }
+      }
+    },
     "downloadEvidence": [
       {
         "files": [
@@ -29411,16 +29424,7 @@
       "defaults": {},
       "depth": {
         "admission": {
-          "candle": {
-            "referencePeakGb": 8.4,
-            "residentGb": 7.2
-          },
           "extrapolationFactor": 1.5,
-          "measured": false,
-          "mlx": {
-            "referencePeakGb": 9.4,
-            "residentGb": 6.5
-          },
           "referenceModelPixels": 524288
         }
       },

@@ -49,13 +49,12 @@ export function turboVariantsForModel(selectedModel, compatibleLoras = []) {
   return compatibleLoras.filter(isTurboVariant);
 }
 
-/// Whether `selectedModel` is a MiniMax-H3 catalog entry. Mirrors
-/// `sceneworks_core::video_request::is_minimax_h3_model` (an `id` prefix test), which is what every
-/// MiniMax-H3 gate in the Rust half already keys on — both catalog partitions (`minimax_h3` and
-/// `minimax_h3_ref`) are in scope, since both load the same DiT architecture and both have a
-/// published turbo adapter.
+/// Whether `selectedModel` is a MiniMax-H3 catalog entry with the turbo adapter surface: the API's
+/// served `supportsMinimaxH3Turbo` verdict of `sceneworks_core::video_request::is_minimax_h3_model`
+/// (SW-7032), which every MiniMax-H3 gate in the Rust half keys on — both catalog partitions
+/// (`minimax_h3` and `minimax_h3_ref`) load the same DiT and have a published turbo adapter.
 export function modelIsMinimaxH3(selectedModel) {
-  return typeof selectedModel?.id === "string" && selectedModel.id.startsWith("minimax_h3");
+  return selectedModel?.supportsMinimaxH3Turbo === true;
 }
 
 /// The variant a fresh MiniMax-H3 studio defaults to, or `null` when none is installed.
