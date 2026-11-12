@@ -2,10 +2,10 @@
   "schemaVersion": 2,
   "source": {
     "repository": "SceneWorks/SceneWorks",
-    "revision": "5a28d413dd9f579cc9607d44f252a045d025bd8e",
-    "inferenceSource": "git+https://github.com/SceneWorks/inference?rev=2b09938e33370915d4f853389961709b8bbf8bf9",
+    "revision": "d3f7b05bf22826e44fd43da19cff0985fb17d68b",
+    "inferenceSource": "git+https://github.com/SceneWorks/inference?rev=4a36a7f8c9645110df4df656ca9d492e55ab6c7c",
     "nativeDump": "cargo run --locked -p sceneworks-core --bin dump-ui-catalog",
-    "trees": {"apps/web/src":"c1f2f492985be99c07eee0f72a8486b35aaaab1f","config/manifests":"5efb4ae8a142a0c2fe0ca7dff7958849a063adb4","config/engine-capabilities":"022db10674fe953457caeb9435fd7696c99f3830","crates/sceneworks-core/src/jobs_store":"19829b0f42a405291da650036095697c2c0a1982","crates/sceneworks-core/src/training.rs":"67f4a0c146297def4ec257950847c3731849c0d7","apps/rust-api/src/models":"b44d52216e31f1d1f3606466e8bd042ab9d89cc5","apps/rust-api/src/training.rs":"72d0a65f360ed8ea75e1ce3073f040365d78b96a"},
+    "trees": {"apps/web/src":"772975465227a704a3e2cc2556538bdee6a06c43","config/manifests":"05d0c44c10ddbfdb518fa2a97c4d36aadb9d877d","config/engine-capabilities":"e13daed70a9a64487ddedfec6360c0d3282f7f68","crates/sceneworks-core/src/jobs_store":"81fd2bcde51d0ca96ed0d66dd1c4b7757d800798","crates/sceneworks-core/src/training.rs":"67f4a0c146297def4ec257950847c3731849c0d7","apps/rust-api/src/models":"d015b0374b475d71cca53868c41ceac14bd72022","apps/rust-api/src/training.rs":"37176d34673549ccd226e8aadc2bdedf5b9da13e"},
     "hostFixture": "All builtin artifacts and declared tiers installed; fixed project assets; no filesystem probing, fetch, weights or model execution. Native support, preview and decoder projections use the production core functions."
   },
   "catalog": {

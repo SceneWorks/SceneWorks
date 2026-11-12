@@ -42,8 +42,8 @@ beforeAll(() => {
 describe("pinned public catalog (SW-7028)", () => {
   it("retains every old catalog model even when no generation studio uses it", () => {
     expect(old.catalog.models).toHaveLength(143);
-    expect(old.source.revision).toBe("5a28d413dd9f579cc9607d44f252a045d025bd8e");
-    expect(old.source.inferenceSource).toContain("2b09938e33370915d4f853389961709b8bbf8bf9");
+    expect(old.source.revision).toBe("d3f7b05bf22826e44fd43da19cff0985fb17d68b");
+    expect(old.source.inferenceSource).toContain("4a36a7f8c9645110df4df656ca9d492e55ab6c7c");
     expect(() => requireOldPopulation(old.catalog, { ...candidate, models: candidate.models.filter((m) => m.id !== "starvector_1b") })).toThrow(/starvector_1b/);
     const reduced = candidateRows.filter((row) => row.model !== "starvector_1b");
     expect(unionPopulation(oldRows, reduced).filter((row) => row.model === "starvector_1b")).toHaveLength(6);

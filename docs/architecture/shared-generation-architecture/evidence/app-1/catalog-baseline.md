@@ -87,8 +87,8 @@ Explicit capture is only for the old checkout. If reproducing later, use an isol
 at the pinned SHA and overlay this test/dump tooling without changing production sources:
 
 ```sh
-node scripts/rearchitecture/capture-catalog-baseline.mjs --source 5a28d413dd9f579cc9607d44f252a045d025bd8e --output apps/web/src/testUtils/catalogBaseline/old-catalog.json
-CAPTURE_OLD_CATALOG=5a28d413dd9f579cc9607d44f252a045d025bd8e npm --prefix apps/web test -- src/catalogBaseline.test.jsx src/catalogBaseline.behavior.test.jsx
+node scripts/rearchitecture/capture-catalog-baseline.mjs --source d3f7b05bf22826e44fd43da19cff0985fb17d68b --output apps/web/src/testUtils/catalogBaseline/old-catalog.json
+CAPTURE_OLD_CATALOG=d3f7b05bf22826e44fd43da19cff0985fb17d68b npm --prefix apps/web test -- src/catalogBaseline.test.jsx src/catalogBaseline.behavior.test.jsx
 ```
 
 The capture helper replaces the earlier signature/source-hash/regex script. It consumes a
@@ -217,3 +217,16 @@ hosted macOS workspace tests were still running. The coordinator owns that pendi
 publication. A `gh api` REST job-status read hit HTTP 403 rate limiting; GraphQL rollup reads and
 the GitHub connector still worked. The last connector step snapshot showed worker build, both
 clippy steps and memory-adapter tests passing before the in-progress workspace tests.
+
+## Re-capture at main d3f7b05bf2 (SW-7033)
+
+Merging main `d3f7b05bf22826e44fd43da19cff0985fb17d68b` (inference
+`4a36a7f8c9645110df4df656ca9d492e55ab6c7c`) into the feature moved the pre-registry side of the
+comparison: main's 86 commits deliberately changed Character Studio (shared LoRA picker, pose
+controls). The three fixtures were re-captured with the commands above in an isolated checkout of
+that SHA, overlaying only the SW-7028 test and dump tooling (`dump-ui-catalog.rs` from
+`24b248c878`). The 1,197-row population is unchanged; `old-catalog.json` and `old-behavior.json`
+changed only in their source identity; `old-observations.json` changed in 111 rows, all Character
+Studio (`poses` 51, `test` 33, `angles` 27 across the three platforms). The integrated registry
+branch matches every re-captured row and behavior case.
+
