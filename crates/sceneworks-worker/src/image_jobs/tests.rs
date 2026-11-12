@@ -668,6 +668,10 @@ use super::routing::resolve_candle_image_route;
 #[cfg(target_os = "macos")]
 use super::routing::resolve_image_route;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::routing::wired_pose_families;
+#[cfg(target_os = "macos")]
+use super::routing::wired_pose_families;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::routing::CandleImageRoute;
 #[cfg(target_os = "macos")]
 use super::routing::ImageRoute;
@@ -675,10 +679,6 @@ use super::routing::ImageRoute;
 use super::routing::PreparedCandleImageRoute;
 #[cfg(target_os = "macos")]
 use super::routing::PreparedImageRoute;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use super::routing::WIRED_CANDLE_POSE_FAMILIES;
-#[cfg(target_os = "macos")]
-use super::routing::WIRED_MLX_POSE_FAMILIES;
 #[cfg(native_lane)]
 use super::sampling::mlx_raw_settings;
 #[cfg(target_os = "macos")]
@@ -710,7 +710,6 @@ use super::sdxl::SdxlSubMode;
 #[cfg(native_lane)]
 use super::sdxl_control::SDXL_CONTROL_ENGINE_ID;
 #[cfg(native_lane)]
-use super::sdxl_control::SDXL_CONTROL_MODELS;
 #[cfg(native_lane)]
 use super::sdxl_control::SDXL_CONTROL_REPO;
 #[cfg(native_lane)]
@@ -12294,7 +12293,7 @@ fn candle_conditioned_angle_work_uses_eleven_prompts_one_seed_and_route_total() 
     assert_eq!(resolve_sensenova_candle_true_cfg(&req), 1.5);
 }
 
-// sc-11814: a strict-pose job on any WIRED MLX pose family (`WIRED_MLX_POSE_FAMILIES`) whose control
+// sc-11814: a strict-pose job on any WIRED MLX pose family (derived wired MLX pose family) whose control
 // base/overlay is NOT installed must route to a loud reject, NOT fall through to the plain MLX txt2img
 // lane (`ImageRoute::Mlx`), which would silently render an unconditioned image and drop the poses.
 // `flux_dev` with a reference is the sc-21673 exception: the requested IP-Adapter + pose combination is
@@ -12311,7 +12310,7 @@ fn image_route_rejects_wired_pose_when_control_base_absent() {
     // `mlx_available`) resolves nothing, so each wired-family pose job falls through to the reject arm.
     settings.data_dir = dir.path().to_path_buf();
 
-    for model in WIRED_MLX_POSE_FAMILIES {
+    for model in wired_pose_families("mlx") {
         // A `referenceAssetId` is present so the `kolors` lane (which additionally requires a reference)
         // is proven to reject on the ABSENT BASE, not the missing reference; it is inert for the others.
         let pose = request(json!({
@@ -12320,7 +12319,7 @@ fn image_route_rejects_wired_pose_when_control_base_absent() {
             "advanced": { "poses": [{ "id": "a" }] }
         }));
         let route = resolve_image_route(&pose, &settings);
-        let expected = if *model == "flux_dev" {
+        let expected = if model == "flux_dev" {
             ImageRoute::FluxIpAdapterPoseReject
         } else {
             ImageRoute::PoseControlBaseMissing
@@ -12438,7 +12437,13 @@ fn image_route_sends_exact_sdxl_pose_family_to_control_before_other_conditioning
     settings.data_dir = dir.path().to_path_buf();
     let model_path = dir.path().to_string_lossy().to_string();
 
-    for model in SDXL_CONTROL_MODELS {
+    for model in [
+        "sdxl",
+        "realvisxl",
+        "realvisxl_lightning",
+        "illustrious_xl_v1",
+        "illustrious_xl_v2",
+    ] {
         let pose = request(json!({
             "projectId": "p", "model": model, "count": 1,
             "advanced": { "modelPath": model_path.clone(), "poses": [{ "id": "a" }] }
@@ -13025,7 +13030,13 @@ fn candle_image_route_gates_on_flag_then_sdxl_control_then_txt2img() {
     );
 
     // Every shipped SDXL-family pose job uses the dedicated shared ControlNet route.
-    for model in SDXL_CONTROL_MODELS {
+    for model in [
+        "sdxl",
+        "realvisxl",
+        "realvisxl_lightning",
+        "illustrious_xl_v1",
+        "illustrious_xl_v2",
+    ] {
         let pose = request(json!({
             "projectId": "p", "model": model, "count": 1,
             "advanced": { "poses": [{ "id": "a" }] }
@@ -22695,12 +22706,12 @@ fn sc_8253_8278_identity_angle_ab() {
 /// The generator now keys the overlay off a DECLARED lane list (`CONTROL_LANE_MODELS`). A declaration in a
 /// different language from the router is only as good as the guard that ties them together, so this is that
 /// guard: add an `else if …_control_available` arm to `resolve_candle_image_route` and a
-/// `WIRED_CANDLE_POSE_FAMILIES` id without declaring it to the matrix, and this test goes red naming the
+/// the derived Candle pose set id without declaring it to the matrix, and this test goes red naming the
 /// missing id. The generator carries the reverse check itself (`assertDeclaredControlLanes` throws when a
 /// measurement block exists for an undeclared lane, i.e. orphaned evidence).
 ///
-/// `WIRED_CANDLE_POSE_FAMILIES` is the right Rust anchor because `base.rs` already documents
-/// `WIRED_MLX_POSE_FAMILIES` as "the MLX twin … and the SAME id set", so one list covers both backends.
+/// the derived Candle pose set is the right Rust anchor because `base.rs` already documents
+/// the derived MLX pose set as "the MLX twin … and the SAME id set", so one list covers both backends.
 /// The second assertion closes the one-level-up blind spot from sc-16095: declaration alone is not
 /// enough if the generated model omits the Candle backend entirely, because then the per-backend loop
 /// still emits no Candle control cells.
@@ -22720,14 +22731,15 @@ fn wired_candle_control_lanes_are_declared_and_emitted_by_the_evidence_matrix() 
         .split_once("];")
         .expect("CONTROL_LANE_MODELS must be a closed array literal")
         .0;
-    let declared: std::collections::BTreeSet<&str> = declared_block
+    let declared: std::collections::BTreeSet<String> = declared_block
         .split('"')
         // A `"a", "b"` list alternates between separators and values, so the values are the odd indices.
         .skip(1)
         .step_by(2)
+        .map(str::to_owned)
         .collect();
-    let wired: std::collections::BTreeSet<&str> =
-        WIRED_CANDLE_POSE_FAMILIES.iter().copied().collect();
+    let wired: std::collections::BTreeSet<String> =
+        wired_pose_families("candle").into_iter().collect();
     assert_eq!(
         declared, wired,
         "the candle control lanes the worker wires and the model ids the memory matrix declares a control \
@@ -22742,7 +22754,7 @@ fn wired_candle_control_lanes_are_declared_and_emitted_by_the_evidence_matrix() 
         "../../../../docs/generated/memory-matrix.json"
     ))
     .expect("generated memory matrix must be valid JSON");
-    let candle_backends: std::collections::BTreeSet<&str> = matrix["models"]
+    let candle_backends: std::collections::BTreeSet<String> = matrix["models"]
         .as_array()
         .expect("memory matrix models must be an array")
         .iter()
@@ -22751,9 +22763,9 @@ fn wired_candle_control_lanes_are_declared_and_emitted_by_the_evidence_matrix() 
                 .as_array()
                 .is_some_and(|backends| backends.iter().any(|backend| backend == "candle"))
         })
-        .filter_map(|model| model["id"].as_str())
+        .filter_map(|model| model["id"].as_str().map(str::to_owned))
         .collect();
-    let omitted: Vec<_> = wired.difference(&candle_backends).copied().collect();
+    let omitted: Vec<_> = wired.difference(&candle_backends).cloned().collect();
     assert!(
         omitted.is_empty(),
         "wired Candle pose families omitted from the generated matrix's Candle backends: {omitted:?}. \
@@ -22790,7 +22802,7 @@ fn wired_candle_control_lanes_are_declared_and_emitted_by_the_evidence_matrix() 
 /// site in the shared strict-control driver — fails here as well. A test that still passed with the
 /// gates deleted would be a false green, which is the failure mode this whole guard exists to prevent.
 ///
-/// This is the same shape as `WIRED_CANDLE_POSE_FAMILIES` (sc-11171, F-008), which exists because this
+/// This is the same shape as the derived Candle pose set (sc-11171, F-008), which exists because this
 /// exact ladder had already drifted once. Deliberately NOT cfg-gated to the candle build: it is a pure
 /// text scan, so it runs in the Linux parity and macOS suites too, not only `windows-candle`.
 #[test]

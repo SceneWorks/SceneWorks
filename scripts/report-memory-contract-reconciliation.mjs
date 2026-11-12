@@ -26,16 +26,14 @@
 //   node scripts/report-memory-contract-reconciliation.mjs --leg engine_manifest
 //   node scripts/report-memory-contract-reconciliation.mjs --drift   # only what two sources disagree on
 //
-// It also carries the FRESHNESS signal for the manifest's engine-projected memory declarations
-// (sc-20246): whether `config/manifests/builtin.models.jsonc` is still the projection of the committed
-// capability dumps. That lives here, not in a test, because a blocking fixed-point invariant would be
-// a new gate. See `manifestFixedPoint` below.
+// The report checks that registry evidence joins to the product catalog. It remains advisory.
 
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { planProjection, projectManifestBody } from "./lib/manifest-memory-declarations.mjs";
+import { planProjection } from "./lib/manifest-memory-declarations.mjs";
+import { projectBuiltinMemoryEvidence, readBuiltinMemoryEvidenceSync } from "./lib/builtin-memory-evidence.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import {
   reconcileMemoryContracts,
@@ -52,40 +50,17 @@ const legFilter = legAt >= 0 ? argv[legAt + 1] : null;
 const driftOnly = argv.includes("--drift");
 
 /**
- * Is the committed manifest still the projection of the committed dumps? (sc-20246)
- *
- * THIS IS THE FRESHNESS SIGNAL, and it is deliberately here rather than in a test. A blocking
- * "the committed projection is a fixed point" invariant would be a new gate — ruled out by Michael's
- * 2026-08-17 decision, and it would contradict the projector's own not-a-gate contract. So the report
- * says whether the manifest is stale and what to run; a human decides. Never throws: a broken input
- * degrades to "could not evaluate", because an unavailable freshness signal is not a build failure.
+ * Check that measured registry evidence joins to the shipped product catalog.
+ * This is an advisory report: unavailable input does not fail a build.
  */
-function manifestFixedPoint() {
+function registryEvidenceStatus() {
   const read = (relative) => readFileSync(path.join(ROOT, relative), "utf8");
   try {
-    const body = read("config/manifests/builtin.models.jsonc");
-    const engineFacts = ["mlx", "candle"].map((backend) => {
-      const facts = JSON.parse(read(`config/engine-capabilities/capabilities.${backend}.json`));
-      // Refuse to answer off a dump that does not carry the two surfaces the projection reads. The
-      // projector treats a missing inventory as "nothing to project", which would render an unusable
-      // dump as a STALE manifest — blaming the wrong artifact, and telling the reader to regenerate
-      // something that is already correct.
-      for (const surface of ["memoryContracts", "memoryRouteWitnesses"]) {
-        if (!Array.isArray(facts[surface]) || facts[surface].length === 0) {
-          throw new Error(`the ${backend} capability dump has no ${surface} inventory`);
-        }
-      }
-      return facts;
-    });
-    const projected = projectManifestBody({
-      body,
-      engineFacts,
-      enginesSource: read("crates/sceneworks-worker/src/engines.rs"),
-      strictControlSource: read("crates/sceneworks-worker/src/image_jobs/strict_control.rs"),
-      imageRoutingSource: read("crates/sceneworks-worker/src/image_jobs/routing.rs"),
-      routeRegistrySource: read("crates/sceneworks-worker/src/memory_route_registry.rs"),
-    });
-    return { current: projected.body === body };
+    projectBuiltinMemoryEvidence(
+      JSON.parse(stripJsoncComments(read("config/manifests/builtin.models.jsonc"))),
+      readBuiltinMemoryEvidenceSync(ROOT),
+    );
+    return { current: true, source: "config/manifests/registry/evidence.json" };
   } catch (error) {
     return { error: (error?.message ?? String(error)).split("\n")[0] };
   }
@@ -94,7 +69,7 @@ function manifestFixedPoint() {
 /**
  * The projection plan, for the triage join (sc-21505).
  *
- * The engine_manifest leg reports that the manifest carries no declaration; the projector is what
+ * The engine_manifest leg reports that registry evidence carries no declaration; the projector is what
  * knows WHY it could not write one. Degrades to an empty plan on any input problem, exactly like
  * `manifestFixedPoint` — an unavailable explanation must not turn a report into a failure, and an
  * empty plan classifies those findings `unclassified`, which is visible rather than silent.
@@ -103,33 +78,35 @@ function projectionPlan() {
   const read = (relative) => readFileSync(path.join(ROOT, relative), "utf8");
   try {
     return planProjection({
-      manifest: JSON.parse(stripJsoncComments(read("config/manifests/builtin.models.jsonc"))),
+      manifest: projectBuiltinMemoryEvidence(
+        JSON.parse(stripJsoncComments(read("config/manifests/builtin.models.jsonc"))),
+        readBuiltinMemoryEvidenceSync(ROOT),
+      ),
       engineFacts: ["mlx", "candle"].map((backend) =>
         JSON.parse(read(`config/engine-capabilities/capabilities.${backend}.json`)),
       ),
       enginesSource: read("crates/sceneworks-worker/src/engines.rs"),
       strictControlSource: read("crates/sceneworks-worker/src/image_jobs/strict_control.rs"),
-      imageRoutingSource: read("crates/sceneworks-worker/src/image_jobs/routing.rs"),
       routeRegistrySource: read("crates/sceneworks-worker/src/memory_route_registry.rs"),
+      memoryRoutePolicySource: read("config/manifests/registry/memory-route-policy.json"),
+      registrySpecsSource: read("config/manifests/registry/specs.json"),
     });
   } catch (error) {
-    // Same degrade-never-throw contract as `manifestFixedPoint`, but the reason travels with it: an
+    // Same degrade-never-throw contract as `registryEvidenceStatus`, but the reason travels with it: an
     // empty plan reclassifies every engine_manifest finding as `unclassified`, and a reader must not
     // have to guess whether that means "genuinely unexplained" or "the projection would not load".
     return { unhosted: [], skipped: [], error: (error?.message ?? String(error)).split("\n")[0] };
   }
 }
 
-function fixedPointLine() {
-  const state = manifestFixedPoint();
+function evidenceStatusLine() {
+  const state = registryEvidenceStatus();
   if (state.error) {
-    return `  Manifest projection freshness: could not evaluate — ${state.error}`;
+    return `  Registry evidence: could not load — ${state.error}`;
   }
   return state.current
-    ? "  Manifest projection: the memory declarations ARE the projection of the committed engine dumps."
-    : "  Manifest projection: STALE — the memory declarations are not the projection of the committed\n" +
-      "  engine dumps. Run `npm run generate:manifest-memory-declarations` to refresh, then regenerate\n" +
-      "  the derived artifacts. Findings below may reflect the old projection.";
+    ? "  Registry evidence: measured facts load and join to the product catalog."
+    : "  Registry evidence: unavailable.";
 }
 
 // The reconciliation needs the matrix's resolved coordinates, plus the calibration plan, the
@@ -146,7 +123,10 @@ async function loadReconciliation() {
     engineFacts: ["mlx", "candle"].map((backend) =>
       JSON.parse(read(`config/engine-capabilities/capabilities.${backend}.json`)),
     ),
-    manifest: JSON.parse(stripJsoncComments(read("config/manifests/builtin.models.jsonc"))),
+    manifest: projectBuiltinMemoryEvidence(
+      JSON.parse(stripJsoncComments(read("config/manifests/builtin.models.jsonc"))),
+      readBuiltinMemoryEvidenceSync(ROOT),
+    ),
     cells,
     calibrationPlan: JSON.parse(read("config/memory-calibration-plan.json")),
     closures: JSON.parse(read("config/inference-provider-closures.json")),
@@ -170,7 +150,7 @@ async function main() {
     // Even the report refuses to fail. If the inputs cannot be assembled at all, say so and exit 0 —
     // this script is a worklist, and an unavailable worklist is not a build failure.
     console.log("Memory-contract reconciliation report");
-    console.log(fixedPointLine());
+    console.log(evidenceStatusLine());
     console.log("  Could not assemble the reconciliation inputs on this branch:");
     console.log(`  ${(error?.stderr || error?.message || String(error)).toString().trim().split("\n").slice(-4).join("\n  ")}`);
     console.log("\nDone. Exit 0 always.");
@@ -198,7 +178,7 @@ async function main() {
       JSON.stringify(
         {
           ...result,
-          manifestProjection: manifestFixedPoint(),
+          registryEvidence: registryEvidenceStatus(),
           triage: {
             total: triage.total,
             byDisposition: triage.byDisposition,
@@ -230,7 +210,7 @@ async function main() {
 
   console.log("Memory-contract reconciliation report");
   console.log("Nothing here fails a build. This is a worklist, not a gate (Michael, 2026-08-17).");
-  console.log(`\n${fixedPointLine()}`);
+  console.log(`\n${evidenceStatusLine()}`);
   if (result.unavailable) {
     console.log(`\n  Reconciliation did not run: ${result.unavailable}`);
     console.log("\nDone. Exit 0 always.");

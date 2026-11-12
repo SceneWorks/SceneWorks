@@ -44,7 +44,7 @@ import { useAppContext } from "../context/AppContext.js";
 import { useScreenActive } from "../context/ScreenActiveContext.js";
 import { appConfirm } from "../appConfirm.jsx";
 
-import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
+import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../modelEligibility.js";
 import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 // sc-24113 — the per-model ordered-reference ceiling. See `imageReferenceLimits.js`.
 import { maxReferencesForModel } from "../imageReferenceLimits.js";

@@ -4689,6 +4689,17 @@ pub const BYTES_PER_GIB: f64 = 1_073_741_824.0;
 /// take the legacy reserve rather than silently adopting a new policy.
 pub const LEGACY_UNIFIED_FALLBACK_RESERVE_GB: f64 = 2.0;
 
+/// Dedicated-VRAM allocator/context slack the Candle lane charges once on top of a per-tier
+/// measured peak (`fit_gate::dedicated_vram_reserve`, `vram_gate::HEADROOM_GB`). Declared here so
+/// the catalog's memory guidance (`crate::memory_guidance`) quotes the same reserve the worker
+/// admits with; the worker reads this constant rather than declaring a second copy.
+pub const DEDICATED_VRAM_ALLOCATOR_SLACK_GB: f64 = 2.0;
+
+/// The Candle lane's same-cell recapture allowance (`ladder_margin_policy::CANDLE_RECAPTURE_SPREAD`
+/// documents its derivation and pins it against the evidence corpus). Declared here so the catalog's
+/// SDXL endpoint guidance applies the allowance the worker admits with.
+pub const CANDLE_ACTIVE_RECAPTURE_SPREAD: f64 = 0.02;
+
 /// The MLX lane's generic flat activation allowance (`HEADROOM_GB`, sc-10863): the max
 /// common-case measured 1024² transient (14.04 GiB) plus a ~4 GiB OS/app reserve. The video
 /// lane's estimate floor is `floor weights + this` (`video_admission::floor_phase_peaks`), and a

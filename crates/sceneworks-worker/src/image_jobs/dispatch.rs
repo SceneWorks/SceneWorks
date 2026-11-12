@@ -68,6 +68,10 @@ use super::qwen_control::generate_candle_qwen_control_stream;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::qwen_edit_candle::generate_candle_qwen_edit_stream;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::routing::wired_pose_families;
+#[cfg(target_os = "macos")]
+use super::routing::wired_pose_families;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::routing::CandleImageRoute;
 #[cfg(target_os = "macos")]
 use super::routing::ImageRoute;
@@ -76,10 +80,6 @@ use super::routing::PreparedCandleImageRoute;
 use super::routing::PreparedFileDispatch;
 #[cfg(target_os = "macos")]
 use super::routing::PreparedImageRoute;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use super::routing::WIRED_CANDLE_POSE_FAMILIES;
-#[cfg(target_os = "macos")]
-use super::routing::WIRED_MLX_POSE_FAMILIES;
 #[cfg(target_os = "macos")]
 use super::sdxl::generate_sdxl_advanced_stream;
 use super::sdxl_control::generate_sdxl_control_stream;
@@ -472,7 +472,7 @@ pub(super) async fn execute_mlx_image_route(
                 ));
             }
             ImageRoute::PoseControlBaseMissing => {
-                // A strict-pose job on a WIRED MLX pose family (`WIRED_MLX_POSE_FAMILIES`) whose control
+                // A strict-pose job on a WIRED MLX pose family (derived wired MLX pose family) whose control
                 // base/overlay snapshot is NOT installed (its `…_control_available` weight-gate failed, so
                 // it fell through). Refuse loudly rather than silently rendering an unconditioned image via
                 // the plain MLX lane and dropping the poses (sc-11796 for krea, generalized to every wired
@@ -493,7 +493,7 @@ pub(super) async fn execute_mlx_image_route(
                      refusing rather than silently generating an unconditioned image (wired MLX control \
                      families: {})",
                     request.model,
-                    WIRED_MLX_POSE_FAMILIES.join(", ")
+                    wired_pose_families("mlx").join(", ")
                 )));
             }
             ImageRoute::Mlx => {
@@ -984,7 +984,7 @@ pub(super) async fn execute_candle_image_route(
                          refusing rather than silently generating an unconditioned image (wired candle control \
                          families: {})",
                         request.model,
-                        WIRED_CANDLE_POSE_FAMILIES.join(", ")
+                        wired_pose_families("candle").join(", ")
                     )));
                 }
                 CandleImageRoute::FluxIpAdapterPoseReject => {

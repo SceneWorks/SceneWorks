@@ -46,11 +46,11 @@ function fixture() {
 }
 function restored(f) { return MUTABLE_FILES.every(file => readFileSync(path.join(f.root, file)).equals(f.original[file])); }
 
-test("closed committed inventory executes all 74 cases across seven exact tests", () => {
+test("closed committed inventory executes all 75 cases across seven exact tests", () => {
   const spec = loadRegistry(ROOT);
-  assert.equal(spec.cases.length, 74); assert.equal(Object.keys(TESTS).length, 7);
+  assert.equal(spec.cases.length, 75); assert.equal(Object.keys(TESTS).length, 7);
   assert.deepEqual(spec.cases.slice(0, 3).map(item => item.id), ["SW-load-text-encoder", "SW-thin-explicit-options", "SW-result-backend"]);
-  // Three independent fail-fast cases follow baseline; the remaining 71 retain their order.
+  // Three independent fail-fast cases follow baseline; the remaining 72 retain their order.
   let workerSeen = false;
   for (const item of spec.cases.slice(3)) {
     const worker = item.tests.some(key => TESTS[key][0] === "sceneworks-worker");

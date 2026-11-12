@@ -878,10 +878,10 @@ fn the_candle_flux2_family_is_resolved_from_the_plans_provider_and_model_id() {
     );
     // ...and bound to the manifest the worker reads that decision from: `is_dense_te_tier` is
     // exactly `mlx.denseTextEncoderTier == true`, so the flag must be its negation per member.
-    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
-        include_str!("../../../../config/manifests/builtin.models.jsonc"),
-    ))
-    .expect("the shipped models manifest parses");
+    let manifest: Value =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("the shipped models manifest parses")
+            .clone();
     for arm in FLUX2_ARMS {
         let entry = manifest["models"]
             .as_array()

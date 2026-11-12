@@ -144,7 +144,14 @@ mod tests {
             .expect("temp dir");
         let out = out_guard.path();
 
-        convert_ltx_native(&source, &upscaler_dir, out, 4).expect("native LTX-2.3 eros convert");
+        convert_ltx_native(
+            &source,
+            &upscaler_dir,
+            Path::new(LTX_SPATIAL_UPSCALER_FILE),
+            out,
+            4,
+        )
+        .expect("native LTX-2.3 eros convert");
 
         for file in [
             "transformer.safetensors",
@@ -1753,14 +1760,8 @@ mod co_requisite_tests {
     /// a dropped/renamed SDXL co-requisite (or a `componentId` that stops matching the descriptor's
     /// `required_components`) fails HERE, not silently at candle render time.
     fn builtin_manifest_entry(model_id: &str) -> Value {
-        let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-            .iter()
-            .find(|(name, _)| *name == "builtin.models.jsonc")
-            .map(|(_, contents)| *contents)
-            .expect("builtin.models.jsonc present");
-        let manifest: Value =
-            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
-                .expect("builtin.models.jsonc parses");
+        let manifest = sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("builtin.models.jsonc parses");
         manifest["models"]
             .as_array()
             .expect("models array")

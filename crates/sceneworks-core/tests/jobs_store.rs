@@ -4,12 +4,12 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection};
 use sceneworks_core::contracts::{
     GenerationMetrics, JobSnapshot, JobStatus, JobType, ProgressStage, WorkerCapability,
-    WorkerStatus, WorkerUtilizationSnapshot,
+    WorkerSnapshot, WorkerStatus, WorkerUtilizationSnapshot,
 };
 use sceneworks_core::jobs_store::{
     candle_supported, mac_capabilities, mac_rust_supported, model_mac_support, CreateJob,
     DuplicateJob, JobsStore, JobsStoreError, ProgressUpdate, RegisterWorker, RetryJob,
-    WorkerHeartbeat, MAC_NOT_AVAILABLE_LABEL, MAX_JOB_ATTEMPTS,
+    RouteDecision, WorkerHeartbeat, MAC_NOT_AVAILABLE_LABEL, MAX_JOB_ATTEMPTS,
 };
 use sceneworks_core::time::now_unix_seconds;
 use serde_json::{json, Map, Value};
@@ -81,6 +81,177 @@ impl Drop for TestStore {
     fn drop(&mut self) {}
 }
 
+/// The production admission/claim protocol for these routing fixtures (SW-7031 AC4).
+///
+/// Since the portable model registry, an unbound model-backed job is unclaimable for every claim
+/// protocol version: the API freezes a portable source binding at admission (or upgrades a
+/// historical carrier) before any worker can fetch or load it, and the shipped Rust worker always
+/// claims with `PORTABLE_MODEL_BINDING_VERSION` plus its backend and platform. These fixtures
+/// therefore admit, register and claim exactly that way instead of reaching a model job through a
+/// versionless legacy claim:
+///
+/// * Jobs are created as the legacy unbound carriers these fixtures have always used. Before every
+///   claim, `claim_portable_routed` runs the API's historical upgrade through the store's
+///   production seam (`unbound_queued_model_jobs` + `bind_historical_queued_job`) with a
+///   pinned-revision binding naming every portable route a fixture worker can speak. Model-free
+///   jobs are never offered to that batch and stay unbound, exactly as in production. The routing
+///   facts derived from the payload, not the binding, still decide which worker may run a job.
+/// * `register_portable_worker` records the platform the shipped worker reports for its backend.
+/// * `claim_portable` / `claim_portable_routed` claim with the production protocol version,
+///   backend and platform. A retired torch descriptor (`mps`, `gpu-N`, `cuda:N` without the
+///   `candle` capability) speaks no portable route, so it keeps the versionless claim and can only
+///   ever receive model-free work.
+trait PortableProtocolFixture {
+    fn upgrade_historical_carriers(&self) -> Result<(), JobsStoreError>;
+    /// Admission-time binding, as `create_image_job` stores it, for a test whose row must not
+    /// pass through the historical upgrade (which would recompute its routing facts).
+    fn create_admitted_job(&self, request: CreateJob) -> Result<JobSnapshot, JobsStoreError>;
+    fn register_portable_worker(
+        &self,
+        request: RegisterWorker,
+    ) -> Result<WorkerSnapshot, JobsStoreError>;
+    fn claim_portable(&self, worker_id: &str) -> Result<Option<JobSnapshot>, JobsStoreError>;
+    fn claim_portable_routed(
+        &self,
+        worker_id: &str,
+        mlx_required: bool,
+    ) -> Result<(Option<JobSnapshot>, Option<RouteDecision>), JobsStoreError>;
+}
+
+const FIXTURE_ROUTES: [(&str, &str); 3] = [("mlx", "macos"), ("candle", "linux"), ("cpu", "linux")];
+
+fn fixture_portable_route(
+    gpu_id: &str,
+    capabilities: &[WorkerCapability],
+) -> Option<(&'static str, &'static str)> {
+    if gpu_id.eq_ignore_ascii_case("mlx") {
+        Some(FIXTURE_ROUTES[0])
+    } else if capabilities
+        .iter()
+        .any(|capability| capability.as_str() == "candle")
+    {
+        Some(FIXTURE_ROUTES[1])
+    } else if gpu_id.eq_ignore_ascii_case("cpu") {
+        Some(FIXTURE_ROUTES[2])
+    } else {
+        None
+    }
+}
+
+fn fixture_portable_binding(job: &JobSnapshot) -> Value {
+    fixture_portable_binding_for(&job.payload)
+}
+
+fn fixture_portable_binding_for(payload: &Map<String, Value>) -> Value {
+    use sceneworks_core::model_artifacts::portable_binding::{
+        canonical_authored_options_sha256, PortableArtifactFile, PortableArtifactMember,
+        PortableJobBinding, PortableModelBinding, PortableRouteBinding, PortableSourceIdentity,
+    };
+    use sceneworks_core::model_artifacts::{ArtifactIdentity, ArtifactMemberRole};
+    let model_id = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|model| !model.trim().is_empty())
+        .unwrap_or("fixture-model");
+    let authored = json!({ "model": model_id });
+    let authored_sha256 = canonical_authored_options_sha256(&authored).expect("authored digest");
+    let routes = FIXTURE_ROUTES
+        .iter()
+        .map(|(backend, platform)| {
+            let member = PortableArtifactMember {
+                role: ArtifactMemberRole::Primary,
+                component_id: None,
+                source: PortableSourceIdentity::Revision {
+                    identity: ArtifactIdentity::pinned("fixture/model", "1".repeat(40), "default")
+                        .expect("pinned fixture identity"),
+                },
+                tier: None,
+                files: vec![PortableArtifactFile {
+                    relative_path: "weights.safetensors".into(),
+                    size_bytes: 1,
+                    sha256: format!("sha256:{}", "a".repeat(64)),
+                }],
+            };
+            let model = PortableModelBinding::new(
+                "modelManifestEntry",
+                model_id,
+                *backend,
+                "default",
+                None,
+                authored_sha256.clone(),
+                vec![member],
+            )
+            .expect("fixture model binding");
+            let route =
+                PortableRouteBinding::new(*backend, *platform, vec![model]).expect("fixture route");
+            (route.key(), route)
+        })
+        .collect();
+    serde_json::to_value(PortableJobBinding::new(authored, routes).expect("fixture binding"))
+        .expect("fixture binding serializes")
+}
+
+impl PortableProtocolFixture for JobsStore {
+    fn create_admitted_job(&self, request: CreateJob) -> Result<JobSnapshot, JobsStoreError> {
+        let binding = fixture_portable_binding_for(&request.payload);
+        self.create_job_with_portable_binding(request, None, None, Some(&binding))
+    }
+
+    fn upgrade_historical_carriers(&self) -> Result<(), JobsStoreError> {
+        // The batch is bounded (8 rows); a row a concurrent claimer already bound or claimed is
+        // refused by the store and drops out of the next batch.
+        for _ in 0..1_000 {
+            let batch = self.unbound_queued_model_jobs(8)?;
+            if batch.is_empty() {
+                return Ok(());
+            }
+            for job in batch {
+                self.bind_historical_queued_job(
+                    &job,
+                    &job.payload,
+                    &fixture_portable_binding(&job),
+                )?;
+            }
+        }
+        panic!("historical fixture upgrade did not converge");
+    }
+
+    fn register_portable_worker(
+        &self,
+        request: RegisterWorker,
+    ) -> Result<WorkerSnapshot, JobsStoreError> {
+        let platform = fixture_portable_route(&request.gpu_id, &request.capabilities)
+            .map(|(_, platform)| platform);
+        self.register_worker_with_platform(request, platform)
+    }
+
+    fn claim_portable(&self, worker_id: &str) -> Result<Option<JobSnapshot>, JobsStoreError> {
+        Ok(self.claim_portable_routed(worker_id, false)?.0)
+    }
+
+    fn claim_portable_routed(
+        &self,
+        worker_id: &str,
+        mlx_required: bool,
+    ) -> Result<(Option<JobSnapshot>, Option<RouteDecision>), JobsStoreError> {
+        self.upgrade_historical_carriers()?;
+        let worker = self.get_worker(worker_id)?;
+        let Some((backend, platform)) =
+            fixture_portable_route(&worker.gpu_id, &worker.capabilities)
+        else {
+            return self.claim_next_job_routed(worker_id, mlx_required);
+        };
+        self.claim_next_job_routed_with_portable_binding(
+            worker_id,
+            mlx_required,
+            sceneworks_core::model_artifacts::portable_binding::PORTABLE_MODEL_BINDING_VERSION,
+            Some(backend),
+            Some(platform),
+        )
+        .map(|(job, decision, _)| (job, decision))
+    }
+}
+
 fn store(name: &str) -> TestStore {
     let db = temp_db(name);
     let store = JobsStore::new(db.path());
@@ -96,7 +267,16 @@ fn store_started_at(name: &str, unix_seconds: i64) -> TestStore {
     TestStore { store, _db: db }
 }
 
-fn image_job(payload: Map<String, Value>) -> CreateJob {
+/// The generic lifecycle fixture job. These tests are about queue/progress/heartbeat semantics,
+/// not model routing, so a job that names no model runs a shipped model the generic worker's
+/// production lane (the candle descriptor below) can serve. Before the portable registry the
+/// synthetic torch descriptor claimed model-less image jobs; no shipped worker does that now.
+const GENERIC_FIXTURE_MODEL: &str = "z_image_turbo";
+
+fn image_job(mut payload: Map<String, Value>) -> CreateJob {
+    payload
+        .entry("model")
+        .or_insert_with(|| Value::String(GENERIC_FIXTURE_MODEL.to_owned()));
     CreateJob {
         job_type: JobType::ImageGenerate,
         project_id: Some("project-1".to_owned()),
@@ -110,13 +290,18 @@ fn image_job(payload: Map<String, Value>) -> CreateJob {
     }
 }
 
+/// The generic GPU worker: the shipped non-MLX GPU worker (the candle descriptor), which speaks
+/// the portable claim protocol. A retired torch descriptor can no longer run any model job.
 fn register_image_worker(store: &JobsStore) {
     store
-        .register_worker(RegisterWorker {
+        .register_portable_worker(RegisterWorker {
             worker_id: "worker-1".to_owned(),
             gpu_id: "gpu-0".to_owned(),
             gpu_name: Some("GPU 0".to_owned()),
-            capabilities: vec![WorkerCapability::ImageGenerate],
+            capabilities: vec![
+                WorkerCapability::ImageGenerate,
+                WorkerCapability::Unknown("candle".to_owned()),
+            ],
             loaded_models: Vec::new(),
             utilization: None,
         })
@@ -1109,7 +1294,7 @@ fn job_lifecycle_create_claim_complete() {
         .create_job(image_job(object(json!({ "prompt": "mist over hills" }))))
         .expect("job creates");
     let claimed = store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("claim succeeds")
         .expect("job claimed");
 
@@ -1156,7 +1341,7 @@ fn clear_terminal_jobs_soft_hides_from_queue_but_keeps_stats() {
         .create_job(image_job(object(json!({ "prompt": "done" }))))
         .expect("job creates");
     let claimed = store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("claim")
         .expect("claimed");
     assert_eq!(claimed.id, completed.id);
@@ -1415,7 +1600,7 @@ fn cancel_pending_jobs_cancels_only_not_yet_started_jobs() {
         .expect("creates");
     // Claim one job so it becomes worker-owned/active (Preparing).
     let active = store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("claim runs")
         .expect("claimed");
     assert_eq!(active.status, JobStatus::Preparing);
@@ -1567,7 +1752,7 @@ fn pending_caption_job_is_not_claimable() {
     // A worker must not be able to claim it while it is pending.
     assert!(
         store
-            .claim_next_job("worker-1")
+            .claim_portable("worker-1")
             .expect("claim runs")
             .is_none(),
         "a pending_caption job must never be claimed"
@@ -1611,7 +1796,7 @@ fn promote_pending_caption_rewrites_prompt_and_queues() {
 
     // Now claimable.
     let claimed = store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("claim runs")
         .expect("promoted job is claimable");
     assert_eq!(claimed.id, created.id);
@@ -1774,7 +1959,7 @@ fn progress_keeps_running_max_for_peak_gpu_meters() {
     let created = store
         .create_job(image_job(object(json!({ "prompt": "p" }))))
         .expect("job creates");
-    store.claim_next_job("worker-1").expect("claim ok");
+    store.claim_portable("worker-1").expect("claim ok");
 
     fn progress(memory: Option<f64>, load: Option<f64>) -> ProgressUpdate {
         ProgressUpdate {
@@ -1869,7 +2054,7 @@ fn progress_leaves_peaks_null_when_no_samples_arrive() {
     let created = store
         .create_job(image_job(object(json!({ "prompt": "p" }))))
         .expect("job creates");
-    store.claim_next_job("worker-1").expect("claim ok");
+    store.claim_portable("worker-1").expect("claim ok");
 
     let progress_no_peaks = ProgressUpdate {
         status: JobStatus::Running,
@@ -2039,12 +2224,13 @@ fn job_snapshot_title_truncates_long_prompts() {
 fn non_gpu_jobs_can_claim_while_gpu_is_busy() {
     let store = store("non-gpu-claim");
     store
-        .register_worker(RegisterWorker {
+        .register_portable_worker(RegisterWorker {
             worker_id: "worker-1".to_owned(),
             gpu_id: "gpu-0".to_owned(),
             gpu_name: None,
             capabilities: vec![
                 WorkerCapability::ImageGenerate,
+                WorkerCapability::Unknown("candle".to_owned()),
                 WorkerCapability::ModelDownload,
             ],
             loaded_models: Vec::new(),
@@ -2071,14 +2257,14 @@ fn non_gpu_jobs_can_claim_while_gpu_is_busy() {
 
     assert_eq!(
         store
-            .claim_next_job("worker-1")
+            .claim_portable("worker-1")
             .expect("first claim succeeds")
             .expect("first job")
             .id,
         gpu_job.id
     );
     let second = store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("second claim succeeds")
         .expect("second job");
     assert_eq!(second.id, download_job.id);
@@ -2093,12 +2279,13 @@ fn model_convert_can_claim_while_gpu_is_busy() {
     // It must claim on the CPU lane even while a GPU job is active on the worker.
     let store = store("model-convert-claim");
     store
-        .register_worker(RegisterWorker {
+        .register_portable_worker(RegisterWorker {
             worker_id: "worker-1".to_owned(),
             gpu_id: "gpu-0".to_owned(),
             gpu_name: None,
             capabilities: vec![
                 WorkerCapability::ImageGenerate,
+                WorkerCapability::Unknown("candle".to_owned()),
                 WorkerCapability::ModelConvert,
             ],
             loaded_models: Vec::new(),
@@ -2126,7 +2313,7 @@ fn model_convert_can_claim_while_gpu_is_busy() {
     // First claim takes the GPU job; it is now active on gpu-0.
     assert_eq!(
         store
-            .claim_next_job("worker-1")
+            .claim_portable("worker-1")
             .expect("first claim succeeds")
             .expect("first job")
             .id,
@@ -2135,7 +2322,7 @@ fn model_convert_can_claim_while_gpu_is_busy() {
     // With a GPU job active only non-GPU work is claimable; model_convert must
     // still claim and land on the CPU lane.
     let second = store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("second claim succeeds")
         .expect("second job");
     assert_eq!(second.id, convert_job.id);
@@ -2146,7 +2333,7 @@ fn model_convert_can_claim_while_gpu_is_busy() {
 fn claim_skips_jobs_not_supported_by_worker_capabilities() {
     let store = store("capabilities");
     store
-        .register_worker(RegisterWorker {
+        .register_portable_worker(RegisterWorker {
             worker_id: "worker-1".to_owned(),
             gpu_id: "gpu-0".to_owned(),
             gpu_name: None,
@@ -2174,7 +2361,7 @@ fn claim_skips_jobs_not_supported_by_worker_capabilities() {
 
     assert_eq!(
         store
-            .claim_next_job("worker-1")
+            .claim_portable("worker-1")
             .expect("claim succeeds")
             .expect("job claimed")
             .id,
@@ -2189,9 +2376,10 @@ fn claim_finds_compatible_job_behind_large_incompatible_prefix() {
     // specialized/utility worker sits idle behind a long incompatible prefix.
     let store = store("starvation");
     store
-        .register_worker(RegisterWorker {
+        .register_portable_worker(RegisterWorker {
             worker_id: "downloader".to_owned(),
-            gpu_id: "gpu-0".to_owned(),
+            // The shipped utility lane: a CPU worker on the portable protocol.
+            gpu_id: "cpu".to_owned(),
             gpu_name: None,
             capabilities: vec![WorkerCapability::ModelDownload],
             loaded_models: Vec::new(),
@@ -2222,7 +2410,7 @@ fn claim_finds_compatible_job_behind_large_incompatible_prefix() {
         .expect("download job creates");
 
     let claimed = store
-        .claim_next_job("downloader")
+        .claim_portable("downloader")
         .expect("claim succeeds")
         .expect("compatible job claimed despite the incompatible prefix");
     assert_eq!(claimed.id, download_job.id);
@@ -2280,7 +2468,7 @@ fn claim_hydrates_one_snapshot_behind_same_type_dynamic_incompatibilities() {
         .expect("compatible job creates");
 
     let claimed = store
-        .claim_next_job("worker-candle")
+        .claim_portable("worker-candle")
         .expect("claim succeeds")
         .expect("compatible tail claims");
     assert_eq!(claimed.id, compatible.id);
@@ -2299,12 +2487,15 @@ fn claim_hydrates_one_snapshot_behind_same_type_dynamic_incompatibilities() {
 fn same_rank_warm_model_selection_hydrates_only_the_winner() {
     let store = store("same-rank-warm-model-headers");
     store
-        .register_worker(RegisterWorker {
+        .register_portable_worker(RegisterWorker {
             worker_id: "worker-1".to_owned(),
             gpu_id: "gpu-0".to_owned(),
             gpu_name: None,
-            capabilities: vec![WorkerCapability::ImageGenerate],
-            loaded_models: vec!["warm-model".to_owned()],
+            capabilities: vec![
+                WorkerCapability::ImageGenerate,
+                WorkerCapability::Unknown("candle".to_owned()),
+            ],
+            loaded_models: vec!["z_image_turbo".to_owned()],
             utilization: None,
         })
         .expect("worker registers");
@@ -2319,13 +2510,13 @@ fn same_rank_warm_model_selection_hydrates_only_the_winner() {
     }
     let warm = store
         .create_job(image_job(object(json!({
-            "model": "warm-model",
+            "model": "z_image_turbo",
             "prompt": "warm compatible tail"
         }))))
         .expect("warm job creates");
 
     let claimed = store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("claim succeeds")
         .expect("warm job claims");
     assert_eq!(claimed.id, warm.id);
@@ -2340,7 +2531,7 @@ fn direct_payload_sql_fails_closed_until_initialize_backfills_facts() {
     let store = store("direct-payload-stales-claim-facts");
     register_candle_worker(&store, "worker-candle");
     let job = store
-        .create_job(image_job(object(json!({
+        .create_admitted_job(image_job(object(json!({
             "model": "z_image_turbo",
             "prompt": "original"
         }))))
@@ -2359,7 +2550,7 @@ fn direct_payload_sql_fails_closed_until_initialize_backfills_facts() {
     drop(connection);
 
     assert!(matches!(
-        store.claim_next_job("worker-candle"),
+        store.claim_portable("worker-candle"),
         Err(JobsStoreError::StaleClaimRoutingFacts { ref job_id, .. }) if job_id == &job.id
     ));
     assert_eq!(
@@ -2373,7 +2564,7 @@ fn direct_payload_sql_fails_closed_until_initialize_backfills_facts() {
         .expect("initialize backfills current facts");
     assert_eq!(
         store
-            .claim_next_job("worker-candle")
+            .claim_portable("worker-candle")
             .expect("claim succeeds after backfill")
             .expect("job claims")
             .id,
@@ -2386,7 +2577,7 @@ fn selected_snapshot_rejects_corrupt_current_version_projection() {
     let store = store("corrupt-current-claim-facts");
     register_candle_worker(&store, "worker-candle");
     let job = store
-        .create_job(image_job(object(json!({
+        .create_admitted_job(image_job(object(json!({
             "model": "pulid_flux_dev",
             "prompt": "not candle compatible"
         }))))
@@ -2402,7 +2593,7 @@ fn selected_snapshot_rejects_corrupt_current_version_projection() {
     drop(connection);
 
     assert!(matches!(
-        store.claim_next_job("worker-candle"),
+        store.claim_portable("worker-candle"),
         Err(JobsStoreError::ClaimRoutingFactsMismatch { ref job_id, .. }) if job_id == &job.id
     ));
     assert_eq!(store.last_claim_hydration().routing_snapshots_hydrated, 1);
@@ -2452,7 +2643,7 @@ fn pending_caption_payload_rewrite_refreshes_claim_facts_atomically() {
 
     assert_eq!(
         store
-            .claim_next_job("worker-candle")
+            .claim_portable("worker-candle")
             .expect("claim succeeds")
             .expect("rewritten job claims")
             .id,
@@ -2464,45 +2655,46 @@ fn pending_caption_payload_rewrite_refreshes_claim_facts_atomically() {
 fn real_lora_train_requires_execute_capability() {
     let store = store("lora-train-execute-routing");
     // A GPU worker that can validate dry-run plans but lacks the inference backend
-    // advertises lora_train but not lora_train_execute.
+    // advertises lora_train but not lora_train_execute. Both workers are the shipped candle
+    // lane, so the real (model-backed) run reaches the execute gate through the bound claim.
     store
-        .register_worker(RegisterWorker {
+        .register_portable_worker(RegisterWorker {
             worker_id: "dry-only".to_owned(),
             gpu_id: "gpu-0".to_owned(),
             gpu_name: None,
-            capabilities: vec![WorkerCapability::Gpu, WorkerCapability::LoraTrain],
+            capabilities: with_candle(vec![WorkerCapability::Gpu, WorkerCapability::LoraTrain]),
             loaded_models: Vec::new(),
             utilization: None,
         })
         .expect("worker registers");
     let real = store
-        .create_job(lora_train_job("auto", false))
+        .create_job(trainable_lora_train_job(false))
         .expect("real training job creates");
 
     // The dry-run-only worker must not claim the real job; it stays queued for a
     // backend-capable worker instead of being claimed and failed.
     assert!(store
-        .claim_next_job("dry-only")
+        .claim_portable("dry-only")
         .expect("claim succeeds")
         .is_none());
 
     store
-        .register_worker(RegisterWorker {
+        .register_portable_worker(RegisterWorker {
             worker_id: "trainer".to_owned(),
             gpu_id: "gpu-1".to_owned(),
             gpu_name: None,
-            capabilities: vec![
+            capabilities: with_candle(vec![
                 WorkerCapability::Gpu,
                 WorkerCapability::LoraTrain,
                 WorkerCapability::LoraTrainExecute,
-            ],
+            ]),
             loaded_models: Vec::new(),
             utilization: None,
         })
         .expect("worker registers");
     assert_eq!(
         store
-            .claim_next_job("trainer")
+            .claim_portable("trainer")
             .expect("claim succeeds")
             .expect("job claimed")
             .id,
@@ -2514,7 +2706,7 @@ fn real_lora_train_requires_execute_capability() {
 fn dry_run_lora_train_does_not_require_execute_capability() {
     let store = store("lora-train-dry-routing");
     store
-        .register_worker(RegisterWorker {
+        .register_portable_worker(RegisterWorker {
             worker_id: "dry-only".to_owned(),
             gpu_id: "gpu-0".to_owned(),
             gpu_name: None,
@@ -2529,7 +2721,7 @@ fn dry_run_lora_train_does_not_require_execute_capability() {
 
     assert_eq!(
         store
-            .claim_next_job("dry-only")
+            .claim_portable("dry-only")
             .expect("claim succeeds")
             .expect("job claimed")
             .id,
@@ -2540,13 +2732,13 @@ fn dry_run_lora_train_does_not_require_execute_capability() {
 #[test]
 fn training_progress_stages_persist_under_running_and_reject_unknown_status() {
     let store = store("training-progress-stages");
-    register_gpu_worker(&store, "trainer", "gpu-0", training_caps());
+    register_gpu_worker(&store, "trainer", "gpu-0", with_candle(training_caps()));
     let job = store
-        .create_job(lora_train_job("auto", false))
+        .create_job(trainable_lora_train_job(false))
         .expect("training job creates");
     assert_eq!(
         store
-            .claim_next_job("trainer")
+            .claim_portable("trainer")
             .expect("claim succeeds")
             .expect("training job is claimable")
             .id,
@@ -2608,13 +2800,13 @@ fn training_progress_stages_persist_under_running_and_reject_unknown_status() {
 #[test]
 fn training_progress_merges_latest_sample_batches_into_history() {
     let store = store("training-sample-history");
-    register_gpu_worker(&store, "trainer", "gpu-0", training_caps());
+    register_gpu_worker(&store, "trainer", "gpu-0", with_candle(training_caps()));
     let job = store
-        .create_job(lora_train_job("auto", false))
+        .create_job(trainable_lora_train_job(false))
         .expect("training job creates");
     assert_eq!(
         store
-            .claim_next_job("trainer")
+            .claim_portable("trainer")
             .expect("claim succeeds")
             .expect("training job is claimable")
             .id,
@@ -2686,7 +2878,7 @@ fn gpu_generation_jobs_reject_cpu_requested_gpu() {
 fn cpu_worker_cannot_claim_auto_gpu_generation_job_even_with_capability() {
     let store = store("cpu-cannot-claim-auto-gpu-job");
     store
-        .register_worker(RegisterWorker {
+        .register_portable_worker(RegisterWorker {
             worker_id: "worker-cpu".to_owned(),
             gpu_id: "CPU".to_owned(),
             gpu_name: Some("CPU inference worker".to_owned()),
@@ -2700,7 +2892,7 @@ fn cpu_worker_cannot_claim_auto_gpu_generation_job_even_with_capability() {
         .expect("gpu job creates");
 
     assert!(store
-        .claim_next_job("worker-cpu")
+        .claim_portable("worker-cpu")
         .expect("claim succeeds")
         .is_none());
 }
@@ -2709,11 +2901,14 @@ fn cpu_worker_cannot_claim_auto_gpu_generation_job_even_with_capability() {
 fn auto_claim_prefers_job_matching_loaded_model() {
     let store = store("loaded-model-preference");
     store
-        .register_worker(RegisterWorker {
+        .register_portable_worker(RegisterWorker {
             worker_id: "worker-1".to_owned(),
             gpu_id: "gpu-0".to_owned(),
             gpu_name: None,
-            capabilities: vec![WorkerCapability::ImageGenerate],
+            capabilities: vec![
+                WorkerCapability::ImageGenerate,
+                WorkerCapability::Unknown("candle".to_owned()),
+            ],
             loaded_models: vec![
                 "z_image_turbo".to_owned(),
                 "Tongyi-MAI/Z-Image-Turbo".to_owned(),
@@ -2722,14 +2917,14 @@ fn auto_claim_prefers_job_matching_loaded_model() {
         })
         .expect("worker registers");
     let other_model_job = store
-        .create_job(image_job(object(json!({ "model": "qwen_image_edit" }))))
+        .create_job(image_job(object(json!({ "model": "chroma1_base" }))))
         .expect("other model job creates");
     let warm_model_job = store
         .create_job(image_job(object(json!({ "model": "z_image_turbo" }))))
         .expect("warm model job creates");
 
     let claimed = store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("claim succeeds")
         .expect("job claimed");
 
@@ -2747,13 +2942,14 @@ fn auto_claim_prefers_job_matching_loaded_model() {
 fn prompt_refinement_automatically_jumps_a_compatible_worker_queue() {
     let store = store("prompt-refine-priority");
     store
-        .register_worker(RegisterWorker {
+        .register_portable_worker(RegisterWorker {
             worker_id: "worker-1".to_owned(),
             gpu_id: "gpu-0".to_owned(),
             gpu_name: None,
             capabilities: vec![
                 WorkerCapability::Gpu,
                 WorkerCapability::ImageGenerate,
+                WorkerCapability::Unknown("candle".to_owned()),
                 WorkerCapability::PromptRefine,
             ],
             loaded_models: Vec::new(),
@@ -2773,7 +2969,7 @@ fn prompt_refinement_automatically_jumps_a_compatible_worker_queue() {
         "prompt refinement receives a durable priority rank at enqueue"
     );
     let claimed = store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("claim succeeds")
         .expect("job claimed");
     assert_eq!(claimed.id, refinement.id);
@@ -2790,32 +2986,36 @@ fn prompt_refinement_automatically_jumps_a_compatible_worker_queue() {
 fn manual_priority_moves_only_pending_jobs_and_beats_gpu_affinity() {
     let store = store("manual-queue-priority");
     store
-        .register_worker(RegisterWorker {
+        .register_portable_worker(RegisterWorker {
             worker_id: "worker-1".to_owned(),
             gpu_id: "gpu-0".to_owned(),
             gpu_name: None,
-            capabilities: vec![WorkerCapability::Gpu, WorkerCapability::ImageGenerate],
-            loaded_models: vec!["warm-model".to_owned()],
+            capabilities: vec![
+                WorkerCapability::Gpu,
+                WorkerCapability::ImageGenerate,
+                WorkerCapability::Unknown("candle".to_owned()),
+            ],
+            loaded_models: vec!["z_image_turbo".to_owned()],
             utilization: None,
         })
         .expect("worker registers");
 
     let active = store
-        .create_job(image_job(object(json!({ "model": "first-model" }))))
+        .create_job(image_job(object(json!({ "model": "sdxl" }))))
         .expect("active job creates");
     let claimed = store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("first claim succeeds")
         .expect("first job claimed");
     assert_eq!(claimed.id, active.id);
 
     let selected = store
-        .create_job(image_job(object(json!({ "model": "cold-model" }))))
+        .create_job(image_job(object(json!({ "model": "chroma1_base" }))))
         .expect("selected job creates");
     let affinity_favorite = store
         .create_job(CreateJob {
             requested_gpu: "gpu-0".to_owned(),
-            ..image_job(object(json!({ "model": "warm-model" })))
+            ..image_job(object(json!({ "model": "z_image_turbo" })))
         })
         .expect("affinity-favored job creates");
 
@@ -2834,7 +3034,7 @@ fn manual_priority_moves_only_pending_jobs_and_beats_gpu_affinity() {
 
     complete_job(&store, &active.id);
     let claimed = store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("next claim succeeds")
         .expect("next job claimed");
     assert_eq!(
@@ -2854,11 +3054,14 @@ fn manual_priority_moves_only_pending_jobs_and_beats_gpu_affinity() {
 fn loaded_model_preference_does_not_skip_explicit_gpu_job() {
     let store = store("loaded-model-explicit-gpu");
     store
-        .register_worker(RegisterWorker {
+        .register_portable_worker(RegisterWorker {
             worker_id: "worker-1".to_owned(),
             gpu_id: "gpu-0".to_owned(),
             gpu_name: None,
-            capabilities: vec![WorkerCapability::ImageGenerate],
+            capabilities: vec![
+                WorkerCapability::ImageGenerate,
+                WorkerCapability::Unknown("candle".to_owned()),
+            ],
             loaded_models: vec!["z_image_turbo".to_owned()],
             utilization: None,
         })
@@ -2866,7 +3069,7 @@ fn loaded_model_preference_does_not_skip_explicit_gpu_job() {
     let explicit_job = store
         .create_job(CreateJob {
             requested_gpu: "gpu-0".to_owned(),
-            ..image_job(object(json!({ "model": "qwen_image_edit" })))
+            ..image_job(object(json!({ "model": "chroma1_base" })))
         })
         .expect("explicit job creates");
     store
@@ -2875,7 +3078,7 @@ fn loaded_model_preference_does_not_skip_explicit_gpu_job() {
 
     assert_eq!(
         store
-            .claim_next_job("worker-1")
+            .claim_portable("worker-1")
             .expect("claim succeeds")
             .expect("job claimed")
             .id,
@@ -2887,30 +3090,33 @@ fn loaded_model_preference_does_not_skip_explicit_gpu_job() {
 fn explicit_gpu_job_beats_younger_warm_auto_match() {
     let store = store("explicit-gpu-before-warm-auto");
     store
-        .register_worker(RegisterWorker {
+        .register_portable_worker(RegisterWorker {
             worker_id: "worker-1".to_owned(),
             gpu_id: "gpu-0".to_owned(),
             gpu_name: None,
-            capabilities: vec![WorkerCapability::ImageGenerate],
-            loaded_models: vec!["model-x".to_owned()],
+            capabilities: vec![
+                WorkerCapability::ImageGenerate,
+                WorkerCapability::Unknown("candle".to_owned()),
+            ],
+            loaded_models: vec!["z_image_turbo".to_owned()],
             utilization: None,
         })
         .expect("worker registers");
     let auto_other = store
-        .create_job(image_job(object(json!({ "model": "model-y" }))))
+        .create_job(image_job(object(json!({ "model": "chroma1_base" }))))
         .expect("auto other job creates");
     let explicit_job = store
         .create_job(CreateJob {
             requested_gpu: "gpu-0".to_owned(),
-            ..image_job(object(json!({ "model": "model-y" })))
+            ..image_job(object(json!({ "model": "chroma1_base" })))
         })
         .expect("explicit job creates");
     let warm_auto = store
-        .create_job(image_job(object(json!({ "model": "model-x" }))))
+        .create_job(image_job(object(json!({ "model": "z_image_turbo" }))))
         .expect("warm auto job creates");
 
     let claimed = store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("claim succeeds")
         .expect("job claimed");
 
@@ -2935,11 +3141,14 @@ fn explicit_gpu_job_beats_younger_warm_auto_match() {
 fn auto_gpu_claim_defers_to_less_loaded_compatible_worker() {
     let store = store("auto-gpu-utilization-preference");
     store
-        .register_worker(RegisterWorker {
+        .register_portable_worker(RegisterWorker {
             worker_id: "worker-loaded".to_owned(),
             gpu_id: "gpu-0".to_owned(),
             gpu_name: Some("Loaded GPU".to_owned()),
-            capabilities: vec![WorkerCapability::ImageGenerate],
+            capabilities: vec![
+                WorkerCapability::ImageGenerate,
+                WorkerCapability::Unknown("candle".to_owned()),
+            ],
             loaded_models: Vec::new(),
             utilization: Some(WorkerUtilizationSnapshot {
                 memory_total_mb: Some(24_000),
@@ -2950,11 +3159,14 @@ fn auto_gpu_claim_defers_to_less_loaded_compatible_worker() {
         })
         .expect("loaded worker registers");
     store
-        .register_worker(RegisterWorker {
+        .register_portable_worker(RegisterWorker {
             worker_id: "worker-idle".to_owned(),
             gpu_id: "gpu-1".to_owned(),
             gpu_name: Some("Idle GPU".to_owned()),
-            capabilities: vec![WorkerCapability::ImageGenerate],
+            capabilities: vec![
+                WorkerCapability::ImageGenerate,
+                WorkerCapability::Unknown("candle".to_owned()),
+            ],
             loaded_models: Vec::new(),
             utilization: Some(WorkerUtilizationSnapshot {
                 memory_total_mb: Some(24_000),
@@ -2969,11 +3181,11 @@ fn auto_gpu_claim_defers_to_less_loaded_compatible_worker() {
         .expect("job creates");
 
     assert!(store
-        .claim_next_job("worker-loaded")
+        .claim_portable("worker-loaded")
         .expect("loaded claim succeeds")
         .is_none());
     let claimed = store
-        .claim_next_job("worker-idle")
+        .claim_portable("worker-idle")
         .expect("idle claim succeeds")
         .expect("idle worker claims");
 
@@ -2985,7 +3197,7 @@ fn auto_gpu_claim_defers_to_less_loaded_compatible_worker() {
 fn cpu_utility_worker_does_not_claim_gpu_generation_job() {
     let store = store("cpu-utility-no-gpu-jobs");
     store
-        .register_worker(RegisterWorker {
+        .register_portable_worker(RegisterWorker {
             worker_id: "worker-cpu".to_owned(),
             gpu_id: "cpu".to_owned(),
             gpu_name: Some("CPU utility worker".to_owned()),
@@ -3005,7 +3217,7 @@ fn cpu_utility_worker_does_not_claim_gpu_generation_job() {
         .expect("gpu job creates");
 
     assert!(store
-        .claim_next_job("worker-cpu")
+        .claim_portable("worker-cpu")
         .expect("claim succeeds")
         .is_none());
 }
@@ -3018,7 +3230,7 @@ fn idle_heartbeat_interrupts_previous_heartbeated_job() {
         .create_job(image_job(Map::new()))
         .expect("job creates");
     let claimed = store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("claim succeeds")
         .expect("job claimed");
 
@@ -3169,7 +3381,7 @@ fn startup_preserves_exact_worker_owner_until_same_id_worker_reports_idle() {
         .create_job(image_job(Map::new()))
         .expect("job creates");
     store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("claim succeeds")
         .expect("job claimed");
     store
@@ -3217,7 +3429,7 @@ fn startup_preserves_exact_worker_owner_until_same_id_worker_reports_idle() {
     // immediately-due idle heartbeat. Registration must not erase ownership before that heartbeat
     // tells us whether this is the same process.
     let registered = store
-        .register_worker(RegisterWorker {
+        .register_portable_worker(RegisterWorker {
             worker_id: "worker-1".to_owned(),
             gpu_id: "gpu-0".to_owned(),
             gpu_name: Some("GPU 0".to_owned()),
@@ -3262,7 +3474,7 @@ fn startup_preserved_worker_job_is_bounded_by_the_stale_sweep() {
         .create_job(image_job(Map::new()))
         .expect("job creates");
     store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("claim succeeds")
         .expect("job claimed");
     store
@@ -3304,7 +3516,7 @@ fn startup_interrupts_an_active_job_with_inconsistent_worker_ownership() {
         .create_job(image_job(Map::new()))
         .expect("job creates");
     store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("claim succeeds")
         .expect("job claimed");
     Connection::open(store.db_path())
@@ -3341,7 +3553,7 @@ fn signal_death_fails_active_job_with_attributed_error() {
         .create_job(image_job(Map::new()))
         .expect("job creates");
     let claimed = store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("claim succeeds")
         .expect("job claimed");
     assert_eq!(claimed.id, created.id);
@@ -3399,7 +3611,7 @@ fn non_signal_exit_fails_active_job_with_exit_code_error() {
         .create_job(image_job(Map::new()))
         .expect("job creates");
     let claimed = store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("claim succeeds")
         .expect("job claimed");
     assert_eq!(claimed.id, created.id);
@@ -3442,7 +3654,7 @@ fn idle_heartbeat_does_not_interrupt_just_claimed_job() {
         .create_job(image_job(Map::new()))
         .expect("job creates");
     let claimed = store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("claim succeeds")
         .expect("job claimed");
 
@@ -3488,7 +3700,7 @@ fn heartbeat_only_refreshes_a_job_the_reporting_worker_owns() {
     register_image_worker(&store);
     // A second, distinct worker that does not own the claimed job.
     store
-        .register_worker(RegisterWorker {
+        .register_portable_worker(RegisterWorker {
             worker_id: "worker-2".to_owned(),
             gpu_id: "gpu-1".to_owned(),
             gpu_name: Some("GPU 1".to_owned()),
@@ -3502,7 +3714,7 @@ fn heartbeat_only_refreshes_a_job_the_reporting_worker_owns() {
         .create_job(image_job(Map::new()))
         .expect("job creates");
     let claimed = store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("claim succeeds")
         .expect("job claimed");
     assert_eq!(claimed.id, created.id);
@@ -3729,7 +3941,7 @@ fn stale_sweep_marks_worker_offline_and_job_interrupted() {
         .create_job(image_job(Map::new()))
         .expect("job creates");
     store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("claim succeeds")
         .expect("job claimed");
 
@@ -3774,7 +3986,7 @@ fn claim_and_go_quiet_since_2000(store: &JobsStore) -> String {
         .create_job(image_job(Map::new()))
         .expect("job creates");
     store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("claim succeeds")
         .expect("job claimed");
     let connection = Connection::open(store.db_path()).expect("db opens");
@@ -3839,14 +4051,17 @@ fn stale_sweep_keeps_lost_contact_wording_for_a_worker_seen_this_session() {
 fn json_columns_use_python_compatible_sorted_key_order() {
     let store = store("json-order");
     let job = store
-        .create_job(image_job(object(json!({
-            "z": 1,
-            "a": {
-                "b": 2,
-                "a": 1,
-                "items": [{ "z": 3, "a": 2 }]
-            }
-        }))))
+        .create_job(image_job_with(
+            json!({
+                "z": 1,
+                "a": {
+                    "b": 2,
+                    "a": 1,
+                    "items": [{ "z": 3, "a": 2 }]
+                }
+            }),
+            "auto",
+        ))
         .expect("job creates");
 
     let connection = Connection::open(store.db_path()).expect("db opens");
@@ -3933,6 +4148,22 @@ fn lora_train_job(requested_gpu: &str, dry_run: bool) -> CreateJob {
     }
 }
 
+/// A `lora_train` job whose resolved plan names a shipped native trainer (Z-Image LoRA), so the
+/// shipped candle worker can claim its real run through the bound claim. The plan-only
+/// [`lora_train_job`] names no kernel, which no native worker trains.
+fn trainable_lora_train_job(dry_run: bool) -> CreateJob {
+    let mut job = lora_train_job("auto", dry_run);
+    job.payload.insert(
+        "plan".to_owned(),
+        json!({
+            "planVersion": 1,
+            "target": { "kernel": "z_image_lora", "baseModel": "z_image_turbo" },
+            "config": { "advanced": { "networkType": "lora" } }
+        }),
+    );
+    job
+}
+
 #[test]
 fn lora_train_rejects_cpu_requested_gpu() {
     let store = store("lora-train-rejects-cpu");
@@ -3949,7 +4180,7 @@ fn lora_train_rejects_cpu_requested_gpu() {
 fn cpu_worker_cannot_claim_lora_train_even_with_capability() {
     let store = store("cpu-cannot-claim-lora-train");
     store
-        .register_worker(RegisterWorker {
+        .register_portable_worker(RegisterWorker {
             worker_id: "worker-cpu".to_owned(),
             gpu_id: "cpu".to_owned(),
             gpu_name: Some("CPU inference worker".to_owned()),
@@ -3963,7 +4194,7 @@ fn cpu_worker_cannot_claim_lora_train_even_with_capability() {
         .expect("lora_train job creates");
 
     assert!(store
-        .claim_next_job("worker-cpu")
+        .claim_portable("worker-cpu")
         .expect("claim succeeds")
         .is_none());
 }
@@ -3972,7 +4203,7 @@ fn cpu_worker_cannot_claim_lora_train_even_with_capability() {
 fn gpu_worker_with_capability_claims_lora_train() {
     let store = store("gpu-claims-lora-train");
     store
-        .register_worker(RegisterWorker {
+        .register_portable_worker(RegisterWorker {
             worker_id: "worker-gpu".to_owned(),
             gpu_id: "gpu-0".to_owned(),
             gpu_name: Some("GPU 0".to_owned()),
@@ -3986,7 +4217,7 @@ fn gpu_worker_with_capability_claims_lora_train() {
         .expect("lora_train job creates");
 
     let claimed = store
-        .claim_next_job("worker-gpu")
+        .claim_portable("worker-gpu")
         .expect("claim succeeds")
         .expect("job claimed");
 
@@ -4000,7 +4231,7 @@ fn gpu_worker_with_capability_claims_lora_train() {
 fn gpu_worker_without_training_capability_skips_lora_train() {
     let store = store("gpu-without-training-cap");
     store
-        .register_worker(RegisterWorker {
+        .register_portable_worker(RegisterWorker {
             worker_id: "worker-gpu".to_owned(),
             gpu_id: "gpu-0".to_owned(),
             gpu_name: Some("GPU 0".to_owned()),
@@ -4014,7 +4245,7 @@ fn gpu_worker_without_training_capability_skips_lora_train() {
         .expect("lora_train job creates");
 
     assert!(store
-        .claim_next_job("worker-gpu")
+        .claim_portable("worker-gpu")
         .expect("claim succeeds")
         .is_none());
 }
@@ -4049,7 +4280,7 @@ fn register_gpu_worker(
     capabilities: Vec<WorkerCapability>,
 ) {
     store
-        .register_worker(RegisterWorker {
+        .register_portable_worker(RegisterWorker {
             worker_id: worker_id.to_owned(),
             gpu_id: gpu_id.to_owned(),
             gpu_name: None,
@@ -4058,6 +4289,13 @@ fn register_gpu_worker(
             utilization: None,
         })
         .expect("worker registers");
+}
+
+/// The shipped Windows/Linux GPU lane: a fixture GPU descriptor that also advertises `candle`, so
+/// it speaks the portable claim protocol (the retired torch descriptor never can).
+fn with_candle(mut capabilities: Vec<WorkerCapability>) -> Vec<WorkerCapability> {
+    capabilities.push(WorkerCapability::Unknown("candle".to_owned()));
+    capabilities
 }
 
 fn image_caps() -> Vec<WorkerCapability> {
@@ -4142,12 +4380,12 @@ fn mlx_eligible_image_job_defers_from_torch_worker_to_idle_mlx_worker() {
 
     // The synthetic generic descriptor refuses the MLX-eligible job; the idle mlx worker claims it.
     assert!(store
-        .claim_next_job("worker-torch")
+        .claim_portable("worker-torch")
         .expect("torch claim ok")
         .is_none());
     // The mlx worker claims it and runs it in-process.
     let claimed = store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .expect("mlx claims the job");
     assert_eq!(claimed.id, job.id);
@@ -4182,13 +4420,13 @@ fn mage_flow_image_job_with_a_lora_is_claimed_by_the_mlx_worker() {
 
     assert!(
         store
-            .claim_next_job("worker-torch")
+            .claim_portable("worker-torch")
             .expect("torch claim ok")
             .is_none(),
         "Mage-Flow uses native backends; the generic torch descriptor must not claim it"
     );
     let claimed = store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .expect(
             "the mlx worker must claim a Mage render carrying a LoRA — otherwise NO backend does \
@@ -4219,11 +4457,11 @@ fn qwen_edit_image_job_defers_to_mlx_worker() {
 
     // The synthetic generic descriptor refuses it; the idle mlx worker claims it.
     assert!(store
-        .claim_next_job("worker-torch")
+        .claim_portable("worker-torch")
         .expect("torch claim ok")
         .is_none());
     let claimed = store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .expect("mlx claims the job");
     assert_eq!(claimed.id, job.id);
@@ -4274,13 +4512,13 @@ fn sensenova_understanding_jobs_defer_to_mlx_worker() {
         // The synthetic generic descriptor refuses it; the idle mlx worker claims it in-process.
         assert!(
             store
-                .claim_next_job("worker-torch")
+                .claim_portable("worker-torch")
                 .expect("torch claim ok")
                 .is_none(),
             "{label}: torch worker should defer to the idle mlx worker"
         );
         let claimed = store
-            .claim_next_job("worker-mlx")
+            .claim_portable("worker-mlx")
             .expect("mlx claim ok")
             .expect("mlx claims the job");
         assert_eq!(claimed.id, job.id, "{label}");
@@ -4309,11 +4547,11 @@ fn qwen_edit_lightning_image_job_defers_to_mlx_worker() {
         .expect("job creates");
 
     assert!(store
-        .claim_next_job("worker-torch")
+        .claim_portable("worker-torch")
         .expect("torch claim ok")
         .is_none());
     let claimed = store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .expect("mlx claims the job");
     assert_eq!(claimed.id, job.id);
@@ -4321,7 +4559,7 @@ fn qwen_edit_lightning_image_job_defers_to_mlx_worker() {
 }
 
 #[test]
-fn mlx_worker_excluded_from_torch_only_image_job() {
+fn mlx_worker_excluded_from_unsupported_image_job() {
     let store = store("mlx-routing-exclude");
     register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
 
@@ -4339,25 +4577,28 @@ fn mlx_worker_excluded_from_torch_only_image_job() {
 
     // The mlx worker must not claim an unsupported image job.
     assert!(store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .is_none());
 
-    // The generic descriptor below is a synthetic compatibility check, not a deployed fallback.
-    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
-    let claimed = store
-        .claim_next_job("worker-torch")
-        .expect("torch claim ok")
-        .expect("torch claims the job");
-    assert_eq!(claimed.id, job.id);
-    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+    // No native lane serves the source-less edit: the shipped candle worker declines it too, and
+    // the job remains queued instead of reaching a claimant that would drop the edit.
+    register_gpu_worker(&store, "worker-candle", "0", with_candle(image_caps()));
+    assert!(store
+        .claim_portable("worker-candle")
+        .expect("candle claim ok")
+        .is_none());
+    assert_eq!(
+        store.get_job(&job.id).expect("job loads").status,
+        JobStatus::Queued
+    );
 }
 
 #[test]
 fn mlx_eligible_image_job_falls_back_to_torch_when_no_mlx_worker() {
     let store = store("mlx-routing-fallback");
     // No mlx worker registered (Windows/Linux, or the mlx worker is down).
-    register_gpu_worker(&store, "worker-torch", "cuda:0", image_caps());
+    register_gpu_worker(&store, "worker-torch", "cuda:0", with_candle(image_caps()));
 
     let job = store
         .create_job(image_job_with(
@@ -4369,7 +4610,7 @@ fn mlx_eligible_image_job_falls_back_to_torch_when_no_mlx_worker() {
     // Legacy warn-mode fixture: the synthetic generic descriptor can claim when no mlx worker is idle.
     // Production has no fallback; unsupported work remains queued.
     let claimed = store
-        .claim_next_job("worker-torch")
+        .claim_portable("worker-torch")
         .expect("torch claim ok")
         .expect("torch claims the job");
     assert_eq!(claimed.id, job.id);
@@ -4444,10 +4685,25 @@ fn queue_summary_counts_and_active_jobs_ignore_500_row_cap() {
 #[test]
 fn mlx_required_defers_eligible_job_even_with_no_idle_mlx_worker() {
     let store = store("mlx-required-defer");
-    // Only an MPS worker is registered — no idle `mlx` worker to take the job. With the
-    // flag OFF this exercises the legacy generic-worker branch; with it ON the MPS worker yields
-    // unconditionally ("never MPS" on Mac). Production has no Python fallback.
-    register_gpu_worker(&store, "worker-mps", "mps", image_caps());
+    // The only `mlx` worker is busy with another job — no idle `mlx` worker to take this one, so
+    // the flag-OFF soft deferral (idle mlx worker only) would let the non-mlx worker claim it.
+    // With the flag ON the non-mlx worker yields unconditionally ("never off-MLX" on Mac).
+    register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
+    let busy = store
+        .create_job(image_job_with(
+            json!({ "model": "z_image_turbo", "prompt": "the mlx worker's current job" }),
+            "auto",
+        ))
+        .expect("busy job creates");
+    assert_eq!(
+        store
+            .claim_portable("worker-mlx")
+            .expect("mlx claim ok")
+            .expect("mlx claims its current job")
+            .id,
+        busy.id
+    );
+    register_gpu_worker(&store, "worker-candle", "0", with_candle(image_caps()));
     store
         .create_job(image_job_with(
             json!({ "model": "z_image_turbo", "prompt": "a misty fjord" }),
@@ -4456,11 +4712,11 @@ fn mlx_required_defers_eligible_job_even_with_no_idle_mlx_worker() {
         .expect("job creates");
 
     let (claimed, decision) = store
-        .claim_next_job_routed("worker-mps", true)
+        .claim_portable_routed("worker-candle", true)
         .expect("claim ok");
     assert!(
         claimed.is_none(),
-        "MPS worker must not claim the MLX-eligible job when mlx is required"
+        "a non-mlx worker must not claim the MLX-eligible job when mlx is required"
     );
     let decision = decision.expect("a routing decision is reported");
     assert_eq!(decision.decision, "deferred_to_mlx");
@@ -4542,26 +4798,30 @@ fn fail_stranded_mlx_jobs_is_noop_when_not_required() {
 }
 
 #[test]
-fn mlx_required_still_lets_mps_claim_a_non_eligible_model() {
-    // 3483 only gates MLX-*eligible* jobs. An unsupported model is not eligible, so this synthetic
-    // MPS descriptor can still claim it — surfacing it as a loud
-    // `mlx_unsupported` failure is sc-3484's job, not this slice's.
+fn mlx_required_still_lets_a_non_mlx_worker_claim_a_non_eligible_job() {
+    // 3483 only gates MLX-*eligible* jobs. A 14B Wan MoE `extend_clip` has no MLX keyframe path
+    // (not eligible) but is served by the candle Wan-VACE lane, so the candle worker can still
+    // claim it with mlx required — surfacing MLX-unsupported work as a loud `mlx_unsupported`
+    // failure is sc-3484's job, not this slice's. A live mlx worker is registered so the claim
+    // has an MLX home it could have deferred to.
     let store = store("mlx-required-noneligible");
-    register_gpu_worker(&store, "worker-mps", "mps", image_caps());
+    register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
+    register_gpu_worker(&store, "worker-candle", "0", with_candle(video_caps()));
     let job = store
-        .create_job(image_job_with(
-            json!({ "model": "pulid_flux_dev", "prompt": "p" }),
+        .create_job(video_job_typed(
+            JobType::VideoExtend,
+            json!({ "model": "wan_2_2_t2v_14b", "mode": "extend_clip", "sourceClipAssetId": "left" }),
             "auto",
         ))
         .expect("job creates");
 
     let claimed = store
-        .claim_next_job_routed("worker-mps", true)
+        .claim_portable_routed("worker-candle", true)
         .expect("claim ok")
         .0
-        .expect("MPS claims the non-eligible job");
+        .expect("candle claims the non-eligible job");
     assert_eq!(claimed.id, job.id);
-    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("0"));
 }
 
 // epic 5483 / sc-5502 — the off-Mac candle twin of the MLX sweeps: the `candle_supported` oracle
@@ -4931,7 +5191,7 @@ fn an_unhealthy_candle_worker_keeps_stranded_jobs_queued() {
     // And the worker still claims nothing, so "queued" does not quietly become "claimed and failed".
     assert!(
         store
-            .claim_next_job("worker-candle")
+            .claim_portable("worker-candle")
             .expect("claim query succeeds")
             .is_none(),
         "the unhealthy worker must not claim the job it is keeping queued"
@@ -6312,32 +6572,23 @@ fn routing_decision_reports_claimed_by_gpu_for_uncategorized_worker() {
     // Defensive catch-all: a GPU worker that is neither `mlx` nor candle (no `candle` marker)
     // claims an MLX-eligible auto job. With the Python torch worker retired from every surface
     // this should not happen in practice, so the decision is named generically
-    // (`claimed_by_gpu`) rather than after a backend that no longer exists.
-    register_gpu_worker(&store, "worker-gpu", "cuda:0", image_caps());
+    // (`claimed_by_gpu`) rather than after a backend that no longer exists. Such a worker speaks
+    // no portable route, so it can only ever reach model-free work: a dry-run plan validation of
+    // an MLX-native training family is the MLX-eligible job it can still claim.
+    register_gpu_worker(&store, "worker-gpu", "cuda:0", training_caps());
     let job = store
-        .create_job(image_job_with(
-            json!({
-                "model": "qwen_image_edit_2511_lightning",
-                "mode": "edit_image",
-                "sourceAssetId": "asset_1",
-                "prompt": "p"
-            }),
-            "auto",
-        ))
+        .create_job(trainable_lora_train_job(true))
         .expect("job creates");
 
     let (claimed, decision) = store
-        .claim_next_job_routed("worker-gpu", false)
+        .claim_portable_routed("worker-gpu", false)
         .expect("gpu claim ok");
     assert_eq!(claimed.expect("gpu worker claims it").id, job.id);
     let decision = decision.expect("routing decision present");
     assert_eq!(decision.decision, "claimed_by_gpu");
     assert_eq!(decision.reason, "gpu_worker");
     assert_eq!(decision.gpu_id, "cuda:0");
-    assert_eq!(
-        decision.model.as_deref(),
-        Some("qwen_image_edit_2511_lightning")
-    );
+    assert_eq!(decision.job_type, "lora_train");
 }
 
 #[test]
@@ -6355,7 +6606,7 @@ fn routing_decision_reports_claimed_by_candle() {
         .expect("job creates");
 
     let (claimed, decision) = store
-        .claim_next_job_routed("worker-candle", false)
+        .claim_portable_routed("worker-candle", false)
         .expect("candle claim ok");
     assert_eq!(claimed.expect("candle claims it").id, job.id);
     let decision = decision.expect("routing decision present");
@@ -6365,9 +6616,9 @@ fn routing_decision_reports_claimed_by_candle() {
 }
 
 #[test]
-fn routing_decision_reports_deferred_to_mlx_for_torch_worker() {
+fn routing_decision_reports_deferred_to_mlx_for_candle_worker() {
     let store = store("route-decision-defer");
-    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    register_gpu_worker(&store, "worker-candle", "0", with_candle(image_caps()));
     register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
     store
         .create_job(image_job_with(
@@ -6377,12 +6628,14 @@ fn routing_decision_reports_deferred_to_mlx_for_torch_worker() {
         .expect("job creates");
 
     let (claimed, decision) = store
-        .claim_next_job_routed("worker-torch", false)
-        .expect("torch claim ok");
-    assert!(claimed.is_none(), "torch defers to the idle mlx worker");
+        .claim_portable_routed("worker-candle", false)
+        .expect("candle claim ok");
+    assert!(claimed.is_none(), "candle defers to the idle mlx worker");
     let decision = decision.expect("routing decision present");
     assert_eq!(decision.decision, "deferred_to_mlx");
     assert_eq!(decision.reason, "idle_mlx_available");
+    assert_eq!(decision.gpu_id, "0");
+    assert_eq!(decision.model.as_deref(), Some("z_image_turbo"));
 }
 
 #[test]
@@ -6397,7 +6650,7 @@ fn routing_decision_reports_claimed_by_mlx() {
         .expect("job creates");
 
     let (claimed, decision) = store
-        .claim_next_job_routed("worker-mlx", false)
+        .claim_portable_routed("worker-mlx", false)
         .expect("mlx claim ok");
     assert_eq!(claimed.expect("mlx claims it").id, job.id);
     let decision = decision.expect("routing decision present");
@@ -6407,20 +6660,22 @@ fn routing_decision_reports_claimed_by_mlx() {
 }
 
 #[test]
-fn routing_decision_is_none_for_non_mlx_model() {
+fn routing_decision_is_none_for_non_mlx_job() {
     let store = store("route-decision-none");
-    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    // A 14B Wan MoE `extend_clip` has no MLX keyframe path; the candle Wan-VACE lane serves it.
+    register_gpu_worker(&store, "worker-candle", "0", with_candle(video_caps()));
     store
-        .create_job(image_job_with(
-            json!({ "model": "some_torch_only_model", "prompt": "p" }),
+        .create_job(video_job_typed(
+            JobType::VideoExtend,
+            json!({ "model": "wan_2_2_t2v_14b", "mode": "extend_clip", "sourceClipAssetId": "left" }),
             "auto",
         ))
         .expect("job creates");
 
     let (claimed, decision) = store
-        .claim_next_job_routed("worker-torch", false)
-        .expect("torch claim ok");
-    assert!(claimed.is_some(), "torch claims the torch-only job");
+        .claim_portable_routed("worker-candle", false)
+        .expect("candle claim ok");
+    assert!(claimed.is_some(), "candle claims the non-MLX job");
     assert!(
         decision.is_none(),
         "a non-MLX-eligible claim is routing-neutral (no event)"
@@ -6456,11 +6711,11 @@ fn qwen_image_edit_job_type_defers_to_mlx_worker() {
 
     // The synthetic generic descriptor refuses the MLX-eligible edit; the idle mlx worker claims it.
     assert!(store
-        .claim_next_job("worker-torch")
+        .claim_portable("worker-torch")
         .expect("torch claim ok")
         .is_none());
     let claimed = store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .expect("mlx claims the job");
     assert_eq!(claimed.id, job.id);
@@ -6490,11 +6745,11 @@ fn sdxl_masked_image_edit_job_type_defers_to_mlx_worker() {
         .expect("job creates");
 
     assert!(store
-        .claim_next_job("worker-torch")
+        .claim_portable("worker-torch")
         .expect("torch claim ok")
         .is_none());
     let claimed = store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .expect("mlx claims the job");
     assert_eq!(claimed.id, job.id);
@@ -6502,12 +6757,13 @@ fn sdxl_masked_image_edit_job_type_defers_to_mlx_worker() {
 }
 
 #[test]
-fn active_mlx_image_edit_blocks_mps_image_edit_claim() {
-    let store = store("mlx-mps-shared-gpu-active-mlx");
-    register_gpu_worker(&store, "worker-mps", "mps", image_edit_caps());
+fn active_mlx_image_edit_blocks_a_second_apple_gpu_image_edit_claim() {
+    // The Apple unified GPU runs one GPU job at a time: while an image edit is active on it, a
+    // second image edit waits instead of being claimed onto the same GPU.
+    let store = store("mlx-shared-gpu-active-mlx");
     register_gpu_worker(&store, "worker-mlx", "mlx", image_edit_caps());
 
-    let mlx_job = store
+    let first = store
         .create_job(image_edit_job_with(
             json!({
                 "model": "qwen_image_edit_2511_lightning",
@@ -6517,96 +6773,97 @@ fn active_mlx_image_edit_blocks_mps_image_edit_claim() {
             }),
             "auto",
         ))
-        .expect("mlx job creates");
-    let claimed_mlx = store
-        .claim_next_job("worker-mlx")
+        .expect("first job creates");
+    let claimed_first = store
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .expect("mlx claims the first job");
-    assert_eq!(claimed_mlx.id, mlx_job.id);
-    assert_eq!(claimed_mlx.assigned_gpu.as_deref(), Some("mlx"));
+    assert_eq!(claimed_first.id, first.id);
+    assert_eq!(claimed_first.assigned_gpu.as_deref(), Some("mlx"));
 
-    // An unported image model is assigned to the synthetic generic descriptor in this compatibility
-    // test: it is not in MLX_ROUTED_MODELS, so it is not soft-deferred to the mlx worker. Production
-    // has no such fallback worker, so an unsupported model remains queued. (Every real built-in image
-    // family is MLX-routed after Lens landed in epic 3164 / sc-5105.)
-    let mps_job = store
-        .create_job(image_job_with(
-            json!({
-                "model": "unported_image_model",
-                "prompt": "p"
-            }),
-            "auto",
-        ))
-        .expect("mps job creates");
-
-    assert!(
-        store
-            .claim_next_job("worker-mps")
-            .expect("mps claim ok")
-            .is_none(),
-        "MPS must wait while the MLX worker is using the shared Apple GPU"
-    );
-
-    complete_job(&store, &claimed_mlx.id);
-    let claimed_mps = store
-        .claim_next_job("worker-mps")
-        .expect("mps claim ok")
-        .expect("mps claims once mlx completes");
-    assert_eq!(claimed_mps.id, mps_job.id);
-    assert_eq!(claimed_mps.assigned_gpu.as_deref(), Some("mps"));
-}
-
-#[test]
-fn active_mps_image_edit_blocks_mlx_image_edit_claim() {
-    let store = store("mlx-mps-shared-gpu-active-mps");
-    register_gpu_worker(&store, "worker-mps", "mps", image_edit_caps());
-    register_gpu_worker(&store, "worker-mlx", "mlx", image_edit_caps());
-
-    // A synthetic unported image model exercises the MPS compatibility descriptor (not in
-    // MLX_ROUTED_MODELS, so it is not soft-deferred to mlx). Production has no MPS fallback.
-    let mps_job = store
-        .create_job(image_job_with(
-            json!({
-                "model": "unported_image_model",
-                "prompt": "p"
-            }),
-            "auto",
-        ))
-        .expect("mps job creates");
-    let claimed_mps = store
-        .claim_next_job("worker-mps")
-        .expect("mps claim ok")
-        .expect("mps claims the first job");
-    assert_eq!(claimed_mps.id, mps_job.id);
-    assert_eq!(claimed_mps.assigned_gpu.as_deref(), Some("mps"));
-
-    let mlx_job = store
+    let second = store
         .create_job(image_edit_job_with(
             json!({
                 "model": "qwen_image_edit_2511_lightning",
                 "mode": "edit_image",
                 "sourceAssetId": "asset_2",
+                "prompt": "make it a charcoal sketch"
+            }),
+            "auto",
+        ))
+        .expect("second job creates");
+
+    assert!(
+        store
+            .claim_portable("worker-mlx")
+            .expect("mlx claim ok")
+            .is_none(),
+        "a second edit must wait while the first is using the shared Apple GPU"
+    );
+
+    complete_job(&store, &claimed_first.id);
+    let claimed_second = store
+        .claim_portable("worker-mlx")
+        .expect("mlx claim ok")
+        .expect("mlx claims once the first edit completes");
+    assert_eq!(claimed_second.id, second.id);
+    assert_eq!(claimed_second.assigned_gpu.as_deref(), Some("mlx"));
+}
+
+#[test]
+fn active_candle_image_edit_blocks_another_workers_claim_on_the_same_gpu() {
+    // Two worker registrations on one CUDA index (for example a restarted worker whose
+    // predecessor's job is still active) share that GPU: while one holds an active image edit,
+    // the other waits instead of claiming a second GPU job onto the same device.
+    let store = store("candle-shared-gpu-active-edit");
+    register_gpu_worker(&store, "worker-a", "0", with_candle(image_edit_caps()));
+    register_gpu_worker(&store, "worker-b", "0", with_candle(image_edit_caps()));
+
+    let first = store
+        .create_job(image_edit_job_with(
+            json!({
+                "model": "qwen_image_edit_2511_lightning",
+                "mode": "edit_image",
+                "sourceAssetId": "asset_1",
                 "prompt": "make it a watercolor painting"
             }),
             "auto",
         ))
-        .expect("mlx job creates");
+        .expect("first job creates");
+    let claimed_first = store
+        .claim_portable("worker-a")
+        .expect("worker-a claim ok")
+        .expect("worker-a claims the first job");
+    assert_eq!(claimed_first.id, first.id);
+    assert_eq!(claimed_first.assigned_gpu.as_deref(), Some("0"));
+
+    let second = store
+        .create_job(image_edit_job_with(
+            json!({
+                "model": "qwen_image_edit_2511_lightning",
+                "mode": "edit_image",
+                "sourceAssetId": "asset_2",
+                "prompt": "make it a charcoal sketch"
+            }),
+            "auto",
+        ))
+        .expect("second job creates");
 
     assert!(
         store
-            .claim_next_job("worker-mlx")
-            .expect("mlx claim ok")
+            .claim_portable("worker-b")
+            .expect("worker-b claim ok")
             .is_none(),
-        "MLX must wait while the MPS worker is using the shared Apple GPU"
+        "worker-b must wait while worker-a is using the shared GPU"
     );
 
-    complete_job(&store, &claimed_mps.id);
-    let claimed_mlx = store
-        .claim_next_job("worker-mlx")
-        .expect("mlx claim ok")
-        .expect("mlx claims once mps completes");
-    assert_eq!(claimed_mlx.id, mlx_job.id);
-    assert_eq!(claimed_mlx.assigned_gpu.as_deref(), Some("mlx"));
+    complete_job(&store, &claimed_first.id);
+    let claimed_second = store
+        .claim_portable("worker-b")
+        .expect("worker-b claim ok")
+        .expect("worker-b claims once the first edit completes");
+    assert_eq!(claimed_second.id, second.id);
+    assert_eq!(claimed_second.assigned_gpu.as_deref(), Some("0"));
 }
 
 #[test]
@@ -6627,7 +6884,7 @@ fn routing_decision_reports_claimed_by_mlx_for_image_edit() {
 
     // The fix makes the claim non-routing-neutral: a gpu_route_decision is now emitted.
     let (claimed, decision) = store
-        .claim_next_job_routed("worker-mlx", false)
+        .claim_portable_routed("worker-mlx", false)
         .expect("mlx claim ok");
     assert_eq!(claimed.expect("mlx claims it").id, job.id);
     let decision = decision.expect("routing decision present");
@@ -6637,14 +6894,14 @@ fn routing_decision_reports_claimed_by_mlx_for_image_edit() {
 }
 
 #[test]
-fn torch_only_image_model_stays_on_torch() {
-    let store = store("mlx-routing-image-torch-only");
+fn unported_image_model_stays_queued_off_every_native_lane() {
+    let store = store("mlx-routing-image-unported");
     register_gpu_worker(&store, "worker-mlx", "mlx", image_edit_caps());
 
     // An unported image model (not in MLX_ROUTED_MODELS) is refused by the mlx worker and remains
     // queued in production. Every ported image family — incl. Kolors' full surface (epic 3090),
     // PuLID-FLUX (sc-3344), and Lens (epic 3164 / sc-5105, the last one) — is MLX now, so this
-    // synthetic compatibility example must use an unported model id.
+    // example must use an unported model id.
     let job = store
         .create_job(image_job_with(
             json!({
@@ -6656,22 +6913,24 @@ fn torch_only_image_model_stays_on_torch() {
         .expect("job creates");
 
     assert!(store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .is_none());
 
-    // This legacy fixture exercises a synthetic generic claim, which is routing-neutral (no event).
-    // Production has no fallback; unsupported shapes remain queued.
-    register_gpu_worker(&store, "worker-torch", "mps", image_edit_caps());
+    // The shipped candle lane has no route for it either: the refusal is routing-neutral (no
+    // gpu_route_decision) and the job remains queued.
+    register_gpu_worker(&store, "worker-candle", "0", with_candle(image_edit_caps()));
     let (claimed, decision) = store
-        .claim_next_job_routed("worker-torch", false)
-        .expect("torch claim ok");
-    let claimed = claimed.expect("torch claims it");
-    assert_eq!(claimed.id, job.id);
-    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+        .claim_portable_routed("worker-candle", false)
+        .expect("candle claim ok");
+    assert!(claimed.is_none(), "candle declines the unported model");
     assert!(
         decision.is_none(),
-        "a torch-only image model is routing-neutral (no gpu_route_decision)"
+        "an unported image model is routing-neutral (no gpu_route_decision)"
+    );
+    assert_eq!(
+        store.get_job(&job.id).expect("job loads").status,
+        JobStatus::Queued
     );
 }
 
@@ -6695,7 +6954,7 @@ fn z_image_edit_routes_to_mlx() {
             .expect("job creates");
 
         let (claimed, decision) = store
-            .claim_next_job_routed("worker-mlx", false)
+            .claim_portable_routed("worker-mlx", false)
             .expect("mlx claim ok");
         assert_eq!(claimed.expect("mlx claims it").id, job.id, "{model}");
         let decision = decision.expect("routing decision present");
@@ -6707,23 +6966,23 @@ fn z_image_edit_routes_to_mlx() {
 #[test]
 fn explicit_gpu_image_job_is_not_deferred_to_mlx_worker() {
     let store = store("mlx-routing-explicit-gpu");
-    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    register_gpu_worker(&store, "worker-candle", "0", with_candle(image_caps()));
     register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
 
-    // This legacy fixture pins the MLX-eligible job to a synthetic generic GPU descriptor.
+    // The user pins the MLX-eligible job to the candle GPU; the idle mlx worker does not take it.
     let job = store
         .create_job(image_job_with(
             json!({ "model": "z_image_turbo", "prompt": "p" }),
-            "mps",
+            "0",
         ))
         .expect("job creates");
 
     let claimed = store
-        .claim_next_job("worker-torch")
-        .expect("torch claim ok")
-        .expect("torch claims the explicit-gpu job");
+        .claim_portable("worker-candle")
+        .expect("candle claim ok")
+        .expect("candle claims the explicit-gpu job");
     assert_eq!(claimed.id, job.id);
-    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("0"));
 }
 
 // --- Training routing (epic 3039, sc-3043/3049) ---
@@ -6804,11 +7063,11 @@ fn joy_caption_routes_to_idle_mlx_worker() {
         .expect("caption job creates");
 
     assert!(store
-        .claim_next_job("worker-torch")
+        .claim_portable("worker-torch")
         .expect("torch claim ok")
         .is_none());
     let claimed = store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .expect("mlx claims joy caption");
     assert_eq!(claimed.id, job.id);
@@ -6818,14 +7077,19 @@ fn joy_caption_routes_to_idle_mlx_worker() {
 #[test]
 fn joy_caption_falls_back_to_torch_when_no_mlx_worker() {
     let store = store("mlx-caption-fallback");
-    register_gpu_worker(&store, "worker-torch", "cuda:0", caption_caps());
+    register_gpu_worker(
+        &store,
+        "worker-torch",
+        "cuda:0",
+        with_candle(caption_caps()),
+    );
 
     let job = store
         .create_job(joy_caption_job("auto"))
         .expect("caption job creates");
 
     let claimed = store
-        .claim_next_job("worker-torch")
+        .claim_portable("worker-torch")
         .expect("torch claim ok")
         .expect("torch claims caption job");
     assert_eq!(claimed.id, job.id);
@@ -6835,19 +7099,19 @@ fn joy_caption_falls_back_to_torch_when_no_mlx_worker() {
 #[test]
 fn explicit_gpu_joy_caption_is_not_deferred_to_mlx_worker() {
     let store = store("mlx-caption-explicit-gpu");
-    register_gpu_worker(&store, "worker-torch", "mps", caption_caps());
+    register_gpu_worker(&store, "worker-candle", "0", with_candle(caption_caps()));
     register_gpu_worker(&store, "worker-mlx", "mlx", caption_caps());
 
     let job = store
-        .create_job(joy_caption_job("mps"))
+        .create_job(joy_caption_job("0"))
         .expect("caption job creates");
 
     let claimed = store
-        .claim_next_job("worker-torch")
-        .expect("torch claim ok")
-        .expect("torch claims explicit caption job");
+        .claim_portable("worker-candle")
+        .expect("candle claim ok")
+        .expect("candle claims explicit caption job");
     assert_eq!(claimed.id, job.id);
-    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("0"));
 }
 
 #[test]
@@ -6868,12 +7132,12 @@ fn mlx_eligible_training_job_defers_from_torch_worker_to_idle_mlx_worker() {
 
     // The synthetic generic descriptor refuses the MLX-native job; the idle mlx worker claims it.
     assert!(store
-        .claim_next_job("worker-torch")
+        .claim_portable("worker-torch")
         .expect("torch claim ok")
         .is_none());
     // The mlx worker claims it and trains in-process via mlx-gen.
     let claimed = store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .expect("mlx claims the training job");
     assert_eq!(claimed.id, job.id);
@@ -6900,12 +7164,12 @@ fn mlx_eligible_kolors_training_job_defers_from_torch_worker_to_idle_mlx_worker(
 
     // The synthetic generic descriptor refuses the MLX-native job; the idle mlx worker claims it.
     assert!(store
-        .claim_next_job("worker-torch")
+        .claim_portable("worker-torch")
         .expect("torch claim ok")
         .is_none());
     // The mlx worker claims it and trains in-process via mlx-gen's KolorsTrainer.
     let claimed = store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .expect("mlx claims the kolors training job");
     assert_eq!(claimed.id, job.id);
@@ -6932,11 +7196,11 @@ fn kolors_lokr_training_job_also_routes_to_the_mlx_worker() {
         .expect("job creates");
 
     assert!(store
-        .claim_next_job("worker-torch")
+        .claim_portable("worker-torch")
         .expect("torch claim ok")
         .is_none());
     let claimed = store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .expect("mlx claims the kolors lokr training job");
     assert_eq!(claimed.id, job.id);
@@ -6960,16 +7224,18 @@ fn mlx_worker_excluded_from_lokr_wan_training_job() {
         .expect("job creates");
 
     assert!(store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .is_none());
 
-    register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
+    // The candle Wan MoE trainer serves LoKr, so the shipped candle worker claims it.
+    register_gpu_worker(&store, "worker-candle", "0", with_candle(training_caps()));
     let claimed = store
-        .claim_next_job("worker-torch")
-        .expect("torch claim ok")
-        .expect("torch claims the LoKr-on-Wan job");
+        .claim_portable("worker-candle")
+        .expect("candle claim ok")
+        .expect("candle claims the LoKr-on-Wan job");
     assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("0"));
 }
 
 #[test]
@@ -6990,11 +7256,11 @@ fn lokr_z_image_training_stays_mlx_eligible() {
         .expect("job creates");
 
     assert!(store
-        .claim_next_job("worker-torch")
+        .claim_portable("worker-torch")
         .expect("torch claim ok")
         .is_none());
     let claimed = store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .expect("mlx claims the LoKr Z-Image job");
     assert_eq!(claimed.id, job.id);
@@ -7006,14 +7272,19 @@ fn mlx_eligible_training_falls_back_to_torch_when_no_mlx_worker() {
     let store = store("mlx-training-fallback");
     // Legacy compatibility fixture with no mlx worker. Production has no fallback; unsupported
     // work remains queued for a compatible native worker.
-    register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
+    register_gpu_worker(
+        &store,
+        "worker-torch",
+        "cuda:0",
+        with_candle(training_caps()),
+    );
 
     let job = store
         .create_job(mlx_training_job("sdxl_lora", "sdxl", "lora", false, "auto"))
         .expect("job creates");
 
     let claimed = store
-        .claim_next_job("worker-torch")
+        .claim_portable("worker-torch")
         .expect("torch claim ok")
         .expect("torch claims the training job");
     assert_eq!(claimed.id, job.id);
@@ -7073,7 +7344,7 @@ fn candle_worker_claims_candle_native_training_kernels() {
             ))
             .expect("job creates");
         let claimed = store
-            .claim_next_job("worker-candle")
+            .claim_portable("worker-candle")
             .unwrap_or_else(|error| panic!("candle claim ok ({kernel}): {error:?}"))
             .unwrap_or_else(|| panic!("candle should claim {kernel}/{base_model}"));
         assert_eq!(claimed.id, job.id, "kernel={kernel} base={base_model}");
@@ -7113,7 +7384,7 @@ fn candle_worker_rejects_invalid_training_base_and_network_cross_product() {
             .expect("job creates");
         assert!(
             store
-                .claim_next_job("worker-candle")
+                .claim_portable("worker-candle")
                 .unwrap_or_else(|error| panic!("candle claim ok ({kernel}): {error:?}"))
                 .is_none(),
             "candle must refuse unsupported {kernel}/{base_model}/{network_type}"
@@ -7161,7 +7432,7 @@ fn mage_flow_training_is_claimable_by_the_mlx_worker_for_lora_and_full() {
 
         assert!(
             store
-                .claim_next_job("worker-torch")
+                .claim_portable("worker-torch")
                 .expect("torch claim ok")
                 .is_none(),
             "a generic worker must defer mage_flow_lora ({base_model}/{network_type}) — it has no \
@@ -7171,7 +7442,7 @@ fn mage_flow_training_is_claimable_by_the_mlx_worker_for_lora_and_full() {
         // `mage_flow_lora` in `MLX_ROUTED_TRAINING_KERNELS` the job queues forever.
         register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());
         let claimed = store
-            .claim_next_job("worker-mlx")
+            .claim_portable("worker-mlx")
             .expect("mlx claim ok")
             .unwrap_or_else(|| {
                 panic!(
@@ -7203,7 +7474,7 @@ fn qwen_image_2_1_training_is_claimable_by_the_native_mlx_and_candle_workers() {
                 .expect("job creates");
             assert!(
                 store
-                    .claim_next_job("worker-torch")
+                    .claim_portable("worker-torch")
                     .expect("torch claim ok")
                     .is_none(),
                 "a generic worker must refuse qwen_image_2_1_lora/{network_type} — no 2.1 trainer"
@@ -7215,7 +7486,7 @@ fn qwen_image_2_1_training_is_claimable_by_the_native_mlx_and_candle_workers() {
             };
             register_gpu_worker(&store, native_worker, gpu_id, caps);
             let claimed = store
-                .claim_next_job(native_worker)
+                .claim_portable(native_worker)
                 .unwrap_or_else(|error| panic!("{native_worker} claim ok: {error:?}"))
                 .unwrap_or_else(|| {
                     panic!("{native_worker} must claim qwen_image_2_1_lora/{network_type}")
@@ -7248,7 +7519,7 @@ fn qwen_image_2_1_edit_training_is_claimable_by_the_native_mlx_and_candle_worker
                 .expect("job creates");
             assert!(
                 store
-                    .claim_next_job("worker-torch")
+                    .claim_portable("worker-torch")
                     .expect("torch claim ok")
                     .is_none(),
                 "a generic worker must refuse qwen_image_2_1_edit_lora/{network_type}"
@@ -7260,7 +7531,7 @@ fn qwen_image_2_1_edit_training_is_claimable_by_the_native_mlx_and_candle_worker
             };
             register_gpu_worker(&store, native_worker, gpu_id, caps);
             let claimed = store
-                .claim_next_job(native_worker)
+                .claim_portable(native_worker)
                 .unwrap_or_else(|error| panic!("{native_worker} claim ok: {error:?}"))
                 .unwrap_or_else(|| {
                     panic!("{native_worker} must claim qwen_image_2_1_edit_lora/{network_type}")
@@ -7281,7 +7552,7 @@ fn qwen_image_2_1_edit_training_is_claimable_by_the_native_mlx_and_candle_worker
         ))
         .expect("job creates");
     assert!(store
-        .claim_next_job("worker-candle")
+        .claim_portable("worker-candle")
         .expect("candle claim ok")
         .is_none());
 }
@@ -7304,13 +7575,13 @@ fn ltx_training_runs_on_candle_with_no_torch_fallback() {
         .expect("job creates");
     assert!(
         store
-            .claim_next_job("worker-torch")
+            .claim_portable("worker-torch")
             .expect("torch claim ok")
             .is_none(),
         "torch must refuse ltx_mlx_lora (native-only, no torch trainer)"
     );
     let claimed = store
-        .claim_next_job("worker-candle")
+        .claim_portable("worker-candle")
         .expect("candle claim ok")
         .expect("candle claims LTX training");
     assert_eq!(claimed.id, job.id);
@@ -7333,14 +7604,14 @@ fn ltx_training_remains_claimable_by_the_mlx_worker() {
         .expect("job creates");
 
     assert!(store
-        .claim_next_job("worker-torch")
+        .claim_portable("worker-torch")
         .expect("torch claim ok")
         .is_none());
 
     // MLX routing remains intact on Mac.
     register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());
     let claimed = store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .expect("mlx claims the LTX training job");
     assert_eq!(claimed.id, job.id);
@@ -7366,14 +7637,14 @@ fn krea_training_has_no_torch_fallback_but_runs_on_either_rust_backend() {
 
     // The synthetic generic descriptor refuses Krea because it has no matching native trainer.
     assert!(store
-        .claim_next_job("worker-torch")
+        .claim_portable("worker-torch")
         .expect("torch claim ok")
         .is_none());
 
     // The candle worker claims it off-Mac (sc-8614), so Krea is native on both Rust backends.
     register_gpu_worker(&store, "worker-candle", "0", candle_training_caps());
     let claimed = store
-        .claim_next_job("worker-candle")
+        .claim_portable("worker-candle")
         .expect("candle claim ok")
         .expect("candle claims the Krea training job");
     assert_eq!(claimed.id, job.id);
@@ -7417,19 +7688,19 @@ fn control_training_routes_to_candle_only() {
 
     // The synthetic generic descriptor refuses because it has no native control trainer.
     assert!(store
-        .claim_next_job("worker-torch")
+        .claim_portable("worker-torch")
         .expect("torch claim ok")
         .is_none());
     // MLX refuses (no MLX control trainer yet).
     assert!(store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .is_none());
 
     // The candle worker is the only home for it.
     register_gpu_worker(&store, "worker-candle", "0", candle_training_caps());
     let claimed = store
-        .claim_next_job("worker-candle")
+        .claim_portable("worker-candle")
         .expect("candle claim ok")
         .expect("candle claims the control training job");
     assert_eq!(claimed.id, job.id);
@@ -7451,13 +7722,13 @@ fn krea_training_runs_on_the_mlx_worker() {
         .expect("job creates");
 
     assert!(store
-        .claim_next_job("worker-torch")
+        .claim_portable("worker-torch")
         .expect("torch claim ok")
         .is_none());
 
     register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());
     let claimed = store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .expect("mlx claims the Krea training job");
     assert_eq!(claimed.id, job.id);
@@ -7483,11 +7754,11 @@ fn lokr_krea_training_stays_mlx_eligible() {
 
     // The synthetic generic descriptor refuses Krea; the mlx worker claims the LoKr job.
     assert!(store
-        .claim_next_job("worker-torch")
+        .claim_portable("worker-torch")
         .expect("torch claim ok")
         .is_none());
     let claimed = store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .expect("mlx claims the Krea LoKr training job");
     assert_eq!(claimed.id, job.id);
@@ -7549,7 +7820,7 @@ fn claiming_an_unstamped_h3_job_stamps_the_resize_mode_it_renders() {
         .is_none());
 
     let claimed = store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("claim ok")
         .expect("the mlx worker claims the H3 job");
     assert_eq!(claimed.id, legacy.id);
@@ -7584,11 +7855,11 @@ fn mlx_eligible_video_job_defers_from_torch_worker_to_idle_mlx_worker() {
 
     // The synthetic generic descriptor refuses the MLX-eligible job; the idle mlx worker claims it.
     assert!(store
-        .claim_next_job("worker-torch")
+        .claim_portable("worker-torch")
         .expect("torch claim ok")
         .is_none());
     let claimed = store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .expect("mlx claims the job");
     assert_eq!(claimed.id, job.id);
@@ -7611,17 +7882,19 @@ fn mlx_worker_excluded_from_advanced_mode_video_job() {
         .expect("job creates");
 
     assert!(store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .is_none());
 
-    register_gpu_worker(&store, "worker-torch", "mps", video_caps());
-    let claimed = store
-        .claim_next_job("worker-torch")
-        .expect("torch claim ok")
-        .expect("torch claims the job");
-    assert_eq!(claimed.id, job.id);
-    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+    register_gpu_worker(&store, "worker-candle", "0", with_candle(video_caps()));
+    assert!(store
+        .claim_portable("worker-candle")
+        .expect("candle claim ok")
+        .is_none());
+    assert_eq!(
+        store.get_job(&job.id).expect("job loads").status,
+        JobStatus::Queued
+    );
 }
 
 #[test]
@@ -7644,11 +7917,11 @@ fn replace_person_job_defers_from_torch_worker_to_idle_mlx_worker() {
         .expect("job creates");
 
     assert!(store
-        .claim_next_job("worker-torch")
+        .claim_portable("worker-torch")
         .expect("torch claim ok")
         .is_none());
     let claimed = store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .expect("mlx claims the replace_person job");
     assert_eq!(claimed.id, job.id);
@@ -7676,13 +7949,13 @@ fn flf_video_job_defers_from_torch_worker_to_idle_mlx_worker() {
 
         assert!(
             store
-                .claim_next_job("worker-torch")
+                .claim_portable("worker-torch")
                 .expect("torch claim ok")
                 .is_none(),
             "{model}: torch defers FLF to the idle mlx worker"
         );
         let claimed = store
-            .claim_next_job("worker-mlx")
+            .claim_portable("worker-mlx")
             .expect("mlx claim ok")
             .expect("mlx claims the FLF job");
         assert_eq!(claimed.id, job.id);
@@ -7691,7 +7964,7 @@ fn flf_video_job_defers_from_torch_worker_to_idle_mlx_worker() {
 }
 
 #[test]
-fn flf_video_job_stays_on_torch_for_non_flf_capable_wan_moe() {
+fn flf_video_job_stays_queued_for_non_flf_capable_wan_moe() {
     // FLF on the 14B Wan MoE engines has no native engine Keyframe path and remains queued.
     let store = store("mlx-video-routing-flf-moe");
     register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
@@ -7704,17 +7977,19 @@ fn flf_video_job_stays_on_torch_for_non_flf_capable_wan_moe() {
         .expect("job creates");
 
     assert!(store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .is_none());
 
-    register_gpu_worker(&store, "worker-torch", "mps", video_caps());
-    let claimed = store
-        .claim_next_job("worker-torch")
-        .expect("torch claim ok")
-        .expect("torch claims the job");
-    assert_eq!(claimed.id, job.id);
-    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+    register_gpu_worker(&store, "worker-candle", "0", with_candle(video_caps()));
+    assert!(store
+        .claim_portable("worker-candle")
+        .expect("candle claim ok")
+        .is_none());
+    assert_eq!(
+        store.get_job(&job.id).expect("job loads").status,
+        JobStatus::Queued
+    );
 }
 
 #[test]
@@ -7748,13 +8023,13 @@ fn clip_conditioning_video_job_defers_from_torch_worker_to_idle_mlx_worker() {
 
             assert!(
                 store
-                    .claim_next_job("worker-torch")
+                    .claim_portable("worker-torch")
                     .expect("torch claim ok")
                     .is_none(),
                 "{model}/{mode}: torch defers the clip job to the idle mlx worker"
             );
             let claimed = store
-                .claim_next_job("worker-mlx")
+                .claim_portable("worker-mlx")
                 .expect("mlx claim ok")
                 .expect("mlx claims the clip job");
             assert_eq!(claimed.id, job.id);
@@ -7764,10 +8039,11 @@ fn clip_conditioning_video_job_defers_from_torch_worker_to_idle_mlx_worker() {
 }
 
 #[test]
-fn clip_conditioning_video_job_stays_on_torch_for_wan_moe_engines() {
-    // extend_clip / video_bridge have no `Keyframe` path on the 14B Wan MoE engines, so they remain
-    // queued even though the mlx worker advertises VideoExtend/VideoBridge. (Wan TI2V-5B
-    // `wan_2_2` IS MLX-eligible — sc-3357 — and is covered by the defer test above.)
+fn clip_conditioning_video_job_stays_off_mlx_for_wan_moe_engines() {
+    // extend_clip / video_bridge have no MLX `Keyframe` path on the 14B Wan MoE engines, so the
+    // mlx worker refuses them even though it advertises VideoExtend/VideoBridge. (Wan TI2V-5B
+    // `wan_2_2` IS MLX-eligible — sc-3357 — and is covered by the defer test above.) The candle
+    // Wan-VACE lane serves both modes for the MoE model (sc-5494), so the candle worker claims them.
     for (job_type, mode) in [
         (JobType::VideoExtend, "extend_clip"),
         (JobType::VideoBridge, "video_bridge"),
@@ -7778,33 +8054,36 @@ fn clip_conditioning_video_job_stays_on_torch_for_wan_moe_engines() {
         let job = store
             .create_job(video_job_typed(
                 job_type.clone(),
-                json!({ "model": "wan_2_2_t2v_14b", "mode": mode, "sourceClipAssetId": "left" }),
+                json!({
+                    "model": "wan_2_2_t2v_14b", "mode": mode,
+                    "sourceClipAssetId": "left", "bridgeRightClipAssetId": "right",
+                }),
                 "auto",
             ))
             .expect("job creates");
 
         assert!(
             store
-                .claim_next_job("worker-mlx")
+                .claim_portable("worker-mlx")
                 .expect("mlx claim ok")
                 .is_none(),
             "{mode}: mlx worker must not claim a 14B Wan MoE clip job"
         );
 
-        register_gpu_worker(&store, "worker-torch", "mps", video_caps());
+        register_gpu_worker(&store, "worker-candle", "0", with_candle(video_caps()));
         let claimed = store
-            .claim_next_job("worker-torch")
-            .expect("torch claim ok")
-            .expect("torch claims the Wan clip job");
+            .claim_portable("worker-candle")
+            .expect("candle claim ok")
+            .expect("candle claims the Wan clip job");
         assert_eq!(claimed.id, job.id);
-        assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+        assert_eq!(claimed.assigned_gpu.as_deref(), Some("0"));
     }
 }
 
 #[test]
 fn mlx_eligible_video_job_falls_back_to_torch_when_no_mlx_worker() {
     let store = store("mlx-video-routing-fallback");
-    register_gpu_worker(&store, "worker-torch", "cuda:0", video_caps());
+    register_gpu_worker(&store, "worker-torch", "cuda:0", with_candle(video_caps()));
 
     let job = store
         .create_job(video_job_with(
@@ -7814,7 +8093,7 @@ fn mlx_eligible_video_job_falls_back_to_torch_when_no_mlx_worker() {
         .expect("job creates");
 
     let claimed = store
-        .claim_next_job("worker-torch")
+        .claim_portable("worker-torch")
         .expect("torch claim ok")
         .expect("torch claims the job");
     assert_eq!(claimed.id, job.id);
@@ -7824,22 +8103,22 @@ fn mlx_eligible_video_job_falls_back_to_torch_when_no_mlx_worker() {
 #[test]
 fn explicit_gpu_video_job_is_not_deferred_to_mlx_worker() {
     let store = store("mlx-video-routing-explicit-gpu");
-    register_gpu_worker(&store, "worker-torch", "mps", video_caps());
+    register_gpu_worker(&store, "worker-candle", "0", with_candle(video_caps()));
     register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
 
     let job = store
         .create_job(video_job_with(
             json!({ "model": "wan_2_2", "mode": "text_to_video", "prompt": "p" }),
-            "mps",
+            "0",
         ))
         .expect("job creates");
 
     let claimed = store
-        .claim_next_job("worker-torch")
-        .expect("torch claim ok")
-        .expect("torch claims the explicit-gpu job");
+        .claim_portable("worker-candle")
+        .expect("candle claim ok")
+        .expect("candle claims the explicit-gpu job");
     assert_eq!(claimed.id, job.id);
-    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+    assert_eq!(claimed.assigned_gpu.as_deref(), Some("0"));
 }
 
 #[test]
@@ -7862,7 +8141,7 @@ fn lokr_on_wan_video_routes_to_mlx() {
         .expect("job creates");
 
     let claimed = store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .expect("mlx claims the LoKr-on-Wan video job");
     assert_eq!(claimed.id, job.id);
@@ -7887,11 +8166,11 @@ fn lokr_on_ltx_video_routes_to_mlx_worker() {
         .expect("job creates");
 
     assert!(store
-        .claim_next_job("worker-torch")
+        .claim_portable("worker-torch")
         .expect("torch claim ok")
         .is_none());
     let claimed = store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .expect("mlx claims the LoKr-on-LTX job");
     assert_eq!(claimed.id, job.id);
@@ -7912,11 +8191,11 @@ fn flux_schnell_txt2img_routes_to_mlx_worker() {
         ))
         .expect("job creates");
     assert!(store
-        .claim_next_job("worker-torch")
+        .claim_portable("worker-torch")
         .expect("torch claim ok")
         .is_none());
     let claimed = store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .expect("mlx claims flux txt2img");
     assert_eq!(claimed.id, job.id);
@@ -7937,11 +8216,11 @@ fn kolors_txt2img_routes_to_mlx_worker() {
         ))
         .expect("job creates");
     assert!(store
-        .claim_next_job("worker-torch")
+        .claim_portable("worker-torch")
         .expect("torch claim ok")
         .is_none());
     let claimed = store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .expect("mlx claims kolors txt2img");
     assert_eq!(claimed.id, job.id);
@@ -7985,11 +8264,11 @@ fn kolors_advanced_modes_route_to_mlx() {
             .create_job(image_edit_job_with(payload, "auto"))
             .expect("job creates");
         assert!(store
-            .claim_next_job("worker-torch")
+            .claim_portable("worker-torch")
             .expect("torch claim ok")
             .is_none());
         let claimed = store
-            .claim_next_job("worker-mlx")
+            .claim_portable("worker-mlx")
             .expect("mlx claim ok")
             .expect("mlx claims kolors advanced job");
         assert_eq!(claimed.id, job.id);
@@ -8012,11 +8291,11 @@ fn flux_reference_job_routes_to_mlx() {
         ))
         .expect("job creates");
     assert!(store
-        .claim_next_job("worker-torch")
+        .claim_portable("worker-torch")
         .expect("torch claim ok")
         .is_none());
     let claimed = store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .expect("mlx claims flux reference job");
     assert_eq!(claimed.id, job.id);
@@ -8037,11 +8316,11 @@ fn qwen_txt2img_and_strict_pose_route_to_mlx() {
         ))
         .expect("txt2img job creates");
     assert!(store
-        .claim_next_job("worker-torch")
+        .claim_portable("worker-torch")
         .expect("torch claim ok")
         .is_none());
     let claimed = store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .expect("mlx claims qwen txt2img");
     assert_eq!(claimed.id, txt2img.id);
@@ -8077,7 +8356,7 @@ fn qwen_txt2img_and_strict_pose_route_to_mlx() {
         ))
         .expect("pose job creates");
     let claimed = store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .expect("mlx claims qwen pose job");
     assert_eq!(claimed.id, pose.id);
@@ -8106,13 +8385,13 @@ fn flux2_klein_variants_route_to_mlx_worker() {
             .unwrap_or_else(|_| panic!("{model} job creates"));
         assert!(
             store
-                .claim_next_job("worker-torch")
+                .claim_portable("worker-torch")
                 .expect("torch claim ok")
                 .is_none(),
             "{model} should defer off the torch worker"
         );
         let claimed = store
-            .claim_next_job("worker-mlx")
+            .claim_portable("worker-mlx")
             .expect("mlx claim ok")
             .unwrap_or_else(|| panic!("mlx claims {model}"));
         assert_eq!(claimed.id, job.id);
@@ -8160,11 +8439,11 @@ fn flux2_edit_reference_job_routes_to_mlx_worker() {
         ))
         .expect("job creates");
     assert!(store
-        .claim_next_job("worker-torch")
+        .claim_portable("worker-torch")
         .expect("torch claim ok")
         .is_none());
     let claimed = store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .expect("mlx claims flux2 edit job");
     assert_eq!(claimed.id, job.id);
@@ -8188,13 +8467,13 @@ fn sdxl_and_realvisxl_route_to_mlx_worker() {
             .unwrap_or_else(|_| panic!("{model} job creates"));
         assert!(
             store
-                .claim_next_job("worker-torch")
+                .claim_portable("worker-torch")
                 .expect("torch claim ok")
                 .is_none(),
             "{model} should defer off the torch worker"
         );
         let claimed = store
-            .claim_next_job("worker-mlx")
+            .claim_portable("worker-mlx")
             .expect("mlx claim ok")
             .unwrap_or_else(|| panic!("mlx claims {model}"));
         assert_eq!(claimed.id, job.id);
@@ -8232,13 +8511,13 @@ fn sdxl_and_realvisxl_route_to_mlx_worker() {
             .expect("advanced job creates");
         assert!(
             store
-                .claim_next_job("worker-torch")
+                .claim_portable("worker-torch")
                 .expect("torch claim ok")
                 .is_none(),
             "sdxl advanced should defer off the torch worker"
         );
         let claimed = store
-            .claim_next_job("worker-mlx")
+            .claim_portable("worker-mlx")
             .expect("mlx claim ok")
             .expect("mlx claims sdxl advanced job");
         assert_eq!(claimed.id, job.id);
@@ -8271,7 +8550,7 @@ fn sdxl_and_realvisxl_route_to_mlx_worker() {
         ))
         .expect("lycoris job creates");
     let claimed = store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .expect("mlx claims sdxl lycoris job");
     assert_eq!(claimed.id, lycoris.id);
@@ -8279,51 +8558,47 @@ fn sdxl_and_realvisxl_route_to_mlx_worker() {
 }
 
 #[test]
-fn realvisxl_lightning_reference_falls_back_off_mlx() {
+fn realvisxl_lightning_conditioning_stays_off_mlx() {
     // sc-6075: RealVisXL Lightning is txt2img-only — the engine's few-step `lightning` sampler
     // rejects reference/img2img conditioning. A reference or edit_image job is therefore NOT
-    // MLX-eligible (`realvisxl_lightning_mlx_eligible`). This legacy fixture exercises the generic
-    // descriptor branch; production has no fallback and leaves the shape queued.
-    let store = store("mlx-routing-realvisxl-lightning");
-    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
-    register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
-
-    for payload in [
-        json!({ "model": "realvisxl_lightning", "prompt": "p", "referenceAssetId": "asset_1" }),
-        json!({ "model": "realvisxl_lightning", "prompt": "p", "mode": "edit_image",
-                "sourceAssetId": "src_1" }),
+    // MLX-eligible (`realvisxl_lightning_mlx_eligible`). No native lane serves the shape, so the
+    // shipped candle worker declines it too and production leaves it queued.
+    for (label, payload) in [
+        (
+            "reference",
+            json!({ "model": "realvisxl_lightning", "prompt": "p", "referenceAssetId": "asset_1" }),
+        ),
+        (
+            "edit",
+            json!({ "model": "realvisxl_lightning", "prompt": "p", "mode": "edit_image",
+                    "sourceAssetId": "src_1" }),
+        ),
     ] {
+        let store = store(&format!("mlx-routing-realvisxl-lightning-{label}"));
+        register_gpu_worker(&store, "worker-candle", "0", with_candle(image_caps()));
+        register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
         let job = store
             .create_job(image_job_with(payload, "auto"))
             .expect("lightning conditioned job creates");
-        let claimed = store
-            .claim_next_job("worker-torch")
-            .expect("torch claim ok")
-            .expect("torch claims the txt2img-only-gated lightning job");
-        assert_eq!(claimed.id, job.id);
-        assert_ne!(
-            claimed.assigned_gpu.as_deref(),
-            Some("mlx"),
-            "txt2img-only lightning conditioning must not route to the mlx worker"
+        assert!(
+            store
+                .claim_portable("worker-mlx")
+                .expect("mlx claim ok")
+                .is_none(),
+            "{label}: txt2img-only lightning conditioning must not route to the mlx worker"
         );
-        store
-            .update_job_progress(
-                &claimed.id,
-                ProgressUpdate {
-                    status: JobStatus::Completed,
-                    stage: ProgressStage::Completed,
-                    progress: 1.0,
-                    message: "done".to_owned(),
-                    error: None,
-                    result: None,
-                    eta_seconds: None,
-                    peak_gpu_memory_pct: None,
-                    peak_gpu_load_pct: None,
-                    backend: None,
-                    worker_id: Some("worker-torch".to_owned()),
-                },
-            )
-            .expect("complete job");
+        assert!(
+            store
+                .claim_portable("worker-candle")
+                .expect("candle claim ok")
+                .is_none(),
+            "{label}: no native lane serves lightning conditioning"
+        );
+        assert_eq!(
+            store.get_job(&job.id).expect("job loads").status,
+            JobStatus::Queued,
+            "{label}"
+        );
     }
 }
 
@@ -8366,13 +8641,13 @@ fn image_detail_routes_to_mlx_worker() {
             .unwrap_or_else(|_| panic!("{model} detail job creates"));
         assert!(
             store
-                .claim_next_job("worker-torch")
+                .claim_portable("worker-torch")
                 .expect("torch claim ok")
                 .is_none(),
             "{model} detail should defer off the torch worker"
         );
         let claimed = store
-            .claim_next_job("worker-mlx")
+            .claim_portable("worker-mlx")
             .expect("mlx claim ok")
             .unwrap_or_else(|| panic!("mlx claims {model} detail"));
         assert_eq!(claimed.id, job.id);
@@ -8406,7 +8681,7 @@ fn image_detail_routes_to_mlx_worker() {
         })))
         .expect("lycoris detail job creates");
     let claimed = store
-        .claim_next_job("worker-mlx")
+        .claim_portable("worker-mlx")
         .expect("mlx claim ok")
         .expect("mlx claims lycoris detail job");
     assert_eq!(claimed.id, lycoris.id);
@@ -8468,7 +8743,7 @@ fn native_candle_utility_capabilities_dispatch_supported_shapes_only() {
             .create_job(utility_job(job_type, payload))
             .unwrap_or_else(|_| panic!("{label} job creates"));
         let claimed = store
-            .claim_next_job("worker-candle")
+            .claim_portable("worker-candle")
             .expect("candle claim succeeds")
             .unwrap_or_else(|| panic!("candle claims {label}"));
         assert_eq!(claimed.id, job.id);
@@ -8501,7 +8776,7 @@ fn native_candle_utility_capabilities_dispatch_supported_shapes_only() {
         .expect("unsupported detail job creates");
     assert!(
         store
-            .claim_next_job("worker-candle")
+            .claim_portable("worker-candle")
             .expect("candle decline succeeds")
             .is_none(),
         "a coarse image_detail advertisement must not claim a non-SDXL request"
@@ -8515,12 +8790,12 @@ fn native_candle_utility_capabilities_dispatch_supported_shapes_only() {
 #[test]
 fn non_mlx_model_image_job_is_not_routed_to_mlx_worker() {
     let store = store("mlx-routing-non-mlx-model");
-    register_gpu_worker(&store, "worker-torch", "mps", image_caps());
+    register_gpu_worker(&store, "worker-candle", "0", with_candle(image_caps()));
     register_gpu_worker(&store, "worker-mlx", "mlx", image_caps());
 
-    // A synthetic unsupported image model shape with no mlx-gen engine (`pulid_flux_dev` plain
-    // txt2img) exercises the generic-descriptor branch while the mlx worker refuses it. Production
-    // has no Python fallback; the shape remains queued.
+    // An unsupported image model shape with no mlx-gen engine (`pulid_flux_dev` plain txt2img) is
+    // refused by the mlx worker. Production has no Python fallback and the candle lane has no
+    // route for it either; the shape remains queued.
     let job = store
         .create_job(image_job_with(
             json!({ "model": "pulid_flux_dev", "prompt": "p" }),
@@ -8528,12 +8803,21 @@ fn non_mlx_model_image_job_is_not_routed_to_mlx_worker() {
         ))
         .expect("job creates");
 
-    let claimed = store
-        .claim_next_job("worker-torch")
-        .expect("torch claim ok")
-        .expect("torch claims the non-MLX-model job");
-    assert_eq!(claimed.id, job.id);
-    assert_eq!(claimed.assigned_gpu.as_deref(), Some("mps"));
+    assert!(
+        store
+            .claim_portable("worker-mlx")
+            .expect("mlx claim ok")
+            .is_none(),
+        "the mlx worker must not claim the non-MLX-model job"
+    );
+    assert!(store
+        .claim_portable("worker-candle")
+        .expect("candle claim ok")
+        .is_none());
+    assert_eq!(
+        store.get_job(&job.id).expect("job loads").status,
+        JobStatus::Queued
+    );
 }
 
 #[test]
@@ -8549,7 +8833,7 @@ fn mlx_worker_claims_eligible_job_with_idle_mps_worker_present() {
     // mlx worker -> the job sat on "Waiting for an available worker" forever.
     let store = store("mlx-claims-with-mps-present");
     store
-        .register_worker(RegisterWorker {
+        .register_portable_worker(RegisterWorker {
             worker_id: "mlx-worker".to_owned(),
             gpu_id: "mlx".to_owned(),
             gpu_name: Some("Apple Silicon (MLX)".to_owned()),
@@ -8566,7 +8850,7 @@ fn mlx_worker_claims_eligible_job_with_idle_mps_worker_present() {
         })
         .expect("mlx worker registers");
     store
-        .register_worker(RegisterWorker {
+        .register_portable_worker(RegisterWorker {
             worker_id: "mps-worker".to_owned(),
             gpu_id: "mps".to_owned(),
             gpu_name: Some("Apple GPU (unified)".to_owned()),
@@ -8600,7 +8884,7 @@ fn mlx_worker_claims_eligible_job_with_idle_mps_worker_present() {
     // The synthetic MPS descriptor must defer because an idle mlx worker can run it.
     assert!(
         store
-            .claim_next_job("mps-worker")
+            .claim_portable("mps-worker")
             .expect("mps claim ok")
             .is_none(),
         "mps worker should defer the flux2 job to the mlx worker"
@@ -8608,7 +8892,7 @@ fn mlx_worker_claims_eligible_job_with_idle_mps_worker_present() {
 
     // The mlx worker must claim it.
     let claimed = store
-        .claim_next_job("mlx-worker")
+        .claim_portable("mlx-worker")
         .expect("mlx claim ok")
         .expect("mlx worker should claim the flux2 t2i job");
     assert_eq!(claimed.id, job.id);
@@ -8642,11 +8926,14 @@ fn concurrent_claims_never_lock_and_stay_exactly_once() {
 
     for w in 0..WORKERS {
         primary
-            .register_worker(RegisterWorker {
+            .register_portable_worker(RegisterWorker {
                 worker_id: format!("worker-{w}"),
                 gpu_id: format!("gpu-{w}"),
                 gpu_name: Some(format!("GPU {w}")),
-                capabilities: vec![WorkerCapability::ImageGenerate],
+                capabilities: vec![
+                    WorkerCapability::ImageGenerate,
+                    WorkerCapability::Unknown("candle".to_owned()),
+                ],
                 loaded_models: Vec::new(),
                 utilization: None,
             })
@@ -8678,7 +8965,7 @@ fn concurrent_claims_never_lock_and_stay_exactly_once() {
             // sequential claims and falsely appears to prove contention safety.
             first_claim_start.wait();
             while remaining.load(Ordering::SeqCst) > 0 {
-                match store.claim_next_job(&worker_id) {
+                match store.claim_portable(&worker_id) {
                     Ok(Some(job)) => {
                         claimed.lock().unwrap().push(job.id.clone());
                         remaining.fetch_sub(1, Ordering::SeqCst);
@@ -8879,7 +9166,7 @@ fn progress_cannot_resurrect_terminal_jobs() {
         .create_job(image_job(Map::new()))
         .expect("job creates");
     store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("claim succeeds")
         .expect("job claimed");
 
@@ -8965,7 +9252,7 @@ fn progress_from_non_owner_worker_is_rejected() {
         .create_job(image_job(Map::new()))
         .expect("job creates");
     store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("claim succeeds")
         .expect("job claimed");
 
@@ -9032,7 +9319,7 @@ fn terminal_side_effect_handoff_is_resumable_only_by_the_original_owner() {
         .create_job(image_job(Map::new()))
         .expect("job creates");
     store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("claim succeeds")
         .expect("job claimed");
     let completion = |worker_id: &str| ProgressUpdate {
@@ -9107,7 +9394,7 @@ fn terminal_side_effect_retry_backoff_doubles_and_survives_restart() {
         .create_job(image_job(Map::new()))
         .expect("job creates");
     store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("claim succeeds")
         .expect("job claimed");
     store
@@ -9196,7 +9483,7 @@ fn cleared_terminal_same_status_retry_still_requires_the_stored_owner() {
         .create_job(image_job(Map::new()))
         .expect("job creates");
     store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("claim succeeds")
         .expect("job claimed");
     let completion = |worker_id: Option<&str>| ProgressUpdate {
@@ -9245,7 +9532,7 @@ fn post_progress_result_cas_never_overwrites_a_competing_update() {
         .create_job(image_job(Map::new()))
         .expect("job creates");
     store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("claim succeeds")
         .expect("job claimed");
     let progress = |result: Value| ProgressUpdate {
@@ -9304,7 +9591,7 @@ fn mlx_worker_claims_anima_text_to_image_jobs() {
         // `current_job_id`, so it cannot claim a second job in the same store.
         let store = store(&format!("anima-claim-{model}"));
         store
-            .register_worker(RegisterWorker {
+            .register_portable_worker(RegisterWorker {
                 worker_id: "mlx-worker".to_owned(),
                 gpu_id: "mlx".to_owned(),
                 gpu_name: Some("Apple Silicon (MLX)".to_owned()),
@@ -9324,7 +9611,7 @@ fn mlx_worker_claims_anima_text_to_image_jobs() {
         let job = store.create_job(image_job(payload)).expect("job created");
 
         let claimed = store
-            .claim_next_job("mlx-worker")
+            .claim_portable("mlx-worker")
             .expect("claim ok")
             .unwrap_or_else(|| {
                 panic!(
@@ -9348,7 +9635,7 @@ fn mlx_worker_claims_anima_text_to_image_jobs() {
 fn mlx_worker_refuses_anima_edit_image_jobs() {
     let store = store("anima-refuses-edit");
     store
-        .register_worker(RegisterWorker {
+        .register_portable_worker(RegisterWorker {
             worker_id: "mlx-worker".to_owned(),
             gpu_id: "mlx".to_owned(),
             gpu_name: Some("Apple Silicon (MLX)".to_owned()),
@@ -9369,7 +9656,7 @@ fn mlx_worker_refuses_anima_edit_image_jobs() {
 
     assert!(
         store
-            .claim_next_job("mlx-worker")
+            .claim_portable("mlx-worker")
             .expect("claim ok")
             .is_none(),
         "an Anima edit_image job must not be claimed by the mlx worker"
@@ -9398,7 +9685,7 @@ fn long_lived_connection_survives_many_sequential_ops() {
             .expect("job creates");
 
         let claimed = store
-            .claim_next_job("worker-1")
+            .claim_portable("worker-1")
             .expect("claim ok")
             .expect("worker claims the queued job");
         assert_eq!(
@@ -9527,7 +9814,7 @@ fn an_unhealthy_heartbeat_persists_its_reason_stops_claims_and_clears_on_recover
 
     assert!(
         store
-            .claim_next_job("worker-1")
+            .claim_portable("worker-1")
             .expect("claim query succeeds")
             .is_none(),
         "an unhealthy worker must not be handed a job it is certain to fail"
@@ -9556,7 +9843,7 @@ fn an_unhealthy_heartbeat_persists_its_reason_stops_claims_and_clears_on_recover
         "a recovered worker must not keep telling operators to fix an already-fixed host"
     );
     let claimed = store
-        .claim_next_job("worker-1")
+        .claim_portable("worker-1")
         .expect("claim succeeds")
         .expect("the recovered worker claims the still-queued job");
     assert_eq!(claimed.id, created.id);
@@ -9600,7 +9887,7 @@ fn resume_checkpoint_step_survives_later_results_and_an_interrupt() {
     let created = store
         .create_job(image_job(object(json!({ "prompt": "p" }))))
         .expect("job creates");
-    store.claim_next_job("worker-1").expect("claim ok");
+    store.claim_portable("worker-1").expect("claim ok");
     let report = |result: serde_json::Value| ProgressUpdate {
         status: JobStatus::Running,
         stage: ProgressStage::Running,
@@ -9658,7 +9945,7 @@ fn slim_step_progress_results_keep_the_accumulated_fact_sets() {
     let created = store
         .create_job(image_job(object(json!({ "prompt": "p" }))))
         .expect("job creates");
-    store.claim_next_job("worker-1").expect("claim ok");
+    store.claim_portable("worker-1").expect("claim ok");
     let report = |result: serde_json::Value| ProgressUpdate {
         status: JobStatus::Running,
         stage: ProgressStage::Running,
@@ -9799,7 +10086,7 @@ fn qwen_image_2_1_turbo_image_jobs_are_claimed_by_the_mlx_and_the_candle_worker(
                 register_candle_worker(&store, &worker);
             }
             let claimed = store
-                .claim_next_job(&worker)
+                .claim_portable(&worker)
                 .unwrap_or_else(|error| panic!("{worker} claim ok: {error:?}"))
                 .unwrap_or_else(|| panic!("{worker} must claim Turbo job {index}"));
             assert_eq!(claimed.id, job.id, "{worker}/{index}");

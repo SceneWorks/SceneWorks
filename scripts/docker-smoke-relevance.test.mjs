@@ -15,7 +15,6 @@ test("root Cargo.toml is Docker relevant", () => {
 test("web build configuration and projected evidence dependencies are Docker relevant", () => {
   for (const file of [
     "apps/web/vite.config.js",
-    "apps/web/sdxl-cuda-memory-projection.js",
     "packages/schemas/memory-calibration.schema.json",
     "packages/schemas/memory-anchor-plan.schema.json",
   ]) {

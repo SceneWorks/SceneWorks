@@ -202,12 +202,25 @@ pub(crate) async fn save_manifest_entries(
         ))
     })?;
     let mut manifest = load_manifest_root(path).await?;
-    manifest.entry("$schema".to_owned()).or_insert_with(|| {
-        Value::String("https://sceneworks.local/schemas/recipe-preset.schema.json".to_owned())
-    });
-    manifest
-        .entry("schemaVersion".to_owned())
-        .or_insert_with(|| json!(1));
+    if field == "models" {
+        sceneworks_core::model_manifest_version::normalize_user_model_manifest_object(
+            &mut manifest,
+        )
+        .map_err(ApiError::bad_request)?;
+        manifest.insert(
+            "$schema".to_owned(),
+            Value::String(
+                sceneworks_core::model_manifest_version::MODEL_MANIFEST_SCHEMA_URL.to_owned(),
+            ),
+        );
+    } else {
+        manifest.entry("$schema".to_owned()).or_insert_with(|| {
+            Value::String("https://sceneworks.local/schemas/recipe-preset.schema.json".to_owned())
+        });
+        manifest
+            .entry("schemaVersion".to_owned())
+            .or_insert_with(|| json!(1));
+    }
     manifest.insert(field.to_owned(), Value::Array(entries));
     let payload = serde_json::to_string_pretty(&Value::Object(manifest))
         .map_err(|error| ApiError::internal(format!("Failed to encode manifest: {error}")))?;
@@ -279,13 +292,17 @@ pub(crate) async fn load_manifest_entries(
             path.display()
         ))
     })?;
-    let manifest: Value =
+    let mut manifest: Value =
         serde_json::from_str(&strip_jsonc_comments(&payload)).map_err(|error| {
             ApiError::internal(format!(
                 "Failed to parse manifest {}: {error}",
                 path.display()
             ))
         })?;
+    if field == "models" {
+        sceneworks_core::model_manifest_version::normalize_user_model_manifest(&mut manifest)
+            .map_err(ApiError::bad_request)?;
+    }
     let entries = manifest
         .get(field)
         .and_then(Value::as_array)
@@ -348,6 +365,51 @@ pub(crate) fn merge_object(base: &mut Value, override_value: Value) {
 // Re-exported `pub(crate)` so the crate-root `use manifest::*` keeps it available
 // to the rest of the api (and tests) under the same path as before.
 pub(crate) use sceneworks_core::jsonc::strip_jsonc_comments;
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn model_writer_upgrades_v1_jsonc_and_preserves_user_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("user.models.jsonc");
+        tokio::fs::write(
+            &path,
+            r#"// old user file
+{ "schemaVersion": 1, "models": [{"id":"imported","hidden":true}], "extension":{"keep":1} }"#,
+        )
+        .await
+        .unwrap();
+        save_manifest_entries(
+            &path,
+            "models",
+            vec![json!({"id":"imported","hidden":true})],
+        )
+        .await
+        .unwrap();
+        let root = load_manifest_root(&path).await.unwrap();
+        assert_eq!(root["schemaVersion"], json!(2));
+        assert_eq!(root["models"], json!([{"id":"imported","hidden":true}]));
+        assert_eq!(root["extension"], json!({"keep":1}));
+        assert_eq!(
+            root["$schema"],
+            json!(sceneworks_core::model_manifest_version::MODEL_MANIFEST_SCHEMA_URL)
+        );
+    }
+
+    #[tokio::test]
+    async fn model_writer_refuses_future_version_without_replacing_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("user.models.jsonc");
+        let before = r#"{"schemaVersion":3,"models":[{"id":"future"}]}"#;
+        tokio::fs::write(&path, before).await.unwrap();
+        assert!(save_manifest_entries(&path, "models", Vec::new())
+            .await
+            .is_err());
+        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), before);
+    }
+}
 
 #[cfg(test)]
 mod file_lock_tests {

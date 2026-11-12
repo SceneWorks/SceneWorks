@@ -229,17 +229,6 @@ const GENERATION_CAPABILITIES = new Set([
   "character_image",
 ]);
 
-/** A `&[&str]` Rust const, read as text. The matrix generator reads the same two pose-family lists the
- *  same way; `image_jobs/routing.rs` compiles only under macOS or `backend-candle`, so a text read is the
- *  only way for a portable script to see them at all. */
-export function rustStringSlice(source, name) {
-  const match = source.match(
-    new RegExp(`const\\s+${name}:\\s*&\\[&str\\]\\s*=\\s*&\\[([\\s\\S]*?)\\];`),
-  );
-  if (!match) throw new Error(`could not derive ${name} from image_jobs/routing.rs`);
-  return new Set([...match[1].matchAll(/"([^"]+)"/g)].map((entry) => entry[1]));
-}
-
 /**
  * True when this backend's exact contract names ONLY the LoRA load profile, so the model cannot
  * serve a plain public coordinate on that backend at all (sc-20799 — Qwen Edit Lightning's
@@ -403,6 +392,25 @@ export function parseStrictControlEngines(source) {
   return new Set(ids);
 }
 
+export function wiredPoseFamiliesFromSpecs(registrySpecsSource, controlEngines) {
+  const specs =
+    typeof registrySpecsSource === "string"
+      ? JSON.parse(registrySpecsSource)
+      : registrySpecsSource;
+  const poseFamilies = { mlx: new Set(), candle: new Set() };
+  for (const [id, spec] of Object.entries(specs)) {
+    const caps = spec?.product?.capabilities ?? [];
+    if (!caps.includes("text_to_image")) continue;
+    for (const backend of ["mlx", "candle"]) {
+      const routeId = spec?.routes?.[backend]?.id;
+      if (routeId && controlEngines.has(`${routeId}_control`)) {
+        poseFamilies[backend].add(id);
+      }
+    }
+  }
+  return poseFamilies;
+}
+
 /**
  * The MLX lanes whose declaration rows MUST carry `requestContexts`.
  *
@@ -418,8 +426,10 @@ export function parseStrictControlEngines(source) {
  * reported. Candle is unaffected: its request-strategy reader returns `Ok(false)` for a row with no
  * `requestContexts`, which is inert rather than malformed.
  */
-export function parseRequestContextLanes(source) {
-  const table = source.match(/const RULES: &\[MemoryRouteRule\] = &\[([\s\S]*?)\n\];/);
+export function parseRequestContextLanes(source, policySource = null) {
+  const table =
+    source.match(/const RULES: &\[MemoryRouteRule\] = &\[([\s\S]*?)\n\];/) ??
+    source.match(/const LEGACY_RULES: &\[MemoryRouteRule\] = &\[([\s\S]*?)\n\];/);
   if (!table) throw new Error("could not locate RULES in memory_route_registry.rs");
   const lanes = new Set();
   let seen = 0;
@@ -432,6 +442,13 @@ export function parseRequestContextLanes(source) {
       throw new Error(`memory-route rule ${seen} is under-keyed`);
     }
     if (backend === "Mlx" && legacy === "false") lanes.add(`mlx:${provider}`);
+  }
+  if (policySource) {
+    const policy = typeof policySource === "string" ? JSON.parse(policySource) : policySource;
+    for (const row of policy.declaredRoutes ?? []) {
+      seen += 1;
+      if (row.backend === "mlx") lanes.add(`mlx:${row.provider}`);
+    }
   }
   if (seen === 0) throw new Error("RULES parsed to zero memory-route rules");
   return lanes;
@@ -651,17 +668,21 @@ export function planProjection({
   engineFacts,
   enginesSource,
   strictControlSource,
-  imageRoutingSource,
   routeRegistrySource,
+  memoryRoutePolicySource = null,
+  registrySpecsSource,
 }) {
   const models = manifest.models ?? [];
   const routes = parseEngineModelTable(enginesSource);
   const controlEngines = parseStrictControlEngines(strictControlSource);
-  const requestContextLanes = parseRequestContextLanes(routeRegistrySource);
-  const poseFamilies = {
-    mlx: rustStringSlice(imageRoutingSource, "WIRED_MLX_POSE_FAMILIES"),
-    candle: rustStringSlice(imageRoutingSource, "WIRED_CANDLE_POSE_FAMILIES"),
-  };
+  const requestContextLanes = parseRequestContextLanes(
+    routeRegistrySource,
+    memoryRoutePolicySource,
+  );
+  if (!registrySpecsSource) {
+    throw new Error("planProjection needs registrySpecsSource to derive the wired pose families");
+  }
+  const poseFamilies = wiredPoseFamiliesFromSpecs(registrySpecsSource, controlEngines);
   const inventory = engineContractInventory(engineFacts);
   const witnessIndex = routeWitnessInventory(engineFacts);
 
@@ -1116,8 +1137,8 @@ export function projectManifestBody({
   engineFacts,
   enginesSource,
   strictControlSource,
-  imageRoutingSource,
   routeRegistrySource,
+  registrySpecsSource,
 }) {
   // Start from the manifest WITHOUT any previous generated region, so what a rerun reads as
   // "already declared by hand" never includes what the last run wrote. Without this the projection
@@ -1129,8 +1150,8 @@ export function projectManifestBody({
     engineFacts,
     enginesSource,
     strictControlSource,
-    imageRoutingSource,
     routeRegistrySource,
+    registrySpecsSource,
   });
   return { body: applyProjection(base, plan.plans), ...plan };
 }

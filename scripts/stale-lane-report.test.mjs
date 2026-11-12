@@ -32,7 +32,7 @@ import {
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const RUST_POLICY_PATH = path.join(ROOT, "crates", "sceneworks-worker", "src", "ladder_margin_policy.rs");
-const MANIFEST_PATH = path.join(ROOT, "config", "manifests", "builtin.models.jsonc");
+const MANIFEST_PATH = path.join(ROOT, "config", "manifests", "registry", "evidence.json");
 
 const digest = (seed) => seed.repeat(64).slice(0, 64);
 const LIVE_MLX = digest("a");

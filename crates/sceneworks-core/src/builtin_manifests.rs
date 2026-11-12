@@ -46,6 +46,13 @@ pub const BUILTIN_MANIFESTS: &[(&str, &str)] = &[
     ),
 ];
 
+/// Measured registry facts are shipped alongside the product manifests. Keep
+/// their source file separate so a manifest cannot silently become the evidence
+/// store again when the memory-key consumers migrate.
+pub const BUILTIN_REGISTRY_EVIDENCE: &str =
+    include_str!("../../../config/manifests/registry/evidence.json");
+pub const BUILTIN_REGISTRY_EVIDENCE_PATH: &str = "registry/evidence.json";
+
 /// Return one immutable shipped catalog, parsed once. Files in `config_dir` and user manifests
 /// are deliberately excluded: edits to those remain observable by the normal filesystem loaders.
 /// Missing, malformed or structurally invalid embedded catalogs are errors, never empty policy.
@@ -62,7 +69,7 @@ pub fn builtin_manifest(name: &str) -> Result<&'static serde_json::Value, &'stat
         .map_err(String::as_str)
 }
 
-fn parse_builtin_manifest(name: &str, contents: &str) -> Result<serde_json::Value, String> {
+fn parse_raw_builtin_manifest(name: &str, contents: &str) -> Result<serde_json::Value, String> {
     use serde_json::Value;
     let field = match name {
         "builtin.models.jsonc" => "models",
@@ -119,6 +126,25 @@ fn parse_builtin_manifest(name: &str, contents: &str) -> Result<serde_json::Valu
     Ok(value)
 }
 
+fn parse_builtin_manifest(name: &str, contents: &str) -> Result<serde_json::Value, String> {
+    let mut value = parse_raw_builtin_manifest(name, contents)?;
+    if name == "builtin.models.jsonc" {
+        for model in value["models"]
+            .as_array_mut()
+            .expect("validated model array")
+        {
+            if let Some(spec) = model["id"]
+                .as_str()
+                .and_then(crate::registry::builtin_model_spec)
+            {
+                *model = spec.project(None);
+            }
+            crate::registry::project_builtin_memory_evidence(model)?;
+        }
+    }
+    Ok(value)
+}
+
 /// Trusted shipped model rows share the validated immutable parser; this is not an imported registry.
 pub fn builtin_model_entries() -> &'static [serde_json::Value] {
     builtin_manifest("builtin.models.jsonc")
@@ -167,7 +193,10 @@ pub fn chatterbox_ve_pin() -> Result<&'static ChatterboxVePin, &'static str> {
 
 #[cfg(test)]
 fn parse_chatterbox_ve_pin(contents: &str) -> Result<ChatterboxVePin, String> {
-    chatterbox_ve_pin_from_manifest(&parse_builtin_manifest("builtin.models.jsonc", contents)?)
+    chatterbox_ve_pin_from_manifest(&parse_raw_builtin_manifest(
+        "builtin.models.jsonc",
+        contents,
+    )?)
 }
 
 fn chatterbox_ve_pin_from_manifest(
@@ -371,6 +400,33 @@ pub fn seed_builtin_manifests(config_dir: &Path, mode: SeedMode) -> std::io::Res
         crate::store_util::atomic_write(&target, contents.as_bytes())
             .map_err(|error| std::io::Error::other(format!("install {name}: {error}")))?;
     }
+    crate::jsonc::reject_duplicate_keys(BUILTIN_REGISTRY_EVIDENCE).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{BUILTIN_REGISTRY_EVIDENCE_PATH}: {error}"),
+        )
+    })?;
+    let evidence: serde_json::Value = serde_json::from_str(BUILTIN_REGISTRY_EVIDENCE)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    if !evidence.is_object() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "registry evidence must be a JSON object",
+        ));
+    }
+    let target = dir.join(BUILTIN_REGISTRY_EVIDENCE_PATH);
+    if manifest_needs_write(
+        std::fs::read(&target).ok().as_deref(),
+        BUILTIN_REGISTRY_EVIDENCE.as_bytes(),
+        mode,
+    ) {
+        std::fs::create_dir_all(target.parent().expect("evidence has a parent"))?;
+        crate::store_util::atomic_write(&target, BUILTIN_REGISTRY_EVIDENCE.as_bytes()).map_err(
+            |error| {
+                std::io::Error::other(format!("install {BUILTIN_REGISTRY_EVIDENCE_PATH}: {error}"))
+            },
+        )?;
+    }
     Ok(())
 }
 
@@ -469,6 +525,9 @@ mod tests {
     #[test]
     fn shipped_chatterbox_downloads_share_one_manifest_authoritative_pin() {
         let pin = chatterbox_ve_pin().expect("shipped Chatterbox pin is valid");
+        let raw_pin = parse_chatterbox_ve_pin(embedded("builtin.models.jsonc"))
+            .expect("raw shipped Chatterbox pin is valid");
+        assert_eq!(pin, &raw_pin);
         assert_eq!(pin.repo, "ResembleAI/chatterbox");
         assert_eq!(pin.revision.len(), 40);
         assert!(pin.revision.bytes().all(|byte| byte.is_ascii_hexdigit()));
@@ -726,8 +785,25 @@ mod tests {
     #[test]
     fn ltx25_builtin_manifest_declares_the_exact_backend_memory_ladders() {
         let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.models.jsonc"));
-        let manifest: serde_json::Value =
+        let raw_manifest: serde_json::Value =
             serde_json::from_str(&stripped).expect("builtin.models.jsonc parses as JSON");
+        let raw_model = raw_manifest["models"]
+            .as_array()
+            .expect("builtin.models.jsonc has a models array")
+            .iter()
+            .find(|model| model["id"].as_str() == Some("ltx_2_5"))
+            .expect("ltx_2_5 is present in raw builtin.models.jsonc");
+        for backend in ["mlx", "candle"] {
+            assert!(
+                raw_model[backend]
+                    .get("memoryStrategyCapabilities")
+                    .is_none(),
+                "raw product manifest must not duplicate {backend} memoryStrategyCapabilities"
+            );
+        }
+
+        let manifest =
+            builtin_manifest("builtin.models.jsonc").expect("builtin.models.jsonc parses");
         let model = manifest["models"]
             .as_array()
             .expect("builtin.models.jsonc has a models array")
@@ -1265,6 +1341,11 @@ mod tests {
             let written = std::fs::read_to_string(dir.join(name)).expect("manifest written");
             assert_eq!(&written, contents, "{name} matches the embedded copy");
         }
+        assert_eq!(
+            std::fs::read_to_string(dir.join(BUILTIN_REGISTRY_EVIDENCE_PATH)).unwrap(),
+            BUILTIN_REGISTRY_EVIDENCE,
+            "registry evidence matches the embedded copy"
+        );
         // No temp files left behind by the atomic write.
         let leftovers: Vec<_> = std::fs::read_dir(&dir)
             .expect("read manifests dir")
@@ -1340,6 +1421,31 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.join("builtin.styles.jsonc")).expect("styles written"),
             embedded("builtin.styles.jsonc")
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join(BUILTIN_REGISTRY_EVIDENCE_PATH)).unwrap(),
+            BUILTIN_REGISTRY_EVIDENCE
+        );
+    }
+
+    #[test]
+    fn registry_evidence_obeys_the_same_seed_modes() {
+        let temp = tempfile::tempdir().unwrap();
+        let evidence = temp.path().join("manifests/registry/evidence.json");
+        std::fs::create_dir_all(evidence.parent().unwrap()).unwrap();
+        std::fs::write(&evidence, b"operator-evidence").unwrap();
+        seed_builtin_manifests(temp.path(), SeedMode::IfMissing).unwrap();
+        assert_eq!(std::fs::read(&evidence).unwrap(), b"operator-evidence");
+        seed_builtin_manifests(temp.path(), SeedMode::SyncFromEmbedded).unwrap();
+        assert_eq!(
+            std::fs::read(&evidence).unwrap(),
+            BUILTIN_REGISTRY_EVIDENCE.as_bytes()
+        );
+        std::fs::write(&evidence, b"stale-evidence").unwrap();
+        seed_builtin_manifests(temp.path(), SeedMode::Overwrite).unwrap();
+        assert_eq!(
+            std::fs::read(&evidence).unwrap(),
+            BUILTIN_REGISTRY_EVIDENCE.as_bytes()
         );
     }
 
@@ -2449,8 +2555,23 @@ mod tests {
         ];
 
         let stripped = crate::jsonc::strip_jsonc_comments(embedded("builtin.models.jsonc"));
-        let manifest: serde_json::Value =
+        let raw_manifest: serde_json::Value =
             serde_json::from_str(&stripped).expect("builtin.models.jsonc parses as JSON");
+        let raw_downloads = raw_manifest["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"].as_str() == Some("krea_realtime_14b"))
+            .expect("krea_realtime_14b present in raw builtin.models.jsonc")["downloads"]
+            .as_array()
+            .expect("raw downloads array");
+        for entry in raw_downloads {
+            assert!(entry["footprint"].get("residentMemoryBytes").is_none());
+            assert!(entry["footprint"].get("peakMemoryBytes").is_none());
+        }
+
+        let manifest =
+            builtin_manifest("builtin.models.jsonc").expect("builtin.models.jsonc parses");
         let model = manifest["models"]
             .as_array()
             .expect("models array")

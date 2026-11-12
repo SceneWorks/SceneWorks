@@ -9,10 +9,10 @@ fn no_staging(admission: &MlxRequestAdmission) -> bool {
 #[test]
 #[ignore = "requires installed flux2_klein_9b bf16, converted flux2_klein_9b_true_v2 and flux2_dev bf16 on a 128 GiB Mac"]
 fn declared_sequential_release_matches_the_request_admission() {
-    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
-        include_str!("../../../../config/manifests/builtin.models.jsonc"),
-    ))
-    .unwrap();
+    let manifest: Value =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("builtin model manifest parses")
+            .clone();
     let home = PathBuf::from(std::env::var_os("HOME").unwrap());
     let hub = home.join(".cache/huggingface/hub");
     let cases = [

@@ -16,6 +16,149 @@ pub struct ShippedControlWeight {
     pub revision: &'static str,
 }
 
+/// Pinned defaults for worker-opened auxiliary sources outside a model's hard closure.
+/// The worker may select an operator override only for an ID whose loader already permits it;
+/// a private source claim freezes its exact bytes and provenance before admission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShippedAuxiliarySource {
+    pub source_id: &'static str,
+    pub repo: &'static str,
+    pub revision: &'static str,
+    pub files: &'static [&'static str],
+}
+
+pub const SHIPPED_AUXILIARY_SOURCES: &[ShippedAuxiliarySource] = &[
+    ShippedAuxiliarySource {
+        source_id: "instantid_mlx",
+        repo: "SceneWorks/instantid-mlx",
+        revision: "bca0cacf8e5e04529bb2b326a521361b02be84fd",
+        files: &[
+            "ip-adapter.safetensors",
+            "scrfd_10g.safetensors",
+            "arcface_iresnet100.safetensors",
+        ],
+    },
+    ShippedAuxiliarySource {
+        source_id: "instantid_controlnet",
+        repo: "InstantX/InstantID",
+        revision: "57b32dfee076092ad2930c71fd6d439c2c3b1820",
+        files: &[
+            "ControlNetModel/config.json",
+            "ControlNetModel/diffusion_pytorch_model.safetensors",
+        ],
+    },
+    ShippedAuxiliarySource {
+        source_id: "instantid_openpose",
+        repo: "xinsir/controlnet-openpose-sdxl-1.0",
+        revision: "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+        files: &["config.json", "diffusion_pytorch_model.safetensors"],
+    },
+    ShippedAuxiliarySource {
+        source_id: "pulid_adapter",
+        repo: "guozinan/PuLID",
+        revision: "492b1451255dc9d9bc3c857259690b5f8b998d4a",
+        files: &["pulid_flux_v0.9.1.safetensors"],
+    },
+    ShippedAuxiliarySource {
+        source_id: "pulid_eva",
+        repo: "SceneWorks/pulid-flux-mlx",
+        revision: "78ef91f977eae16d66fb191caf003154b7a0a0b8",
+        files: &["eva02_clip_l_336.safetensors"],
+    },
+    ShippedAuxiliarySource {
+        source_id: "pulid_bisenet",
+        repo: "SceneWorks/pulid-flux-mlx",
+        revision: "78ef91f977eae16d66fb191caf003154b7a0a0b8",
+        files: &["bisenet_parsing.safetensors"],
+    },
+    ShippedAuxiliarySource {
+        source_id: "pulid_scrfd",
+        repo: "SceneWorks/instantid-mlx",
+        revision: "bca0cacf8e5e04529bb2b326a521361b02be84fd",
+        files: &["scrfd_10g.safetensors"],
+    },
+    ShippedAuxiliarySource {
+        source_id: "pulid_arcface",
+        repo: "SceneWorks/instantid-mlx",
+        revision: "bca0cacf8e5e04529bb2b326a521361b02be84fd",
+        files: &["arcface_iresnet100.safetensors"],
+    },
+    ShippedAuxiliarySource {
+        source_id: "flux_ip_adapter",
+        repo: "XLabs-AI/flux-ip-adapter",
+        revision: "18f6940238ab5dc3744df7a8e30315892279d5f9",
+        files: &["ip_adapter.safetensors"],
+    },
+    ShippedAuxiliarySource {
+        source_id: "flux_ip_encoder",
+        repo: "openai/clip-vit-large-patch14",
+        revision: "32bd64288804d66eefd0ccbe215aa642df71cc41",
+        files: &["model.safetensors"],
+    },
+    ShippedAuxiliarySource {
+        source_id: "sdxl_ip_adapter",
+        repo: "h94/IP-Adapter",
+        revision: "018e402774aeeddd60609b4ecdb7e298259dc729",
+        files: &["sdxl_models/ip-adapter-plus_sdxl_vit-h.safetensors"],
+    },
+    ShippedAuxiliarySource {
+        source_id: "sdxl_ip_encoder",
+        repo: "h94/IP-Adapter",
+        revision: "018e402774aeeddd60609b4ecdb7e298259dc729",
+        files: &[
+            "models/image_encoder/config.json",
+            "models/image_encoder/model.safetensors",
+        ],
+    },
+    ShippedAuxiliarySource {
+        source_id: "sdxl_detail_tile_control",
+        repo: "xinsir/controlnet-tile-sdxl-1.0",
+        revision: "1ae8d9529efe58f7362a987363ff86a7904dc84f",
+        files: &["diffusion_pytorch_model.safetensors"],
+    },
+    ShippedAuxiliarySource {
+        source_id: "depth_anything_v2_small",
+        repo: "depth-anything/Depth-Anything-V2-Small-hf",
+        revision: "5426e4f0f36572d16453bbda7a8389317b1bef99",
+        files: &["model.safetensors"],
+    },
+    ShippedAuxiliarySource {
+        source_id: "ltx_training_text_encoder",
+        repo: "SceneWorks/ltx-2.3-mlx",
+        revision: "01df27d308466533aa09d251e3aebdcc627d07eb",
+        files: &["gemma/*"],
+    },
+    ShippedAuxiliarySource {
+        source_id: "iris_depth_export",
+        repo: "speridlabs/iris-3b",
+        revision: "7445443349bc9abe3c96f01ff793e2098ca012b3",
+        files: &[
+            "depth/config.yaml",
+            "depth/model.safetensors",
+            "depth/empty_prompt.safetensors",
+        ],
+    },
+    ShippedAuxiliarySource {
+        source_id: "iris_generation_text_encoder",
+        repo: "Qwen/Qwen3-VL-4B-Instruct",
+        revision: "ebb281ec70b05090aa6165b016eac8ec08e71b17",
+        files: &[
+            "config.json",
+            "generation_config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "model.safetensors.index.json",
+            "model-*.safetensors",
+        ],
+    },
+];
+
+pub fn shipped_auxiliary_source(source_id: &str) -> Option<&'static ShippedAuxiliarySource> {
+    SHIPPED_AUXILIARY_SOURCES
+        .iter()
+        .find(|source| source.source_id == source_id)
+}
+
 /// Exact shipped control-weight allow-list.
 ///
 /// Z-Image base has distinct MLX and Candle filenames in the upstream repo, and
@@ -130,6 +273,88 @@ pub fn default_control_revision(engine_id: &str) -> Option<&'static str> {
         .map(|artifact| artifact.revision)
 }
 
+/// The strict-control route's shipped component for this exact request. The worker and API
+/// consult the same table; an authored registered overlay replaces this default separately.
+/// A control file is selected only when the request actually enters a pose/control route.
+pub fn default_control_weight_for_request(
+    model_id: &str,
+    entry: &serde_json::Value,
+    backend: &str,
+    payload: &serde_json::Map<String, serde_json::Value>,
+) -> Option<&'static ShippedControlWeight> {
+    let poses = payload
+        .get("advanced")?
+        .get("poses")?
+        .as_array()
+        .is_some_and(|poses| !poses.is_empty());
+    if !poses || payload.get("mode").and_then(serde_json::Value::as_str) == Some("edit_image") {
+        return None;
+    }
+    // An imported fine-tune names its base explicitly, or carries the server-projected control
+    // base of its registered generate route (`ui.controlOverlayBaseModel`, set by the catalog's
+    // imported operation surface); a builtin row is its own base.
+    let base_model = entry
+        .get("baseModel")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            entry
+                .get("ui")
+                .and_then(|ui| ui.get("controlOverlayBaseModel"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .unwrap_or(model_id);
+    let engine = match base_model {
+        "sdxl"
+        | "realvisxl"
+        | "realvisxl_lightning"
+        | "illustrious_xl_v1"
+        | "illustrious_xl_v2" => "sdxl",
+        "flux_dev" => "flux1_dev_control",
+        "flux2_dev" => "flux2_dev_control",
+        "z_image_turbo" => "z_image_turbo_control",
+        "z_image" => "z_image_control",
+        "qwen_image" => "qwen_image_control",
+        "kolors" => "kolors_control",
+        "krea_2_turbo" => "krea_2_turbo_control",
+        _ => return None,
+    };
+    let file = match engine {
+        "z_image_control" if backend == "candle" => "diffusion_pytorch_model.safetensors",
+        "z_image_control" => "Z-Image-Fun-Controlnet-Union-2.1.safetensors",
+        "qwen_image_control" => match selected_qwen_control_tier(payload) {
+            "q4" => "q4/model.safetensors",
+            "bf16" => "bf16/model.safetensors",
+            _ => "q8/model.safetensors",
+        },
+        _ => {
+            SHIPPED_CONTROL_WEIGHTS
+                .iter()
+                .find(|weight| weight.engine_id == engine)?
+                .file
+        }
+    };
+    SHIPPED_CONTROL_WEIGHTS
+        .iter()
+        .find(|weight| weight.engine_id == engine && weight.file == file)
+}
+
+/// The portable control tier is independent of this host's installed snapshot. The legacy
+/// worker may clamp an implicit Q8 pick to a present tier, but a bound job must keep Q8 across
+/// hosts and fetch or refuse when it is missing.
+pub fn selected_qwen_control_tier(
+    payload: &serde_json::Map<String, serde_json::Value>,
+) -> &'static str {
+    let bits = payload
+        .get("advanced")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|advanced| crate::payload_util::optional_i64(advanced, "mlxQuantize"));
+    match bits {
+        Some(bits) if bits <= 0 => "bf16",
+        Some(bits) if bits <= 4 => "q4",
+        _ => "q8",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,6 +367,34 @@ mod tests {
             .as_array()
             .expect("models array")
             .to_vec()
+    }
+
+    #[test]
+    fn iris_depth_parent_alternatives_match_pinned_catalog_closures() {
+        let models = builtin_models();
+        let depth = models
+            .iter()
+            .find(|model| model["id"] == "iris_3b_depth")
+            .unwrap();
+        let export = shipped_auxiliary_source("iris_depth_export").unwrap();
+        let depth_download = &depth["downloads"][0];
+        assert_eq!(depth_download["repo"], export.repo);
+        assert_eq!(depth_download["revision"], export.revision);
+        assert_eq!(depth_download["files"], json!(export.files));
+        let generation = models
+            .iter()
+            .find(|model| model["id"] == "iris_3b")
+            .unwrap();
+        let encoder = shipped_auxiliary_source("iris_generation_text_encoder").unwrap();
+        let encoder_download = generation["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["componentId"] == "text_encoder")
+            .unwrap();
+        assert_eq!(encoder_download["repo"], encoder.repo);
+        assert_eq!(encoder_download["revision"], encoder.revision);
+        assert_eq!(encoder_download["files"], json!(encoder.files));
     }
 
     #[test]

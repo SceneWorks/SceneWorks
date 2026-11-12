@@ -238,21 +238,21 @@
     {
       "id": "SW-MLX-route",
       "tests": [
-        "catalog"
+        "scheduler",
+        "matrix"
       ],
       "patches": [
         {
-          "file": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
+          "file": "config/engine-capabilities/runtime/capabilities.mlx.json",
           "op": "replace",
-          "old": "pub const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[\n    \"moss_image_lora\",\n",
-          "new": "pub const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[\n"
+          "old": "    \"z_image_turbo_lora\": \"z_image_turbo\",\n    \"moss_image_base_lora\": \"moss_image_base\",\n    \"moss_image_sft_lora\": \"moss_image_sft\"\n",
+          "new": "    \"z_image_turbo_lora\": \"z_image_turbo\"\n"
         }
       ]
     },
     {
       "id": "SW-generic-refusal",
       "tests": [
-        "catalog",
         "scheduler"
       ],
       "patches": [
@@ -267,30 +267,28 @@
     {
       "id": "SW-generation-base-Candle-adapter",
       "tests": [
-        "catalog",
         "scheduler"
       ],
       "patches": [
         {
-          "file": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
+          "file": "config/manifests/registry/route-policy.json",
           "op": "replace",
-          "old": "    ModelCaps::new(\"moss_image_base\", true, true, false, true, false),",
-          "new": "    ModelCaps::new(\"moss_image_base\", true, true, false, false, false),"
+          "old": "      \"id\": \"moss_image_base\",\n      \"mlxRouted\": true,\n      \"candleRouted\": true,\n      \"candleQuant\": false,\n      \"candleLora\": true,",
+          "new": "      \"id\": \"moss_image_base\",\n      \"mlxRouted\": true,\n      \"candleRouted\": true,\n      \"candleQuant\": false,\n      \"candleLora\": false,"
         }
       ]
     },
     {
       "id": "SW-generation-sft-Candle-adapter",
       "tests": [
-        "catalog",
         "scheduler"
       ],
       "patches": [
         {
-          "file": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
+          "file": "config/manifests/registry/route-policy.json",
           "op": "replace",
-          "old": "    ModelCaps::new(\"moss_image_sft\", true, true, false, true, false),",
-          "new": "    ModelCaps::new(\"moss_image_sft\", true, true, false, false, false),"
+          "old": "      \"id\": \"moss_image_sft\",\n      \"mlxRouted\": true,\n      \"candleRouted\": true,\n      \"candleQuant\": false,\n      \"candleLora\": true,",
+          "new": "      \"id\": \"moss_image_sft\",\n      \"mlxRouted\": true,\n      \"candleRouted\": true,\n      \"candleQuant\": false,\n      \"candleLora\": false,"
         }
       ]
     },
@@ -343,11 +341,10 @@
       ],
       "patches": [
         {
-          "file": "crates/sceneworks-core/src/jobs_store/routing/matrix.rs",
+          "file": "config/engine-capabilities/runtime/capabilities.mlx.json",
           "op": "replace",
-          "old": "(\"moss_image_base\", \"moss_image_base\")",
-          "new": "(\"wrong\", \"wrong\")",
-          "anchor": "pub(crate) fn expected_backend_local_trainer_id("
+          "old": "\"moss_image_base_lora\": \"moss_image_base\"",
+          "new": "\"moss_image_base_lora\": \"wrong\""
         }
       ]
     },
@@ -358,11 +355,10 @@
       ],
       "patches": [
         {
-          "file": "crates/sceneworks-core/src/jobs_store/routing/matrix.rs",
+          "file": "config/engine-capabilities/runtime/capabilities.mlx.json",
           "op": "replace",
-          "old": "(\"moss_image_sft\", \"moss_image_sft\")",
-          "new": "(\"wrong\", \"wrong\")",
-          "anchor": "pub(crate) fn expected_backend_local_trainer_id("
+          "old": "\"moss_image_sft_lora\": \"moss_image_sft\"",
+          "new": "\"moss_image_sft_lora\": \"wrong\""
         }
       ]
     },
@@ -618,6 +614,20 @@
           "old": "Some(Value::String(value)) if value.trim().is_empty() => \"lora\",",
           "new": "Some(Value::String(value)) if value.trim().is_empty() => \"full\",",
           "anchor": "pub(crate) fn moss_training_plan_is_supported("
+        }
+      ]
+    },
+    {
+      "id": "SW-catalog-candle-adapter-projection",
+      "tests": [
+        "catalog"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
+          "op": "replace",
+          "old": "pub(crate) CANDLE_LORA_MODELS, IMAGE_MODEL_CAPS, candle_lora",
+          "new": "pub(crate) CANDLE_LORA_MODELS, IMAGE_MODEL_CAPS, candle_quant_lora"
         }
       ]
     },
@@ -902,7 +912,7 @@
           "op": "replace",
           "old": "\"moss_image_sft\" => Some(\"moss_image_sft\"),",
           "new": "\"moss_image_sft\" => Some(\"moss_image_base\"),",
-          "anchor": "pub(crate) fn engine_trainer_id_for("
+          "anchor": "pub fn engine_trainer_id_for("
         }
       ]
     },

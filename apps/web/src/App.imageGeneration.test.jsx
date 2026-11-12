@@ -2137,6 +2137,7 @@ describe("SceneWorks app shell", () => {
                 name: "Wan2.2 14B (T2V)",
                 type: "video",
                 family: "wan-video",
+                downloads: [{ variant: "q4", platforms: ["windows", "linux"] }],
                 capabilities: ["text_to_video"],
                 defaults: { duration: 5, fps: 16, resolution: "832x480", quality: "balanced" },
                 limits: { durations: [3, 4, 5], fps: [16], resolutions: ["832x480"] },

@@ -31,6 +31,15 @@ export function mossComponentPurpose(options, mode) {
   if (mode === "edit_image") return "moss_image_edit";
   return mossAccelerated(options) ? `moss_dmd_${options.acceleration}` : null;
 }
+// The acceleration the studio's 8-step checkbox selects.
+export const mossAccelerationMode = "unmerged_bf16";
+// Whether the checkpoint declares the optional 8-step package the acceleration control selects: the
+// catalog's `conditionalPurposes` (projected from the manifest's `conditionalComponents[].requiredFor`)
+// carries that purpose. Only MOSS-Image SFT ships it; Base declares none, so the control is absent.
+export function mossAccelerationAvailable(model, mode) {
+  const purpose = mossComponentPurpose({ acceleration: mossAccelerationMode }, mode);
+  return Boolean(purpose && model?.conditionalPurposes?.[purpose]);
+}
 export function mossComponentState(model, options, mode) {
   const purpose = mossComponentPurpose(options, mode);
   if (!purpose) return { ready: true, purpose: null, state: "installed" };

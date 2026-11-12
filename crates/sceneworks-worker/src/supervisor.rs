@@ -479,6 +479,8 @@ pub(crate) fn start_child_worker(settings: &Settings, spec: &WorkerSpec) -> Work
     // Do not rely on ambient inheritance: first remove any raw parent value,
     // then add the trimmed, nonblank value Settings accepted (if configured).
     command.env_remove("SCENEWORKS_ACCESS_TOKEN");
+    command.env_remove("SCENEWORKS_WORKER_PROOF_MASTER");
+    command.env_remove("SCENEWORKS_WORKER_PROOF_KEY");
     command.envs(child_environment(settings, spec));
     // Windows graceful-shutdown channel (sc-11184 / F-014). Windows has no per-child
     // SIGTERM, so give the child a supervisor-held stdin pipe: closing the write end in
@@ -552,6 +554,12 @@ pub(crate) fn child_environment(
     env.insert("SCENEWORKS_GPU_ID".to_owned(), spec.gpu_id.clone());
     if let Some(access_token) = &settings.access_token {
         env.insert("SCENEWORKS_ACCESS_TOKEN".to_owned(), access_token.clone());
+    }
+    if let Ok(Some(key)) = sceneworks_core::worker_proof::derived_key_from_master_env_or_file(
+        &settings.credentials_dir,
+        &spec.worker_id,
+    ) {
+        env.insert("SCENEWORKS_WORKER_PROOF_KEY".to_owned(), key);
     }
     if spec.gpu_id == "cpu" {
         env.insert("CUDA_VISIBLE_DEVICES".to_owned(), String::new());

@@ -668,6 +668,16 @@ def test_the_fingerprint_covers_only_the_anchor_and_catalog_sources():
     )
     assert sources["anchorExtractor"] == "scripts/extract-memory-anchors.mjs"
     assert sources["manifest"] == "config/manifests/builtin.models.jsonc"
+    # SW-7031/SW-7032: the typed model registry joined the fingerprint — the measured
+    # footprints (memoryEvidence), the lane/cap policy the population derives its
+    # routing from (routePolicy/memoryRoutePolicy), the ModelSpec projections the
+    # tier and pose-family derivations read (registrySpecs), and the strict-control
+    # engine set (strictControl) can all move a cell, so each must rotate the revision.
+    assert sources["memoryEvidence"] == "config/manifests/registry/evidence.json"
+    assert sources["routePolicy"] == "config/manifests/registry/route-policy.json"
+    assert sources["registrySpecs"] == "config/manifests/registry/specs.json"
+    assert sources["memoryRoutePolicy"] == "config/manifests/registry/memory-route-policy.json"
+    assert sources["strictControl"] == "crates/sceneworks-worker/src/image_jobs/strict_control.rs"
     removed = {
         "config/memory-calibration-plan.json",
         "docs/generated/memory-calibration-evidence.json",
@@ -688,7 +698,6 @@ def test_the_fingerprint_covers_only_the_anchor_and_catalog_sources():
         "routingCandle",
         "routingMlx",
         "engines",
-        "imageRouting",
         "videoRouteWan",
         "videoRouteLtx",
         "videoRouteSvd",
@@ -698,6 +707,11 @@ def test_the_fingerprint_covers_only_the_anchor_and_catalog_sources():
         "videoRouteCandle",
         "mlxFitGate",
         "memoryRouteRegistry",
+        "memoryEvidence",
+        "routePolicy",
+        "registrySpecs",
+        "memoryRoutePolicy",
+        "strictControl",
         "instantId",
         "anchorStore",
         "anchorLoaderClosures",
@@ -843,9 +857,10 @@ def fold_implementation_states(states):
 
 def moss_source_facts():
     """The MOSS image lane as the SOURCES declare it: the builtin manifest's `moss_image` family
-    (read through the repo's own JSONC helper), the routing catalog's `ModelCaps` rows, and the
-    runtime-dumped generator capabilities. Nothing here reads the generated matrix, so the matrix
-    cannot vouch for itself."""
+    (read through the repo's own JSONC helper), the model registry's typed route policy (the
+    authored owner of the routing catalog's `ModelCaps` rows since SW-7032 — build.rs compiles
+    it into the table), and the runtime-dumped generator capabilities. Nothing here reads the
+    generated matrix, so the matrix cannot vouch for itself."""
     out = subprocess.run(
         ["node", "--input-type=module", "-e", _MOSS_FACTS_SCRIPT],
         cwd=ROOT,
@@ -855,9 +870,10 @@ def moss_source_facts():
     ).stdout
     payload = json.loads(out)
     manifest_models = payload["models"]
-    catalog = (
-        ROOT / "crates/sceneworks-core/src/jobs_store/routing/catalog.rs"
-    ).read_text(encoding="utf-8")
+    route_policy = json.loads(
+        (ROOT / "config/manifests/registry/route-policy.json").read_text(encoding="utf-8")
+    )
+    policy_rows = {row["id"]: row for row in route_policy["image"]}
     dumps = {
         backend: json.loads(
             (ROOT / f"config/engine-capabilities/runtime/capabilities.{backend}.json").read_text(
@@ -868,13 +884,11 @@ def moss_source_facts():
     }
     facts = {}
     for entry in manifest_models:
-        row = re.search(
-            r'ModelCaps::new\(\s*"%s",\s*(true|false),\s*(true|false),\s*(true|false),'
-            r"\s*(true|false),\s*(true|false)\s*\)" % re.escape(entry["id"]),
-            catalog,
-        )
-        assert row, f"{entry['id']} has no routing-catalog ModelCaps row"
-        mlx_routed, candle_routed, _quant, candle_lora, _both = (v == "true" for v in row.groups())
+        row = policy_rows.get(entry["id"])
+        assert row is not None, f"{entry['id']} has no registry route-policy image row"
+        mlx_routed = row["mlxRouted"]
+        candle_routed = row["candleRouted"]
+        candle_lora = row["candleLora"]
         runtime = {
             backend: next((c for c in dumps[backend] if c["id"] == entry["id"]), None)
             for backend in ("mlx", "candle")

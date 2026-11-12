@@ -2,6 +2,290 @@
 use super::support::*;
 use crate::{validate_prompt_enhancement_fields, validate_prompt_enhancement_payload};
 
+const JOBS_FIXTURE_REVISION: &str = "1111111111111111111111111111111111111111";
+
+/// Menu and routing tests use deliberately small handwritten catalogs. Give their positive
+/// source rows immutable revisions before exercising portable admission; keep missing-revision
+/// refusal in its own test below instead of weakening the production boundary.
+fn pin_handwritten_jobs_manifest(settings: &Settings) {
+    let path = settings.config_dir.join("manifests/builtin.models.jsonc");
+    let raw = std::fs::read_to_string(&path).expect("handwritten models manifest");
+    let mut manifest: Value = serde_json::from_str(&strip_jsonc_comments(&raw))
+        .expect("handwritten models manifest parses");
+    for model in manifest["models"].as_array_mut().expect("models array") {
+        for download in model["downloads"].as_array_mut().into_iter().flatten() {
+            if download["provider"] != "huggingface" || download.get("revision").is_some() {
+                continue;
+            }
+            let repo = download["repo"].as_str().expect("fixture repository");
+            let shipped = sceneworks_core::builtin_manifests::builtin_model_entries()
+                .iter()
+                .flat_map(|entry| entry["downloads"].as_array().into_iter().flatten())
+                .find(|row| row["repo"] == repo)
+                .and_then(|row| row["revision"].as_str());
+            download["revision"] = json!(shipped.unwrap_or(JOBS_FIXTURE_REVISION));
+        }
+    }
+    std::fs::write(path, manifest.to_string()).expect("pinned fixture manifest writes");
+}
+
+/// A route fixture may customize UI or resource fields, but its executable model identity and
+/// default package must remain a real registered native model with a pinned source closure.
+fn use_shipped_default_image_package(manifest_dir: &std::path::Path, model_id: &str) {
+    let path = manifest_dir.join("builtin.models.jsonc");
+    let raw = std::fs::read_to_string(&path).expect("handwritten models manifest");
+    let mut manifest: Value =
+        serde_json::from_str(&strip_jsonc_comments(&raw)).expect("handwritten catalog parses");
+    let shipped = sceneworks_core::builtin_manifests::builtin_model_entries()
+        .iter()
+        .find(|entry| entry["id"] == model_id)
+        .expect("registered native fixture model");
+    let default = shipped["downloads"]
+        .as_array()
+        .expect("shipped downloads")
+        .iter()
+        .find(|row| row["default"] == true)
+        .expect("shipped default package");
+    let row = manifest["models"]
+        .as_array_mut()
+        .expect("fixture models")
+        .iter_mut()
+        .find(|row| row["id"] == model_id)
+        .expect("fixture model");
+    for field in ["family", "adapter", "capabilities"] {
+        row[field] = shipped[field].clone();
+    }
+    row["downloads"] = json!([default]);
+    std::fs::write(path, manifest.to_string()).expect("native fixture package writes");
+}
+
+/// Preserve a small routing fixture's authored model fields and alternate downloads while
+/// selecting the exact shipped default source declaration with its file selectors.
+fn use_shipped_default_download(manifest_dir: &std::path::Path, model_id: &str) {
+    let shipped = sceneworks_core::builtin_manifests::builtin_model_entry(model_id)
+        .expect("shipped fixture model");
+    let default = shipped
+        .get("downloads")
+        .and_then(Value::as_array)
+        .and_then(|downloads| {
+            downloads
+                .iter()
+                .find(|download| download["default"] == true)
+        })
+        .expect("shipped default download");
+    let path = manifest_dir.join("builtin.models.jsonc");
+    let raw = std::fs::read_to_string(&path).expect("fixture manifest reads");
+    let mut manifest: Value =
+        serde_json::from_str(&strip_jsonc_comments(&raw)).expect("fixture manifest parses");
+    let row = manifest["models"]
+        .as_array_mut()
+        .expect("fixture models")
+        .iter_mut()
+        .find(|row| row["id"] == model_id)
+        .expect("fixture model row");
+    let downloads = row["downloads"].as_array_mut().expect("fixture downloads");
+    if let Some(first) = downloads.first_mut() {
+        assert_eq!(first["repo"], default["repo"]);
+        *first = default.clone();
+    } else {
+        downloads.push(default.clone());
+    }
+    std::fs::write(path, manifest.to_string()).expect("fixture manifest writes");
+}
+
+fn pinned_jobs_fixture_metadata(
+    selectors: &[String],
+) -> Vec<sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile> {
+    use sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile;
+    let mut files = selectors
+        .iter()
+        .map(|selector| PortableArtifactFile {
+            relative_path: std::path::PathBuf::from(selector.replace('*', "fixture.safetensors")),
+            size_bytes: 1,
+            sha256: format!("sha256:{}", "a".repeat(64)),
+        })
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    files.dedup_by(|left, right| left.relative_path == right.relative_path);
+    files
+}
+
+fn install_pinned_jobs_fixture_metadata(state: &crate::AppState) {
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(true);
+    *state.test_hooks.pinned_metadata_override.lock() =
+        Some(std::sync::Arc::new(|_, _, selectors| {
+            pinned_jobs_fixture_metadata(selectors)
+        }));
+}
+
+fn jobs_fixture_app_with_pinned_metadata(
+    settings: Settings,
+) -> Result<(axum::Router, crate::AppState), sceneworks_core::jobs_store::JobsStoreError> {
+    let (app, state) = create_app_with_state(settings)?;
+    install_pinned_jobs_fixture_metadata(&state);
+    Ok((app, state))
+}
+
+fn pinned_jobs_fixture_app_with_state(
+    settings: Settings,
+) -> Result<(axum::Router, crate::AppState), sceneworks_core::jobs_store::JobsStoreError> {
+    pin_handwritten_jobs_manifest(&settings);
+    jobs_fixture_app_with_pinned_metadata(settings)
+}
+
+fn pinned_jobs_fixture_app(
+    settings: Settings,
+) -> Result<axum::Router, sceneworks_core::jobs_store::JobsStoreError> {
+    pinned_jobs_fixture_app_with_state(settings).map(|(app, _)| app)
+}
+
+#[tokio::test]
+async fn handwritten_job_source_without_immutable_revision_still_fails_admission() {
+    // By design a registered builtin's downloads come from the compiled registry, which pins every
+    // row at build time, so a config-dir copy can no longer hand-write an unpinned source for one
+    // (and a user row that is not an import is refused by provider registration before capture).
+    // The admission rule this test owns is therefore exercised at the admission capture seam
+    // itself: the registered krea_2_turbo carrier with its default download hand-edited to carry
+    // no revision, or a mutable `main`, must fail closed with `model_artifact_incomplete`.
+    let shipped = sceneworks_core::builtin_manifests::builtin_model_entry("krea_2_turbo")
+        .expect("krea_2_turbo is registered");
+    let default_index = shipped["downloads"]
+        .as_array()
+        .expect("shipped downloads")
+        .iter()
+        .position(|row| row["default"] == true)
+        .expect("shipped default package");
+    assert!(
+        shipped["downloads"][default_index]["revision"]
+            .as_str()
+            .is_some_and(|revision| revision.len() == 40),
+        "the registered row itself is pinned"
+    );
+    for revision in [None, Some("main")] {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let (_, state) = create_app_with_state(test_settings(&temp)).expect("admission state");
+        let mut entry = Value::Object(shipped.clone());
+        let download = entry["downloads"][default_index]
+            .as_object_mut()
+            .expect("download row");
+        match revision {
+            Some(revision) => {
+                download.insert("revision".into(), json!(revision));
+            }
+            None => {
+                download.remove("revision");
+            }
+        }
+        let payload = json!({"projectId":"project-1","model":"krea_2_turbo",
+            "mode":"text_to_image","prompt":"a lighthouse","count":1,
+            "modelManifestEntry": entry});
+        let error = crate::portable_admission::capture_portable_model_binding(
+            &state,
+            &crate::JobType::ImageGenerate,
+            payload.as_object().unwrap(),
+            "auto",
+        )
+        .await
+        .expect_err("an unpinned hand-written source must not bind");
+        assert_eq!(
+            error.status,
+            StatusCode::CONFLICT,
+            "{revision:?}: {error:?}"
+        );
+        assert_eq!(
+            error.code,
+            Some("model_artifact_incomplete"),
+            "{revision:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn wan_vace_fun_video_enqueue_keeps_a_pinned_source() {
+    use sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile;
+
+    fn pinned_metadata(selectors: &[String]) -> Vec<PortableArtifactFile> {
+        selectors
+            .iter()
+            .map(|selector| PortableArtifactFile {
+                relative_path: std::path::PathBuf::from(selector.replace('*', "model_index.json")),
+                size_bytes: 1,
+                sha256: format!("sha256:{}", "a".repeat(64)),
+            })
+            .collect()
+    }
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let settings = test_settings(&temp);
+    sceneworks_core::builtin_manifests::seed_builtin_manifests(
+        &settings.config_dir,
+        sceneworks_core::builtin_manifests::SeedMode::Overwrite,
+    )
+    .expect("builtin manifests seed");
+    let (app, state) = create_app_with_state(settings).expect("app and state");
+    *state
+        .test_hooks
+        .model_size_estimate_disabled_override
+        .lock() = Some(true);
+    *state.test_hooks.video_platform_override.lock() = Some("macos");
+    *state.test_hooks.pinned_metadata_override.lock() =
+        Some(std::sync::Arc::new(|_, _, selectors| {
+            pinned_metadata(selectors)
+        }));
+    let (_, project) = create_project(app.clone(), &"VACE pin regression").await;
+    let (status, job) = request(
+        app,
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project["id"],
+            "model": "wan_2_2_vace_fun_14b",
+            "mode": "replace_person",
+            "prompt": "a person walks through a garden",
+            "sourceClipAssetId": "clip-1",
+            "personTrackId": "track-1",
+            "characterId": "character-1"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["payload"]["model"], "wan_2_2_vace_fun_14b");
+}
+
+#[test]
+fn generation_dtos_preserve_unset_carrier_encoding() {
+    let image: crate::dto::ImageJobRequest = serde_json::from_value(json!({
+        "projectId": "project-1", "mode": "text_to_image", "prompt": "probe"
+    }))
+    .unwrap();
+    let image = serde_json::to_value(image).unwrap();
+    for key in ["sourceAssetId", "referenceAssetId", "maskAssetId"] {
+        assert!(image.get(key).is_some_and(Value::is_null), "image {key}");
+    }
+    assert_eq!(image["referenceAssetIds"], json!([]));
+
+    let video: crate::dto::VideoJobRequest = serde_json::from_value(json!({
+        "projectId": "project-1", "mode": "text_to_video", "prompt": "probe"
+    }))
+    .unwrap();
+    let video = serde_json::to_value(video).unwrap();
+    for key in [
+        "sourceAssetId",
+        "lastFrameAssetId",
+        "sourceClipAssetId",
+        "bridgeRightClipAssetId",
+        "referenceClipAssetId",
+    ] {
+        assert!(video.get(key).is_some_and(Value::is_null), "video {key}");
+    }
+    for key in ["referenceAssetIds", "sourceClipAssetIds"] {
+        assert_eq!(video[key], json!([]), "video {key}");
+    }
+}
+
 #[test]
 fn image_and_video_jobs_accept_ten_loras_and_reject_eleven() {
     for count in [10, 11] {
@@ -393,30 +677,60 @@ fn write_vector_test_manifest_with_provider_state(
 
 fn write_vector_workflow_test_manifest(
     config_dir: &std::path::Path,
-    raster_revision: &str,
     vector_revision: &str,
-) {
+) -> sceneworks_core::hf_home::test_support::CacheRootGuard {
+    let root = config_dir
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("test root");
+    let data = root.join("data");
+    let guard = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+        data.clone(),
+        root.join("test-hub"),
+    );
+    let spec = sceneworks_core::registry::builtin_model_spec("flux_schnell")
+        .expect("registered raster model");
+    let raster = spec.project(None);
+    let download = raster["downloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["default"] == true)
+        .expect("default raster variant");
+    let snapshot = sceneworks_core::hf_home::huggingface_repo_cache_path(
+        &data,
+        download["repo"].as_str().unwrap(),
+    )
+    .unwrap()
+    .join("snapshots")
+    .join(download["revision"].as_str().unwrap())
+    .join(download["variant"].as_str().unwrap());
+    // The workflow requires an installed raster model. Materialize its declared tier in the
+    // fixture's private hub; the metadata-only tests never open or execute these weights.
+    std::fs::create_dir_all(&snapshot).unwrap();
+    std::fs::write(
+        snapshot.join("model_index.json"),
+        serde_json::to_vec(&json!({
+            "_class_name":"FluxPipeline", "transformer":["diffusers","FluxTransformer2DModel"],
+            "vae":["diffusers","AutoencoderKL"], "text_encoder":["transformers","CLIPTextModel"],
+            "text_encoder_2":["transformers","T5EncoderModel"]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    for component in ["transformer", "vae", "text_encoder", "text_encoder_2"] {
+        let dir = snapshot.join(component);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), b"{}").unwrap();
+        std::fs::write(dir.join("model.safetensors"), b"fixture").unwrap();
+    }
     std::fs::create_dir_all(config_dir).expect("manifest dir creates");
     std::fs::write(
         config_dir.join("builtin.models.jsonc"),
         serde_json::to_vec_pretty(&json!({
             "schemaVersion": 1,
             "models": [
-                {
-                    "id": "flux_schnell",
-                    "name": "Raster test",
-                    "type": "image",
-                    "family": "flux",
-                    "adapter": "flux_diffusers",
-                    "capabilities": ["text_to_image"],
-                    "defaults": { "count": 1, "resolution": { "width": 512, "height": 512 } },
-                    "downloads": [{
-                        "provider": "huggingface",
-                        "repo": "SceneWorks/raster-workflow-test",
-                        "revision": raster_revision,
-                        "files": ["config.json", "model.safetensors"]
-                    }]
-                },
+                raster,
                 {
                     "id": "starvector_test",
                     "name": "Vector test",
@@ -444,21 +758,86 @@ fn write_vector_workflow_test_manifest(
     )
     .expect("builtin models write");
     write_empty_sibling_manifests(config_dir);
-    let root = config_dir
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("test root");
-    for repo in [
-        "SceneWorks__raster-workflow-test",
-        "SceneWorks__vector-workflow-test",
-    ] {
-        let installed = root.join("data/models").join(repo);
-        std::fs::create_dir_all(&installed).expect("workflow install dir creates");
-        std::fs::write(installed.join(".sceneworks-download-complete.json"), b"{}")
-            .expect("workflow receipt writes");
-        std::fs::write(installed.join("config.json"), b"{}").expect("config writes");
-        std::fs::write(installed.join("model.safetensors"), b"weights").expect("weights write");
+    let installed = data.join("models/SceneWorks__vector-workflow-test");
+    std::fs::create_dir_all(&installed).expect("workflow install dir creates");
+    std::fs::write(installed.join(".sceneworks-download-complete.json"), b"{}")
+        .expect("workflow receipt writes");
+    std::fs::write(installed.join("config.json"), b"{}").expect("config writes");
+    std::fs::write(installed.join("model.safetensors"), b"fixture").expect("weights write");
+    guard
+}
+
+async fn vector_workflow_metadata_server() -> (String, tokio::task::JoinHandle<()>) {
+    use sha2::{Digest, Sha256};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("pinned vector metadata listener");
+    let base_url = format!(
+        "http://{}",
+        listener.local_addr().expect("listener address")
+    );
+    let model_index = serde_json::to_vec(&json!({
+        "_class_name":"FluxPipeline", "transformer":["diffusers","FluxTransformer2DModel"],
+        "vae":["diffusers","AutoencoderKL"], "text_encoder":["transformers","CLIPTextModel"],
+        "text_encoder_2":["transformers","T5EncoderModel"]
+    }))
+    .expect("model index serializes");
+    let mut files = vec![
+        ("config.json".to_owned(), b"{}".to_vec()),
+        ("model.safetensors".to_owned(), b"fixture".to_vec()),
+        ("q4/model_index.json".to_owned(), model_index),
+    ];
+    for component in ["transformer", "vae", "text_encoder", "text_encoder_2"] {
+        files.push((format!("q4/{component}/config.json"), b"{}".to_vec()));
+        files.push((
+            format!("q4/{component}/model.safetensors"),
+            b"fixture".to_vec(),
+        ));
     }
+    for tier in ["q8", "bf16"] {
+        files.push((format!("{tier}/model.safetensors"), b"fixture".to_vec()));
+    }
+    let tree = Value::Array(
+        files
+            .into_iter()
+            .map(|(path, bytes)| {
+                json!({"type":"file","path":path,"size":bytes.len(),
+                    "lfs":{"oid":format!("{:x}", Sha256::digest(&bytes))}})
+            })
+            .collect(),
+    );
+    let app = axum::Router::new().fallback(move || {
+        let tree = tree.clone();
+        async move { axum::Json(tree) }
+    });
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("metadata server");
+    });
+    (base_url, server)
+}
+
+async fn uncataloged_convert_metadata_server() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("conversion metadata listener");
+    let base_url = format!(
+        "http://{}",
+        listener.local_addr().expect("listener address")
+    );
+    let app = axum::Router::new().fallback(|uri: axum::http::Uri| async move {
+        if uri.path().ends_with("/revision/main") {
+            axum::Json(json!({"sha":"4444444444444444444444444444444444444444"}))
+        } else {
+            axum::Json(json!([{
+                "type":"file", "path":"diffusion_pytorch_model.safetensors", "size":7,
+                "lfs":{"oid":"f16d05ec6b29248d2c61adb1e9263f78e4f7bace1b955014a2d17872cfe4064d"}
+            }]))
+        }
+    });
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("metadata server");
+    });
+    (base_url, server)
 }
 
 #[test]
@@ -543,10 +922,11 @@ fn prompt_vector_intermediate_ownership_is_server_authored_and_worker_facts_are_
 
 #[tokio::test]
 async fn prompt_vector_workflow_persists_a_nonclaimable_parent_and_cancel_cascades() {
+    let (base_url, metadata_server) = vector_workflow_metadata_server().await;
+    let _metadata_env = HfCacheEnvGuard::set(&[("SCENEWORKS_HUGGINGFACE_BASE_URL", &base_url)]);
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_vector_workflow_test_manifest(
+    let _cache_root = write_vector_workflow_test_manifest(
         &temp_dir.path().join("config/manifests"),
-        "1111111111111111111111111111111111111111",
         "2222222222222222222222222222222222222222",
     );
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
@@ -587,7 +967,14 @@ async fn prompt_vector_workflow_persists_a_nonclaimable_parent_and_cancel_cascad
     );
     assert_eq!(
         workflow["rasterStage"]["revision"],
-        "1111111111111111111111111111111111111111"
+        sceneworks_core::registry::builtin_model_spec("flux_schnell")
+            .unwrap()
+            .project(None)["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["default"] == true)
+            .unwrap()["revision"]
     );
     assert_eq!(
         workflow["vectorStage"]["revision"],
@@ -672,14 +1059,16 @@ async fn prompt_vector_workflow_persists_a_nonclaimable_parent_and_cancel_cascad
         .await;
         assert_eq!(canceled["status"], "canceled");
     }
+    metadata_server.abort();
 }
 
 #[tokio::test]
 async fn prompt_vector_replay_creates_both_stages_anew_and_revision_drift_is_typed() {
+    let (base_url, metadata_server) = vector_workflow_metadata_server().await;
+    let _metadata_env = HfCacheEnvGuard::set(&[("SCENEWORKS_HUGGINGFACE_BASE_URL", &base_url)]);
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_vector_workflow_test_manifest(
+    let _cache_root = write_vector_workflow_test_manifest(
         &temp_dir.path().join("config/manifests"),
-        "1111111111111111111111111111111111111111",
         "2222222222222222222222222222222222222222",
     );
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
@@ -711,6 +1100,9 @@ async fn prompt_vector_replay_creates_both_stages_anew_and_revision_drift_is_typ
         original["payload"]["workflow"]["vectorStage"]["sampling"]["seed"],
         original_vector_seed
     );
+    // The original immutable revision and file ledger are already frozen in the parent and
+    // child. A replay must not depend on a second publisher metadata request.
+    metadata_server.abort();
 
     let (status, replay) = request(
         app.clone(),
@@ -762,13 +1154,124 @@ async fn prompt_vector_replay_creates_both_stages_anew_and_revision_drift_is_typ
 }
 
 #[tokio::test]
+async fn vector_parent_without_linked_child_replays_its_frozen_raster_after_catalog_drift() {
+    let (base_url, metadata_server) = vector_workflow_metadata_server().await;
+    let _metadata_env = HfCacheEnvGuard::set(&[("SCENEWORKS_HUGGINGFACE_BASE_URL", &base_url)]);
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    let _cache_root = write_vector_workflow_test_manifest(
+        &config_dir,
+        "2222222222222222222222222222222222222222",
+    );
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).expect("app creates");
+    let (_, project) = crate::tests::support::create_project(app.clone(), &"Frozen vector").await;
+    let (status, original) = request(
+        app,
+        "POST",
+        "/api/v1/image/vectorize/prompt/jobs",
+        json!({
+            "projectId": project["id"], "prompt":"an angular fox",
+            "rasterModel":"flux_schnell", "vectorModel":"starvector_test"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    let original_id = original["id"].as_str().expect("parent id");
+    let connection = rusqlite::Connection::open(&settings.jobs_db_path).expect("jobs db opens");
+    let (raw_payload, raw_binding): (String, String) = connection
+        .query_row(
+            "SELECT payload_json, portable_model_binding_json FROM jobs WHERE id = ?1",
+            [original_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("frozen parent exists");
+    let binding: Value = serde_json::from_str(&raw_binding).expect("binding JSON");
+    for route in binding["routes"].as_object().expect("routes").values() {
+        let slots = route["models"]
+            .as_array()
+            .expect("models")
+            .iter()
+            .filter_map(|model| model["slot"].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            slots.contains("modelManifestEntries/0"),
+            "raster source must be frozen before child creation"
+        );
+    }
+    let mut parent_payload: Value = serde_json::from_str(&raw_payload).expect("payload JSON");
+    parent_payload["workflow"]["childJobId"] = Value::Null;
+    connection
+        .execute(
+            "UPDATE jobs SET payload_json = ?1 WHERE id = ?2",
+            rusqlite::params![parent_payload.to_string(), original_id],
+        )
+        .expect("simulate parent persisted before child link");
+    drop(connection);
+    let manifest_path = config_dir.join("builtin.models.jsonc");
+    let manifest = std::fs::read_to_string(&manifest_path).expect("manifest reads");
+    std::fs::write(
+        &manifest_path,
+        manifest.replace(
+            "2222222222222222222222222222222222222222",
+            "3333333333333333333333333333333333333333",
+        ),
+    )
+    .expect("catalog HEAD drifts");
+    let replay_app = create_app(settings.clone()).expect("fresh catalog app creates");
+    let (status, replay) = request(
+        replay_app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{original_id}/retry"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replay}");
+    assert_eq!(
+        replay["payload"]["workflow"]["vectorStage"]["revision"],
+        "2222222222222222222222222222222222222222"
+    );
+    let child_id = replay["payload"]["workflow"]["childJobId"]
+        .as_str()
+        .expect("replayed child id");
+    let (_, child) = request(
+        replay_app,
+        "GET",
+        &format!("/api/v1/jobs/{child_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(child["type"], "image_generate");
+    assert_eq!(child["payload"]["modelManifestEntry"]["id"], "flux_schnell");
+    let mut removed: Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path).expect("manifest reads"))
+            .expect("manifest JSON");
+    removed["models"]
+        .as_array_mut()
+        .expect("model array")
+        .retain(|model| model["id"] != "starvector_test");
+    std::fs::write(&manifest_path, removed.to_string())
+        .expect("remove current vector registration");
+    let blocked_app = create_app(settings).expect("fresh policy app creates");
+    let (status, blocked) = request(
+        blocked_app,
+        "POST",
+        &format!("/api/v1/jobs/{original_id}/retry"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{blocked}");
+    metadata_server.abort();
+}
+
+#[tokio::test]
 async fn vector_route_resolves_default_seed_once_and_preserves_explicit_and_replayed_seeds() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_vector_test_manifest(
         &temp_dir.path().join("config/manifests"),
         &["image_to_svg", "text_to_svg"],
     );
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Vector seed persistence").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -1159,7 +1662,7 @@ async fn vector_route_validates_and_stamps_typed_image_to_svg_request() {
         &temp_dir.path().join("config/manifests"),
         &["image_to_svg", "text_to_svg"],
     );
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
 
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Vector Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -1214,13 +1717,11 @@ async fn vector_route_validates_and_stamps_typed_image_to_svg_request() {
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "text-only-vector-worker",
-            "gpuId": "test-gpu-1",
-            "gpuName": "Test GPU",
-            "capabilities": ["gpu", "vector_text_to_svg"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "text-only-vector-worker",
+            &["gpu", "mlx", "vector_text_to_svg"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -1228,18 +1729,35 @@ async fn vector_route_validates_and_stamps_typed_image_to_svg_request() {
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "text-only-vector-worker" }),
+        portable_test_worker_claim("text-only-vector-worker", TestPortableRoute::MlxMacos),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(wrong_claim["job"].is_null());
-    claim_job_as_worker(
+    claim_job_as_worker_on_route(
         &app,
         created["id"].as_str().expect("job id"),
         "image-vector-worker",
         &["gpu", "vector_image_to_svg"],
+        TestPortableRoute::MlxMacos,
     )
     .await;
+    // Both fixture workers advertise the same MLX device; release the image claim before
+    // checking that the text-only worker can take a different vector mode.
+    let (status, completed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{}/progress", created["id"].as_str().unwrap()),
+        json!({
+            "workerId":"image-vector-worker",
+            "status":"completed",
+            "stage":"completed",
+            "progress":1.0,
+            "message":"image vector fixture completed"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
 
     let (status, text_created) = request(
         app.clone(),
@@ -1260,7 +1778,7 @@ async fn vector_route_validates_and_stamps_typed_image_to_svg_request() {
         app,
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "text-only-vector-worker" }),
+        portable_test_worker_claim("text-only-vector-worker", TestPortableRoute::MlxMacos),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -1275,7 +1793,7 @@ async fn vector_route_validates_and_stamps_typed_image_to_svg_request() {
 async fn vector_worker_fact_publishes_through_the_api_sidecar_contract() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_vector_test_manifest(&temp_dir.path().join("config/manifests"), &["image_to_svg"]);
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Vector publication").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -1330,11 +1848,12 @@ async fn vector_worker_fact_publishes_through_the_api_sidecar_contract() {
     let (status, legacy_job) = create(app.clone()).await;
     assert_eq!(status, StatusCode::CREATED, "{legacy_job}");
     let legacy_job_id = legacy_job["id"].as_str().expect("legacy job id");
-    claim_job_as_worker(
+    claim_job_as_worker_on_route(
         &app,
         legacy_job_id,
         "legacy-vector-worker",
         &["gpu", "vector_image_to_svg"],
+        TestPortableRoute::MlxMacos,
     )
     .await;
     let mut legacy_fact = fact("asset_vector_legacy", "genset_vector_legacy");
@@ -1376,11 +1895,12 @@ async fn vector_worker_fact_publishes_through_the_api_sidecar_contract() {
     let (status, generated_job) = create(app.clone()).await;
     assert_eq!(status, StatusCode::CREATED, "{generated_job}");
     let generated_job_id = generated_job["id"].as_str().expect("generated job id");
-    claim_job_as_worker(
+    claim_job_as_worker_on_route(
         &app,
         generated_job_id,
         "fixed-vector-worker",
         &["gpu", "vector_image_to_svg"],
+        TestPortableRoute::MlxMacos,
     )
     .await;
     let generated_fact = fact("asset_vector_fixed", "genset_vector_fixed");
@@ -1547,6 +2067,70 @@ async fn vector_route_rejects_bad_source_ownership_media_and_model_capability_be
 /// because the worker's pre-loader guard fails closed on a model-backed job with no carriers.
 /// The client's own fields must still pass through untouched.
 #[tokio::test]
+async fn raw_image_detail_rejects_unregistered_adapter_locator() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest directory");
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        include_str!("../../../../config/manifests/builtin.models.jsonc"),
+    )
+    .expect("builtin model catalog");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, body) = request(
+        app,
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type":"image_detail",
+            "requestedGpu":"auto",
+            "payload":{
+                "model":"realvisxl",
+                "sourceAssetId":"asset-1",
+                "loras":[{"id":"unregistered_alias","installedPath":"/private/substitute.safetensors"}]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("LoRA not found: unregistered_alias")),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn raw_job_rejects_unregistered_model_even_with_client_source_carrier() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, body) = request(
+        app,
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type":"image_detail",
+            "requestedGpu":"auto",
+            "payload":{
+                "model":"unregistered_model",
+                "sourceAssetId":"asset-1",
+                "modelManifestEntry":{
+                    "id":"unregistered_model",
+                    "modelPath":temp_dir.path().join("client/weights.safetensors")
+                }
+            }
+        }),
+    )
+    .await;
+    assert!(status.is_client_error(), "{body}");
+    assert!(
+        !body.to_string().contains("client/weights.safetensors"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
 async fn generic_jobs_route_still_serves_non_generation_types() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
@@ -1590,6 +2174,57 @@ async fn generic_jobs_route_still_serves_non_generation_types() {
     }
 }
 
+fn raw_detail_fixture_app(settings: Settings) -> (axum::Router, crate::AppState) {
+    use sceneworks_core::contracts::WorkerCapability;
+    use sceneworks_core::jobs_store::RegisterWorker;
+    use sceneworks_core::model_artifacts::portable_binding::{
+        PortableSourceClaim, PortableSourceProvenance,
+    };
+
+    let (app, state) = create_app_with_state(settings).expect("app and state create");
+    *state.test_hooks.pinned_metadata_override.lock() =
+        Some(std::sync::Arc::new(|_, _, selectors| {
+            pinned_jobs_fixture_metadata(selectors)
+        }));
+    let tile =
+        sceneworks_core::control_weights::shipped_auxiliary_source("sdxl_detail_tile_control")
+            .expect("shipped Detail tile source");
+    let selectors = tile
+        .files
+        .iter()
+        .map(|file| (*file).to_owned())
+        .collect::<Vec<_>>();
+    let claim = PortableSourceClaim::new(
+        tile.source_id,
+        PortableSourceProvenance::PinnedRepo {
+            repository: tile.repo.into(),
+            revision: tile.revision.into(),
+        },
+        pinned_jobs_fixture_metadata(&selectors),
+    )
+    .expect("exact shipped tile claim");
+    state
+        .jobs_store
+        .register_worker_with_portable_sources(
+            RegisterWorker {
+                worker_id: "candle-detail-worker".into(),
+                gpu_id: "0".into(),
+                gpu_name: None,
+                capabilities: vec![
+                    WorkerCapability::Gpu,
+                    WorkerCapability::ImageDetail,
+                    WorkerCapability::Unknown("candle".into()),
+                ],
+                loaded_models: vec![],
+                utilization: None,
+            },
+            Some("linux"),
+            Some(&[claim]),
+        )
+        .expect("Detail worker registers exact pinned source");
+    (app, state)
+}
+
 /// sc-18480: Batch Detail keeps its established raw `/api/v1/jobs` contract, but the Candle SDXL
 /// provider needs the selected model's three descriptor-owned co-requisites. Start with the exact
 /// client shape (no `modelManifestEntry`) and prove the API enriches the persisted worker payload
@@ -1605,7 +2240,7 @@ async fn raw_batch_detail_injects_authoritative_sdxl_components_for_the_worker()
         include_str!("../../../../config/manifests/builtin.models.jsonc"),
     )
     .expect("shipped model manifest writes");
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (app, _state) = raw_detail_fixture_app(test_settings(&temp_dir));
 
     let (status, job) = request(
         app.clone(),
@@ -1655,25 +2290,11 @@ async fn raw_batch_detail_injects_authoritative_sdxl_components_for_the_worker()
         "the raw job must reach Candle with every component its SDXL descriptor requires"
     );
 
-    let (status, _) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/workers/register",
-        json!({
-            "workerId": "candle-detail-worker",
-            "gpuId": "0",
-            "gpuName": "Candle GPU",
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
     let (status, claimed) = request(
         app,
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "candle-detail-worker" }),
+        portable_test_worker_claim("candle-detail-worker", TestPortableRoute::CandleLinux),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "detail dispatches: {claimed}");
@@ -1807,7 +2428,7 @@ async fn raw_batch_detail_overwrites_untrusted_client_manifest_metadata() {
         include_str!("../../../../config/manifests/builtin.models.jsonc"),
     )
     .expect("shipped model manifest writes");
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (app, _state) = raw_detail_fixture_app(test_settings(&temp_dir));
 
     let (status, job) = request(
         app,
@@ -1923,7 +2544,7 @@ async fn raw_batch_detail_rejects_every_explicit_packed_tier_carrier() {
 async fn retry_and_duplicate_recanonicalize_batch_detail_manifest_and_dense_tier() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_shipped_image_model_manifests(temp_dir.path());
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (app, _state) = raw_detail_fixture_app(test_settings(&temp_dir));
     let (status, original) = request(
         app.clone(),
         "POST",
@@ -2006,7 +2627,8 @@ async fn retry_and_duplicate_recanonicalize_batch_detail_manifest_and_dense_tier
 async fn retry_and_duplicate_recanonicalize_imported_generate_and_edit_manifests() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_imported_image_model_manifests(temp_dir.path());
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let settings = test_settings(&temp_dir);
+    let (app, state) = create_app_with_state(settings.clone()).expect("app and state create");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Imported image replay").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -2015,6 +2637,7 @@ async fn retry_and_duplicate_recanonicalize_imported_generate_and_edit_manifests
         ("text_to_image", Value::Null),
         ("edit_image", json!("source-asset")),
     ] {
+        register_imported_krea_worker(&state, true);
         let mut body = json!({
             "projectId": project_id,
             "mode": mode,
@@ -2031,40 +2654,519 @@ async fn retry_and_duplicate_recanonicalize_imported_generate_and_edit_manifests
             original["payload"]["modelManifestEntry"]["id"],
             "imported_krea"
         );
+        assert!(
+            original["payload"]["modelManifestEntry"]["paths"]["model"].is_null(),
+            "public job must hide the registered private locator: {original}"
+        );
+        let connection = rusqlite::Connection::open(&settings.jobs_db_path).expect("jobs db opens");
+        let binding_json: String = connection
+            .query_row(
+                "SELECT portable_model_binding_json FROM jobs WHERE id = ?1",
+                [original["id"].as_str().expect("job id")],
+                |row| row.get(0),
+            )
+            .expect("private binding exists");
+        let binding: Value = serde_json::from_str(&binding_json).expect("binding JSON");
+        for route in binding["routes"].as_object().expect("routes").values() {
+            assert_eq!(route["models"][0]["members"][0]["source"]["kind"], "digest");
+        }
         let job_id = original["id"].as_str().expect("job id");
-
         for operation in ["retry", "duplicate"] {
             let (status, replay) = request(
                 app.clone(),
                 "POST",
                 &format!("/api/v1/jobs/{job_id}/{operation}"),
-                json!({
-                    "payloadChanges": {
-                        "modelManifestEntry": {
-                            "id": "client-spoof",
-                            "family": "sdxl",
-                            "paths": { "model": "C:/attacker/other-model" }
-                        }
-                    }
-                }),
+                json!({"payloadChanges":{"modelManifestEntry":{
+                    "id":"client-spoof", "family":"sdxl",
+                    "paths":{"model":"C:/attacker/other-model"}
+                }}}),
             )
             .await;
             assert_eq!(status, StatusCode::CREATED, "{mode} {operation}: {replay}");
-            let entry = &replay["payload"]["modelManifestEntry"];
-            assert_eq!(entry["id"], "imported_krea");
-            assert_eq!(entry["family"], "krea_2");
-            assert!(
-                entry["paths"]["model"]
-                    .as_str()
-                    .is_some_and(|path| path.contains("imported_krea")),
-                "the authoritative imported install path must survive: {entry}"
+            assert_eq!(
+                replay["payload"]["modelManifestEntry"]["id"],
+                "imported_krea"
             );
-            assert!(
-                !entry.to_string().contains("attacker"),
-                "{mode} {operation} must replace the spoofed path: {entry}"
-            );
+            assert_eq!(replay["payload"]["modelManifestEntry"]["family"], "krea_2");
+            assert!(replay["payload"]["modelManifestEntry"]["paths"]["model"].is_null());
+            assert!(!replay.to_string().contains("attacker"));
         }
+        state
+            .jobs_store
+            .heartbeat_worker_with_portable_sources(
+                sceneworks_core::jobs_store::WorkerHeartbeat {
+                    worker_id: "registered-krea-worker".into(),
+                    status: sceneworks_core::contracts::WorkerStatus::Idle,
+                    current_job_id: None,
+                    loaded_models: vec![],
+                    utilization: None,
+                    status_reason: None,
+                },
+                Some(&[]),
+            )
+            .expect("worker clears source claim before local substitution checks");
+        let checkpoint = temp_dir
+            .path()
+            .join("data/models/imports/imported_krea/model.safetensors");
+        std::fs::write(&checkpoint, b"substituted").expect("change registered model bytes");
+        let (status, changed) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/retry"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{changed}");
+        std::fs::write(&checkpoint, b"fixture").expect("restore registered model bytes");
+        std::fs::remove_file(&checkpoint).expect("remove registered model bytes");
+        let (status, missing) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/retry"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{missing}");
+        std::fs::write(&checkpoint, b"fixture").expect("restore registered model bytes");
     }
+}
+
+#[tokio::test]
+async fn imported_model_replay_accepts_same_worker_bytes_under_another_root() {
+    use sceneworks_core::contracts::WorkerCapability;
+    use sceneworks_core::jobs_store::RegisterWorker;
+    use sceneworks_core::model_artifacts::portable_binding::{
+        portable_file_ledger_sha256, PortableArtifactFile, PortableJobBinding, PortableSourceClaim,
+        PortableSourceProvenance,
+    };
+
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_imported_image_model_manifests(temp_dir.path());
+    let settings = test_settings(&temp_dir);
+    let (app, state) = create_app_with_state(settings.clone()).expect("app and state create");
+    register_imported_krea_worker(&state, true);
+    let (_, project) = create_project(app.clone(), &"Cross-root import replay").await;
+    let (status, original) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId":project["id"], "mode":"text_to_image", "prompt":"a fox",
+            "model":"imported_krea", "count":1
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    let job_id = original["id"].as_str().expect("job id");
+    let connection = rusqlite::Connection::open(&settings.jobs_db_path).expect("jobs db opens");
+    let binding_json: String = connection
+        .query_row(
+            "SELECT portable_model_binding_json FROM jobs WHERE id = ?1",
+            [job_id],
+            |row| row.get(0),
+        )
+        .expect("private binding exists");
+    let frozen: PortableJobBinding = serde_json::from_str(&binding_json).expect("binding parses");
+    state
+        .jobs_store
+        .heartbeat_worker_with_portable_sources(
+            sceneworks_core::jobs_store::WorkerHeartbeat {
+                worker_id: "registered-krea-worker".into(),
+                status: sceneworks_core::contracts::WorkerStatus::Idle,
+                current_job_id: None,
+                loaded_models: vec![],
+                utilization: None,
+                status_reason: None,
+            },
+            Some(&[]),
+        )
+        .expect("initial worker clears its source claim");
+    let route = frozen.routes.values().next().expect("frozen route");
+    let member = &route.models[0].members[0];
+    let worker_root = temp_dir.path().join("other-worker/models/imported_krea");
+    std::fs::create_dir_all(&worker_root).expect("worker root creates");
+    let worker_file = worker_root.join(&member.files[0].relative_path);
+    std::fs::write(&worker_file, b"fixture").expect("worker copy writes");
+    let files = vec![PortableArtifactFile {
+        relative_path: member.files[0].relative_path.clone(),
+        size_bytes: 7,
+        sha256: format!(
+            "sha256:{}",
+            sceneworks_core::hashing::sha256_bytes(b"fixture")
+        ),
+    }];
+    assert_eq!(files, member.files, "worker bytes match frozen ledger");
+    let ledger = portable_file_ledger_sha256(&files).expect("worker ledger hashes");
+    let source_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+        "model",
+        "imported_krea",
+        None,
+        &ledger,
+    )
+    .expect("logical source key");
+    let claim = PortableSourceClaim::new(
+        source_id,
+        PortableSourceProvenance::OperatorOverride,
+        files.clone(),
+    )
+    .expect("worker claim");
+    let gpu_id = if route.backend == "mlx" {
+        "mlx"
+    } else {
+        "cuda:0"
+    };
+    let mut capabilities = vec![
+        WorkerCapability::Gpu,
+        WorkerCapability::ImageGenerate,
+        WorkerCapability::ImageEdit,
+    ];
+    if route.backend == "candle" {
+        capabilities.push(WorkerCapability::Unknown("candle".into()));
+    }
+    state
+        .jobs_store
+        .register_worker_with_portable_sources(
+            RegisterWorker {
+                worker_id: "other-root-worker".into(),
+                gpu_id: gpu_id.into(),
+                gpu_name: None,
+                capabilities,
+                loaded_models: vec![],
+                utilization: None,
+            },
+            Some(&route.platform),
+            Some(std::slice::from_ref(&claim)),
+        )
+        .expect("worker registers exact bytes");
+    let api_file = temp_dir
+        .path()
+        .join("data/models/imports/imported_krea/model.safetensors");
+    std::fs::remove_file(&api_file).expect("API host source disappears");
+    let (status, replay) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/retry"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "exact worker copy: {replay}");
+    assert!(!replay
+        .to_string()
+        .contains(&worker_root.display().to_string()));
+
+    let changed = PortableSourceClaim::new(
+        claim.source_id.clone(),
+        PortableSourceProvenance::OperatorOverride,
+        vec![PortableArtifactFile {
+            relative_path: files[0].relative_path.clone(),
+            size_bytes: 11,
+            sha256: format!(
+                "sha256:{}",
+                sceneworks_core::hashing::sha256_bytes(b"substituted")
+            ),
+        }],
+    )
+    .expect("substitute claim");
+    state
+        .jobs_store
+        .heartbeat_worker_with_portable_sources(
+            sceneworks_core::jobs_store::WorkerHeartbeat {
+                worker_id: "other-root-worker".into(),
+                status: sceneworks_core::contracts::WorkerStatus::Idle,
+                current_job_id: None,
+                loaded_models: vec![],
+                utilization: None,
+                status_reason: None,
+            },
+            Some(&[changed]),
+        )
+        .expect("worker publishes substitute");
+    let (status, refused) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/retry"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "substituted worker: {refused}"
+    );
+    state
+        .jobs_store
+        .heartbeat_worker_with_portable_sources(
+            sceneworks_core::jobs_store::WorkerHeartbeat {
+                worker_id: "other-root-worker".into(),
+                status: sceneworks_core::contracts::WorkerStatus::Idle,
+                current_job_id: None,
+                loaded_models: vec![],
+                utilization: None,
+                status_reason: None,
+            },
+            Some(&[]),
+        )
+        .expect("worker clears source claim");
+    let (status, missing) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/retry"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "missing worker: {missing}");
+    let (status, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(jobs.as_array().map(Vec::len), Some(2));
+}
+
+#[tokio::test]
+async fn fresh_admission_requires_one_capable_worker_with_both_operator_sources() {
+    use sceneworks_core::contracts::{JobType, WorkerCapability};
+    use sceneworks_core::jobs_store::RegisterWorker;
+    use sceneworks_core::model_artifacts::portable_binding::{
+        PortableArtifactFile, PortableSourceClaim, PortableSourceProvenance,
+    };
+
+    let (base_url, metadata_server) = vector_workflow_metadata_server().await;
+    let _metadata_env = HfCacheEnvGuard::set(&[("SCENEWORKS_HUGGINGFACE_BASE_URL", &base_url)]);
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (_, state) = create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    let payload = json!({
+        "model":"instantid_realvisxl", "mode":"character_image",
+        "referenceAssetId":"reference-asset",
+        "modelManifestEntry":{
+            "id":"instantid_realvisxl", "type":"image", "family":"sdxl",
+            "capabilities":["character_image"],
+            "downloads":[{"provider":"huggingface","repo":"SceneWorks/realvisxl-mlx",
+                "revision":"e40202d63baef826c7df95a639a811698c1178d2",
+                "variant":"bf16","files":["bf16/*"]}]
+        }
+    });
+    let payload = payload.as_object().expect("payload object");
+    let claims = ["instantid_mlx", "instantid_controlnet"].map(|source_id| {
+        PortableSourceClaim::new(
+            source_id,
+            PortableSourceProvenance::OperatorOverride,
+            vec![PortableArtifactFile {
+                relative_path: "weights.safetensors".into(),
+                size_bytes: 7,
+                sha256: format!(
+                    "sha256:{}",
+                    sceneworks_core::hashing::sha256_bytes(b"fixture")
+                ),
+            }],
+        )
+        .expect("source claim")
+    });
+    let register =
+        |worker_id: &str, capabilities: Vec<WorkerCapability>, claims: &[PortableSourceClaim]| {
+            state
+                .jobs_store
+                .register_worker_with_portable_sources(
+                    RegisterWorker {
+                        worker_id: worker_id.into(),
+                        gpu_id: "mlx".into(),
+                        gpu_name: None,
+                        capabilities,
+                        loaded_models: vec![],
+                        utilization: None,
+                    },
+                    Some("macos"),
+                    Some(claims),
+                )
+                .expect("worker registers");
+        };
+    let capable = || vec![WorkerCapability::Gpu, WorkerCapability::ImageGenerate];
+    register("split-a", capable(), &claims[..1]);
+    register("split-b", capable(), &claims[1..]);
+    assert!(
+        crate::portable_admission::capture_portable_model_binding(
+            &state,
+            &JobType::ImageGenerate,
+            payload,
+            "mlx",
+        )
+        .await
+        .is_err(),
+        "split workers cannot create one source closure"
+    );
+    register("incapable", vec![WorkerCapability::Gpu], &claims);
+    assert!(
+        crate::portable_admission::capture_portable_model_binding(
+            &state,
+            &JobType::ImageGenerate,
+            payload,
+            "mlx",
+        )
+        .await
+        .is_err(),
+        "a worker missing image capability cannot authorize admission"
+    );
+    register("complete", capable(), &claims);
+    let binding = crate::portable_admission::capture_portable_model_binding(
+        &state,
+        &JobType::ImageGenerate,
+        payload,
+        "mlx",
+    )
+    .await
+    .expect("complete worker admits")
+    .expect("model binding");
+    let route = binding.select_route("mlx", "macos").expect("MLX route");
+    for source_id in ["instantid_mlx", "instantid_controlnet"] {
+        assert!(route.models[0].members.iter().any(|member| {
+            matches!(&member.source,
+                sceneworks_core::model_artifacts::portable_binding::PortableSourceIdentity::WorkerClaim {source_id: id, ..}
+                if id == source_id)
+        }), "{source_id} is frozen");
+    }
+    metadata_server.abort();
+}
+
+#[tokio::test]
+async fn fresh_imported_model_admission_requires_matching_worker_bytes() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_imported_image_model_manifests(temp_dir.path());
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    let (_, project) = create_project(app.clone(), "Fresh import source proof").await;
+    let payload = json!({
+        "projectId":project["id"], "mode":"text_to_image", "prompt":"a fox",
+        "model":"imported_krea", "count":1
+    });
+    let (status, missing) =
+        request(app.clone(), "POST", "/api/v1/image/jobs", payload.clone()).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "no worker owns the local bytes: {missing}"
+    );
+    register_imported_krea_worker(&state, false);
+    let (status, substituted) =
+        request(app.clone(), "POST", "/api/v1/image/jobs", payload.clone()).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "worker bytes differ: {substituted}"
+    );
+    register_imported_krea_worker(&state, true);
+    let (status, admitted) = request(app, "POST", "/api/v1/image/jobs", payload).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "matching worker bytes: {admitted}"
+    );
+}
+
+#[tokio::test]
+async fn imported_model_replay_refuses_when_worker_claim_disappears() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_imported_image_model_manifests(temp_dir.path());
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    register_imported_krea_worker(&state, true);
+    let (_, project) = create_project(app.clone(), "Unavailable import replay").await;
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId":project["id"], "mode":"text_to_image", "prompt":"a fox",
+            "model":"imported_krea", "count":1
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "initial admission: {created}");
+    let job_id = created["id"].as_str().expect("job id");
+    state
+        .jobs_store
+        .heartbeat_worker_with_portable_sources(
+            sceneworks_core::jobs_store::WorkerHeartbeat {
+                worker_id: "registered-krea-worker".into(),
+                status: sceneworks_core::contracts::WorkerStatus::Idle,
+                current_job_id: None,
+                loaded_models: vec![],
+                utilization: None,
+                status_reason: None,
+            },
+            Some(&[]),
+        )
+        .expect("worker removes source claim");
+    assert!(
+        temp_dir
+            .path()
+            .join("data/models/imports/imported_krea/model.safetensors")
+            .is_file(),
+        "API bytes remain present"
+    );
+    for operation in ["retry", "duplicate"] {
+        let body = if operation == "duplicate" {
+            json!({"payloadChanges":{}})
+        } else {
+            json!({})
+        };
+        let (status, refused) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{operation}: {refused}");
+    }
+}
+
+fn register_imported_krea_worker(state: &crate::AppState, exact: bool) {
+    use sceneworks_core::contracts::WorkerCapability;
+    use sceneworks_core::jobs_store::RegisterWorker;
+    use sceneworks_core::model_artifacts::portable_binding::{
+        portable_file_ledger_sha256, PortableArtifactFile, PortableSourceClaim,
+        PortableSourceProvenance,
+    };
+
+    let bytes: &[u8] = if exact { b"fixture" } else { b"changed" };
+    let files = vec![PortableArtifactFile {
+        relative_path: "model.safetensors".into(),
+        size_bytes: bytes.len() as u64,
+        sha256: format!("sha256:{}", sceneworks_core::hashing::sha256_bytes(bytes)),
+    }];
+    let source_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+        "model",
+        "imported_krea",
+        None,
+        &portable_file_ledger_sha256(&files).expect("ledger hash"),
+    )
+    .expect("source ID");
+    let claim =
+        PortableSourceClaim::new(source_id, PortableSourceProvenance::OperatorOverride, files)
+            .expect("worker claim");
+    let mut capabilities = vec![
+        WorkerCapability::Gpu,
+        WorkerCapability::ImageGenerate,
+        WorkerCapability::ImageEdit,
+    ];
+    let gpu_id = if cfg!(target_os = "macos") {
+        "mlx"
+    } else {
+        capabilities.push(WorkerCapability::Unknown("candle".into()));
+        "cuda:0"
+    };
+    state
+        .jobs_store
+        .register_worker_with_portable_sources(
+            RegisterWorker {
+                worker_id: "registered-krea-worker".into(),
+                gpu_id: gpu_id.into(),
+                gpu_name: None,
+                capabilities,
+                loaded_models: vec![],
+                utilization: None,
+            },
+            Some(std::env::consts::OS),
+            Some(&[claim]),
+        )
+        .expect("worker registers source bytes");
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -2084,6 +3186,8 @@ fn write_imported_image_model_manifests(root: &std::path::Path) {
     let install_dir = root.join("data/models/imports/imported_krea");
     std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
     std::fs::create_dir_all(&install_dir).expect("imported install dir creates");
+    std::fs::write(install_dir.join("model.safetensors"), b"fixture")
+        .expect("imported checkpoint writes");
     std::fs::write(
         manifest_dir.join("builtin.models.jsonc"),
         r#"{ "schemaVersion": 1, "models": [] }"#,
@@ -2123,6 +3227,307 @@ fn write_imported_image_model_manifests(root: &std::path::Path) {
         )
         .expect("empty sibling manifest writes");
     }
+}
+
+#[tokio::test]
+async fn historical_path_only_import_fails_before_worker_claim() {
+    let temp = tempfile::tempdir().unwrap();
+    write_imported_image_model_manifests(temp.path());
+    let (app, state) = create_app_with_state(test_settings(&temp)).unwrap();
+    register_imported_krea_worker(&state, true);
+    let job = state
+        .jobs_store
+        .create_job(crate::CreateJob {
+            job_type: crate::JobType::ImageGenerate,
+            project_id: None,
+            project_name: None,
+            payload: json!({"model":"imported_krea", "mode":"text_to_image", "prompt":"old source",
+                "modelManifestEntry":{"id":"imported_krea","type":"image","family":"krea_2",
+                    "paths":{"model":temp.path().join("data/models/imports/imported_krea/model.safetensors")}}})
+                .as_object().unwrap().clone(),
+            requested_gpu: "auto".into(),
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+            initial_status: None,
+        })
+        .unwrap();
+    let (status, claim) = request(
+        app,
+        "POST",
+        "/api/v1/jobs/claim",
+        portable_test_worker_claim("registered-krea-worker", TestPortableRoute::MlxMacos),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{claim}");
+    assert!(claim["job"].is_null(), "{claim}");
+    assert_eq!(
+        state.jobs_store.get_job(&job.id).unwrap().status,
+        crate::JobStatus::Failed
+    );
+}
+
+/// SW-7031 AC4 / APPREG-6: omitting `portableModelBindingVersion` is not a weaker claim policy.
+/// A versionless `/jobs/claim` never receives an unbound historical model job (FIFO-first here),
+/// while a model-free job keeps its existing versionless claim.
+#[tokio::test]
+async fn versionless_claim_never_reaches_an_unbound_historical_model_job() {
+    // A valid historical carrier (a pinned user audio model, unchanged catalog) whose route cannot
+    // be proven yet stays queued and unbound: exactly the row a versionless claim must not reach.
+    let temp = tempfile::tempdir().unwrap();
+    let manifests = temp.path().join("config/manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+    std::fs::write(
+        manifests.join("user.models.jsonc"),
+        json!({"schemaVersion":2,"models":[{"id":"custom_tts","name":"Custom TTS","type":"audio",
+            "family":"kokoro","adapter":"kokoro","downloads":[{"provider":"huggingface",
+            "repo":"owner/custom-tts","revision":"a".repeat(40),"files":["model.safetensors"]}]}]})
+        .to_string(),
+    )
+    .unwrap();
+    let (app, state) = create_app_with_state(test_settings(&temp)).unwrap();
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({"workerId":"versionless-worker", "gpuId":"0", "gpuName":"Legacy",
+            "capabilities":["gpu","audio_generate","model_download"], "loadedModels":[]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let create = |job_type: crate::JobType, payload: Value| crate::CreateJob {
+        job_type,
+        project_id: None,
+        project_name: None,
+        payload: payload.as_object().unwrap().clone(),
+        requested_gpu: "auto".into(),
+        source_job_id: None,
+        duplicate_of_job_id: None,
+        attempts: 1,
+        initial_status: None,
+    };
+    let entry = crate::models::resolve_model_manifest_entry(&state, "custom_tts")
+        .await
+        .unwrap();
+    let model_job = state
+        .jobs_store
+        .create_job(create(
+            crate::JobType::AudioGenerate,
+            json!({"model":"custom_tts","text":"historical","modelManifestEntry":entry}),
+        ))
+        .unwrap();
+    let download = state
+        .jobs_store
+        .create_job(create(
+            crate::JobType::ModelDownload,
+            json!({"modelId":"custom_tts"}),
+        ))
+        .unwrap();
+    let (status, claim) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({"workerId":"versionless-worker"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{claim}");
+    assert_eq!(claim["job"]["id"], json!(download.id), "{claim}");
+    let (status, claim) = request(
+        app,
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({"workerId":"versionless-worker"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{claim}");
+    assert!(claim["job"].is_null(), "{claim}");
+    let model_job = state.jobs_store.get_job(&model_job.id).unwrap();
+    assert_eq!(model_job.status, crate::JobStatus::Queued, "{model_job:?}");
+    assert!(model_job.worker_id.is_none());
+    assert!(state
+        .jobs_store
+        .portable_model_binding(&model_job.id)
+        .unwrap()
+        .is_none());
+}
+
+/// Codex review (PR #3369, jobs.rs claim path): historical carrier migration runs inside the claim,
+/// and one stalled publisher metadata lookup used to hold every claim past the worker's 30-second
+/// request deadline. The migration now spends at most its claim budget: an unrelated runnable job is
+/// claimed within the deadline, the stalled carrier stays queued and unbound (never failed), and a
+/// later claim binds it once metadata answers. Paused time: the budget elapses without a real wait.
+#[tokio::test(start_paused = true)]
+async fn stalled_historical_metadata_never_delays_a_claim_past_its_deadline() {
+    let temp = tempfile::tempdir().unwrap();
+    let manifests = temp.path().join("config/manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+    std::fs::write(
+        manifests.join("user.models.jsonc"),
+        json!({"schemaVersion":2,"models":[{"id":"custom_tts","name":"Custom TTS","type":"audio",
+            "family":"kokoro","adapter":"kokoro","downloads":[{"provider":"huggingface",
+            "repo":"owner/custom-tts","revision":"a".repeat(40),"files":["model.safetensors"]}]}]})
+        .to_string(),
+    )
+    .unwrap();
+    let (app, state) = create_app_with_state(test_settings(&temp)).unwrap();
+    install_pinned_jobs_fixture_metadata(&state);
+    let (open_metadata, gate) = tokio::sync::watch::channel(false);
+    *state.test_hooks.pinned_metadata_gate.lock() = Some(gate);
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({"workerId":"budget-worker", "gpuId":"0", "gpuName":"Budget",
+            "capabilities":["gpu","audio_generate","model_download"], "loadedModels":[]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let create = |job_type: crate::JobType, payload: Value| crate::CreateJob {
+        job_type,
+        project_id: None,
+        project_name: None,
+        payload: payload.as_object().unwrap().clone(),
+        requested_gpu: "auto".into(),
+        source_job_id: None,
+        duplicate_of_job_id: None,
+        attempts: 1,
+        initial_status: None,
+    };
+    let entry = crate::models::resolve_model_manifest_entry(&state, "custom_tts")
+        .await
+        .unwrap();
+    // FIFO-first, and unbound: the claim must first try to migrate it.
+    let historical = state
+        .jobs_store
+        .create_job(create(
+            crate::JobType::AudioGenerate,
+            json!({"model":"custom_tts","text":"historical","modelManifestEntry":entry}),
+        ))
+        .unwrap();
+    let download = state
+        .jobs_store
+        .create_job(create(
+            crate::JobType::ModelDownload,
+            json!({"modelId":"custom_tts"}),
+        ))
+        .unwrap();
+
+    let claim = || {
+        request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs/claim",
+            json!({"workerId":"budget-worker"}),
+        )
+    };
+    let deadline = sceneworks_core::network_policy::CONTROL_REQUEST_TIMEOUT;
+    let started = tokio::time::Instant::now();
+    let (status, claimed) = tokio::time::timeout(deadline, claim())
+        .await
+        .expect("a stalled historical lookup must not hold the claim past the worker's deadline");
+    assert!(started.elapsed() < deadline, "{:?}", started.elapsed());
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    assert_eq!(claimed["job"]["id"], json!(download.id), "{claimed}");
+    let stalled = state.jobs_store.get_job(&historical.id).unwrap();
+    assert_eq!(stalled.status, crate::JobStatus::Queued, "{stalled:?}");
+    assert!(stalled.worker_id.is_none());
+    assert!(state
+        .jobs_store
+        .portable_model_binding(&historical.id)
+        .unwrap()
+        .is_none());
+
+    // Metadata answers, and the deferral window has passed: the next claim binds the carrier.
+    open_metadata.send(true).unwrap();
+    rusqlite::Connection::open(&state.settings.jobs_db_path)
+        .unwrap()
+        .execute(
+            "update jobs set historical_source_retry_after = 0 where id = ?1",
+            [&historical.id],
+        )
+        .unwrap();
+    let (status, claimed) = tokio::time::timeout(deadline, claim()).await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    assert!(
+        state
+            .jobs_store
+            .portable_model_binding(&historical.id)
+            .unwrap()
+            .is_some(),
+        "{claimed}"
+    );
+}
+
+/// SW-7031 AC4 (review finding 5): a non-image/video carrier is re-resolved from the current
+/// catalog. A same-ID replacement of a user audio model with another pinned revision fails the
+/// historical job before any fetch or load instead of being compared against itself.
+#[tokio::test]
+async fn historical_audio_carrier_refuses_same_id_catalog_replacement() {
+    let temp = tempfile::tempdir().unwrap();
+    let manifests = temp.path().join("config/manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+    let entry = |revision: &str| {
+        json!({"id":"custom_tts","name":"Custom TTS","type":"audio","family":"kokoro",
+            "adapter":"kokoro","downloads":[{"provider":"huggingface","repo":"owner/custom-tts",
+            "revision":revision,"files":["model.safetensors"]}]})
+    };
+    let write_catalog = |revision: &str| {
+        std::fs::write(
+            manifests.join("user.models.jsonc"),
+            json!({"schemaVersion":2,"models":[entry(revision)]}).to_string(),
+        )
+        .unwrap();
+    };
+    write_catalog(&"a".repeat(40));
+    let (app, state) = create_app_with_state(test_settings(&temp)).unwrap();
+    let original = crate::models::resolve_model_manifest_entry(&state, "custom_tts")
+        .await
+        .unwrap();
+    assert_eq!(original["downloads"][0]["revision"], json!("a".repeat(40)));
+    let job = state
+        .jobs_store
+        .create_job(crate::CreateJob {
+            job_type: crate::JobType::AudioGenerate,
+            project_id: None,
+            project_name: None,
+            payload: json!({"model":"custom_tts","text":"hello","modelManifestEntry":original})
+                .as_object()
+                .unwrap()
+                .clone(),
+            requested_gpu: "auto".into(),
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+            initial_status: None,
+        })
+        .unwrap();
+    write_catalog(&"b".repeat(40));
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({"workerId":"audio-worker", "gpuId":"0", "gpuName":"Audio",
+            "capabilities":["gpu","audio_generate"], "loadedModels":[]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, claim) = request(
+        app,
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({"workerId":"audio-worker"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{claim}");
+    assert!(claim["job"].is_null(), "{claim}");
+    let job = state.jobs_store.get_job(&job.id).unwrap();
+    assert_eq!(job.status, crate::JobStatus::Failed, "{job:?}");
+    assert!(
+        job.error
+            .as_deref()
+            .is_some_and(|error| error.contains("differs from its original declaration")),
+        "{job:?}"
+    );
 }
 
 /// sc-13617 / F-055: raw jobs whose `model` reaches worker-side model path resolution must
@@ -2179,10 +3584,12 @@ async fn generic_model_utility_jobs_reject_path_unsafe_model_id_before_create() 
 
 #[tokio::test]
 async fn raw_model_convert_rejects_unrecoverable_output_before_enqueue() {
+    let (base_url, metadata_server) = uncataloged_convert_metadata_server().await;
+    let _metadata_env = HfCacheEnvGuard::set(&[("SCENEWORKS_HUGGINGFACE_BASE_URL", &base_url)]);
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let conversion_root = settings.data_dir.join("models/mlx");
-    let app = create_app(settings).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
 
     let request_convert = |output_dir: &std::path::Path| {
         json!({
@@ -2191,6 +3598,7 @@ async fn raw_model_convert_rejects_unrecoverable_output_before_enqueue() {
             "payload": {
                 "modelId": "model-1",
                 "sourceRepo": "owner/source",
+                "converter": "flux2_dev_quant",
                 "outputDir": output_dir.display().to_string(),
             },
         })
@@ -2208,6 +3616,40 @@ async fn raw_model_convert_rejects_unrecoverable_output_before_enqueue() {
         StatusCode::CREATED,
         "backup-looking model names remain valid in the disjoint recovery design: {accepted}"
     );
+    let connection = rusqlite::Connection::open(&settings.jobs_db_path).expect("jobs db opens");
+    let binding_json: String = connection
+        .query_row(
+            "SELECT portable_model_binding_json FROM jobs WHERE id = ?1",
+            [accepted["id"].as_str().expect("conversion job id")],
+            |row| row.get(0),
+        )
+        .expect("conversion binding exists");
+    let binding: Value = serde_json::from_str(&binding_json).expect("conversion binding JSON");
+    for route in binding["routes"].as_object().expect("route map").values() {
+        let primary = &route["models"][0]["members"][0]["source"];
+        assert_eq!(primary["kind"], "revision");
+        assert_eq!(
+            primary["identity"]["revision"],
+            "4444444444444444444444444444444444444444"
+        );
+    }
+    let (status, edited_source) = request(
+        app.clone(),
+        "POST",
+        &format!(
+            "/api/v1/jobs/{}/duplicate",
+            accepted["id"].as_str().expect("conversion job id")
+        ),
+        json!({"payloadChanges":{"sourceFile":"different.safetensors"}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{edited_source}");
+
+    let mut physical_source = request_convert(&conversion_root.join("model-physical"));
+    physical_source["payload"]["sourceFile"] = json!("/tmp/foreign/checkpoint.safetensors");
+    let (status, rejected) = request(app.clone(), "POST", "/api/v1/jobs", physical_source).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+    assert!(!rejected.to_string().contains("/tmp/foreign"));
 
     for (output_dir, expected) in [
         (conversion_root.join("nested/model-2"), "direct child"),
@@ -2237,6 +3679,7 @@ async fn raw_model_convert_rejects_unrecoverable_output_before_enqueue() {
     }
 
     let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    metadata_server.abort();
     assert_eq!(
         jobs.as_array().expect("jobs array").len(),
         1,
@@ -2244,12 +3687,12 @@ async fn raw_model_convert_rejects_unrecoverable_output_before_enqueue() {
     );
 }
 
-/// Write a two-variant convert-at-install family that SHARES one source repo — the Anima shape: each
+/// Write a three-variant convert-at-install family that SHARES one source repo — the Anima shape: each
 /// card names its own `mlx.convertSourceFile` inside `owner/shared`, and the per-variant downloads are
 /// serialized, so one variant's weights land while the other's are still streaming.
 fn shared_repo_convert_manifest(config_dir: &std::path::Path) {
     std::fs::create_dir_all(config_dir).expect("manifest dir creates");
-    let models = ["alpha", "beta"]
+    let models = ["alpha", "beta", "gamma"]
         .into_iter()
         .map(|variant| {
             json!({
@@ -2260,11 +3703,12 @@ fn shared_repo_convert_manifest(config_dir: &std::path::Path) {
                 "downloads": [{
                     "provider": "huggingface",
                     "repo": "owner/shared",
+                    "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     "files": [format!("split_files/diffusion_models/{variant}.safetensors")]
                 }],
                 "mlx": {
                     "requiresConversion": true,
-                    "converter": "fixture_quant",
+                    "converter": "anima_quant",
                     "convertSourceRepo": "owner/shared",
                     "convertSourceFile": format!("split_files/diffusion_models/{variant}.safetensors")
                 }
@@ -2278,6 +3722,28 @@ fn shared_repo_convert_manifest(config_dir: &std::path::Path) {
     )
     .expect("builtin models writes");
     write_empty_sibling_manifests(config_dir);
+}
+
+#[test]
+fn shipped_anima_variants_declare_distinct_conversion_sources() {
+    for variant in ["base", "aesthetic", "turbo"] {
+        let entry =
+            sceneworks_core::builtin_manifests::builtin_model_entry(&format!("anima_{variant}"))
+                .expect("shipped Anima variant");
+        let source_file = format!("split_files/diffusion_models/anima-{variant}-v1.0.safetensors");
+        assert_eq!(entry["mlx"]["convertSourceRepo"], "circlestone-labs/Anima");
+        assert_eq!(entry["mlx"]["convertSourceFile"], source_file);
+        assert!(entry["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|download| {
+                download["repo"] == "circlestone-labs/Anima"
+                    && download["files"]
+                        .as_array()
+                        .is_some_and(|files| files.iter().any(|file| file == &source_file))
+            }));
+    }
 }
 
 /// Seed `file` into the HF cache snapshot for `repo` under `data_dir`, the way a completed download
@@ -2306,7 +3772,8 @@ async fn model_convert_is_refused_while_its_source_weights_are_still_downloading
     shared_repo_convert_manifest(&temp_dir.path().join("config/manifests"));
     let settings = test_settings(&temp_dir);
     let data_dir = settings.data_dir.clone();
-    let app = create_app(settings).expect("app creates");
+    let jobs_db_path = settings.jobs_db_path.clone();
+    let app = create_training_fixture_app(settings).expect("app creates");
 
     // Nothing cached at all: the source repo, not just one variant's file, is missing.
     let (status, body) = request(
@@ -2358,6 +3825,69 @@ async fn model_convert_is_refused_while_its_source_weights_are_still_downloading
         StatusCode::CREATED,
         "a cached source must still convert: {body}"
     );
+    assert_eq!(
+        body["payload"]["modelManifestEntries"][0]["id"],
+        "fixture_alpha"
+    );
+
+    // Every variant must freeze its own source row, even after all three siblings share a
+    // downloaded repository. Selecting by repository alone silently freezes the first row.
+    for variant in ["beta", "gamma"] {
+        seed_snapshot_file(
+            &data_dir,
+            "owner/shared",
+            &format!("split_files/diffusion_models/{variant}.safetensors"),
+        );
+        let (status, accepted) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/models/fixture_{variant}/convert"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{accepted}");
+        assert_eq!(
+            accepted["payload"]["modelManifestEntries"][0]["id"],
+            format!("fixture_{variant}")
+        );
+        assert_eq!(
+            accepted["payload"]["modelManifestEntries"][0]["downloads"][0]["files"][0],
+            format!("split_files/diffusion_models/{variant}.safetensors")
+        );
+        let connection = rusqlite::Connection::open(&jobs_db_path).expect("jobs db opens");
+        let binding: String = connection
+            .query_row(
+                "SELECT portable_model_binding_json FROM jobs WHERE id = ?1",
+                [accepted["id"].as_str().expect("convert job id")],
+                |row| row.get(0),
+            )
+            .expect("frozen conversion binding");
+        assert!(
+            binding.contains(&format!(
+                "split_files/diffusion_models/{variant}.safetensors"
+            )),
+            "the frozen source closure must select the requested variant: {binding}"
+        );
+    }
+
+    let (status, forged) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "model_convert",
+            "requestedGpu": "auto",
+            "payload": {
+                "modelId": "fixture_beta",
+                "sourceRepo": "owner/shared",
+                "sourceFile": "split_files/diffusion_models/alpha.safetensors",
+                "converter": "anima_quant",
+                "outputDir": data_dir.join("models/mlx/forged-beta").display().to_string()
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{forged}");
 
     // An in-flight download for the model itself is reported as such, with its progress, even once
     // the file exists (a re-download of the same variant).
@@ -2417,8 +3947,7 @@ async fn typed_model_convert_confines_route_id_before_catalog_lookup() {
 #[tokio::test]
 async fn retry_and_duplicate_reject_path_unsafe_merged_generation_model_before_create() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Audio Project").await;
     let project_id = project["id"].as_str().expect("project id");
     let (status, audio_job) = request(
@@ -2490,7 +4019,7 @@ async fn retry_and_duplicate_reauthorize_merged_control_weights_before_create() 
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_style_test_manifests(&temp_dir.path().join("config"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Control Retry Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -2502,7 +4031,7 @@ async fn retry_and_duplicate_reauthorize_merged_control_weights_before_create() 
             "projectId": project_id,
             "mode": "text_to_image",
             "prompt": "a fox",
-            "model": "img-model",
+            "model": "sdxl",
             "count": 1,
             "width": 1024,
             "height": 1024
@@ -2551,8 +4080,8 @@ async fn retry_and_duplicate_reauthorize_merged_control_weights_before_create() 
         }
     }
 
-    // The one shipped SDXL OpenPose tuple is accepted at every alternate create boundary, while
-    // caller-forged authorization/revision fields are removed and never persisted.
+    // A retry retains the original frozen source, even for a valid new control choice. A
+    // duplicate may instead make a fresh admission after the control tuple is canonicalized.
     for operation in ["retry", "duplicate"] {
         let (status, body) = request(
             app.clone(),
@@ -2572,6 +4101,12 @@ async fn retry_and_duplicate_reauthorize_merged_control_weights_before_create() 
             }),
         )
         .await;
+        if operation == "retry" {
+            assert_eq!(status, StatusCode::CONFLICT, "{operation}: {body}");
+            assert!(body["detail"].as_str().is_some_and(|detail| detail
+                .contains("replay source-affecting choices differ from frozen admission")));
+            continue;
+        }
         assert_eq!(status, StatusCode::CREATED, "{operation}: {body}");
         let weights = body["payload"]["advanced"]["controlWeights"]
             .as_object()
@@ -2608,8 +4143,88 @@ async fn retry_and_duplicate_reauthorize_merged_control_weights_before_create() 
     let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
     assert_eq!(
         jobs.as_array().expect("jobs array").len(),
-        5,
-        "only the original, two shipped-control operations, and two clean operations may persist"
+        4,
+        "only the original, freshly authorized duplicate, and two clean operations may persist"
+    );
+}
+
+/// Review finding 3: the claim-time historical upgrade re-resolves the authored text encoder the
+/// same way create/retry/duplicate do, instead of comparing a carrier that never re-ran the stamp.
+/// A historical job whose encoder choice has since disappeared fails with that resolution's own
+/// reason (not a generic identity mismatch), proving the authored choice was resolved, not dropped.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn historical_upgrade_re_resolves_the_authored_text_encoder() {
+    let _env = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    single_model_manifest(&manifest_dir, "krea_2_turbo", "SceneWorks/krea-2-turbo-mlx");
+    use_shipped_default_image_package(&manifest_dir, "krea_2_turbo");
+    let jobs_db_path = test_settings(&temp_dir).jobs_db_path;
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
+    let stale_id = "text_encoder_ffffffffffffffffffffffffffffffff";
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({"projectId":"project-1","mode":"text_to_image","prompt":"mist",
+            "model":"krea_2_turbo","count":1,"width":1024,"height":1024}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let jobs_store = sceneworks_core::jobs_store::JobsStore::new(jobs_db_path);
+    let admitted = jobs_store.get_job(created["id"].as_str().unwrap()).unwrap();
+    let mut payload = admitted.payload.clone();
+    payload
+        .entry("advanced")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .expect("advanced")
+        .insert("textEncoderModel".into(), json!(stale_id));
+    payload["modelManifestEntry"]["resolvedTextEncoder"] = json!({
+        "selectionId": stale_id, "sourceKind": "directory",
+        "path": temp_dir.path().join("old-root/text-encoder")
+    });
+    let historical = jobs_store
+        .create_job(crate::CreateJob {
+            job_type: admitted.job_type.clone(),
+            project_id: admitted.project_id.clone(),
+            project_name: None,
+            payload,
+            requested_gpu: admitted.requested_gpu.clone(),
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+            initial_status: None,
+        })
+        .unwrap();
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({"workerId":"encoder-worker","gpuId":"mlx","platform":"macos","gpuName":"MLX",
+            "capabilities":["gpu","image_generate"],"loadedModels":[]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, claim) = request(
+        app,
+        "POST",
+        "/api/v1/jobs/claim",
+        portable_test_worker_claim("encoder-worker", TestPortableRoute::MlxMacos),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{claim}");
+    assert_ne!(claim["job"]["id"], json!(historical.id), "{claim}");
+    let failed = jobs_store.get_job(&historical.id).unwrap();
+    assert_eq!(failed.status, crate::JobStatus::Failed, "{failed:?}");
+    assert!(
+        failed
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("is unavailable")),
+        "{failed:?}"
     );
 }
 
@@ -2624,7 +4239,8 @@ async fn image_create_retry_and_duplicate_resolve_text_encoder_fresh_and_fail_cl
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let manifest_dir = temp_dir.path().join("config/manifests");
     single_model_manifest(&manifest_dir, "krea_2_turbo", "SceneWorks/krea-2-turbo-mlx");
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    use_shipped_default_image_package(&manifest_dir, "krea_2_turbo");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
 
     let stale_id = "text_encoder_ffffffffffffffffffffffffffffffff";
     let base_payload = json!({
@@ -2715,14 +4331,21 @@ async fn image_create_retry_and_duplicate_resolve_text_encoder_fresh_and_fail_cl
 #[tokio::test]
 async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_retains_it() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    let (app, state) =
-        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        include_str!("../../../../config/manifests/builtin.models.jsonc"),
+    )
+    .expect("shipped model manifest writes");
+    let (app, state) = raw_detail_fixture_app(test_settings(&temp_dir));
     let selected = temp_dir.path().join("server/private/selected.safetensors");
     let selected_parent = selected.parent().expect("selected parent").to_path_buf();
     let distinct_server_root = temp_dir.path().join("other/managed/models");
     let distinct_canonical_target = temp_dir.path().join("outside/canonical/encoder.bin");
     let selection_id = "text_encoder_0123456789abcdef0123456789abcdef";
     let job_payload = json!({
+        "model": "realvisxl",
         "prompt": "/imagine a lake",
         "installedPath": "/public/models/base.safetensors",
         "sourcePath": "/public/loras/style.safetensors",
@@ -2791,6 +4414,14 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
             Some(provenance.clone())
         );
         assert_eq!(job.extra["modelProvenance"], provenance);
+        // Typed admission freezes a portable binding at create; this directly seeded row must be
+        // bound the same way (an unbound model job is unclaimable, and its historical upgrade would
+        // re-resolve the fixture's opaque encoder id against a catalog that has no such option).
+        crate::tests::support::bind_inserted_test_job(
+            state,
+            &job.id,
+            crate::tests::support::TestPortableRoute::MlxMacos,
+        );
         crate::publish(state, "job.updated", &job);
         crate::publish_queue(state).await.unwrap();
         serde_json::to_value(crate::public_job_snapshot(job)).unwrap()
@@ -2827,20 +4458,19 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
         selection_id
     );
     assert_eq!(created["payload"]["prompt"], "/imagine a lake");
-    assert_eq!(
-        created["payload"]["installedPath"],
-        "/public/models/base.safetensors"
-    );
-    assert_eq!(
-        created["payload"]["sourcePath"],
-        "/public/loras/style.safetensors"
-    );
+    assert!(created["payload"].get("installedPath").is_none());
+    assert!(created["payload"].get("sourcePath").is_none());
     assert_eq!(
         created["payload"]["selectedEcho"],
         "[selected text encoder]"
     );
     let job_id = created["id"].as_str().expect("job id").to_owned();
     let raw = state.jobs_store.get_job(&job_id).expect("raw job reads");
+    assert_eq!(
+        raw.payload["installedPath"],
+        "/public/models/base.safetensors"
+    );
+    assert_eq!(raw.payload["sourcePath"], "/public/loras/style.safetensors");
     assert_eq!(
         raw.payload["modelManifestEntry"]["resolvedTextEncoder"]["path"],
         selected.display().to_string(),
@@ -2899,11 +4529,33 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
     assert_eq!(reconnect[2].0, "queue.updated");
     assert_public("reconnect queue.updated", &reconnect[2].1);
 
+    // Give replay a normally admitted Detail row with an immutable source binding. A direct
+    // jobs-store row above deliberately tests projection of historical private metadata, but
+    // portable replay must reject that row because it never went through source admission.
+    let (status, admitted) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "projectName": "Project 1",
+            "requestedGpu": "auto",
+            "payload": { "model": "realvisxl", "sourceAssetId": "asset-1", "prompt": "lake" }
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "admitted Detail job: {admitted}"
+    );
+    let admitted_id = admitted["id"].as_str().expect("admitted job id");
     for operation in ["retry", "duplicate"] {
         let (status, response) = request(
             app.clone(),
             "POST",
-            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            &format!("/api/v1/jobs/{admitted_id}/{operation}"),
             json!({ "payloadChanges": { "prompt": format!("safe {operation}") } }),
         )
         .await;
@@ -2947,13 +4599,11 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "worker-1",
-            "gpuId": "gpu-0",
-            "gpuName": "Test GPU",
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "worker-1",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -2961,7 +4611,7 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-1" }),
+        portable_test_worker_claim("worker-1", TestPortableRoute::MlxMacos),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{claimed}");
@@ -3111,7 +4761,7 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-1" }),
+        portable_test_worker_claim("worker-1", TestPortableRoute::MlxMacos),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{termination_claim}");
@@ -4168,9 +5818,10 @@ async fn candle_required_builtin_krea_keeps_builtin_scope_and_queues() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let manifest_dir = temp_dir.path().join("config/manifests");
     single_model_manifest(&manifest_dir, "krea_2_turbo", "SceneWorks/krea-2-turbo-mlx");
+    use_shipped_default_download(&manifest_dir, "krea_2_turbo");
     let mut settings = test_settings(&temp_dir);
     settings.candle_required = true;
-    let app = create_app(settings).expect("app creates");
+    let app = pinned_jobs_fixture_app(settings).expect("app creates");
 
     let (status, created) = request(
         app,
@@ -4303,6 +5954,7 @@ fn write_decoder_capable_catalog(temp_dir: &tempfile::TempDir) {
         ),
     )
     .expect("builtin models writes");
+    use_shipped_default_download(&manifest_dir, "qwen_image");
 
     let data_dir = temp_dir.path().join("data");
     std::fs::create_dir_all(&data_dir).expect("data dir creates");
@@ -4342,7 +5994,7 @@ async fn candle_required_moves_the_decoder_gate_onto_the_candle_option_list() {
     write_decoder_capable_catalog(&candle_dir);
     let mut candle_settings = test_settings(&candle_dir);
     candle_settings.candle_required = true;
-    let candle_app = create_app(candle_settings).expect("app creates");
+    let candle_app = pinned_jobs_fixture_app(candle_settings).expect("app creates");
     let (status, error) = request(
         candle_app,
         "POST",
@@ -4368,7 +6020,7 @@ async fn candle_required_moves_the_decoder_gate_onto_the_candle_option_list() {
     // refusal above came from the backend swap and not from the option being unusable.
     let native_dir = tempfile::tempdir().expect("temp dir creates");
     write_decoder_capable_catalog(&native_dir);
-    let native_app = create_app(test_settings(&native_dir)).expect("app creates");
+    let native_app = pinned_jobs_fixture_app(test_settings(&native_dir)).expect("app creates");
     let (status, body) = request(
         native_app,
         "POST",
@@ -4399,7 +6051,7 @@ async fn retry_and_duplicate_gate_a_merged_decoder_selection_the_create_path_ref
     let _env = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_decoder_capable_catalog(&temp_dir);
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
 
     // The original job selects no decoder, so it is admitted on either lane.
     let (status, original) = request(
@@ -4559,7 +6211,7 @@ fn write_lora_gate_catalog(temp_dir: &tempfile::TempDir) {
           "schemaVersion": 1,
           "models": [
             {
-              "id": "gate_image",
+              "id": "z_image_turbo",
               "name": "Gate Image",
               "family": "z-image",
               "type": "image",
@@ -4587,6 +6239,8 @@ fn write_lora_gate_catalog(temp_dir: &tempfile::TempDir) {
         }"#,
     )
     .expect("builtin models writes");
+    use_shipped_default_download(&config_dir, "z_image_turbo");
+    use_shipped_default_download(&config_dir, "ltx_2_3");
     std::fs::write(
         config_dir.join("user.models.jsonc"),
         r#"{ "schemaVersion": 1, "models": [] }"#,
@@ -4642,6 +6296,60 @@ fn write_lora_gate_catalog(temp_dir: &tempfile::TempDir) {
     }
 }
 
+async fn advertise_fixture_lora_source(
+    app: &axum::Router,
+    lora_id: &str,
+    path: &std::path::Path,
+    capability: &str,
+) {
+    advertise_fixture_lora_sources(app, &[(lora_id, path)], capability).await;
+}
+
+async fn advertise_fixture_lora_sources(
+    app: &axum::Router,
+    sources: &[(&str, &std::path::Path)],
+    capability: &str,
+) {
+    use sceneworks_core::model_artifacts::portable_binding::{
+        portable_file_ledger_sha256, PortableArtifactFile, PortableSourceClaim,
+        PortableSourceProvenance,
+    };
+    let claims = sources
+        .iter()
+        .map(|(lora_id, path)| {
+            let files = vec![PortableArtifactFile {
+                relative_path: path.file_name().expect("LoRA file name").into(),
+                size_bytes: std::fs::metadata(path).expect("LoRA file metadata").len(),
+                sha256: format!(
+                    "sha256:{}",
+                    sceneworks_core::hashing::sha256_file(path).expect("LoRA file hash")
+                ),
+            }];
+            let ledger = portable_file_ledger_sha256(&files).expect("LoRA file ledger");
+            let source_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+                "lora", lora_id, None, &ledger,
+            )
+            .expect("registered LoRA source id");
+            PortableSourceClaim::new(source_id, PortableSourceProvenance::OperatorOverride, files)
+                .expect("LoRA source claim")
+        })
+        .collect::<Vec<_>>();
+    let mut registration = portable_test_worker_registration(
+        "test-lora-source-worker",
+        &["gpu", "mlx", capability],
+        TestPortableRoute::MlxMacos,
+    );
+    registration["portableSourceClaims"] = serde_json::to_value(claims).unwrap();
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        registration,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
 /// sc-18420: `validate_job_lora_compatibility_with` runs at BOTH create boundaries
 /// (`create_image_job`, `create_video_job`) and at neither retry/duplicate one. `loras` is a
 /// TOP-LEVEL key, so the shallow `payload_changes` merge replaces the whole array — a retry could
@@ -4651,12 +6359,20 @@ fn write_lora_gate_catalog(temp_dir: &tempfile::TempDir) {
 /// Every refusal string here is the create path's own, asserted verbatim against the same catalog.
 #[tokio::test]
 async fn retry_and_duplicate_gate_a_merged_lora_set_the_create_path_refuses() {
+    let _env = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_lora_gate_catalog(&temp_dir);
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     // The LoRA catalog is project-scoped, so the gate needs a real project to resolve against.
     let (_, project) = crate::tests::support::create_project(app.clone(), &"LoRA Gate").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
+    advertise_fixture_lora_source(
+        &app,
+        "good_style",
+        &temp_dir.path().join("data/loras/good.safetensors"),
+        "image_generate",
+    )
+    .await;
 
     // Baseline: created with a COMPATIBLE adapter, so the refusals below are about the merged set
     // and not about the route rejecting adapters at all.
@@ -4668,7 +6384,7 @@ async fn retry_and_duplicate_gate_a_merged_lora_set_the_create_path_refuses() {
             "projectId": project_id,
             "mode": "text_to_image",
             "prompt": "mist over hills",
-            "model": "gate_image",
+            "model": "z_image_turbo",
             "count": 1,
             "loras": [{ "id": "good_style" }],
         }),
@@ -4682,7 +6398,7 @@ async fn retry_and_duplicate_gate_a_merged_lora_set_the_create_path_refuses() {
 
     for (expected, loras) in [
         (
-            "LoRA qwen_style is not compatible with model gate_image: the LoRA is a qwen-image adapter, and gate_image loads z-image adapters",
+            "LoRA qwen_style is not compatible with model z_image_turbo: the LoRA is a qwen-image adapter, and z_image_turbo loads z-image adapters",
             json!([{ "id": "qwen_style" }]),
         ),
         (
@@ -4695,7 +6411,7 @@ async fn retry_and_duplicate_gate_a_merged_lora_set_the_create_path_refuses() {
         ),
         // A mixed set must be refused for its bad member, not silently pruned to the good one.
         (
-            "LoRA qwen_style is not compatible with model gate_image: the LoRA is a qwen-image adapter, and gate_image loads z-image adapters",
+            "LoRA qwen_style is not compatible with model z_image_turbo: the LoRA is a qwen-image adapter, and z_image_turbo loads z-image adapters",
             json!([{ "id": "good_style" }, { "id": "qwen_style" }]),
         ),
     ] {
@@ -4709,7 +6425,7 @@ async fn retry_and_duplicate_gate_a_merged_lora_set_the_create_path_refuses() {
                 "projectId": project_id,
                 "mode": "text_to_image",
                 "prompt": "mist over hills",
-                "model": "gate_image",
+                "model": "z_image_turbo",
                 "count": 1,
                 "loras": loras,
             }),
@@ -4773,9 +6489,10 @@ async fn retry_and_duplicate_gate_a_merged_lora_set_the_create_path_refuses() {
 /// `payloadChanges`.
 #[tokio::test]
 async fn retry_honours_character_inline_lora_provenance_without_letting_others_borrow_it() {
+    let _env = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_lora_gate_catalog(&temp_dir);
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Character Retry").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let (_, character) = request(
@@ -4795,19 +6512,32 @@ async fn retry_honours_character_inline_lora_provenance_without_letting_others_b
         json!({
             "name": "Character Style",
             "sourcePath": source.display().to_string(),
-            // Compatible with `gate_image` so the test-job itself is admitted; the family gate is
+            // Compatible with `z_image_turbo` so the test-job itself is admitted; the family gate is
             // pinned elsewhere and is not what this test is about.
             "compatibility": { "families": ["z-image"] }
         }),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{attached}");
+    let linked_lora_id = attached["loras"][0]["id"]
+        .as_str()
+        .expect("attached character LoRA id");
+    let good_style_path = temp_dir.path().join("data/loras/good.safetensors");
+    advertise_fixture_lora_sources(
+        &app,
+        &[
+            (linked_lora_id, source.as_path()),
+            ("good_style", good_style_path.as_path()),
+        ],
+        "image_generate",
+    )
+    .await;
 
     let (status, character_job) = request(
         app.clone(),
         "POST",
         &format!("/api/v1/projects/{project_id}/characters/{character_id}/test-jobs"),
-        json!({ "prompt": "portrait", "model": "gate_image" }),
+        json!({ "prompt": "portrait", "model": "z_image_turbo" }),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{character_job}");
@@ -4917,6 +6647,40 @@ async fn retry_honours_character_inline_lora_provenance_without_letting_others_b
         }
     }
 
+    // The public link omits private paths. A caller who knows its id cannot redirect the loader
+    // through an alternate path spelling or file selector before portable confinement runs.
+    for (field, value) in [
+        ("installedPath", json!(foreign.display().to_string())),
+        ("path", json!(foreign.display().to_string())),
+        (
+            "source",
+            json!({ "provider": "local", "path": foreign.display().to_string() }),
+        ),
+        ("files", json!(["foreign.safetensors"])),
+    ] {
+        let mut redirected = inline_lora.clone();
+        redirected[field] = value;
+        for operation in ["retry", "duplicate"] {
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{character_job_id}/{operation}"),
+                json!({ "payloadChanges": { "loras": [redirected.clone()] } }),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{field} {operation}: {error}"
+            );
+            assert_eq!(
+                error["detail"],
+                format!("LoRA not found: {inline_lora_id}"),
+                "{field} {operation} must not inspect a caller-selected source"
+            );
+        }
+    }
+
     // A CATALOG adapter added alongside the persisted inline set is admitted — the narrowing must
     // not turn a character job into one that can never gain an adapter — and both survive, in order.
     let (status, widened) = request(
@@ -4953,7 +6717,7 @@ async fn retry_honours_character_inline_lora_provenance_without_letting_others_b
             "mode": "character_image",
             "characterId": "character_not_really_mine",
             "prompt": "mist over hills",
-            "model": "gate_image",
+            "model": "z_image_turbo",
             "count": 1,
             "referenceAssetIds": [],
             "loras": [],
@@ -5021,12 +6785,20 @@ async fn retry_honours_character_inline_lora_provenance_without_letting_others_b
 /// The video half of the same LoRA bypass — `create_video_job` runs the identical gate.
 #[tokio::test]
 async fn retry_and_duplicate_gate_a_merged_video_lora_set_the_create_path_refuses() {
+    let _env = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_lora_gate_catalog(&temp_dir);
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     // The LoRA catalog is project-scoped, so the gate needs a real project to resolve against.
     let (_, project) = crate::tests::support::create_project(app.clone(), &"LoRA Gate").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
+    advertise_fixture_lora_source(
+        &app,
+        "motion_style",
+        &temp_dir.path().join("data/loras/motion.safetensors"),
+        "video_generate",
+    )
+    .await;
 
     let (status, original) = request(
         app.clone(),
@@ -5116,9 +6888,76 @@ async fn retry_and_duplicate_gate_a_merged_video_lora_set_the_create_path_refuse
 /// refuses an imported request shape the resolved provider registration cannot execute; the merged
 /// boundary never ran that check, so a retry could swap `advanced` for one carrying a shape the
 /// backend has no route for.
+fn register_imported_fixture_worker(
+    state: &crate::AppState,
+    model_id: &str,
+    source: &std::path::Path,
+    backend: &str,
+    platform: &str,
+) {
+    use sceneworks_core::contracts::WorkerCapability;
+    use sceneworks_core::jobs_store::RegisterWorker;
+    use sceneworks_core::model_artifacts::portable_binding::{
+        portable_file_ledger_sha256, PortableArtifactFile, PortableSourceClaim,
+        PortableSourceProvenance,
+    };
+
+    let file = if source.is_dir() {
+        source.join("model.safetensors")
+    } else {
+        source.to_path_buf()
+    };
+    let bytes = std::fs::read(&file).expect("fixture source reads");
+    let relative_path = if source.is_dir() {
+        file.strip_prefix(source)
+            .expect("source member")
+            .to_path_buf()
+    } else {
+        file.file_name().expect("source filename").into()
+    };
+    let files = vec![PortableArtifactFile {
+        relative_path,
+        size_bytes: bytes.len() as u64,
+        sha256: format!("sha256:{}", sceneworks_core::hashing::sha256_bytes(&bytes)),
+    }];
+    let source_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+        "model",
+        model_id,
+        None,
+        &portable_file_ledger_sha256(&files).expect("ledger hash"),
+    )
+    .expect("source ID");
+    let claim =
+        PortableSourceClaim::new(source_id, PortableSourceProvenance::OperatorOverride, files)
+            .expect("worker claim");
+    let mut capabilities = vec![WorkerCapability::Gpu, WorkerCapability::ImageGenerate];
+    if backend == "candle" {
+        capabilities.push(WorkerCapability::Unknown("candle".into()));
+    }
+    state
+        .jobs_store
+        .register_worker_with_portable_sources(
+            RegisterWorker {
+                worker_id: format!("fixture-{model_id}-{backend}"),
+                gpu_id: if backend == "mlx" { "mlx" } else { "cuda:0" }.into(),
+                gpu_name: None,
+                capabilities,
+                loaded_models: vec![],
+                utilization: None,
+            },
+            Some(platform),
+            Some(&[claim]),
+        )
+        .expect("fixture worker registers exact source");
+}
+
 #[tokio::test]
 async fn retry_and_duplicate_gate_a_merged_imported_shape_the_create_path_refuses() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let model_path = temp_dir.path().join("data/imported/user-krea.safetensors");
+    std::fs::create_dir_all(model_path.parent().expect("model parent"))
+        .expect("model directory creates");
+    std::fs::write(&model_path, b"fixture weights").expect("model source writes");
     let manifest_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
     write_empty_sibling_manifests(&manifest_dir);
@@ -5129,23 +6968,18 @@ async fn retry_and_duplicate_gate_a_merged_imported_shape_the_create_path_refuse
     .expect("builtin manifest writes");
     std::fs::write(
         manifest_dir.join("user.models.jsonc"),
-        r#"{
-          "schemaVersion": 1,
-          "models": [{
-            "id": "user_krea",
-            "name": "User Krea",
-            "type": "image",
-            "family": "krea_2",
-            "importSourceShape": "transformer_file",
-            "paths": { "model": "/probe/user-krea.safetensors" }
-          }]
-        }"#,
+        json!({"schemaVersion": 1, "models": [{
+            "id": "user_krea", "name": "User Krea", "type": "image", "family": "krea_2",
+            "importSourceShape": "transformer_file", "paths": {"model": model_path}
+        }]})
+        .to_string(),
     )
     .expect("user manifest writes");
     let mut settings = test_settings(&temp_dir);
     // Candle serves imported pose jobs, while canny and incomplete control intent remain unsupported.
     settings.candle_required = true;
-    let app = create_app(settings).expect("app creates");
+    let (app, state) = pinned_jobs_fixture_app_with_state(settings).expect("app creates");
+    register_imported_fixture_worker(&state, "user_krea", &model_path, "candle", "linux");
 
     let (status, original) = request(
         app.clone(),
@@ -5213,9 +7047,23 @@ async fn retry_and_duplicate_gate_a_merged_imported_shape_the_create_path_refuse
     assert_eq!(status, StatusCode::CREATED, "{replayed}");
 }
 
+/// Run once per worker host shape whatever OS runs the test: imported Krea pose is served by the
+/// MLX/macOS worker and by the Candle worker on Linux and Windows (a Candle-required API).
 #[tokio::test]
 async fn imported_pose_overlay_uses_the_server_projected_base() {
+    for (backend, platform) in [("mlx", "macos"), ("candle", "linux"), ("candle", "windows")] {
+        imported_pose_overlay_uses_the_server_projected_base_on(backend, platform).await;
+    }
+}
+
+async fn imported_pose_overlay_uses_the_server_projected_base_on(backend: &str, platform: &str) {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    // The registry admits an imported source only from a managed root, bound to a worker that
+    // serves that exact source (see `register_imported_fixture_worker`).
+    let model_path = temp_dir.path().join("data/imported/user-krea.safetensors");
+    std::fs::create_dir_all(model_path.parent().expect("model parent"))
+        .expect("model directory creates");
+    std::fs::write(&model_path, b"fixture weights").expect("model source writes");
     let manifest_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
     write_empty_sibling_manifests(&manifest_dir);
@@ -5226,9 +7074,10 @@ async fn imported_pose_overlay_uses_the_server_projected_base() {
     .unwrap();
     std::fs::write(
         manifest_dir.join("user.models.jsonc"),
-        r#"{"schemaVersion":1,"models":[{"id":"user_krea","name":"User Krea",
-        "type":"image","family":"krea_2","importSourceShape":"transformer_file",
-        "paths":{"model":"/probe/user-krea.safetensors"}}]}"#,
+        json!({"schemaVersion":1,"models":[{"id":"user_krea","name":"User Krea",
+            "type":"image","family":"krea_2","importSourceShape":"transformer_file",
+            "paths":{"model":model_path}}]})
+        .to_string(),
     )
     .unwrap();
     let overlays: Vec<Value> = [("krea-pose", "krea_2_turbo"), ("foreign-pose", "flux2_dev")]
@@ -5249,8 +7098,9 @@ async fn imported_pose_overlay_uses_the_server_projected_base() {
     )
     .unwrap();
     let mut settings = test_settings(&temp_dir);
-    settings.candle_required = cfg!(not(target_os = "macos"));
-    let app = create_app(settings).expect("app creates");
+    settings.candle_required = backend == "candle";
+    let (app, state) = pinned_jobs_fixture_app_with_state(settings).expect("app creates");
+    register_imported_fixture_worker(&state, "user_krea", &model_path, backend, platform);
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Fine-tune poses").await;
     let project_id = project["id"].as_str().expect("project id");
     for (overlay_id, expected) in [
@@ -5263,7 +7113,10 @@ async fn imported_pose_overlay_uses_the_server_projected_base() {
             "advanced":{"poses":[{"id":"pose-1","keypoints":[]}],
                 "controlWeights":{"overlayId":overlay_id}}
         })).await;
-        assert_eq!(status, expected, "{overlay_id}: {response}");
+        assert_eq!(
+            status, expected,
+            "{backend}/{platform} {overlay_id}: {response}"
+        );
         if status == StatusCode::CREATED {
             assert_eq!(
                 response["payload"]["modelManifestEntry"]["ui"]["controlOverlayBaseModel"],
@@ -5283,6 +7136,10 @@ async fn imported_pose_overlay_uses_the_server_projected_base() {
 #[tokio::test]
 async fn native_imported_control_requires_pose_but_preserves_krea_pose_user_map() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let model_path = temp_dir.path().join("data/imported/user-krea.safetensors");
+    std::fs::create_dir_all(model_path.parent().expect("model parent"))
+        .expect("model directory creates");
+    std::fs::write(&model_path, b"fixture weights").expect("model source writes");
     let manifest_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
     write_empty_sibling_manifests(&manifest_dir);
@@ -5293,22 +7150,18 @@ async fn native_imported_control_requires_pose_but_preserves_krea_pose_user_map(
     .expect("builtin manifest writes");
     std::fs::write(
         manifest_dir.join("user.models.jsonc"),
-        r#"{
-          "schemaVersion": 1,
-          "models": [{
-            "id": "user_krea",
-            "name": "User Krea",
-            "type": "image",
-            "family": "krea_2",
-            "importSourceShape": "transformer_file",
-            "paths": { "model": "/probe/user-krea.safetensors" }
-          }]
-        }"#,
+        json!({"schemaVersion": 1, "models": [{
+            "id": "user_krea", "name": "User Krea", "type": "image", "family": "krea_2",
+            "baseModel": "krea_2_turbo",
+            "importSourceShape": "transformer_file", "paths": {"model": model_path}
+        }]})
+        .to_string(),
     )
     .expect("user manifest writes");
     let settings = test_settings(&temp_dir);
     let jobs_db_path = settings.jobs_db_path.clone();
-    let app = create_app(settings).expect("app creates");
+    let (app, state) = pinned_jobs_fixture_app_with_state(settings).expect("app creates");
+    register_imported_fixture_worker(&state, "user_krea", &model_path, "mlx", "macos");
 
     for advanced in [
         json!({ "controlImage": "control-1" }),
@@ -5374,6 +7227,10 @@ async fn native_imported_control_requires_pose_but_preserves_krea_pose_user_map(
 #[tokio::test]
 async fn native_imported_mage_queues_only_the_exact_registered_generate_shape() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let model_path = temp_dir.path().join("data/imported/finetune-mage");
+    std::fs::create_dir_all(&model_path).expect("model directory creates");
+    std::fs::write(model_path.join("model.safetensors"), b"fixture weights")
+        .expect("model source writes");
     let manifest_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
     write_empty_sibling_manifests(&manifest_dir);
@@ -5384,22 +7241,18 @@ async fn native_imported_mage_queues_only_the_exact_registered_generate_shape() 
     .expect("builtin manifest writes");
     std::fs::write(
         manifest_dir.join("user.models.jsonc"),
-        r#"{
-          "schemaVersion": 1,
-          "models": [{
-            "id": "finetune_mage",
-            "name": "Fine-tuned Mage",
-            "type": "image",
-            "family": "mage-flow",
-            "importSourceShape": "transformer_directory",
-            "paths": { "model": "/probe/finetune-mage" }
-          }]
-        }"#,
+        json!({"schemaVersion": 1, "models": [{
+            "id": "finetune_mage", "name": "Fine-tuned Mage", "type": "image",
+            "family": "mage-flow", "importSourceShape": "transformer_directory",
+            "paths": {"model": model_path}
+        }]})
+        .to_string(),
     )
     .expect("user manifest writes");
     let settings = test_settings(&temp_dir);
     let jobs_db_path = settings.jobs_db_path.clone();
-    let app = create_app(settings).expect("app creates");
+    let (app, state) = pinned_jobs_fixture_app_with_state(settings).expect("app creates");
+    register_imported_fixture_worker(&state, "finetune_mage", &model_path, "mlx", "macos");
 
     for (label, extra) in [
         (
@@ -5671,7 +7524,7 @@ fn write_audio_manifest(config_dir: &std::path::Path) {
                 "maxDurationSecs": 30
               },
               "downloads": [
-                { "provider": "huggingface", "repo": "hexgrad/Kokoro-82M", "files": ["config.json", "kokoro-v1_0.pth", "voices/*"] }
+                { "provider": "huggingface", "repo": "hexgrad/Kokoro-82M", "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987", "files": ["config.json", "kokoro-v1_0.pth", "voices/*"] }
               ],
               "paths": { "model": "${HF_CACHE}/hexgrad/Kokoro-82M" },
               "ui": { "label": "Kokoro 82M" }
@@ -5687,7 +7540,7 @@ fn write_audio_manifest(config_dir: &std::path::Path) {
                 "maxDurationSecs": 30
               },
               "downloads": [
-                { "provider": "huggingface", "repo": "OpenMOSS-Team/MOSS-SoundEffect-v2.0", "files": ["model_index.json"] }
+                { "provider": "huggingface", "repo": "OpenMOSS-Team/MOSS-SoundEffect-v2.0", "revision": "e35df4d82fbe87fcd5d14e5d100e349c0c3c076d", "files": ["model_index.json"] }
               ],
               "paths": { "model": "${HF_CACHE}/OpenMOSS-Team/MOSS-SoundEffect-v2.0" },
               "ui": { "label": "MOSS SoundEffect v2" }
@@ -5705,7 +7558,7 @@ fn write_audio_manifest(config_dir: &std::path::Path) {
                 "conditioning": ["AudioEdit"]
               },
               "downloads": [
-                { "provider": "huggingface", "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers", "files": ["model_index.json"] }
+                { "provider": "huggingface", "repo": "ACE-Step/acestep-v15-xl-turbo-diffusers", "revision": "200ba991ae448051e14b0183157e35c2d27c9fb0", "files": ["model_index.json"] }
               ],
               "paths": { "model": "${HF_CACHE}/ACE-Step/acestep-v15-xl-turbo-diffusers" },
               "ui": { "label": "ACE-Step v1.5 XL Turbo" }
@@ -5720,7 +7573,7 @@ fn write_audio_manifest(config_dir: &std::path::Path) {
                 "conditioning": ["ReferenceAudio"]
               },
               "downloads": [
-                { "provider": "huggingface", "repo": "myshell-ai/OpenVoiceV2", "files": ["converter/config.json", "converter/checkpoint.pth"] }
+                { "provider": "huggingface", "repo": "myshell-ai/OpenVoiceV2", "revision": "f36e7edfe1684461a8343844af60babc2efbb727", "files": ["converter/config.json", "converter/checkpoint.pth"] }
               ],
               "paths": { "model": "${HF_CACHE}/myshell-ai/OpenVoiceV2" },
               "ui": { "label": "OpenVoice V2" }
@@ -5739,7 +7592,7 @@ fn write_audio_manifest(config_dir: &std::path::Path) {
                 "supportsStreaming": false
               },
               "downloads": [
-                { "provider": "huggingface", "repo": "OpenMOSS-Team/MOSS-TTSD-v0.5", "files": ["config.json", "model.safetensors", "tokenizer.json", "tokenizer_config.json"] },
+                { "provider": "huggingface", "repo": "OpenMOSS-Team/MOSS-TTSD-v0.5", "revision": "8527b9136b6afefe2252ae597cecea2e80e7ebeb", "files": ["config.json", "model.safetensors", "tokenizer.json", "tokenizer_config.json"] },
                 { "provider": "huggingface", "repo": "OpenMOSS-Team/XY_Tokenizer_TTSD_V0", "revision": "c83433728e698ed0698e88cb5096bc221fb8f8c5", "coRequisite": true, "files": ["xy_tokenizer.ckpt"] }
               ],
               "paths": { "model": "${HF_CACHE}/OpenMOSS-Team/MOSS-TTSD-v0.5" },
@@ -5755,10 +7608,10 @@ fn write_audio_manifest(config_dir: &std::path::Path) {
                 "supportsSegmentedLyrics": true, "supportsRepetitionPenalty": true
               },
               "downloads": [
-                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-cot-candle", "variant": "q4", "default": true, "files": ["q4/*"] },
-                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-cot-candle", "variant": "q8", "files": ["q8/*"] },
-                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-cot-candle", "variant": "bf16", "files": ["bf16/*"] },
-                { "provider": "huggingface", "repo": "SceneWorks/yue-s2-1b-general-candle", "coRequisite": true, "componentId": "stage2", "variant": "q4", "subdir": "q4", "files": ["q4/*"] }
+                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-cot-candle", "revision": "5842b8bc97d2a6dddc427a444920050dd3860949", "variant": "q4", "default": true, "files": ["q4/*"] },
+                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-cot-candle", "revision": "5842b8bc97d2a6dddc427a444920050dd3860949", "variant": "q8", "files": ["q8/*"] },
+                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-cot-candle", "revision": "5842b8bc97d2a6dddc427a444920050dd3860949", "variant": "bf16", "files": ["bf16/*"] },
+                { "provider": "huggingface", "repo": "SceneWorks/yue-s2-1b-general-candle", "revision": "3d6a71c7f2af1010983fc9da7bcaba528f083da6", "coRequisite": true, "componentId": "stage2", "variant": "q4", "subdir": "q4", "files": ["q4/*"] }
               ],
               "paths": { "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-en-cot-candle" },
               "ui": { "label": "YuE English CoT" }
@@ -5775,9 +7628,9 @@ fn write_audio_manifest(config_dir: &std::path::Path) {
                 "supportsOutputLimiter": true
               },
               "downloads": [
-                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-icl-candle", "variant": "q4", "default": true, "files": ["q4/*"] },
-                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-icl-candle", "variant": "q8", "files": ["q8/*"] },
-                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-icl-candle", "variant": "bf16", "files": ["bf16/*"] }
+                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-icl-candle", "revision": "fc8cb3515e654d419c2831dcdaf931b61a050179", "variant": "q4", "default": true, "files": ["q4/*"] },
+                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-icl-candle", "revision": "fc8cb3515e654d419c2831dcdaf931b61a050179", "variant": "q8", "files": ["q8/*"] },
+                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-icl-candle", "revision": "fc8cb3515e654d419c2831dcdaf931b61a050179", "variant": "bf16", "files": ["bf16/*"] }
               ],
               "paths": { "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-en-icl-candle" },
               "ui": { "label": "YuE English ICL" }
@@ -5806,6 +7659,34 @@ fn write_audio_manifest(config_dir: &std::path::Path) {
     .expect("user models writes");
 }
 
+fn pinned_audio_fixture_metadata(
+    selectors: &[String],
+) -> Vec<sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile> {
+    use sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile;
+    let mut files = selectors
+        .iter()
+        .map(|selector| PortableArtifactFile {
+            relative_path: std::path::PathBuf::from(selector.replace('*', "fixture")),
+            size_bytes: 1,
+            sha256: format!("sha256:{}", "a".repeat(64)),
+        })
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    files.dedup_by(|left, right| left.relative_path == right.relative_path);
+    files
+}
+
+fn audio_fixture_app(temp_dir: &tempfile::TempDir) -> axum::Router {
+    write_audio_manifest(&temp_dir.path().join("config/manifests"));
+    let (app, state) =
+        create_app_with_state(test_settings(temp_dir)).expect("audio fixture app creates");
+    *state.test_hooks.pinned_metadata_override.lock() =
+        Some(std::sync::Arc::new(|_, _, selectors| {
+            pinned_audio_fixture_metadata(selectors)
+        }));
+    app
+}
+
 /// The audio job path (sc-13404): a well-formed `POST /api/v1/audio/jobs` maps the request into an
 /// `audio_generate` job whose payload carries the audio knobs (voice / language / targetDurationSecs
 /// / seed) verbatim and the resolved `type: audio` manifest entry — the audio twin of how the video
@@ -5813,8 +7694,7 @@ fn write_audio_manifest(config_dir: &std::path::Path) {
 #[tokio::test]
 async fn create_audio_job_maps_request_to_audio_generate_payload() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Audio Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
@@ -5860,8 +7740,7 @@ async fn create_audio_job_maps_request_to_audio_generate_payload() {
 #[tokio::test]
 async fn create_audio_job_maps_the_multi_speaker_script() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Dialogue Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -5907,8 +7786,7 @@ async fn create_audio_job_maps_the_multi_speaker_script() {
 #[tokio::test]
 async fn create_audio_job_rejects_empty_prompt_and_empty_script() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Dialogue Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -5947,8 +7825,7 @@ async fn create_audio_job_rejects_empty_prompt_and_empty_script() {
 #[tokio::test]
 async fn create_audio_job_maps_sfx_sampling_knobs() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) = crate::tests::support::create_project(app.clone(), &"SFX Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
@@ -5998,8 +7875,7 @@ async fn create_audio_job_maps_sfx_sampling_knobs() {
 #[tokio::test]
 async fn create_audio_job_injects_base_model_entry_for_voice_clone() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Voice Clone Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -6042,8 +7918,7 @@ async fn create_audio_job_injects_base_model_entry_for_voice_clone() {
 #[tokio::test]
 async fn create_audio_job_omits_base_model_entry_without_a_reference() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Plain Audio Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -6068,8 +7943,7 @@ async fn create_audio_job_omits_base_model_entry_without_a_reference() {
 #[tokio::test]
 async fn create_audio_job_rejects_out_of_range_match_strength() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Bad Strength Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -6096,8 +7970,7 @@ async fn create_audio_job_rejects_out_of_range_match_strength() {
 #[tokio::test]
 async fn create_audio_job_rejects_nonsense_sampling_knobs() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) = crate::tests::support::create_project(app.clone(), &"SFX Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
@@ -6127,8 +8000,7 @@ async fn create_audio_job_rejects_nonsense_sampling_knobs() {
 #[tokio::test]
 async fn create_audio_job_maps_music_and_edit_fields() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Music Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
@@ -6183,8 +8055,7 @@ async fn create_audio_job_maps_music_and_edit_fields() {
 #[tokio::test]
 async fn create_audio_job_rejects_half_specified_edit() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Music Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
@@ -6214,8 +8085,7 @@ async fn create_audio_job_rejects_half_specified_edit() {
 #[tokio::test]
 async fn create_audio_job_rejects_nonsense_music_fields() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Music Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
@@ -6284,8 +8154,7 @@ async fn create_audio_job_rejects_nonsense_music_fields() {
 #[tokio::test]
 async fn create_audio_job_accepts_case_insensitive_edit_mode() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Music Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
@@ -6331,8 +8200,7 @@ async fn create_audio_job_accepts_case_insensitive_edit_mode() {
 #[tokio::test]
 async fn create_audio_job_rejects_non_audio_model() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Audio Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
@@ -6372,8 +8240,7 @@ async fn create_audio_job_rejects_non_audio_model() {
 #[tokio::test]
 async fn create_audio_job_rejects_empty_prompt() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Audio Project").await;
     let project_id = project["id"].as_str().expect("project id");
 
@@ -6398,8 +8265,7 @@ async fn create_audio_job_rejects_empty_prompt() {
 /// YuE job-surface tests (sc-19384).
 async fn yue_audio_app() -> (tempfile::TempDir, axum::Router, String) {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    write_audio_manifest(&temp_dir.path().join("config/manifests"));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = audio_fixture_app(&temp_dir);
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Song Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     (temp_dir, app, project_id)
@@ -6546,6 +8412,7 @@ async fn create_audio_job_maps_the_full_yue_control_set() {
 /// on a model that does not declare them, and the controls YuE does not read are refused on YuE.
 #[tokio::test]
 async fn create_audio_job_rejects_invalid_yue_requests() {
+    let _env = isolate_hf_cache();
     let (_temp_dir, app, project_id) = yue_audio_app().await;
     let lyrics = "[verse]\nla la la";
     let cases: Vec<(&str, Value, &str)> = vec![
@@ -6676,13 +8543,6 @@ async fn create_audio_job_rejects_invalid_yue_requests() {
             json!({ "model": "acestep_v15_turbo", "outputLimiter": "rescale" }),
             "does not take an outputLimiter",
         ),
-        (
-            // `yue_en_cot` here declares segmented lyrics but NOT `supportsOutputLimiter`: the
-            // gate is the limiter's own flag, not the segmented-lyrics one.
-            "output limiter on a segmented model without the limiter flag",
-            json!({ "model": "yue_en_cot", "outputLimiter": "clamp" }),
-            "does not take an outputLimiter",
-        ),
     ];
     for (name, overrides, needle) in cases {
         let mut body = json!({ "projectId": project_id, "prompt": "pop", "lyrics": lyrics });
@@ -6698,6 +8558,34 @@ async fn create_audio_job_rejects_invalid_yue_requests() {
             "{name}: expected a detail containing {needle:?}, got {response}"
         );
     }
+
+    // The limiter gate is the limiter's own flag, not the segmented-lyrics one. Every SHIPPED
+    // segmented YuE row declares `supportsOutputLimiter`, and the compiled registry owns those rows
+    // (a config-dir copy cannot clear the flag), so the distinction is proven at the validator seam
+    // the route calls: the registered yue_en_cot entry with only the limiter flag cleared.
+    let mut segmented_without_limiter = Value::Object(
+        sceneworks_core::builtin_manifests::builtin_model_entry("yue_en_cot")
+            .expect("yue_en_cot is registered")
+            .clone(),
+    );
+    assert_eq!(
+        segmented_without_limiter["audio"]["supportsSegmentedLyrics"],
+        true
+    );
+    segmented_without_limiter["audio"]["supportsOutputLimiter"] = json!(false);
+    let request: crate::dto::AudioJobRequest = serde_json::from_value(json!({
+        "projectId": project_id, "prompt": "pop", "lyrics": lyrics,
+        "model": "yue_en_cot", "outputLimiter": "clamp"
+    }))
+    .expect("audio request parses");
+    let error =
+        crate::validators::validate_audio_job_for_model(&request, &segmented_without_limiter)
+            .expect_err("output limiter on a segmented model without the limiter flag");
+    assert!(
+        error.detail.contains("does not take an outputLimiter"),
+        "{}",
+        error.detail
+    );
 }
 
 // The queue-lifecycle tests below drive `POST /api/v1/jobs` — claim, cancel, retry,
@@ -6716,13 +8604,11 @@ async fn worker_can_register_claim_and_complete_job_through_http() {
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "worker-1",
-            "gpuId": "gpu-0",
-            "gpuName": "GPU 0",
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "worker-1",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -6746,7 +8632,7 @@ async fn worker_can_register_claim_and_complete_job_through_http() {
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-1" }),
+        portable_test_worker_claim("worker-1", TestPortableRoute::MlxMacos),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -6801,7 +8687,14 @@ async fn in_flight_running_progress_cannot_resurrect_a_canceled_job() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     let job_id = created["id"].as_str().expect("job id").to_owned();
-    claim_job_as_worker(&app, &job_id, "stream-worker", &["image_detail"]).await;
+    claim_job_as_worker_on_route(
+        &app,
+        &job_id,
+        "stream-worker",
+        &["gpu", "mlx", "image_detail"],
+        TestPortableRoute::MlxMacos,
+    )
+    .await;
 
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
     *state.test_hooks.progress_before_accept_once.lock() = Some(barrier.clone());
@@ -6925,13 +8818,11 @@ async fn progress_ticks_only_republish_queue_on_status_change() {
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "worker-1",
-            "gpuId": "gpu-0",
-            "gpuName": "GPU 0",
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "worker-1",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     let (_, created) = request(
@@ -6952,7 +8843,7 @@ async fn progress_ticks_only_republish_queue_on_status_change() {
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-1" }),
+        portable_test_worker_claim("worker-1", TestPortableRoute::MlxMacos),
     )
     .await;
     // Move the job into `running` (a transition from `preparing`).
@@ -7019,13 +8910,11 @@ async fn live_job_events_drop_result_assets_on_running_ticks_but_not_terminal() 
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "worker-1",
-            "gpuId": "gpu-0",
-            "gpuName": "GPU 0",
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "worker-1",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     let (_, created) = request(
@@ -7046,7 +8935,7 @@ async fn live_job_events_drop_result_assets_on_running_ticks_but_not_terminal() 
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-1" }),
+        portable_test_worker_claim("worker-1", TestPortableRoute::MlxMacos),
     )
     .await;
 
@@ -7142,13 +9031,11 @@ async fn cleared_terminal_noop_retry_is_owner_checked_and_emits_no_events() {
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "worker-1",
-            "gpuId": "gpu-0",
-            "gpuName": "GPU 0",
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "worker-1",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     let (_, created) = request(
@@ -7169,7 +9056,7 @@ async fn cleared_terminal_noop_retry_is_owner_checked_and_emits_no_events() {
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-1" }),
+        portable_test_worker_claim("worker-1", TestPortableRoute::MlxMacos),
     )
     .await;
     let terminal_payload = json!({
@@ -7283,13 +9170,11 @@ async fn canceling_queued_job_finishes_without_worker_acknowledgement() {
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "worker-1",
-            "gpuId": "gpu-0",
-            "gpuName": "GPU 0",
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "worker-1",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -7298,7 +9183,7 @@ async fn canceling_queued_job_finishes_without_worker_acknowledgement() {
         app,
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-1" }),
+        portable_test_worker_claim("worker-1", TestPortableRoute::MlxMacos),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -7452,13 +9337,11 @@ async fn cancel_pending_jobs_cancels_every_queued_item_but_not_active_ones() {
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "worker-1",
-            "gpuId": "gpu-0",
-            "gpuName": "GPU 0",
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "worker-1",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -7486,7 +9369,7 @@ async fn cancel_pending_jobs_cancels_every_queued_item_but_not_active_ones() {
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-1" }),
+        portable_test_worker_claim("worker-1", TestPortableRoute::MlxMacos),
     )
     .await;
     let active_id = claimed["job"]["id"]
@@ -7548,13 +9431,11 @@ async fn prioritize_jobs_moves_selected_pending_work_ahead_for_the_next_claim() 
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "worker-priority",
-            "gpuId": "gpu-0",
-            "gpuName": "GPU 0",
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "worker-priority",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -7603,7 +9484,7 @@ async fn prioritize_jobs_moves_selected_pending_work_ahead_for_the_next_claim() 
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-priority" }),
+        portable_test_worker_claim("worker-priority", TestPortableRoute::MlxMacos),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -7819,7 +9700,8 @@ async fn image_job_route_threads_upscale_contract_when_enabled() {
         "#,
     )
     .expect("builtin models writes");
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    use_shipped_default_image_package(&config_dir, "z_image_turbo");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
 
     let base_request = json!({
         "projectId": "project-1",
@@ -7837,10 +9719,23 @@ async fn image_job_route_threads_upscale_contract_when_enabled() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
     assert!(base_job["payload"].get("upscale").is_none());
-    assert_eq!(
-        base_job["payload"]["modelManifestEntry"]["resources"]["imageUpscalers"]["real-esrgan"]
-            ["x4"]["file"],
-        json!("RealESRGAN_x4plus.pth")
+    // By design the job carries the REGISTERED z_image_turbo row, and that compiled row declares no
+    // `resources` block: the config-dir copy's invented `imageUpscalers` cannot reach the payload.
+    // The shipped Real-ESRGAN weights are declared by the registered `real_esrgan` utility row,
+    // which the worker resolves from its install (`upscale_jobs::manifest_onnx_resource` falls back
+    // to that install when the generation entry carries no resource). The contract this route owns,
+    // threading `upscale` only when enabled and validating its factor, is asserted below.
+    assert!(
+        base_job["payload"]["modelManifestEntry"]
+            .get("resources")
+            .is_none(),
+        "{base_job}"
+    );
+    assert!(
+        sceneworks_core::builtin_manifests::builtin_model_entry("real_esrgan")
+            .and_then(|entry| entry.get("resources"))
+            .and_then(|resources| resources.pointer("/imageUpscalers/real-esrgan/x4/file"))
+            .is_some_and(|file| file == "RealESRGAN_x4plus.pth")
     );
 
     let mut disabled_request = base_request.clone();
@@ -7905,7 +9800,7 @@ async fn flux3_owned_reference_jobs_preserve_order_duplicates_and_optional_size_
         br#"{"schemaVersion":1,"models":[]}"#,
     )
     .unwrap();
-    let app = create_app(test_settings(&temp_dir)).unwrap();
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).unwrap();
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"FLUX3 references").await;
     let project_id = project["id"].as_str().unwrap();
@@ -8227,7 +10122,14 @@ async fn ideogram_plain_text_job_degrades_to_original_prompt_when_expansion_fail
 
     let refine_id = wait_for_prompt_refine_job(&app).await;
     const WORKER_ID: &str = "test-prompt-refine-worker";
-    claim_job_as_worker(&app, &refine_id, WORKER_ID, &["gpu", "prompt_refine"]).await;
+    claim_job_as_worker_on_route(
+        &app,
+        &refine_id,
+        WORKER_ID,
+        &["gpu", "prompt_refine"],
+        TestPortableRoute::MlxMacos,
+    )
+    .await;
     let (status, _) = request(
         app.clone(),
         "POST",
@@ -8959,6 +10861,7 @@ async fn a_qwen_rewrite_result_offers_an_editable_prompt_beside_the_untouched_or
 async fn direct_prompting_needs_neither_rewriter_installed() {
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let _hub_guard = pin_hf_hub_cache(&temp_dir.path().join("fixture-hub"));
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
     std::fs::write(
@@ -9025,7 +10928,7 @@ async fn direct_prompting_needs_neither_rewriter_installed() {
     )
     .expect("user models writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Direct Prompting Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -9466,7 +11369,10 @@ async fn ref2va_reference_caps_refuse_fifteen_files_and_admit_twelve() {
               "type": "video",
               "adapter": "stub",
               "capabilities": ["text_to_video", "reference_to_video"],
-              "downloads": [],
+              "downloads": [{
+                "provider": "huggingface", "repo": "fixture/minimax-h3-ref",
+                "files": ["transformer_ref/model.safetensors"], "default": true
+              }],
               "paths": {},
               "defaults": {},
               "limits": {
@@ -9501,7 +11407,7 @@ async fn ref2va_reference_caps_refuse_fifteen_files_and_admit_twelve() {
     )
     .expect("user models writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     crate::tests::support::create_project(app.clone(), &"Ref2VA").await;
 
     let submit = |model: &str, images: usize, clips: usize, audio: usize| {
@@ -9997,25 +11903,23 @@ async fn scail2_animate_character_reaches_the_queue_and_validates_media() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
-fn write_scail2_reference_test_manifest(config_dir: &std::path::Path, multi_reference: bool) {
-    std::fs::create_dir_all(config_dir).expect("manifest dir creates");
-    std::fs::write(
-        config_dir.join("builtin.models.jsonc"),
-        serde_json::to_string_pretty(&json!({
-            "schemaVersion": 1,
-            "models": [{
-                "id": "scail2_14b",
-                "name": "SCAIL-2 14B",
-                "family": "scail2",
-                "type": "video",
-                "capabilities": ["image_to_video"],
-                "ui": { "scail2MultiReference": multi_reference }
-            }]
-        }))
-        .expect("multi-reference manifest serializes"),
-    )
-    .expect("multi-reference manifest writes");
-    write_empty_sibling_manifests(config_dir);
+/// The registered SCAIL-2 row as the server resolves it, with `ui.scail2MultiReference` set the way
+/// the release that ships the paired inference descriptor will set it. The compiled registry owns a
+/// registered builtin's row (APPREG-1), so a config-dir copy can no longer flip the flag for the
+/// running server; the enabled half of the gate is exercised at the validator seam every
+/// create/retry/duplicate boundary calls (`validate_video_reference_asset_ids_payload`).
+fn scail2_entry_with_paired_descriptor() -> Value {
+    let mut model = Value::Object(
+        sceneworks_core::builtin_manifests::builtin_model_entry("scail2_14b")
+            .expect("shipped SCAIL-2 row")
+            .clone(),
+    );
+    assert_ne!(
+        model["ui"]["scail2MultiReference"], true,
+        "the shipped row has not enabled the paired descriptor yet"
+    );
+    model["ui"]["scail2MultiReference"] = json!(true);
+    model
 }
 
 /// The paired SCAIL-2 provider has six source-position slots: the first character plus five
@@ -10027,7 +11931,8 @@ fn write_scail2_reference_test_manifest(config_dir: &std::path::Path, multi_refe
 #[tokio::test]
 async fn scail2_animate_character_preserves_ordered_multi_references_and_rejects_seven() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (app, state) = create_app_with_state(test_settings(&temp_dir)).expect("app creates");
+    install_pinned_jobs_fixture_metadata(&state);
     crate::tests::support::create_project(app.clone(), &"SCAIL-2 multi-reference").await;
 
     let base = || {
@@ -10142,14 +12047,9 @@ async fn scail2_animate_character_preserves_ordered_multi_references_and_rejects
         "seven references must be rejected explicitly, got: {error}"
     );
 
-    // The exact same endpoint becomes source-ready when the resolved, server-owned manifest
-    // carries the paired-descriptor gate. Use an isolated miniature catalog rather than changing
-    // the real builtin manifest before inference-main and terminal evidence exist.
-    let enabled_temp_dir = tempfile::tempdir().expect("enabled temp dir creates");
-    let config_dir = enabled_temp_dir.path().join("config/manifests");
-    write_scail2_reference_test_manifest(&config_dir, true);
-    let enabled_app = create_app(test_settings(&enabled_temp_dir)).expect("enabled app creates");
-    crate::tests::support::create_project(enabled_app.clone(), &"SCAIL-2 paired descriptor").await;
+    // The exact same gate becomes source-ready when the resolved, server-owned entry carries the
+    // paired-descriptor flag (see `scail2_entry_with_paired_descriptor`).
+    let enabled_entry = scail2_entry_with_paired_descriptor();
     for count in [2usize, 6] {
         let references: Vec<String> = (0..count)
             .map(|index| format!("character-{index}"))
@@ -10158,14 +12058,17 @@ async fn scail2_animate_character_preserves_ordered_multi_references_and_rejects
         body.as_object_mut()
             .unwrap()
             .insert("referenceAssetIds".to_owned(), json!(references.clone()));
-        let (status, job) = request(enabled_app.clone(), "POST", "/api/v1/video/jobs", body).await;
-        assert_eq!(
-            status,
-            StatusCode::CREATED,
-            "{count} references must be accepted"
+        let result = crate::validators::validate_video_reference_asset_ids_payload(
+            body.as_object().unwrap(),
+            &enabled_entry,
+        );
+        assert!(
+            result.is_ok(),
+            "{count} references must be accepted: {:?}",
+            result.err()
         );
         assert_eq!(
-            job["payload"]["referenceAssetIds"],
+            body["referenceAssetIds"],
             json!(references),
             "{count} references must stay ordered for the paired worker contract"
         );
@@ -10179,7 +12082,8 @@ async fn scail2_animate_character_preserves_ordered_multi_references_and_rejects
 #[tokio::test]
 async fn retry_and_duplicate_strictly_validate_scail2_multi_reference_replay() {
     let current_temp_dir = tempfile::tempdir().expect("current temp dir creates");
-    let current_app = create_app(test_settings(&current_temp_dir)).expect("current app creates");
+    let (current_app, _) = jobs_fixture_app_with_pinned_metadata(test_settings(&current_temp_dir))
+        .expect("current app creates");
     crate::tests::support::create_project(
         current_app.clone(),
         &"SCAIL-2 current descriptor replay",
@@ -10328,30 +12232,10 @@ async fn retry_and_duplicate_strictly_validate_scail2_multi_reference_replay() {
         }
     }
 
-    let enabled_temp_dir = tempfile::tempdir().expect("enabled temp dir creates");
-    write_scail2_reference_test_manifest(&enabled_temp_dir.path().join("config/manifests"), true);
-    let enabled_app = create_app(test_settings(&enabled_temp_dir)).expect("enabled app creates");
-    crate::tests::support::create_project(
-        enabled_app.clone(),
-        &"SCAIL-2 enabled descriptor replay",
-    )
-    .await;
-    let (status, enabled_original) = request(
-        enabled_app.clone(),
-        "POST",
-        "/api/v1/video/jobs",
-        json!({
-            "projectId": "project-1",
-            "model": "scail2_14b",
-            "mode": "animate_character",
-            "prompt": "the character dances",
-            "sourceClipAssetId": "clip-driving",
-            "referenceAssetIds": ["character-primary"]
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "{enabled_original}");
-    let enabled_job_id = enabled_original["id"].as_str().expect("enabled job id");
+    // An enabled descriptor keeps every accepted id in caller order: the replay boundary re-runs
+    // the same validator against the rebuilt entry, which accepts the exact six-reference order
+    // once the shipped row carries the paired-descriptor flag.
+    let enabled_entry = scail2_entry_with_paired_descriptor();
     let ordered = json!([
         "character-4",
         "character-1",
@@ -10360,17 +12244,22 @@ async fn retry_and_duplicate_strictly_validate_scail2_multi_reference_replay() {
         "character-3",
         "character-2"
     ]);
+    let merged = json!({
+        "projectId": "project-1",
+        "model": "scail2_14b",
+        "mode": "animate_character",
+        "prompt": "the character dances",
+        "sourceClipAssetId": "clip-driving",
+        "referenceAssetIds": ordered.clone()
+    });
     for operation in ["retry", "duplicate"] {
-        let (status, replayed) = request(
-            enabled_app.clone(),
-            "POST",
-            &format!("/api/v1/jobs/{enabled_job_id}/{operation}"),
-            json!({ "payloadChanges": { "referenceAssetIds": ordered.clone() } }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::CREATED, "{operation}: {replayed}");
+        let result = crate::validators::validate_video_reference_asset_ids_payload(
+            merged.as_object().unwrap(),
+            &enabled_entry,
+        );
+        assert!(result.is_ok(), "{operation}: {:?}", result.err());
         assert_eq!(
-            replayed["payload"]["referenceAssetIds"], ordered,
+            merged["referenceAssetIds"], ordered,
             "{operation} must preserve the exact six-reference order"
         );
     }
@@ -10712,6 +12601,9 @@ async fn generation_job_routes_reject_incompatible_loras() {
 /// own — its defaults, limits and repo are written here — so nothing this test pins has changed.
 #[tokio::test]
 async fn video_jobs_expand_recipe_presets_server_side() {
+    // The registered row names real pinned repositories; resolve them against a tempdir HF
+    // cache, never a developer's real cache (sc-13835).
+    let _hf = isolate_hf_cache();
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
@@ -10801,10 +12693,54 @@ async fn video_jobs_expand_recipe_presets_server_side() {
     std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
     write_test_safetensors(&lora_dir.join("motion.safetensors"));
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Video Preset Project").await;
     let project_id = project["id"].as_str().expect("project id");
+
+    // The preset's LoRA is a local source. A native video worker must advertise the exact
+    // registered file closure before the API can admit the merged preset request.
+    let adapter = lora_dir.join("motion.safetensors");
+    let files = vec![
+        sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile {
+            relative_path: "motion.safetensors".into(),
+            size_bytes: std::fs::metadata(&adapter).expect("LoRA metadata").len(),
+            sha256: format!(
+                "sha256:{}",
+                sceneworks_core::hashing::sha256_file(&adapter).expect("LoRA hash")
+            ),
+        },
+    ];
+    let ledger =
+        sceneworks_core::model_artifacts::portable_binding::portable_file_ledger_sha256(&files)
+            .expect("LoRA ledger");
+    let source_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+        "lora",
+        "motion-lora",
+        None,
+        &ledger,
+    )
+    .expect("LoRA source id");
+    let claim = sceneworks_core::model_artifacts::portable_binding::PortableSourceClaim::new(
+        source_id,
+        sceneworks_core::model_artifacts::portable_binding::PortableSourceProvenance::OperatorOverride,
+        files,
+    )
+    .expect("LoRA source claim");
+    let mut registration = portable_test_worker_registration(
+        "video-preset-source-worker",
+        &["gpu", "mlx", "video_generate"],
+        TestPortableRoute::MlxMacos,
+    );
+    registration["portableSourceClaims"] = serde_json::to_value(vec![claim]).unwrap();
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        registration,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
 
     let (status, video_job) = request(
         app.clone(),
@@ -10818,7 +12754,9 @@ async fn video_jobs_expand_recipe_presets_server_side() {
             // Client render settings that DIFFER from the preset's declared
             // defaults — the studio seeds the form from the preset but the user
             // is free to override, so these submitted values must win.
-            "duration": 10,
+            // wan_2_2's compiled row caps clips at 8 s, so the client override that must win over
+            // the preset's 8 s default is 7 s (any in-cap value different from the preset).
+            "duration": 7,
             "fps": 24,
             "width": 640,
             "height": 640,
@@ -10828,7 +12766,7 @@ async fn video_jobs_expand_recipe_presets_server_side() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(status, StatusCode::CREATED, "{video_job}");
     // Prompt prefix/suffix are folded in server-side around the raw client
     // prompt — the regression that motivated this path.
     assert_eq!(
@@ -10837,7 +12775,7 @@ async fn video_jobs_expand_recipe_presets_server_side() {
     );
     // Render settings are client-owned and overrideable: the submitted values
     // win over the preset's declared defaults (8 / 30 / 1280x720 / best / jitter).
-    assert_eq!(video_job["payload"]["duration"], 10);
+    assert_eq!(video_job["payload"]["duration"], 7);
     assert_eq!(video_job["payload"]["fps"], 24);
     assert_eq!(video_job["payload"]["width"], 640);
     assert_eq!(video_job["payload"]["height"], 640);
@@ -10982,7 +12920,7 @@ async fn preset_overridden_video_model_carries_its_own_manifest_entry() {
     )
     .expect("user recipe presets writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Preset Override Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -11001,7 +12939,7 @@ async fn preset_overridden_video_model_carries_its_own_manifest_entry() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(status, StatusCode::CREATED, "{video_job}");
     // The preset's model won over the omitted-model default...
     assert_eq!(video_job["payload"]["model"], "mochi_1");
     // ...and the entry travelling with it must describe THAT model, not the default's.
@@ -11097,7 +13035,7 @@ async fn mac_only_video_is_rejected_before_enqueue_on_direct_preset_and_replay_r
     .expect("user presets writes");
 
     let (app, state) =
-        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+        pinned_jobs_fixture_app_with_state(test_settings(&temp_dir)).expect("app and state create");
     *state.test_hooks.video_platform_override.lock() = Some("windows");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Platform Withdrawal Project").await;
@@ -11190,6 +13128,9 @@ async fn mac_only_video_is_rejected_before_enqueue_on_direct_preset_and_replay_r
 
 #[tokio::test]
 async fn preset_overridden_image_model_carries_its_own_manifest_entry() {
+    // The registered row names real pinned repositories; resolve them against a tempdir HF
+    // cache, never a developer's real cache (sc-13835).
+    let _hf = isolate_hf_cache();
     // sc-12300: create_image_job has the identical ordering shape as create_video_job —
     // apply_recipe_preset_to_image_payload may overwrite job_payload["model"] (gated on the
     // omitted-model default_image_model()), and the entry was likewise resolved from the
@@ -11223,14 +13164,14 @@ async fn preset_overridden_image_model_carries_its_own_manifest_entry() {
               "ui": { "label": "Default Img" }
             },
             {
-              "id": "preset-img",
+              "id": "z_image",
               "name": "Preset Img",
-              "family": "flux",
+              "family": "z-image",
               "type": "image",
-              "adapter": "flux",
+              "adapter": "z_image_diffusers",
               "capabilities": ["text_to_image"],
               "downloads": [
-                { "provider": "huggingface", "repo": "owner/preset-img", "files": ["*.safetensors"], "default": true }
+                { "provider": "huggingface", "repo": "owner/z_image", "files": ["*.safetensors"], "default": true }
               ],
               "paths": {},
               "defaults": {},
@@ -11258,7 +13199,7 @@ async fn preset_overridden_image_model_carries_its_own_manifest_entry() {
               "id": "img_override",
               "name": "Img Override",
               "workflow": "text_to_image",
-              "model": "preset-img",
+              "model": "z_image",
               "defaults": {},
               "prompt": { "prefix": "cinematic", "suffix": "smooth" }
             }
@@ -11273,7 +13214,7 @@ async fn preset_overridden_image_model_carries_its_own_manifest_entry() {
     )
     .expect("user recipe presets writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Img Override Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -11292,24 +13233,43 @@ async fn preset_overridden_image_model_carries_its_own_manifest_entry() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(image_job["payload"]["model"], "preset-img");
+    assert_eq!(image_job["payload"]["model"], "z_image");
     let entry = &image_job["payload"]["modelManifestEntry"];
     assert_eq!(
-        entry["id"], "preset-img",
+        entry["id"], "z_image",
         "manifest entry should be resolved from the post-override model"
     );
-    assert_eq!(
-        entry["downloads"][0]["repo"], "owner/preset-img",
-        "wrong repo => the worker fetches the wrong model's weights (loud failure)"
+    // z_image is registered, so its entry is the compiled registry row (the config-dir copy's
+    // `owner/z_image` repo is not authority); it must still be z_image's OWN row, not the default's.
+    let shipped = sceneworks_core::builtin_manifests::builtin_model_entry("z_image")
+        .expect("z_image is registered");
+    let default_shipped =
+        sceneworks_core::builtin_manifests::builtin_model_entry(&default_image_model)
+            .expect("the default image model is registered");
+    assert_ne!(
+        shipped["downloads"][0]["repo"],
+        default_shipped["downloads"][0]["repo"]
     );
     assert_eq!(
-        entry["limits"]["requiresDimensionsMultipleOf"], 16,
+        entry["downloads"][0]["repo"], shipped["downloads"][0]["repo"],
+        "wrong repo => the worker fetches the wrong model's weights (loud failure)"
+    );
+    // The compiled z_image row declares no `requiresDimensionsMultipleOf` (the fixture's 16 was
+    // config-dir only), so compare the whole geometry envelope against z_image's own row.
+    assert_eq!(
+        entry["limits"], shipped["limits"],
         "wrong dimension floor => silently renders off-bucket geometry"
     );
 }
 
 #[tokio::test]
 async fn preset_image_job_builds_each_catalog_once() {
+    use sceneworks_core::jobs_store::RegisterWorker;
+    use sceneworks_core::model_artifacts::portable_binding::{
+        portable_file_ledger_sha256, PortableArtifactFile, PortableSourceClaim,
+        PortableSourceProvenance,
+    };
+
     // sc-8819 (F-017): a preset-backed POST /image/jobs fans out into recipe_preset_catalog,
     // merge_preset_loras_into_payload, and validate_job_lora_compatibility. Before the fix
     // each re-assembled model_catalog/lora_catalog from scratch, re-running the whole
@@ -11327,11 +13287,11 @@ async fn preset_image_job_builds_each_catalog_once() {
           "schemaVersion": 1,
           "models": [
             {
-              "id": "img-model",
+              "id": "z_image_turbo",
               "name": "Img Model",
               "family": "z-image",
               "type": "image",
-              "adapter": "z_image",
+              "adapter": "z_image_diffusers",
               "capabilities": ["text_to_image"],
               "downloads": [
                 { "provider": "huggingface", "repo": "owner/img", "files": ["*.safetensors"], "default": true }
@@ -11386,7 +13346,7 @@ async fn preset_image_job_builds_each_catalog_once() {
               "id": "dream_style",
               "name": "Dream Style",
               "workflow": "text_to_image",
-              "model": "img-model",
+              "model": "z_image_turbo",
               "defaults": { "count": 1, "resolution": "1024x1024", "negativePrompt": "blur" },
               "prompt": { "prefix": "cinematic", "suffix": "high detail" },
               "loras": [{ "id": "style-lora", "weight": 0.5 }]
@@ -11405,7 +13365,42 @@ async fn preset_image_job_builds_each_catalog_once() {
     std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
     write_test_safetensors(&lora_dir.join("style.safetensors"));
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (app, state) =
+        pinned_jobs_fixture_app_with_state(test_settings(&temp_dir)).expect("app creates");
+    let lora_path = lora_dir.join("style.safetensors");
+    let files = vec![PortableArtifactFile {
+        relative_path: "style.safetensors".into(),
+        size_bytes: std::fs::metadata(&lora_path).expect("LoRA metadata").len(),
+        sha256: format!(
+            "sha256:{}",
+            sceneworks_core::hashing::sha256_file(&lora_path).expect("LoRA hash")
+        ),
+    }];
+    let source_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+        "lora",
+        "style-lora",
+        None,
+        &portable_file_ledger_sha256(&files).expect("LoRA ledger"),
+    )
+    .expect("LoRA source ID");
+    let claim =
+        PortableSourceClaim::new(source_id, PortableSourceProvenance::OperatorOverride, files)
+            .expect("LoRA claim");
+    state
+        .jobs_store
+        .register_worker_with_portable_sources(
+            RegisterWorker {
+                worker_id: "preset-lora-worker".into(),
+                gpu_id: "mlx".into(),
+                gpu_name: None,
+                capabilities: vec![WorkerCapability::Gpu, WorkerCapability::ImageGenerate],
+                loaded_models: vec![],
+                utilization: None,
+            },
+            Some("macos"),
+            Some(&[claim]),
+        )
+        .expect("worker registers exact LoRA bytes");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Image Preset Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -11421,7 +13416,7 @@ async fn preset_image_job_builds_each_catalog_once() {
             "projectId": project_id,
             "mode": "text_to_image",
             "prompt": "a fox",
-            "model": "img-model",
+            "model": "z_image_turbo",
             "count": 1,
             "width": 1024,
             "height": 1024,
@@ -11475,11 +13470,11 @@ async fn preset_image_job_skips_server_lora_merge_when_client_resolved() {
           "schemaVersion": 1,
           "models": [
             {
-              "id": "img-model",
+              "id": "z_image_turbo",
               "name": "Img Model",
               "family": "z-image",
               "type": "image",
-              "adapter": "z_image",
+              "adapter": "z_image_diffusers",
               "capabilities": ["text_to_image"],
               "downloads": [
                 { "provider": "huggingface", "repo": "owner/img", "files": ["*.safetensors"], "default": true }
@@ -11534,7 +13529,7 @@ async fn preset_image_job_skips_server_lora_merge_when_client_resolved() {
               "id": "dream_style",
               "name": "Dream Style",
               "workflow": "text_to_image",
-              "model": "img-model",
+              "model": "z_image_turbo",
               "defaults": { "count": 1, "resolution": "1024x1024" },
               "prompt": { "prefix": "cinematic" },
               "loras": [{ "id": "style-lora", "weight": 0.5 }]
@@ -11553,7 +13548,7 @@ async fn preset_image_job_skips_server_lora_merge_when_client_resolved() {
     std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
     write_test_safetensors(&lora_dir.join("style.safetensors"));
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Client Resolved Preset Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -11568,7 +13563,7 @@ async fn preset_image_job_skips_server_lora_merge_when_client_resolved() {
             "projectId": project_id,
             "mode": "text_to_image",
             "prompt": "a fox",
-            "model": "img-model",
+            "model": "z_image_turbo",
             "count": 1,
             "width": 1024,
             "height": 1024,
@@ -11612,11 +13607,11 @@ async fn preset_image_job_skips_server_prompt_fold_when_client_resolved() {
           "schemaVersion": 1,
           "models": [
             {
-              "id": "img-model",
+              "id": "z_image_turbo",
               "name": "Img Model",
               "family": "z-image",
               "type": "image",
-              "adapter": "z_image",
+              "adapter": "z_image_diffusers",
               "capabilities": ["text_to_image"],
               "downloads": [
                 { "provider": "huggingface", "repo": "owner/img", "files": ["*.safetensors"], "default": true }
@@ -11647,7 +13642,7 @@ async fn preset_image_job_skips_server_prompt_fold_when_client_resolved() {
               "id": "dream_style",
               "name": "Dream Style",
               "workflow": "text_to_image",
-              "model": "img-model",
+              "model": "z_image_turbo",
               "defaults": { "count": 1, "resolution": "1024x1024" },
               "prompt": { "prefix": "cinematic" }
             }
@@ -11662,7 +13657,7 @@ async fn preset_image_job_skips_server_prompt_fold_when_client_resolved() {
     )
     .expect("user recipe presets writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Client Prompt Preset Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -11676,7 +13671,7 @@ async fn preset_image_job_skips_server_prompt_fold_when_client_resolved() {
             "projectId": project_id,
             "mode": "text_to_image",
             "prompt": "a fox",
-            "model": "img-model",
+            "model": "z_image_turbo",
             "count": 1,
             "width": 1024,
             "height": 1024,
@@ -11701,7 +13696,7 @@ async fn preset_image_job_skips_server_prompt_fold_when_client_resolved() {
             "projectId": project_id,
             "mode": "text_to_image",
             "prompt": "cinematic, a fox",
-            "model": "img-model",
+            "model": "z_image_turbo",
             "count": 1,
             "width": 1024,
             "height": 1024,
@@ -11864,18 +13859,19 @@ fn interleave_job_validation_bounds_prompt_images_and_assets() {
 #[tokio::test]
 async fn worker_heartbeat_interrupts_previous_active_job_through_http() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    // Admission captures the job's pinned source metadata; the offline fixture answers it, so the
+    // test neither calls huggingface.co nor reads another test's metadata endpoint from the env.
+    let (app, _) =
+        jobs_fixture_app_with_pinned_metadata(test_settings(&temp_dir)).expect("app creates");
     request(
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "worker-1",
-            "gpuId": "gpu-0",
-            "gpuName": null,
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "worker-1",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     let (_, created) = request(
@@ -11889,7 +13885,7 @@ async fn worker_heartbeat_interrupts_previous_active_job_through_http() {
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-1" }),
+        portable_test_worker_claim("worker-1", TestPortableRoute::MlxMacos),
     )
     .await;
 
@@ -11936,13 +13932,11 @@ async fn worker_heartbeat_broadcasts_job_updated_for_the_job_it_interrupts() {
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "worker-1",
-            "gpuId": "gpu-0",
-            "gpuName": null,
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "worker-1",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     let (_, created) = request(
@@ -11957,7 +13951,7 @@ async fn worker_heartbeat_broadcasts_job_updated_for_the_job_it_interrupts() {
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-1" }),
+        portable_test_worker_claim("worker-1", TestPortableRoute::MlxMacos),
     )
     .await;
     // Establish the job's first heartbeat, so the idle heartbeat below is treated as a
@@ -12004,19 +13998,20 @@ async fn worker_heartbeat_without_an_interrupt_broadcasts_no_job_event() {
     // every few seconds must NOT publish job.updated/queue.updated. Getting this wrong would
     // put the whole queue on the SSE bus at heartbeat cadence.
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    let (app, state) = create_app_with_state(test_settings(&temp_dir)).expect("app creates");
+    // Admission captures the job's pinned source metadata; the offline fixture answers it, so the
+    // test neither calls huggingface.co nor reads another test's metadata endpoint from the env.
+    let (app, state) =
+        jobs_fixture_app_with_pinned_metadata(test_settings(&temp_dir)).expect("app creates");
 
     request(
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "worker-1",
-            "gpuId": "gpu-0",
-            "gpuName": null,
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "worker-1",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     let (_, created) = request(
@@ -12031,7 +14026,7 @@ async fn worker_heartbeat_without_an_interrupt_broadcasts_no_job_event() {
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-1" }),
+        portable_test_worker_claim("worker-1", TestPortableRoute::MlxMacos),
     )
     .await;
 
@@ -12069,13 +14064,11 @@ async fn stale_sweep_broadcasts_job_updated_for_interrupted_jobs() {
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "worker-1",
-            "gpuId": "gpu-0",
-            "gpuName": null,
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "worker-1",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     let (_, created) = request(
@@ -12090,7 +14083,7 @@ async fn stale_sweep_broadcasts_job_updated_for_interrupted_jobs() {
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-1" }),
+        portable_test_worker_claim("worker-1", TestPortableRoute::MlxMacos),
     )
     .await;
 
@@ -12133,13 +14126,11 @@ async fn claim_sweeps_stale_jobs_once_and_still_refreshes_the_queue() {
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "worker-1",
-            "gpuId": "gpu-0",
-            "gpuName": null,
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "worker-1",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     let (_, created) = request(
@@ -12154,7 +14145,7 @@ async fn claim_sweeps_stale_jobs_once_and_still_refreshes_the_queue() {
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-1" }),
+        portable_test_worker_claim("worker-1", TestPortableRoute::MlxMacos),
     )
     .await;
 
@@ -12165,13 +14156,11 @@ async fn claim_sweeps_stale_jobs_once_and_still_refreshes_the_queue() {
         app.clone(),
         "POST",
         "/api/v1/workers/register",
-        json!({
-            "workerId": "worker-2",
-            "gpuId": "gpu-1",
-            "gpuName": null,
-            "capabilities": ["image_detail"],
-            "loadedModels": []
-        }),
+        portable_test_worker_registration(
+            "worker-2",
+            &["gpu", "mlx", "image_detail"],
+            TestPortableRoute::MlxMacos,
+        ),
     )
     .await;
     request(
@@ -12191,7 +14180,7 @@ async fn claim_sweeps_stale_jobs_once_and_still_refreshes_the_queue() {
         app.clone(),
         "POST",
         "/api/v1/jobs/claim",
-        json!({ "workerId": "worker-2" }),
+        portable_test_worker_claim("worker-2", TestPortableRoute::MlxMacos),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -12311,7 +14300,7 @@ async fn video_duration_past_the_post_preset_models_hard_cap_is_rejected() {
     )
     .expect("user recipe presets writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Duration Cap Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -12475,7 +14464,7 @@ async fn video_fps_outside_the_post_preset_models_menu_is_rejected() {
     )
     .expect("user recipe presets writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Fps Menu Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -12630,7 +14619,7 @@ async fn image_steps_under_the_models_hard_floor_is_rejected() {
           "schemaVersion": 1,
           "models": [
             {
-              "id": "unfloored_image",
+              "id": "z_image_turbo",
               "name": "Unfloored",
               "family": "z-image",
               "type": "image",
@@ -12670,7 +14659,7 @@ async fn image_steps_under_the_models_hard_floor_is_rejected() {
     )
     .expect("user models writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Image Step Floor Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -12731,7 +14720,7 @@ async fn image_steps_under_the_models_hard_floor_is_rejected() {
         "/api/v1/image/jobs",
         json!({
             "projectId": project_id,
-            "model": "unfloored_image",
+            "model": "z_image_turbo",
             "prompt": "a lighthouse",
             "advanced": { "steps": 1 }
         }),
@@ -12753,6 +14742,8 @@ async fn image_steps_under_the_models_hard_floor_is_rejected() {
 /// and a request with no `hiresFix` block creates a payload without the key.
 #[tokio::test]
 async fn image_hires_fix_is_forwarded_for_capable_models_and_refused_for_others() {
+    // The refusal half needs a registered image model that is neither SDXL nor img2img-capable; the
+    // compiled z_image_turbo row now advertises img2img, so chroma1_base (which does not) is used.
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
@@ -12764,11 +14755,11 @@ async fn image_hires_fix_is_forwarded_for_capable_models_and_refused_for_others(
           "schemaVersion": 1,
           "models": [
             {
-              "id": "img2img_image",
+              "id": "krea_2_raw",
               "name": "Img2Img",
               "family": "krea_2",
               "type": "image",
-              "adapter": "z_image_diffusers",
+              "adapter": "mlx_krea",
               "capabilities": ["text_to_image"],
               "downloads": [
                 { "provider": "huggingface", "repo": "owner/img2img", "files": ["*.safetensors"], "default": true }
@@ -12779,7 +14770,7 @@ async fn image_hires_fix_is_forwarded_for_capable_models_and_refused_for_others(
               "ui": { "label": "Img2Img", "img2img": true }
             },
             {
-              "id": "plain_image",
+              "id": "chroma1_base",
               "name": "Plain",
               "family": "z-image",
               "type": "image",
@@ -12804,7 +14795,7 @@ async fn image_hires_fix_is_forwarded_for_capable_models_and_refused_for_others(
     )
     .expect("user models writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Hires Fix Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -12817,7 +14808,7 @@ async fn image_hires_fix_is_forwarded_for_capable_models_and_refused_for_others(
         "/api/v1/image/jobs",
         json!({
             "projectId": project_id,
-            "model": "img2img_image",
+            "model": "krea_2_raw",
             "prompt": "a lighthouse",
             "hiresFix": {
                 "enabled": true,
@@ -12850,7 +14841,7 @@ async fn image_hires_fix_is_forwarded_for_capable_models_and_refused_for_others(
         "/api/v1/image/jobs",
         json!({
             "projectId": project_id,
-            "model": "plain_image",
+            "model": "chroma1_base",
             "prompt": "a lighthouse",
             "hiresFix": { "enabled": true }
         }),
@@ -12862,7 +14853,7 @@ async fn image_hires_fix_is_forwarded_for_capable_models_and_refused_for_others(
         "a non-img2img model must refuse Hires.fix at enqueue: {body}"
     );
     let detail = body["detail"].as_str().unwrap_or_default();
-    assert!(detail.contains("plain_image"), "names the model: {detail}");
+    assert!(detail.contains("chroma1_base"), "names the model: {detail}");
     assert!(
         detail.contains("img2img-capable"),
         "names the missing capability: {detail}"
@@ -12876,7 +14867,7 @@ async fn image_hires_fix_is_forwarded_for_capable_models_and_refused_for_others(
         "/api/v1/image/jobs",
         json!({
             "projectId": project_id,
-            "model": "plain_image",
+            "model": "chroma1_base",
             "prompt": "a lighthouse"
         }),
     )
@@ -12905,7 +14896,7 @@ async fn image_sampler_off_the_models_menu_is_rejected() {
           "schemaVersion": 1,
           "models": [
             {
-              "id": "menuless_image",
+              "id": "z_image_turbo",
               "name": "Menuless",
               "family": "z-image",
               "type": "image",
@@ -12948,7 +14939,7 @@ async fn image_sampler_off_the_models_menu_is_rejected() {
     )
     .expect("user models writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Image Sampler Menu Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -12992,7 +14983,9 @@ async fn image_sampler_off_the_models_menu_is_rejected() {
         );
     }
 
-    let (status, body) = post("menuless_image", json!({ "sampler": "dpmpp_3m" })).await;
+    // A registered builtin's menu comes from the compiled registry, and z_image_turbo now declares
+    // one; realvisxl_lightning is the shipped image model that declares no sampler menu.
+    let (status, body) = post("realvisxl_lightning", json!({ "sampler": "dpmpp_3m" })).await;
     assert_eq!(
         status,
         StatusCode::CREATED,
@@ -13023,7 +15016,7 @@ async fn iris_and_plain_app() -> (tempfile::TempDir, axum::Router, String) {
         .expect("iris_3b is shipped")
         .clone();
     let plain = json!({
-        "id": "plain_image",
+        "id": "z_image_turbo",
         "name": "Plain",
         "family": "z-image",
         "type": "image",
@@ -13047,7 +15040,7 @@ async fn iris_and_plain_app() -> (tempfile::TempDir, axum::Router, String) {
         r#"{ "schemaVersion": 1, "models": [] }"#,
     )
     .expect("user models writes");
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Iris Controls Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -13062,6 +15055,7 @@ async fn iris_and_plain_app() -> (tempfile::TempDir, axum::Router, String) {
 /// controls refuses them by name.
 #[tokio::test]
 async fn iris_sampling_controls_are_typed_at_image_enqueue() {
+    let _hf_cache = isolate_hf_cache();
     let (_temp_dir, app, project_id) = iris_and_plain_app().await;
     let project_id = project_id.as_str();
     let post = |model: &'static str, negative: &'static str, advanced: Value| {
@@ -13135,11 +15129,11 @@ async fn iris_sampling_controls_are_typed_at_image_enqueue() {
         json!({ "cfgInterval": [0.2, 0.8] }),
         json!({ "captionOverflow": "warn" }),
     ] {
-        let (status, body) = post("plain_image", "", advanced.clone()).await;
+        let (status, body) = post("z_image_turbo", "", advanced.clone()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{advanced}: {body}");
     }
     // The undeclared model keeps its historical behaviour for everything else.
-    let (status, body) = post("plain_image", "blurry", json!({ "guidanceScale": 1.0 })).await;
+    let (status, body) = post("z_image_turbo", "blurry", json!({ "guidanceScale": 1.0 })).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
 }
 
@@ -13151,6 +15145,7 @@ async fn iris_sampling_controls_are_typed_at_image_enqueue() {
 /// *Mutation that reds this:* drop the `prompt_batch_error` call in `create_image_job`.
 #[tokio::test]
 async fn a_native_prompt_batch_is_typed_at_image_enqueue() {
+    let _hf_cache = isolate_hf_cache();
     let (_temp_dir, app, project_id) = iris_and_plain_app().await;
     let post = |model: &'static str, prompt: &'static str, prompts: Value, count: u32| {
         let app = app.clone();
@@ -13229,6 +15224,9 @@ async fn a_native_prompt_batch_is_typed_at_image_enqueue() {
 /// twin, so a gate that simply rejected everything could not pass.
 #[tokio::test]
 async fn image_reference_count_and_free_size_are_bounded_by_the_models_declared_limits() {
+    // The registered row names real pinned repositories; resolve them against a tempdir HF
+    // cache, never a developer's real cache (sc-13835).
+    let _hf = isolate_hf_cache();
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
@@ -13240,11 +15238,11 @@ async fn image_reference_count_and_free_size_are_bounded_by_the_models_declared_
           "schemaVersion": 1,
           "models": [
             {
-              "id": "unbounded_image",
+              "id": "qwen_image_2_1_turbo",
               "name": "Unbounded",
-              "family": "z-image",
+              "family": "qwen-image-2-1",
               "type": "image",
-              "adapter": "z_image_diffusers",
+              "adapter": "qwen_image_2_1_turbo",
               "capabilities": ["text_to_image", "image_to_image"],
               "downloads": [
                 { "provider": "huggingface", "repo": "owner/unbounded", "files": ["*.safetensors"], "default": true }
@@ -13288,7 +15286,7 @@ async fn image_reference_count_and_free_size_are_bounded_by_the_models_declared_
     )
     .expect("user models writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Qwen 2.1 Controls Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -13393,23 +15391,35 @@ async fn image_reference_count_and_free_size_are_bounded_by_the_models_declared_
 
     // A model that declares NO cap is untouched: absent means no opinion, so every other image
     // model in the catalog is byte-for-byte unchanged by this gate.
-    let (status, body) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/image/jobs",
-        json!({
+    // qwen_image_2_1_turbo is registered and its compiled row declares a reference cap, so a
+    // config-dir copy cannot make it uncapped. flux2_klein_9b is the shipped multi-reference
+    // edit model that declares none. By design its native route (like every shipped native image
+    // route other than Qwen-Image 2.1) owns its own source contract of at most 4 references, so
+    // eleven are refused by that ROUTE, never by this declared-cap gate: the gate stays silent.
+    let post_uncapped = |count: usize| {
+        let app = app.clone();
+        let body = json!({
             "projectId": project_id,
-            "model": "unbounded_image",
+            "model": "flux2_klein_9b",
             "mode": "edit_image",
             "prompt": "swap the sky",
-            "referenceAssetIds": refs(11),
-        }),
-    )
-    .await;
+            "referenceAssetIds": refs(count),
+        });
+        async move { request(app, "POST", "/api/v1/image/jobs", body).await }
+    };
+    let (status, body) = post_uncapped(1).await;
     assert_eq!(
         status,
         StatusCode::CREATED,
         "a model with no declared reference cap is unchanged: {body}"
+    );
+    let (_, body) = post_uncapped(11).await;
+    assert!(
+        !body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("reference images, but this request supplies"),
+        "a model with no declared reference cap is unchanged by the declared-cap gate: {body}"
     );
 
     // FREE SIZE — the declared envelope admits a size the blanket 256 floor would have refused
@@ -13481,7 +15491,7 @@ async fn image_reference_count_and_free_size_are_bounded_by_the_models_declared_
         "/api/v1/image/jobs",
         json!({
             "projectId": project_id,
-            "model": "unbounded_image",
+            "model": "z_image_turbo", // registered; its compiled row declares no minDimension
             "prompt": "a lighthouse",
             "width": 64,
             "height": 64,
@@ -13718,12 +15728,12 @@ async fn qwen_image_2_1_edit_validates_the_whole_ordered_conditioning_list() {
           "schemaVersion": 1,
           "models": [
             {
-              "id": "unbounded_image",
+              "id": "qwen_image_2_1_turbo",
               "name": "Unbounded",
-              "family": "z-image",
+              "family": "qwen-image-2-1",
               "type": "image",
-              "adapter": "z_image_diffusers",
-              "capabilities": ["text_to_image", "image_to_image", "edit_image"],
+              "adapter": "qwen_image_2_1_turbo",
+              "capabilities": ["text_to_image", "image_to_image"],
               "downloads": [
                 { "provider": "huggingface", "repo": "owner/unbounded", "files": ["*.safetensors"], "default": true }
               ],
@@ -13758,7 +15768,7 @@ async fn qwen_image_2_1_edit_validates_the_whole_ordered_conditioning_list() {
     )
     .expect("user models writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Qwen 2.1 Ordered Conditioning").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -13957,26 +15967,35 @@ async fn qwen_image_2_1_edit_validates_the_whole_ordered_conditioning_list() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 
-    // ── Every one of these is armed by the SAME declaration as the cap, so a model that declares
-    // nothing pays none of it — not the refusals, and not the asset reads.
-    for body in [
-        json!({
-            "projectId": project_id, "model": "unbounded_image", "mode": "edit_image",
-            "prompt": "compose these"
-        }),
-        json!({
-            "projectId": project_id, "model": "unbounded_image", "mode": "edit_image",
-            "prompt": "compose these", "referenceAssetIds": ["not-an-asset"],
-            "advanced": { "strength": 0.5 }
-        }),
-    ] {
-        let (status, response) = post(body.clone()).await;
-        assert_eq!(
-            status,
-            StatusCode::CREATED,
-            "a model declaring no cap is byte-for-byte unchanged: {body} -> {response}"
-        );
-    }
+    // ── The declared cap applies only to this model. A second native route with no authored
+    // reference cap admits both one and eleven valid references through its own source contract.
+    // qwen_image_2_1_turbo is registered and its compiled row declares a reference cap, so a
+    // config-dir copy cannot make it uncapped. flux2_klein_9b is the shipped multi-reference
+    // edit model that declares none.
+    // By design flux2_klein_9b's native route admits at most 4 references through its own source
+    // contract, so the eleven-reference request is refused by that route, not by the declared cap.
+    let body = json!({
+        "projectId": project_id, "model": "flux2_klein_9b", "mode": "edit_image",
+        "prompt": "compose these", "referenceAssetIds": [assets[0]]
+    });
+    let (status, response) = post(body.clone()).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a model declaring no cap admits its own valid reference request: {body} -> {response}"
+    );
+    let body = json!({
+        "projectId": project_id, "model": "flux2_klein_9b", "mode": "edit_image",
+        "prompt": "compose these", "referenceAssetIds": assets[0..11]
+    });
+    let (_, response) = post(body.clone()).await;
+    assert!(
+        !response["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("reference images, but this request supplies"),
+        "the declared cap applies only to the declaring model: {body} -> {response}"
+    );
 
     // ── And plain text-to-image on the capped model is not this gate's business either.
     let (status, body) = post(json!({
@@ -14003,11 +16022,15 @@ async fn qwen_image_2_1_edit_validates_the_whole_ordered_conditioning_list() {
 /// from a single sigma grid point.
 #[tokio::test]
 async fn video_steps_under_the_post_preset_models_hard_floor_is_rejected() {
+    let _env = isolate_hf_cache();
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
-    let default_video_model = crate::defaults::default_video_model();
+    // The shipped default video model (ltx_2_3) is registered and its compiled row declares a fixed
+    // 8-step schedule, so a config-dir copy cannot make it step-agnostic. The "no floor / no menu"
+    // comparison model is wan_2_2: a registered text-to-video model that declares no step contract.
+    let default_video_model = "wan_2_2".to_owned();
     std::fs::write(
         config_dir.join("builtin.models.jsonc"),
         r#"
@@ -14080,7 +16103,7 @@ async fn video_steps_under_the_post_preset_models_hard_floor_is_rejected() {
     )
     .expect("user recipe presets writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Step Floor Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -14212,11 +16235,15 @@ async fn video_steps_under_the_post_preset_models_hard_floor_is_rejected() {
 /// platform-dependent. Nothing about the step-menu contract changed; only the id it is asserted on.
 #[tokio::test]
 async fn video_steps_off_the_post_preset_models_exact_menu_is_rejected() {
+    let _env = isolate_hf_cache();
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
-    let default_video_model = crate::defaults::default_video_model();
+    // The shipped default video model (ltx_2_3) is registered and its compiled row declares a fixed
+    // 8-step schedule, so a config-dir copy cannot make it step-agnostic. The "no floor / no menu"
+    // comparison model is wan_2_2: a registered text-to-video model that declares no step contract.
+    let default_video_model = "wan_2_2".to_owned();
     std::fs::write(
         config_dir.join("builtin.models.jsonc"),
         r#"
@@ -14289,7 +16316,7 @@ async fn video_steps_off_the_post_preset_models_exact_menu_is_rejected() {
     )
     .expect("user recipe presets writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Step Menu Project").await;
     let project_id = project["id"].as_str().expect("project id");
@@ -14739,11 +16766,11 @@ fn write_style_test_manifests(config_dir: &std::path::Path) {
           "schemaVersion": 1,
           "models": [
             {
-              "id": "img-model",
+              "id": "z_image_turbo",
               "name": "Img Model",
               "family": "z-image",
               "type": "image",
-              "adapter": "z_image",
+              "adapter": "z_image_diffusers",
               "capabilities": ["text_to_image"],
               "downloads": [
                 { "provider": "huggingface", "repo": "owner/img", "files": ["*.safetensors"], "default": true }
@@ -14755,11 +16782,26 @@ fn write_style_test_manifests(config_dir: &std::path::Path) {
               "ui": { "label": "Img" }
             },
             {
-              "id": "tag-model",
+              "id": "sdxl",
+              "name": "SDXL",
+              "family": "sdxl",
+              "type": "image",
+              "adapter": "sdxl_diffusers",
+              "capabilities": ["text_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/sdxl", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": {},
+              "limits": {},
+              "ui": { "label": "SDXL" }
+            },
+            {
+              "id": "anima_base",
               "name": "Tag Model",
               "family": "anima",
               "type": "image",
-              "adapter": "anima",
+              "adapter": "mlx_anima",
               "captionStyle": "tags",
               "capabilities": ["text_to_image"],
               "downloads": [
@@ -14817,7 +16859,7 @@ async fn styled_image_job_folds_style_server_side_from_style_id() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_style_test_manifests(&temp_dir.path().join("config"));
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Styled Job Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -14833,7 +16875,7 @@ async fn styled_image_job_folds_style_server_side_from_style_id() {
             "projectId": project_id,
             "mode": "text_to_image",
             "prompt": "a fox\nSetting: snowy field",
-            "model": "img-model",
+            "model": "z_image_turbo",
             "count": 1,
             "width": 1024,
             "height": 1024,
@@ -14861,7 +16903,7 @@ async fn styled_image_job_folds_style_server_side_from_style_id() {
             "projectId": project_id,
             "mode": "text_to_image",
             "prompt": "a fox",
-            "model": "img-model",
+            "model": "z_image_turbo",
             "count": 1,
             "width": 1024,
             "height": 1024,
@@ -14884,7 +16926,7 @@ async fn styled_image_job_folds_style_server_side_from_style_id() {
             "projectId": project_id,
             "mode": "text_to_image",
             "prompt": "a fox",
-            "model": "img-model",
+            "model": "z_image_turbo",
             "count": 1,
             "width": 1024,
             "height": 1024,
@@ -14904,7 +16946,7 @@ async fn styled_image_job_rejects_a_style_on_a_tag_convention_model() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_style_test_manifests(&temp_dir.path().join("config"));
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Tag Model Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -14913,7 +16955,7 @@ async fn styled_image_job_rejects_a_style_on_a_tag_convention_model() {
         "projectId": project_id,
         "mode": "text_to_image",
         "prompt": "1girl, solo, pink hair",
-        "model": "tag-model",
+        "model": "anima_base",
         "count": 1,
         "width": 1024,
         "height": 1024,
@@ -14923,7 +16965,7 @@ async fn styled_image_job_rejects_a_style_on_a_tag_convention_model() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{err:?}");
     let message = err["detail"].as_str().unwrap_or_default().to_owned();
     assert!(
-        message.contains("tag-model") && message.contains("tag-style"),
+        message.contains("anima_base") && message.contains("tag-style"),
         "the rejection must name the model and the reason: {message}"
     );
 
@@ -14943,7 +16985,7 @@ async fn styled_image_job_rejects_a_style_on_a_tag_convention_model() {
             "projectId": project["id"].as_str().expect("project id"),
             "mode": "text_to_image",
             "prompt": "1girl, solo, pink hair",
-            "model": "tag-model",
+            "model": "anima_base",
             "count": 1,
             "width": 1024,
             "height": 1024
@@ -14964,7 +17006,7 @@ async fn styled_image_job_skips_fold_when_prompt_resolved_client_side() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     write_style_test_manifests(&temp_dir.path().join("config"));
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = pinned_jobs_fixture_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"Client Styled Project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -14978,7 +17020,7 @@ async fn styled_image_job_skips_fold_when_prompt_resolved_client_side() {
             "projectId": project_id,
             "mode": "text_to_image",
             "prompt": already_composed,
-            "model": "img-model",
+            "model": "z_image_turbo",
             "count": 1,
             "width": 1024,
             "height": 1024,
@@ -14997,6 +17039,7 @@ async fn styled_image_job_skips_fold_when_prompt_resolved_client_side() {
 
 #[tokio::test]
 async fn appearance_catalog_and_job_route_share_model_aware_composition() {
+    let _hf_cache = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let (app, project_id) = shipped_manifest_app(&temp_dir).await;
     let (status, catalog) = request(app.clone(), "GET", "/api/v1/appearance", Value::Null).await;
@@ -15163,7 +17206,8 @@ async fn shipped_manifest_app_on_os(
         sceneworks_core::builtin_manifests::SeedMode::Overwrite,
     )
     .expect("builtin manifests seed");
-    let app = create_app(settings).expect("app creates");
+    let (app, state) = create_app_with_state(settings).expect("app creates");
+    install_pinned_jobs_fixture_metadata(&state);
     let (_, project) =
         crate::tests::support::create_project(app.clone(), &"MiniMax-H3 Reachability").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
@@ -15178,6 +17222,7 @@ async fn shipped_manifest_app_on_os(
 /// in sceneworks-core, since this route can no longer write one.)
 #[tokio::test]
 async fn video_route_stamps_and_replays_the_h3_reference_resize_mode() {
+    let _hf_cache = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let (app, project_id) = shipped_manifest_app(&temp_dir).await;
     let submit = |model: &str, advanced: Value| {
@@ -15283,6 +17328,7 @@ async fn video_route_stamps_and_replays_the_h3_reference_resize_mode() {
 /// appears in a list is what GH #2074 already passed.
 #[tokio::test]
 async fn minimax_h3_every_declared_mode_is_accepted_end_to_end() {
+    let _hf_cache = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let (app, project_id) = shipped_manifest_app(&temp_dir).await;
 
@@ -15436,6 +17482,7 @@ async fn minimax_h3_every_declared_mode_is_accepted_end_to_end() {
 /// is compared in full.
 #[tokio::test]
 async fn minimax_h3_refusals_each_name_their_own_reason() {
+    let _hf_cache = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let (app, project_id) = shipped_manifest_app(&temp_dir).await;
 
@@ -15725,6 +17772,7 @@ async fn minimax_h3_refusals_each_name_their_own_reason() {
 /// worker." forever next to an idle worker (sc-15328).
 #[tokio::test]
 async fn a_video_mode_no_lane_serves_is_refused_at_submission() {
+    let _hf_cache = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let (app, project_id) = shipped_manifest_app(&temp_dir).await;
 
@@ -15971,6 +18019,7 @@ fn video_job_body(project_id: &str, model: &str, case: &Value) -> Value {
 /// accepting these off-Mac does not resurrect the hang.
 #[tokio::test]
 async fn the_video_enqueue_contract_is_identical_on_every_platform() {
+    let _hf_cache = isolate_hf_cache();
     let stranded = mlx_only_stranded_pairs();
     let served = candle_served_pairs();
     // Was 20 when sc-19570 measured it. Syncing `main` into this epic branch gave thirteen of those
@@ -16025,6 +18074,7 @@ async fn the_video_enqueue_contract_is_identical_on_every_platform() {
 /// developer's machine instead of only on the Linux CI lane hours later.
 #[tokio::test]
 async fn the_parity_replace_person_fixture_is_platform_independent() {
+    let _hf_cache = isolate_hf_cache();
     for os in ["macos", "windows", "linux"] {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
         let (app, project_id) = shipped_manifest_app_on_os(&temp_dir, os).await;
@@ -16079,6 +18129,7 @@ async fn the_parity_replace_person_fixture_is_platform_independent() {
 ///     so a sweep that failed everything cannot pass.
 #[tokio::test]
 async fn an_mlx_only_video_job_reaches_a_terminal_failed_state_off_mac() {
+    let _hf_cache = isolate_hf_cache();
     let stranded = mlx_only_stranded_pairs();
     let served = candle_served_pairs();
 
@@ -16182,6 +18233,7 @@ async fn an_mlx_only_video_job_reaches_a_terminal_failed_state_off_mac() {
 /// check anywhere on that path, and must be terminal again after a single claim.
 #[tokio::test]
 async fn a_requeued_unreachable_job_is_failed_by_the_claim_sweep() {
+    let _hf_cache = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let (app, project_id) = shipped_manifest_app_on_os(&temp_dir, "windows").await;
 
@@ -16288,6 +18340,7 @@ async fn a_requeued_unreachable_job_is_failed_by_the_claim_sweep() {
 /// A future edit that turns either into the other turns this red.
 #[tokio::test]
 async fn the_no_lane_anywhere_gate_still_400s_and_is_distinct_from_the_platform_case() {
+    let _hf_cache = isolate_hf_cache();
     for os in ["macos", "windows", "linux"] {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
         let (app, project_id) = shipped_manifest_app_on_os(&temp_dir, os).await;
@@ -16364,6 +18417,7 @@ async fn the_no_lane_anywhere_gate_still_400s_and_is_distinct_from_the_platform_
 /// asserted by the macOS rust lane — which is how the off-Mac half of this defect stayed invisible.
 #[tokio::test]
 async fn the_models_endpoint_carries_a_candle_support_block_for_every_video_model() {
+    let _hf_cache = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let (app, _project_id) = shipped_manifest_app(&temp_dir).await;
     let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
@@ -16818,6 +18872,54 @@ async fn h3_veda_api_preserves_complete_controls_and_refuses_malformed_or_incomp
             "transformer_blocks.0.attn.to_q.lora_B.default.weight".into(),
         ],
     );
+    // Portable admission requires one real worker to advertise the exact installed LoRA closure.
+    // Both files are synthetic headers; the test exercises only route admission and never loads
+    // either adapter into an inference engine.
+    let lora_claim = |id: &str, path: &std::path::Path| {
+        use sceneworks_core::model_artifacts::portable_binding::{
+            portable_file_ledger_sha256, PortableArtifactFile, PortableSourceClaim,
+            PortableSourceProvenance,
+        };
+        let files = vec![PortableArtifactFile {
+            relative_path: path.file_name().unwrap().into(),
+            size_bytes: std::fs::metadata(path).unwrap().len(),
+            sha256: format!(
+                "sha256:{}",
+                sceneworks_core::hashing::sha256_file(path).unwrap()
+            ),
+        }];
+        let ledger = portable_file_ledger_sha256(&files).unwrap();
+        PortableSourceClaim::new(
+            sceneworks_core::portable_sources::registered_digest_claim_id(
+                "lora", id, None, &ledger,
+            )
+            .unwrap(),
+            PortableSourceProvenance::OperatorOverride,
+            files,
+        )
+        .unwrap()
+    };
+    let claims = [
+        lora_claim("minimax_h3_turbo_8step", &turbo_file),
+        lora_claim(
+            "user_style",
+            &temp.path().join("data/loras/h3_style.safetensors"),
+        ),
+    ];
+    sceneworks_core::jobs_store::JobsStore::new(test_settings(&temp).jobs_db_path)
+        .register_worker_with_portable_sources(
+            sceneworks_core::jobs_store::RegisterWorker {
+                worker_id: "h3-veda-fixture-worker".into(),
+                gpu_id: "mlx".into(),
+                gpu_name: None,
+                capabilities: vec![WorkerCapability::Gpu, WorkerCapability::VideoGenerate],
+                loaded_models: vec![],
+                utilization: None,
+            },
+            Some("macos"),
+            Some(&claims),
+        )
+        .unwrap();
     let controls = json!({"enabled":true,"generated":"32","reference":"0%","fullAttentionLayers":"49,2–0","fullAttentionSteps":"0;7"});
     let payload = json!({"projectId":project_id,"model":"minimax_h3","mode":"text_to_video","prompt":"a lighthouse","loras":[{"id":"minimax_h3_turbo_8step","weight":0.8},{"id":"user_style","weight":0.4}],"advanced":{"veda":controls}});
     let (status, created) =
@@ -16988,7 +19090,14 @@ async fn image_depth_route_queues_a_typed_job_and_publishes_a_depth_asset() {
 
     // The worker reports the depth fact; the API persists it as a depth asset with its raw map, its
     // separate preview and its reload contract.
-    claim_job_as_worker(&app, &job_id, "depth-worker", &["gpu", "image_depth"]).await;
+    claim_job_as_worker_on_route(
+        &app,
+        &job_id,
+        "depth-worker",
+        &["gpu", "image_depth"],
+        TestPortableRoute::MlxMacos,
+    )
+    .await;
     let npy_rel = "assets/depth/genset_dapi/map.npy";
     let preview_rel = "assets/depth/genset_dapi/map.preview.png";
     std::fs::create_dir_all(project_path.join("assets/depth/genset_dapi")).unwrap();

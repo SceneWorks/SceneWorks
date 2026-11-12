@@ -934,7 +934,7 @@
   },
   "properties": {
     "$schema": { "type": "string" },
-    "schemaVersion": { "type": "integer", "minimum": 1 },
+    "schemaVersion": { "type": "integer", "enum": [1, 2], "description": "Version 1 user JSONC is read through the shared upgrader; version 2 is the canonical written format." },
     "models": {
       "type": "array",
       "items": {
@@ -1535,7 +1535,7 @@
                 "type": "integer",
                 "minimum": 1,
                 "x-sceneworks-contract": "advisory",
-                "x-sceneworks-readers": [{ "path": "apps/web/src/screens/modelManager/ModelCard.jsx", "anchor": "blanketFloorGb(model, \"mlx\", lightestInstallableTier(model))" }],
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/memory_guidance.rs", "anchor": "fn blanket_floor_gb(" }, { "path": "apps/web/src/screens/modelManager/ModelCard.jsx", "anchor": "memoryLane(model, \"mlx\")?.entryFloorGb" }],
                 "description": "Minimum unified memory (GB) to run this model on MLX. Mirrors MlxVideoAdapter.estimate_requirements peak_gb."
               },
               "minMemoryGbByTier": {
@@ -1545,9 +1545,9 @@
                 "propertyNames": { "$ref": "#/$defs/quantVariantKey" },
                 "x-sceneworks-contract": "advisory",
                 "x-sceneworks-readers": [
-                  { "path": "apps/web/src/screens/modelManager/ModelCard.jsx", "anchor": "blanketFloorGb(model, \"mlx\", lightestInstallableTier(model))" },
-                  { "path": "apps/web/src/tierSuggestion.js", "anchor": "tierFloorRowGb(options.model, options.backend, variant?.variant)" },
-                  { "path": "apps/web/src/tierSuggestion.js", "anchor": "blanketFloorGb(model, backend, tier)" }
+                  { "path": "apps/web/src/screens/modelManager/ModelCard.jsx", "anchor": "memoryLane(model, \"mlx\")?.entryFloorGb" },
+                  { "path": "crates/sceneworks-core/src/memory_guidance.rs", "anchor": "fn tier_floor_row_gb(" },
+                  { "path": "crates/sceneworks-core/src/memory_guidance.rs", "anchor": "fn blanket_floor_gb(" }
                 ],
                 "description": "Per-tier form of minMemoryGb for a model whose installable tiers have genuinely different floors (sc-24112). SAME semantics as the scalar: an ALREADY-PADDED floor, never a raw peak, so no consumer adds headroom on top of it — which is exactly what distinguishes it from vramGbByTier's measured/estimated peak ladder. A tier with no row falls back to the scalar minMemoryGb, so the scalar must stay the conservative value for any tier key not listed (including nvfp4). The value may be DERIVED (parameter counts x dtype width plus a stated transient model); the entry's own comment must say which, because this key carries no evidence class of its own. Advisory on MLX: the Model Manager quotes it and the tier suggestion vetoes a tier whose row exceeds the host; no MLX runtime gate reads it (the MLX fit gate admits from the provider's own memory contract)."
               },
@@ -1556,8 +1556,8 @@
                 "exclusiveMinimum": 0,
                 "maximum": 1,
                 "x-sceneworks-contract": "advisory",
-                "x-sceneworks-readers": [{ "path": "apps/web/src/tierSuggestion.js", "anchor": "measuredSiblingActiveDiskFraction" }],
-                "description": "Opt in only when every selectable MLX quant tier preserves the same load topology. This is the fraction of precision-dependent disk growth active at once (for example 0.5 when one of two equal experts is resident). The web estimator anchors an unmeasured tier at a smaller compatible sibling's measured peak and scales only the disk delta by this fraction. Absence keeps the calibrated dense fallback; a shared model id alone is not compatibility evidence."
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/memory_guidance.rs", "anchor": "measuredSiblingActiveDiskFraction" }],
+                "description": "Opt in only when every selectable MLX quant tier preserves the same load topology. This is the fraction of precision-dependent disk growth active at once (for example 0.5 when one of two equal experts is resident). The API's memory guidance (crates/sceneworks-core/src/memory_guidance.rs) anchors an unmeasured tier at a smaller compatible sibling's measured peak and scales only the disk delta by this fraction. Absence keeps the calibrated dense fallback; a shared model id alone is not compatibility evidence."
               },
               "memoryStrategyCapabilities": {
                 "$ref": "#/properties/models/items/properties/candle/properties/memoryStrategyCapabilities",
@@ -2029,12 +2029,12 @@
               "admission": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["measured", "referenceModelPixels", "extrapolationFactor", "mlx", "candle"],
+                "required": ["referenceModelPixels", "extrapolationFactor"],
                 "x-sceneworks-contract": "binding",
                 "x-sceneworks-readers": [
                   { "path": "crates/sceneworks-worker/src/depth_jobs.rs", "anchor": "entry.pointer(\"/depth/admission\")" }
                 ],
-                "description": "The depth job's DECLARED memory admission, read per lane before load: predicted peak = residentGb + (referencePeakGb - residentGb) x (model pixels / referenceModelPixels), the activation term padded by extrapolationFactor above the reference area. A request whose prediction exceeds the host budget is refused (never downscaled). measured=false until the epic-end campaign replaces it.",
+                "description": "The depth job's DECLARED memory admission, read per lane before load: predicted peak = residentGb + (referencePeakGb - residentGb) x (model pixels / referenceModelPixels), the activation term padded by extrapolationFactor above the reference area. A request whose prediction exceeds the host budget is refused (never downscaled). measured=false until the epic-end campaign replaces it. For a registered builtin the measured facts (measured, and each lane's residentGb / referencePeakGb) live in config/manifests/registry/evidence.json under depth.admission and are projected here; the product row declares only referenceModelPixels and extrapolationFactor (SW-7032).",
                 "properties": {
                   "measured": { "type": "boolean" },
                   "referenceModelPixels": { "type": "integer", "minimum": 1 },
@@ -2069,6 +2069,10 @@
               "supportsSchedulerShift": {
                 "type": "boolean",
                 "description": "Does the native provider consume a schedule-shift override? The control remains visible independently of the scheduler menu. False disables it and the API refuses an override. A blank value retains the native grid; explicit overrides must be finite and positive."
+              },
+              "supportsHiresFix": {
+                "type": "boolean",
+                "description": "Does the checkpoint accept Hires.fix's img2img second pass? False for a few-step distilled checkpoint whose baked-in schedule cannot re-noise and denoise a partial pass (RealVisXL Lightning). ABSENT MEANS TRUE. A product fact of the checkpoint, not an author choice: user.models.jsonc cannot change it. When false, Image Studio disables Hires.fix and the API refuses a Hires.fix request for the model."
               },
               "supportsCfgInterval": {
                 "type": "boolean",
@@ -2109,6 +2113,10 @@
               "type": "boolean",
               "description": "Whether this provider consumes an explicit native schedule shift; false leaves the control visible but unavailable."
             },
+            "supportsLightning": {
+                "type": "boolean",
+                "description": "Does the engine honor the 4-step Lightning distill toggle (`advanced.lightning`)? True for the two shipped Wan2.2 A14B engines on every platform: the worker applies the lightx2v/Wan2.2-Lightning LoRA pair, fetching it on first use where no download row installs it. ABSENT MEANS FALSE. A product fact of the engine, not an author choice: user.models.jsonc cannot change it, and it never depends on the platform-filtered download list."
+              },
             "supportsGuidance": {
                 "type": "boolean",
                 "description": "Does the engine have a classifier-free-guidance axis? False when the engine exposes no guidance scale at all: krea_realtime_14b's Self-Forcing distillation baked guidance out (a single batch-1 forward), and svd drives its own frame-wise CFG ramp — `generate_svd` hard-sets `guidance: None`. ABSENT MEANS TRUE. When false, Video Studio hides its Guidance control and stops emitting `advanced.guidanceScale`."
@@ -2439,5 +2447,456 @@
       }
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "schemaVersion": {
+            "const": 2
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "models": {
+            "items": {
+              "$comment": "APPREG-4: a REGISTERED builtin's memory evidence lives in the registry evidence store, so a v2 row overriding one may not carry memory keys (the projection never reads them). A row whose id is not registered (imported, trained or custom) has no evidence-store row; its own memory keys are its only memory facts and stay permitted. The id enum mirrors config/manifests/registry/specs.json; a sceneworks-core test keeps the two equal.",
+              "if": {
+                "required": ["id"],
+                "properties": {
+                  "id": {
+                    "enum": [
+                    "acestep_v15_turbo",
+                    "anima_aesthetic",
+                    "anima_base",
+                    "anima_turbo",
+                    "aura_sr_v2",
+                    "bernini",
+                    "bernini_image",
+                    "boogu_image",
+                    "boogu_image_edit",
+                    "boogu_image_turbo",
+                    "chatterbox_tts",
+                    "chatterbox_ve",
+                    "chroma1_base",
+                    "chroma1_flash",
+                    "chroma1_hd",
+                    "clap_htsat_unfused",
+                    "clip_vit_l14",
+                    "controlnet_tile_sdxl",
+                    "depth_anything_v2_base",
+                    "depth_anything_v2_large",
+                    "depth_anything_v2_small",
+                    "dwpose_pose_detector",
+                    "elatentlpips_flux",
+                    "elatentlpips_sd3",
+                    "elatentlpips_sdxl",
+                    "film_planner_qwen3_6_27b",
+                    "flux2_dev",
+                    "flux2_klein_9b",
+                    "flux2_klein_9b_kv",
+                    "flux2_klein_9b_true_v2",
+                    "flux2_vae",
+                    "flux3_image_klein_pup",
+                    "flux3_klein",
+                    "flux3_klein_base",
+                    "flux_dev",
+                    "flux_schnell",
+                    "hybrik_resnet34",
+                    "ideogram_4",
+                    "ideogram_4_turbo",
+                    "illustrious_xl_v1",
+                    "illustrious_xl_v2",
+                    "instantid_face_stack",
+                    "instantid_realvisxl",
+                    "iris_3b",
+                    "iris_3b_depth",
+                    "iris_3b_restore",
+                    "iris_repa_teacher_dinov2_base",
+                    "iris_restore_train_critic_trunk",
+                    "iris_restore_train_lpips_lin",
+                    "iris_restore_train_vgg16",
+                    "joycaption_beta_one",
+                    "kokoro_82m",
+                    "kolors",
+                    "krea_2_raw",
+                    "krea_2_turbo",
+                    "krea_realtime_14b",
+                    "lens",
+                    "lens_turbo",
+                    "ltx_2_3",
+                    "ltx_2_3_eros",
+                    "ltx_2_5",
+                    "mage_flow",
+                    "mage_flow_base",
+                    "mage_flow_edit",
+                    "mage_flow_edit_base",
+                    "mage_flow_edit_turbo",
+                    "mage_flow_turbo",
+                    "minimax_h3",
+                    "minimax_h3_ref",
+                    "mmaudio_large_44k",
+                    "mmaudio_small_16k",
+                    "moss_image_base",
+                    "moss_image_sft",
+                    "moss_sfx_v2",
+                    "moss_tts_realtime",
+                    "moss_ttsd_v05",
+                    "mp_facemesh_v2",
+                    "openvoice_v2",
+                    "person_detector",
+                    "pid_flux",
+                    "pid_flux2",
+                    "pid_qwenimage",
+                    "pid_sdxl",
+                    "prompt_refine_anubis_8b",
+                    "pulid_flux_dev",
+                    "qwen_image",
+                    "qwen_image_2_1",
+                    "qwen_image_2_1_pe_i2i",
+                    "qwen_image_2_1_pe_t2i",
+                    "qwen_image_2_1_turbo",
+                    "qwen_image_edit_2511",
+                    "qwen_image_edit_2511_lightning",
+                    "real_esrgan",
+                    "realvisxl",
+                    "realvisxl_lightning",
+                    "sam2_person_segment",
+                    "sam3_person_segment",
+                    "sana_1600m",
+                    "sana_sprint_1600m",
+                    "sapiens_normal_0_3b",
+                    "scail2_14b",
+                    "sd3_5_large",
+                    "sd3_5_large_turbo",
+                    "sd3_5_medium",
+                    "sdxl",
+                    "seedvr2_upscaler",
+                    "sensenova_u1_8b",
+                    "sensenova_u1_8b_fast",
+                    "sensenova_u1_8b_infographic_v2",
+                    "sensenova_u1_8b_infographic_v2_fast",
+                    "sensenova_u1_8b_infographic_v3",
+                    "sensenova_u1_8b_infographic_v3_fast",
+                    "starvector_1b",
+                    "starvector_8b",
+                    "supra2_img",
+                    "svd",
+                    "taef1",
+                    "taef2",
+                    "taeltx2_3",
+                    "taeqi2_1",
+                    "taesd3",
+                    "taesdxl",
+                    "taew2_1",
+                    "taew2_2",
+                    "vision_caption_qwen3vl_8b",
+                    "vitpose_plus_base",
+                    "wan_2_2",
+                    "wan_2_2_i2v_14b",
+                    "wan_2_2_t2v_14b",
+                    "wan_2_2_vace_fun_14b",
+                    "whisper_base",
+                    "yue2",
+                    "yue_en_cot",
+                    "yue_en_icl",
+                    "yue_jp_kr_cot",
+                    "yue_jp_kr_icl",
+                    "yue_zh_cot",
+                    "yue_zh_icl",
+                    "z_image",
+                    "z_image_edit",
+                    "z_image_turbo",
+                    "zimage_turbo_training_adapter_v1",
+                    "zimage_turbo_training_adapter_v2"
+                    ]
+                  }
+                }
+              },
+              "then": {
+              "allOf": [
+                {
+                  "not": {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "minMemoryGb"
+                        ]
+                      }
+                    ]
+                  }
+                },
+                {
+                  "properties": {
+                    "mlx": {
+                      "not": {
+                        "anyOf": [
+                          {
+                            "required": [
+                              "minMemoryGb"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "minMemoryGbByTier"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "memoryStrategyContract"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "memoryStrategyCapabilities"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "memoryStrategyStructuralExemptions"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "calibrations"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "vramGbByTier"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "vramMeasuredPixels"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "supportsSequentialOffload"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "sequentialPeakGb"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "measured"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "imageActivationGbPerMegapixel"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "turboFit"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "control"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "memoryDeclarationWithhold"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "measuredSiblingActiveDiskFraction"
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "candle": {
+                      "not": {
+                        "anyOf": [
+                          {
+                            "required": [
+                              "minMemoryGb"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "minMemoryGbByTier"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "memoryStrategyContract"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "memoryStrategyCapabilities"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "memoryStrategyStructuralExemptions"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "calibrations"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "vramGbByTier"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "vramMeasuredPixels"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "supportsSequentialOffload"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "sequentialPeakGb"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "measured"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "imageActivationGbPerMegapixel"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "turboFit"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "control"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "memoryDeclarationWithhold"
+                            ]
+                          },
+                          {
+                            "required": [
+                              "measuredSiblingActiveDiskFraction"
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "depth": {
+                      "properties": {
+                        "admission": {
+                          "not": {
+                            "anyOf": [
+                              {
+                                "required": [
+                                  "measured"
+                                ]
+                              }
+                            ]
+                          },
+                          "properties": {
+                            "mlx": {
+                              "not": {
+                                "anyOf": [
+                                  {
+                                    "required": [
+                                      "residentGb"
+                                    ]
+                                  },
+                                  {
+                                    "required": [
+                                      "referencePeakGb"
+                                    ]
+                                  }
+                                ]
+                              }
+                            },
+                            "candle": {
+                              "not": {
+                                "anyOf": [
+                                  {
+                                    "required": [
+                                      "residentGb"
+                                    ]
+                                  },
+                                  {
+                                    "required": [
+                                      "referencePeakGb"
+                                    ]
+                                  }
+                                ]
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "downloads": {
+                      "items": {
+                        "properties": {
+                          "footprint": {
+                            "not": {
+                              "anyOf": [
+                                {
+                                  "required": [
+                                    "residentMemoryBytes"
+                                  ]
+                                },
+                                {
+                                  "required": [
+                                    "peakMemoryBytes"
+                                  ]
+                                },
+                                {
+                                  "required": [
+                                    "measuredPixels"
+                                  ]
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
   "additionalProperties": false
 }

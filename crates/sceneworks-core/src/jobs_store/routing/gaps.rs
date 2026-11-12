@@ -1396,6 +1396,36 @@ pub fn convert_artifact_required_here(converter: &str) -> bool {
     }
 }
 
+#[cfg(test)]
+#[test]
+fn converter_policy_covers_shipped_products_and_preserves_platform_fallbacks() {
+    for spec in crate::registry::builtin_model_specs() {
+        if let Some(converter) = spec
+            .product
+            .fields
+            .get("mlx")
+            .and_then(|mlx| mlx.get("converter"))
+            .and_then(Value::as_str)
+        {
+            assert!(
+                NATIVE_CONVERTERS.contains(&converter),
+                "{} declares unknown converter {converter}",
+                spec.product.id
+            );
+        }
+    }
+    for converter in CANDLE_NATIVE_CONVERTERS {
+        assert!(NATIVE_CONVERTERS.contains(converter));
+    }
+    assert!(!convert_artifact_required_here("not_a_converter"));
+    assert!(convert_artifact_required_here("supra2_img"));
+    assert_eq!(
+        convert_artifact_required_here("anima_quant"),
+        cfg!(target_os = "macos")
+    );
+    assert!(convert_artifact_required_here("flux2_klein_diffusers"));
+}
+
 /// `model_convert` is supported for the in-process Rust converters enumerated in
 /// [`NATIVE_CONVERTERS`] (FLUX.2-klein `flux2_klein_diffusers` sc-3136; LTX-2.3 `ltx_video` sc-3240;
 /// FLUX.2-dev `flux2_dev_quant` sc-5921; the SD3.5 `sd3_5_*_quant` variants sc-7871; Anima

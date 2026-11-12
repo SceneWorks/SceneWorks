@@ -1392,7 +1392,7 @@ fn sdxl_realvisxl_q4_tier_mlx_smoke() {
 }
 
 /// A model built with a manifest entry so `uses_standard_tier_layout` / `is_dense_te_tier`
-/// can be exercised without touching the hardcoded registries.
+/// can be exercised without editing the compiled builtin registry.
 #[cfg(native_lane)]
 fn manifest_request(model: &str, mlx: serde_json::Value) -> ImageRequest {
     ImageRequest::from_payload(
@@ -1403,12 +1403,12 @@ fn manifest_request(model: &str, mlx: serde_json::Value) -> ImageRequest {
 }
 
 /// sc-8508: the standard-tier routing is manifest-driven — a model NOT in
-/// [`STANDARD_TIER_MODELS`] opts in via `mlx.standardTierLayout: true`, while a registry model
-/// stays true without the flag and an ordinary model stays false. Back-compat guard.
+/// the compiled product opt-in uses `mlx.standardTierLayout: true`; an imported model can still
+/// opt in through its request manifest, while a model with neither flag stays false.
 #[cfg(native_lane)]
 #[test]
-fn standard_tier_layout_is_manifest_driven_with_registry_backcompat() {
-    // Registry member, no manifest flag → still true.
+fn standard_tier_layout_uses_compiled_product_or_import_manifest() {
+    // Builtin product owns the flag, even when a request's manifest omits it.
     assert!(uses_standard_tier_layout(&manifest_request(
         "flux2_dev",
         json!({})
@@ -1423,6 +1423,49 @@ fn standard_tier_layout_is_manifest_driven_with_registry_backcompat() {
         "some_dense_model",
         json!({})
     )));
+}
+
+#[cfg(native_lane)]
+#[test]
+fn shipped_standard_tier_membership_is_compiled_product_data() {
+    for id in [
+        "flux2_dev",
+        "sd3_5_large",
+        "sd3_5_large_turbo",
+        "sd3_5_medium",
+        "z_image_turbo",
+        "z_image",
+        "z_image_edit",
+        "flux2_klein_9b",
+        "flux2_klein_9b_kv",
+        "qwen_image",
+        "qwen_image_edit_2511",
+        "qwen_image_edit_2511_lightning",
+        "flux_schnell",
+        "flux_dev",
+        "pulid_flux_dev",
+        "lens",
+        "lens_turbo",
+        "sana_1600m",
+        "sana_sprint_1600m",
+        "kolors",
+    ] {
+        assert!(
+            uses_standard_tier_layout(&manifest_request(id, json!({}))),
+            "{id}"
+        );
+    }
+    for id in [
+        "ideogram_4",
+        "boogu_image",
+        "krea_2_turbo",
+        "qwen_image_2_1",
+    ] {
+        assert!(
+            !uses_standard_tier_layout(&manifest_request(id, json!({}))),
+            "{id}"
+        );
+    }
 }
 
 /// sc-15799: the dense-TE guard is MANIFEST-ONLY. An above-tier residency the shared decision cannot

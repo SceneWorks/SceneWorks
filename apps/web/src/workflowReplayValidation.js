@@ -28,7 +28,7 @@
 // will not carry, or where the missing piece is supplied. Nothing is silent either way.
 
 import { issue } from "./validation/issues.js";
-import { macModelBlock, macModelFeatureBlock } from "./macGating.js";
+import { macModelBlock, macModelFeatureBlock } from "./modelEligibility.js";
 import { imageModelServesMode, supportedControlModes } from "./modelEligibility.js";
 import { workflowInputSlots } from "./workflowShare.js";
 import { isMossEdit } from "./mossImage.js";

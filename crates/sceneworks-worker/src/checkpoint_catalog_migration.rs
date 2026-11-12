@@ -185,7 +185,9 @@ async fn read_user_model_entries(path: &Path) -> WorkerResult<Option<Vec<JsonObj
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    let manifest: Value = serde_json::from_str(&strip_jsonc_comments(&payload))?;
+    let mut manifest: Value = serde_json::from_str(&strip_jsonc_comments(&payload))?;
+    sceneworks_core::model_manifest_version::normalize_user_model_manifest(&mut manifest)
+        .map_err(WorkerError::InvalidPayload)?;
     let entries = manifest
         .get("models")
         .and_then(Value::as_array)

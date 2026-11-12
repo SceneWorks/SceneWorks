@@ -243,11 +243,10 @@ export function parseEngineModelTable(rustSource) {
  * Parse preview support for the bespoke Candle Qwen-Edit lane.
  *
  * That provider is dispatched directly by SceneWorks rather than registered in the generic media
- * registry, so stage-1 engine facts cannot describe it. The declaration and the actual
- * `QwenEditRequest.preview` wiring live in one Rust source file; both must remain present or this
- * parser fails loudly instead of preserving a stale `true` claim.
+ * registry, so stage-1 engine facts cannot describe it. The typed registry export owns model
+ * membership; the live `QwenEditRequest.preview` sink must still be present.
  */
-export function parseBespokePreviewRoutes(rustSource) {
+export function parseBespokePreviewRoutes(rustSource, specs) {
   if (typeof rustSource !== "string" || rustSource.length === 0) {
     throw new Error("parseBespokePreviewRoutes: expected qwen_edit_candle.rs source text");
   }
@@ -255,27 +254,17 @@ export function parseBespokePreviewRoutes(rustSource) {
     rustSource,
     "parseBespokePreviewRoutes: qwen_edit_candle.rs",
   );
-  const anchor = "const QWEN_EDIT_CANDLE_PREVIEW_MODELS: &[&str] =";
-  const declarations = source.split(anchor).length - 1;
-  if (declarations !== 1) {
-    throw new Error(
-      `parseBespokePreviewRoutes: expected exactly one ${anchor}, found ${declarations}`,
-    );
+  if (!specs || typeof specs !== "object" || Array.isArray(specs)) {
+    throw new Error("parseBespokePreviewRoutes: expected typed registry specs");
   }
-  const afterAnchor = source.slice(source.indexOf(anchor) + anchor.length);
-  const open = afterAnchor.indexOf("&[");
-  const close = open === -1 ? -1 : afterAnchor.indexOf("]", open + 2);
-  if (open === -1 || close === -1) {
-    throw new Error("parseBespokePreviewRoutes: preview model list is not a closed `&[...]`");
-  }
-  const body = afterAnchor.slice(open + 2, close);
-  const modelIds = [...body.matchAll(/"([a-z0-9_]+)"/g)].map((match) => match[1]);
-  const quotes = (body.match(/"/g) ?? []).length;
-  if (modelIds.length === 0 || quotes !== modelIds.length * 2) {
-    throw new Error("parseBespokePreviewRoutes: preview model list is empty or only partly parsed");
-  }
-  if (new Set(modelIds).size !== modelIds.length) {
-    throw new Error("parseBespokePreviewRoutes: preview model list contains a duplicate id");
+  const modelIds = Object.entries(specs)
+    .filter(([, spec]) => spec.product?.family === "qwen-image"
+      && spec.previewByBackend?.candle === true
+      && spec.routes?.candle === undefined
+      && spec.routes?.mlx?.id === "qwen_image_edit")
+    .map(([id]) => id);
+  if (modelIds.length === 0) {
+    throw new Error("parseBespokePreviewRoutes: no typed Qwen-Edit preview routes");
   }
   if (
     !/move\s*\|\s*index,\s*\(seed,\s*prompt\),\s*preview,\s*on_progress\s*\|/.test(source) ||

@@ -131,9 +131,9 @@ pub(super) fn reindex_project_path(
                 optional_str(&timeline, "name").unwrap_or("Timeline"),
                 rel_path,
                 optional_str(&timeline, "aspectRatio").unwrap_or("16:9"),
-                optional_u64(&timeline, "width").unwrap_or(1280),
-                optional_u64(&timeline, "height").unwrap_or(720),
-                optional_u64(&timeline, "fps").unwrap_or(30),
+                sql_int(optional_u64(&timeline, "width").unwrap_or(1280)),
+                sql_int(optional_u64(&timeline, "height").unwrap_or(720)),
+                sql_int(optional_u64(&timeline, "fps").unwrap_or(30)),
                 optional_f64(&timeline, "duration").unwrap_or(0.0),
                 optional_str(&timeline, "createdAt").unwrap_or(""),
                 optional_str(&timeline, "updatedAt")

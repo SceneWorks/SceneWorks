@@ -24,7 +24,7 @@ import { digestsAtRevision, resolveRevision } from "./inference-closure-digest.m
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const BUNDLE = "docs/generated/memory-calibration-evidence.json";
 const CLOSURES = "config/inference-provider-closures.json";
-const MANIFEST = "config/manifests/builtin.models.jsonc";
+const MANIFEST = "config/manifests/registry/evidence.json";
 
 export function recordsNeedingDigest(bundle) {
   // Only records that can ever be `current` need one; fixtures, candidates and gated records never

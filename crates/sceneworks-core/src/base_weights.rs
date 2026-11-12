@@ -319,8 +319,8 @@ pub enum BaseWeightDetection {
 /// user model and routed to that family's existing in-process engine (the S0d family-routing path
 /// in `jobs_store::routing::catalog`). Seeded with `krea_2` — the community Krea 2 DiT export the
 /// detector recognizes by its `txtfusion.` marker, whose builtins already route to the Krea MLX
-/// engine. Grows one entry per landed loader; keep it aligned with [`import_supported`]'s arms and
-/// with `MLX_ROUTED_FAMILIES` (routing).
+/// engine. Membership comes from build-validated product families with an exact imported-provider
+/// registration on either backend; [`import_supported`] still checks role and source encoding.
 /// `mage-flow` (sc-15036, epic 14034 F6) is the DIRECTORY-shaped member: unlike the other three —
 /// the single-file families `flux2`, `krea_2` and `sdxl` — a loadable Mage-Flow backbone is a
 /// diffusers **transformer component directory**
@@ -332,7 +332,81 @@ pub enum BaseWeightDetection {
 /// sc-21485 bound to `flux2_klein_9b`. A dense or fp8 FLUX.2 single file has no import loader and
 /// is still refused by [`import_supported`]'s `flux2` quant arm — this constant names the family,
 /// never the encodings.
-pub const IMPORT_SUPPORTED_FAMILIES: &[&str] = &["flux2", "krea_2", "mage-flow", "sdxl"];
+pub static IMPORT_SUPPORTED_FAMILIES: std::sync::LazyLock<Vec<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        let mut families = Vec::new();
+        for source in [
+            include_str!("../../../config/engine-capabilities/capabilities.mlx.json"),
+            include_str!("../../../config/engine-capabilities/capabilities.candle.json"),
+        ] {
+            let facts: Value = serde_json::from_str(source).expect("native import provider facts");
+            for route in facts["imports"].as_array().expect("native import routes") {
+                let Some(family) = route["family"]
+                    .as_str()
+                    .and_then(crate::model_family::exact_identity)
+                else {
+                    continue;
+                };
+                if image_loader_accepts_family(family) {
+                    families.push(family);
+                }
+            }
+        }
+        families.sort_unstable();
+        families.dedup();
+        families
+    });
+
+fn image_loader_accepts_family(family: &str) -> bool {
+    [ComponentRole::Transformer, ComponentRole::Checkpoint]
+        .into_iter()
+        .any(|component| {
+            [
+                QuantFormat::Bf16,
+                QuantFormat::F16,
+                QuantFormat::F32,
+                QuantFormat::Int8TensorwisePerRow,
+                QuantFormat::Fp8E4M3Scalar,
+                QuantFormat::Fp8E5M2Scalar,
+                QuantFormat::Mxfp8,
+                QuantFormat::Nvfp4,
+            ]
+            .into_iter()
+            .any(|quant| image_import_encoding_supported(family, component, quant))
+        })
+}
+
+fn image_import_encoding_supported(
+    family: &str,
+    component: ComponentRole,
+    quant: QuantFormat,
+) -> bool {
+    matches!(
+        (family, component, quant),
+        (
+            crate::model_family::KREA_2,
+            ComponentRole::Transformer,
+            QuantFormat::Bf16
+                | QuantFormat::Int8TensorwisePerRow
+                | QuantFormat::Fp8E4M3Scalar
+                | QuantFormat::Fp8E5M2Scalar
+                | QuantFormat::Mxfp8
+                | QuantFormat::Nvfp4
+        ) | (
+            crate::model_family::FLUX2,
+            ComponentRole::Transformer,
+            QuantFormat::Nvfp4
+        ) | (
+            crate::model_family::SDXL,
+            ComponentRole::Checkpoint,
+            QuantFormat::F16 | QuantFormat::Bf16 | QuantFormat::F32
+        ) | (
+            crate::model_family::MAGE_FLOW,
+            ComponentRole::Transformer,
+            QuantFormat::Bf16
+        )
+    )
+}
 
 /// The VIDEO families model import accepts (sc-26680, epic 26679). Separate from
 /// [`IMPORT_SUPPORTED_FAMILIES`] because that list is the IMAGE route-by-family contract — the
@@ -704,33 +778,12 @@ pub fn imported_model_primary_weight_file(source: &Path) -> Option<PathBuf> {
 /// (plain/scaled/inline fp8, `comfy_quant` fp4-packed, GGUF, a file mixing conventions) — is refused
 /// with a specific reason.
 pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
+    if verdict.family.as_deref().is_some_and(|family| {
+        image_import_encoding_supported(family, verdict.component, verdict.quant)
+    }) {
+        return Ok(());
+    }
     match (verdict.family.as_deref(), verdict.component, verdict.quant) {
-        // --- Supported loaders: one arm per landed loader (add the next family/quant here) ---
-        (
-            Some(crate::model_family::KREA_2),
-            ComponentRole::Transformer,
-            QuantFormat::Bf16
-                | QuantFormat::Int8TensorwisePerRow
-                | QuantFormat::Fp8E4M3Scalar
-                | QuantFormat::Fp8E5M2Scalar
-                | QuantFormat::Mxfp8
-                | QuantFormat::Nvfp4,
-        ) => Ok(()),
-        // sc-11043 (epic 11037): the FLUX.2 Klein single-file BFL export, NVFP4 only. Its
-        // architecture mapping (fused QKV rows, the AdaLN half-swap) rides sc-21485's declarative
-        // transforms over the shared reader, so this gate names the family and the source codec and
-        // nothing else. Dense/fp8 FLUX.2 single files are refused below: they have no import
-        // loader, and admitting them here would claim a lane nothing serves.
-        (Some(crate::model_family::FLUX2), ComponentRole::Transformer, QuantFormat::Nvfp4) => Ok(()),
-        (
-            Some(crate::model_family::SDXL),
-            ComponentRole::Checkpoint,
-            QuantFormat::F16 | QuantFormat::Bf16 | QuantFormat::F32,
-        ) => Ok(()),
-        // sc-15036: a dense Mage-Flow DiT. Loadable only as a transformer component DIRECTORY —
-        // the caller must additionally pass the directory shape through
-        // [`is_mage_flow_transformer_dir`]; this triple gate cannot see the config sibling.
-        (Some(crate::model_family::MAGE_FLOW), ComponentRole::Transformer, QuantFormat::Bf16) => Ok(()),
         // Dense or native ConvRot INT8 H3 DiT. The header-only INT8 classification is not codec
         // authority: H3SourceInventory validates every ConvRot descriptor and operand before the
         // plan can become runnable. Plain int8-per-row, affine Q8, and W4A8 fail that boundary.

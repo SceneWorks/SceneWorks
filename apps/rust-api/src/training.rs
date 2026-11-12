@@ -1,6 +1,24 @@
 use super::*;
 use sceneworks_core::training::CaptionMode;
 
+async fn portable_training_binding(
+    state: &AppState,
+    job_type: &JobType,
+    payload: &JsonObject,
+    requested_gpu: &str,
+) -> Result<Option<Value>, ApiError> {
+    crate::portable_admission::capture_portable_model_binding(
+        state,
+        job_type,
+        payload,
+        requested_gpu,
+    )
+    .await?
+    .map(serde_json::to_value)
+    .transpose()
+    .map_err(|error| ApiError::internal(format!("portable model binding serialize: {error}")))
+}
+
 pub(crate) async fn list_training_targets() -> Json<TrainingTargetRegistry> {
     Json(effective_training_targets())
 }
@@ -66,7 +84,9 @@ pub(crate) async fn fresh_flux3_training_duplicate(
             .get("baseModel")
             .is_some_and(|base| Some(base) != job.payload.get("baseModel"))
     {
-        return Err(ApiError::bad_request("FLUX.3 duplicate copies the original training inputs with a fresh server-owned output identity. Use Training Studio to change model, options or dataset."));
+        return Err(ApiError::bad_request(
+            "FLUX.3 duplicate copies the original training inputs with a fresh server-owned output identity. Use Training Studio to change model, options or dataset.",
+        ));
     }
     let mut plan: sceneworks_core::training::TrainingPlan =
         serde_json::from_value(original.clone()).map_err(|error| {
@@ -174,7 +194,10 @@ pub(crate) fn effective_training_targets_for_candle(candle: bool) -> TrainingTar
     let mut registry = builtin_training_targets();
     if candle {
         for target in &mut registry.targets {
-            apply_candle_training_defaults(&target.kernel, &mut target.defaults);
+            sceneworks_core::training::apply_candle_training_defaults(
+                &target.kernel,
+                &mut target.defaults,
+            );
         }
     }
     registry
@@ -196,48 +219,14 @@ pub(crate) fn effective_training_presets_for_candle(
                 .iter()
                 .find(|target| target.id == preset.target_id)
             {
-                apply_candle_training_defaults(&target.kernel, &mut preset.config);
+                sceneworks_core::training::apply_candle_training_defaults(
+                    &target.kernel,
+                    &mut preset.config,
+                );
             }
         }
     }
     presets
-}
-
-fn apply_candle_training_defaults(
-    kernel: &str,
-    config: &mut sceneworks_core::training::TrainingConfig,
-) {
-    match kernel {
-        // These Candle trainers are intentionally dense and do not render previews. MLX retains
-        // its established checkpointing/preview defaults in the core catalog and macOS response.
-        "kolors_lora" | "sd3_lora" | "mage_flow_lora" | "anima_lora" => {
-            config
-                .advanced
-                .insert("gradientCheckpointing".to_owned(), json!(false));
-            config.advanced.insert("sampleEvery".to_owned(), json!(0));
-            if kernel == "mage_flow_lora" {
-                config.advanced.insert(
-                    "fullFinetuneConfig".to_owned(),
-                    json!({
-                        "mixedPrecision": "f32",
-                        "gradientCheckpointing": false
-                    }),
-                );
-            }
-        }
-        // The Wan single-DiT and I2V trainers do not preview. Both A14B variants require
-        // checkpointing on Candle; TI2V-5B remains a negative and honors its existing value.
-        "wan_lora" => {
-            config.advanced.insert("sampleEvery".to_owned(), json!(0));
-        }
-        "wan_moe_lora" => {
-            config
-                .advanced
-                .insert("gradientCheckpointing".to_owned(), json!(true));
-            config.advanced.insert("sampleEvery".to_owned(), json!(0));
-        }
-        _ => {}
-    }
 }
 
 pub(crate) async fn list_training_datasets(
@@ -776,18 +765,30 @@ pub(crate) async fn create_training_dataset_caption_job(
         )
         .await?;
     }
+    let portable_binding = portable_training_binding(
+        &state,
+        &JobType::TrainingCaption,
+        &job_payload,
+        &requested_gpu,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.create_job(CreateJob {
-            job_type: JobType::TrainingCaption,
-            project_id: Some(project_id),
-            project_name: Some(project_name),
-            payload: job_payload,
-            requested_gpu,
-            source_job_id: None,
-            duplicate_of_job_id: None,
-            attempts: 1,
-            initial_status: None,
-        })
+        store.create_job_with_portable_binding(
+            CreateJob {
+                job_type: JobType::TrainingCaption,
+                project_id: Some(project_id),
+                project_name: Some(project_name),
+                payload: job_payload,
+                requested_gpu,
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+                initial_status: None,
+            },
+            None,
+            None,
+            portable_binding.as_ref(),
+        )
     })
     .await?;
     publish(&state, "job.updated", &job);
@@ -950,7 +951,7 @@ pub(crate) async fn create_training_dataset_parquet_import_job(
         _ => {
             return Err(ApiError::internal(
                 "Parquet import payload must be an object",
-            ))
+            ));
         }
     };
     crate::model_sources::ensure_runtime_model_sources(
@@ -959,18 +960,26 @@ pub(crate) async fn create_training_dataset_parquet_import_job(
         &mut job_payload,
     )
     .await?;
+    let portable_binding =
+        portable_training_binding(&state, &JobType::DatasetParquetImport, &job_payload, "auto")
+            .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.create_job(CreateJob {
-            job_type: JobType::DatasetParquetImport,
-            project_id: Some(project_id),
-            project_name: Some(project_name),
-            payload: job_payload,
-            requested_gpu: "auto".to_owned(),
-            source_job_id: None,
-            duplicate_of_job_id: None,
-            attempts: 1,
-            initial_status: None,
-        })
+        store.create_job_with_portable_binding(
+            CreateJob {
+                job_type: JobType::DatasetParquetImport,
+                project_id: Some(project_id),
+                project_name: Some(project_name),
+                payload: job_payload,
+                requested_gpu: "auto".to_owned(),
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+                initial_status: None,
+            },
+            None,
+            None,
+            portable_binding.as_ref(),
+        )
     })
     .await?;
     publish(&state, "job.updated", &job);
@@ -1146,7 +1155,7 @@ pub(crate) async fn create_training_dataset_analysis_job(
         _ => {
             return Err(ApiError::internal(
                 "dataset analysis job payload must be an object",
-            ))
+            ));
         }
     };
     crate::model_sources::ensure_runtime_model_sources(
@@ -1155,18 +1164,30 @@ pub(crate) async fn create_training_dataset_analysis_job(
         &mut job_payload,
     )
     .await?;
+    let portable_binding = portable_training_binding(
+        &state,
+        &JobType::DatasetAnalysis,
+        &job_payload,
+        &requested_gpu,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.create_job(CreateJob {
-            job_type: JobType::DatasetAnalysis,
-            project_id: Some(project_id),
-            project_name: Some(project_name),
-            payload: job_payload,
-            requested_gpu,
-            source_job_id: None,
-            duplicate_of_job_id: None,
-            attempts: 1,
-            initial_status: None,
-        })
+        store.create_job_with_portable_binding(
+            CreateJob {
+                job_type: JobType::DatasetAnalysis,
+                project_id: Some(project_id),
+                project_name: Some(project_name),
+                payload: job_payload,
+                requested_gpu,
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+                initial_status: None,
+            },
+            None,
+            None,
+            portable_binding.as_ref(),
+        )
     })
     .await?;
     publish(&state, "job.updated", &job);
@@ -1246,7 +1267,7 @@ pub(crate) async fn create_training_dataset_face_analysis_job(
         _ => {
             return Err(ApiError::internal(
                 "dataset face analysis job payload must be an object",
-            ))
+            ));
         }
     };
     crate::model_sources::ensure_runtime_model_sources(
@@ -1255,18 +1276,30 @@ pub(crate) async fn create_training_dataset_face_analysis_job(
         &mut job_payload,
     )
     .await?;
+    let portable_binding = portable_training_binding(
+        &state,
+        &JobType::DatasetFaceAnalysis,
+        &job_payload,
+        &requested_gpu,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.create_job(CreateJob {
-            job_type: JobType::DatasetFaceAnalysis,
-            project_id: Some(project_id),
-            project_name: Some(project_name),
-            payload: job_payload,
-            requested_gpu,
-            source_job_id: None,
-            duplicate_of_job_id: None,
-            attempts: 1,
-            initial_status: None,
-        })
+        store.create_job_with_portable_binding(
+            CreateJob {
+                job_type: JobType::DatasetFaceAnalysis,
+                project_id: Some(project_id),
+                project_name: Some(project_name),
+                payload: job_payload,
+                requested_gpu,
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+                initial_status: None,
+            },
+            None,
+            None,
+            portable_binding.as_ref(),
+        )
     })
     .await?;
     publish(&state, "job.updated", &job);
@@ -1432,7 +1465,7 @@ pub(crate) async fn create_training_dataset_subject_mask_job(
         _ => {
             return Err(ApiError::internal(
                 "dataset subject mask job payload must be an object",
-            ))
+            ));
         }
     };
     crate::model_sources::ensure_runtime_model_sources(
@@ -1441,18 +1474,30 @@ pub(crate) async fn create_training_dataset_subject_mask_job(
         &mut job_payload,
     )
     .await?;
+    let portable_binding = portable_training_binding(
+        &state,
+        &JobType::DatasetSubjectMask,
+        &job_payload,
+        &requested_gpu,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.create_job(CreateJob {
-            job_type: JobType::DatasetSubjectMask,
-            project_id: Some(project_id),
-            project_name: Some(project_name),
-            payload: job_payload,
-            requested_gpu,
-            source_job_id: None,
-            duplicate_of_job_id: None,
-            attempts: 1,
-            initial_status: None,
-        })
+        store.create_job_with_portable_binding(
+            CreateJob {
+                job_type: JobType::DatasetSubjectMask,
+                project_id: Some(project_id),
+                project_name: Some(project_name),
+                payload: job_payload,
+                requested_gpu,
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+                initial_status: None,
+            },
+            None,
+            None,
+            portable_binding.as_ref(),
+        )
     })
     .await?;
     publish(&state, "job.updated", &job);
@@ -1811,7 +1856,7 @@ pub(crate) async fn create_training_dataset_upscale_job(
         _ => {
             return Err(ApiError::internal(
                 "dataset upscale job payload must be an object",
-            ))
+            ));
         }
     };
     crate::model_sources::ensure_runtime_model_sources(
@@ -1820,18 +1865,30 @@ pub(crate) async fn create_training_dataset_upscale_job(
         &mut job_payload,
     )
     .await?;
+    let portable_binding = portable_training_binding(
+        &state,
+        &JobType::DatasetUpscale,
+        &job_payload,
+        &requested_gpu,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.create_job(CreateJob {
-            job_type: JobType::DatasetUpscale,
-            project_id: Some(project_id),
-            project_name: Some(project_name),
-            payload: job_payload,
-            requested_gpu,
-            source_job_id: None,
-            duplicate_of_job_id: None,
-            attempts: 1,
-            initial_status: None,
-        })
+        store.create_job_with_portable_binding(
+            CreateJob {
+                job_type: JobType::DatasetUpscale,
+                project_id: Some(project_id),
+                project_name: Some(project_name),
+                payload: job_payload,
+                requested_gpu,
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+                initial_status: None,
+            },
+            None,
+            None,
+            portable_binding.as_ref(),
+        )
     })
     .await?;
     publish(&state, "job.updated", &job);
@@ -2178,7 +2235,9 @@ fn validate_training_submission(
             .and_then(Value::as_bool)
             == Some(true)
     {
-        return Err(ApiError::bad_request("Resume a stopped FLUX.3 run using its queue entry; a new submit cannot select a previous checkpoint identity."));
+        return Err(ApiError::bad_request(
+            "Resume a stopped FLUX.3 run using its queue entry; a new submit cannot select a previous checkpoint identity.",
+        ));
     }
     // ControlNet training (epic 10159) reuses this submit path — same target registry, dataset
     // resolution, plan build, and output/guardrail plumbing — but produces a control branch, not a
@@ -2799,8 +2858,10 @@ async fn enqueue_training_submission(
         requested_gpu,
         training_job_type,
     } = prepared;
+    let portable_binding =
+        portable_training_binding(&state, &training_job_type, &job_payload, &requested_gpu).await?;
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.create_job_with_id(
+        store.create_job_with_id_and_portable_binding(
             job_id,
             CreateJob {
                 job_type: training_job_type,
@@ -2813,6 +2874,7 @@ async fn enqueue_training_submission(
                 attempts: 1,
                 initial_status: None,
             },
+            portable_binding.as_ref(),
         )
     })
     .await?;
@@ -3093,6 +3155,18 @@ pub(crate) fn resolve_base_model_path(target: &TrainingTarget, data_dir: &FsPath
                 }
             }
             if let Some(snapshot) = snapshots.into_iter().next() {
+                // Iris depth and restoration are separate exports in one pinned repository.
+                // Bind only the task directory the trainer loads, even when both are installed.
+                if target.kernel == "iris_train" {
+                    let task_dir = match target.base_model.as_str() {
+                        "iris_3b_depth" => Some("depth"),
+                        "iris_3b_restore" => Some("upscaler"),
+                        _ => None,
+                    };
+                    if let Some(task_dir) = task_dir {
+                        return snapshot.join(task_dir).display().to_string();
+                    }
+                }
                 return tiered_turnkey_train_dir(snapshot, target)
                     .display()
                     .to_string();

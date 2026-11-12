@@ -1,6 +1,5 @@
 #[cfg(target_os = "macos")]
 use super::artifact_resolution::is_anima_model;
-use super::artifact_resolution::STANDARD_TIER_MODELS;
 use super::ImageRequest;
 use crate::Path;
 use crate::PathBuf;
@@ -15,19 +14,20 @@ use crate::Value;
 // a TE that sc-8711/sc-9362 deliberately kept dense.
 
 /// Whether a request's model ships the standard SceneWorks quant-matrix turnkey layout (sc-8508):
-/// true when it is registered in [`STANDARD_TIER_MODELS`] OR its manifest entry declares
-/// `mlx.standardTierLayout: true`. The manifest flag is the first-class, catalog-driven form of the
-/// hardcoded registry (epic 8506) — a new quant-matrix model can opt in from the manifest alone,
-/// while the registry keeps every already-wired model working with zero manifest change.
+/// true when the compiled product declares `mlx.standardTierLayout: true`. Imported requests
+/// retain their own manifest flag because they have no builtin spec.
 #[cfg(native_lane)]
 pub(super) fn uses_standard_tier_layout(request: &ImageRequest) -> bool {
-    STANDARD_TIER_MODELS.contains(&request.model.as_str())
-        || request
-            .model_manifest_entry
-            .get("mlx")
-            .and_then(|mlx| mlx.get("standardTierLayout"))
+    let flag = |mlx: Option<&Value>| {
+        mlx.and_then(|mlx| mlx.get("standardTierLayout"))
             .and_then(Value::as_bool)
             .unwrap_or(false)
+    };
+    if let Some(spec) = sceneworks_core::registry::builtin_model_spec(&request.model) {
+        flag(spec.product.fields.get("mlx"))
+    } else {
+        flag(request.model_manifest_entry.get("mlx"))
+    }
 }
 
 /// Whether a standard-tier request keeps a DENSE bf16 text encoder in every tier (sc-8508): true iff its
@@ -550,6 +550,20 @@ pub(super) fn qwen_control_tier_subdir(
     request: &ImageRequest,
     snapshot: Option<&Path>,
 ) -> &'static str {
+    // Portable dispatch writes this private field only after verifying the route binding.
+    // It fixes the source tier across hosts instead of clamping to this worker's cache.
+    if let Some(tier) = request
+        .advanced
+        .get("__portableBoundTier")
+        .and_then(Value::as_str)
+    {
+        return match tier {
+            "q4" => "q4",
+            "q8" => "q8",
+            "bf16" => "bf16",
+            _ => "q8", // the verified guard rejects any other tier before dispatch
+        };
+    }
     request.quant_bits().map_or_else(
         || qwen_control_installed_default_tier(snapshot),
         |bits| crate::payload::tier_for_bits(Some(bits), "q8"),
@@ -635,6 +649,11 @@ mod control_helper_tests {
         let request = ImageRequest::from_payload(payload.as_object().unwrap());
         assert_eq!(qwen_control_tier_subdir(&request, Some(dir.path())), "q4");
         assert_eq!(qwen_control_tier_subdir(&request, None), "q8");
+        let mut bound = request.clone();
+        bound
+            .advanced
+            .insert("__portableBoundTier".into(), json!("q8"));
+        assert_eq!(qwen_control_tier_subdir(&bound, Some(dir.path())), "q8");
         for (bits, expected) in [(0, "bf16"), (4, "q4"), (8, "q8")] {
             let mut request = request.clone();
             request.advanced.insert("mlxQuantize".into(), json!(bits));

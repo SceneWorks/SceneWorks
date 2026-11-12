@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import atexit
 import copy
+import hashlib
 import json
 import os
 import re
 import sqlite3
 import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import lru_cache
@@ -91,6 +93,95 @@ def write_updated_snapshots() -> None:
 atexit.register(write_updated_snapshots)
 
 
+# The portable binding contract version this harness's fake workers claim with (SW-7030).
+PORTABLE_MODEL_BINDING_VERSION = 2
+
+
+def portable_claim_envelope(worker_id: str, capabilities: list[str]) -> dict:
+    """A production worker's registration + claim envelope for the harness fakes.
+
+    A worker registration without `platform` can never match a frozen route's
+    platform, and a claim without the portable route envelope is refused every
+    bound job (`{"job": null}`). The fake harness workers therefore advertise
+    the same `platform` + route envelope a real worker sends — the established
+    pattern in apps/rust-api/src/tests/support.rs (`TestPortableRoute`) and the
+    e2e smoke harness.
+
+    The route is pinned to `candle:linux` regardless of the host OS: the frozen
+    route set is a property of the model manifests (their per-download
+    platforms), never of the API host, and the platform check compares the
+    CLAIM against the worker's REGISTERED platform row — so a fake registered as
+    a linux candle worker claims the candle:linux route identically on a macOS
+    dev box and a Linux CI runner. That keeps the recorded snapshots
+    OS-independent (`gpuId: 0`, `platform: linux` everywhere), which a
+    host-derived backend could not.
+    """
+    backend = "candle"
+    platform = "linux"
+    gpu_id = "0"
+    # The `candle` marker capability is the seam `worker_is_candle` keys off.
+    advertise = list(capabilities) + [backend]
+    registration = {
+        "workerId": worker_id,
+        "gpuId": gpu_id,
+        "gpuName": "Fixture GPU",
+        "platform": platform,
+        "capabilities": advertise,
+        "loadedModels": [],
+    }
+    claim = {
+        "workerId": worker_id,
+        "portableModelBindingVersion": PORTABLE_MODEL_BINDING_VERSION,
+        "portableBackend": backend,
+        "portablePlatform": platform,
+    }
+    return {"registration": registration, "claim": claim}
+
+
+def portable_lora_source_claim(lora_id: str, path: Path) -> dict:
+    """The `registered_digest:lora:...` source claim a production worker derives from its
+    own inventory of the same LoRA bytes (SW-7030), so the harness's fake workers advertise
+    the exact local source closure a character's bound LoRA entry requires at enqueue.
+    Path-free: keyed by the logical lora id + the sha256 file ledger — the same envelope
+    the Rust-API harness fixture (`advertise_fixture_lora_sources`) builds, and the same
+    shape the e2e smoke harness derives. `sourceId` embeds sha256(("lora", id, None)) and
+    the ledger; admission recomputes both from the frozen member, so any drift is a 409
+    rather than a silent mismatch."""
+    payload = path.read_bytes()
+    sha256 = "sha256:" + hashlib.sha256(payload).hexdigest()
+    files = [
+        {
+            "relativePath": path.name,
+            "sizeBytes": path.stat().st_size,
+            "sha256": sha256,
+        }
+    ]
+    # Mirror portable_file_ledger_sha256 (crates/sceneworks-core/...): sha256 over each
+    # file's (relative path, NUL, size, NUL, sha256, newline) run.
+    ledger = "sha256:" + hashlib.sha256(
+        path.name.encode()
+        + b"\x00"
+        + str(path.stat().st_size).encode()
+        + b"\x00"
+        + sha256.encode()
+        + b"\n"
+    ).hexdigest()
+    identity = json.dumps(["lora", lora_id, None], separators=(",", ":")).encode()
+    source_id = (
+        "registered_digest:lora:"
+        + hashlib.sha256(identity).hexdigest()
+        + ":"
+        + ledger
+    )
+    return {
+        "schemaVersion": PORTABLE_MODEL_BINDING_VERSION,
+        "sourceId": source_id,
+        "provenance": {"kind": "operator_override"},
+        "files": files,
+        "closureSha256": ledger,
+    }
+
+
 def write_contract_manifests(config_dir: Path) -> None:
     manifest_dir = config_dir / "manifests"
     manifest_dir.mkdir(parents=True)
@@ -129,18 +220,16 @@ def write_contract_manifests(config_dir: Path) -> None:
               "ui": { "label": "Base" }
             },
             {
+              // A REGISTERED builtin id: the compiled registry's row (with its typed
+              // evidence) replaces whatever this file says for it (SW-7031), so the row
+              // only places z_image_turbo in this catalog. It is the routed model the job
+              // contracts need; its fields here are deliberately minimal because none of
+              // them reach a response.
               "id": "z_image_turbo",
-              "name": "Z-Image Turbo",
+              "name": "Z-Image-Turbo",
               "family": "z-image",
               "type": "image",
-              "adapter": "z_image_diffusers",
-              "capabilities": ["text_to_image", "edit_image", "character_image"],
-              "downloads": [],
-              "paths": {},
-              "defaults": { "width": 1024, "height": 1024 },
-              "limits": {},
-              "loraCompatibility": { "families": ["z-image"] },
-              "ui": { "label": "Z-Image" }
+              "adapter": "z_image_diffusers"
             }
           ]
         }
@@ -492,7 +581,255 @@ def test_cached_snapshots_are_isolated_between_callers():
     assert "mutation-probe" not in snapshots()
 
 
-def assert_snapshot(label: str, normalized_value: Any) -> None:
+# Registered builtins (SW-7031): a registered id's row comes from the compiled registry, with
+# the measured memory facts of config/manifests/registry/evidence.json projected into it. Those
+# facts change whenever evidence is re-measured, so no snapshot may freeze them. They are checked
+# against the store (same fields, same values, nothing extra) and then replaced by a marker;
+# every product field stays frozen. A registered row is frozen once, in the model manifest
+# response and the unredacted worker claim; every other job snapshot folds its embedded copy to
+# a marker after asserting it equals that catalog row modulo the public job redaction.
+REGISTRY_DIR = ROOT / "config" / "manifests" / "registry"
+REGISTRY_EVIDENCE_MARKER = "<registry-evidence>"
+MANIFEST_CARRIER_RE = re.compile(r"ManifestEntr(?:y|ies)$")
+
+
+@lru_cache(maxsize=None)
+def registry_evidence() -> dict[str, Any]:
+    return json.loads((REGISTRY_DIR / "evidence.json").read_text(encoding="utf-8"))
+
+
+@lru_cache(maxsize=None)
+def registered_builtin_products() -> dict[str, Any]:
+    specs = json.loads((REGISTRY_DIR / "specs.json").read_text(encoding="utf-8"))
+    return {model_id: spec["product"] for model_id, spec in specs.items()}
+
+
+@lru_cache(maxsize=None)
+def registry_evidence_fields() -> dict[str, frozenset[str]]:
+    """Every field name the evidence store projects, per location, read from the store itself
+    so a newly measured field is covered without editing this harness. An unknown location
+    raises: the registry's projection would need a matching rule here."""
+    fields: dict[str, set[str]] = {
+        "model": set(), "mlx": set(), "candle": set(), "footprint": set(),
+        "depth.admission": set(), "depth.admission.lane": set(),
+    }
+    for record in registry_evidence().values():
+        for location, values in record.items():
+            if location == "downloads":
+                for download in values:
+                    fields["footprint"].update(download["footprint"])
+            elif location == "depth":
+                # SW-7032: a depth job's measured admission facts (`depth.admission`).
+                assert set(values) == {"admission"}, f"unknown depth evidence {sorted(values)!r}"
+                for name, value in values["admission"].items():
+                    if isinstance(value, dict):
+                        fields["depth.admission.lane"].update(value)
+                    else:
+                        fields["depth.admission"].add(name)
+            else:
+                fields[location].update(values)
+    return {location: frozenset(names) for location, names in fields.items()}
+
+
+def _mask_evidence_fields(target: dict, measured: dict, names: frozenset[str], where: str) -> None:
+    present = {name: target[name] for name in names if name in target}
+    assert present == measured, (
+        f"{where}: projected memory evidence {present!r} does not match the evidence store {measured!r}"
+    )
+    for name in measured:
+        target[name] = REGISTRY_EVIDENCE_MARKER
+
+
+def mask_registry_evidence(entry: dict) -> None:
+    """Replace a model row's evidence-projected values with a marker, in place, after asserting
+    the row carries exactly the store's fields and values (none at all for an id the store does
+    not measure). Also covers a catalog row's `variants[].footprint`, a copy of its download's."""
+    model_id = entry.get("id")
+    record = registry_evidence().get(model_id, {})
+    names = registry_evidence_fields()
+    _mask_evidence_fields(entry, record.get("model", {}), names["model"], f"{model_id}")
+    for backend in ("mlx", "candle"):
+        block = entry.get(backend)
+        if isinstance(block, dict):
+            _mask_evidence_fields(block, record.get(backend, {}), names[backend], f"{model_id}.{backend}")
+        else:
+            assert backend not in record, f"{model_id}: evidence for absent {backend} block"
+    admission = (entry.get("depth") or {}).get("admission")
+    measured_admission = record.get("depth", {}).get("admission", {})
+    if isinstance(admission, dict):
+        _mask_evidence_fields(
+            admission,
+            {k: v for k, v in measured_admission.items() if not isinstance(v, dict)},
+            names["depth.admission"],
+            f"{model_id}.depth.admission",
+        )
+        for backend in ("mlx", "candle"):
+            lane = admission.get(backend)
+            if isinstance(lane, dict):
+                _mask_evidence_fields(
+                    lane, measured_admission.get(backend, {}), names["depth.admission.lane"],
+                    f"{model_id}.depth.admission.{backend}",
+                )
+            else:
+                assert backend not in measured_admission, f"{model_id}: depth evidence for absent {backend} lane"
+    else:
+        assert not measured_admission, f"{model_id}: depth evidence for absent depth.admission"
+    mask_memory_guidance(entry)
+    downloads = entry.get("downloads") or []
+    measured_by_index: dict[int, dict] = {}
+    for measured in record.get("downloads", []):
+        identity = {key: value for key, value in measured.items() if key != "footprint"}
+        matches = [
+            index
+            for index, download in enumerate(downloads)
+            if all(download.get(key) == value for key, value in identity.items())
+        ]
+        assert len(matches) == 1, f"{model_id}: evidence download {identity!r} matched {matches!r}"
+        measured_by_index[matches[0]] = measured["footprint"]
+    for variant in entry.get("variants") or []:
+        footprint = variant.get("footprint")
+        if footprint is None:
+            continue
+        owners = [index for index, download in enumerate(downloads) if download.get("variant") == variant.get("variant")]
+        assert len(owners) == 1, f"{model_id}: variant {variant.get('variant')!r} has owners {owners!r}"
+        assert footprint == downloads[owners[0]].get("footprint"), f"{model_id}: variant footprint drifted from its download"
+        _mask_evidence_fields(
+            footprint, measured_by_index.get(owners[0], {}), names["footprint"], f"{model_id}.variants"
+        )
+    for index, download in enumerate(downloads):
+        footprint = download.get("footprint")
+        if isinstance(footprint, dict):
+            _mask_evidence_fields(
+                footprint, measured_by_index.get(index, {}), names["footprint"], f"{model_id}.downloads[{index}]"
+            )
+        else:
+            assert index not in measured_by_index, f"{model_id}: measured download {index} has no footprint"
+
+
+MEMORY_GUIDANCE_LANE_KEYS = frozenset(
+    {"suggestion", "tiers", "blanketGb", "entryFloorGb", "uncalibrated", "resolutionMinHostGb"}
+)
+
+
+def mask_memory_guidance(entry: dict) -> None:
+    """A catalog row's `memoryGuidance` (SW-7032) is computed from the row's evidence-projected
+    memory facts and the API's tier-suggestion policy, so its values move whenever evidence is
+    re-measured. Freeze its lane shape (both lanes, each lane's fields) and replace the values with
+    a marker; the values are pinned by the Rust guidance tests and the native catalog fixture."""
+    guidance = entry.get("memoryGuidance")
+    if guidance is None:
+        return
+    assert set(guidance) == {"mlx", "candle"}, f"{entry.get('id')}: memoryGuidance lanes {sorted(guidance)!r}"
+    masked = {}
+    for lane, fields in guidance.items():
+        extra = set(fields) - MEMORY_GUIDANCE_LANE_KEYS - ({"endpointEstimate"} if lane == "candle" else set())
+        assert MEMORY_GUIDANCE_LANE_KEYS <= set(fields) and not extra, (
+            f"{entry.get('id')}.memoryGuidance.{lane}: fields {sorted(fields)!r}"
+        )
+        masked[lane] = {field: REGISTRY_EVIDENCE_MARKER for field in sorted(fields)}
+    entry["memoryGuidance"] = masked
+
+
+def _strip_public_locators(value: Any) -> Any:
+    """The public job redaction as it applies to a catalog row: `paths` blocks and `path`
+    strings never reach a public job payload (apps/rust-api/src/job_redaction.rs)."""
+    if isinstance(value, dict):
+        return {
+            key: _strip_public_locators(item)
+            for key, item in value.items()
+            if key != "paths" and not (key.lower() == "path" and isinstance(item, str))
+        }
+    if isinstance(value, list):
+        return [_strip_public_locators(item) for item in value]
+    return value
+
+
+def fold_registered_entries(value: Any, catalog: dict[str, dict], *, freeze: bool) -> Any:
+    """Return `value` with every embedded registered-builtin manifest entry checked against
+    the catalog row for its id. `freeze=False` (public job payloads) replaces the entry with a
+    marker after asserting it equals the row modulo the public redaction; `freeze=True` (the
+    unredacted worker claim) keeps it, evidence masked, after asserting it equals the row."""
+    products = registered_builtin_products()
+
+    def fold_entry(entry: Any, where: str) -> Any:
+        if not isinstance(entry, dict) or entry.get("id") not in products:
+            return walk(entry, where)
+        model_id = entry["id"]
+        required = set(products[model_id]) - ({"paths"} if not freeze else set())
+        assert required <= set(entry), f"{where}: product fields {sorted(required - set(entry))} are missing"
+        row = catalog.get(model_id)
+        if row is None:
+            # A runtime-injected entry (an auxiliary detector, a job's own video model) that
+            # this harness's catalog does not list: this snapshot is its only frozen copy.
+            masked = copy.deepcopy(entry)
+            mask_registry_evidence(masked)
+            return masked
+        assert set(entry) <= set(row), f"{where}: keys {sorted(set(entry) - set(row))} are not catalog fields"
+        expected = {key: row[key] for key in entry}
+        if not freeze:
+            expected = _strip_public_locators(expected)
+        diffs = diff_values(expected, entry, where)
+        assert not diffs, f"{where}: embedded {model_id} entry differs from its catalog row:\n" + "\n".join(diffs)
+        if not freeze:
+            return f"<registered-model-entry:{model_id}>"
+        masked = copy.deepcopy(entry)
+        mask_registry_evidence(masked)
+        return masked
+
+    def walk(item: Any, where: str) -> Any:
+        if isinstance(item, dict):
+            folded = {}
+            for key, child in item.items():
+                child_where = f"{where}.{key}"
+                if MANIFEST_CARRIER_RE.search(key) and isinstance(child, list):
+                    folded[key] = [fold_entry(entry, f"{child_where}[{i}]") for i, entry in enumerate(child)]
+                elif MANIFEST_CARRIER_RE.search(key):
+                    folded[key] = fold_entry(child, child_where)
+                else:
+                    folded[key] = walk(child, child_where)
+            return folded
+        if isinstance(item, list):
+            return [walk(child, f"{where}[{i}]") for i, child in enumerate(item)]
+        return item
+
+    return walk(value, "$")
+
+
+def contains_registered_entry(value: Any) -> bool:
+    products = registered_builtin_products()
+    if isinstance(value, dict):
+        for key, child in value.items():
+            entries = child if isinstance(child, list) else [child]
+            if MANIFEST_CARRIER_RE.search(key) and any(
+                isinstance(entry, dict) and entry.get("id") in products for entry in entries
+            ):
+                return True
+            if contains_registered_entry(child):
+                return True
+    elif isinstance(value, list):
+        return any(contains_registered_entry(child) for child in value)
+    return False
+
+
+def normalized_catalog(runtime: ContractRuntime) -> dict[str, dict]:
+    response = runtime.request("GET", "/api/v1/models")
+    assert response.status_code == 200, f"{runtime.name} model catalog failed: {response.body}"
+    rows = normalize_contract(response.body, runtime.roots)
+    return {row["id"]: row for row in rows}
+
+
+def assert_snapshot(
+    label: str,
+    normalized_value: Any,
+    *,
+    runtime: ContractRuntime | None = None,
+    freeze_registered_entries: bool = False,
+) -> None:
+    if contains_registered_entry(normalized_value):
+        assert runtime is not None, f"{label} embeds a registered model entry; pass the runtime it came from"
+        normalized_value = fold_registered_entries(
+            normalized_value, normalized_catalog(runtime), freeze=freeze_registered_entries
+        )
     if UPDATE_SNAPSHOTS:
         UPDATED_SNAPSHOTS[label] = normalized_value
         return
@@ -518,6 +855,7 @@ def assert_response_contract(
     *,
     expected_status: int | None = None,
     snapshot: bool = False,
+    freeze_registered_entries: bool = False,
 ) -> Any:
     assert baseline_response.status_code == candidate_response.status_code, (
         f"{label} status drifted: baseline {baseline_response.status_code}, candidate {candidate_response.status_code}"
@@ -536,7 +874,12 @@ def assert_response_contract(
         candidate_response.body,
     )
     if snapshot:
-        assert_snapshot(label, normalized)
+        assert_snapshot(
+            label,
+            normalized,
+            runtime=baseline_runtime,
+            freeze_registered_entries=freeze_registered_entries,
+        )
     return normalized
 
 def db_counts(project_path: Path) -> dict[str, int]:
@@ -763,7 +1106,7 @@ def attach_character_lora_pair(
     character_ids: list[str],
     *,
     snapshot: bool = True,
-) -> tuple[list[str], Any]:
+) -> tuple[list[str], Any, list[Path]]:
     responses = [
         runtime.request(
             "POST",
@@ -787,13 +1130,15 @@ def attach_character_lora_pair(
         snapshot=snapshot,
     )
     lora_link_ids = [response.body["loras"][0]["id"] for response in responses]
+    copied_paths = []
     for runtime, response in zip(runtimes, responses):
         copied_path = runtime.project_path / response.body["loras"][0]["projectPath"]
         assert copied_path.exists(), f"{runtime.name} did not copy character LoRA to {copied_path}"
         assert copied_path.read_bytes() == safetensors_bytes()
+        copied_paths.append(copied_path)
     copied_rel_paths = [response.body["loras"][0]["projectPath"] for response in responses]
     assert_runtime_consistency("character lora copied project path", baseline_runtime, candidate_runtime, copied_rel_paths[0], copied_rel_paths[1])
-    return lora_link_ids, normalized
+    return lora_link_ids, normalized, copied_paths
 
 
 def read_sse_message(lines: Any) -> dict[str, Any]:
@@ -880,6 +1225,26 @@ def test_system_manifest_and_http_contracts(contract_runtimes):
                         "label": "Model encoder (default)",
                     }
                 ]
+            # z_image_turbo is a registered builtin, so its row is the registry's, which
+            # declares an `mlx` block. The catalog probes MLX install/conversion state for
+            # such a row only on macOS (off macOS only for candle-native converters,
+            # sc-20529), so these keys are host facts, not lane contract: assert the host
+            # split, then remove exactly them before comparing with the Linux snapshot.
+            mlx_host_state = {
+                key: turbo.pop(key)
+                for key in ("mlxConversionState", "mlxConvertedPath", "mlxInstallState")
+                if key in turbo
+            }
+            if sys.platform == "darwin":
+                assert mlx_host_state == {
+                    "mlxConversionState": "ready",
+                    "mlxConvertedPath": None,
+                    "mlxInstallState": "missing",
+                }, mlx_host_state
+            else:
+                assert mlx_host_state == {}, mlx_host_state
+            for model in normalized:
+                mask_registry_evidence(model)
             assert_snapshot(label, normalized)
 
     cors_headers = {
@@ -1245,7 +1610,7 @@ def test_character_look_and_lora_contracts(contract_runtimes):
         snapshot=True,
     )
 
-    lora_link_ids, _ = attach_character_lora_pair(
+    lora_link_ids, _, _ = attach_character_lora_pair(
         contract_runtimes,
         baseline_runtime,
         candidate_runtime,
@@ -1322,7 +1687,26 @@ def test_character_test_job_contracts(contract_runtimes):
     character_ids, _ = create_character_pair(contract_runtimes, baseline_runtime, candidate_runtime)
     attach_character_reference_pair(contract_runtimes, baseline_runtime, candidate_runtime, character_ids, snapshot=False)
     look_ids, _ = create_character_look_pair(contract_runtimes, baseline_runtime, candidate_runtime, character_ids, snapshot=False)
-    attach_character_lora_pair(contract_runtimes, baseline_runtime, candidate_runtime, character_ids, snapshot=False)
+    _, _, copied_lora_paths = attach_character_lora_pair(contract_runtimes, baseline_runtime, candidate_runtime, character_ids, snapshot=False)
+
+    # SW-7030: the character's bound LoRA entry becomes a Digest member of the frozen
+    # route, and admission refuses an image job whose local source closure no
+    # authenticated worker advertises. Register the harness's fake worker with the
+    # same portable envelope a production worker sends — platform + route on the
+    # claim envelope, plus the `registered_digest:lora:...` claim over the copied
+    # adapter bytes — so the test job enqueues exactly as it would against a live
+    # worker inventory.
+    for runtime, character_id, copied_lora_path in zip(contract_runtimes, character_ids, copied_lora_paths):
+        character = runtime.request(
+            "GET",
+            f"/api/v1/projects/{runtime.project_id}/characters/{character_id}",
+        ).body
+        lora_link_id = character["loras"][0]["id"]
+        claim = portable_lora_source_claim(lora_link_id, copied_lora_path)
+        envelope = portable_claim_envelope("character-test-worker", ["image_generate"])
+        envelope["registration"]["portableSourceClaims"] = [claim]
+        registration = runtime.request("POST", "/api/v1/workers/register", json_payload=envelope["registration"])
+        assert registration.status_code == 200, f"{runtime.name} worker registration failed: {registration.body}"
 
     test_jobs = []
     event_sets = []
@@ -1355,7 +1739,7 @@ def test_character_test_job_contracts(contract_runtimes):
         event_sets[0],
         event_sets[1],
     )
-    assert_snapshot("character test job SSE events", normalized_events)
+    assert_snapshot("character test job SSE events", normalized_events, runtime=baseline_runtime)
 
 
 def test_timeline_and_worker_job_creation_contracts(contract_runtimes):
@@ -1618,7 +2002,11 @@ def test_model_lora_and_image_job_contracts(contract_runtimes):
                 "projectId": runtime.project_id,
                 "projectName": "Parity Project",
                 "prompt": "mist over hills",
-                "model": "base-model",
+                # SW-7030: `base-model` is an unrouted synthetic id (neither MLX- nor
+                # candle-routed in the routing tables), so admission now fails it closed
+                # (400 "No native route..."); z_image_turbo is the routed registered
+                # builtin, so the job carries the registry's row and its pinned downloads.
+                "model": "z_image_turbo",
                 "seed": 101,
                 "requestedGpu": "auto",
             },
@@ -1634,19 +2022,14 @@ def test_job_state_transition_contracts(contract_runtimes):
     baseline_runtime, candidate_runtime = contract_runtimes
     create_projects(contract_runtimes, baseline_runtime, candidate_runtime)
 
+    # SW-7030: the fake worker uses the production portable route envelope (platform +
+    # binding-version + backend/platform on the claim) exactly as a real worker does —
+    # a plain claim is refused every bound job. The registration/claim pair is built by
+    # `portable_claim_envelope`, which picks the backend from the host OS like a real worker.
+    envelopes = [portable_claim_envelope("parity-worker", ["image_generate"]) for _ in contract_runtimes]
     workers = [
-        runtime.request(
-            "POST",
-            "/api/v1/workers/register",
-            json_payload={
-                "workerId": "parity-worker",
-                "gpuId": "gpu-0",
-                "gpuName": "Fixture GPU",
-                "capabilities": ["image_generate"],
-                "loadedModels": ["Tongyi-MAI/Z-Image-Turbo"],
-            },
-        )
-        for runtime in contract_runtimes
+        runtime.request("POST", "/api/v1/workers/register", json_payload=envelope["registration"])
+        for runtime, envelope in zip(contract_runtimes, envelopes)
     ]
     assert_response_contract("worker registration response", baseline_runtime, candidate_runtime, workers[0], workers[1], expected_status=200, snapshot=True)
 
@@ -1658,7 +2041,7 @@ def test_job_state_transition_contracts(contract_runtimes):
                 "projectId": runtime.project_id,
                 "projectName": "Parity Project",
                 "prompt": "mist over hills",
-                "model": "base-model",
+                "model": "z_image_turbo",
                 "seed": 101,
                 "requestedGpu": "auto",
             },
@@ -1669,8 +2052,21 @@ def test_job_state_transition_contracts(contract_runtimes):
         runtime.job_id = response.body["id"]
     assert_response_contract("transition image job response", baseline_runtime, candidate_runtime, image_jobs[0], image_jobs[1], expected_status=201, snapshot=True)
 
-    claimed_jobs = [runtime.request("POST", "/api/v1/jobs/claim", json_payload={"workerId": "parity-worker"}) for runtime in contract_runtimes]
-    assert_response_contract("job claim response", baseline_runtime, candidate_runtime, claimed_jobs[0], claimed_jobs[1], expected_status=200, snapshot=True)
+    claimed_jobs = [
+        runtime.request("POST", "/api/v1/jobs/claim", json_payload=envelope["claim"])
+        for runtime, envelope in zip(contract_runtimes, envelopes)
+    ]
+    assert_response_contract(
+        "job claim response",
+        baseline_runtime,
+        candidate_runtime,
+        claimed_jobs[0],
+        claimed_jobs[1],
+        expected_status=200,
+        snapshot=True,
+        # The worker-facing claim is the one unredacted copy of the registered entry.
+        freeze_registered_entries=True,
+    )
 
     busy_workers = [
         runtime.request(
@@ -1715,20 +2111,28 @@ def concurrent_claim_result(runtime: ContractRuntime) -> list[Any]:
     # generation job types, whose typed routes resolve a model manifest entry the generic
     # route cannot. image_detail is a real caller of this route (the web batch ops post it)
     # and is GPU-routed, so the two-workers-one-gpu race below is unchanged.
-    runtime.request(
-        "POST",
-        "/api/v1/workers/register",
-        json_payload={"workerId": "claim-worker-a", "gpuId": "gpu-0", "capabilities": ["image_detail"], "loadedModels": []},
-    )
-    runtime.request(
-        "POST",
-        "/api/v1/workers/register",
-        json_payload={"workerId": "claim-worker-b", "gpuId": "gpu-0", "capabilities": ["image_detail"], "loadedModels": []},
-    )
+    # SW-7030: both workers use the production portable route envelope (`platform` on
+    # registration, binding-version + backend/platform on the claim) so a frozen binding
+    # is actually claimable by one of them, exactly as two real workers racing would be.
+    envelopes = {
+        worker_id: portable_claim_envelope(worker_id, ["image_detail"])
+        for worker_id in ["claim-worker-a", "claim-worker-b"]
+    }
+    for worker_id in ["claim-worker-a", "claim-worker-b"]:
+        runtime.request(
+            "POST",
+            "/api/v1/workers/register",
+            json_payload=envelopes[worker_id]["registration"],
+        )
     runtime.request("POST", "/api/v1/jobs", json_payload={"type": "image_detail", "payload": {}, "requestedGpu": "auto"})
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [
-            executor.submit(runtime.request, "POST", "/api/v1/jobs/claim", json_payload={"workerId": worker_id})
+            executor.submit(
+                runtime.request,
+                "POST",
+                "/api/v1/jobs/claim",
+                json_payload=envelopes[worker_id]["claim"],
+            )
             for worker_id in ["claim-worker-a", "claim-worker-b"]
         ]
     responses = [future.result() for future in futures]
@@ -1742,7 +2146,12 @@ def test_concurrent_claim_contracts(contract_runtimes):
     baseline_runtime, candidate_runtime = contract_runtimes
     claims = [concurrent_claim_result(runtime) for runtime in contract_runtimes]
     normalized_claims = assert_runtime_consistency("concurrent claim response set", baseline_runtime, candidate_runtime, claims[0], claims[1])
-    assert_snapshot("concurrent claim response set", normalized_claims)
+    assert_snapshot(
+        "concurrent claim response set",
+        normalized_claims,
+        runtime=baseline_runtime,
+        freeze_registered_entries=True,
+    )
     for runtime_claims in claims:
         assert sum(1 for claim in runtime_claims if claim["job"] is not None) == 1
         assert sum(1 for claim in runtime_claims if claim["job"] is None) == 1

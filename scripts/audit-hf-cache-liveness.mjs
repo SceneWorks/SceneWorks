@@ -293,6 +293,16 @@ export async function loadManifests(dir = path.join(ROOT, "config/manifests")) {
   for (const name of (await readdir(dir)).sort()) {
     if (name.endsWith(".jsonc")) manifests[name] = await readJsonc(path.join(dir, name));
   }
+  // The typed model registry (SW-7031/SW-7032) carries repo declarations of its own —
+  // `artifactRepository` and per-download `repo` rows moved into `registry/specs.json`
+  // and `registry/evidence.json`. A liveness source the scanner cannot see is a repo
+  // nobody can account for, so the registry joins the manifest set under `registry/…` keys.
+  const registryDir = path.join(dir, "registry");
+  for (const name of (await readdir(registryDir).catch(() => [])).sort()) {
+    if (name.endsWith(".json")) {
+      manifests[`registry/${name}`] = await readJsonc(path.join(registryDir, name));
+    }
+  }
   return manifests;
 }
 

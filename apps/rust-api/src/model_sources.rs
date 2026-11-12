@@ -69,7 +69,10 @@ pub(crate) fn canonical_utility_model_carrier(job_type: &JobType) -> bool {
 /// DATA TABLE: job types that always load a fixed utility model, keyed on the job type and the
 /// request's own data (engine/flags) — never on a model name. Referenced ids are ordinary catalog
 /// manifest entries; adding a model or utility changes manifest data, not this seam.
-fn fixed_runtime_model_ids(job_type: &JobType, payload: &JsonObject) -> Vec<&'static str> {
+pub(crate) fn fixed_runtime_model_ids(
+    job_type: &JobType,
+    payload: &JsonObject,
+) -> Vec<&'static str> {
     let payload_flag = |key: &str| payload.get(key).and_then(Value::as_bool).unwrap_or(false);
     // A trained Iris task model never loads the release task export, so the release entry is never
     // attached for it — a disconnected library holding the release copy must not refuse a run that
@@ -197,10 +200,97 @@ fn fixed_runtime_model_ids(job_type: &JobType, payload: &JsonObject) -> Vec<&'st
     }
 }
 
+/// Iris task training loads the task export named by the server-resolved training target.
+/// Its catalog source rides in an auxiliary carrier because the plan owns the primary model.
+pub(crate) fn iris_training_task_source_id<'a>(
+    job_type: &JobType,
+    payload: &'a JsonObject,
+) -> Option<&'a str> {
+    if *job_type != JobType::LoraTrain {
+        return None;
+    }
+    let target = payload.get("plan")?.get("target")?;
+    if target.get("kernel")?.as_str()? != "iris_train" {
+        return None;
+    }
+    let base_model = target.get("baseModel")?.as_str()?;
+    (payload.get("baseModel")?.as_str()? == base_model).then_some(base_model)
+}
+
+/// A trained Iris task export is selected by its request field, not by a catalog route for the
+/// release task model. The caller validates its registered task identity before admission.
+pub(crate) fn trained_iris_task_source<'a>(
+    job_type: &JobType,
+    payload: &'a JsonObject,
+) -> Option<(&'a str, &'static str, &'static str)> {
+    let (selected, task, engine_model) = match job_type {
+        JobType::ImageDepth => (
+            payload.get("irisModel")?.as_str()?,
+            "depth",
+            sceneworks_core::depth_map::DEPTH_MODEL_ID,
+        ),
+        JobType::ImageUpscale
+            if payload
+                .get("engine")
+                .and_then(Value::as_str)
+                .is_some_and(sceneworks_core::image_restoration::is_iris_engine) =>
+        {
+            (
+                payload.get("irisModel")?.as_str()?,
+                "restoration",
+                sceneworks_core::image_restoration::IRIS_RESTORE_MODEL_ID,
+            )
+        }
+        JobType::ImageGenerate | JobType::ImageEdit => {
+            let upscale = payload.get("upscale")?.as_object()?;
+            if upscale.get("enabled").and_then(Value::as_bool) != Some(true)
+                || !upscale
+                    .get("engine")
+                    .and_then(Value::as_str)
+                    .is_some_and(sceneworks_core::image_restoration::is_iris_engine)
+            {
+                return None;
+            }
+            (
+                upscale.get("irisModel")?.as_str()?,
+                "restoration",
+                sceneworks_core::image_restoration::IRIS_RESTORE_MODEL_ID,
+            )
+        }
+        _ => return None,
+    };
+    let selected = selected.trim();
+    (!selected.is_empty() && selected != engine_model).then_some((selected, task, engine_model))
+}
+
 fn payload_has_model_entry(payload: &JsonObject, model_id: &str) -> bool {
     payload_model_entries(payload)
         .into_iter()
         .any(|entry| entry.get("id").and_then(Value::as_str) == Some(model_id))
+}
+
+fn discard_client_fixed_source_carriers(payload: &mut JsonObject, fixed_ids: &[&str]) {
+    for key in ["modelManifestEntry", "baseModelManifestEntry"] {
+        if payload
+            .get(key)
+            .and_then(|entry| entry.get("id"))
+            .and_then(Value::as_str)
+            .is_some_and(|id| fixed_ids.contains(&id))
+        {
+            payload.remove(key);
+        }
+    }
+    if let Some(entries) = payload
+        .get_mut("modelManifestEntries")
+        .and_then(Value::as_array_mut)
+    {
+        entries.retain(|entry| {
+            !entry
+                .get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| fixed_ids.contains(&id))
+        });
+    }
 }
 
 fn payload_model_entries(payload: &JsonObject) -> Vec<&Value> {
@@ -263,22 +353,14 @@ pub(crate) async fn ensure_runtime_model_sources(
             .filter(|value| !value.is_empty())
             .ok_or_else(|| ApiError::bad_request("model_convert requires sourceRepo"))?
             .to_owned();
-        // The conversion's source repository, not its output model id, is the immutable runtime
-        // input. A cataloged repo carries its full manifest entry; an uncataloged one (user
-        // conversions of arbitrary repos are supported) carries a minimal declarative entry built
-        // from the request's own data — its install evidence is then whatever receipts the repo
-        // actually has, so a disconnect is still typed while a never-downloaded repo stays on the
-        // established convert/download path.
-        let entry = match resolve_model_manifest_entry_by_repo(state, &repository).await {
-            Ok(entry) => entry,
-            Err(_) => json!({
-                "id": format!("model_convert:{repository}"),
-                "downloads": [{ "provider": "huggingface", "repo": repository }],
-            }),
-        };
+        // Conversion identities are model ids: multiple variants can share a repository while
+        // selecting different checkpoint files. Resolve the exact registered row and reject a
+        // mismatched request before freezing its source closure. Arbitrary-repository conversions
+        // retain their synthetic entry and established download path.
+        let entry = conversion_source_entry(state, &repository, payload).await?;
         payload.remove("modelManifestEntry");
         payload.insert("modelManifestEntries".to_owned(), json!([entry]));
-        return preflight_payload_model_sources(state, payload).await;
+        return preflight_payload_model_sources(state, job_type, payload).await;
     }
 
     let canonical_primary = canonical_utility_model_carrier(job_type);
@@ -293,6 +375,18 @@ pub(crate) async fn ensure_runtime_model_sources(
         }
     }
     let fixed_ids = fixed_runtime_model_ids(job_type, payload);
+    // Fixed runtime sources belong to the server's catalog. A request may carry a same-id
+    // manifest from an older client, but its source metadata must never replace that catalog row.
+    let task_source = iris_training_task_source_id(job_type, payload).map(str::to_owned);
+    let trained_iris_source =
+        trained_iris_task_source(job_type, payload).map(|(id, _, _)| id.to_owned());
+    let selected_source_ids = fixed_ids
+        .iter()
+        .copied()
+        .chain(task_source.as_deref())
+        .chain(trained_iris_source.as_deref())
+        .collect::<Vec<_>>();
+    discard_client_fixed_source_carriers(payload, &selected_source_ids);
     let primary_id = if canonical_primary {
         fixed_ids.first().map(|id| (*id).to_owned()).or_else(|| {
             payload_reference_spec(job_type)
@@ -311,6 +405,7 @@ pub(crate) async fn ensure_runtime_model_sources(
         None
     };
     let mut ids = fixed_ids.into_iter().map(str::to_owned).collect::<Vec<_>>();
+    ids.extend(trained_iris_source);
     let mut repositories = Vec::new();
     let has_primary_carrier = payload.contains_key("modelManifestEntry");
     for reference in payload_reference_spec(job_type) {
@@ -327,7 +422,18 @@ pub(crate) async fn ensure_runtime_model_sources(
             continue;
         };
         if is_repository {
-            repositories.push(value.to_owned());
+            if *job_type == JobType::TrainingCaption
+                && key == "modelNameOrPath"
+                && (!looks_like_huggingface_repository(value)
+                    || app_managed_utility_path_exists(&state.settings.data_dir, value))
+            {
+                // The captioner may load an app-managed local snapshot. Its executable family
+                // remains the server-owned JoyCaption catalog entry; admission binds the selected
+                // local bytes in place of that entry's publisher primary.
+                ids.push("joycaption_beta_one".to_owned());
+            } else {
+                repositories.push(value.to_owned());
+            }
         } else if !has_primary_carrier {
             ids.push(value.to_owned());
         }
@@ -377,7 +483,130 @@ pub(crate) async fn ensure_runtime_model_sources(
         payload.insert("modelManifestEntry".to_owned(), entry);
     }
 
-    preflight_payload_model_sources(state, payload).await
+    preflight_payload_model_sources(state, job_type, payload).await
+}
+
+async fn conversion_source_entry(
+    state: &AppState,
+    repository: &str,
+    payload: &JsonObject,
+) -> Result<Value, ApiError> {
+    let model_id = payload
+        .get("modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("model_convert requires modelId"))?;
+    let Some(_) = crate::models::find_model_by_id(state, model_id).await? else {
+        return uncataloged_conversion_entry(repository, payload);
+    };
+    let entry = crate::models::resolve_model_manifest_entry(state, model_id).await?;
+    let source_file = payload.get("sourceFile").and_then(Value::as_str);
+    let declared_source_repo = entry
+        .get("mlx")
+        .and_then(|mlx| mlx.get("convertSourceRepo"))
+        .and_then(Value::as_str);
+    let declared_source_file = entry
+        .get("mlx")
+        .and_then(|mlx| mlx.get("convertSourceFile"))
+        .and_then(Value::as_str);
+    let matches_repo = entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|download| {
+            sceneworks_core::model_artifacts::artifact_selection::is_supported_model_download(
+                download,
+            )
+        })
+        .any(|download| {
+            download.get("repo").and_then(Value::as_str) == Some(repository)
+                && source_file.is_none_or(|file| {
+                    download
+                        .get("files")
+                        .and_then(Value::as_array)
+                        .is_none_or(|files| {
+                            files.iter().any(|pattern| {
+                                pattern.as_str().is_some_and(|pattern| {
+                                    glob::Pattern::new(pattern)
+                                        .is_ok_and(|pattern| pattern.matches(file))
+                                })
+                            })
+                        })
+                })
+        });
+    if !matches_repo
+        || declared_source_repo.is_some_and(|declared| declared != repository)
+        || source_file != declared_source_file
+    {
+        return Err(ApiError::model_artifact_conflict(
+            format!("Conversion source for model '{model_id}' does not match its catalog entry."),
+            "model_artifact_incomplete",
+        ));
+    }
+    Ok(entry)
+}
+
+pub(crate) fn looks_like_huggingface_repository(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty() || value.contains('\\') || Path::new(value).is_absolute() {
+        return false;
+    }
+    let mut parts = value.split('/');
+    let (Some(owner), Some(repository), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    !owner.is_empty()
+        && !repository.is_empty()
+        && ![owner, repository]
+            .iter()
+            .any(|part| *part == "." || *part == "..")
+}
+
+pub(crate) fn app_managed_utility_path_exists(data_dir: &Path, selection: &str) -> bool {
+    let path = Path::new(selection);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        data_dir.join(path)
+    };
+    path.is_dir()
+}
+
+/// Arbitrary-repository LTX conversions still load the pinned Gemma bundle after promotion.
+/// Borrow its declaration from the shipped Eros catalog so admission and the worker freeze the
+/// same immutable co-requisite as a cataloged Eros conversion.
+fn uncataloged_conversion_entry(repository: &str, payload: &JsonObject) -> Result<Value, ApiError> {
+    let mut downloads = vec![json!({ "provider": "huggingface", "repo": repository })];
+    if payload.get("converter").and_then(Value::as_str) == Some("ltx_video") {
+        let gemma = sceneworks_core::builtin_manifests::builtin_model_entry("ltx_2_3_eros")
+            .and_then(|entry| entry.get("downloads"))
+            .and_then(Value::as_array)
+            .and_then(|rows| {
+                rows.iter().find(|row| {
+                    row.get("repo").and_then(Value::as_str) == Some("SceneWorks/ltx-2.3-mlx")
+                        && row.get("coRequisite").and_then(Value::as_bool) == Some(true)
+                        && row
+                            .get("files")
+                            .and_then(Value::as_array)
+                            .is_some_and(|files| {
+                                files.iter().any(|file| file.as_str() == Some("gemma/*"))
+                            })
+                        && row
+                            .get("revision")
+                            .and_then(Value::as_str)
+                            .is_some_and(|revision| {
+                                revision.len() == 40
+                                    && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+                            })
+                })
+            })
+            .ok_or_else(|| ApiError::internal("LTX Gemma co-requisite is not pinned"))?;
+        downloads.push(gemma.clone());
+    }
+    Ok(json!({
+        "id": format!("model_convert:{repository}"),
+        "downloads": downloads,
+    }))
 }
 
 /// Resolve the exact catalog model whose supported download names `repository`.
@@ -633,9 +862,17 @@ fn refresh_live_external_availability_blocking(
 /// model's durable install identity proves it lives on an unavailable external library.
 async fn preflight_payload_model_sources(
     state: &AppState,
+    job_type: &JobType,
     payload: &JsonObject,
 ) -> Result<(), ApiError> {
     let requested_variant = requested_runtime_variant(payload);
+    let local_utility_selection = matches!(
+        job_type,
+        JobType::DatasetAnalysis | JobType::TrainingCaption
+    )
+    .then(|| payload.get("modelNameOrPath").and_then(Value::as_str))
+    .flatten()
+    .filter(|selection| !selection.trim().is_empty());
     let entries = payload_model_entries(payload)
         .into_iter()
         .filter(|entry| {
@@ -644,7 +881,31 @@ async fn preflight_payload_model_sources(
                 .and_then(Value::as_array)
                 .is_some_and(|downloads| !downloads.is_empty())
         })
-        .cloned()
+        .map(|entry| {
+            let mut entry = entry.clone();
+            if let Some(selection) = local_utility_selection.filter(|_| {
+                payload.get("modelManifestEntries").and_then(Value::as_array)
+                    .and_then(|entries| entries.first()) == Some(&entry)
+            }) {
+                let publisher_selected = !app_managed_utility_path_exists(&state.settings.data_dir, selection)
+                    && entry.get("downloads").and_then(Value::as_array)
+                    .is_some_and(|downloads| downloads.iter().any(|download| {
+                        !sceneworks_core::model_artifacts::artifact_selection::is_co_requisite_download(download)
+                            && download.get("repo").and_then(Value::as_str) == Some(selection)
+                    }));
+                if !publisher_selected {
+                    if let Some(downloads) = entry.get_mut("downloads").and_then(Value::as_array_mut) {
+                        downloads.retain(sceneworks_core::model_artifacts::artifact_selection::is_co_requisite_download);
+                    }
+                    if let Some(object) = entry.as_object_mut() {
+                        object.remove("modelAvailability");
+                        object.remove("modelResolution");
+                    }
+                }
+            }
+            entry
+        })
+        .filter(|entry| entry.get("downloads").and_then(Value::as_array).is_some_and(|downloads| !downloads.is_empty()))
         .collect::<Vec<_>>();
     if entries.is_empty() {
         return Ok(());
@@ -689,6 +950,7 @@ async fn preflight_payload_model_sources(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sceneworks_core::model_artifacts::artifact_selection::selected_model_artifact_closure;
     use sceneworks_core::model_artifacts::external_library::{
         ExternalArtifactRequirement, ExternalLibraryBindingStore,
     };
@@ -696,6 +958,74 @@ mod tests {
     use std::path::PathBuf;
 
     const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    #[test]
+    fn repository_shaped_local_utility_path_is_still_a_local_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("different/tree")).unwrap();
+        assert!(looks_like_huggingface_repository("different/tree"));
+        assert!(app_managed_utility_path_exists(
+            temp.path(),
+            "different/tree"
+        ));
+        assert!(!app_managed_utility_path_exists(
+            temp.path(),
+            "different/absent"
+        ));
+    }
+
+    #[test]
+    fn fixed_runtime_sources_discard_same_id_client_carriers_before_catalog_resolution() {
+        let mut payload = json!({
+            "modelManifestEntry": {"id": "sam3_person_segment", "downloads": [{"repo": "client/primary"}]},
+            "modelManifestEntries": [
+                {"id": "sam3_person_segment", "downloads": [{"repo": "client/array"}]},
+                {"id": "unrelated_model", "downloads": [{"repo": "client/other"}]}
+            ]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        discard_client_fixed_source_carriers(&mut payload, &["sam3_person_segment"]);
+        assert!(!payload.contains_key("modelManifestEntry"));
+        assert_eq!(
+            payload["modelManifestEntries"],
+            json!([{"id": "unrelated_model", "downloads": [{"repo": "client/other"}]}])
+        );
+    }
+
+    #[test]
+    fn uncataloged_ltx_conversion_carries_pinned_gemma_into_selected_closure() {
+        let payload = json!({ "converter": "ltx_video" })
+            .as_object()
+            .unwrap()
+            .clone();
+        let entry = uncataloged_conversion_entry("owner/custom-eros", &payload).unwrap();
+        let selected = selected_model_artifact_closure(&entry, "macos", None);
+        let downloads = selected["downloads"].as_array().unwrap();
+        assert_eq!(downloads.len(), 2);
+        assert_eq!(downloads[0]["repo"], "owner/custom-eros");
+        assert_eq!(downloads[0]["coRequisite"], Value::Null);
+        assert_eq!(downloads[1]["repo"], "SceneWorks/ltx-2.3-mlx");
+        assert_eq!(downloads[1]["coRequisite"], true);
+        assert_eq!(
+            downloads[1]["revision"],
+            "254989c3ca7ee691187647f350b112c0c448789d"
+        );
+        assert_eq!(downloads[1]["files"], json!(["gemma/*"]));
+
+        let other = json!({ "converter": "flux2_dev_quant" })
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            uncataloged_conversion_entry("owner/custom-eros", &other).unwrap()["downloads"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
 
     /// The catalog READ path must reflect disconnect/reconnect from ONE binding probe and must be
     /// write-free: no binding or validated-closure ledger byte may change on a catalog GET.

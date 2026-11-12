@@ -19,6 +19,7 @@ import addFormats from "ajv-formats";
 import { hashArtifactInventory, listCachedArtifactFiles } from "./hash-artifact-inventory.mjs";
 import { claimKey, patternToRegExp } from "./check-download-patterns.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { projectBuiltinMemoryEvidence, readBuiltinMemoryEvidence } from "./lib/builtin-memory-evidence.mjs";
 
 export const PROFILE_NAME = "epic-20738-candle-cuda-terminal-v1";
 export const PROFILE_PATH = "config/terminal-evidence/epic-20738-cuda.json";
@@ -4195,9 +4196,12 @@ export async function runCampaign(args, options = {}) {
     if (pin !== inference.sha) {
       fail(`SceneWorks pins inference ${pin} but the checked-out inference HEAD is ${inference.sha}`);
     }
-    const manifest = JSON.parse(stripJsoncComments(await readFile(
-      path.join(sceneworks.root, "config/manifests/builtin.models.jsonc"), "utf8",
-    )));
+    const manifest = projectBuiltinMemoryEvidence(
+      JSON.parse(stripJsoncComments(await readFile(
+        path.join(sceneworks.root, "config/manifests/builtin.models.jsonc"), "utf8",
+      ))),
+      await readBuiltinMemoryEvidence(sceneworks.root),
+    );
     validateManifestAuthorities(profile, manifest);
     const downloadEvidencePath = path.join(sceneworks.root, DOWNLOAD_EVIDENCE_PATH);
     const downloadEvidenceBytes = await readFile(downloadEvidencePath, "utf8");
@@ -5279,7 +5283,10 @@ async function main() {
     });
     const profile = validateProfile(loadProfile(profilePath));
     const pin = await liveInferencePin();
-    const manifest = JSON.parse(stripJsoncComments(await readFile("config/manifests/builtin.models.jsonc", "utf8")));
+    const manifest = projectBuiltinMemoryEvidence(
+      JSON.parse(stripJsoncComments(await readFile("config/manifests/builtin.models.jsonc", "utf8"))),
+      await readBuiltinMemoryEvidence(ROOT),
+    );
     validateManifestAuthorities(profile, manifest);
     const downloadEvidenceBytes = await readFile(DOWNLOAD_EVIDENCE_PATH, "utf8");
     const { artifactExpectedFiles: expected } =

@@ -276,6 +276,14 @@ pub(crate) async fn create_character_test_job(
         move |store| store.get_character(&project_id, &character_id)
     })
     .await?;
+    let project_path = project_call(state.clone(), {
+        let project_id = project_id.clone();
+        move |store| store.get_project(&project_id)
+    })
+    .await?
+    .path;
+    let selected_loras =
+        selected_character_test_loras(&character, std::path::Path::new(&project_path))?;
     let look = payload.look_id.as_deref().and_then(|look_id| {
         character
             .get("looks")
@@ -333,10 +341,7 @@ pub(crate) async fn create_character_test_job(
         Value::String("character-test".to_owned()),
     );
     job_payload.insert("sourceAssetId".to_owned(), Value::Null);
-    job_payload.insert(
-        "loras".to_owned(),
-        character.get("loras").cloned().unwrap_or_else(|| json!([])),
-    );
+    job_payload.insert("loras".to_owned(), Value::Array(selected_loras));
     job_payload.insert("characterId".to_owned(), Value::String(character_id));
     job_payload.insert(
         "characterLookId".to_owned(),
@@ -357,4 +362,62 @@ pub(crate) async fn create_character_test_job(
     )
     .await?;
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
+}
+
+fn selected_character_test_loras(
+    character: &Value,
+    project_path: &std::path::Path,
+) -> Result<Vec<Value>, ApiError> {
+    let mut selected_loras = character
+        .get("loras")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for link in &mut selected_loras {
+        let Some(relative) = link.get("projectPath").and_then(Value::as_str) else {
+            continue;
+        };
+        let within_loras = relative
+            .strip_prefix("loras/")
+            .ok_or_else(|| ApiError::bad_request("Character LoRA project path is invalid"))?;
+        let selected = sceneworks_core::safe_path::confine_under(
+            &project_path.join("loras"),
+            within_loras,
+            sceneworks_core::safe_path::Confinement::SymlinkSafe,
+        )
+        .map_err(|_| ApiError::bad_request("Character LoRA project path is unavailable"))?;
+        let selected = selected.to_string_lossy().into_owned();
+        link["installedPath"] = json!(selected.clone());
+        link["sourcePath"] = json!(selected);
+    }
+    Ok(selected_loras)
+}
+
+#[cfg(test)]
+mod character_test_source_tests {
+    use super::*;
+
+    #[test]
+    fn attached_lora_uses_project_copy_after_original_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        let copy = project.join("loras/characters/mira/style.safetensors");
+        std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+        std::fs::write(&copy, b"attached weights").unwrap();
+        let original = temp.path().join("original.safetensors");
+        std::fs::write(&original, b"changed original").unwrap();
+        let character = json!({"loras":[{
+            "id":"character_lora_fixture",
+            "category":"character",
+            "sourcePath":original,
+            "projectPath":"loras/characters/mira/style.safetensors"
+        }]});
+        let selected = selected_character_test_loras(&character, &project).unwrap();
+        let expected = std::fs::canonicalize(copy).unwrap();
+        assert_eq!(
+            sceneworks_core::lora_family::adapter_record_path(&selected[0]),
+            Some(expected.clone())
+        );
+        assert_eq!(selected[0]["sourcePath"], json!(expected));
+    }
 }

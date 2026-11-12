@@ -396,6 +396,12 @@ pub fn selected_components(
 ) -> Result<JsonObject, String> {
     selected_components_for_purpose(entry, purpose(options))
 }
+pub const EDIT_COMPONENT: &str = gen_core::moss_image_edit::EDIT_COMPONENT;
+
+pub fn is_runtime_optional_component_id(id: &str) -> bool {
+    id.starts_with("moss-dmd-") || id == EDIT_COMPONENT
+}
+
 pub fn selected_components_for_purpose(
     entry: &JsonObject,
     purpose: Option<&str>,

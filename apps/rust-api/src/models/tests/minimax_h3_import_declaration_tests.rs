@@ -30,8 +30,74 @@ fn app(temp: &tempfile::TempDir) -> axum::Router {
     create_app(test_settings(temp)).unwrap()
 }
 
+/// Materialize one REGISTERED minimax_h3 component row in `snapshot` so the shared completeness
+/// predicate (`minimax_h3_import::import_component_files_complete`) accepts it: explicit files as
+/// written, and a wildcard component directory with the minimum loadable closure for its kind.
+/// Returns the files written, the weights file last.
+fn seed_registered_h3_component(
+    snapshot: &std::path::Path,
+    row: &Value,
+) -> Vec<std::path::PathBuf> {
+    let mut written = Vec::new();
+    let mut write = |path: std::path::PathBuf, bytes: &[u8]| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        written.push(path);
+    };
+    let files = row["files"].as_array().unwrap();
+    let shards = files
+        .iter()
+        .filter_map(|file| file.as_str()?.rsplit('/').next())
+        .filter(|name| name.starts_with("model-") && name.ends_with(".safetensors"))
+        .map(|name| (name.to_owned(), json!(name)))
+        .collect::<serde_json::Map<_, _>>();
+    for file in files {
+        let file = file.as_str().unwrap();
+        let Some(dir) = file.strip_suffix("/*") else {
+            let bytes = if file.ends_with("model.safetensors.index.json") {
+                json!({"weight_map": shards}).to_string().into_bytes()
+            } else {
+                b"{}".to_vec()
+            };
+            write(snapshot.join(file), &bytes);
+            continue;
+        };
+        let dir = snapshot.join(dir);
+        match row["componentId"].as_str().unwrap_or_default() {
+            "text_encoder" => {
+                write(dir.join("config.json"), b"{}");
+                write(
+                    dir.join("model.safetensors.index.json"),
+                    br#"{"weight_map":{"w":"model.safetensors"}}"#,
+                );
+                write(dir.join("model.safetensors"), b"weights");
+            }
+            "tokenizer" => {
+                write(dir.join("tokenizer_config.json"), b"{}");
+                write(dir.join("tokenizer.json"), b"{}");
+            }
+            // The CUDA row fetches the whole FL2VA audio-VAE directory: its constructor
+            // documents and the weights beside them.
+            "fl2va_audio_vae_config" => {
+                for name in
+                    sceneworks_core::mlx_tier_completeness::MINIMAX_H3_AUDIO_VAE_CONFIG_FILES
+                {
+                    write(dir.join(name), b"{}");
+                }
+                write(dir.join("model.safetensors"), b"weights");
+            }
+            _ => {
+                write(dir.join("config.json"), b"{}");
+                write(dir.join("diffusion_pytorch_model.safetensors"), b"weights");
+            }
+        }
+    }
+    written
+}
+
 #[tokio::test]
 async fn explicit_three_partitions_are_queued_with_persisted_catalog_fields() {
+    let _env = isolate_hf_cache();
     let temp = tempfile::tempdir().unwrap();
     let app = app(&temp);
     for (partition, base) in [
@@ -59,27 +125,70 @@ async fn explicit_three_partitions_are_queued_with_persisted_catalog_fields() {
         assert_eq!(entry["minimaxH3Partition"], partition);
         assert_eq!(entry["type"], "video");
         let rows = entry["downloads"].as_array().unwrap();
-        assert_eq!(rows.len(), if partition == "hybrid" { 2 } else { 3 });
+        // The import inherits its base's shared component floor. Both bases are REGISTERED, so the
+        // floor is the compiled registry row's (the dense q4 encoder, both VAEs, the tokenizer and
+        // the FL2VA constructor documents), not the miniature config-dir rows above. Single-partition
+        // imports also carry the opposite stock DiT as their companion.
+        let mut components = rows
+            .iter()
+            .filter_map(|row| row["componentId"].as_str())
+            .collect::<Vec<_>>();
+        components.sort_unstable();
+        components.dedup();
+        for shared in [
+            "audio_vae",
+            "fl2va_audio_vae_config",
+            "import_transformer_config",
+            "text_encoder",
+            "tokenizer",
+            "video_vae",
+        ] {
+            assert!(
+                components.contains(&shared),
+                "{partition}: {shared}: {rows:#?}"
+            );
+        }
+        assert_eq!(
+            rows.len(),
+            if partition == "hybrid" { 6 } else { 7 },
+            "{rows:#?}"
+        );
         let config = rows
             .iter()
             .find(|row| row["componentId"] == "import_transformer_config")
             .unwrap();
+        // The config row is the architecture document of the registered base's own dense (bf16)
+        // primary as this host serves it: the rehost's `bf16/<partition>/` on macOS, upstream
+        // `transformer/` for the CUDA `minimax_h3` row.
+        let dense =
+            sceneworks_core::model_artifacts::artifact_selection::model_download_for_variant(
+                &registered_entry_for_api_host(base),
+                "bf16",
+            )
+            .expect("registered dense primary on this host");
+        let dense_dir = dense["files"][0]
+            .as_str()
+            .and_then(|file| file.strip_suffix("/*"))
+            .expect("dense primary is one component directory");
         assert_eq!(
-            config["revision"],
-            "1111111111111111111111111111111111111111"
+            (&config["repo"], &config["revision"]),
+            (&dense["repo"], &dense["revision"])
         );
-        assert_eq!(
-            config["files"],
-            json!([if partition == "ref2va" {
-                "bf16/transformer_ref/config.json"
+        assert_eq!(config["files"], json!([format!("{dense_dir}/config.json")]));
+        assert!(
+            dense_dir.ends_with(if partition == "ref2va" {
+                "transformer_ref"
             } else {
-                "bf16/transformer/config.json"
-            }])
+                "transformer"
+            }),
+            "{partition}: {dense_dir}"
         );
         assert!(rows.iter().all(super::is_co_requisite_download));
         assert!(
-            rows.iter()
-                .all(|row| { row["revision"] == "1111111111111111111111111111111111111111" }),
+            rows.iter().all(|row| row["revision"]
+                .as_str()
+                .is_some_and(|revision| revision.len() == 40
+                    && revision.bytes().all(|byte| byte.is_ascii_hexdigit()))),
             "E8/E9: every queued resident declaration must pin its source revision"
         );
         assert!(
@@ -98,42 +207,23 @@ async fn explicit_three_partitions_are_queued_with_persisted_catalog_fields() {
                     .contains(&imported_slot.to_owned()))
         );
     }
-    // Negative control for this shared catalog: absent revisions must still refuse BEFORE
-    // queuing either an import or any component download (E8/E9), never float to main.
-    let (_, before) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
-    let path = temp.path().join("config/manifests/builtin.models.jsonc");
-    let mut catalog: Value =
-        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    for row in catalog["models"][0]["downloads"].as_array_mut().unwrap() {
+    // Negative control: an absent component revision must refuse (E8/E9), never float to main.
+    // The bases are REGISTERED and the compiled registry pins every row at build time, so a
+    // config-dir edit can no longer author an unpinned resident for them; the refusal is exercised
+    // on the seam every H3 import admission freezes its component declaration through.
+    let mut unpinned = sceneworks_core::builtin_manifests::builtin_model_entry("minimax_h3")
+        .expect("registered base")
+        .clone();
+    for row in unpinned["downloads"].as_array_mut().unwrap() {
         if row["componentId"] == "tokenizer" {
             row.as_object_mut().unwrap().remove("revision");
         }
     }
-    std::fs::write(path, catalog.to_string()).unwrap();
-    let router = create_app(test_settings(&temp)).unwrap();
-    let (status, error) = request(
-        router.clone(),
-        "POST",
-        "/api/v1/models/import",
-        json!({
-            "name":"Unpinned H3 residents", "repo":"owner/custom", "family":"minimax-h3",
-            "baseModel":"minimax_h3", "minimaxH3Partition":"fl2va", "licenseAcknowledged":true,
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
-    assert!(
-        error["detail"]
-            .as_str()
-            .unwrap()
-            .contains("component revision is missing"),
-        "{error}"
-    );
-    let (_, after) = request(router, "GET", "/api/v1/jobs", Value::Null).await;
-    assert_eq!(
-        after, before,
-        "an unpinned declaration cannot enqueue imports or components"
-    );
+    let error =
+        sceneworks_core::model_artifacts::provenance::frozen_h3_component_downloads(&unpinned)
+            .expect_err("an unpinned resident declaration must refuse");
+    assert!(error.contains("component revision is missing"), "{error}");
+    drop(app);
 }
 
 #[tokio::test]
@@ -462,24 +552,41 @@ async fn h3_card_repairs_only_the_missing_bound_component_not_the_imported_dit()
     let store =
         sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
     let root = store.approve_root(&library).unwrap();
-    let revision = "0123456789012345678901234567890123456789";
+    // The selected base is REGISTERED: it authorizes exactly its compiled rows, so the import binds
+    // the registered audio VAE and q4 packed encoder rows (a config-dir edit of the base can no
+    // longer add resident rows for it). Each wildcard selector is materialized as two files.
+    let base = registered_entry_for_api_host("minimax_h3");
+    let registered_row = |component: &str, variant: Option<&str>| {
+        base["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| {
+                row["componentId"] == component
+                    && variant.is_none_or(|variant| row["variant"] == variant)
+            })
+            .unwrap_or_else(|| panic!("registered {component} row"))
+            .clone()
+    };
     let rows = json!([
-        {"provider":"huggingface","repo":"fixture/shared","revision":revision,"coRequisite":true,"componentId":"audio_vae","files":["audio_vae/config.json", "audio_vae/weights.safetensors"]},
-        {"provider":"huggingface","repo":"fixture/tiers","revision":revision,"variant":"q4","coRequisite":true,"componentId":"text_encoder","files":["q4/text_encoder/config.json", "q4/text_encoder/model.safetensors"]}
+        registered_row("audio_vae", None),
+        registered_row("text_encoder", Some("q4")),
     ]);
+    let mut audio_weights = None;
     let mut entry = json!({"id":"repair_h3","name":"Repair H3", "family":"minimax-h3", "baseModel":"minimax_h3","minimaxH3Partition":"fl2va","importComponentTier":"q4", "source":{"provider":"linked-library","rootId":root.root_id,"relativePath":"custom"}, "downloads":rows}).as_object().unwrap().clone();
     for row in rows.as_array().unwrap() {
         let cache =
             super::huggingface_repo_cache_path(&settings.data_dir, row["repo"].as_str().unwrap())
                 .unwrap();
         assert!(cache.starts_with(temp.path()));
-        for file in row["files"].as_array().unwrap() {
-            let path = cache
+        let written = seed_registered_h3_component(
+            &cache
                 .join("snapshots")
-                .join(revision)
-                .join(file.as_str().unwrap());
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, b"fixture").unwrap();
+                .join(row["revision"].as_str().unwrap()),
+            row,
+        );
+        if row["componentId"] == "audio_vae" {
+            audio_weights = written.last().cloned();
         }
     }
     // E8/E9: capture complete contents before compile, then remove only the repair target.
@@ -508,21 +615,9 @@ async fn h3_card_repairs_only_the_missing_bound_component_not_the_imported_dit()
         json!({"schemaVersion":1,"models":[entry]}).to_string(),
     )
     .unwrap();
-    // The selected base authorizes only these resident rows, not its primary DiT download.
-    let builtin_path = settings.config_dir.join("manifests/builtin.models.jsonc");
-    let mut builtin: Value =
-        serde_json::from_str(&std::fs::read_to_string(&builtin_path).unwrap()).unwrap();
-    builtin["models"][0]["downloads"]
-        .as_array_mut()
-        .unwrap()
-        .extend(rows.as_array().unwrap().iter().cloned());
-    std::fs::write(builtin_path, builtin.to_string()).unwrap();
     // Start complete; remove ONLY audio VAE bytes. The import and text encoder remain sound.
-    let audio = super::huggingface_repo_cache_path(&settings.data_dir, "fixture/shared")
-        .unwrap()
-        .join("snapshots")
-        .join(revision)
-        .join("audio_vae/weights.safetensors");
+    let audio_row = &rows[0];
+    let audio = audio_weights.expect("the audio VAE weights were seeded");
     std::fs::remove_file(&audio).unwrap();
     let router = create_app(settings.clone()).unwrap();
     let (status, catalog) = request(router.clone(), "GET", "/api/v1/models", Value::Null).await;
@@ -576,8 +671,8 @@ async fn h3_card_repairs_only_the_missing_bound_component_not_the_imported_dit()
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{job}");
-    assert_eq!(job["payload"]["repo"], "fixture/shared");
-    assert_eq!(job["payload"]["revision"], revision);
+    assert_eq!(job["payload"]["repo"], audio_row["repo"]);
+    assert_eq!(job["payload"]["revision"], audio_row["revision"]);
     assert_eq!(job["payload"]["files"], rows[0]["files"]);
     assert_eq!(job["payload"]["importComponentTier"], "q4");
     assert_eq!(job["payload"]["componentId"], "audio_vae");
@@ -873,28 +968,65 @@ async fn import_persists_a_complete_bf16_only_shared_closure_as_its_generation_d
     let temp = tempfile::tempdir().unwrap();
     let _ = app(&temp);
     let settings = test_settings(&temp);
-    let revision = "1111111111111111111111111111111111111111";
-    let base = json!({"id":"minimax_h3","type":"video","family":"minimax-h3","downloads":[
-        {"provider":"huggingface","repo":"fixture/tiers","variant":"q4","default":true,"files":["q4/transformer/*"]},
-        {"provider":"huggingface","repo":"fixture/tiers","revision":revision,"variant":"bf16","files":["bf16/transformer/*"]},
-        {"provider":"huggingface","repo":"fixture/shared","revision":revision,"coRequisite":true,"variant":"q4","files":["q4/encoder.bin"]},
-        {"provider":"huggingface","repo":"fixture/shared","revision":revision,"coRequisite":true,"variant":"bf16","files":["bf16/encoder.bin"]}
-    ]});
-    std::fs::write(
-        settings.config_dir.join("manifests/builtin.models.jsonc"),
-        json!({"schemaVersion":1,"models":[base]}).to_string(),
-    )
-    .unwrap();
-    let snapshot = super::huggingface_repo_cache_path(&settings.data_dir, "fixture/shared")
+    // minimax_h3 is registered, so its shared closure is the compiled registry row's, not a
+    // config-dir miniature. Seed exactly that row's bf16 dense encoder (this host's platform row)
+    // and nothing for q4, so bf16 is the only complete shared closure.
+    let base = sceneworks_core::builtin_manifests::builtin_model_entry("minimax_h3")
+        .expect("registered base");
+    let encoder = registered_entry_for_api_host("minimax_h3")["downloads"]
+        .as_array()
         .unwrap()
-        .join("snapshots")
-        .join(revision);
-    std::fs::create_dir_all(snapshot.join("bf16")).unwrap();
-    std::fs::write(
-        snapshot.join("bf16/encoder.bin"),
-        b"selected bf16 shared encoder",
+        .iter()
+        .find(|row| row["componentId"] == "text_encoder" && row["variant"] == "bf16")
+        .expect("the registered bf16 encoder row for this host")
+        .clone();
+    let revision = encoder["revision"].as_str().unwrap().to_owned();
+    // Seed exactly the bf16 import closure the server computes from the registered base (shared
+    // floor, the stock companion DiT and the transformer config), and nothing tier-specific for
+    // q4/q8, so bf16 is the only complete resident closure.
+    let declaration = json!({"baseModel":"minimax_h3","minimaxH3Partition":"fl2va"});
+    let closure = sceneworks_core::minimax_h3_import::import_component_downloads(
+        declaration.as_object().unwrap(),
+        &Value::Object(base.clone()),
+        Some("bf16"),
+        API_HOST_OS,
     )
-    .unwrap();
+    .expect("the registered base has a bf16 import closure");
+    for row in &closure {
+        let snapshot =
+            super::huggingface_repo_cache_path(&settings.data_dir, row["repo"].as_str().unwrap())
+                .unwrap()
+                .join("snapshots")
+                .join(row["revision"].as_str().unwrap());
+        let partition = row["files"].as_array().unwrap().iter().find_map(|file| {
+            let file = file.as_str()?;
+            ["transformer_ref", "transformer"]
+                .into_iter()
+                .find(|partition| file == format!("bf16/{partition}/*"))
+        });
+        match partition {
+            Some(partition) => crate::tests::catalog::seed_minimax_partition(
+                &snapshot,
+                "bf16",
+                partition,
+                &crate::tests::catalog::MINIMAX_SHARDS,
+            ),
+            None => {
+                seed_registered_h3_component(&snapshot, row);
+            }
+        }
+    }
+    let incomplete = closure
+        .iter()
+        .filter(|row| {
+            super::install_state::imported_component_presence(&settings.data_dir, row)
+                != sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence::Installed
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        incomplete.is_empty(),
+        "the seeded bf16 closure is resident: {incomplete:#?}"
+    );
     let app = create_app(settings).unwrap();
     let (status, job) = request(app,"POST","/api/v1/models/import",json!({"modelId":"bf16_only_import","source":{"kind":"huggingFace","repo":"community/custom"},"baseModel":"minimax_h3","minimaxH3Partition":"fl2va","licenseAcknowledged":true})).await;
     assert_eq!(status, StatusCode::CREATED, "{job}");
@@ -902,14 +1034,14 @@ async fn import_persists_a_complete_bf16_only_shared_closure_as_its_generation_d
         job["payload"]["manifestEntry"]["importComponentTier"],
         "bf16"
     );
-    assert_eq!(
-        job["payload"]["manifestEntry"]["downloads"][0]["variant"],
-        "bf16"
-    );
-    assert_eq!(
-        job["payload"]["manifestEntry"]["downloads"][0]["revision"],
-        revision
-    );
+    let bound_encoder = job["payload"]["manifestEntry"]["downloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["componentId"] == "text_encoder")
+        .expect("the import binds a text encoder");
+    assert_eq!(bound_encoder["variant"], "bf16");
+    assert_eq!(bound_encoder["revision"], revision);
     let mut surface = job["payload"]["manifestEntry"].as_object().unwrap().clone();
     super::apply_imported_video_support_surface(&mut surface);
     assert_eq!(

@@ -633,18 +633,25 @@ pub(crate) async fn run_image_detail_job(
              admission falls back to the uncertified resident estimate"
         );
     }
-    let control_dir =
-        huggingface_snapshot_dir(&settings.data_dir, &control_repo).ok_or_else(|| {
+    let control_file = if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
+        crate::portable_aux_sources::bound_aux_path(&request.advanced, "sdxl_detail_tile_control")
+            .ok_or_else(|| {
+            WorkerError::InvalidPayload("portable Detail tile source is not bound".to_owned())
+        })?
+    } else {
+        let control_dir =
+            huggingface_snapshot_dir(&settings.data_dir, &control_repo).ok_or_else(|| {
+                WorkerError::InvalidPayload(format!(
+                    "tile ControlNet weights not found (download {control_repo})."
+                ))
+            })?;
+        first_safetensors_path(&control_dir).ok_or_else(|| {
             WorkerError::InvalidPayload(format!(
-                "tile ControlNet weights not found (download {control_repo})."
+                "no .safetensors under the tile ControlNet snapshot {}",
+                control_dir.display()
             ))
-        })?;
-    let control_file = first_safetensors_path(&control_dir).ok_or_else(|| {
-        WorkerError::InvalidPayload(format!(
-            "no .safetensors under the tile ControlNet snapshot {}",
-            control_dir.display()
-        ))
-    })?;
+        })?
+    };
 
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let (candle_paths, candle_provider_spec, candle_memory_context, detail_memory_receipt) = {

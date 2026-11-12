@@ -19,13 +19,12 @@ import {
 } from "../licenseAcknowledgment.js";
 import { modelLoraFamilies } from "../presetUtils.js";
 import {
-  blanketFloorGb,
-  declaredFloorHostGb,
-  installedFloorHostGb,
-  lightestInstallableTier,
-  sdxlCudaMemoryEstimate,
-} from "../tierSuggestion.js";
-import { nativeTierEligibility } from "../quantTier.js";
+  endpointEstimate,
+  installedTiers,
+  memoryLane,
+  nativeTierEligibility,
+  tierHostEligible,
+} from "../quantTier.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
 
 // Simple Model Manager (design handoff): a tabbed catalog (Image / Video / Utility /
@@ -99,14 +98,15 @@ export function SimpleModelManager() {
         // Match the generation picker's per-model native format contract. In particular,
         // generic nvfp4 workers cannot supply FLUX.3 packed-provider measurements.
         const options = { ...tierOptions, ...nativeTierEligibility(model, visibleWorkers) };
+        const needs = needsLabel(model, options);
+        const endpoint = memoryLane(model, options.backend)?.endpointEstimate;
         return {
           id: model.id,
           name: model.name ?? model.id,
-          meta: [downloadSizeText(model), needsLabel(model, options), importedCheckpointLabel(model)]
+          meta: [downloadSizeText(model), needs, importedCheckpointLabel(model)]
             .filter(Boolean)
             .join(" · "),
-          memoryTitle: needsLabel(model, options)?.startsWith("Q4 optimized ")
-            ? sdxlCudaMemoryEstimate(model, "q4", options.backend)?.description : undefined,
+          memoryTitle: endpoint && needs?.startsWith(endpoint.label) ? endpoint.description : undefined,
           manageOnly: model.installState === "installed" || model.platformCleanupOnly === true,
           entry: model,
           kind: "model",
@@ -299,72 +299,98 @@ function importedCheckpointLabel(model) {
 // The catalog's own human-readable download size; `~` marks an estimate, exactly as the
 // advanced Models screen labels it.
 
-// The model's memory requirement, PREFERRING the per-tier measured peak over the blanket per-lane
-// `minMemoryGb` (sc-15400). Showing the blanket unconditionally over-warns every variant-matrix model
-// whose user only wants a lighter tier (z_image declares 48 while its measured q4 tier peaks at 19.42
-// GiB; krea_realtime_14b declares 64 against a 27.90 GiB q4). The advanced Models screen dodges this by
-// SUPPRESSING the badge for matrix models and deferring to its per-tier download panel
-// (ModelManagerScreen's `hasTierMatrix`); Simple has no such panel — "Manage" hands off to that screen —
-// so instead of hiding the number it shows the one that applies to the tier actually in play.
+// The model's memory requirement on the ACTIVE lane, PREFERRING the per-tier measured peak over the
+// blanket per-lane `minMemoryGb` (sc-15400): showing the blanket unconditionally over-warns every
+// variant-matrix model whose user only wants a lighter tier. The advanced Models screen defers to its
+// per-tier download panel; Simple has no such panel, so it shows the number for the tiers in play.
 //
-// THREE THINGS THE NUMBER MUST GET RIGHT, all one-directional (getting them wrong UNDER-states a
-// requirement, and the user downloads a model that then OOMs). The arithmetic for all three lives in
-// `tierSuggestion.installedFloorHostGb` / `declaredFloorHostGb`; this function composes wording only.
-//
-// A. HEADROOM, PER LANE. A declared peak is a RAW high-water mark, and the two lanes convert it to a host
-//    size differently: MLX budgets `peak <= host × MEMORY_HEADROOM_FRACTION` (`tierFits`, the resolution
-//    gate), while candle's own gate admits at `peak + 2` (`vram_gate.rs` `HEADROOM_GB`). Quoting the raw
-//    peak under-states on both; quoting the MLX form on candle OVER-states against the gate that actually
-//    rejects (`flux2_dev` bf16: 143 vs the 130 the gate requires).
-//
-// B. LANE. `footprint.peakMemoryBytes` is an Apple unified-memory measurement and `candle.vramGbByTier`
-//    is a discrete-VRAM one; they are not interchangeable in either direction (see the lane note in
-//    tierSuggestion.js). So the row reads the ACTIVE backend's evidence only. When the candle lane has
-//    none, the row says nothing rather than borrowing the MLX figure — `qwen_image` declares mlx 50
-//    against candle 56, so the MLX number is not even reliably the conservative one.
-//
-// C. THE BLANKET IS A FLOOR, NOT A CEILING. `minMemoryGb` is the DEFAULT (lightest) tier's peak plus
-//    headroom — the schema and `vram_gate.rs:180` both say so — so it can sit BELOW a heavier installed
-//    tier's requirement, and falling back to it alone under-stated four real install-sets (`flux_dev` /
-//    `flux_schnell` read 24 against a measured q8 of 31.8; `krea_2_turbo` read 32 against a measured
-//    bf16 of 47.2). Whenever the per-tier evidence is incomplete or the lane flags it estimated, the
-//    displayed number is the MAX of the two bases, never the blanket alone.
-//
-// Three cases, in order:
-//   1. The model has tiers installed ⇒ `needs N GB`, over exactly those tiers (case 1/2/3 of
-//      `installedFloorHostGb`). This is what is on disk, so it is a statement about this install.
-//   2. Not installed, and some declared tier has a number ⇒ `from N GB`. The client cannot know which
-//      tier Download will fetch (the catalog omits the manifest `default` flag, and 3 of the 53 matrix
-//      models default to a heavier tier than the lightest), so the honest statement is the ENTRY cost —
-//      which is also what a "can I use this model at all" decision needs. Deliberately worded as a
-//      floor, never as a specific tier's requirement.
-//   3. No per-tier evidence at all ⇒ this lane's blanket floor, exactly as before. Covers every
-//      single-variant model and every matrix model epic 15448 has not measured yet.
-//
-// EXPORTED for memoryFloorCatalogParity.test.js, which drives THIS function against every
-// (model, OS, installed-subset) the real manifest can produce. That test exists because the previous
-// round's suite asserted the helpers individually and every composed-label case used a hand-written
-// literal — so a defect that lived only in how the three cases compose (the blanket fallback) had no
-// test that could see it.
+// Every number is API-served (`memoryGuidance.<lane>`, `sceneworks_core::memory_guidance`): each tier
+// row already carries its host size in its own lane's terms (MLX headroom fraction vs Candle allocator
+// slack), its lane, whether it is that tier's own evidence or an estimate/proxy, and its declared
+// floor. This function only selects the rows of the tiers this install has and composes wording:
+//   1. Tiers installed ⇒ `needs N GB` over exactly those tiers. With every installed tier carrying
+//      its own calibrated evidence, the max of their host sizes. Otherwise the blanket is a FLOOR
+//      (the default tier's peak plus headroom can sit below a heavier installed tier): the max of the
+//      host sizes and the tiers' floors, or nothing when an installed tier has no number and no floor.
+//   2. Not installed, and some eligible declared tier has its own measured number ⇒ `from N GB`, the
+//      ENTRY cost (the client cannot know which tier Download will fetch). An uncalibrated lane
+//      floors it at the entry floor.
+//   3. Otherwise the lane's entry floor (the lightest installable tier's declared floor).
+// EXPORTED for the catalog-driven guidance tests.
 export function needsLabel(model, tierOptions) {
-  const endpoint = sdxlCudaMemoryEstimate(model, "q4", tierOptions?.backend);
+  const lane = memoryLane(model, tierOptions?.backend);
+  if (lane === null) {
+    return null;
+  }
+  const endpoint = lane.endpointEstimate
+    ? endpointEstimate(model, lane.endpointEstimate.tier, tierOptions?.backend)
+    : null;
   const installedVariants = model?.variants?.filter((variant) => variant.installState === "installed") ?? [];
-  if (endpoint && model.variants?.some((variant) => variant.variant === "q4")
+  if (endpoint && model.variants?.some((variant) => variant.variant === endpoint.tier)
       && ((installedVariants.length === 0 && model.installState !== "installed")
-        || (installedVariants.length === 1 && installedVariants[0].variant === "q4"))) {
+        || (installedVariants.length === 1 && installedVariants[0].variant === endpoint.tier))) {
     return endpoint.label + (Number.isFinite(tierOptions?.hostMemoryGb)
       && tierOptions.hostMemoryGb >= endpoint.optimizedHostGb ? " · can fit with optimizations" : "");
   }
-  const installed = installedFloorHostGb(model, tierOptions);
+  const installed = installedFloorHostGb(model, lane, tierOptions);
   if (installed !== null) {
     return `needs ${installed} GB`;
   }
   if (model?.installState !== "installed") {
-    const entry = declaredFloorHostGb(model, tierOptions);
+    const entry = declaredFloorHostGb(lane, tierOptions);
     if (entry !== null) {
       return `from ${entry} GB`;
     }
   }
-  const floor = blanketFloorGb(model, tierOptions?.backend, lightestInstallableTier(model));
+  const floor = typeof lane.entryFloorGb === "number" ? lane.entryFloorGb : null;
   return floor === null ? null : `needs ${floor} GB`;
+}
+
+const servedNumber = (value) => (typeof value === "number" ? value : null);
+const maxOf = (a, b) => (a === null ? b : b === null ? a : Math.max(a, b));
+
+// Host GB over the INSTALLED tiers (host-eligible per `tierOptions`), or null.
+function installedFloorHostGb(model, lane, tierOptions) {
+  const tiers = installedTiers(model, tierOptions);
+  if (tiers.length === 0) {
+    return null;
+  }
+  let ceiling = null;
+  let floor = null;
+  let complete = true;
+  let estimated = false;
+  for (const tier of tiers) {
+    const row = lane.tiers?.[tier];
+    const hostGb = servedNumber(row?.installedHostGb);
+    if (hostGb === null) {
+      complete = false;
+    } else {
+      ceiling = maxOf(ceiling, hostGb);
+      estimated = estimated || row.installedEstimated === true;
+    }
+    floor = maxOf(floor, servedNumber(row?.floorGb) ?? servedNumber(lane.blanketGb));
+  }
+  if (complete && !estimated && lane.uncalibrated !== true) {
+    return ceiling;
+  }
+  if (!complete && floor === null) {
+    return null;
+  }
+  return maxOf(ceiling, floor);
+}
+
+// The ENTRY host GB for a model that is not installed: the cheapest host-eligible tier's own measured
+// number, floored at the entry floor on an uncalibrated lane. Null when no tier is measured.
+function declaredFloorHostGb(lane, tierOptions) {
+  let cheapest = null;
+  for (const [tier, row] of Object.entries(lane.tiers ?? {})) {
+    const hostGb = servedNumber(row?.measuredHostGb);
+    if (hostGb !== null && tierHostEligible(tier, tierOptions) && (cheapest === null || hostGb < cheapest)) {
+      cheapest = hostGb;
+    }
+  }
+  if (cheapest === null || lane.uncalibrated !== true) {
+    return cheapest;
+  }
+  return maxOf(cheapest, servedNumber(lane.entryFloorGb));
 }

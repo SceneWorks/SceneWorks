@@ -237,6 +237,81 @@ async fn submit(
     .await
 }
 
+fn persisted_output(state: &crate::AppState, job_id: &str) -> (std::path::PathBuf, String) {
+    let job = state.jobs_store.get_job(job_id).expect("stored job reads");
+    let output = &job.payload["plan"]["output"];
+    let dir = std::path::PathBuf::from(output["outputDir"].as_str().expect("private output dir"));
+    let stem = output["fileName"]
+        .as_str()
+        .expect("private output file")
+        .trim_end_matches(".safetensors")
+        .to_owned();
+    (dir, stem)
+}
+
+pub(super) async fn advertise_trained_source(
+    app: &axum::Router,
+    model_id: &str,
+    export: &std::path::Path,
+    capability: &str,
+) {
+    use sceneworks_core::model_artifacts::portable_binding::{
+        portable_file_ledger_sha256, PortableArtifactFile, PortableSourceClaim,
+        PortableSourceProvenance,
+    };
+    let mut files = std::fs::read_dir(export)
+        .expect("export directory reads")
+        .filter_map(|entry| {
+            let path = entry.expect("export file reads").path();
+            let name = path.file_name().expect("export file name");
+            if matches!(
+                name.to_str(),
+                Some(
+                    ".sceneworks-artifact-provenance.json"
+                        | ".sceneworks-artifact-provenance.lock"
+                        | ".sceneworks-produced-artifact.json"
+                        | ".sceneworks-produced-artifact.lock"
+                )
+            ) {
+                return None;
+            }
+            Some(PortableArtifactFile {
+                relative_path: name.into(),
+                size_bytes: std::fs::metadata(&path)
+                    .expect("export file metadata")
+                    .len(),
+                sha256: format!(
+                    "sha256:{}",
+                    sceneworks_core::hashing::sha256_file(&path).expect("export file hash")
+                ),
+            })
+        })
+        .collect::<Vec<_>>();
+    files.sort();
+    let ledger = portable_file_ledger_sha256(&files).expect("export ledger");
+    let source_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+        "model", model_id, None, &ledger,
+    )
+    .expect("registered source id");
+    let claim =
+        PortableSourceClaim::new(source_id, PortableSourceProvenance::OperatorOverride, files)
+            .expect("source claim");
+    let mut registration = portable_test_worker_registration(
+        "test-iris-source-worker",
+        &["gpu", "mlx", capability],
+        TestPortableRoute::MlxMacos,
+    );
+    registration["portableSourceClaims"] = serde_json::to_value(vec![claim]).unwrap();
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        registration,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
 async fn complete(app: &axum::Router, job_id: &str, status: &str, result: Value) -> Value {
     let (code, body) = request(
         app.clone(),
@@ -295,7 +370,7 @@ async fn depth_training_registers_a_selectable_depth_model() {
     let _env = env("128");
     let temp_dir = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp_dir);
-    let app = create_app(settings.clone()).unwrap();
+    let (app, state) = create_training_fixture_app_with_state(settings.clone()).unwrap();
     let project_id = project(&app).await;
     let dataset = dataset(&app, &project_id, 1).await;
     let dataset_id = dataset["id"].as_str().unwrap().to_owned();
@@ -407,13 +482,8 @@ async fn depth_training_registers_a_selectable_depth_model() {
     assert_eq!(entry["type"], "utility");
     assert_eq!(entry["trainedCheckpoint"]["engineModel"], "iris_3b_depth");
     let job_id = job["id"].as_str().unwrap().to_owned();
-    let output_dir = std::path::PathBuf::from(plan["output"]["outputDir"].as_str().unwrap());
+    let (output_dir, stem) = persisted_output(&state, &job_id);
     assert!(output_dir.starts_with(settings.data_dir.join("models").join("finetunes")));
-    let stem = plan["output"]["fileName"]
-        .as_str()
-        .unwrap()
-        .trim_end_matches(".safetensors")
-        .to_owned();
     claim_training_job_as_mlx_worker(&app, &job_id).await;
     let export = output_dir.join(&stem);
     std::fs::create_dir_all(&export).unwrap();
@@ -444,10 +514,20 @@ async fn depth_training_registers_a_selectable_depth_model() {
     assert_eq!(model["irisTask"], "depth");
     assert_eq!(model["trainedCheckpoint"]["task"], "depth");
     assert_eq!(model["installState"], "installed", "{model:#}");
+    // SW-7032: the measured lane facts come from the evidence store through the projection with
+    // their recorded values; the declared parameters stay product data.
+    let depth_admission = json!({
+        "measured": false,
+        "referenceModelPixels": 524288,
+        "extrapolationFactor": 1.5,
+        "mlx": {"residentGb": 6.5, "referencePeakGb": 9.4},
+        "candle": {"residentGb": 7.2, "referencePeakGb": 8.4}
+    });
     assert_eq!(
-        model["depth"]["admission"]["measured"], false,
+        model["depth"]["admission"], depth_admission,
         "the depth engine's admission declaration is overlaid: {model:#}"
     );
+    advertise_trained_source(&app, &model_id, &export, "image_depth").await;
 
     // ---- selected by id in the depth job; a non-depth model is refused ----------------------------
     let (_, source) = request_multipart_upload(
@@ -474,8 +554,8 @@ async fn depth_training_registers_a_selectable_depth_model() {
     let stored = stored_payload(&app, depth_job["id"].as_str().unwrap()).await;
     assert_eq!(carrier_ids(&stored), vec![model_id.clone()], "{stored:#}");
     assert_eq!(
-        stored["modelManifestEntries"][0]["depth"]["admission"]["measured"],
-        false
+        stored["modelManifestEntries"][0]["depth"]["admission"],
+        depth_admission
     );
     let (status, refused) = request(
         app.clone(),
@@ -534,7 +614,7 @@ async fn restoration_training_requires_its_resources_and_registers_a_restoration
     let _env = env("128");
     let temp_dir = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp_dir);
-    let app = create_app(settings.clone()).unwrap();
+    let (app, state) = create_training_fixture_app_with_state(settings.clone()).unwrap();
     let project_id = project(&app).await;
     let dataset = dataset(&app, &project_id, 1).await;
     let dataset_id = dataset["id"].as_str().unwrap().to_owned();
@@ -632,12 +712,7 @@ async fn restoration_training_requires_its_resources_and_registers_a_restoration
         "a LoRA restoration run still exports a restoration model"
     );
     let job_id = job["id"].as_str().unwrap().to_owned();
-    let output_dir = std::path::PathBuf::from(plan["output"]["outputDir"].as_str().unwrap());
-    let stem = plan["output"]["fileName"]
-        .as_str()
-        .unwrap()
-        .trim_end_matches(".safetensors")
-        .to_owned();
+    let (output_dir, stem) = persisted_output(&state, &job_id);
     claim_training_job_as_mlx_worker(&app, &job_id).await;
     let export = output_dir.join(&stem);
     std::fs::create_dir_all(&export).unwrap();
@@ -664,6 +739,7 @@ async fn restoration_training_requires_its_resources_and_registers_a_restoration
     assert_eq!(model["irisTask"], "restoration");
     assert_eq!(model["trainedCheckpoint"]["engineModel"], "iris_3b_restore");
     assert_eq!(model["installState"], "installed", "{model:#}");
+    advertise_trained_source(&app, &model_id, &export, "image_upscale").await;
 
     let (_, source) = request_multipart_upload(
         app.clone(),
@@ -814,7 +890,7 @@ async fn a_failed_task_export_registers_no_model_and_leaves_its_sources_untouche
     let _env = env("128");
     let temp_dir = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp_dir);
-    let app = create_app(settings.clone()).unwrap();
+    let (app, state) = create_training_fixture_app_with_state(settings.clone()).unwrap();
     let project_id = project(&app).await;
     stage_task_export(&settings.data_dir, "depth", DEPTH_CONFIG);
     stage_task_export(&settings.data_dir, "upscaler", UPSCALER_CONFIG);
@@ -869,16 +945,23 @@ async fn a_failed_task_export_registers_no_model_and_leaves_its_sources_untouche
             let models_before = model_ids(&app).await;
             let (code, job) =
                 submit(&app, &project_id, &dataset_id, target_id, config.clone()).await;
-            assert_eq!(code, StatusCode::CREATED, "{target_id}: {job}");
-            let plan = &job["payload"]["plan"];
+            assert_eq!(code, StatusCode::CREATED, "{target_id}/{status}: {job}");
             let job_id = job["id"].as_str().unwrap().to_owned();
-            let output_dir =
-                std::path::PathBuf::from(plan["output"]["outputDir"].as_str().unwrap());
-            let stem = plan["output"]["fileName"]
-                .as_str()
-                .unwrap()
-                .trim_end_matches(".safetensors")
-                .to_owned();
+            let (output_dir, stem) = persisted_output(&state, &job_id);
+            let stored = state.jobs_store.get_job(&job_id).expect("stored plan");
+            let task_dir = if target_id == DEPTH_TARGET {
+                "depth"
+            } else {
+                "upscaler"
+            };
+            assert_eq!(
+                stored.payload["plan"]["target"]["baseModelPath"],
+                json!(snapshot(&settings.data_dir, WEIGHTS_REPO, WEIGHTS_REVISION)
+                    .join(task_dir)
+                    .display()
+                    .to_string()),
+                "the plan must bind only its selected task export"
+            );
             claim_training_job_as_mlx_worker(&app, &job_id).await;
             let export = output_dir.join(&stem);
             std::fs::create_dir_all(&export).unwrap();

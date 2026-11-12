@@ -2662,14 +2662,26 @@ pub(super) async fn generate_video_using(
         + 'static,
 ) -> WorkerResult<DecodedVideo> {
     if input.veda.as_ref().is_some_and(|veda| veda.enabled) {
-        let component_settings = settings.clone();
-        // Hashing is blocking disk work. Absence/corruption is a soft omission; the provider
-        // records its repair/install dense-fallback reason when the enabled request runs.
-        input.veda_predictor = crate::load_progress::spawn_blocking(move || {
-            super::minimax_h3::resolve_veda_predictor_offline(&component_settings)
-        })
-        .await
-        .map_err(|error| WorkerError::Engine(error.to_string()))?;
+        if let Some(advanced) = job.payload.get("advanced").and_then(Value::as_object) {
+            if crate::portable_aux_sources::has_bound_aux_paths(advanced) {
+                let path = crate::portable_aux_sources::bound_aux_path(advanced, "veda_predictor")
+                    .ok_or_else(|| {
+                        WorkerError::InvalidPayload(
+                            "portable Veda predictor is not bound".to_owned(),
+                        )
+                    })?;
+                input.veda_predictor = Some(WeightsSource::File(path));
+            } else {
+                let component_settings = settings.clone();
+                // Hashing is blocking disk work. Absence/corruption is a soft omission; the provider
+                // records its repair/install dense-fallback reason when the enabled request runs.
+                input.veda_predictor = crate::load_progress::spawn_blocking(move || {
+                    super::minimax_h3::resolve_veda_predictor_offline(&component_settings)
+                })
+                .await
+                .map_err(|error| WorkerError::Engine(error.to_string()))?;
+            }
+        }
     }
     // Per-generation sampler / scheduler axis for video (epic 7114 P5, sc-7127). The handlers leave
     // `input.sampler`/`scheduler` `None`; read them from the caller's already-parsed `advanced` block

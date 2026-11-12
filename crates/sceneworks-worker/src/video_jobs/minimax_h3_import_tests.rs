@@ -488,7 +488,7 @@ fn an_imported_h3_dit_reaches_the_candle_provider_as_its_transformer_with_its_id
         ("HUGGINGFACE_HUB_CACHE", ""),
         ("HF_HOME", ""),
     ]);
-    use crate::minimax_h3_import_fixture::{SHARED_REVISION, TIER_REVISION};
+    use crate::minimax_h3_import_fixture::{shared_revision, tier_revision};
     let data = tempfile::Builder::new()
         .prefix("sw_candle_imported_h3_")
         .tempdir()
@@ -498,9 +498,9 @@ fn an_imported_h3_dit_reaches_the_candle_provider_as_its_transformer_with_its_id
             .expect("repo cache path")
             .join("snapshots")
             .join(if repo == "SceneWorks/minimax-h3-mlx" {
-                TIER_REVISION
+                tier_revision()
             } else {
-                SHARED_REVISION
+                shared_revision()
             });
         std::fs::create_dir_all(&root).expect("snapshot dir");
         root
@@ -584,7 +584,7 @@ fn an_imported_h3_dit_reaches_the_candle_provider_as_its_transformer_with_its_id
         .collect::<Vec<_>>();
     assert!(!shared.is_empty());
     for member in shared {
-        assert_eq!(member["revision"], SHARED_REVISION);
+        assert_eq!(member["revision"], shared_revision());
         for file in member["files"].as_array().unwrap() {
             let path = bound_root.join(file["relativePath"].as_str().unwrap());
             let pin = spec
@@ -1027,9 +1027,9 @@ fn candle_imported_partition_staging_matches_the_task_selected_sibling() {
             .unwrap()
             .join("snapshots")
             .join(if repo == "SceneWorks/minimax-h3-mlx" {
-                crate::minimax_h3_import_fixture::TIER_REVISION
+                crate::minimax_h3_import_fixture::tier_revision()
             } else {
-                crate::minimax_h3_import_fixture::SHARED_REVISION
+                crate::minimax_h3_import_fixture::shared_revision()
             });
         std::fs::create_dir_all(&root).unwrap();
         root
@@ -1481,6 +1481,114 @@ fn provider_resolution_holds_dense_and_native_source_leases_until_release() {
 }
 
 #[test]
+fn imported_h3_portable_plan_uses_frozen_layers_without_a_worker_plan_record() {
+    use sceneworks_core::model_artifacts::portable_binding::PortableCheckpointPlan;
+
+    let api = tempfile::tempdir().unwrap();
+    let worker = tempfile::tempdir().unwrap();
+    let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_layout(
+        api.path(),
+        "portable_h3",
+        "dense",
+    );
+    let source = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(api.path())
+        .resolve(&imported.checkpoint_id)
+        .unwrap();
+    let portable = PortableCheckpointPlan::from_import_plan(&source.plan, None).unwrap();
+    let private = worker.path().join("verified-attempt");
+    std::fs::create_dir_all(&private).unwrap();
+    let lease = std::sync::Arc::new(
+        sceneworks_core::file_lock::FileLock::open_exclusive(&worker.path().join("attempt.lock"))
+            .unwrap(),
+    );
+    let mut verified = crate::external_library_runtime::VerifiedPlanLayers::new_for_test(lease);
+    verified
+        .add_plan(&imported.checkpoint_id, portable)
+        .unwrap();
+    for layer in &source.layers {
+        let path = private.join(&layer.layer.target_path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::copy(&layer.path, &path).unwrap();
+        verified
+            .insert(&imported.checkpoint_id, &layer.layer.layer_id, path)
+            .unwrap();
+    }
+    let canceled = verified
+        .resolve_checkpoint(&imported.checkpoint_id, &|| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "H3 preparation canceled",
+            ))
+        })
+        .unwrap_err();
+    assert!(
+        matches!(
+            canceled,
+            sceneworks_core::checkpoint_plan_store::CheckpointPlanError::Io { .. }
+        ),
+        "cancellation keeps the store-style I/O error class: {canceled}"
+    );
+    let settings = Settings {
+        data_dir: worker.path().to_path_buf(),
+        verified_plan_layers: Some(std::sync::Arc::new(verified)),
+        ..offline_settings()
+    };
+    // The only persisted plan is on the API host, and its source has disappeared. A worker with
+    // identical registered bytes under another root still resolves the guard's private lease.
+    std::fs::remove_dir_all(&imported.install_dir).unwrap();
+    let request = imported_minimax_h3_request("portable_h3", &imported.entry);
+    let dit = crate::video_jobs::minimax_h3::resolve_imported_minimax_h3_dit(&request, &settings)
+        .expect("the semantic plan and frozen layers are sufficient on another host");
+    assert_eq!(dit.plan_id, imported.plan_id);
+    assert_eq!(
+        dit.semantic_digest.as_deref(),
+        Some(imported.semantic_digest.as_str())
+    );
+    assert!(dit.transformer_dir.starts_with(&private));
+    dit.load_authority.validate().unwrap();
+
+    // A partial private handoff must fail before the H3 provider sees a checkpoint, even though
+    // the original API host had a complete plan and the worker still has some matching layers.
+    let incomplete_lease = std::sync::Arc::new(
+        sceneworks_core::file_lock::FileLock::open_exclusive(
+            &worker.path().join("incomplete-attempt.lock"),
+        )
+        .unwrap(),
+    );
+    let mut incomplete =
+        crate::external_library_runtime::VerifiedPlanLayers::new_for_test(incomplete_lease);
+    incomplete
+        .add_plan(
+            &imported.checkpoint_id,
+            PortableCheckpointPlan::from_import_plan(&source.plan, None).unwrap(),
+        )
+        .unwrap();
+    for layer in source.layers.iter().skip(1) {
+        incomplete
+            .insert(
+                &imported.checkpoint_id,
+                &layer.layer.layer_id,
+                private.join(&layer.layer.target_path),
+            )
+            .unwrap();
+    }
+    let incomplete_settings = Settings {
+        verified_plan_layers: Some(std::sync::Arc::new(incomplete)),
+        ..settings
+    };
+    let error = crate::video_jobs::minimax_h3::resolve_imported_minimax_h3_dit(
+        &request,
+        &incomplete_settings,
+    )
+    .err()
+    .expect("a missing frozen layer must refuse before H3 load");
+    assert!(
+        error.to_string().contains("private plan layer set differs"),
+        "{error}"
+    );
+}
+
+#[test]
 fn provider_stages_the_persisted_weight_only_config_and_source_owned_config_wins() {
     for source_owned in [false, true] {
         let data = tempfile::tempdir().unwrap();
@@ -1578,7 +1686,7 @@ fn drive_bound_component_import(
 #[test]
 fn bound_shared_tier_and_exact_snapshots_reach_native_loadspec_despite_distracting_main() {
     use crate::minimax_h3_import_fixture::{
-        component_downloads, write_companion, write_shared_configs, SHARED_REVISION, TIER_REVISION,
+        component_downloads, shared_revision, tier_revision, write_companion, write_shared_configs,
     };
     let _env = crate::test_env::EnvVars::set(&[
         ("HF_HUB_CACHE", ""),
@@ -1605,8 +1713,8 @@ fn bound_shared_tier_and_exact_snapshots_reach_native_loadspec_despite_distracti
             .unwrap();
             dir
         };
-        let base_a = snapshot("MiniMaxAI/MiniMax-H3", SHARED_REVISION);
-        let tier_a = snapshot("SceneWorks/minimax-h3-mlx", TIER_REVISION);
+        let base_a = snapshot("MiniMaxAI/MiniMax-H3", shared_revision());
+        let tier_a = snapshot("SceneWorks/minimax-h3-mlx", tier_revision());
         let base_b = snapshot(
             "MiniMaxAI/MiniMax-H3",
             "3333333333333333333333333333333333333333",

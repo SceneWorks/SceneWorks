@@ -9,6 +9,7 @@ use gen_core::{
     OffloadPolicy, Precision, Quant, WeightsSource,
 };
 use serde_json::{Map as JsonObject, Value};
+use std::sync::LazyLock;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MemoryRouteBackend {
@@ -392,38 +393,9 @@ struct MemoryRouteRule {
 const ALL_TIERS: &[MemoryRouteTier] = &MemoryRouteTier::ALL;
 const ALL_MODES: &[MemoryRouteMode] = &MemoryRouteMode::ALL;
 const PLAIN: &[MemoryRouteLoadProfile] = &[MemoryRouteLoadProfile::Plain];
-const IDENTITY_ONLY: &[MemoryRouteLoadProfile] = &[MemoryRouteLoadProfile::Identity];
 const SINGLE_CONTROL: &[MemoryRouteLoadProfile] = &[MemoryRouteLoadProfile::SingleControl];
 const PLAIN_LORA: &[MemoryRouteLoadProfile] =
     &[MemoryRouteLoadProfile::Plain, MemoryRouteLoadProfile::Lora];
-const PLAIN_LORA_PID: &[MemoryRouteLoadProfile] = &[
-    MemoryRouteLoadProfile::Plain,
-    MemoryRouteLoadProfile::Lora,
-    MemoryRouteLoadProfile::LoraPid,
-    MemoryRouteLoadProfile::Pid,
-];
-const SDXL_CANDLE_PROFILES: &[MemoryRouteLoadProfile] = &[
-    MemoryRouteLoadProfile::Plain,
-    MemoryRouteLoadProfile::Lora,
-    MemoryRouteLoadProfile::Pid,
-    MemoryRouteLoadProfile::LoraPid,
-    MemoryRouteLoadProfile::SingleControl,
-    MemoryRouteLoadProfile::LoraSingleControl,
-    MemoryRouteLoadProfile::IpAdapter,
-    MemoryRouteLoadProfile::LoraIpAdapter,
-    MemoryRouteLoadProfile::IpAdapterPid,
-    MemoryRouteLoadProfile::LoraIpAdapterPid,
-];
-const FLUX1_IP_PROFILES: &[MemoryRouteLoadProfile] = &[
-    MemoryRouteLoadProfile::IpAdapter,
-    MemoryRouteLoadProfile::LoraIpAdapter,
-    MemoryRouteLoadProfile::IpAdapterPid,
-    MemoryRouteLoadProfile::LoraIpAdapterPid,
-];
-const FLUX1_CONTROL_PROFILES: &[MemoryRouteLoadProfile] = &[
-    MemoryRouteLoadProfile::SingleControl,
-    MemoryRouteLoadProfile::LoraSingleControl,
-];
 const PLAIN_SINGLE_CONTROL: &[MemoryRouteLoadProfile] = &[
     MemoryRouteLoadProfile::Plain,
     MemoryRouteLoadProfile::SingleControl,
@@ -466,8 +438,6 @@ const TEXT_AND_STYLE: &[MemoryRouteMode] = &[
     MemoryRouteMode::StyleVariations,
 ];
 const EDIT_MODES: &[MemoryRouteMode] = &[MemoryRouteMode::EditImage, MemoryRouteMode::ImageToImage];
-const SANA_MODES: &[MemoryRouteMode] =
-    &[MemoryRouteMode::TextToImage, MemoryRouteMode::ImageToImage];
 /// SC-20799: the two still modes candle-gen-bernini's `route_ok` admits — its still arm matches the
 /// mode keys "text_to_image" (0 references) and "edit" (exactly 1), the latter reached through
 /// `MemoryRouteMode::EditImage`. Deliberately NOT `MemoryRouteMode::ImageToImage`: that spelling maps
@@ -475,60 +445,16 @@ const SANA_MODES: &[MemoryRouteMode] =
 /// `bernini_image` entry's `capabilities` either.
 const BERNINI_STILL_MODES: &[MemoryRouteMode] =
     &[MemoryRouteMode::TextToImage, MemoryRouteMode::EditImage];
-const IDEOGRAM_MODES: &[MemoryRouteMode] = &[
-    MemoryRouteMode::TextToImage,
-    MemoryRouteMode::ImageToImage,
-    MemoryRouteMode::EditImage,
-    MemoryRouteMode::ImageInpaint,
-];
-const QWEN_EDIT_MODES: &[MemoryRouteMode] =
-    &[MemoryRouteMode::EditImage, MemoryRouteMode::CharacterImage];
 /// SC-24114: Qwen-Image 2.1 serves ONE upstream call — an empty ordered reference list is
 /// text-to-image, a non-empty one is the edit — under four public modes.
 /// The provider's `MAX_REFERENCE_IMAGES` — this module compiles on every target, so it is restated
 /// here and pinned against the linked provider by
 /// `qwen_image_2_1_reference_bound_matches_the_linked_provider`.
 pub(crate) const QWEN_IMAGE_2_1_MAX_REFERENCES: u32 = 10;
-const QWEN_IMAGE_2_1_MODES: &[MemoryRouteMode] = &[
-    MemoryRouteMode::TextToImage,
-    MemoryRouteMode::EditImage,
-    MemoryRouteMode::ImageToImage,
-    MemoryRouteMode::CharacterImage,
-];
-const FLUX2_KLEIN_EDIT_MODES: &[MemoryRouteMode] = &[
-    MemoryRouteMode::EditImage,
-    MemoryRouteMode::CharacterImage,
-    MemoryRouteMode::StyleVariations,
-];
-const FLUX2_KLEIN_BASE_MODES: &[MemoryRouteMode] =
-    &[MemoryRouteMode::TextToImage, MemoryRouteMode::ImageToImage];
-/// FLUX.2 Dev's three installed MLX tiers. NVFP4 belongs to the Candle family surface only.
-const FLUX2_DEV_TIERS: &[MemoryRouteTier] = &[
-    MemoryRouteTier::Bf16,
-    MemoryRouteTier::Q4,
-    MemoryRouteTier::Q8,
-];
-const FLUX2_DEV_EDIT_MODES: &[MemoryRouteMode] = &[
-    MemoryRouteMode::EditImage,
-    MemoryRouteMode::ImageToImage,
-    MemoryRouteMode::CharacterImage,
-    MemoryRouteMode::StyleVariations,
-];
 const KOLORS_MODES: &[MemoryRouteMode] = &[
     MemoryRouteMode::TextToImage,
     MemoryRouteMode::StyleVariations,
     MemoryRouteMode::EditImage,
-    MemoryRouteMode::CharacterImage,
-];
-// SC-20790: Candle Kolors has three distinct provider identities.  Do not collapse the base
-// registered generator, IP-Adapter character route, and pose-ControlNet route into an MLX-shaped
-// "kolors" row: their artifacts and residency receipts are not interchangeable.
-const KOLORS_CANDLE_BASE_MODES: &[MemoryRouteMode] =
-    &[MemoryRouteMode::TextToImage, MemoryRouteMode::EditImage];
-const KOLORS_CANDLE_IP_MODES: &[MemoryRouteMode] = &[MemoryRouteMode::CharacterImage];
-const KOLORS_CANDLE_CONTROL_MODES: &[MemoryRouteMode] = &[
-    MemoryRouteMode::TextToImage,
-    MemoryRouteMode::StyleVariations,
     MemoryRouteMode::CharacterImage,
 ];
 const PLAIN_IP: &[MemoryRouteLoadProfile] = &[
@@ -540,16 +466,6 @@ const PLAIN_LORA_IP: &[MemoryRouteLoadProfile] = &[
     MemoryRouteLoadProfile::Lora,
     MemoryRouteLoadProfile::IpAdapter,
 ];
-const KOLORS_CANDLE_IP_PROFILES: &[MemoryRouteLoadProfile] = &[
-    MemoryRouteLoadProfile::IpAdapter,
-    MemoryRouteLoadProfile::LoraIpAdapter,
-];
-const KOLORS_CANDLE_CONTROL_PROFILES: &[MemoryRouteLoadProfile] = &[
-    MemoryRouteLoadProfile::SingleControl,
-    MemoryRouteLoadProfile::SingleControlPid,
-    MemoryRouteLoadProfile::LoraSingleControl,
-    MemoryRouteLoadProfile::LoraSingleControlPid,
-];
 const Q4_Q8: &[MemoryRouteTier] = &[MemoryRouteTier::Q4, MemoryRouteTier::Q8];
 const Q4_ONLY: &[MemoryRouteTier] = &[MemoryRouteTier::Q4];
 const BF16_ONLY: &[MemoryRouteTier] = &[MemoryRouteTier::Bf16];
@@ -559,7 +475,7 @@ const BF16_Q4_Q8: &[MemoryRouteTier] = &[
     MemoryRouteTier::Q8,
 ];
 
-const RULES: &[MemoryRouteRule] = &[
+const LEGACY_RULES: &[MemoryRouteRule] = &[
     MemoryRouteRule {
         backend: MemoryRouteBackend::Mlx,
         provider: "lens",
@@ -587,82 +503,6 @@ const RULES: &[MemoryRouteRule] = &[
         requires_sequential_selection: false,
         legacy_shaping: true,
     },
-    // sc-24112 — Qwen-Image 2.1, registered on BOTH lanes with the SAME coordinates. That symmetry
-    // is the declaration, not a shortcut: after inference #1007 both providers load the same packed
-    // artefacts, declare the same `supported_quants: [Q4, Q8]` (plus the dense bf16 snapshot), and
-    // publish the same `Resident` / `StagedResidency` / `BoundedDecode` ladder off one derived
-    // memory model. A per-lane divergence here would be a claim neither engine makes.
-    //
-    // `BF16_Q4_Q8` and not `ALL_TIERS`: the catalog ships exactly these three, and NVFP4 is not a
-    // tier either provider can serve.
-    //
-    // `QWEN_IMAGE_2_1_MODES` — every PUBLIC mode the request route serves (sc-24114): text-to-image
-    // and the three conditioned faces of the SAME upstream call (`edit_image`, `image_to_image`,
-    // `character_image`). Before sc-24114 this was `TEXT_ONLY`, which left every reference request
-    // with no declaration at all (candle: `NoRelevantDeclaration`), so the terminal campaign and
-    // the admission path could only ever see text-to-image.
-    //
-    // The provider's `memory_strategy::safety_check` admits `MemoryMode::TextToImage` and PRICES
-    // references there (each one an extra `REFERENCE_FIT_TOKENS` joint-sequence block, bounded by
-    // `MAX_REFERENCE_IMAGES`) — there is no separate provider edit mode. So the manifest's
-    // `requestContexts` map every public mode onto `providerMode: "text_to_image"`, and
-    // [`expected_provider_mode`] states that mapping for this provider: the public coordinate
-    // (what the matrix and the campaign key on) stays the request's own mode, while the provider
-    // receives the one mode it implements.
-    //
-    // `PLAIN_LORA` (sc-24163): the pinned providers apply LoRA/LoKr (MLX sc-24156, Candle
-    // sc-24157) and the pinned engine reports `supports_lora=true`, and since sc-24158 the routing
-    // catalog sends a LoRA-carrying 2.1 job to Candle (`candle_quant_lora`). Until the terminal pin
-    // bump these rows stayed `PLAIN` (sc-24158) because they are published as
-    // `memoryRouteWitnesses` in the checked-in engine capability dumps and the macOS lane's
-    // fresh-dump check reds on any witness the pinned dump lacks; the `lora` profile moved here
-    // together with that re-dump and the `lora` overlay/profile on the manifest's hand-authored
-    // contract rows.
-    //
-    // `requires_sequential_selection: false`: Resident is reachable with no sequential selection;
-    // only the staged rung asks for one. `legacy_shaping: false`: this coordinate is
-    // declaration-owned and was never in the pre-declaration shaper, so removing the declaration
-    // must make it unreachable rather than fall back to legacy shaping.
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Mlx,
-        provider: "qwen_image_2_1",
-        tiers: BF16_Q4_Q8,
-        modes: QWEN_IMAGE_2_1_MODES,
-        load_profiles: PLAIN_LORA,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "qwen_image_2_1",
-        tiers: BF16_Q4_Q8,
-        modes: QWEN_IMAGE_2_1_MODES,
-        load_profiles: PLAIN_LORA,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    // Qwen-Image 2.1 Turbo (sc-25907, epic 25899): the same provider crates register the distilled
-    // checkpoint under its own id with the base contract's rungs, tiers, modes and load profiles —
-    // under Turbo's own calibration fingerprint, so no base record can answer for it. Same rule
-    // shape as the base rows above, for the same reasons.
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Mlx,
-        provider: "qwen_image_2_1_turbo",
-        tiers: BF16_Q4_Q8,
-        modes: QWEN_IMAGE_2_1_MODES,
-        load_profiles: PLAIN_LORA,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "qwen_image_2_1_turbo",
-        tiers: BF16_Q4_Q8,
-        modes: QWEN_IMAGE_2_1_MODES,
-        load_profiles: PLAIN_LORA,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
     MemoryRouteRule {
         backend: MemoryRouteBackend::Mlx,
         provider: "qwen_image_edit",
@@ -671,207 +511,6 @@ const RULES: &[MemoryRouteRule] = &[
         load_profiles: PLAIN_LORA,
         requires_sequential_selection: false,
         legacy_shaping: true,
-    },
-    // SC-20795: the six built-in Mage routes share one provider implementation, but their public
-    // request identities do not. Generation admits plain or LoRA loads with no references; edit
-    // admits only the manifest's plain, single-reference instruction-edit shape. These are new
-    // declaration-owned coordinates so a missing or crossed manifest row cannot fall through to
-    // the historical provider-id shaper.
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Mlx,
-        provider: "mage_flow_base",
-        tiers: BF16_Q4_Q8,
-        modes: TEXT_ONLY,
-        load_profiles: PLAIN_LORA,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Mlx,
-        provider: "mage_flow",
-        tiers: BF16_Q4_Q8,
-        modes: TEXT_ONLY,
-        load_profiles: PLAIN_LORA,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Mlx,
-        provider: "mage_flow_turbo",
-        tiers: BF16_Q4_Q8,
-        modes: TEXT_ONLY,
-        load_profiles: PLAIN_LORA,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Mlx,
-        provider: "mage_flow_edit_base",
-        tiers: BF16_Q4_Q8,
-        modes: &[MemoryRouteMode::EditImage],
-        load_profiles: PLAIN,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Mlx,
-        provider: "mage_flow_edit",
-        tiers: BF16_Q4_Q8,
-        modes: &[MemoryRouteMode::EditImage],
-        load_profiles: PLAIN,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Mlx,
-        provider: "mage_flow_edit_turbo",
-        tiers: BF16_Q4_Q8,
-        modes: &[MemoryRouteMode::EditImage],
-        load_profiles: PLAIN,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Mlx,
-        provider: "krea_2_turbo",
-        tiers: ALL_TIERS,
-        modes: TEXT_ONLY,
-        load_profiles: PLAIN_LORA_PID,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Mlx,
-        provider: "krea_2_raw",
-        tiers: ALL_TIERS,
-        modes: TEXT_ONLY,
-        load_profiles: PLAIN_LORA_PID,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Mlx,
-        provider: "krea_2_edit",
-        tiers: ALL_TIERS,
-        modes: EDIT_MODES,
-        load_profiles: PLAIN_LORA_PID,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Mlx,
-        provider: "krea_2_turbo_edit",
-        tiers: ALL_TIERS,
-        modes: EDIT_MODES,
-        load_profiles: PLAIN_LORA_PID,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Mlx,
-        provider: "flux1_schnell",
-        tiers: ALL_TIERS,
-        modes: TEXT_AND_STYLE,
-        load_profiles: PLAIN_LORA_PID,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Mlx,
-        provider: "flux1_dev",
-        tiers: ALL_TIERS,
-        modes: TEXT_AND_STYLE,
-        load_profiles: PLAIN_LORA_PID,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Mlx,
-        provider: "flux1_dev",
-        tiers: ALL_TIERS,
-        modes: CHARACTER_ONLY,
-        load_profiles: FLUX1_IP_PROFILES,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Mlx,
-        provider: "flux1_dev_control",
-        tiers: ALL_TIERS,
-        modes: &[
-            MemoryRouteMode::TextToImage,
-            MemoryRouteMode::StyleVariations,
-            MemoryRouteMode::CharacterImage,
-        ],
-        load_profiles: FLUX1_CONTROL_PROFILES,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Mlx,
-        provider: "pulid_flux",
-        tiers: ALL_TIERS,
-        modes: CHARACTER_ONLY,
-        load_profiles: IDENTITY_ONLY,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    // SC-20794: base, multi-reference edit, and Fun-Controlnet-Union are distinct MLX providers.
-    // Their public mode/reference/control-load axes must remain separate; no rung transfers across
-    // these sibling routes merely because they share the FLUX.2 Dev family.
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Mlx,
-        provider: "flux2_dev",
-        tiers: FLUX2_DEV_TIERS,
-        modes: TEXT_ONLY,
-        load_profiles: PLAIN,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Mlx,
-        provider: "flux2_dev_edit",
-        tiers: FLUX2_DEV_TIERS,
-        modes: FLUX2_DEV_EDIT_MODES,
-        load_profiles: PLAIN,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Mlx,
-        provider: "flux2_dev_control",
-        tiers: FLUX2_DEV_TIERS,
-        modes: TEXT_ONLY,
-        load_profiles: SINGLE_CONTROL,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Mlx,
-        provider: "flux2_klein_9b",
-        tiers: ALL_TIERS,
-        modes: FLUX2_KLEIN_BASE_MODES,
-        load_profiles: PLAIN_LORA_PID,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Mlx,
-        provider: "flux2_klein_9b_edit",
-        tiers: ALL_TIERS,
-        modes: FLUX2_KLEIN_EDIT_MODES,
-        load_profiles: PLAIN_LORA_PID,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Mlx,
-        provider: "flux2_klein_9b_kv_edit",
-        tiers: ALL_TIERS,
-        modes: FLUX2_KLEIN_EDIT_MODES,
-        load_profiles: PLAIN_LORA_PID,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
     },
     // sc-21609: `BF16_Q4_Q8`, not `ALL_TIERS` — Metal has no FP4 hardware and
     // `nvfp4_host_eligible()` is hard-false on macOS, so an MLX nvfp4 witness can never
@@ -902,15 +541,6 @@ const RULES: &[MemoryRouteRule] = &[
         load_profiles: SDXL_MLX_IP_PROFILES,
         requires_sequential_selection: false,
         legacy_shaping: true,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "sdxl",
-        tiers: BF16_Q4_Q8,
-        modes: ALL_MODES,
-        load_profiles: SDXL_CANDLE_PROFILES,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
     },
     MemoryRouteRule {
         backend: MemoryRouteBackend::Mlx,
@@ -1018,45 +648,6 @@ const RULES: &[MemoryRouteRule] = &[
         requires_sequential_selection: false,
         legacy_shaping: true,
     },
-    // sc-22731: the MLX twins of the two Candle SANA rows above. Until these existed the registry
-    // named 37 MLX providers and NEITHER SANA route, so `mlx-gen-sana`'s windowed rung 4
-    // (`bounded_transformer_residency` over `TRANSFORMER_WINDOW_COMPONENT::Dit`, inference PR 951)
-    // was unroutable by construction: `evaluate_declared_mlx_load_shape_for_request_with_strategy`
-    // refuses any provider with no `Mlx` rule, so no MLX SANA declaration could ever be consulted.
-    //
-    // `ALL_TIERS` like the three MLX Chroma1 rows above — the packed macOS turnkeys ship q4, q8 and
-    // bf16 and `mlx-gen-sana` opens each. `SANA_MODES` and `PLAIN`, exactly as the Candle rows: the
-    // engine's route gate admits text_to_image and image_to_image, and the MLX still lane builds its
-    // spec with no adapters. `requires_sequential_selection: true` because PR 951's
-    // `contract_with_asset_facts` declares the windowed rung ONLY under `OffloadPolicy::Sequential`
-    // — a Resident load must therefore keep the shape it came in with, which is what the
-    // `matching.all(|rule| rule.requires_sequential_selection)` short-circuit below guarantees, and
-    // why the six `sana_*:*:mlx` RESIDENT anchors keep `eager_materialization`.
-    //
-    // `legacy_shaping: false` and NOT the `true` the MLX Chroma1 rows carry: these coordinates did
-    // not exist in the pre-declaration shaper, so they must not become reachable through
-    // `apply_registered_load_shape` merely because a manifest declaration is absent. The cost is
-    // that the lane is request-context-owned (`requires_request_context` below), so it stays
-    // refused-and-eager — exactly what it is today with no rule at all — until the
-    // `sana_*.mlx` `memoryStrategyContract` blocks carry `requestContexts`.
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Mlx,
-        provider: "sana_1600m",
-        tiers: ALL_TIERS,
-        modes: SANA_MODES,
-        load_profiles: PLAIN,
-        requires_sequential_selection: true,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Mlx,
-        provider: "sana_sprint_1600m",
-        tiers: ALL_TIERS,
-        modes: SANA_MODES,
-        load_profiles: PLAIN,
-        requires_sequential_selection: true,
-        legacy_shaping: false,
-    },
     MemoryRouteRule {
         backend: MemoryRouteBackend::Mlx,
         provider: "kolors",
@@ -1074,126 +665,6 @@ const RULES: &[MemoryRouteRule] = &[
         load_profiles: PLAIN_LORA_IP,
         requires_sequential_selection: false,
         legacy_shaping: true,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "z_image",
-        tiers: ALL_TIERS,
-        modes: TEXT_AND_STYLE,
-        load_profiles: PLAIN_LORA,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "sana_1600m",
-        tiers: BF16_ONLY,
-        modes: SANA_MODES,
-        load_profiles: PLAIN,
-        requires_sequential_selection: true,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "sana_sprint_1600m",
-        tiers: BF16_ONLY,
-        modes: SANA_MODES,
-        load_profiles: PLAIN,
-        requires_sequential_selection: true,
-        legacy_shaping: false,
-    },
-    // SC-20799 gap 1: the three Anima Candle routes. One provider contract builder serves all three
-    // (candle-gen-anima `IDS`), but each keeps its own calibration identity, so they are three rules
-    // rather than one shared coordinate. `TEXT_ONLY` because both the engine route gate and the
-    // entries' `capabilities` admit text_to_image alone; `BF16_ONLY` because `resolved_numeric_tier`
-    // refuses any precision but bf16 AND the off-Mac download is the raw dense `split_files/` tree
-    // (the `anima_quant` tier converter is macOS-only, so there is no other tier to resolve).
-    // `PLAIN_LORA` because Resident admits a LoRA/LoKr overlay; staged residency refuses one, which
-    // is recorded as a structural exemption on the manifest declaration rather than by narrowing the
-    // load profiles here — the lora profile IS reachable, just not on the staged rung.
-    // `requires_sequential_selection` stays false: Resident is reachable without a sequential
-    // selection, and only the staged row carries `requiredOffloadPolicy: "sequential"`.
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "anima_base",
-        tiers: BF16_ONLY,
-        modes: TEXT_ONLY,
-        load_profiles: PLAIN_LORA,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "anima_aesthetic",
-        tiers: BF16_ONLY,
-        modes: TEXT_ONLY,
-        load_profiles: PLAIN_LORA,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "anima_turbo",
-        tiers: BF16_ONLY,
-        modes: TEXT_ONLY,
-        load_profiles: PLAIN_LORA,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    // SC-20799 gap 1: the three Boogu Candle routes. `BF16_Q4_Q8` matches
-    // candle-gen-boogu `validate_load_spec` (bf16 precision, quantize in {None, Q4, Q8}) and the
-    // three turnkey subdirs. `PLAIN` only: the same function REFUSES adapters, control, extra
-    // controls, IP-adapter, identity and external text encoders outright, so no overlay-bearing load
-    // profile is admissible — the entries' `loraCompatibility` blocks are reserved family
-    // placeholders with empty `types` lists. Base and Turbo are text-to-image; Edit is the
-    // `Route::Edit` arm, which admits `MemoryMode::Edit` at 1..=5 references and is the only mode in
-    // that entry's `capabilities`. The engine's base/turbo image_to_image arm is deliberately not
-    // routed: neither entry lists `image_to_image` in `capabilities`, so it has no catalog axis.
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "boogu_image",
-        tiers: BF16_Q4_Q8,
-        modes: TEXT_ONLY,
-        load_profiles: PLAIN,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "boogu_image_turbo",
-        tiers: BF16_Q4_Q8,
-        modes: TEXT_ONLY,
-        load_profiles: PLAIN,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "boogu_image_edit",
-        tiers: BF16_Q4_Q8,
-        modes: &[MemoryRouteMode::EditImage],
-        load_profiles: PLAIN,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    // SC-20799 gap 1: the Candle Bernini STILL-image ladder. The provider is the ENGINE id `bernini`
-    // (`crate::bernini::MODEL_ID`, the FULL_MEMORY_REGISTRATION provider), which the MODEL_TABLE maps
-    // the `bernini_image` sceneworks id onto — the same id the video entry uses, distinguished here
-    // by the image modes. `route_ok`'s still arm admits mode key "text_to_image" (0 references) and
-    // "edit" (exactly 1), the latter reached through `MemoryRouteMode::EditImage` because
-    // `candle_memory_strategy::request_mode` maps the "edit_image" spelling to `MemoryMode::Edit`.
-    // `BF16_Q4_Q8` matches `expected_packing` (None/Q4/Q8) and the published tier subdirs.
-    // `PLAIN_LORA` because the still route accepts an absent overlay or exactly "lora", and the
-    // off-Mac Candle descriptor genuinely serves LoRA/LoKr. Bernini declares no staged-residency
-    // rung, so nothing here gates on a sequential selection.
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "bernini",
-        tiers: BF16_Q4_Q8,
-        modes: BERNINI_STILL_MODES,
-        load_profiles: PLAIN_LORA,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
     },
     // sc-21609: the MLX twin, enabling the deferred shape Michael's coverage decision turned on.
     // mlx-gen-bernini implements rung 4 at every tier behind `structurally_streamable` (Dir +
@@ -1214,141 +685,6 @@ const RULES: &[MemoryRouteRule] = &[
         requires_sequential_selection: false,
         legacy_shaping: true,
     },
-    // SC-20788: all three Chroma turnkey routes expose the same exact request-scoped Candle
-    // Resident/Staged surface. Their public identity remains route-local, and PiD is a typed load
-    // profile rather than a mode or an untracked overlay.
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "chroma1_hd",
-        tiers: BF16_Q4_Q8,
-        modes: TEXT_ONLY,
-        load_profiles: PLAIN_LORA_PID,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "chroma1_base",
-        tiers: BF16_Q4_Q8,
-        modes: TEXT_ONLY,
-        load_profiles: PLAIN_LORA_PID,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "chroma1_flash",
-        tiers: BF16_Q4_Q8,
-        modes: TEXT_ONLY,
-        load_profiles: PLAIN_LORA_PID,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    // SC-20790: the Candle base/edit, IP character, and pose-ControlNet routes remain separate
-    // receipt/evidence domains.  In particular this leaves impossible IP+control and IP+PiD shapes
-    // without a matching rule instead of granting them through the base profile.
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "kolors",
-        tiers: BF16_Q4_Q8,
-        modes: KOLORS_CANDLE_BASE_MODES,
-        load_profiles: PLAIN_LORA_PID,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "candle_kolors_ipadapter",
-        tiers: BF16_Q4_Q8,
-        modes: KOLORS_CANDLE_IP_MODES,
-        load_profiles: KOLORS_CANDLE_IP_PROFILES,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "candle_kolors_control",
-        tiers: BF16_Q4_Q8,
-        modes: KOLORS_CANDLE_CONTROL_MODES,
-        load_profiles: KOLORS_CANDLE_CONTROL_PROFILES,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    // SC-20789: Ideogram Base and Turbo share the public request surface but retain distinct
-    // provider receipts (Base owns two DiTs; Turbo owns one DiT plus its mandatory bundled
-    // TurboTime adapter). Native/PiD and ordered user-adapter loads are exact typed profiles.
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "ideogram_4",
-        tiers: BF16_Q4_Q8,
-        modes: IDEOGRAM_MODES,
-        load_profiles: PLAIN_LORA_PID,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "ideogram_4_turbo",
-        tiers: BF16_Q4_Q8,
-        modes: IDEOGRAM_MODES,
-        load_profiles: PLAIN_LORA_PID,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "z_image_turbo",
-        tiers: ALL_TIERS,
-        modes: TEXT_AND_STYLE,
-        load_profiles: PLAIN_LORA,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "z_image_turbo",
-        tiers: ALL_TIERS,
-        modes: EDIT_MODES,
-        load_profiles: PLAIN_LORA,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "z_image_control",
-        tiers: ALL_TIERS,
-        modes: TEXT_AND_STYLE,
-        load_profiles: SINGLE_CONTROL,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "z_image_turbo_control",
-        tiers: ALL_TIERS,
-        modes: TEXT_AND_STYLE,
-        load_profiles: SINGLE_CONTROL,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "lens",
-        tiers: Q4_Q8,
-        modes: TEXT_ONLY,
-        load_profiles: PLAIN,
-        requires_sequential_selection: true,
-        legacy_shaping: false,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "lens_turbo",
-        tiers: Q4_Q8,
-        modes: TEXT_ONLY,
-        load_profiles: PLAIN,
-        requires_sequential_selection: true,
-        legacy_shaping: false,
-    },
     MemoryRouteRule {
         backend: MemoryRouteBackend::Candle,
         provider: "qwen_image",
@@ -1357,15 +693,6 @@ const RULES: &[MemoryRouteRule] = &[
         load_profiles: PLAIN,
         requires_sequential_selection: false,
         legacy_shaping: true,
-    },
-    MemoryRouteRule {
-        backend: MemoryRouteBackend::Candle,
-        provider: "qwen_image_edit",
-        tiers: BF16_Q4_Q8,
-        modes: QWEN_EDIT_MODES,
-        load_profiles: PLAIN_LORA,
-        requires_sequential_selection: false,
-        legacy_shaping: false,
     },
     MemoryRouteRule {
         backend: MemoryRouteBackend::Candle,
@@ -1459,8 +786,52 @@ const RULES: &[MemoryRouteRule] = &[
     },
 ];
 
+fn static_slice<T: 'static>(values: Vec<T>) -> &'static [T] {
+    Box::leak(values.into_boxed_slice())
+}
+
+static DECLARED_RULES: LazyLock<Vec<MemoryRouteRule>> = LazyLock::new(|| {
+    sceneworks_core::registry::declared_memory_routes()
+        .iter()
+        .map(|row| MemoryRouteRule {
+            backend: match row.backend.as_str() {
+                "mlx" => MemoryRouteBackend::Mlx,
+                "candle" => MemoryRouteBackend::Candle,
+                _ => unreachable!("build-validated memory route backend"),
+            },
+            provider: Box::leak(row.provider.clone().into_boxed_str()),
+            tiers: static_slice(
+                row.tiers
+                    .iter()
+                    .map(|tier| MemoryRouteTier::from_resolved_tier(tier).expect("validated tier"))
+                    .collect(),
+            ),
+            modes: static_slice(
+                row.modes
+                    .iter()
+                    .map(|mode| MemoryRouteMode::from_manifest(mode).expect("validated mode"))
+                    .collect(),
+            ),
+            load_profiles: static_slice(
+                row.load_profiles
+                    .iter()
+                    .map(|profile| {
+                        MemoryRouteLoadProfile::from_str(profile).expect("validated load profile")
+                    })
+                    .collect(),
+            ),
+            requires_sequential_selection: row.requires_sequential_selection,
+            legacy_shaping: false,
+        })
+        .collect()
+});
+
+fn all_rules() -> impl Iterator<Item = &'static MemoryRouteRule> {
+    LEGACY_RULES.iter().chain(DECLARED_RULES.iter())
+}
+
 fn matching_rules(selector: MemoryRouteSelector) -> impl Iterator<Item = &'static MemoryRouteRule> {
-    RULES.iter().filter(move |rule| {
+    all_rules().filter(move |rule| {
         rule.backend == selector.backend
             && rule.provider == selector.provider
             && rule.tiers.contains(&selector.tier)
@@ -1478,16 +849,6 @@ fn rule_coordinates_match(selector: MemoryRouteSelector) -> bool {
 fn rule_matches(selector: MemoryRouteSelector, sequential_selected: bool) -> bool {
     matching_rules(selector).any(|rule| !rule.requires_sequential_selection || sequential_selected)
 }
-
-/// The Candle bespoke providers whose request admission `declared_candle_bespoke_request` is
-/// authoritative for (SC-20790). Load-bearing in two places: the admission below refuses any
-/// provider outside this census, and `scripts/generate-memory-matrix.mjs` reads this const AS TEXT
-/// (`parseCandleBespokeRequestProviders`) so the published matrix can see receipt-backed bespoke
-/// coverage that no manifest declaration row carries (sc-20799). Growing the census without
-/// teaching the generator's lane map about the new provider fails the matrix build closed rather
-/// than publishing a delivered lane as `Missing`.
-pub(crate) const CANDLE_BESPOKE_REQUEST_PROVIDERS: &[&str] =
-    &["candle_kolors_ipadapter", "candle_kolors_control"];
 
 /// Exact typed authority for bespoke Candle providers whose physical contract is assembled from
 /// request-local component paths instead of the registered catalog loader. This is intentionally
@@ -1514,10 +875,14 @@ pub(crate) fn declared_candle_bespoke_request(
     if context.mode != mode || context.use_pid != spec.pid.is_some() || context.has_phases {
         return false;
     }
-    // The census gate and the per-provider shape arms are one conjunction: a provider outside
-    // `CANDLE_BESPOKE_REQUEST_PROVIDERS` can never admit, and a censused provider still has to
-    // satisfy its exact reference shape.
-    let reference_shape_matches = CANDLE_BESPOKE_REQUEST_PROVIDERS.contains(&runtime_provider)
+    // The typed policy's composed-provider link and these request-local shape arms are one
+    // conjunction; a provider absent from either side cannot admit.
+    let bespoke_provider = sceneworks_core::registry::declared_memory_routes()
+        .iter()
+        .any(|row| {
+            row.backend == "candle" && row.provider == runtime_provider && row.model_id.is_some()
+        });
+    let reference_shape_matches = bespoke_provider
         && match runtime_provider {
             "candle_kolors_ipadapter" => context.reference_count == 1 && !context.use_pid,
             "candle_kolors_control" => context.reference_count == 0,
@@ -2540,8 +1905,7 @@ pub fn apply_declared_mlx_load_policy_for_request(
     }
     let selector = MemoryRouteSelector {
         backend: MemoryRouteBackend::Mlx,
-        provider: RULES
-            .iter()
+        provider: all_rules()
             .find(|rule| rule.backend == MemoryRouteBackend::Mlx && rule.provider == provider)
             .map(|rule| rule.provider)
             .unwrap_or(""),
@@ -2739,8 +2103,7 @@ fn evaluate_declared_mlx_load_shape_for_request_with_strategy(
     if context.use_pid != spec.pid.is_some() {
         return spec.with_refused_load_shape_declaration();
     }
-    let Some(registered_provider) = RULES
-        .iter()
+    let Some(registered_provider) = all_rules()
         .find(|rule| rule.backend == MemoryRouteBackend::Mlx && rule.provider == provider)
         .map(|rule| rule.provider)
     else {
@@ -3027,8 +2390,7 @@ fn evaluate_declared_candle_load_shape_for_request_with(
     }
     let selector = MemoryRouteSelector {
         backend: MemoryRouteBackend::Candle,
-        provider: RULES
-            .iter()
+        provider: all_rules()
             .find(|rule| {
                 rule.backend == MemoryRouteBackend::Candle && rule.provider == runtime_provider
             })
@@ -3096,8 +2458,7 @@ pub fn declared_mlx_deferred_routes(models: &[Value]) -> std::collections::BTree
         else {
             continue;
         };
-        let Some(provider) = RULES
-            .iter()
+        let Some(provider) = all_rules()
             .find(|rule| rule.backend == MemoryRouteBackend::Mlx && rule.provider == provider)
             .map(|rule| rule.provider)
         else {
@@ -3151,10 +2512,7 @@ pub fn declared_candle_deferred_routes(
         ) else {
             continue;
         };
-        for rule in RULES
-            .iter()
-            .filter(|rule| rule.backend == MemoryRouteBackend::Candle)
-        {
+        for rule in all_rules().filter(|rule| rule.backend == MemoryRouteBackend::Candle) {
             let declared = rule.tiers.iter().any(|&tier| {
                 rule.modes.iter().any(|&mode| {
                     if !capabilities.iter().any(|capability| {
@@ -3187,7 +2545,7 @@ pub fn declared_candle_deferred_routes(
 /// This is derived from the same registry row production evaluates; callers must not maintain a
 /// second provider list for declaration-only behavior.
 pub fn candle_declaration_owns_load_shape(provider: &str) -> bool {
-    RULES.iter().any(|rule| {
+    all_rules().any(|rule| {
         rule.backend == MemoryRouteBackend::Candle
             && rule.provider == provider
             && !rule.legacy_shaping
@@ -3204,9 +2562,9 @@ pub fn apply_registered_load_shape(
     if spec.load_shape_declaration_result != LoadShapeDeclarationResult::NotEvaluated {
         return spec;
     }
-    let Some(rule) = RULES
+    let Some(rule) = LEGACY_RULES
         .iter()
-        .find(|rule| rule.backend == backend && rule.provider == provider && rule.legacy_shaping)
+        .find(|rule| rule.backend == backend && rule.provider == provider)
     else {
         return spec;
     };
@@ -3267,7 +2625,7 @@ pub fn apply_registered_load_shape(
 /// Exact finite witness emitted into the pin-bound engine-capability facts.
 pub fn deferred_route_witnesses() -> Vec<MemoryRouteSelector> {
     let mut out = Vec::new();
-    for rule in RULES {
+    for rule in all_rules() {
         for &tier in rule.tiers {
             for &mode in rule.modes {
                 for &load_profile in rule.load_profiles {
@@ -3546,9 +2904,7 @@ pub(crate) fn has_gate_policy(backend: MemoryRouteBackend, provider: &str) -> bo
         || crate::engines::MODEL_TABLE
             .iter()
             .any(|row| row.engine_id == provider)
-        || RULES
-            .iter()
-            .any(|rule| rule.backend == backend && rule.provider == provider)
+        || all_rules().any(|rule| rule.backend == backend && rule.provider == provider)
     {
         return true;
     }

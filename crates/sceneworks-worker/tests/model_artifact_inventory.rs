@@ -54,6 +54,17 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
         },
     },
     ModelConsumerInventoryEntry {
+        source_files: &["crates/sceneworks-worker/src/portable_aux_sources.rs"],
+        categories: &[
+            Category::Image,
+            Category::OptionalComponent,
+            Category::CoRequisite,
+        ],
+        resolution: Resolution::SharedContract {
+            entrypoint: TypedResolverEntrypoint::PinnedComponent,
+        },
+    },
+    ModelConsumerInventoryEntry {
         source_files: &[
             "crates/sceneworks-worker/src/image_jobs.rs",
             "crates/sceneworks-worker/src/image_jobs/artifact_resolution.rs",
@@ -316,7 +327,11 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
     // job's carriers (all categories) against the typed source-library availability contract and
     // is deliberately the ONLY worker surface holding external-library availability policy.
     ModelConsumerInventoryEntry {
-        source_files: &["crates/sceneworks-worker/src/external_library_runtime.rs"],
+        source_files: &[
+            "crates/sceneworks-worker/src/external_library_runtime.rs",
+            "crates/sceneworks-worker/src/portable_source_claims.rs",
+            "crates/sceneworks-worker/src/utility_dispatch.rs",
+        ],
         categories: &[
             Category::Image,
             Category::Video,
@@ -361,7 +376,10 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
     // sc-19708: the API's single model-source seam (carrier attachment + submission preflight);
     // same shared source-library contract, mirrored on the API side of the boundary.
     ModelConsumerInventoryEntry {
-        source_files: &["apps/rust-api/src/model_sources.rs"],
+        source_files: &[
+            "apps/rust-api/src/model_sources.rs",
+            "apps/rust-api/src/portable_admission.rs",
+        ],
         categories: &[
             Category::Image,
             Category::Video,

@@ -16,11 +16,18 @@ fn png_rgb(w: u32, h: u32, shade: u8) -> Vec<u8> {
 }
 
 /// A project with one dataset of three images. Returns (app, project id, dataset id, item ids,
-/// item relative paths).
+/// item relative paths, app state).
 async fn dataset_fixture(
     temp_dir: &tempfile::TempDir,
-) -> (axum::Router, String, String, Vec<String>, Vec<String>) {
-    let app = create_app(test_settings(temp_dir)).expect("app creates");
+) -> (
+    axum::Router,
+    String,
+    String,
+    Vec<String>,
+    Vec<String>,
+    crate::AppState,
+) {
+    let (app, state) = create_app_with_state(test_settings(temp_dir)).expect("app creates");
     let (_, project) = create_project(app.clone(), &"Batch describe project").await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let mut items = Vec::new();
@@ -56,13 +63,20 @@ async fn dataset_fixture(
             .map(|item| item[key].as_str().expect("item field").to_owned())
             .collect()
     };
-    (app, project_id, dataset_id, field("id"), field("path"))
+    (
+        app,
+        project_id,
+        dataset_id,
+        field("id"),
+        field("path"),
+        state,
+    )
 }
 
 #[tokio::test]
 async fn batch_describe_job_enqueues_every_image_with_the_vision_captioner_by_default() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    let (app, project_id, dataset_id, item_ids, paths) = dataset_fixture(&temp_dir).await;
+    let (app, project_id, dataset_id, item_ids, paths, _) = dataset_fixture(&temp_dir).await;
     let route =
         format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
 
@@ -94,7 +108,7 @@ async fn batch_describe_job_enqueues_every_image_with_the_vision_captioner_by_de
 #[tokio::test]
 async fn batch_describe_subset_keeps_dataset_order_and_carries_the_custom_prompt() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    let (app, project_id, dataset_id, item_ids, _) = dataset_fixture(&temp_dir).await;
+    let (app, project_id, dataset_id, item_ids, _, _) = dataset_fixture(&temp_dir).await;
     let route =
         format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
 
@@ -136,7 +150,7 @@ async fn batch_describe_subset_keeps_dataset_order_and_carries_the_custom_prompt
 #[tokio::test]
 async fn batch_describe_refuses_other_models_unknown_items_and_oversized_prompts() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    let (app, project_id, dataset_id, _, _) = dataset_fixture(&temp_dir).await;
+    let (app, project_id, dataset_id, _, _, _) = dataset_fixture(&temp_dir).await;
     let route =
         format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
     for (body, field, expect) in [
@@ -195,7 +209,7 @@ async fn batch_describe_refuses_other_models_unknown_items_and_oversized_prompts
 #[tokio::test]
 async fn batch_describe_accepts_joycaption_with_its_own_prompt_limit() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    let (app, project_id, dataset_id, item_ids, _) = dataset_fixture(&temp_dir).await;
+    let (app, project_id, dataset_id, item_ids, _, _) = dataset_fixture(&temp_dir).await;
     let route =
         format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
 
@@ -231,17 +245,40 @@ async fn batch_describe_accepts_joycaption_with_its_own_prompt_limit() {
 /// SW-7082: the describe worker appends each finished image to `/result-items` (its progress
 /// result carries only counts), and the dialog pages them back in dataset order. Only the owning
 /// worker may append, and a canceled job still serves the images it finished.
+///
+/// The describer is served on both native lanes (typed_registry_contract_tests pins the
+/// `dataset_batch_describe` cells), so the claim runs once per worker host shape whatever OS
+/// runs the test: the MLX/macOS worker and the Candle worker on Linux and Windows. A Candle
+/// worker advertises its `candle` lane capability, as the shipped Candle worker does.
 #[tokio::test]
 async fn batch_describe_items_are_appended_by_the_owner_and_paged_back_in_order() {
+    for (route, lane) in [
+        (TestPortableRoute::MlxMacos, "mlx"),
+        (TestPortableRoute::CandleLinux, "candle"),
+        (TestPortableRoute::CandleWindows, "candle"),
+    ] {
+        batch_describe_items_round_trip_on(route, lane).await;
+    }
+}
+
+async fn batch_describe_items_round_trip_on(worker_route: TestPortableRoute, lane: &str) {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    let (app, project_id, dataset_id, item_ids, _) = dataset_fixture(&temp_dir).await;
+    let (app, project_id, dataset_id, item_ids, _, state) = dataset_fixture(&temp_dir).await;
     let route =
         format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
     let (status, job) = request(app.clone(), "POST", &route, json!({})).await;
     assert_eq!(status, StatusCode::CREATED, "{job}");
     let job_id = job["id"].as_str().expect("job id").to_owned();
     const WORKER: &str = "test-describe-worker";
-    claim_job_as_worker(&app, &job_id, WORKER, &["gpu", "prompt_refine"]).await;
+    bind_inserted_test_job(&state, &job_id, worker_route);
+    claim_job_as_worker_on_route(
+        &app,
+        &job_id,
+        WORKER,
+        &["gpu", "prompt_refine", lane],
+        worker_route,
+    )
+    .await;
 
     let items_route = format!("/api/v1/jobs/{job_id}/result-items");
     let item = |index: usize| {
@@ -329,7 +366,7 @@ async fn batch_describe_items_are_appended_by_the_owner_and_paged_back_in_order(
 #[tokio::test]
 async fn batch_describe_jobs_list_the_datasets_runs_newest_first() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    let (app, project_id, dataset_id, item_ids, _) = dataset_fixture(&temp_dir).await;
+    let (app, project_id, dataset_id, item_ids, _, _) = dataset_fixture(&temp_dir).await;
     let route =
         format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
 
