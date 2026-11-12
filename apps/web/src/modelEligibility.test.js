@@ -48,6 +48,26 @@ it("derives Wan A14B Lightning and paired-LoRA controls from shipped catalog fac
   expect(wanPairedLoraAvailable(imported)).toBe(false);
 });
 
+// The API serves only the download rows whose `platforms` include the host OS
+// (`retain_downloads_for_os`), and the Lightning distill pair is a macOS-only row. Availability
+// must not depend on that filtered list: the Candle worker fetches the pair on first use.
+it("serves the Wan A14B Lightning toggle on every platform's catalog", () => {
+  const forOs = (model, os) => {
+    const downloads = model.downloads ?? [];
+    if (!downloads.some((row) => row.platforms)) return model;
+    return { ...model, downloads: downloads.filter((row) => !row.platforms || row.platforms.includes(os)) };
+  };
+  for (const os of ["macos", "windows", "linux"]) {
+    const catalog = fallbackModels.map((model) => forOs(model, os));
+    expect(catalog.filter(wanLightningAvailable).map((model) => model.id).sort(), os)
+      .toEqual(["wan_2_2_i2v_14b", "wan_2_2_t2v_14b"]);
+    expect(catalog.filter(wanPairedLoraAvailable).map((model) => model.id).sort(), os)
+      .toEqual(["wan_2_2_i2v_14b", "wan_2_2_t2v_14b"]);
+  }
+  const t2v = fallbackModels.find((model) => model.id === "wan_2_2_t2v_14b");
+  expect(forOs(t2v, "windows").downloads.some((row) => row.repo === "lightx2v/Wan2.2-Lightning")).toBe(false);
+});
+
 it("requires IC-LoRA only for the shipped LTX generations and their clip modes", () => {
   const expected = ["ltx_2_3", "ltx_2_3_eros", "ltx_2_5"];
   expect(fallbackModels.filter((model) => ltxIcLoraRequired(model, "video_bridge")).map((model) => model.id).sort()).toEqual(expected);

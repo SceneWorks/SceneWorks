@@ -230,6 +230,33 @@ fn user_menus_only_narrow_native_product_choices_and_reconcile_defaults() {
     assert!(row["defaults"].get("sampler").is_none());
 }
 
+/// Lightning availability is the typed `video.supportsLightning` fact of exactly the two shipped
+/// Wan A14B engines. It is served whatever the platform's download rows say (the distill pair
+/// downloads only on macOS), and an author choice cannot flip it on either side.
+#[test]
+fn lightning_is_an_immutable_product_fact_of_the_wan_a14b_engines() {
+    let mut lightning: Vec<_> = super::builtin_model_specs()
+        .filter(|spec| spec.product.supports_lightning())
+        .map(|spec| spec.product.id.as_str())
+        .collect();
+    lightning.sort_unstable();
+    assert_eq!(lightning, ["wan_2_2_i2v_14b", "wan_2_2_t2v_14b"]);
+    let flip =
+        |value: bool| json!({"video": {"supportsLightning": value}, "ui": {"label": "Mine"}});
+    for id in lightning {
+        let spec = builtin_model_spec(id).unwrap();
+        let projected = spec.project(Some(&flip(false)));
+        assert_eq!(
+            projected["ui"]["label"], "Mine",
+            "the author choice applies"
+        );
+        assert_eq!(projected["video"]["supportsLightning"], true, "{id}");
+    }
+    let dense = builtin_model_spec("wan_2_2").unwrap();
+    assert!(!dense.product.supports_lightning());
+    assert!(dense.project(Some(&flip(true)))["video"]["supportsLightning"].is_null());
+}
+
 #[test]
 fn presentation_overrides_never_panic_when_builtin_lacks_image_menus() {
     // Video, audio, and utility builtins lack `limits.count` (or `limits` altogether).

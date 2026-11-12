@@ -11360,6 +11360,9 @@
       "type": "video",
       "adapter": "wan_video",
       "capabilities": ["text_to_video"],
+      // Both native lanes honor the 4-step Lightning toggle. The distill LoRA pair downloads with
+      // the model only on macOS; the Candle worker fetches it on first use.
+      "video": { "supportsLightning": true },
       // Per-platform source: macOS downloads the turnkey pre-converted dual-expert MLX snapshot
       // from the SceneWorks HF org (sc-5607, epic 5594; replaces the third-party AITRADER mirror);
       // Windows/Linux load the diffusers/GGUF layout via the torch wan_video adapter.
@@ -11656,6 +11659,8 @@
       // for the checkpoint, not a flag flip. Upstream ships no Wan2.2 FLF2V variant of this family
       // either. `extend_clip` / `video_bridge` stay: the candle Wan-VACE lane genuinely serves them.
       "capabilities": ["image_to_video", "extend_clip", "video_bridge"],
+      // Lightning on both native lanes; see wan_2_2_t2v_14b.
+      "video": { "supportsLightning": true },
       // Per-platform source: macOS downloads the turnkey pre-converted dual-expert MLX snapshot
       // from the SceneWorks HF org (sc-5600, epic 5594); Windows/Linux load the diffusers/GGUF
       // layout via the torch wan_video adapter. The API serves only the entry matching the OS.

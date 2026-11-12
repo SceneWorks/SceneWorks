@@ -5,11 +5,12 @@
 // state) — callers layer installState via the helpers at the bottom.
 import { POSE_DETECT_MODEL_ID, VISION_CAPTION_MODEL_ID } from "./constants.js";
 
-// The native fast recipe is packaged only with the two shipped Wan A14B engines. Imported
-// same-family checkpoints do not inherit the worker's builtin Lightning route.
+// The 4-step Lightning toggle is the typed `video.supportsLightning` product fact of the two
+// shipped Wan A14B engines, served on every platform. Never infer it from `downloads`: the API
+// keeps only the host OS's rows, and the Lightning pair is a macOS-only row that the Candle worker
+// fetches on first use. Imported same-family checkpoints do not inherit the builtin Lightning route.
 export function wanLightningAvailable(model) {
-  return model?.family === "wan-video" && model?.type === "video" && !model?.importedSource &&
-    model?.downloads?.some((download) => download.repo === "lightx2v/Wan2.2-Lightning") === true;
+  return model?.type === "video" && !model?.importedSource && model?.video?.supportsLightning === true;
 }
 
 // Paired high/low-noise LoRA uploads belong to the two shipped 14B generation backbones.

@@ -2173,7 +2173,8 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
   let container;
   let root;
 
-  // The two A14B MoE engines ship the Lightning package advertised by the catalog.
+  // The two A14B MoE engines carry the typed Lightning fact. The rows are the Windows/Linux
+  // catalog's: the API drops the macOS-only Lightning download there, and the toggle must remain.
   const WAN_T2V_14B = {
     id: "wan_2_2_t2v_14b",
     name: "Wan2.2 14B (T2V)",
@@ -2184,7 +2185,8 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
     limits: { durations: [3, 4, 5], fps: [16], resolutions: ["832x480", "480x832"] },
     quantization: {},
     loraCompatibility: { sizeClass: "14b" },
-    downloads: [{ repo: "lightx2v/Wan2.2-Lightning" }],
+    video: { supportsLightning: true },
+    downloads: [{ repo: "SceneWorks/wan2.2-t2v-a14b-candle", variant: "q4", platforms: ["windows", "linux"] }],
     ui: {},
   };
   const WAN_I2V_14B = {
@@ -2200,6 +2202,7 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
     name: "Wan 2.2 (5B)",
     capabilities: ["text_to_video"],
     loraCompatibility: { sizeClass: "5b" },
+    video: {},
     downloads: [],
   };
   // A non-Wan engine (LTX) — no toggle.
@@ -3078,7 +3081,8 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
     family: "wan-video",
     adapter: "wan_video",
     capabilities: ["text_to_video"],
-    downloads: [{ repo: "lightx2v/Wan2.2-Lightning" }],
+    video: { supportsLightning: true },
+    downloads: [],
     defaults: { duration: 5, resolution: "832x480", fps: 16 },
     limits: { durations: [3, 4, 5], fps: [16], resolutions: ["832x480"] },
     quantization: {},
@@ -3474,8 +3478,11 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
     // `negative_prompt` is on it, so the axes genuinely do not exist. The non-declaring count is
     // deliberately asserted separately. LTX-2.5 declares both absent for its default distilled
     // surface; Video Studio reopens only negative conditioning when dev is explicitly selected.
+    // A block that declares only another fact (Wan A14B's `supportsLightning`) keeps both axes.
     const videoEntries = models.filter((entry) => entry.type === "video");
-    const declaring = videoEntries.filter((entry) => entry.video).map((entry) => entry.id).sort();
+    const declaring = videoEntries
+      .filter((entry) => entry.video && ("supportsGuidance" in entry.video || "supportsNegativePrompt" in entry.video))
+      .map((entry) => entry.id).sort();
     expect(declaring).toEqual(["krea_realtime_14b", "ltx_2_5", "minimax_h3", "minimax_h3_ref", "svd"]);
     expect(videoEntries.length - declaring.length).toBe(8);
 

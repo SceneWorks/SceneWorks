@@ -92,6 +92,16 @@ impl ProductModel {
     pub fn supports_hires_fix(&self) -> bool {
         supports_hires_fix(self.fields.get("image"))
     }
+
+    /// The engine's `video.supportsLightning` fact: true when it honors the 4-step Lightning
+    /// toggle on every platform. Absent means false. Author choices never change it.
+    pub fn supports_lightning(&self) -> bool {
+        self.fields
+            .get("video")
+            .and_then(|video| video.get("supportsLightning"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
 }
 
 /// `image.supportsHiresFix` of a product or manifest `image` block; absent means true.

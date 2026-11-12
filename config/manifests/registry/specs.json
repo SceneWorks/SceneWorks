@@ -68178,6 +68178,9 @@
           "extend_clip",
           "video_bridge"
         ]
+      },
+      "video": {
+        "supportsLightning": true
       }
     },
     "routes": {},
@@ -68672,6 +68675,9 @@
         "recommendedFor": [
           "text_to_video"
         ]
+      },
+      "video": {
+        "supportsLightning": true
       }
     },
     "routes": {},

@@ -2113,6 +2113,10 @@
               "type": "boolean",
               "description": "Whether this provider consumes an explicit native schedule shift; false leaves the control visible but unavailable."
             },
+            "supportsLightning": {
+                "type": "boolean",
+                "description": "Does the engine honor the 4-step Lightning distill toggle (`advanced.lightning`)? True for the two shipped Wan2.2 A14B engines on every platform: the worker applies the lightx2v/Wan2.2-Lightning LoRA pair, fetching it on first use where no download row installs it. ABSENT MEANS FALSE. A product fact of the engine, not an author choice: user.models.jsonc cannot change it, and it never depends on the platform-filtered download list."
+              },
             "supportsGuidance": {
                 "type": "boolean",
                 "description": "Does the engine have a classifier-free-guidance axis? False when the engine exposes no guidance scale at all: krea_realtime_14b's Self-Forcing distillation baked guidance out (a single batch-1 forward), and svd drives its own frame-wise CFG ramp — `generate_svd` hard-sets `guidance: None`. ABSENT MEANS TRUE. When false, Video Studio hides its Guidance control and stops emitting `advanced.guidanceScale`."
