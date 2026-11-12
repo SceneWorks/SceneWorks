@@ -2982,7 +2982,6 @@ export function ImageStudio() {
             promptGuide={promptGuide}
             model={model}
             refinePrompt={refinePrompt}
-            handleResolutionChange={handleResolutionChange}
             handleApplyProposedSize={handleApplyProposedSize}
             qwenRewriteReferenceIds={qwenRewriteReferenceIds}
             qwenRewriteModel={qwenRewriteModel}
