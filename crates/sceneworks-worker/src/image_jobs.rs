@@ -2864,6 +2864,11 @@ pub(crate) use lane_controls::{
 
 #[cfg(native_lane)]
 mod tier_resolver;
+/// The engine's standard-tier resolution, for portable-binding tests outside this module.
+#[cfg(all(test, native_lane))]
+pub(crate) fn standard_tier_subdir_for_test(root: &Path, request: &ImageRequest) -> PathBuf {
+    standard_tier_subdir(root, request)
+}
 #[cfg(target_os = "macos")]
 use tier_resolver::resolved_tier_is_complete;
 #[cfg(all(test, native_lane))]

@@ -1220,6 +1220,10 @@ fn install_portable_gemma(
         .map_err(|error| WorkerError::Engine(error.to_string()))?;
     for (relative, file) in &members {
         let input = plain_member(source, relative)?;
+        // A pinned Gemma member reaches here as an entry of the route's verified source view;
+        // read the file it stands for, then hold it to this ledger as before.
+        let input =
+            crate::external_library_runtime::revision_view_backing_file(&input)?.unwrap_or(input);
         verify_file(&input, file)?;
         let output = staging.path().join(relative);
         if let Some(directory) = output.parent() {
@@ -1244,6 +1248,72 @@ fn install_portable_gemma(
 mod portable_gemma_tests {
     use super::*;
     use sha2::{Digest, Sha256};
+
+    /// Codex review of PR #3379: a portable LTX conversion hands the Gemma installer the route's
+    /// verified source view, whose entries are links to the hub; it installs their verified bytes.
+    #[test]
+    fn frozen_gemma_installs_from_a_verified_source_view() {
+        use sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile;
+
+        let temp = tempfile::tempdir().unwrap();
+        let hub = temp
+            .path()
+            .join("hub/models--SceneWorks--ltx-2.3-mlx/snapshots/0123456789abcdef0123456789abcdef01234567/gemma");
+        std::fs::create_dir_all(&hub).unwrap();
+        let mut weights = Vec::new();
+        let header = br#"{"weight":{"dtype":"U8","shape":[1],"data_offsets":[0,1]}}"#;
+        weights.extend_from_slice(&(header.len() as u64).to_le_bytes());
+        weights.extend_from_slice(header);
+        weights.push(7);
+        let sources = [
+            ("config.json", br#"{"model_type":"gemma3"}"#.to_vec()),
+            ("tokenizer.json", br#"{"model":{}}"#.to_vec()),
+            ("model.safetensors", weights),
+        ];
+        for (name, bytes) in &sources {
+            std::fs::write(hub.join(name), bytes).unwrap();
+        }
+        let data = temp.path().join("data");
+        let names = sources
+            .iter()
+            .map(|(name, _)| (format!("gemma/{name}"), hub.join(name)))
+            .collect::<Vec<_>>();
+        let root = crate::external_library_runtime::test_revision_view(
+            &data.join("models/portable-attempts/route"),
+            "SceneWorks/ltx-2.3-mlx",
+            "0123456789abcdef0123456789abcdef01234567",
+            &names
+                .iter()
+                .map(|(name, path)| (name.as_str(), path.as_path()))
+                .collect::<Vec<_>>(),
+        );
+        let source = root.join("gemma");
+        assert!(std::fs::symlink_metadata(source.join("config.json"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let files: Vec<PortableGemmaFile> = serde_json::from_value(
+            serde_json::to_value(
+                sources
+                    .iter()
+                    .map(|(name, bytes)| PortableArtifactFile {
+                        relative_path: format!("gemma/{name}").into(),
+                        size_bytes: bytes.len() as u64,
+                        sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        install_portable_gemma(&source, &data, &files).unwrap();
+        let target = data.join("models/mlx/gemma");
+        for (name, bytes) in &sources {
+            let installed = target.join(name);
+            assert!(std::fs::symlink_metadata(&installed).unwrap().is_file());
+            assert_eq!(std::fs::read(installed).unwrap(), *bytes);
+        }
+    }
 
     #[test]
     fn frozen_gemma_survives_source_removal_and_refuses_divergent_sibling() {

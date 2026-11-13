@@ -1419,6 +1419,16 @@ pub(super) fn model_variant_downloads(model: &Value) -> Vec<&Value> {
         .collect()
 }
 
+/// The variant keys (`bf16`/`q8`/`q4`, or `default`) whose files are installed on this host, by
+/// the same per-tier probe the catalog's `variants[].installed` reports.
+pub(crate) fn installed_variant_keys(model: &Value, data_dir: &FsPath) -> Vec<String> {
+    model_variant_states(model, data_dir)
+        .into_iter()
+        .filter(|variant| variant.installed)
+        .map(|variant| variant.variant)
+        .collect()
+}
+
 // Build the per-variant install state for every selected download entry. Each entry is probed
 // independently against the HF cache using that tier's own `files` filter, so the catalog can
 // advertise (e.g.) bf16 installed while q4 is missing.

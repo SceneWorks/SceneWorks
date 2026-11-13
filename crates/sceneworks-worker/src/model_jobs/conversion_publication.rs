@@ -143,6 +143,13 @@ fn materialize_portable_conversion_links(temp_dir: &Path, data_dir: &Path) -> Wo
         cache_root: &Path,
         active: &mut Vec<PathBuf>,
     ) -> WorkerResult<()> {
+        // A pinned Hugging Face member is served from the route's verified source view, whose
+        // entries stand for files outside the private snapshot: copy the verified file itself.
+        if let Some(backing) = crate::external_library_runtime::revision_view_backing_file(source)?
+        {
+            std::fs::copy(backing, destination)?;
+            return Ok(());
+        }
         let canonical = std::fs::canonicalize(source)?;
         if !canonical.starts_with(cache_root) {
             return Err(WorkerError::InvalidPayload(format!(
@@ -186,8 +193,23 @@ fn materialize_portable_conversion_links(temp_dir: &Path, data_dir: &Path) -> Wo
             let path = entry.path();
             let metadata = std::fs::symlink_metadata(&path)?;
             if metadata.file_type().is_symlink() {
-                let target = std::fs::canonicalize(&path)?;
-                if target.starts_with(cache_root) {
+                let canonical = std::fs::canonicalize(&path)?;
+                // A link straight to a view entry resolves outside the private snapshot; borrow
+                // the entry it names, which `copy_borrowed` resolves to its verified file.
+                let named = path
+                    .parent()
+                    .unwrap_or(directory)
+                    .join(std::fs::read_link(&path)?);
+                let target = if canonical.starts_with(cache_root) {
+                    Some(canonical)
+                } else if crate::external_library_runtime::revision_view_backing_file(&named)?
+                    .is_some()
+                {
+                    Some(named)
+                } else {
+                    None
+                };
+                if let Some(target) = target {
                     let replacement = path.with_file_name(format!(
                         ".portable-copy-{}",
                         Uuid::new_v4()
@@ -225,6 +247,69 @@ fn materialize_portable_conversion_links(temp_dir: &Path, data_dir: &Path) -> Wo
 mod conversion_lock_tests {
     use super::*;
     use fs2::FileExt as _;
+
+    /// Codex review of PR #3379: a conversion that borrows component directories and files from
+    /// the route's verified source view (entries are links to the hub) publishes real copies of
+    /// the verified bytes, and refuses a view file the ledger does not freeze.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn converted_install_copies_borrowed_source_view_entries() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("data dir");
+        let data_dir = root.path();
+        let hub = data_dir.join("hub/models--guardfx--flux/snapshots/rev");
+        std::fs::create_dir_all(hub.join("vae")).unwrap();
+        std::fs::write(hub.join("vae/model.safetensors"), b"vae bytes").unwrap();
+        std::fs::write(hub.join("tokenizer.json"), b"tokenizer bytes").unwrap();
+        let view = crate::external_library_runtime::test_revision_view(
+            &data_dir.join("models/portable-attempts/route"),
+            "guardfx/flux",
+            "0123456789abcdef0123456789abcdef01234567",
+            &[
+                ("vae/model.safetensors", &hub.join("vae/model.safetensors")),
+                ("tokenizer.json", &hub.join("tokenizer.json")),
+            ],
+        );
+        let conversion_root = data_dir.join("models/mlx");
+        std::fs::create_dir_all(&conversion_root).unwrap();
+        let staged = conversion_root.join("staged");
+        std::fs::create_dir(&staged).unwrap();
+        symlink(view.join("vae"), staged.join("vae")).unwrap();
+        symlink(view.join("tokenizer.json"), staged.join("tokenizer.json")).unwrap();
+        let installed = conversion_root.join("converted");
+        finalize_converted_dir(&staged, &installed, data_dir)
+            .await
+            .expect("publish converted install borrowing view entries");
+        std::fs::remove_dir_all(data_dir.join("models/portable-attempts/route")).unwrap();
+        std::fs::remove_dir_all(data_dir.join("hub")).unwrap();
+        for (name, bytes) in [
+            ("vae/model.safetensors", b"vae bytes".as_slice()),
+            ("tokenizer.json", b"tokenizer bytes".as_slice()),
+        ] {
+            let path = installed.join(name);
+            assert!(!std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+
+        let view = crate::external_library_runtime::test_revision_view(
+            &data_dir.join("models/portable-attempts/other"),
+            "guardfx/flux",
+            "0123456789abcdef0123456789abcdef01234567",
+            &[],
+        );
+        std::fs::create_dir_all(&view).unwrap();
+        std::fs::write(view.join("stray.safetensors"), b"unfrozen").unwrap();
+        let staged = conversion_root.join("staged-stray");
+        std::fs::create_dir(&staged).unwrap();
+        symlink(view.join("stray.safetensors"), staged.join("stray.safetensors")).unwrap();
+        finalize_converted_dir(&staged, &conversion_root.join("converted-stray"), data_dir)
+            .await
+            .expect_err("an unfrozen view file is never published");
+    }
 
     #[cfg(unix)]
     #[tokio::test]

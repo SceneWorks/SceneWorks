@@ -3996,6 +3996,7 @@
           "durationHint": "Use shorter clips until local looping behavior is validated.",
           "label": "Wan2.2",
           "promptGuide": {
+            "path": "/prompt-guides/wan-2-2.md",
             "sources": [
               {
                 "label": "Qwen Cloud video prompt guide",

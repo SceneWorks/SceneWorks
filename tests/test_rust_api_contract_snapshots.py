@@ -730,17 +730,37 @@ def mask_memory_guidance(entry: dict) -> None:
     entry["memoryGuidance"] = masked
 
 
-def _strip_public_locators(value: Any) -> Any:
+def _is_web_prompt_guide_path(value: str) -> bool:
+    """Mirror of `is_web_prompt_guide_path` (apps/rust-api/src/job_redaction.rs): the web app's
+    own `/prompt-guides/<name>.md` asset URL, one segment, not a host locator."""
+    name = value.removeprefix("/prompt-guides/")
+    return (
+        name != value
+        and name != ""
+        and name.endswith(".md")
+        and "/" not in name
+        and "\\" not in name
+        and not name.startswith(".")
+    )
+
+
+def _strip_public_locators(value: Any, parent: str | None = None) -> Any:
     """The public job redaction as it applies to a catalog row: `paths` blocks and `path`
-    strings never reach a public job payload (apps/rust-api/src/job_redaction.rs)."""
+    strings never reach a public job payload, except a `promptGuide` object's web asset `path`
+    (apps/rust-api/src/job_redaction.rs)."""
     if isinstance(value, dict):
         return {
-            key: _strip_public_locators(item)
+            key: _strip_public_locators(item, key)
             for key, item in value.items()
-            if key != "paths" and not (key.lower() == "path" and isinstance(item, str))
+            if key != "paths"
+            and not (
+                key.lower() == "path"
+                and isinstance(item, str)
+                and not (parent == "promptGuide" and _is_web_prompt_guide_path(item))
+            )
         }
     if isinstance(value, list):
-        return [_strip_public_locators(item) for item in value]
+        return [_strip_public_locators(item, parent) for item in value]
     return value
 
 
