@@ -137,6 +137,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          echo "[tier2-ab] $(date -u +%Y-%m-%dT%H:%M:%SZ) phase=waiting_for_metal_lock wait_s=7200"
           source tier2-ab-driver/scripts/ci/metal_execution_entry.sh
           metal_execution_entry 7200 node tier2-ab-driver/scripts/tier2-ab.mjs --run
       - name: Retain the A/B evidence
@@ -147,9 +148,16 @@ jobs:
           path: ${{ env.TIER2_AB_WORK }}/evidence/
           if-no-files-found: warn
           retention-days: 30
+      # Head writes read-only attempt bundles under the run's own state dir. The driver restores
+      # owner write permission inside the scratch roots only (never following a link, never a hub
+      # root) before removing them; the driver checkout goes last.
       - name: Remove every scratch directory
         if: ${{ always() }}
-        run: rm -rf -- "${TIER2_AB_WORK:?}" "$GITHUB_WORKSPACE/tier2-ab-base" "$GITHUB_WORKSPACE/tier2-ab-head" "$GITHUB_WORKSPACE/tier2-ab-driver"
+        run: |
+          status=0
+          if [ -f tier2-ab-driver/scripts/tier2-ab.mjs ]; then node tier2-ab-driver/scripts/tier2-ab.mjs --cleanup || status=$?; fi
+          rm -rf -- "$GITHUB_WORKSPACE/tier2-ab-driver"
+          exit "$status"
 
   cuda:
     if: ${{ inputs.backend == 'cuda' }}
@@ -246,6 +254,10 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
+          # The lease wrapper prints nothing while it waits. Strict-idle admission needs physical
+          # GPU1 under 2 GiB used, under 5% utilization and no compute process; the driver prints
+          # "[tier2-ab] ... phase=driver_started" once admitted, then one line per phase.
+          Write-Host "[tier2-ab] $([DateTime]::UtcNow.ToString('o')) phase=waiting_for_gpu1_lease policy=strict-idle budget_min=540"
           python -I scripts/ci/windows_cuda_execution.py --actor tier2-ab-cuda --budget-minutes 540 --cuda-ordinals 0 -- node scripts/tier2-ab.mjs --run
           if ($LASTEXITCODE -ne 0) { throw 'tier2-ab comparison failed; see the evidence artifact' }
       - name: Retain the A/B evidence
@@ -258,9 +270,13 @@ jobs:
             ${{ runner.temp }}/sceneworks-cuda-execution-${{ github.run_id }}-${{ github.run_attempt }}-tier2-ab-cuda/
           if-no-files-found: warn
           retention-days: 30
+      # Same read-only-bundle restore as the mlx job; multiply linked read-only files are refused
+      # rather than changed, because they may share bytes with the hub.
       - name: Remove every scratch directory
         if: ${{ always() }}
         run: |
-          foreach ($dir in @($env:TIER2_AB_WORK, "$env:GITHUB_WORKSPACE\tier2-ab-base", "$env:GITHUB_WORKSPACE\tier2-ab-head", "$env:GITHUB_WORKSPACE\tier2-ab-driver")) {
-            if ($dir -and (Test-Path -LiteralPath $dir)) { cmd /c rmdir /s /q "$dir" }
-          }
+          $status = 0
+          if (Test-Path -LiteralPath 'tier2-ab-driver\scripts\tier2-ab.mjs') { node tier2-ab-driver\scripts\tier2-ab.mjs --cleanup; $status = $LASTEXITCODE }
+          $driver = "$env:GITHUB_WORKSPACE\tier2-ab-driver"
+          if (Test-Path -LiteralPath $driver) { cmd /c rmdir /s /q "$driver" }
+          exit $status

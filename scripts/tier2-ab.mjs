@@ -24,7 +24,7 @@
 //   array / ';'-separated list of hub roots), TIER2_AB_INFERENCE_SHA (optional cross-check).
 import assert from "node:assert/strict";
 import { execFile as execFileCallback, spawn } from "node:child_process";
-import { copyFile, cp, mkdir, open, readFile, readdir, realpath, rm, stat, statfs, writeFile } from "node:fs/promises";
+import { chmod, copyFile, cp, lstat, mkdir, open, readFile, readdir, realpath, rm, stat, statfs, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -58,16 +58,16 @@ const PROMPT_IMAGE = "A red glass apple beside a blue ceramic cup, studio photog
 // flux1-owner-worker-proof (FLUX.1), flux3 app lifecycle (Klein, smaller size), load-progress
 // (MOSS-Image, Chatterbox), sdxl admitted replay (SDXL q4); the LTX-2.5 body uses the shortest
 // declared duration/fps of the unchanged catalog entry and the worker's default distilled variant.
-const IMAGE_ROUTE = (id, backend, model, tier, group, body) => ({ id, backend, model, kind: "image", mode: "text_to_image", tier, group, endpoint: "/api/v1/image/jobs", timeoutMinutes: 40, body });
+const IMAGE_ROUTE = (id, backend, model, tier, group, body) => ({ id, backend, model, kind: "image", mode: "text_to_image", tier, group, endpoint: "/api/v1/image/jobs", claimMinutes: 5, timeoutMinutes: 20, body });
 export const ROUTES = Object.freeze(Object.fromEntries([
   IMAGE_ROUTE("mlx-flux1-dev-t2i", "mlx", "flux_dev", "q4", "mlx-flux-t2i", { mode: "text_to_image", model: "flux_dev", prompt: PROMPT_IMAGE, negativePrompt: "", seed: 33111, width: 768, height: 768, count: 1, advanced: { steps: 4, sampler: "euler", guidanceScale: 3.5 }, loras: [] }),
   IMAGE_ROUTE("mlx-flux3-klein-t2i", "mlx", "flux3_klein", "bf16", "mlx-flux-t2i", { mode: "text_to_image", model: "flux3_klein", prompt: "A small teal ceramic teapot on a pale yellow table, soft daylight, studio photograph", negativePrompt: "", seed: 26234, width: 512, height: 512, count: 1, advanced: { steps: 4, sampler: "euler", guidanceScale: 0 }, loras: [] }),
   IMAGE_ROUTE("mlx-moss-image-t2i", "mlx", "moss_image_sft", null, null, { mode: "text_to_image", model: "moss_image_sft", prompt: "A red ceramic cup on a white table", width: 256, height: 256, count: 1, seed: 26325, advanced: { steps: 2, guidanceScale: 1.0, mossImage: { acceleration: "off", max_sequence_length: 64 } } }),
-  { id: "mlx-ltx25-distilled-t2v", backend: "mlx", model: "ltx_2_5", kind: "video", mode: "text_to_video", tier: "q4", group: null, endpoint: "/api/v1/video/jobs", timeoutMinutes: 75, body: { mode: "text_to_video", model: "ltx_2_5", prompt: "A paper boat drifting across a calm pond, gentle morning light", negativePrompt: "", duration: 4, fps: 24, width: 768, height: 512, seed: 25001, loras: [], advanced: { transformerVariant: "distilled" } } },
-  { id: "mlx-chatterbox-tts", backend: "mlx", model: "chatterbox_tts", kind: "audio", mode: "text_to_speech", tier: null, group: null, endpoint: "/api/v1/audio/jobs", timeoutMinutes: 30, referenceAudio: true, body: { model: "chatterbox_tts", prompt: "The red cup is on the table.", seed: 27980 } },
+  { id: "mlx-ltx25-distilled-t2v", backend: "mlx", model: "ltx_2_5", kind: "video", mode: "text_to_video", tier: "q4", group: null, endpoint: "/api/v1/video/jobs", claimMinutes: 10, timeoutMinutes: 45, body: { mode: "text_to_video", model: "ltx_2_5", prompt: "A paper boat drifting across a calm pond, gentle morning light", negativePrompt: "", duration: 4, fps: 24, width: 768, height: 512, seed: 25001, loras: [], advanced: { transformerVariant: "distilled" } } },
+  { id: "mlx-chatterbox-tts", backend: "mlx", model: "chatterbox_tts", kind: "audio", mode: "text_to_speech", tier: null, group: null, endpoint: "/api/v1/audio/jobs", claimMinutes: 5, timeoutMinutes: 15, referenceAudio: true, body: { model: "chatterbox_tts", prompt: "The red cup is on the table.", seed: 27980 } },
   IMAGE_ROUTE("cuda-sdxl-q4-t2i", "cuda", "sdxl", "q4", null, { model: "sdxl", mode: "text_to_image", prompt: "a photorealistic red apple on a wooden table, studio lighting", width: 1024, height: 1024, count: 1, seed: 16402, loras: [], advanced: { mlxQuantize: 4 } }),
   IMAGE_ROUTE("cuda-moss-image-t2i", "cuda", "moss_image_sft", null, null, { mode: "text_to_image", model: "moss_image_sft", prompt: "A red ceramic cup on a white table", width: 256, height: 256, count: 1, seed: 26325, advanced: { steps: 2, guidanceScale: 1.0, mossImage: { acceleration: "off", max_sequence_length: 64 } } }),
-  { id: "cuda-ltx25-distilled-t2v", backend: "cuda", model: "ltx_2_5", kind: "video", mode: "text_to_video", tier: "q4", group: null, endpoint: "/api/v1/video/jobs", timeoutMinutes: 75, body: { mode: "text_to_video", model: "ltx_2_5", prompt: "A paper boat drifting across a calm pond, gentle morning light", negativePrompt: "", duration: 4, fps: 24, width: 768, height: 512, seed: 25001, loras: [], advanced: { transformerVariant: "distilled" } } },
+  { id: "cuda-ltx25-distilled-t2v", backend: "cuda", model: "ltx_2_5", kind: "video", mode: "text_to_video", tier: "q4", group: null, endpoint: "/api/v1/video/jobs", claimMinutes: 10, timeoutMinutes: 45, body: { mode: "text_to_video", model: "ltx_2_5", prompt: "A paper boat drifting across a calm pond, gentle morning light", negativePrompt: "", duration: 4, fps: 24, width: 768, height: 512, seed: 25001, loras: [], advanced: { transformerVariant: "distilled" } } },
 ].map((route) => [route.id, Object.freeze(route)])));
 export const DEFAULT_ROUTE_IDS = Object.freeze({
   mlx: Object.freeze(["mlx-flux1-dev-t2i", "mlx-flux3-klein-t2i", "mlx-moss-image-t2i", "mlx-ltx25-distilled-t2v", "mlx-chatterbox-tts"]),
@@ -126,7 +126,11 @@ export function resolveConfig(env, { platform = process.platform, home = os.home
   const routes = selectRoutes(backend, env.TIER2_AB_ROUTES);
   const hubs = listInput(env.TIER2_AB_HUBS, /[;\r\n]+/) ?? defaultHubs(backend, home);
   fact(hubs.length > 0 && hubs.every((hub) => absoluteFor(platform, hub)), "every hub root must be an absolute path");
-  return { backend, baseSha, headSha, inferenceSha, baseDir, headDir, work, routes, hubs: hubs.map((hub) => paths.resolve(hub)) };
+  // Optional operator knob: one claim bound (minutes) for every route, e.g. to fail fast.
+  const claimText = (env.TIER2_AB_CLAIM_MINUTES ?? "").trim();
+  const claimMinutesOverride = claimText === "" ? null : Number(claimText);
+  fact(claimMinutesOverride === null || (Number.isFinite(claimMinutesOverride) && claimMinutesOverride > 0 && claimMinutesOverride <= 60), "TIER2_AB_CLAIM_MINUTES must be a number in (0, 60]");
+  return { backend, baseSha, headSha, inferenceSha, baseDir, headDir, work, routes, hubs: hubs.map((hub) => paths.resolve(hub)), claimMinutesOverride };
 }
 
 // Pure selector for the registered dispatcher (memory-catalog-campaign.yml, profile tier2-ab).
@@ -334,6 +338,74 @@ export function exitCodeFor(report) {
   return bad || report.summary.ran === 0 || report.fatal ? 1 : 0;
 }
 
+// ---- job polling bounds and diagnostics ---------------------------------------------------------
+// A job is claimed once a worker id is attached or it leaves the queued/pending states. Two
+// bounds per route: claimMinutes from submission until the claim, timeoutMinutes from the claim
+// until completion. Either stops the run early with a specific reason instead of a long ceiling.
+const UNCLAIMED = new Set(["queued", "pending_caption", "pending_workflow"]);
+export const jobClaimed = (job) => Boolean(job?.workerId) || (job?.status !== undefined && !UNCLAIMED.has(job.status));
+export function jobProgressDecision({ job, postedMs, claimedAtMs = null, nowMs, claimMinutes, timeoutMinutes }) {
+  const where = `${job?.status ?? "?"}/${job?.stage ?? "?"}${job?.message ? ` (${String(job.message).slice(0, 200)})` : ""}`;
+  if (["failed", "canceled", "interrupted"].includes(job?.status)) return { state: "stop", reason: `job ${job.status}: ${job.error ?? job.message ?? "no error served"}` };
+  if (job?.status === "completed") return { state: "completed" };
+  if (!jobClaimed(job)) {
+    if (nowMs - postedMs > claimMinutes * 60_000) return { state: "stop", reason: `unclaimed: job stayed ${where} for more than ${claimMinutes} min after submission` };
+    return { state: "waiting_claim" };
+  }
+  const claimed = claimedAtMs ?? nowMs;
+  if (nowMs - claimed > timeoutMinutes * 60_000) return { state: "stop", reason: `execution bound: job still ${where} ${timeoutMinutes} min after the claim` };
+  return { state: "running", claimedAtMs: claimed };
+}
+const JOB_FIELDS = ["id", "status", "stage", "message", "error", "workerId", "assignedGpu", "requestedGpu", "attempts", "cancelRequested", "progress", "createdAt", "updatedAt", "startedAt"];
+// What the API serves about a job's state, including any refusal/blocked/admission field.
+export function jobDiagnostics(job) {
+  if (!job || typeof job !== "object") return null;
+  const out = Object.fromEntries(JOB_FIELDS.filter((key) => job[key] !== undefined).map((key) => [key, job[key]]));
+  const reasons = {};
+  for (const [scope, value] of [["job", job], ["result", job.result], ["payload", job.payload]]) for (const [key, child] of Object.entries(value && typeof value === "object" ? value : {})) if (/block|refus|reason|admission|claim|pending/i.test(key)) reasons[`${scope}.${key}`] = child;
+  if (Object.keys(reasons).length) out.reasons = reasons;
+  return out;
+}
+export function lastLines(text, count = 50) { const lines = String(text ?? "").replace(/\r\n/g, "\n").split("\n"); while (lines.length && lines.at(-1) === "") lines.pop(); return lines.slice(-count); }
+// One line per phase transition on the job log, so a watcher sees where a run is.
+export function progressLine(fields, at = new Date()) {
+  return `[tier2-ab] ${at.toISOString()} ${Object.entries(fields).filter(([, value]) => value !== undefined && value !== null && value !== "").map(([key, value]) => `${key}=${String(value).replace(/\s+/g, " ").slice(0, 300)}`).join(" ")}`;
+}
+let progressSink = (line) => process.stdout.write(`${line}\n`);
+const progress = (fields) => progressSink(progressLine(fields));
+
+// ---- scratch cleanup ----------------------------------------------------------------------------
+// Head's worker writes immutable (read-only) attempt bundles under state/data/models, so a plain
+// recursive delete fails. Restore owner write permission ONLY inside an attempt-owned scratch
+// root, never following a link: on POSIX only directories need it (unlinking a read-only file
+// needs a writable parent); on Windows read-only files are cleared too, except multiply linked
+// files, which may share bytes with a hub and are reported instead of modified.
+const inside = (root, candidate, paths) => { const rel = paths.relative(root, candidate); return rel !== "" && !rel.startsWith("..") && !paths.isAbsolute(rel); };
+export async function removeScratch(target, { allowedRoots, protectedRoots = [], platform = process.platform, fs = { lstat, readdir, chmod, rm } } = {}) {
+  const paths = pathsFor(platform), resolved = paths.resolve(target);
+  const norm = (value) => (platform === "win32" ? paths.resolve(value).toLowerCase() : paths.resolve(value));
+  fact(allowedRoots.some((root) => root && inside(norm(root), norm(resolved), paths)), `refusing to remove ${resolved}: not strictly inside ${allowedRoots.filter(Boolean).join(" or ") || "an allowed scratch root"}`);
+  for (const hub of protectedRoots.filter(Boolean)) fact(norm(hub) !== norm(resolved) && !inside(norm(resolved), norm(hub), paths) && !inside(norm(hub), norm(resolved), paths), `refusing to remove ${resolved}: it overlaps the model hub ${hub}`);
+  const result = { target: resolved, removed: false, restoredDirectories: 0, restoredFiles: 0, linkedReadOnly: [] };
+  let top; try { top = await fs.lstat(resolved); } catch (error) { if (error.code === "ENOENT") return { ...result, removed: true, absent: true }; throw error; }
+  const walk = async (dir) => {
+    const info = await fs.lstat(dir);
+    if (info.isSymbolicLink()) return;
+    if (info.isDirectory()) {
+      if ((info.mode & 0o700) !== 0o700) { await fs.chmod(dir, (info.mode & 0o7777) | 0o700); result.restoredDirectories++; }
+      for (const name of await fs.readdir(dir)) await walk(paths.join(dir, name));
+    } else if (platform === "win32" && (info.mode & 0o200) === 0) {
+      if (info.nlink > 1) result.linkedReadOnly.push(dir);
+      else { await fs.chmod(dir, (info.mode & 0o7777) | 0o200); result.restoredFiles++; }
+    }
+  };
+  if (!top.isSymbolicLink()) await walk(resolved);
+  fact(result.linkedReadOnly.length === 0, `refusing to change ${result.linkedReadOnly.length} multiply linked read-only file(s), e.g. ${result.linkedReadOnly[0]}`);
+  await fs.rm(resolved, { recursive: true, force: true });
+  result.removed = true;
+  return result;
+}
+
 // ---- identity and redaction ---------------------------------------------------------------------
 const IDENTITY_KEY = /model|artifact|binding|source|identity|revision|repo|tier|variant|quant|adapter|engine|snapshot|claim|path|digest|sha256|lease|ledger/i;
 export function redactPaths(value, roots) {
@@ -436,13 +508,13 @@ export function renderMarkdown(report) {
     const time = (label) => secs(run(label)?.timing?.enqueueToCompleteSeconds), mem = (label) => gib(run(label)?.memory?.peakBytes);
     lines.push(`| ${route.id} | ${route.model} | ${route.status} | ${route.verdict ?? "–"} | ${time("base#1")} | ${time("head")} | ${time("base#2")} | ${mem("base#1")} | ${mem("head")} | ${(route.skipReason ?? route.verdictReason ?? "").replace(/\|/g, "/").slice(0, 300)} |`);
   }
-  for (const route of report.routes.filter((item) => item.comparison)) {
+  for (const route of report.routes.filter((item) => item.comparison || item.runs?.length)) {
     lines.push("", `## ${route.id}`, "", `- hub: ${route.hub}`, `- request sha256: ${route.request.sha256}`);
-    for (const runRecord of route.runs ?? []) lines.push(`- ${runRecord.label}: ${runRecord.status}; content ${runRecord.output?.content?.method ?? "-"} ${runRecord.output?.content?.sha256 ?? "-"}; file ${runRecord.output?.fileSha256 ?? "-"}; load ${secs(runRecord.timing?.loadSeconds)}, denoise ${secs(runRecord.timing?.denoiseSeconds)}; startup ${secs(runRecord.timing?.startupSeconds)}${runRecord.error ? `; error: ${runRecord.error}` : ""}`);
-    const diff = route.comparison.payloadIdentityDiff;
+    for (const runRecord of route.runs ?? []) lines.push(`- ${runRecord.label}: ${runRecord.status}; content ${runRecord.output?.content?.method ?? "-"} ${runRecord.output?.content?.sha256 ?? "-"}; file ${runRecord.output?.fileSha256 ?? "-"}; load ${secs(runRecord.timing?.loadSeconds)}, denoise ${secs(runRecord.timing?.denoiseSeconds)}; startup ${secs(runRecord.timing?.startupSeconds)}; claim ${secs(runRecord.timing?.claimSeconds)}${runRecord.error ? `; error: ${runRecord.error}` : ""}${runRecord.diagnostics?.lastJob ? `; last job ${runRecord.diagnostics.lastJob.status}/${runRecord.diagnostics.lastJob.stage}${runRecord.diagnostics.lastJob.message ? ` "${String(runRecord.diagnostics.lastJob.message).slice(0, 200)}"` : ""}${runRecord.diagnostics.lastJob.reasons ? ` reasons ${JSON.stringify(runRecord.diagnostics.lastJob.reasons).slice(0, 300)}` : ""}` : ""}`);
+    const diff = route.comparison?.payloadIdentityDiff;
     lines.push(`- payload identity diff (base#1 vs head): ${diff?.count ?? 0} field(s)`);
     for (const entry of (diff?.entries ?? []).slice(0, 40)) lines.push(`  - \`${entry.path}\`: base ${entry.base} → head ${entry.head}`);
-    if (route.comparison.numericDifference) lines.push(`- numeric difference (${route.comparison.numericDifferenceOf}): ${JSON.stringify(route.comparison.numericDifference)}`);
+    if (route.comparison?.numericDifference) lines.push(`- numeric difference (${route.comparison.numericDifferenceOf}): ${JSON.stringify(route.comparison.numericDifference)}`);
     if (route.hubMutation?.changed) lines.push(`- **hub mutation detected**: ${JSON.stringify(route.hubMutation.diff.entries.slice(0, 10))}`);
   }
   return lines.join("\n") + "\n";
@@ -564,7 +636,11 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
   for (const dir of [path.join(state, "data", "projects"), path.join(state, "credentials"), xet, logs]) await mkdir(dir, { recursive: true });
   await cp(path.join(sideCfg.dir, "config"), path.join(state, "config"), { recursive: true });
   const workerId = `tier2-ab-${side}-${process.pid}-${Date.now().toString(36)}`;
-  const record = { label, side, sha: sideCfg.sha, binarySha256: built[side].binarySha256, workerId, status: "running", startedAt: new Date().toISOString(), timing: {}, memory: {}, identity: {}, watchdog: { capBytes: null, timeoutMinutes: route.timeoutMinutes } };
+  const claimMinutes = cfg.claimMinutesOverride ?? route.claimMinutes;
+  const record = { label, side, sha: sideCfg.sha, binarySha256: built[side].binarySha256, workerId, status: "running", phase: "starting", startedAt: new Date().toISOString(), timing: {}, memory: {}, identity: {}, watchdog: { capBytes: null, claimMinutes, timeoutMinutes: route.timeoutMinutes } };
+  // run.json is rewritten at every phase transition, so a cancelled job still leaves evidence.
+  const persist = () => writeFile(path.join(evidence, "run.json"), redactSensitiveText(JSON.stringify(record, null, 2) + "\n", secrets)).catch(() => {});
+  const phase = async (name, fields = {}) => { record.phase = name; progress({ route: route.id, run: label, phase: name, ...fields }); await persist(); };
   const envs = childEnvironments(env, { backend: cfg.backend, state, hub: plan.hub, xet, workerId, metallib: built[side].metallib?.path });
   const children = [], handles = [], controller = new AbortController();
   const onAbort = () => controller.abort(signal.reason ?? new Error("A/B interrupted"));
@@ -579,9 +655,13 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
   };
   let endpoint, apiUrl, job, accepted, samplers = [], sampling = false;
   const runStarted = Date.now();
-  const deadline = runStarted + route.timeoutMinutes * 60_000;
+  // Outer backstop only; the claim and execution bounds below stop a run first and say why.
+  const runMinutes = claimMinutes + route.timeoutMinutes + 15;
+  record.watchdog.runMinutes = runMinutes;
+  const deadline = runStarted + runMinutes * 60_000;
   const watchdog = (reason) => { if (!controller.signal.aborted) { record.watchdog.tripped = reason; controller.abort(new Error(`watchdog: ${reason}`)); } };
-  const timer = setTimeout(() => watchdog(`per-run timeout ${route.timeoutMinutes} min`), route.timeoutMinutes * 60_000);
+  const timer = setTimeout(() => watchdog(`per-run backstop ${runMinutes} min`), runMinutes * 60_000);
+  let lastJob = null;
   const alive = () => { if (controller.signal.aborted) throw controller.signal.reason; };
   const wait = async (probe, seconds, what) => { const end = Math.min(Date.now() + seconds * 1000, deadline); while (Date.now() < end) { alive(); const value = await probe(); if (value) return value; await delay(500); } throw new Error(`${what} timed out`); };
   try {
@@ -599,6 +679,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     fact(registration.gpuId === expectedGpu, `owned worker registered gpuId ${registration.gpuId}, expected ${expectedGpu}`);
     record.identity.worker = { id: registration.id, gpuId: registration.gpuId, gpuName: registration.gpuName, capabilities: registration.capabilities };
     record.timing.startupSeconds = (Date.now() - runStarted) / 1000;
+    await phase("services_up", { side, startup_s: record.timing.startupSeconds.toFixed(1) });
     const project = await endpoint.call("POST", "/api/v1/projects", { name: `SW-7033 tier2 A/B ${route.id} ${label}` });
     const projectPath = await realpath(project.path), stateReal = await realpath(state);
     fact(!path.relative(stateReal, projectPath).startsWith(".."), "project escaped the run's own state");
@@ -632,16 +713,31 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     const response = await endpoint.exchange("POST", route.endpoint, body);
     record.acceptedStatus = response.status;
     fact(response.status < 300 && response.body?.id, `API refused the request (${response.status}): ${JSON.stringify(response.body).slice(0, 1500)}`);
-    accepted = response.body;
-    const stages = []; let last = "";
-    job = await wait(async () => {
+    accepted = response.body; record.jobId = accepted.id;
+    const roots = { hub: plan.hub, "hf-home": path.dirname(plan.hub), state: await realpath(state), checkout: sideCfg.dir, work: cfg.work, home: os.homedir() };
+    // Recorded at submission so a run that never completes still carries its payload identity.
+    record.identity.payload = redactPaths(identitySubset(accepted.payload ?? {}), roots);
+    await phase("submitted", { side, job: accepted.id });
+    const stages = []; let last = "", claimedAtMs = null;
+    record.timing.stages = stages;
+    while (true) {
+      alive();
+      if (Date.now() > deadline) throw new Error("per-run backstop reached while polling");
       const current = await endpoint.call("GET", `/api/v1/jobs/${accepted.id}`);
+      lastJob = current;
       const key = `${current.status}/${current.stage}`;
-      if (key !== last) { stages.push({ atSeconds: (Date.now() - posted) / 1000, status: current.status, stage: current.stage, message: String(current.message ?? "").slice(0, 200) }); last = key; }
-      if (["failed", "canceled", "interrupted"].includes(current.status)) throw new Error(`job ${current.status}: ${current.error ?? current.message}`);
-      return current.status === "completed" && current;
-    }, route.timeoutMinutes * 60, "job completion");
+      if (key !== last) {
+        stages.push({ atSeconds: (Date.now() - posted) / 1000, status: current.status, stage: current.stage, message: String(current.message ?? "").slice(0, 200) }); last = key;
+        if (claimedAtMs === null && jobClaimed(current)) { claimedAtMs = Date.now(); record.timing.claimSeconds = (claimedAtMs - posted) / 1000; await phase("claimed", { side, job: accepted.id, worker: current.workerId === workerId ? "owned" : current.workerId, after_s: record.timing.claimSeconds.toFixed(1) }); }
+        else await phase(`stage_${current.stage}`, { side, job: accepted.id, status: current.status, at_s: ((Date.now() - posted) / 1000).toFixed(1) });
+      }
+      const decision = jobProgressDecision({ job: current, postedMs: posted, claimedAtMs, nowMs: Date.now(), claimMinutes, timeoutMinutes: route.timeoutMinutes });
+      if (decision.state === "stop") { record.stopReason = decision.reason; throw new Error(decision.reason); }
+      if (decision.state === "completed") { job = current; break; }
+      await delay(500);
+    }
     record.timing.enqueueToCompleteSeconds = (Date.now() - posted) / 1000;
+    await phase("completed", { side, job: accepted.id, total_s: record.timing.enqueueToCompleteSeconds.toFixed(1) });
     sampling = false; await Promise.all(samplers); samplers = [];
     if (cfg.backend === "cuda") {
       memory.peakBytes = memory.gpuPeakBytes ?? null;
@@ -650,8 +746,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     memory.workerReportedPeakGpuMemoryPct = job.peakGpuMemoryPct ?? null;
     record.memory = memory;
     const at = (stage) => stages.find((item) => item.stage === stage)?.atSeconds;
-    record.timing.stages = stages;
-    record.timing.claimSeconds = stages.find((item) => item.status !== "queued")?.atSeconds ?? null;
+    record.timing.claimSeconds ??= null;
     const loadStart = at("loading_model") ?? record.timing.claimSeconds, generate = at("generating") ?? at("rendering"), finish = at("saving") ?? at("muxing") ?? record.timing.enqueueToCompleteSeconds;
     record.timing.loadSeconds = Number.isFinite(loadStart) && Number.isFinite(generate) ? generate - loadStart : null;
     record.timing.denoiseSeconds = Number.isFinite(generate) ? finish - generate : null;
@@ -672,7 +767,6 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     const content = await decodedContent(output, route.kind, { ffmpeg: env.SCENEWORKS_FFMPEG || "ffmpeg" });
     record.output = { file: path.relative(evidenceRoot, output).split(path.sep).join("/"), bytes: saved.length, fileSha256: sha256(saved), content: { method: content.method, sha256: content.sha256, shape: content.shape, decoderError: content.decoderError }, mimeType: assets[0].file?.mimeType ?? null };
     decodedBuffers.set(record, content.buffer);
-    const roots = { hub: plan.hub, "hf-home": path.dirname(plan.hub), state: stateReal, checkout: sideCfg.dir, work: cfg.work, home: os.homedir() };
     record.identity.payload = redactPaths(identitySubset(job.payload), roots);
     record.identity.result = redactPaths({ adapter: job.result.adapter ?? null, model: job.result.model ?? null, backend: job.backend ?? null, assignedGpu: job.assignedGpu ?? null, workerId: job.workerId === workerId ? "<owned>" : job.workerId }, roots);
     fact(job.workerId === workerId, `job ran on ${job.workerId}, not the owned worker`);
@@ -682,6 +776,14 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
   } finally {
     clearTimeout(timer); signal.removeEventListener("abort", onAbort);
     sampling = false; await Promise.all(samplers);
+    if (record.status !== "completed" && apiUrl) {
+      // What the API serves right now about this job and the owned worker (direct requests: the
+      // owned-endpoint gate refuses everything once the run has been aborted).
+      const direct = (route) => fetch(`${apiUrl}${route}`, { signal: AbortSignal.timeout(10_000) }).then((response) => response.json(), () => null);
+      if (accepted?.id) lastJob = (await direct(`/api/v1/jobs/${encodeURIComponent(accepted.id)}`)) ?? lastJob;
+      const workers = await direct("/api/v1/workers");
+      record.diagnostics = { lastJob: jobDiagnostics(lastJob), ownedWorker: Array.isArray(workers) ? workers.filter((row) => String(row?.id ?? "").startsWith(workerId)).map(({ id, status, gpuId, currentJobId, capabilities }) => ({ id, status, gpuId, currentJobId, capabilityCount: capabilities?.length ?? null })) : null };
+    }
     // Direct request: the owned-endpoint gate refuses every call once the watchdog has aborted.
     if (accepted?.id && record.status !== "completed" && apiUrl) {
       record.cancelRequested = await fetch(`${apiUrl}/api/v1/jobs/${encodeURIComponent(accepted.id)}/cancel`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}", redirect: "error", signal: AbortSignal.timeout(15_000) }).then((response) => response.status, (error) => error.message);
@@ -691,9 +793,13 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     record.cleanup = await teardown(children);
     endpoint?.close();
     await Promise.all(handles.map((handle) => handle.close().catch(() => {})));
-    for (const name of ["api", "worker"]) { const text = await tail(path.join(logs, `${name}.log`), 2 * 1024 * 1024); if (text) await writeFile(path.join(evidence, `${name}.log`), redactSensitiveText(text, secrets)); }
+    for (const name of ["api", "worker"]) {
+      const text = await tail(path.join(logs, `${name}.log`), 2 * 1024 * 1024);
+      if (text) await writeFile(path.join(evidence, `${name}.log`), redactSensitiveText(text, secrets));
+      if (record.status !== "completed") (record.diagnostics ??= {})[`${name}LogTail`] = lastLines(redactSensitiveText(text, secrets), 50);
+    }
     record.finishedAt = new Date().toISOString();
-    await writeFile(path.join(evidence, "run.json"), redactSensitiveText(JSON.stringify(record, null, 2) + "\n", secrets));
+    await phase(record.status === "completed" ? "run_done" : "run_error", { side, job: accepted?.id, reason: record.status === "completed" ? undefined : record.error, last_status: record.diagnostics?.lastJob ? `${record.diagnostics.lastJob.status}/${record.diagnostics.lastJob.stage}` : undefined });
   }
   return record;
 }
@@ -735,11 +841,14 @@ async function runComparison(env, cfg, report, signal) {
   const built = recorded.built;
   for (const side of ["base", "head"]) { fact(await fileSha256(built[side].binary) === built[side].binarySha256, `${side} binary changed since build`); report[side].binarySha256 = built[side].binarySha256; }
   const secrets = new Set([env.HF_TOKEN].filter((value) => value && value.length >= 8));
+  for (const route of report.routes.filter((item) => item.status === "skipped")) progress({ route: route.id, phase: "skipped", reason: route.skipReason });
   for (const route of report.routes.filter((item) => item.status === "ready")) {
     const definition = ROUTES[route.id];
     const repos = [...route.rows.required, ...route.rows.optional];
     const before = await hubFingerprint(route.hub, repos);
-    route.runs = [];
+    route.runs = []; route.status = "running";
+    progress({ route: route.id, phase: "route_start", model: route.model, hub: route.hub, claim_min: cfg.claimMinutesOverride ?? definition.claimMinutes, exec_min: definition.timeoutMinutes });
+    await writeReport(cfg, report);
     const run = async (label) => { const record = await executeRun({ env, cfg, route: definition, plan: route, label, side: label.startsWith("base") ? "base" : "head", built, evidenceRoot: evidence, secrets, signal }); route.runs.push(record); await writeReport(cfg, report); return record; };
     const base1 = await run("base#1");
     const head = signal.aborted ? null : await run("head");
@@ -755,6 +864,7 @@ async function runComparison(env, cfg, report, signal) {
     // Only the route's own repositories decide `changed`; the shared root listing can legitimately
     // change under another runner job, so it is recorded but never fails this one.
     route.hubMutation = { changed: JSON.stringify(before.repos) !== JSON.stringify(after.repos), rootChanged: JSON.stringify([before.root, before.hfHome]) !== JSON.stringify([after.root, after.hfHome]), diff: diffObjects(before, after, 50), method: "readdir/stat of the hub root, its parent, and each route repository's dir/refs/snapshots/blobs (metadata only)" };
+    progress({ route: route.id, phase: "verdict", verdict: decision.verdict, reason: decision.reason });
     if (decision.verdict === "head_differs") process.stderr.write(`\n[tier2-ab] ${route.id}: head_differs. Payload identity diff (base#1 -> head):\n${JSON.stringify(route.comparison.payloadIdentityDiff, null, 2)}\n`);
     await writeReport(cfg, report);
     if (signal.aborted) break;
@@ -770,11 +880,26 @@ async function writeReport(cfg, report) {
   await writeFile(path.join(dir, `${reportName(report.mode)}.md`), renderMarkdown(report));
 }
 
+// Workflow cleanup: the attempt-owned work dir and both side checkouts, never a hub root.
+async function cleanup(env, cfg) {
+  const allowedRoots = [env.RUNNER_TEMP, env.GITHUB_WORKSPACE].filter(Boolean);
+  fact(allowedRoots.length, "--cleanup needs RUNNER_TEMP or GITHUB_WORKSPACE to bound what it may remove");
+  const protectedRoots = [...cfg.hubs, ...defaultHubs(cfg.backend)];
+  let failed = 0;
+  for (const target of [cfg.work, cfg.baseDir, cfg.headDir]) {
+    try { const result = await removeScratch(target, { allowedRoots, protectedRoots }); progress({ phase: "cleanup", target, removed: result.removed, restored_dirs: result.restoredDirectories, restored_files: result.restoredFiles }); }
+    catch (error) { failed++; progress({ phase: "cleanup_failed", target, reason: error.message }); }
+  }
+  return failed ? 1 : 0;
+}
+
 export async function main(argv = process.argv.slice(2), env = process.env) {
-  const modes = { "--preflight-only": "preflight", "--build-only": "build", "--run": "run" };
-  fact(argv.length === 1 && modes[argv[0]], "exactly one of --preflight-only, --build-only, --run is required");
+  const modes = { "--preflight-only": "preflight", "--build-only": "build", "--run": "run", "--cleanup": "cleanup" };
+  fact(argv.length === 1 && modes[argv[0]], "exactly one of --preflight-only, --build-only, --run, --cleanup is required");
   const mode = modes[argv[0]];
   const cfg = resolveConfig(env);
+  if (mode === "cleanup") return cleanup(env, cfg);
+  progress({ phase: "driver_started", mode, backend: cfg.backend, runner: env.RUNNER_NAME });
   const report = { schemaVersion: 1, kind: "sw-7033-tier2-ab", mode, status: "running", backend: cfg.backend, startedAt: new Date().toISOString(), runner: { name: env.RUNNER_NAME ?? null, platform: process.platform, arch: process.arch, totalMemoryBytes: os.totalmem(), runId: env.GITHUB_RUN_ID ?? null, runAttempt: env.GITHUB_RUN_ATTEMPT ?? null, dispatchSha: env.GITHUB_SHA ?? null }, base: { sha: cfg.baseSha }, head: { sha: cfg.headSha }, inputs: { routes: cfg.routes.map((route) => route.id), hubs: cfg.hubs }, memoryMethod: cfg.backend === "mlx" ? "worker process-tree phys_footprint (top MEM) + RSS, ~2 s cadence; watchdog cap min(100 GiB, 80% RAM)" : "physical GPU1 nvidia-smi memory.used peak above a 5-sample pre-request baseline, ~500 ms cadence; worker working-set watchdog at 75% RAM", routes: [] };
   const controller = new AbortController();
   const interrupt = () => controller.abort(new Error("A/B interrupted by signal"));

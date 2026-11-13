@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { sha256 } from "./lib/file-sha256.mjs";
 import {
   DEFAULT_ROUTE_IDS, ROUTES, contentDigest, decodePng, decodedContent, descendants, diffObjects, dispatchOptions,
-  exitCodeFor, identitySubset, numericDifference, parseTopMem, parseWav, planRoutes, readCatalog, redactPaths, referenceWav,
+  exitCodeFor, identitySubset, jobClaimed, jobDiagnostics, jobProgressDecision, lastLines, numericDifference, progressLine, removeScratch, parseTopMem, parseWav, planRoutes, readCatalog, redactPaths, referenceWav,
   renderMarkdown, reportName, requestBody, requestTemplate, resolveConfig, routeDownloadRows, routePresence, selectRoutes,
   summarize, verdictFor,
 } from "./tier2-ab.mjs";
@@ -82,6 +82,55 @@ test("exit policy: head_differs, error, hub mutation and zero ran fail; nondeter
   assert.equal(exitCodeFor(report([{ status: "ready" }], "preflight")), 0);
   assert.equal(exitCodeFor(report([{ status: "skipped" }], "preflight")), 1);
   assert.equal(exitCodeFor({ ...report([{ status: "ran", verdict: "equal" }]), fatal: "x" }), 1);
+});
+
+test("job polling: claim bound before a worker attaches, execution bound after, terminal states stop at once", () => {
+  const base = { postedMs: 0, claimMinutes: 5, timeoutMinutes: 20 };
+  assert.equal(jobProgressDecision({ ...base, job: { status: "queued", stage: "queued" }, nowMs: 4 * 60_000 }).state, "waiting_claim");
+  const unclaimed = jobProgressDecision({ ...base, job: { status: "queued", stage: "queued", message: "no eligible worker" }, nowMs: 5 * 60_000 + 1 });
+  assert.equal(unclaimed.state, "stop"); assert.match(unclaimed.reason, /^unclaimed: job stayed queued\/queued \(no eligible worker\) for more than 5 min/);
+  assert.equal(jobProgressDecision({ ...base, job: { status: "pending_workflow", stage: "pending_workflow" }, nowMs: 6 * 60_000 }).state, "stop");
+  assert.equal(jobProgressDecision({ ...base, job: { status: "queued", workerId: "w" }, nowMs: 6 * 60_000, claimedAtMs: 5.5 * 60_000 }).state, "running", "a worker id is a claim");
+  const running = jobProgressDecision({ ...base, job: { status: "running", stage: "generating" }, nowMs: 30 * 60_000, claimedAtMs: 10 * 60_000 });
+  assert.equal(running.state, "running");
+  const over = jobProgressDecision({ ...base, job: { status: "running", stage: "generating" }, nowMs: 30 * 60_000, claimedAtMs: 10 * 60_000 - 1 });
+  assert.equal(over.state, "stop"); assert.match(over.reason, /^execution bound: job still running\/generating 20 min after the claim/);
+  assert.deepEqual(jobProgressDecision({ ...base, job: { status: "failed", error: "model_artifact_incomplete" }, nowMs: 1 }), { state: "stop", reason: "job failed: model_artifact_incomplete" });
+  assert.equal(jobProgressDecision({ ...base, job: { status: "completed" }, nowMs: 99 * 60_000 }).state, "completed");
+  assert.equal(jobClaimed({ status: "queued", workerId: null }), false); assert.equal(jobClaimed({ status: "running" }), true);
+  for (const id of Object.keys(ROUTES)) { const route = ROUTES[id]; assert.ok(route.claimMinutes > 0 && route.claimMinutes <= 10 && route.timeoutMinutes <= (route.kind === "video" ? 45 : 20), `${id} bounds fit the route`); }
+  assert.equal(resolveConfig(env({ TIER2_AB_CLAIM_MINUTES: "2" }), { platform: "darwin" }).claimMinutesOverride, 2);
+  for (const bad of ["0", "-1", "61", "x"]) assert.throws(() => resolveConfig(env({ TIER2_AB_CLAIM_MINUTES: bad }), { platform: "darwin" }), /TIER2_AB_CLAIM_MINUTES/);
+});
+
+test("diagnostics keep the served job state and refusal fields; progress lines are one greppable line", () => {
+  const job = { id: "j", status: "queued", stage: "queued", message: "waiting", workerId: null, prompt: "x", payload: { model: "m", admissionRefusal: "no claim" }, result: { blockedReason: "b" } };
+  const diag = jobDiagnostics(job);
+  assert.equal(diag.status, "queued"); assert.equal(diag.prompt, undefined);
+  assert.deepEqual(diag.reasons, { "payload.admissionRefusal": "no claim", "result.blockedReason": "b" });
+  assert.equal(jobDiagnostics(null), null);
+  assert.deepEqual(lastLines(Array.from({ length: 80 }, (_, i) => `l${i}`).join("\r\n") + "\n", 50), Array.from({ length: 50 }, (_, i) => `l${i + 30}`));
+  const line = progressLine({ route: "r", run: "head", phase: "claimed", worker: "owned", empty: "", reason: "a\nb  c" }, new Date("2026-11-12T00:00:00Z"));
+  assert.equal(line, "[tier2-ab] 2026-11-12T00:00:00.000Z route=r run=head phase=claimed worker=owned reason=a b c");
+});
+
+test("scratch cleanup refuses roots outside scratch or overlapping a hub, and never changes a multiply linked Windows file", async () => {
+  const allowedRoots = ["/runner/_temp", "/runner/_work/repo"];
+  await assert.rejects(removeScratch("/runner/_temp", { allowedRoots }), /not strictly inside/);
+  await assert.rejects(removeScratch("/elsewhere/x", { allowedRoots }), /not strictly inside/);
+  await assert.rejects(removeScratch("/runner/_temp/t2ab", { allowedRoots, protectedRoots: ["/runner/_temp/t2ab/hub"] }), /overlaps the model hub/);
+  await assert.rejects(removeScratch("/runner/_temp/t2ab/hub/x", { allowedRoots, protectedRoots: ["/runner/_temp/t2ab/hub"] }), /overlaps the model hub/);
+  const entries = { "C:\\t\\w": { dir: true, mode: 0o40555, children: ["a", "b", "l"] }, "C:\\t\\w\\a": { mode: 0o100444, nlink: 1 }, "C:\\t\\w\\b": { mode: 0o100444, nlink: 2 }, "C:\\t\\w\\l": { link: true, mode: 0o120777 } };
+  const changed = [], removed = [];
+  const fakeFs = { lstat: async (p) => { const e = entries[p]; if (!e) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); return { mode: e.mode, nlink: e.nlink ?? 1, isDirectory: () => Boolean(e.dir), isSymbolicLink: () => Boolean(e.link) }; }, readdir: async (p) => entries[p].children, chmod: async (p, mode) => changed.push([p, mode]), rm: async (p) => removed.push(p) };
+  await assert.rejects(removeScratch("C:\\t\\w", { allowedRoots: ["C:\\t"], platform: "win32", fs: fakeFs }), /multiply linked read-only/);
+  assert.deepEqual(removed, [], "nothing removed after a refusal");
+  assert.ok(!changed.some(([p]) => p.endsWith("\\b") || p.endsWith("\\l")), "neither the linked file nor the symlink is modified");
+  entries["C:\\t\\w\\b"].nlink = 1; changed.length = 0;
+  const result = await removeScratch("C:\\t\\w", { allowedRoots: ["C:\\t"], platform: "win32", fs: fakeFs });
+  assert.deepEqual({ dirs: result.restoredDirectories, files: result.restoredFiles, removed }, { dirs: 1, files: 2, removed: ["C:\\t\\w"] });
+  assert.ok(!changed.some(([p]) => p.endsWith("\\l")));
+  assert.equal((await removeScratch("C:\\t\\missing", { allowedRoots: ["C:\\t"], platform: "win32", fs: fakeFs })).absent, true);
 });
 
 // --- synthetic PNG encoder with every filter type and arbitrary extra chunks ---
@@ -252,18 +301,26 @@ const server = http.createServer((req, res) => {
     if (p === "/api/v1/health") return send(res, 200, { status: "ok", service: "sceneworks-api", runtime: "rust", readiness: { status: "ready" }, authRequired: false, directories: { data, config: env.SCENEWORKS_CONFIG_DIR, projects, jobsDb: env.SCENEWORKS_JOBS_DB_PATH } });
     if (p === "/api/v1/workers") return send(res, 200, workers);
     if (p === "/api/v1/projects" && req.method === "POST") { const id = "p" + owned.size; const dir = path.join(projects, id); fs.mkdirSync(dir, { recursive: true }); owned.set(id, fs.realpathSync(dir)); return send(res, 201, { id, path: fs.realpathSync(dir) }); }
-    if (p === "/api/v1/image/jobs") { const request = JSON.parse(body); const id = "job-" + Date.now() + "-" + jobs.size; jobs.set(id, { id, request, created: Date.now() }); return send(res, 201, { id, type: "image_generate", payload: request }); }
+    if (p === "/api/v1/image/jobs") {
+      // Immutable attempt bundle, as head's worker publishes under data/models (read-only dirs).
+      const bundle = path.join(data, "models", "portable-attempts", "r", "bundle", "hf");
+      if (!fs.existsSync(bundle)) { fs.mkdirSync(bundle, { recursive: true }); fs.writeFileSync(path.join(bundle, "f.bin"), "x"); if (mode.outside) fs.symlinkSync(mode.outside, path.join(bundle, "link")); fs.chmodSync(path.join(bundle, "f.bin"), 0o444); for (const d of [bundle, path.dirname(bundle), path.dirname(path.dirname(bundle))]) fs.chmodSync(d, 0o555); }
+      const request = JSON.parse(body); const id = "job-" + Date.now() + "-" + jobs.size; jobs.set(id, { id, request, created: Date.now() }); return send(res, 201, { id, type: "image_generate", payload: request }); }
     const job = /^\/api\/v1\/jobs\/([^/]+)$/.exec(p);
     if (job) {
       const j = jobs.get(job[1]), age = Date.now() - j.created, done = age > 900;
       const stage = age < 150 ? "queued" : age < 400 ? "loading_model" : age < 900 ? "generating" : "completed";
-      const view = { id: j.id, status: done ? "completed" : age < 150 ? "queued" : "running", stage, message: "", workerId: workers[0].id, backend: "mlx", assignedGpu: "mlx", payload: { ...j.request, modelBinding: { revision: mode.binding, path: path.join(env.HF_HUB_CACHE, "models--x") } }, result: {} };
+      if (j.canceled) return send(res, 200, { id: j.id, status: "canceled", stage: "canceled", message: "", workerId: null, payload: j.request, result: {} });
+      if (mode.neverClaim) return send(res, 200, { id: j.id, status: "queued", stage: "queued", message: "waiting for an eligible worker", blockedReason: "no worker publishes a matching source claim", workerId: null, payload: j.request, result: {} });
+      if (mode.fail && age > 300) return send(res, 200, { id: j.id, status: "failed", stage: "failed", message: "", error: "model_artifact_incomplete: fake refusal", workerId: workers[0].id, payload: j.request, result: {} });
+      const view = { id: j.id, status: done ? "completed" : age < 150 ? "queued" : "running", stage, message: "", workerId: age < 150 ? null : workers[0].id, backend: "mlx", assignedGpu: "mlx", payload: { ...j.request, modelBinding: { revision: mode.binding, path: path.join(env.HF_HUB_CACHE, "models--x") } }, result: {} };
       if (done) { const rel = "assets/images/" + j.id + ".png"; const file = path.join(owned.get(j.request.projectId), ...rel.split("/")); if (!fs.existsSync(file)) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, png(j.request.seed + mode.offset, j.id)); } view.result = { adapter: "fake", model: j.request.model, assets: [{ id: "a-" + j.id, type: "image", file: { path: rel, mimeType: "image/png" } }], assetIds: ["a-" + j.id] }; }
       return send(res, 200, view);
     }
     const file = /^\/api\/v1\/projects\/([^/]+)\/files\/(.+)$/.exec(p);
     if (file) { res.writeHead(200); return res.end(fs.readFileSync(path.join(owned.get(file[1]), ...decodeURIComponent(file[2]).split("/")))); }
-    if (/\/cancel$/.test(p)) return send(res, 200, {});
+    const cancel = /^\/api\/v1\/jobs\/([^/]+)\/cancel$/.exec(p);
+    if (cancel) { const j = jobs.get(cancel[1]); if (j) j.canceled = true; return send(res, 200, {}); }
     send(res, 404, { error: p });
   });
 });
@@ -271,7 +328,7 @@ server.listen(0, "127.0.0.1", () => console.log(JSON.stringify({ event: "api_lis
 `;
 const macWithPython = process.platform === "darwin" && process.arch === "arm64" && spawnSync("python3.12", ["--version"]).status === 0;
 test("--run drives fake base/head services through the stop rule and writes evidence", { skip: !macWithPython && "needs Apple-silicon macOS with python3.12 (the mlx preflight's own requirements)", timeout: 120_000 }, async (t) => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "tier2-ab-run-")); t.after(() => rm(dir, { recursive: true, force: true }));
+  const dir = await mkdtemp(path.join(os.tmpdir(), "tier2-ab-run-")); t.after(() => { spawnSync("chmod", ["-R", "u+w", dir]); return rm(dir, { recursive: true, force: true }); });
   const pin = "4".repeat(40), revision = "f".repeat(40);
   const lock = `[[package]]\nname = "pmetal-mlx-sys"\nversion = "0.1.0"\nsource = "git+https://example.invalid/mlx-rs?rev=${"9".repeat(40)}#${"9".repeat(40)}"\n\n[[package]]\nname = "gen-core"\nversion = "0.1.0"\nsource = "git+https://github.com/SceneWorks/inference?rev=${pin}#${pin}"\n`;
   const catalog = JSON.stringify({ models: [{ id: "moss_image_sft", downloads: [{ provider: "huggingface", repo: "OpenMOSS-Team/MOSS-Image-SFT", revision, files: ["a.bin"] }] }] });
@@ -284,18 +341,20 @@ test("--run drives fake base/head services through the stop rule and writes evid
   }
   const hub = path.join(dir, "hub"), snapshot = path.join(hub, "models--OpenMOSS-Team--MOSS-Image-SFT", "snapshots", revision);
   await mkdir(snapshot, { recursive: true }); await writeFile(path.join(snapshot, "a.bin"), "w");
-  const scenario = async (name, headOffset) => {
+  const outside = path.join(dir, "outside-hub-file"); await writeFile(outside, "hub bytes"); const { chmod: chmodFile, stat: statFile } = await import("node:fs/promises"); await chmodFile(outside, 0o444);
+  const scenario = async (name, headOffset, headMode = {}, extraEnv = {}) => {
     const work = path.join(dir, `work-${name}`), built = {};
     for (const label of ["base", "head"]) {
       const bin = path.join(work, "scratch", "bin", label), binary = path.join(bin, "sceneworks-rust-api");
       await mkdir(bin, { recursive: true }); await writeFile(binary, FAKE_APP, { mode: 0o755 });
-      await writeFile(path.join(bin, "mode.json"), JSON.stringify({ offset: label === "head" ? headOffset : 0, binding: label }));
+      await writeFile(path.join(bin, "mode.json"), JSON.stringify({ offset: label === "head" ? headOffset : 0, binding: label, outside, ...(label === "head" ? headMode : {}) }));
       built[label] = { binary, binarySha256: sha256(await readFile(binary)), metallib: null };
     }
     await writeFile(path.join(work, "scratch", "build.json"), JSON.stringify({ baseSha: sides.base.sha, headSha: sides.head.sha, backend: "mlx", built }));
-    const childEnv = { PATH: process.env.PATH, HOME: process.env.HOME, TIER2_AB_BACKEND: "mlx", TIER2_AB_BASE_SHA: sides.base.sha, TIER2_AB_HEAD_SHA: sides.head.sha, TIER2_AB_BASE_DIR: sides.base.repo, TIER2_AB_HEAD_DIR: sides.head.repo, TIER2_AB_WORK: work, TIER2_AB_ROUTES: "mlx-moss-image-t2i", TIER2_AB_HUBS: hub };
+    const childEnv = { PATH: process.env.PATH, HOME: process.env.HOME, TIER2_AB_BACKEND: "mlx", TIER2_AB_BASE_SHA: sides.base.sha, TIER2_AB_HEAD_SHA: sides.head.sha, TIER2_AB_BASE_DIR: sides.base.repo, TIER2_AB_HEAD_DIR: sides.head.repo, TIER2_AB_WORK: work, TIER2_AB_ROUTES: "mlx-moss-image-t2i", TIER2_AB_HUBS: hub, ...extraEnv };
+    const startedAt = Date.now();
     const result = spawnSync(process.execPath, [path.join(root, "scripts", "tier2-ab.mjs"), "--run"], { env: childEnv, encoding: "utf8", timeout: 100_000 });
-    return { status: result.status, stderr: result.stderr, report: JSON.parse(await readFile(path.join(work, "evidence", "report.json"), "utf8")), work };
+    return { status: result.status, stderr: result.stderr, stdout: result.stdout, seconds: (Date.now() - startedAt) / 1000, report: JSON.parse(await readFile(path.join(work, "evidence", "report.json"), "utf8")), work };
   };
   const equal = await scenario("equal", 0);
   assert.equal(equal.status, 0, equal.stderr + JSON.stringify(equal.report.fatal));
@@ -313,6 +372,34 @@ test("--run drives fake base/head services through the stop rule and writes evid
   assert.deepEqual(differs.report.routes[0].runs.map((run) => run.label), ["base#1", "head", "base#2"]);
   assert.equal(differs.report.routes[0].comparison.numericDifference.changedElements, 48);
   assert.match(await readFile(path.join(differs.work, "evidence", "report.md"), "utf8"), /head_differs/);
+  // Live progress: one line per phase transition, in order, for every run plus the verdict.
+  const phases = equal.stdout.split("\n").filter((line) => line.startsWith("[tier2-ab] ")).map((line) => / route=(\S+)(?: run=(\S+))? phase=(\S+)/.exec(line)?.slice(1).filter(Boolean).join(":")).filter(Boolean);
+  for (const expected of ["mlx-moss-image-t2i:route_start", "mlx-moss-image-t2i:base#1:services_up", "mlx-moss-image-t2i:base#1:submitted", "mlx-moss-image-t2i:base#1:claimed", "mlx-moss-image-t2i:base#1:completed", "mlx-moss-image-t2i:head:completed", "mlx-moss-image-t2i:verdict"]) assert.ok(phases.includes(expected), `missing progress ${expected} in ${phases.join(", ")}`);
+  assert.ok(phases.indexOf("mlx-moss-image-t2i:base#1:submitted") < phases.indexOf("mlx-moss-image-t2i:base#1:claimed") && phases.indexOf("mlx-moss-image-t2i:base#1:claimed") < phases.indexOf("mlx-moss-image-t2i:base#1:completed"));
+  assert.match(equal.stdout, /phase=driver_started mode=run/);
+  // An unclaimed head job stops at the claim bound with the served reason, not the execution ceiling.
+  const unclaimed = await scenario("unclaimed", 0, { neverClaim: true }, { TIER2_AB_CLAIM_MINUTES: "0.05" });
+  const stuck = unclaimed.report.routes[0].runs.find((run) => run.label === "head");
+  assert.equal(unclaimed.status, 1); assert.equal(unclaimed.report.routes[0].verdict, "error");
+  assert.match(stuck.error, /^unclaimed: job stayed queued\/queued \(waiting for an eligible worker\) for more than 0.05 min/);
+  assert.equal(stuck.diagnostics.lastJob.status, "queued"); assert.equal(stuck.diagnostics.lastJob.reasons["job.blockedReason"], "no worker publishes a matching source claim");
+  assert.ok(stuck.diagnostics.apiLogTail.length > 0 && stuck.diagnostics.apiLogTail.length <= 50 && Array.isArray(stuck.diagnostics.workerLogTail));
+  assert.ok(stuck.timing.claimSeconds === undefined || stuck.timing.claimSeconds === null);
+  assert.ok(unclaimed.seconds < 60, `claim bound must stop early, took ${unclaimed.seconds}s`);
+  assert.match(await readFile(path.join(unclaimed.work, "evidence", "report.md"), "utf8"), /last job queued\/queued "waiting for an eligible worker" reasons/);
+  assert.match(unclaimed.stdout, /run=head phase=run_error .*reason=unclaimed/);
+  // A failed job stops immediately with the served error.
+  const failed = await scenario("failed", 0, { fail: true });
+  assert.match(failed.report.routes[0].runs.find((run) => run.label === "head").error, /^job failed: model_artifact_incomplete: fake refusal/);
+  // Cleanup restores write permission only inside scratch, never through a link, then removes it.
+  const cleanupEnv = { PATH: process.env.PATH, HOME: process.env.HOME, TIER2_AB_BACKEND: "mlx", TIER2_AB_BASE_SHA: sides.base.sha, TIER2_AB_HEAD_SHA: sides.head.sha, TIER2_AB_BASE_DIR: sides.base.repo, TIER2_AB_HEAD_DIR: sides.head.repo, TIER2_AB_WORK: equal.work, TIER2_AB_HUBS: hub, RUNNER_TEMP: dir, GITHUB_WORKSPACE: dir };
+  const blocked = spawnSync("rm", ["-rf", equal.work], { encoding: "utf8" });
+  assert.notEqual(blocked.status, 0, "the read-only bundle reproduces the plain rm failure");
+  const cleaned = spawnSync(process.execPath, [path.join(root, "scripts", "tier2-ab.mjs"), "--cleanup"], { env: cleanupEnv, encoding: "utf8" });
+  assert.equal(cleaned.status, 0, cleaned.stdout + cleaned.stderr);
+  for (const gone of [equal.work, sides.base.repo, sides.head.repo]) await assert.rejects(statFile(gone));
+  assert.equal((await statFile(outside)).mode & 0o777, 0o444, "a linked file outside scratch keeps its mode");
+  assert.equal(await readFile(path.join(snapshot, "a.bin"), "utf8"), "w", "hub untouched");
 });
 
 // ---- static workflow contracts (dispatch-only, runner labels, GPU binding, cleanup) ----
@@ -362,6 +449,9 @@ test("tier2-ab jobs pin the isolated runners, physical GPU1, ceilings, Metal loc
     assert.match(item, /name: Remove every scratch directory[\s\S]*if: \$\{\{ always\(\) \}\}/);
   }
   assert.match(mlx, /metal_execution_entry [0-9]+ node tier2-ab-driver\/scripts\/tier2-ab\.mjs --run/);
+  assert.match(mlx, /node tier2-ab-driver\/scripts\/tier2-ab\.mjs --cleanup/); assert.match(cuda, /node tier2-ab-driver\\scripts\\tier2-ab\.mjs --cleanup/);
+  assert.doesNotMatch(reusable, /rm -rf -- "\$\{TIER2_AB_WORK/, "plain rm of the work dir fails on read-only bundles");
+  assert.match(mlx, /phase=waiting_for_metal_lock/); assert.match(cuda, /phase=waiting_for_gpu1_lease/);
   for (const [key, value] of [["CUDA_VISIBLE_DEVICES", '"1"'], ["NVIDIA_VISIBLE_DEVICES", '"1"'], ["SCENEWORKS_GPU_ID", '"1"'], ["CUDA_DEVICE_ORDER", "PCI_BUS_ID"], ["RUSTC_WRAPPER", '""']]) assert.match(cuda, new RegExp(`\\n      ${key}: ${value}\\n`));
   assert.match(cuda, /python -I scripts\/ci\/windows_cuda_execution\.py --actor tier2-ab-cuda --budget-minutes [0-9]+ --cuda-ordinals 0 -- node scripts\/tier2-ab\.mjs --run/);
   assert.match(cuda, /Add-Content -Path \$env:GITHUB_ENV -Value 'RUSTC_WRAPPER='/);
