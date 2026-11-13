@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { sha256 } from "./lib/file-sha256.mjs";
 import {
   DEFAULT_ROUTE_IDS, ROUTES, contentDigest, decodePng, decodedContent, descendants, diffObjects, dispatchOptions,
-  childEnvironments, childStdio, exitCodeFor, gpuInventory, processState, identitySubset, jobClaimed, jobDiagnostics, jobProgressDecision, lastLines, numericDifference, progressLine, removeScratch, parseTopMem, parseWav, planRoutes, readCatalog, redactPaths, referenceWav,
+  childEnvironments, childStdio, exitCodeFor, gpuInventory, HUB_MUTATION_LISTING_LIMIT, hubMutationAttribution, processState, identitySubset, jobClaimed, jobDiagnostics, jobProgressDecision, lastLines, numericDifference, progressLine, removeScratch, parseTopMem, parseWav, planRoutes, readCatalog, redactPaths, referenceWav,
   renderMarkdown, reportName, requestBody, requestTemplate, resolveConfig, routeDownloadRows, routePresence, selectRoutes,
   summarize, verdictFor,
 } from "./tier2-ab.mjs";
@@ -77,7 +77,13 @@ test("exit policy: head_differs, error, hub mutation and zero ran fail; nondeter
   assert.equal(exitCodeFor(report([{ status: "ran", verdict: "nondeterministic_on_runner" }])), 0);
   assert.equal(exitCodeFor(report([{ status: "ran", verdict: "head_differs" }])), 1);
   assert.equal(exitCodeFor(report([{ status: "ran", verdict: "error" }])), 1);
-  assert.equal(exitCodeFor(report([{ status: "ran", verdict: "equal", hubMutation: { changed: true } }])), 1);
+  assert.equal(exitCodeFor(report([{ status: "ran", verdict: "equal", hubMutation: { changed: true } }])), 1, "unattributed mutation fails");
+  const runs = (baseChanged, headChanged) => [{ label: "base#1", side: "base", hubMutation: { changed: baseChanged } }, { label: "head", side: "head", hubMutation: { changed: headChanged } }];
+  assert.equal(exitCodeFor(report([{ status: "ran", verdict: "equal", hubMutation: { changed: true }, runs: runs(true, false) }])), 0, "base-only mutation is a note, not a failure");
+  assert.equal(exitCodeFor(report([{ status: "ran", verdict: "equal", hubMutation: { changed: true }, runs: runs(false, true) }])), 1, "head mutation fails");
+  assert.equal(exitCodeFor(report([{ status: "ran", verdict: "equal", hubMutation: { changed: true }, runs: runs(true, true) }])), 1);
+  assert.deepEqual([runs(true, false), runs(false, true), runs(false, false)].map((list) => hubMutationAttribution({ hubMutation: { changed: true }, runs: list })), ["base_only", "head", "unattributed"]);
+  assert.equal(hubMutationAttribution({ hubMutation: { changed: false } }), "none");
   assert.equal(exitCodeFor(report([{ status: "skipped" }, { status: "skipped" }])), 1, "zero routes ran");
   assert.equal(exitCodeFor(report([{ status: "ready" }], "preflight")), 0);
   assert.equal(exitCodeFor(report([{ status: "skipped" }], "preflight")), 1);
@@ -295,6 +301,10 @@ test("identity subset, path redaction and diff are stable and hub-relative", () 
   const redacted = redactPaths(subset, { hub: "E:\\huggingface\\hub", "hf-home": "E:\\huggingface" });
   assert.equal(redacted.modelBinding.artifact.path, "<hub>/models--O--m/snapshots/x/q4");
   assert.equal(redactPaths("/Users/r/work/state/x", { work: "/Users/r/work", state: "/Users/r/work/state" }), "<state>/x");
+  const many = Object.fromEntries(Array.from({ length: 300 }, (_, i) => [`gemma/f${i}#entry`, { link: true }]));
+  const relinked = Object.fromEntries(Object.keys(many).map((key) => [key, { link: false }]));
+  const full = diffObjects(many, relinked, HUB_MUTATION_LISTING_LIMIT);
+  assert.equal(full.count, 300); assert.equal(full.entries.length, 300); assert.equal(full.truncated, false, "a 300-entry hub listing is kept whole in report.json");
   const diff = diffObjects({ a: 1, b: { c: [1, 2] } }, { a: 1, b: { c: [1, 3] }, d: true });
   assert.deepEqual(diff.entries.map((entry) => entry.path), ["/b/c/1", "/d"]); assert.equal(diff.count, 2);
 });
@@ -363,6 +373,7 @@ const server = http.createServer((req, res) => {
       // Immutable attempt bundle, as head's worker publishes under data/models (read-only dirs).
       const bundle = path.join(data, "models", "portable-attempts", "r", "bundle", "hf");
       if (!fs.existsSync(bundle)) { fs.mkdirSync(bundle, { recursive: true }); fs.writeFileSync(path.join(bundle, "f.bin"), "x"); if (mode.outside) fs.symlinkSync(mode.outside, path.join(bundle, "link")); fs.chmodSync(path.join(bundle, "f.bin"), 0o444); for (const d of [bundle, path.dirname(bundle), path.dirname(path.dirname(bundle))]) fs.chmodSync(d, 0o555); }
+      if (mode.mutate && !mode.mutated) { mode.mutated = true; fs.unlinkSync(mode.mutate); fs.writeFileSync(mode.mutate, "w"); }
       const request = JSON.parse(body); const id = "job-" + Date.now() + "-" + jobs.size; jobs.set(id, { id, request, created: Date.now() }); return send(res, 201, { id, type: "image_generate", payload: request }); }
     const job = /^\/api\/v1\/jobs\/([^/]+)$/.exec(p);
     if (job) {
@@ -460,6 +471,16 @@ test("--run drives fake base/head services through the stop rule and writes evid
   assert.equal(dead.diagnostics.processes.api.alive, true); assert.ok(Array.isArray(dead.diagnostics.workersResponse));
   assert.ok(noWorker.seconds < 30, `stopped after one run, took ${noWorker.seconds}s`);
   assert.match(await readFile(path.join(noWorker.work, "evidence", "report.md"), "utf8"), /worker exited code 3 signal null \(stdin pipe\); \/workers: /);
+  // A hub change made only by the BASE worker is a prominent note; one made by HEAD fails the run.
+  const mutated = path.join(snapshot, "a.bin");
+  const baseMut = await scenario("basemut", 0, {}, {}, { mutate: mutated });
+  assert.equal(baseMut.status, 0, baseMut.stderr); const baseRoute = baseMut.report.routes[0];
+  assert.equal(baseRoute.verdict, "equal"); assert.equal(baseRoute.hubMutation.changed, true); assert.equal(hubMutationAttribution(baseRoute), "base_only");
+  assert.deepEqual(baseRoute.runs.map((run) => [run.label, run.hubMutation.changed]), [["base#1", true], ["head", false]]);
+  assert.match(await readFile(path.join(baseMut.work, "evidence", "report.md"), "utf8"), /\*\*Note:\*\* the BASE worker changed the model hub during mlx-moss-image-t2i[\s\S]*hub mutation during the BASE run only \(does not fail this comparison\)/);
+  const headMut = await scenario("headmut", 0, { mutate: mutated });
+  assert.equal(headMut.status, 1); assert.equal(hubMutationAttribution(headMut.report.routes[0]), "head");
+  assert.match(await readFile(path.join(headMut.work, "evidence", "report.md"), "utf8"), /hub mutation \(head; fails this comparison\)/);
   // A failed job stops immediately with the served error.
   const failed = await scenario("failed", 0, { fail: true });
   assert.match(failed.report.routes[0].runs.find((run) => run.label === "head").error, /^job failed: model_artifact_incomplete: fake refusal/);

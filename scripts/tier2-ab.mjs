@@ -345,9 +345,20 @@ export function verdictFor({ base1, head, base2 }) {
   if (contentOf(base2) !== contentOf(base1)) return { verdict: "nondeterministic_on_runner", needBase2: false, reason: "base#1 and base#2 differ on this runner; no further runs" };
   return { verdict: "head_differs", needBase2: false, reason: "base#1 equals base#2 and head differs" };
 }
+// A hub change seen only around BASE runs is pre-feature behaviour (base's Windows worker relinks
+// HF snapshot symlinks to hardlinks); it is reported prominently but does not fail the comparison.
+// A change during a head run, or one no single run accounts for, still fails it.
+export function hubMutationAttribution(route) {
+  if (!route?.hubMutation?.changed) return "none";
+  const changed = (route.runs ?? []).filter((run) => run.hubMutation?.changed);
+  if (!changed.length) return "unattributed";
+  return changed.every((run) => run.side === "base") ? "base_only" : "head";
+}
+// Full mutation listings go to report.json; the Markdown shows a handful.
+export const HUB_MUTATION_LISTING_LIMIT = 20_000;
 export function exitCodeFor(report) {
   if (report.mode === "preflight") return report.summary.ready > 0 && !report.fatal ? 0 : 1;
-  const bad = report.routes.some((route) => ["head_differs", "error"].includes(route.verdict) || route.hubMutation?.changed);
+  const bad = report.routes.some((route) => ["head_differs", "error"].includes(route.verdict) || (route.hubMutation?.changed && hubMutationAttribution(route) !== "base_only"));
   return bad || report.summary.ran === 0 || report.fatal ? 1 : 0;
 }
 
@@ -533,6 +544,8 @@ export function renderMarkdown(report) {
     for (const gpu of report.gpus) { const count = (type) => gpu.processes.filter((row) => row.type === type).length; lines.push(`| ${gpu.index} | ${gpu.pciBusId} | ${gpu.uuid} | ${gpu.displayAttached} | ${gpu.memoryUsed} / ${gpu.memoryTotal} | ${gpu.utilization} | C ${count("C")} (${gpu.processes.filter((row) => row.type === "C").map((row) => `${row.name}:${row.pid}`).join(" ")}), G ${count("G")}, C+G ${count("C+G")} |`); }
     lines.push("");
   }
+  const baseOnly = (report.routes ?? []).filter((route) => hubMutationAttribution(route) === "base_only");
+  if (baseOnly.length) lines.push(`**Note:** the BASE worker changed the model hub during ${baseOnly.map((route) => route.id).join(", ")} (see each route). Head runs changed nothing. This does not fail the comparison.`, "");
   if (report.fatal) lines.push(`**Fatal:** ${report.fatal}`, "");
   lines.push("| route | model | status | verdict | base#1 time | head time | base#2 time | base#1 mem | head mem | notes |", "|---|---|---|---|---|---|---|---|---|---|");
   for (const route of report.routes) {
@@ -547,7 +560,12 @@ export function renderMarkdown(report) {
     lines.push(`- payload identity diff (base#1 vs head): ${diff?.count ?? 0} field(s)`);
     for (const entry of (diff?.entries ?? []).slice(0, 40)) lines.push(`  - \`${entry.path}\`: base ${entry.base} → head ${entry.head}`);
     if (route.comparison?.numericDifference) lines.push(`- numeric difference (${route.comparison.numericDifferenceOf}): ${JSON.stringify(route.comparison.numericDifference)}`);
-    if (route.hubMutation?.changed) lines.push(`- **hub mutation detected**: ${JSON.stringify(route.hubMutation.diff.entries.slice(0, 10))}`);
+    if (route.hubMutation?.changed) {
+      const attribution = hubMutationAttribution(route);
+      lines.push(attribution === "base_only"
+        ? `- **hub mutation during the BASE run only (does not fail this comparison)**: ${route.hubMutation.diff.count} change(s) in the model hub; full listing in report.json. First: ${JSON.stringify(route.hubMutation.diff.entries.slice(0, 3))}`
+        : `- **hub mutation (${attribution}; fails this comparison)**: ${route.hubMutation.diff.count} change(s); full listing in report.json. First: ${JSON.stringify(route.hubMutation.diff.entries.slice(0, 5))}`);
+    }
     for (const runRecord of (route.runs ?? []).filter((item) => item.hubMutation?.changed)) lines.push(`- hub mutation during ${runRecord.label} (${runRecord.side}): ${runRecord.hubMutation.diff.count} change(s), e.g. ${JSON.stringify(runRecord.hubMutation.diff.entries.slice(0, 6))}`);
   }
   return lines.join("\n") + "\n";
@@ -657,7 +675,7 @@ async function hubFingerprint(hub, repos) {
       for (const entry of entries) {
         const child = path.join(dir, entry.name), childRel = rel ? `${rel}/${entry.name}` : entry.name;
         if (entry.isDirectory() && depth < 4) await walk(child, childRel, depth + 1);
-        else { try { const info = await lstat(child); nested[`${childRel}#entry`] = { mtime: info.mtimeMs, ctime: info.ctimeMs, link: info.isSymbolicLink(), size: info.size }; } catch { nested[`${childRel}#entry`] = null; } }
+        else { try { const info = await lstat(child); nested[`${childRel}#entry`] = { mtime: info.mtimeMs, ctime: info.ctimeMs, link: info.isSymbolicLink(), nlink: info.nlink, size: info.size }; } catch { nested[`${childRel}#entry`] = null; } }
       }
     };
     await walk(snap, "", 0);
@@ -932,7 +950,7 @@ async function runComparison(env, cfg, report, signal) {
       const runBefore = await hubFingerprint(route.hub, repos);
       const record = await executeRun({ env, cfg, route: definition, plan: route, label, side: label.startsWith("base") ? "base" : "head", built, evidenceRoot: evidence, secrets, signal });
       const runAfter = await hubFingerprint(route.hub, repos);
-      record.hubMutation = { changed: JSON.stringify(runBefore.repos) !== JSON.stringify(runAfter.repos), diff: diffObjects(runBefore.repos, runAfter.repos, 50) };
+      record.hubMutation = { changed: JSON.stringify(runBefore.repos) !== JSON.stringify(runAfter.repos), diff: diffObjects(runBefore.repos, runAfter.repos, HUB_MUTATION_LISTING_LIMIT) };
       if (record.hubMutation.changed) progress({ route: route.id, run: label, phase: "hub_mutation", entries: record.hubMutation.diff.count });
       route.runs.push(record); await writeReport(cfg, report); return record;
     };
@@ -960,7 +978,7 @@ async function runComparison(env, cfg, report, signal) {
     const after = await hubFingerprint(route.hub, repos);
     // Only the route's own repositories decide `changed`; the shared root listing can legitimately
     // change under another runner job, so it is recorded but never fails this one.
-    route.hubMutation = { changed: JSON.stringify(before.repos) !== JSON.stringify(after.repos), rootChanged: JSON.stringify([before.root, before.hfHome]) !== JSON.stringify([after.root, after.hfHome]), diff: diffObjects(before, after, 50), method: "readdir/stat of the hub root, its parent, and each route repository's dir/refs/snapshots/blobs (metadata only)" };
+    route.hubMutation = { changed: JSON.stringify(before.repos) !== JSON.stringify(after.repos), rootChanged: JSON.stringify([before.root, before.hfHome]) !== JSON.stringify([after.root, after.hfHome]), diff: diffObjects(before, after, HUB_MUTATION_LISTING_LIMIT), method: "readdir/stat of the hub root, its parent, and each route repository's dir/refs/snapshots/blobs (metadata only)" };
     progress({ route: route.id, phase: "verdict", verdict: decision.verdict, reason: decision.reason });
     if (decision.verdict === "head_differs") process.stderr.write(`\n[tier2-ab] ${route.id}: head_differs. Payload identity diff (base#1 -> head):\n${JSON.stringify(route.comparison.payloadIdentityDiff, null, 2)}\n`);
     await writeReport(cfg, report);
