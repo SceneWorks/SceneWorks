@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { sha256 } from "./lib/file-sha256.mjs";
 import {
   DEFAULT_ROUTE_IDS, ROUTES, contentDigest, decodePng, decodedContent, descendants, diffObjects, dispatchOptions,
-  exitCodeFor, gpuInventory, identitySubset, jobClaimed, jobDiagnostics, jobProgressDecision, lastLines, numericDifference, progressLine, removeScratch, parseTopMem, parseWav, planRoutes, readCatalog, redactPaths, referenceWav,
+  childEnvironments, childStdio, exitCodeFor, gpuInventory, processState, identitySubset, jobClaimed, jobDiagnostics, jobProgressDecision, lastLines, numericDifference, progressLine, removeScratch, parseTopMem, parseWav, planRoutes, readCatalog, redactPaths, referenceWav,
   renderMarkdown, reportName, requestBody, requestTemplate, resolveConfig, routeDownloadRows, routePresence, selectRoutes,
   summarize, verdictFor,
 } from "./tier2-ab.mjs";
@@ -82,6 +82,20 @@ test("exit policy: head_differs, error, hub mutation and zero ran fail; nondeter
   assert.equal(exitCodeFor(report([{ status: "ready" }], "preflight")), 0);
   assert.equal(exitCodeFor(report([{ status: "skipped" }], "preflight")), 1);
   assert.equal(exitCodeFor({ ...report([{ status: "ran", verdict: "equal" }]), fatal: "x" }), 1);
+});
+
+test("win32 launch: API and worker hold a stdin pipe and the worker gets the candle GPU1 environment", () => {
+  // The real worker shuts down on stdin EOF when SCENEWORKS_WORKER_CHILD=1 (Windows); stdin "ignore"
+  // is immediate EOF from NUL, which is what took every worker offline in run 43427303870.
+  assert.deepEqual(childStdio("worker", 7), ["pipe", 7, 7]); assert.deepEqual(childStdio("api", 7), ["pipe", 7, 7]); assert.deepEqual(childStdio("sentinel", 7), ["pipe", 7, 7]);
+  const host = { Path: "C:\\Windows", CUDA_VISIBLE_DEVICES: "1", NVIDIA_VISIBLE_DEVICES: "1", CUDA_DEVICE_ORDER: "PCI_BUS_ID", SCENEWORKS_GPU_ID: "1", SCENEWORKS_STALE: "x", HF_TOKEN: "hf_secret_token", GITHUB_TOKEN: "ghs_secret" };
+  const envs = childEnvironments(host, { backend: "cuda", state: "D:\\t\\state", hub: "E:\\huggingface\\hub", xet: "D:\\t\\xet", workerId: "w1", metallib: null });
+  const worker = envs.worker("http://127.0.0.1:5555"), api = envs.api;
+  for (const [key, value] of Object.entries({ SCENEWORKS_WORKER_CHILD: "1", SCENEWORKS_WORKER_ONLY: "1", SCENEWORKS_GPU_ID: "1", SCENEWORKS_BACKEND_CANDLE_ENABLED: "true", SCENEWORKS_BACKEND_MLX_ENABLED: "false", SCENEWORKS_RUN_UTILITY_INPROCESS: "0", SCENEWORKS_WORKER_ID: "w1", SCENEWORKS_API_URL: "http://127.0.0.1:5555", SCENEWORKS_API_PORT: "5555", CUDA_VISIBLE_DEVICES: "1", NVIDIA_VISIBLE_DEVICES: "1", CUDA_DEVICE_ORDER: "PCI_BUS_ID", HF_HUB_OFFLINE: "1", HF_HUB_CACHE: "E:\\huggingface\\hub", HF_TOKEN: "hf_secret_token" })) assert.equal(worker[key], value, key);
+  for (const key of ["SCENEWORKS_MLX_REQUIRED", "SCENEWORKS_MLX_UNSUPPORTED_MODE", "SCENEWORKS_STALE", "SCENEWORKS_RUST_WORKER_GPU_ID", "GITHUB_TOKEN"]) assert.equal(worker[key], undefined, key);
+  for (const [key, value] of Object.entries({ SCENEWORKS_RUN_UTILITY_INPROCESS: "1", SCENEWORKS_RUST_WORKER_GPU_ID: "cpu", SCENEWORKS_WORKER_ID: "w1-utility", SCENEWORKS_API_PORT: "0", SCENEWORKS_WORKER_CHILD: "1" })) assert.equal(api[key], value, key);
+  assert.equal(api.SCENEWORKS_API_URL, undefined);
+  assert.deepEqual(processState({ label: "worker", pid: 9, exitCode: 3, signalCode: null }), { pid: 9, alive: false, exitCode: 3, signal: null, stdin: "pipe" });
 });
 
 test("job polling: claim bound before a worker attaches, execution bound after, terminal states stop at once", () => {
@@ -292,10 +306,17 @@ const http = require("http"), fs = require("fs"), path = require("path"), zlib =
 const env = process.env, mode = JSON.parse(fs.readFileSync(path.join(__dirname, "mode.json"), "utf8"));
 const parent = Number(env.SCENEWORKS_PARENT_PID);
 setInterval(() => { try { process.kill(parent, 0); } catch { process.exit(0); } }, 100);
+// Mirror the real worker's Windows rule (lib.rs wait_for_process_shutdown_source): with
+// SCENEWORKS_WORKER_CHILD=1, stdin EOF is a graceful-shutdown request, so a child started with
+// stdin "ignore" goes offline right after registering. Applied here on every platform.
+const childStdinShutdown = (onEnd) => { if (env.SCENEWORKS_WORKER_CHILD === "1") { process.stdin.on("end", onEnd); process.stdin.on("error", onEnd); process.stdin.resume(); } };
 if (env.SCENEWORKS_WORKER_ONLY === "1") {
+  if (mode.workerExit) process.exit(mode.workerExit);
+  childStdinShutdown(() => { const req = http.request(env.SCENEWORKS_API_URL + "/fake/offline", { method: "POST" }, (res) => { res.resume(); res.on("end", () => process.exit(0)); }); req.on("error", () => process.exit(0)); req.end(env.SCENEWORKS_WORKER_ID); });
   const register = () => { const req = http.request(env.SCENEWORKS_API_URL + "/fake/register", { method: "POST" }, (res) => res.resume()); req.on("error", () => setTimeout(register, 100)); req.end(env.SCENEWORKS_WORKER_ID); };
   register(); return;
 }
+childStdinShutdown(() => process.exit(0));
 const data = env.SCENEWORKS_DATA_DIR, projects = path.join(data, "projects");
 fs.mkdirSync(path.dirname(env.SCENEWORKS_JOBS_DB_PATH), { recursive: true }); fs.writeFileSync(env.SCENEWORKS_JOBS_DB_PATH, "");
 const workers = [], jobs = new Map(), owned = new Map();
@@ -306,6 +327,7 @@ const send = (res, status, value) => { res.writeHead(status, { "content-type": "
 const server = http.createServer((req, res) => {
   let body = ""; req.on("data", (c) => (body += c)); req.on("end", () => {
     const url = new URL(req.url, "http://x"), p = url.pathname;
+    if (p === "/fake/offline") { const row = workers.find((w) => w.id === body); if (row) row.status = "offline"; return send(res, 200, {}); }
     if (p === "/fake/register") { workers.push({ id: body, status: "idle", gpuId: "mlx", gpuName: "Apple Silicon (MLX)", capabilities: ["gpu", "image_generate"] }); return send(res, 200, {}); }
     if (p === "/api/v1/health") return send(res, 200, { status: "ok", service: "sceneworks-api", runtime: "rust", readiness: { status: "ready" }, authRequired: false, directories: { data, config: env.SCENEWORKS_CONFIG_DIR, projects, jobsDb: env.SCENEWORKS_JOBS_DB_PATH } });
     if (p === "/api/v1/workers") return send(res, 200, workers);
@@ -340,7 +362,7 @@ test("--run drives fake base/head services through the stop rule and writes evid
   const dir = await mkdtemp(path.join(os.tmpdir(), "tier2-ab-run-")); t.after(() => { spawnSync("chmod", ["-R", "u+w", dir]); return rm(dir, { recursive: true, force: true }); });
   const pin = "4".repeat(40), revision = "f".repeat(40);
   const lock = `[[package]]\nname = "pmetal-mlx-sys"\nversion = "0.1.0"\nsource = "git+https://example.invalid/mlx-rs?rev=${"9".repeat(40)}#${"9".repeat(40)}"\n\n[[package]]\nname = "gen-core"\nversion = "0.1.0"\nsource = "git+https://github.com/SceneWorks/inference?rev=${pin}#${pin}"\n`;
-  const catalog = JSON.stringify({ models: [{ id: "moss_image_sft", downloads: [{ provider: "huggingface", repo: "OpenMOSS-Team/MOSS-Image-SFT", revision, files: ["a.bin"] }] }] });
+  const catalog = JSON.stringify({ models: [{ id: "moss_image_sft", downloads: [{ provider: "huggingface", repo: "OpenMOSS-Team/MOSS-Image-SFT", revision, files: ["a.bin"] }] }, { id: "flux_dev", downloads: [{ provider: "huggingface", repo: "SceneWorks/flux1-dev-mlx", revision, variant: "q4", default: true, files: ["q4/*"] }] }] });
   const git = (cwd, ...args) => { const result = spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8" }); assert.equal(result.status, 0, result.stderr); return result.stdout.trim(); };
   const sides = {};
   for (const [label, note] of [["base", "b"], ["head", "h"]]) {
@@ -350,13 +372,14 @@ test("--run drives fake base/head services through the stop rule and writes evid
   }
   const hub = path.join(dir, "hub"), snapshot = path.join(hub, "models--OpenMOSS-Team--MOSS-Image-SFT", "snapshots", revision);
   await mkdir(snapshot, { recursive: true }); await writeFile(path.join(snapshot, "a.bin"), "w");
+  const fluxSnapshot = path.join(hub, "models--SceneWorks--flux1-dev-mlx", "snapshots", revision, "q4"); await mkdir(fluxSnapshot, { recursive: true }); await writeFile(path.join(fluxSnapshot, "w.bin"), "w");
   const outside = path.join(dir, "outside-hub-file"); await writeFile(outside, "hub bytes"); const { chmod: chmodFile, stat: statFile } = await import("node:fs/promises"); await chmodFile(outside, 0o444);
-  const scenario = async (name, headOffset, headMode = {}, extraEnv = {}) => {
+  const scenario = async (name, headOffset, headMode = {}, extraEnv = {}, baseMode = {}) => {
     const work = path.join(dir, `work-${name}`), built = {};
     for (const label of ["base", "head"]) {
       const bin = path.join(work, "scratch", "bin", label), binary = path.join(bin, "sceneworks-rust-api");
       await mkdir(bin, { recursive: true }); await writeFile(binary, FAKE_APP, { mode: 0o755 });
-      await writeFile(path.join(bin, "mode.json"), JSON.stringify({ offset: label === "head" ? headOffset : 0, binding: label, outside, ...(label === "head" ? headMode : {}) }));
+      await writeFile(path.join(bin, "mode.json"), JSON.stringify({ offset: label === "head" ? headOffset : 0, binding: label, outside, ...(label === "head" ? headMode : baseMode) }));
       built[label] = { binary, binarySha256: sha256(await readFile(binary)), metallib: null };
     }
     await writeFile(path.join(work, "scratch", "build.json"), JSON.stringify({ baseSha: sides.base.sha, headSha: sides.head.sha, backend: "mlx", built }));
@@ -397,6 +420,18 @@ test("--run drives fake base/head services through the stop rule and writes evid
   assert.ok(unclaimed.seconds < 60, `claim bound must stop early, took ${unclaimed.seconds}s`);
   assert.match(await readFile(path.join(unclaimed.work, "evidence", "report.md"), "utf8"), /last job queued\/queued "waiting for an eligible worker" reasons/);
   assert.match(unclaimed.stdout, /run=head phase=run_error .*reason=unclaimed/);
+  // A worker that exits before registering on base#1 of the first route stops the whole run.
+  const noWorker = await scenario("noworker", 0, {}, { TIER2_AB_ROUTES: "mlx-moss-image-t2i,mlx-flux1-dev-t2i" }, { workerExit: 3 });
+  assert.equal(noWorker.status, 1); assert.match(noWorker.report.fatal, /owned worker registration failed on base#1 of the first route/);
+  const [firstRoute, secondRoute] = noWorker.report.routes;
+  assert.equal(firstRoute.verdict, "error"); assert.deepEqual(firstRoute.runs.map((run) => run.label), ["base#1"]);
+  assert.equal(secondRoute.status, "not_run"); assert.match(secondRoute.skipReason, /could not register/);
+  const dead = firstRoute.runs[0];
+  assert.match(dead.error, /^owned worker exited before registering idle \(code 3/); assert.equal(dead.failureClass, "worker_registration");
+  assert.deepEqual({ alive: dead.diagnostics.processes.worker.alive, exitCode: dead.diagnostics.processes.worker.exitCode, stdin: dead.diagnostics.processes.worker.stdin }, { alive: false, exitCode: 3, stdin: "pipe" });
+  assert.equal(dead.diagnostics.processes.api.alive, true); assert.ok(Array.isArray(dead.diagnostics.workersResponse));
+  assert.ok(noWorker.seconds < 30, `stopped after one run, took ${noWorker.seconds}s`);
+  assert.match(await readFile(path.join(noWorker.work, "evidence", "report.md"), "utf8"), /worker exited code 3 signal null \(stdin pipe\); \/workers: /);
   // A failed job stops immediately with the served error.
   const failed = await scenario("failed", 0, { fail: true });
   assert.match(failed.report.routes[0].runs.find((run) => run.label === "head").error, /^job failed: model_artifact_incomplete: fake refusal/);

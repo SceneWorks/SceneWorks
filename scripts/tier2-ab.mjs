@@ -504,6 +504,7 @@ export function summarize(routes) {
   for (const route of routes) {
     if (route.status === "ready") summary.ready++;
     if (route.status === "ran") summary.ran++;
+    if (route.status === "not_run") summary.notRun = (summary.notRun ?? 0) + 1;
     if (route.status === "skipped") summary.skipped++;
     else if (route.verdict && route.verdict !== "skipped" && Object.hasOwn(summary, route.verdict)) summary[route.verdict]++;
   }
@@ -524,11 +525,11 @@ export function renderMarkdown(report) {
   for (const route of report.routes) {
     const run = (label) => route.runs?.find((item) => item.label === label);
     const time = (label) => secs(run(label)?.timing?.enqueueToCompleteSeconds), mem = (label) => gib(run(label)?.memory?.peakBytes);
-    lines.push(`| ${route.id} | ${route.model} | ${route.status} | ${route.verdict ?? "–"} | ${time("base#1")} | ${time("head")} | ${time("base#2")} | ${mem("base#1")} | ${mem("head")} | ${(route.skipReason ?? route.verdictReason ?? "").replace(/\|/g, "/").slice(0, 300)} |`);
+    lines.push(`| ${route.id} | ${route.model} | ${route.status} | ${route.verdict ?? (route.status === "not_run" ? "not_run" : "–")} | ${time("base#1")} | ${time("head")} | ${time("base#2")} | ${mem("base#1")} | ${mem("head")} | ${(route.skipReason ?? route.verdictReason ?? "").replace(/\|/g, "/").slice(0, 300)} |`);
   }
   for (const route of report.routes.filter((item) => item.comparison || item.runs?.length)) {
     lines.push("", `## ${route.id}`, "", `- hub: ${route.hub}`, `- request sha256: ${route.request.sha256}`);
-    for (const runRecord of route.runs ?? []) lines.push(`- ${runRecord.label}: ${runRecord.status}; content ${runRecord.output?.content?.method ?? "-"} ${runRecord.output?.content?.sha256 ?? "-"}; file ${runRecord.output?.fileSha256 ?? "-"}; load ${secs(runRecord.timing?.loadSeconds)}, denoise ${secs(runRecord.timing?.denoiseSeconds)}; startup ${secs(runRecord.timing?.startupSeconds)}; claim ${secs(runRecord.timing?.claimSeconds)}${runRecord.error ? `; error: ${runRecord.error}` : ""}${runRecord.diagnostics?.lastJob ? `; last job ${runRecord.diagnostics.lastJob.status}/${runRecord.diagnostics.lastJob.stage}${runRecord.diagnostics.lastJob.message ? ` "${String(runRecord.diagnostics.lastJob.message).slice(0, 200)}"` : ""}${runRecord.diagnostics.lastJob.reasons ? ` reasons ${JSON.stringify(runRecord.diagnostics.lastJob.reasons).slice(0, 300)}` : ""}` : ""}`);
+    for (const runRecord of route.runs ?? []) lines.push(`- ${runRecord.label}: ${runRecord.status}; content ${runRecord.output?.content?.method ?? "-"} ${runRecord.output?.content?.sha256 ?? "-"}; file ${runRecord.output?.fileSha256 ?? "-"}; load ${secs(runRecord.timing?.loadSeconds)}, denoise ${secs(runRecord.timing?.denoiseSeconds)}; startup ${secs(runRecord.timing?.startupSeconds)}; claim ${secs(runRecord.timing?.claimSeconds)}${runRecord.error ? `; error: ${runRecord.error}` : ""}${runRecord.diagnostics?.processes?.worker ? `; worker ${runRecord.diagnostics.processes.worker.alive ? "alive" : `exited code ${runRecord.diagnostics.processes.worker.exitCode} signal ${runRecord.diagnostics.processes.worker.signal}`} (stdin ${runRecord.diagnostics.processes.worker.stdin})` : ""}${Array.isArray(runRecord.diagnostics?.workersResponse) ? `; /workers: ${runRecord.diagnostics.workersResponse.map((row) => `${row.id}=${row.status}`).join(", ").slice(0, 300)}` : ""}${runRecord.diagnostics?.lastJob ? `; last job ${runRecord.diagnostics.lastJob.status}/${runRecord.diagnostics.lastJob.stage}${runRecord.diagnostics.lastJob.message ? ` "${String(runRecord.diagnostics.lastJob.message).slice(0, 200)}"` : ""}${runRecord.diagnostics.lastJob.reasons ? ` reasons ${JSON.stringify(runRecord.diagnostics.lastJob.reasons).slice(0, 300)}` : ""}` : ""}`);
     const diff = route.comparison?.payloadIdentityDiff;
     lines.push(`- payload identity diff (base#1 vs head): ${diff?.count ?? 0} field(s)`);
     for (const entry of (diff?.entries ?? []).slice(0, 40)) lines.push(`  - \`${entry.path}\`: base ${entry.base} → head ${entry.head}`);
@@ -639,7 +640,17 @@ async function hubFingerprint(hub, repos) {
   }
   return out;
 }
-function childEnvironments(env, { backend, state, hub, xet, workerId, metallib }) {
+// The worker treats stdin EOF as a graceful-shutdown request on Windows whenever
+// SCENEWORKS_WORKER_CHILD=1 (worker lib.rs wait_for_process_shutdown_source, at base and head).
+// A child started with stdin "ignore" reads EOF from NUL at once, latches shutdown, posts an
+// Offline heartbeat right after registering and never claims; the in-process utility loops in
+// the API do the same. So API and worker get a held stdin pipe, exactly like the proven Windows
+// admitted-replay launcher (measure-sdxl-cuda-endpoints.mjs), and teardown closes it to request
+// the graceful shutdown. stdout and stderr both go to the process's own log.
+export const CHILD_STDIN = Object.freeze({ sentinel: "pipe", api: "pipe", worker: "pipe" });
+export const processState = (child) => ({ pid: child.pid ?? null, alive: Boolean(child.pid) && child.exitCode === null && child.signalCode === null, exitCode: child.exitCode ?? null, signal: child.signalCode ?? null, stdin: CHILD_STDIN[child.label] ?? "ignore" });
+export function childStdio(name, logFd) { return [CHILD_STDIN[name] ?? "ignore", logFd, logFd]; }
+export function childEnvironments(env, { backend, state, hub, xet, workerId, metallib }) {
   const weights = path.dirname(hub);
   let base = buildChildEnv(env, { state, weights, hub, xet, workerId, url: "http://127.0.0.1:0" });
   if (backend === "cuda") {
@@ -674,9 +685,9 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
   const onAbort = () => controller.abort(signal.reason ?? new Error("A/B interrupted"));
   signal.addEventListener("abort", onAbort, { once: true });
   const posix = process.platform !== "win32";
-  const launch = async (name, command, args, childEnv, stdinPipe = false) => {
+  const launch = async (name, command, args, childEnv) => {
     const log = await open(path.join(logs, `${name}.log`), "wx"); handles.push(log);
-    const child = spawn(command, args, { cwd: sideCfg.dir, env: childEnv, detached: posix && !stdinPipe, stdio: [stdinPipe ? "pipe" : "ignore", log.fd, log.fd], windowsHide: true });
+    const child = spawn(command, args, { cwd: sideCfg.dir, env: childEnv, detached: posix && name !== "sentinel", stdio: childStdio(name, log.fd), windowsHide: true });
     child.label = name; children.push(child);
     child.done = new Promise((resolve) => { child.once("error", (error) => resolve({ error: error.message })); child.once("exit", (code, sig) => resolve({ code, signal: sig })); });
     return child;
@@ -694,7 +705,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
   const wait = async (probe, seconds, what) => { const end = Math.min(Date.now() + seconds * 1000, deadline); while (Date.now() < end) { alive(); const value = await probe(); if (value) return value; await delay(500); } throw new Error(`${what} timed out`); };
   try {
     // Desktop parent-death contract: API and worker exit gracefully when this sentinel ends.
-    const sentinel = await launch("sentinel", process.execPath, ["-e", 'process.stdin.resume();process.stdin.on("end",()=>process.exit(0));'], env, true);
+    const sentinel = await launch("sentinel", process.execPath, ["-e", 'process.stdin.resume();process.stdin.on("end",()=>process.exit(0));'], env);
     envs.api.SCENEWORKS_PARENT_PID = String(sentinel.pid);
     const api = await launch("api", built[side].binary, [], envs.api);
     const url = await wait(async () => boundApiUrl(await readFile(path.join(logs, "api.log"), "utf8")), 180, "API bound-port announcement");
@@ -702,7 +713,14 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
     endpoint = ownedApiController({ url, state, api, controller });
     record.identity.health = await wait(async () => { try { return await endpoint.verify(); } catch (error) { if (controller.signal.aborted) throw error; return false; } }, 180, "API readiness");
     const worker = await endpoint.startWorker(() => launch("worker", built[side].binary, [], { ...envs.worker(url), SCENEWORKS_PARENT_PID: String(sentinel.pid) }));
-    const registration = await wait(async () => { const row = (await endpoint.call("GET", "/api/v1/workers")).find((item) => item.id === workerId); return row?.status === "idle" && row; }, 300, "owned worker registration");
+    // Registration fails fast, with a cause, when the worker exits or reports offline.
+    let offlineSince = null;
+    const registration = await wait(async () => {
+      if (worker.exitCode !== null || worker.signalCode !== null) { record.failureClass = "worker_registration"; throw new Error(`owned worker exited before registering idle (code ${worker.exitCode}, signal ${worker.signalCode})`); }
+      const row = (await endpoint.call("GET", "/api/v1/workers")).find((item) => item.id === workerId);
+      if (row?.status === "offline") { offlineSince ??= Date.now(); if (Date.now() - offlineSince > 15_000) { record.failureClass = "worker_registration"; throw new Error("owned worker registered but reports offline (it requested its own shutdown)"); } } else offlineSince = null;
+      return row?.status === "idle" && row;
+    }, 300, "owned worker registration").catch((error) => { record.failureClass ??= "worker_registration"; throw error; });
     const expectedGpu = cfg.backend === "mlx" ? "mlx" : CUDA_PHYSICAL_GPU;
     fact(registration.gpuId === expectedGpu, `owned worker registered gpuId ${registration.gpuId}, expected ${expectedGpu}`);
     record.identity.worker = { id: registration.id, gpuId: registration.gpuId, gpuName: registration.gpuName, capabilities: registration.capabilities };
@@ -811,7 +829,9 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       const direct = (route) => fetch(`${apiUrl}${route}`, { signal: AbortSignal.timeout(10_000) }).then((response) => response.json(), () => null);
       if (accepted?.id) lastJob = (await direct(`/api/v1/jobs/${encodeURIComponent(accepted.id)}`)) ?? lastJob;
       const workers = await direct("/api/v1/workers");
-      record.diagnostics = { lastJob: jobDiagnostics(lastJob), ownedWorker: Array.isArray(workers) ? workers.filter((row) => String(row?.id ?? "").startsWith(workerId)).map(({ id, status, gpuId, currentJobId, capabilities }) => ({ id, status, gpuId, currentJobId, capabilityCount: capabilities?.length ?? null })) : null };
+      // Process state BEFORE teardown: is each child alive, and how did it exit if not.
+      const processes = Object.fromEntries(children.filter((child) => child.label !== "sentinel").map((child) => [child.label, processState(child)]));
+      record.diagnostics = { processes, workersResponse: workers === null ? null : JSON.parse(redactSensitiveText(JSON.stringify(workers), secrets)), lastJob: jobDiagnostics(lastJob), ownedWorker: Array.isArray(workers) ? workers.filter((row) => String(row?.id ?? "").startsWith(workerId)).map(({ id, status, gpuId, currentJobId, capabilities }) => ({ id, status, gpuId, currentJobId, capabilityCount: capabilities?.length ?? null })) : null };
     }
     // Direct request: the owned-endpoint gate refuses every call once the watchdog has aborted.
     if (accepted?.id && record.status !== "completed" && apiUrl) {
@@ -839,6 +859,9 @@ async function teardown(children) {
   const results = [], sentinel = children.find((child) => child.label === "sentinel");
   const exited = (child) => child.exitCode !== null || child.signalCode !== null;
   const within = async (child, ms) => { let timer; try { return await Promise.race([child.done, new Promise((resolve) => { timer = setTimeout(() => resolve(null), ms); })]); } finally { clearTimeout(timer); } };
+  // Close each service's stdin first (the worker's graceful-shutdown signal on Windows), then the
+  // sentinel (the parent-death signal on every platform).
+  for (const child of children) if (child.label !== "sentinel") child.stdin?.end();
   sentinel?.stdin?.end();
   for (const child of children.filter((item) => item.label !== "sentinel")) {
     if (!child.pid) continue;
@@ -871,7 +894,9 @@ async function runComparison(env, cfg, report, signal) {
   for (const side of ["base", "head"]) { fact(await fileSha256(built[side].binary) === built[side].binarySha256, `${side} binary changed since build`); report[side].binarySha256 = built[side].binarySha256; }
   const secrets = new Set([env.HF_TOKEN].filter((value) => value && value.length >= 8));
   for (const route of report.routes.filter((item) => item.status === "skipped")) progress({ route: route.id, phase: "skipped", reason: route.skipReason });
+  let firstRoute = true;
   for (const route of report.routes.filter((item) => item.status === "ready")) {
+    if (route.status !== "ready") continue;
     const definition = ROUTES[route.id];
     const repos = [...route.rows.required, ...route.rows.optional];
     const before = await hubFingerprint(route.hub, repos);
@@ -880,6 +905,17 @@ async function runComparison(env, cfg, report, signal) {
     await writeReport(cfg, report);
     const run = async (label) => { const record = await executeRun({ env, cfg, route: definition, plan: route, label, side: label.startsWith("base") ? "base" : "head", built, evidenceRoot: evidence, secrets, signal }); route.runs.push(record); await writeReport(cfg, report); return record; };
     const base1 = await run("base#1");
+    // A worker that cannot register on the very first run will not register on the next five
+    // either (same host, same launch); stop the whole comparison with that verdict.
+    if (base1.failureClass === "worker_registration" && firstRoute) {
+      route.status = "ran"; route.verdict = "error"; route.verdictReason = `base#1 worker registration failed: ${base1.error}`;
+      for (const other of report.routes.filter((item) => item.status === "ready")) { other.status = "not_run"; other.skipReason = "stopped: the owned worker could not register on base#1 of the first route"; }
+      report.fatal = `owned worker registration failed on base#1 of the first route (${base1.error}); remaining runs not attempted`;
+      progress({ route: route.id, phase: "verdict", verdict: "error", reason: report.fatal });
+      await writeReport(cfg, report);
+      break;
+    }
+    firstRoute = false;
     const head = signal.aborted ? null : await run("head");
     let decision = verdictFor({ base1, head });
     let base2 = null;
