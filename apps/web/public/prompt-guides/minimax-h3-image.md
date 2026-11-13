@@ -1,6 +1,6 @@
 # MiniMax-H3-Image Prompt Guide
 
-MiniMax-H3-Image is MiniMax's open-weights text-to-image model. It is the MiniMax-H3
+MiniMax-H3-Image is MiniMax's open-weights text-to-image and image-editing model. It is the MiniMax-H3
 transformer without its audio stream, distilled to a fixed six-step sampler, and it decodes
 through its own image VAE. This guide covers what SceneWorks exposes for it today.
 
@@ -22,7 +22,20 @@ through its own image VAE. This guide covers what SceneWorks exposes for it toda
   These edges go past the 4096 px limit the other image models use; the larger limit applies to
   this model only. A size below about 4 megapixels is generated on a larger canvas at the same
   aspect and resized back, so small outputs cost about as much as 2048 x 2048.
-- **Seed.** The seed is the only other input; set one to repeat a render's starting noise.
+- **Seed.** Set one to repeat a render's starting noise.
+- **Sampler.** LCM re-noising (noise scale 1.1 falling to 0.9) is the default; Euler, the
+  released deterministic step, is selectable in Advanced.
+- **LoRAs.** MiniMax-H3-Image LoRAs, up to the LoRA limit. MiniMax-H3 video LoRAs are a different
+  family and are not offered here, even though the two models share layer names.
+
+## Editing with reference images
+
+Switch to Edit and add 1 to 16 reference images. The model reads them in the order listed and
+names them `<Picture 1>`, `<Picture 2>`, … in that order, so write the instruction with those
+names: "Put the hat from `<Picture 2>` on the person in `<Picture 1>`." Each listed reference has
+an Insert button that adds its name to the prompt, and reordering the list renumbers them. The
+output size is the size you pick; each reference is resized by the model itself. Edit uses the
+same fixed six steps and the same sampler as text-to-image.
 
 ## What is fixed, and why the controls are hidden
 
@@ -41,9 +54,7 @@ through its own image VAE. This guide covers what SceneWorks exposes for it toda
 
 ## Not available yet
 
-Reference-image editing, LoRAs and the MiniMax prompt expander are separate pieces of work and
-are not offered for this model yet. The Q8 and Q4 tiers are not published yet; bf16 is the only
-installable tier today.
+The Q8 and Q4 tiers are not published yet; bf16 is the only installable tier today.
 
 ## Licence
 

@@ -7,6 +7,7 @@ import JSON5 from "json5";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { click, mountRoot, unmountRoot } from "./testUtils/dom.js";
 import { H3_IMAGE_EXPAND_COPY, h3ImageProposedResolution } from "./minimaxH3ImageExpand.js";
+import { writeSimpleStudioSnapshot } from "./simpleStudioStore.js";
 
 // SW-7102 (feature SW-F363): MiniMax-H3-Image's prompt expander in both Image Studio views, from
 // the SHIPPED catalog entries. The Expand prompt tool appears only for MiniMax-H3-Image with the
@@ -240,6 +241,28 @@ describe("Expand prompt in the advanced Image Studio (SW-7102)", () => {
     );
   });
 
+  // SW-7101: in the edit, the expander is grounded in exactly the ordered references the render
+  // conditions on, in their <Picture N> order.
+  it("grounds an edit's expansion in the ordered references the render sends", async () => {
+    const refs = ["ref-a", "ref-b", "ref-c"];
+    window.localStorage.setItem(
+      "sceneworks-studio-image-project_1",
+      JSON.stringify({ mode: "edit_image", model: "minimax_h3_image", referenceAssetIds: refs }),
+    );
+    const assets = refs.map((id) => ({ id, projectId: "project_1", type: "image", displayName: id, status: {} }));
+    const value = context([H3_IMAGE, PE], { assets });
+    await render(value);
+    await act(async () =>
+      setTextarea(container.querySelector('textarea[aria-label="Prompt"]'), "<Picture 1> in the coat from <Picture 3>"),
+    );
+    await click(buttonWithText(container, "Expand prompt"));
+    await click(buttonWithText(container.querySelector(".qwen-rewrite-control"), "Expand edit instruction"));
+    await act(async () => {});
+    expect(value.h3ImageExpandPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({ modelId: "minimax_h3_image", sourceAssetIds: refs }),
+    );
+  });
+
   it("keeps the original prompt when the user declines the expansion", async () => {
     const value = context([H3_IMAGE, PE]);
     await render(value);
@@ -316,6 +339,23 @@ describe("Expand prompt in the Simple Image Studio (SW-7102)", () => {
       width: 5472,
       height: 3072,
     });
+  });
+
+  // SW-7101: Simple's edit grounds the expander in its ordered list — the armed tile first.
+  it("grounds an edit's expansion in the ordered references the render sends", async () => {
+    const refs = ["ref-a", "ref-b"].map((id) => ({ id, projectId: "project_1", type: "image", name: id, status: {} }));
+    writeSimpleStudioSnapshot("project_1", {
+      image: { mode: "edit_image", model: "minimax_h3_image", referenceAssetId: "ref-a", extraReferenceIds: ["ref-b"] },
+    });
+    const value = context([H3_IMAGE, PE], { assets: refs, recentImageAssets: refs });
+    await openImage(value);
+    await act(async () => setTextarea(container.querySelector("#su-image-prompt"), "<Picture 2> on <Picture 1>"));
+    await click(buttonWithText(container, "Expand prompt"));
+    await click(buttonWithText(container.querySelector(".qwen-rewrite-control"), "Expand edit instruction"));
+    await act(async () => {});
+    expect(value.h3ImageExpandPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({ modelId: "minimax_h3_image", sourceAssetIds: ["ref-a", "ref-b"] }),
+    );
   });
 
   it("offers no Expand prompt tile without the expander", async () => {

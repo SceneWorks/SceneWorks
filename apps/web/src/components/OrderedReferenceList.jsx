@@ -35,8 +35,13 @@ export function OrderedReferenceList({
   onMove,
   onRemove,
   firstOrdinal = 1,
+  // SW-7101: (index) => the token the model's prompt names this reference by (`<Picture N>`), or
+  // null. With `onInsertToken`, each row offers to insert it — so a single reference is listed too.
+  tokenFor,
+  onInsertToken,
 }) {
-  if (!Array.isArray(assetIds) || (assetIds.length < 2 && !onRemove)) {
+  const inserts = typeof tokenFor === "function" && typeof onInsertToken === "function";
+  if (!Array.isArray(assetIds) || (assetIds.length < 2 && !onRemove && !(inserts && assetIds.length))) {
     return null;
   }
   const move = (from, to) => onMove ? onMove(from, to) : onChange(moveReference(assetIds, from, to));
@@ -69,6 +74,16 @@ export function OrderedReferenceList({
             </button>
             {onRemove ? <button aria-label={`Remove ${referenceOrdinalLabel(index)}`}
               className="secondary-action" type="button" onClick={() => onRemove(index)}>Remove</button> : null}
+            {inserts && tokenFor(index + firstOrdinal - 1) ? (
+              <button
+                aria-label={`Insert ${tokenFor(index + firstOrdinal - 1)} into the prompt`}
+                className="secondary-action"
+                onClick={() => onInsertToken(tokenFor(index + firstOrdinal - 1))}
+                type="button"
+              >
+                Insert {tokenFor(index + firstOrdinal - 1)}
+              </button>
+            ) : null}
           </span>
         </li>
       ))}

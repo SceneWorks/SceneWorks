@@ -266,6 +266,10 @@ export function buildSimpleImageRequest({
     // sc-24113: the advanced fold's knobs, through the SAME builder the full studio uses
     // (`stepsOverride` / `guidanceOverride` are its names for "" = use the model default).
     referenceAssetIds,
+    // SW-7101: an edit on a model with the ordered surface sends that list as the plural
+    // `referenceAssetIds` (the armed reference is its first entry), exactly as the full studio's
+    // multi-reference picker does; without this the builder sent the armed source alone.
+    multiReference: editing && !mossEdit && referenceAssetIds.length > 0,
     mossImageEdit,
     mossImage: mossEdit ? { max_sequence_length: maxSequenceLength, training_shift: trainingShift } : undefined,
     mossImageAdvanced: mossEdit ? mossImageAdvanced : undefined,

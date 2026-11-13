@@ -611,10 +611,16 @@ pub(crate) fn supra2_mlx_eligible(payload: &Map<String, Value>) -> bool {
             .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
 }
 
-/// MiniMax-H3-Image (SW-7100) text-to-image: no source, reference, mask, control, pose, user LoRA,
-/// multi-phase schedule or hires fix (its second pass is an img2img refinement the t2i route does
-/// not take). A tier carrier (`mlxQuantize` / `quantTier`) IS admitted: both engines read the
-/// pre-packed q8/q4 DiT tiers. Reference editing (SW-7092) and LoRAs (SW-7101) widen this later.
+/// MiniMax-H3-Image (SW-7100, SW-7101): text-to-image and the 1..=16-reference edit are ONE
+/// engine call — an empty ordered reference list is text-to-image and a non-empty one is the edit
+/// (the engine's `edit_reference_images`), so both claim through the same predicate, exactly as
+/// Qwen-Image 2.1 does ([`qwen_image_2_1_mlx_eligible`]). The ordered list is the shared
+/// [`qwen_image_2_1_reference_ids`] the
+/// API caps (`limits.maxReferenceAssets`) and the worker renders; only a MALFORMED carrier refuses
+/// here. User LoRAs route (SW-7096 installs them on every tier) and a tier carrier (`mlxQuantize` /
+/// `quantTier`) is admitted: both engines read the pre-packed q8/q4 DiT tiers. Still refused: a
+/// control, a pose, a multi-phase schedule, and hires fix (its second pass is an img2img
+/// refinement this engine does not take).
 pub(crate) fn minimax_h3_image_mlx_eligible(payload: &Map<String, Value>) -> bool {
     let hires_fix_enabled = payload
         .get("hiresFix")
@@ -622,10 +628,15 @@ pub(crate) fn minimax_h3_image_mlx_eligible(payload: &Map<String, Value>) -> boo
         .and_then(|hires| hires.get("enabled"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    !hires_fix_enabled
-        && mage_flow_mlx_eligible(payload)
-        && !has_nonempty_array(payload, "loras")
+    matches!(
+        payload.get("mode").and_then(Value::as_str),
+        None | Some("text_to_image" | "edit_image")
+    ) && !hires_fix_enabled
+        && !has_nonempty_array(payload, "controls")
+        && !has_nonempty_array(payload, "controlnets")
+        && !has_nonempty_nested_array(payload, "advanced", "poses")
         && !has_nonempty_nested_array(payload, "advanced", "phases")
+        && qwen_image_2_1_reference_ids(payload).is_some()
 }
 
 /// Mage-Flow Edit requires a real primary source image. Optional plural references augment that

@@ -3860,10 +3860,11 @@ mod base_model_gating_tests {
     /// (the model declarations) and `minimax_h3_turbo_loras_are_registered_and_sha_pinned` (the LoRA
     /// entries), which do read the embedded manifests. Keep these fixtures in step with them by hand.
     ///
-    /// It also pins that detection reports `minimax-h3` — before sc-18725 it reported `None`, which
-    /// let the file through this gate by ACCIDENT (the detected-family check is skipped on `None`)
-    /// while leaving a user-imported copy family-less and hidden by the web picker's fail-closed
-    /// rule.
+    /// It also pins what detection reports for this key space. sc-18725 made it `minimax-h3`;
+    /// SW-7101 (E26) made it `None` again, deliberately: MiniMax-H3-Image is the same DiT key space
+    /// (blocks and refiner), so the file's keys cannot tell an H3 adapter from an H3-Image one. The
+    /// DECLARED family is what admits it here — and what refuses it on `minimax_h3_image`, and an
+    /// H3-Image adapter on H3, which the last arms prove.
     #[test]
     fn minimax_h3_turbo_lora_passes_the_submit_gate_on_both_partitions() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3871,14 +3872,14 @@ mod base_model_gating_tests {
             tmp.path(),
             "minimax_h3_fl2v_turbo_8step_v1.0_bf16.safetensors",
         );
-        // The fixture is only meaningful if it really detects as minimax-h3 — pin that, so a change
-        // in the detector turns into a clear failure here rather than a vacuous pass.
+        // The shared H3 / H3-Image key space is inconclusive by design — pin that, so a change in
+        // the detector turns into a clear failure here rather than a silent cross-filing.
         let header = read_safetensors_header(
             &tmp.path()
                 .join("minimax_h3_fl2v_turbo_8step_v1.0_bf16.safetensors"),
         )
         .unwrap();
-        assert_eq!(detect_lora_family(&header).as_deref(), Some("minimax-h3"));
+        assert_eq!(detect_lora_family(&header), None);
 
         let models = vec![
             json!({
@@ -3910,6 +3911,36 @@ mod base_model_gating_tests {
             .unwrap_or_else(|error| {
                 panic!("the turbo accelerator must be accepted on {model_id}: {error:?}")
             });
+        }
+
+        // Family isolation (SW-7101): the same file declared for H3 is refused on H3-Image, and
+        // declared for H3-Image it is refused on H3 and accepted on H3-Image.
+        let mut models = models;
+        models.push(json!({
+            "id": "minimax_h3_image",
+            "family": "minimax-h3-image",
+            "loraCompatibility": { "families": ["minimax-h3-image"] }
+        }));
+        let image_lora = json!({
+            "id": "minimax_h3_image_style",
+            "installState": "installed",
+            "installedPath": tmp.path().to_str().unwrap(),
+            "families": ["minimax-h3-image"],
+        });
+        for (model_id, lora, accepted) in [
+            ("minimax_h3_image", &lora, false),
+            ("minimax_h3", &image_lora, false),
+            ("minimax_h3_image", &image_lora, true),
+        ] {
+            let result = validate_lora_specs_for_model(
+                &models,
+                &[],
+                model_id,
+                std::slice::from_ref(lora),
+                true,
+                "LoRA",
+            );
+            assert_eq!(result.is_ok(), accepted, "{} on {model_id}", lora["id"]);
         }
     }
 

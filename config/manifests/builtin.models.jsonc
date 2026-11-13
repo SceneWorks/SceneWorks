@@ -26601,7 +26601,9 @@
       "family": "minimax-h3-image",
       "type": "image",
       "adapter": "minimax_h3_image",
-      "capabilities": ["text_to_image"],
+      // SW-7101: one engine call serves both — no reference is text-to-image, 1 to 16 ordered
+      // references (`limits.maxReferenceAssets`) are the edit, read by the prompt as `<Picture N>`.
+      "capabilities": ["text_to_image", "edit_image"],
       // No classifier-free guidance and no negative prompt (`gen_core::h3_image` refuses both), so
       // Image Studio hides those controls rather than offering knobs the engine refuses. The six
       // sigmas are fixed (`pdd_config.json`, never shifted), so there is no scheduler shift either.
@@ -26795,7 +26797,9 @@
         "count": [1],
         "minDimension": 16,
         "maxDimension": 6272,
-        "maxReferenceAssets": 0,
+        // SW-7101: the model card's edit ceiling (`gen_core::h3_image::MAX_REFERENCES`), counted over
+        // the flattened ordered list at enqueue, by the worker, and by the Image Studio picker.
+        "maxReferenceAssets": 16,
         "hardMinSteps": 6,
         "hardMaxSteps": 6,
         // One fixed six-sigma schedule; no generic sampler or scheduler menu. The sampler (Euler or
@@ -26803,10 +26807,11 @@
         "samplers": ["default"],
         "schedulers": ["default"]
       },
-      // LoRAs are SW-7101; nothing is advertised until then.
+      // SW-7101: H3-Image LoRAs only — its own family token, never `minimax-h3` (E26). Both engines
+      // install them as forward-time residuals on every tier (SW-7096).
       "loraCompatibility": {
-        "families": [],
-        "types": []
+        "families": ["minimax-h3-image"],
+        "types": ["style", "enhance", "character"]
       },
       // DERIVED floors, NOT measured (the terminal item measures them). Every phase is staged — the
       // text encoder, the DiT and the VAE are each mapped, used and released in turn
@@ -26826,8 +26831,11 @@
         "label": "MiniMax-H3-Image",
         // §IV.2: "MiniMax-H3-Image", exactly — the H3 video entries' "MiniMax H3" does not satisfy it.
         "attribution": "Powered by MiniMax-H3-Image",
-        "description": "MiniMax-H3-Image is MiniMax's open-weights text-to-image model: the MiniMax-H3 transformer without its audio stream, distilled to a fixed six-step sampler and decoded by its own image VAE. It renders large images natively — the published presets are about 16 megapixels each, up to 6272 px on the long edge (21:9) — and smaller sizes are generated at about 4 megapixels and resized back. Steps are fixed at six and there is no guidance scale and no negative prompt, so those controls are hidden. It reads the same Qwen3-VL-32B text encoder as MiniMax-H3: with MiniMax-H3 already installed, the text encoder is not downloaded again. It renders through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux. The bf16 tier is MiniMax's own upstream checkpoint; the Q8 and Q4 tiers are not published yet. Governed by the MiniMax-H3-Image Community License Agreement, which you must accept before downloading.",
-        "recommendedFor": ["text_to_image"],
+        "description": "MiniMax-H3-Image is MiniMax's open-weights text-to-image and image-editing model: the MiniMax-H3 transformer without its audio stream, distilled to a fixed six-step sampler and decoded by its own image VAE. It renders large images natively — the published presets are about 16 megapixels each, up to 6272 px on the long edge (21:9) — and smaller sizes are generated at about 4 megapixels and resized back. It edits from up to 16 reference images, named in the prompt as <Picture 1> through <Picture 16> in the order you give them, and it takes MiniMax-H3-Image LoRAs (not MiniMax-H3 video LoRAs). Steps are fixed at six and there is no guidance scale and no negative prompt, so those controls are hidden. It reads the same Qwen3-VL-32B text encoder as MiniMax-H3: with MiniMax-H3 already installed, the text encoder is not downloaded again. It renders through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux. The bf16 tier is MiniMax's own upstream checkpoint; the Q8 and Q4 tiers are not published yet. Governed by the MiniMax-H3-Image Community License Agreement, which you must accept before downloading.",
+        "recommendedFor": ["text_to_image", "edit_image"],
+        // SW-7101: the ordered multi-reference picker (plural `referenceAssetIds`) for the edit; its
+        // ceiling is `limits.maxReferenceAssets`. No `img2img`: an H3-Image reference has no strength.
+        "multiReference": true,
         "promptGuide": {
           "title": "MiniMax-H3-Image Prompt Guide",
           "path": "/prompt-guides/minimax-h3-image.md",

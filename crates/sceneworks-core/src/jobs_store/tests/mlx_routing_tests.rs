@@ -2311,8 +2311,9 @@ fn dataset_subject_mask_routes_by_the_sam3_image_segment_capability() {
     ));
 }
 
-/// SW-7100: a MiniMax-H3-Image text-to-image job routes to the MLX worker, tier carrier included;
-/// every carrier outside that surface keeps it off the lane. Off-Mac the same model routes to Candle
+/// SW-7100 / SW-7101: a MiniMax-H3-Image job routes to the MLX worker for text-to-image AND the
+/// ordered-reference edit (1..=16 references, LoRAs and a tier carrier included); every carrier
+/// outside that surface keeps it off the lane. Off-Mac the same model routes to Candle
 /// (`minimax_h3_image_routes_to_candle_for_text_to_image`).
 #[test]
 fn minimax_h3_image_routes_text_to_image_to_mlx() {
@@ -2320,27 +2321,34 @@ fn minimax_h3_image_routes_text_to_image_to_mlx() {
     assert!(CANDLE_ROUTED_MODELS.contains(&"minimax_h3_image"));
     let eligible =
         |payload: Value| image_request_mlx_eligible("minimax_h3_image", &object(payload));
+    let sixteen: Vec<String> = (1..=16).map(|i| format!("ref{i}")).collect();
     for admitted in [
         json!({ "model": "minimax_h3_image", "mode": "text_to_image" }),
         json!({ "model": "minimax_h3_image", "advanced": { "mlxQuantize": 4 } }),
         json!({ "model": "minimax_h3_image", "advanced": { "quantTier": "q8" } }),
         json!({ "model": "minimax_h3_image", "hiresFix": { "enabled": false }, "loras": [] }),
+        json!({ "model": "minimax_h3_image", "loras": [{ "id": "l", "weight": 0.8 }] }),
+        json!({ "model": "minimax_h3_image", "mode": "edit_image", "referenceAssetIds": ["a"] }),
+        json!({ "model": "minimax_h3_image", "mode": "edit_image", "referenceAssetIds": sixteen,
+                "loras": [{ "id": "l", "weight": 0.8 }], "advanced": { "mlxQuantize": 8 } }),
     ] {
         assert!(eligible(admitted.clone()), "{admitted}");
+        assert!(
+            worker_supports_job(&mlx_worker(), &image_generate_job(admitted.clone())),
+            "the MLX worker must claim {admitted}"
+        );
     }
     let job = image_generate_job(json!({ "model": "minimax_h3_image", "prompt": "a lighthouse" }));
     assert!(image_job_is_mlx_eligible(&job));
     assert!(worker_supports_job(&mlx_worker(), &job));
     for refused in [
-        json!({ "mode": "edit_image", "sourceAssetId": "a" }),
         json!({ "mode": "image_to_image", "sourceAssetId": "a" }),
-        json!({ "referenceAssetId": "a" }),
-        json!({ "referenceAssetIds": ["a"] }),
-        json!({ "maskAssetId": "a" }),
+        json!({ "mode": "character_image", "referenceAssetId": "a" }),
+        json!({ "mode": "edit_image", "referenceAssetIds": [""] }),
+        json!({ "mode": "edit_image", "referenceAssetIds": "a" }),
         json!({ "controls": [{}] }),
         json!({ "advanced": { "poses": [{}] } }),
         json!({ "advanced": { "phases": [{}] } }),
-        json!({ "loras": [{ "id": "l", "weight": 0.8 }] }),
         json!({ "hiresFix": { "enabled": true } }),
     ] {
         let mut payload = refused.clone();

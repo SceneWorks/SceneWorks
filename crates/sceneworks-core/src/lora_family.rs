@@ -818,6 +818,11 @@ pub fn detect_lora_family(header: &Value) -> Option<String> {
     if let Some(family) = detect_unique_key_family(&keys) {
         return Some(family);
     }
+    // The MiniMax-H3 lineage (H3 video and H3-Image) shares one DiT key space, so it is decided
+    // here and never handed to the bucket scorer: see [`detect_minimax_h3_lineage_family`].
+    if let Some(family) = detect_minimax_h3_lineage_family(&keys) {
+        return family;
+    }
     let bucket = detect_bucket(&keys)?;
     match bucket {
         Bucket::WanVideo => Some(crate::model_family::WAN_VIDEO.to_owned()),
@@ -1139,34 +1144,71 @@ fn detect_unique_key_family(keys: &[String]) -> Option<String> {
     }) {
         return Some(crate::model_family::KREA_2.to_owned());
     }
-    // MiniMax-H3 (epic 17137, sc-18725). Its DiT prepends a two-layer token refiner whose blocks are
-    // keyed `token_refiner.refiner_blocks.<n>.` — a doubled `refiner` no other family we detect uses
-    // (Hunyuan's analogue is `individual_token_refiner.blocks`, and nothing else has a refiner at
-    // all). Needed HERE rather than as a bucket signature because the rest of an H3 LoRA is
-    // architecturally anonymous: bare `transformer_blocks.<n>.attn.to_{q,k,v}` / `attn.to_out.0` /
-    // `ff.net.0.proj` / `ff.net.2` with NO `transformer.` or `diffusion_model.` prefix and none of
-    // the dual-stream `img_mlp`/`txt_mlp`/`add_{q,k}_proj` markers, so every bucket scores it below
-    // `MIN_KEY_MATCHES` and it fell through as family-less. All four published
-    // `lightx2v/Minimax-h3-Turbo` diffusers files carry 24 refiner tensors of 624 (the refiner is
-    // load-bearing, not optional — sc-18724), so one marker identifies the whole shipped set.
-    //
-    // The `_comfyui_` twins from the same repo use a different key space (fused `attn.qkv_proj`,
-    // SwiGLU halves swapped). The inference adapter now converts that layout explicitly; this
-    // marker remains specific to Diffusers because the ComfyUI spelling has no equally unique
-    // segment. Exact trainer exports are identified from `ss_network_module` above.
-    //
-    // Both the diffusers dotted form and the kohya/flattened underscore form are matched, per the
-    // Anima and Krea precedent above.
-    if keys.iter().any(|key| {
-        key.contains("token_refiner.refiner_blocks.")
-            || key.contains("_token_refiner_refiner_blocks_")
-    }) {
-        return Some(crate::model_family::MINIMAX_H3.to_owned());
-    }
     if keys.iter().any(|key| is_qwen_image_2_1_key(key)) {
         return Some(crate::model_family::QWEN_IMAGE_2_1.to_owned());
     }
     None
+}
+
+/// The MiniMax-H3 lineage's family from tensor keys alone (SW-7101, E26), or `None` when the keys
+/// are not of that lineage. The inner value is the verdict: a family, or `None` when the lineage is
+/// certain but the member is not.
+///
+/// MiniMax-H3 (epic 17137, sc-18725) prepends a two-layer token refiner keyed
+/// `token_refiner.refiner_blocks.<n>.` — a doubled `refiner` no family outside the lineage uses
+/// (Hunyuan's analogue is `individual_token_refiner.blocks`). The rest of an H3 LoRA is
+/// architecturally anonymous: bare `transformer_blocks.<n>.attn.to_{q,k,v}` / `attn.to_out.0` /
+/// `ff.net.0.proj` / `ff.net.2`, which every bucket scores below `MIN_KEY_MATCHES`. All four
+/// published `lightx2v/Minimax-h3-Turbo` diffusers files carry 24 refiner tensors of 624. Both the
+/// diffusers dotted and the kohya flattened spellings are matched, per the Anima/Krea precedent;
+/// the `_comfyui_` twins (`token_refiner.blocks.`) have no equally unique segment and stay
+/// inconclusive. Exact trainer exports are identified from `ss_network_module` instead.
+///
+/// MiniMax-H3-Image (SW-7100) is that SAME DiT without the audio stream: the same 50 blocks, the
+/// same refiner, the same leaf names. So the refiner marker proves the lineage, not the member:
+///
+/// * a key on a module only the IMAGE DiT has or adapts — a per-step `pdd_proj_out.<i>` head (the
+///   image DiT's only new modules), or, beside the refiner and with no audio module, a block's
+///   `adaln_proj.linear`, the `time_embedder` or `norm_out.linear`, which the image adapter surface
+///   addresses (`AdaLnSurface::ImageAllLinears`) and H3's own installer refuses — is
+///   `minimax-h3-image`;
+/// * a key on H3's joint audio stream (`audio_*`), which the image DiT does not have, is
+///   `minimax-h3`;
+/// * a refiner-and-block file with no such key is AMBIGUOUS between the two, and the verdict is
+///   `None`: filing it as either would let H3's LoRAs load on H3-Image, or refuse an H3-Image LoRA
+///   on its own model. Its family comes from its metadata, or from the user (the inconclusive
+///   import path, and the assign-family route for an unresolved LoRA).
+fn detect_minimax_h3_lineage_family(keys: &[String]) -> Option<Option<String>> {
+    let any = |needles: &[&str]| {
+        keys.iter()
+            .any(|key| needles.iter().any(|needle| key.contains(needle)))
+    };
+    if any(&["pdd_proj_out.", "pdd_proj_out_"]) {
+        return Some(Some(crate::model_family::MINIMAX_H3_IMAGE.to_owned()));
+    }
+    if !any(&[
+        "token_refiner.refiner_blocks.",
+        "_token_refiner_refiner_blocks_",
+    ]) {
+        return None;
+    }
+    // The joint audio stream (`audio_proj_in` and the other `audio_*` modules) exists only in H3's
+    // DiT — the image DiT has no audio tensor at all — so a file naming one is H3. That is what a
+    // full H3 checkpoint carries ([`detect_model_family`] reads checkpoints through this detector).
+    if any(&["audio_"]) {
+        return Some(Some(crate::model_family::MINIMAX_H3.to_owned()));
+    }
+    if any(&[
+        "adaln_proj.linear",
+        "adaln_proj_linear",
+        "time_embedder.",
+        "time_embedder_",
+        "norm_out.linear",
+        "norm_out_linear",
+    ]) {
+        return Some(Some(crate::model_family::MINIMAX_H3_IMAGE.to_owned()));
+    }
+    Some(None)
 }
 
 /// Lets tensor keys overrule a Qwen-Image metadata label that names the WRONG Qwen-Image
@@ -4442,35 +4484,98 @@ mod tests {
     }
 
     #[test]
-    fn detects_minimax_h3_turbo_lora_by_its_token_refiner() {
-        // sc-18725. Before this, all four published turbo files detected as `None`: their DiT keys
-        // are bare `transformer_blocks.<n>.attn.to_{q,k,v}` / `ff.net.*` with no architecture
-        // prefix, which reaches no bucket (the MMDiT bucket needs the dual-stream
-        // `img_mlp`/`txt_mlp`/`add_q_proj` group; LTX and SD3 need a `transformer.`/
-        // `diffusion_model.` prefix). `None` is not harmless: `reconcile_lora_family` then fills in
-        // no family for a user-imported copy, and the web picker fails CLOSED on a family-less LoRA
-        // (`loraHasResolvableFamily`, sc-10509), so the file is silently unusable.
+    fn the_shared_h3_refiner_surface_is_the_lineage_not_the_member() {
+        // sc-18725 detected the published turbo files as `minimax-h3` from their refiner marker.
+        // SW-7101 (E26): MiniMax-H3-Image is the SAME DiT — same 50 blocks, same refiner, same leaf
+        // names — so the marker proves only the lineage. Filing a refiner-and-block file as H3
+        // would refuse an H3-Image LoRA on its own model (and the reverse would load H3's LoRAs on
+        // H3-Image), so the verdict is `None` and the family comes from metadata or the user.
         let keys = minimax_h3_diffusers_keys();
         let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
-
-        assert_eq!(detect_lora_family(&header).as_deref(), Some("minimax-h3"));
-    }
-
-    #[test]
-    fn detects_minimax_h3_from_the_token_refiner_alone() {
-        // The marker must classify on its own, EXEMPT from the `MIN_KEY_MATCHES` floor the bucket
-        // scorer applies, the way the Krea and Anima unique-key entries are — `detect_unique_key_family`
-        // runs ahead of the scorer and never consults the floor. 24 of the 624 published tensors
-        // target the refiner, and a sparse adapter touching only it must still classify rather than
-        // fall through as family-less.
-        let keys: Vec<String> = minimax_h3_diffusers_keys()
+        assert_eq!(detect_lora_family(&header), None);
+        // The marker still claims the file for the lineage: a `transformer.`-prefixed PEFT export
+        // (which reaches the LTX/SD3 buckets' prefix) is never handed to the bucket scorer.
+        let prefixed: Vec<String> = keys
+            .iter()
+            .map(|key| format!("transformer.{key}"))
+            .collect();
+        let header = header_from_keys(&prefixed.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(detect_lora_family(&header), None);
+        // A refiner-only slice (24 of the 624) is the same verdict, exempt from `MIN_KEY_MATCHES`.
+        let refiner: Vec<String> = keys
             .into_iter()
             .filter(|key| key.starts_with("token_refiner."))
             .collect();
-        assert_eq!(keys.len(), 24, "the refiner slice of the published key set");
-        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(
+            refiner.len(),
+            24,
+            "the refiner slice of the published key set"
+        );
+        let header = header_from_keys(&refiner.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(detect_lora_family(&header), None);
+    }
 
-        assert_eq!(detect_lora_family(&header).as_deref(), Some("minimax-h3"));
+    #[test]
+    fn h3_and_h3_image_loras_are_never_filed_as_each_other() {
+        let shared = minimax_h3_diffusers_keys();
+        let with = |extra: &[String]| {
+            let keys: Vec<&str> = shared.iter().chain(extra).map(String::as_str).collect();
+            detect_lora_family(&header_from_keys(&keys))
+        };
+        // Image-only modules beside the shared surface name H3-Image, in both spellings.
+        for extra in [
+            vec!["pdd_proj_out.3.lora_A.weight".to_owned()],
+            vec!["transformer_blocks.7.adaln_proj.linear.lora_A.weight".to_owned()],
+            vec!["time_embedder.linear_1.lora_A.weight".to_owned()],
+            vec!["norm_out.linear.lora_A.weight".to_owned()],
+            vec!["lora_unet_pdd_proj_out_0.lora_down.weight".to_owned()],
+            vec!["lora_unet_transformer_blocks_7_adaln_proj_linear.lora_down.weight".to_owned()],
+        ] {
+            assert_eq!(
+                with(&extra).as_deref(),
+                Some(crate::model_family::MINIMAX_H3_IMAGE),
+                "{extra:?}"
+            );
+        }
+        // A heads-only adapter is H3-Image without the refiner too.
+        assert_eq!(
+            detect_lora_family(&header_from_keys(&[
+                "pdd_proj_out.0.lora_A.weight",
+                "pdd_proj_out.0.lora_B.weight"
+            ]))
+            .as_deref(),
+            Some(crate::model_family::MINIMAX_H3_IMAGE)
+        );
+        // Metadata decides an otherwise-ambiguous file, the image family ahead of H3's substring.
+        for (stamp, family) in [
+            ("minimax-h3-image", crate::model_family::MINIMAX_H3_IMAGE),
+            ("MiniMax_H3_Image", crate::model_family::MINIMAX_H3_IMAGE),
+            ("minimax-h3", crate::model_family::MINIMAX_H3),
+        ] {
+            let mut header =
+                header_from_keys(&shared.iter().map(String::as_str).collect::<Vec<_>>());
+            header["__metadata__"] = json!({ "ss_base_model_version": stamp });
+            assert_eq!(
+                detect_lora_family(&header).as_deref(),
+                Some(family),
+                "{stamp}"
+            );
+        }
+        // H3's audio stream names H3 — a full H3 checkpoint, read through `detect_model_family`,
+        // carries `audio_proj_in` beside the same refiner and AdaLN modules.
+        assert_eq!(
+            with(&[
+                "audio_proj_in.weight".to_owned(),
+                "transformer_blocks.0.adaln_proj.linear.weight".to_owned(),
+            ])
+            .as_deref(),
+            Some(crate::model_family::MINIMAX_H3)
+        );
+        // The exact H3 trainer stamp stays H3, never H3-Image.
+        assert_eq!(
+            detect_lora_family(&minimax_h3_trainer_header(16)).as_deref(),
+            Some(crate::model_family::MINIMAX_H3)
+        );
     }
 
     #[test]

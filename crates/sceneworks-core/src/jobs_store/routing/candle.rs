@@ -80,6 +80,10 @@ pub(crate) enum CandleImageLane {
     /// refuses `edit_image` and every conditioning carrier for EVERY family — the same reason
     /// `ZImageEdit` exists for an id that is itself a candle txt2img id.
     QwenImage21Edit,
+    /// MiniMax-H3-Image edit (SW-7101): ONE ordered list of 1..=16 reference images. Bespoke for the
+    /// same reason as [`Self::QwenImage21Edit`]: the generic txt2img gate refuses `edit_image` and
+    /// every conditioning carrier, and the id is itself a candle txt2img id.
+    MinimaxH3ImageEdit,
     /// FLUX.3's ordered AE-only conditioning, served by the generic registered generator.
     Flux3Reference,
     BooguImg2Img,
@@ -233,6 +237,14 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
         // Turbo (sc-25907) is the same request contract under a second engine id.
         models: ModelMatch::Any(crate::jobs_store::routing::QWEN_IMAGE_2_1_MODEL_IDS),
         shape: qwen_image_2_1_edit_candle_eligible,
+    },
+    // MiniMax-H3-Image edit (SW-7101): the Candle port registers the SAME engine id and the SAME
+    // `Reference` + `MultiReference` conditioning as MLX, so the shape is the MLX predicate plus a
+    // non-empty ordered list — one request contract on both backends.
+    CandleImageRoute {
+        lane: CandleImageLane::MinimaxH3ImageEdit,
+        models: ModelMatch::Any(&["minimax_h3_image"]),
+        shape: minimax_h3_image_edit_candle_eligible,
     },
     CandleImageRoute {
         lane: CandleImageLane::BooguImg2Img,
@@ -438,8 +450,9 @@ pub(crate) enum CandleImageRefusal {
     /// `quantTier`) or an enabled hires fix. Delegates to [`supra2_mlx_eligible`] so the two lanes
     /// refuse exactly the same list.
     Supra2Surface,
-    /// MiniMax-H3-Image (SW-7100): anything outside the text-to-image surface the MLX arm admits.
-    /// Delegates to [`minimax_h3_image_mlx_eligible`] so the two lanes refuse exactly the same list.
+    /// MiniMax-H3-Image (SW-7100): anything outside the text-to-image surface the MLX arm admits
+    /// (an edit is claimed earlier, by [`CandleImageLane::MinimaxH3ImageEdit`]). Delegates to
+    /// [`minimax_h3_image_mlx_eligible`] so the two lanes refuse exactly the same list.
     MinimaxH3ImageSurface,
 }
 
@@ -1901,6 +1914,14 @@ pub(crate) fn mage_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
 /// MLX-only cells (`image_to_image`, `reference`, `referenceRgba`) with no exception behind them.
 pub(crate) fn qwen_image_2_1_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
     qwen_image_2_1_mlx_eligible(payload)
+        && crate::jobs_store::routing::qwen_image_2_1_reference_ids(payload)
+            .is_some_and(|ids| !ids.is_empty())
+}
+
+/// MiniMax-H3-Image edit (SW-7101) on candle: the MLX arm's shape with a NON-EMPTY ordered
+/// reference list (an empty one is text-to-image, which the generic txt2img lane serves).
+pub(crate) fn minimax_h3_image_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
+    minimax_h3_image_mlx_eligible(payload)
         && crate::jobs_store::routing::qwen_image_2_1_reference_ids(payload)
             .is_some_and(|ids| !ids.is_empty())
 }

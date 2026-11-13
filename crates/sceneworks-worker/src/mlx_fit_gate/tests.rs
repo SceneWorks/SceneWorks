@@ -13211,6 +13211,25 @@ fn spec_adapter_bytes_distinguish_additive_and_folded_loads() {
             .folded_adapter_bytes,
         250
     );
+    // SW-7101: MiniMax-H3-Image installs every LoRA as a forward-time residual, dense or packed,
+    // so the gate prices the adapter bytes on top of the weights.
+    for spec in [
+        additive.clone(),
+        additive.clone().with_quant(gen_core::Quant::Q8),
+    ] {
+        assert_eq!(spec_component_bytes("minimax_h3_image", &spec).0, 1_250);
+        assert_eq!(
+            MlxRequestPlan::for_spec_and_manifest(
+                "minimax_h3_image",
+                "minimax_h3_image",
+                &spec,
+                None,
+                None
+            )
+            .folded_adapter_bytes,
+            250
+        );
+    }
 
     let dense_wan = LoadSpec::new(WeightsSource::Dir(weights.clone()))
         .with_quant(gen_core::Quant::Q4)

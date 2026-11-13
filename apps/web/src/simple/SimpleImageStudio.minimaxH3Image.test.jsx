@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppContext } from "../context/AppContext.js";
 import { SimpleShell } from "./SimpleShell.jsx";
 import { click, mountRoot, setInput, unmountRoot } from "../testUtils/dom.js";
+import { writeSimpleStudioSnapshot } from "../simpleStudioStore.js";
 
 // SW-7100 (feature SW-F363): MiniMax-H3-Image in the Simple Image Studio, from the SHIPPED catalog
 // entry — the published presets up to 6272 px, no Steps / Guidance / Negative prompt, and the
@@ -147,5 +148,48 @@ describe("SimpleImageStudio with MiniMax-H3-Image (SW-7100)", () => {
     expect(request).toMatchObject({ model: "minimax_h3_image", width: 6272, height: 2688 });
     expect(request.advanced?.steps).toBeUndefined();
     expect(request.advanced?.guidanceScale).toBeUndefined();
+  });
+
+  // SW-7101: the Edit tab takes up to sixteen ordered references — the armed tile is <Picture 1>,
+  // the rest ride the ordered list in the Advanced fold — each with an Insert <Picture N> action,
+  // and the edit keeps the t2i surface (no steps / guidance / negative, the LCM default sampler).
+  it("edits from sixteen ordered references with <Picture N> insertion", async () => {
+    const refs = Array.from({ length: 17 }, (_, index) => ({
+      id: `ref-${index}`,
+      projectId: "project-1",
+      type: "image",
+      name: `Ref ${index}`,
+      status: {},
+    }));
+    writeSimpleStudioSnapshot("project-1", {
+      image: {
+        mode: "edit_image",
+        model: "minimax_h3_image",
+        prompt: "Put the hat from",
+        referenceAssetId: "ref-0",
+        extraReferenceIds: refs.slice(1, 17).map((ref) => ref.id),
+        advancedOpen: true,
+      },
+    });
+    const context = await openImage(baseContext({ assets: refs, recentImageAssets: refs }));
+    expect(container.querySelector('label[for="su-image-add-reference"]')?.textContent).toBe(
+      "References (up to 16, in order)",
+    );
+    // The seventeenth restored reference is dropped: the list is the model's cap.
+    expect(container.querySelectorAll(".ordered-reference")).toHaveLength(16);
+    expect(container.querySelector("#su-image-steps")).toBeNull();
+    expect(container.querySelector("#su-image-guidance")).toBeNull();
+    expect(container.querySelector("#su-image-negative")).toBeNull();
+    await click(container.querySelector('button[aria-label="Insert <Picture 3> into the prompt"]'));
+    expect(container.querySelector("#su-image-prompt").value).toBe("Put the hat from <Picture 3>");
+    await click(container.querySelector(".su-generate"));
+    const request = context.createImageJob.mock.calls[0][0];
+    // One ordered list, the armed reference first — the same payload the full studio sends.
+    expect(request).toMatchObject({ model: "minimax_h3_image", mode: "edit_image", sourceAssetId: null });
+    expect(request.referenceAssetIds).toEqual(refs.slice(0, 16).map((ref) => ref.id));
+    // Simple sends no sampler block for the edit, as for text-to-image: the worker runs (and
+    // records) the LCM 1.1 / 0.9 default.
+    expect(request.advanced?.h3ImageSampler).toBeUndefined();
+    expect(request.advanced?.steps).toBeUndefined();
   });
 });

@@ -106,6 +106,14 @@ fn adapter_bytes_disable_krea_streaming_and_missing_bytes_fail_closed() {
     for model in ["sd3_5_large", "sd3_5_large_turbo", "sd3_5_medium"] {
         assert_eq!(candle_adapter_resident_bytes(model, "bf16", 321), 321);
     }
+    // SW-7101: MiniMax-H3-Image keeps every adapter as a residual, so admission counts it on the
+    // dense tier as well as the packed ones.
+    for tier in ["bf16", "q8", "q4"] {
+        assert_eq!(
+            candle_adapter_resident_bytes("minimax_h3_image", tier, 321),
+            321
+        );
+    }
 
     let missing = vec![gen_core::AdapterSpec::new(
         root.join("missing.safetensors"),
