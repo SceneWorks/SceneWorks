@@ -1284,5 +1284,5 @@ pub(super) fn mlx_tier_pick_is_exact(advanced: &crate::JsonObject) -> bool {
         .get("mlxQuantizeExplicit")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
-        || sceneworks_core::payload_util::quant_is_bound(advanced)
+        || sceneworks_core::payload_util::portable_bound_tier_bits(advanced).is_some()
 }

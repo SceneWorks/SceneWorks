@@ -517,6 +517,61 @@ pub fn unique_portable_snapshot(
     )))
 }
 
+/// Whether `path` is covered by the frozen files of the active PORTABLE scope whose snapshot it lies
+/// in: a file must be one of them, a directory must hold at least one of them (the snapshot root
+/// itself always does). `None` when no portable scope serves `path`, so a non-portable job and any
+/// path outside a served snapshot are unaffected.
+///
+/// A portable route serves pinned Hugging Face members in place from the worker's hub snapshot,
+/// which can also hold files the route never verified (another installed tier, an unselected
+/// companion). This is the load-boundary check that a resolver's answer stayed inside the
+/// verified set, whatever selector produced it.
+pub fn portable_scope_covers(path: &Path) -> Option<bool> {
+    let active = lock_active();
+    let mut served = false;
+    for held in active
+        .entries
+        .iter()
+        .filter(|held| held.portable_holders > 0)
+    {
+        let Some(relative) = path_under(&held.entry.snapshot_root, path) else {
+            continue;
+        };
+        served = true;
+        if relative.as_os_str().is_empty()
+            || held
+                .entry
+                .files
+                .iter()
+                .any(|file| file.starts_with(&relative))
+        {
+            return Some(true);
+        }
+    }
+    served.then_some(false)
+}
+
+/// `path` relative to `root`, lexically or (macOS `/var` vs `/private/var`, a linked library
+/// root) through the canonical directory that holds it. A snapshot file is a link into the
+/// repository's `blobs/`, so a file is compared by its canonical parent plus its own name.
+fn path_under(root: &Path, path: &Path) -> Option<PathBuf> {
+    if let Ok(relative) = path.strip_prefix(root) {
+        return Some(relative.to_path_buf());
+    }
+    let canonical_root = std::fs::canonicalize(root).ok()?;
+    let canonical = if path.is_dir() {
+        std::fs::canonicalize(path).ok()?
+    } else {
+        std::fs::canonicalize(path.parent()?)
+            .ok()?
+            .join(path.file_name()?)
+    };
+    canonical
+        .strip_prefix(&canonical_root)
+        .ok()
+        .map(Path::to_path_buf)
+}
+
 /// Rewrite an already-confined path that points into the configured source library so it reads
 /// from the leased local bundle instead.
 ///

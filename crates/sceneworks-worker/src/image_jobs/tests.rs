@@ -29921,16 +29921,36 @@ fn image_tier_selectors_honor_the_frozen_tier_and_refuse_malformed_values() {
         Some("q4"),
         "FLUX.1 packed reads null as no tier named: the q4 default"
     );
-    assert!(
-        crate::image_jobs::candle::candle_tier_pick_is_exact("flux_dev", &null_with_binding),
-        "a present mlxQuantize key, even null, has always made a FLUX.1 pick exact"
-    );
-    assert!(!crate::image_jobs::candle::candle_tier_pick_is_exact(
-        "z_image_turbo",
+    // A frozen tier is always exact, whatever else the request carries.
+    for model in ["flux_dev", "z_image_turbo"] {
+        assert!(crate::image_jobs::candle::candle_tier_pick_is_exact(
+            model,
+            &null_with_binding
+        ));
+    }
+    assert!(crate::image_jobs::mlx::mlx_tier_pick_is_exact(
         &null_with_binding
     ));
+
+    // Codex review of PR #3379 (4562495166): the web sends `mlxQuantize` bits WITHOUT
+    // `mlxQuantizeExplicit`. With a frozen q8, a q4 sibling installed and too little memory for
+    // q8, the capability downtier (gated by these predicates at image_jobs/candle.rs and
+    // image_jobs/mlx.rs, `downtier_candidate_tiers`) must not run; without a binding it still does.
+    let web_bits_bound = advanced(json!({"mlxQuantize": 8, "__portableBoundTier": "q8"}));
+    let web_bits_unbound = advanced(json!({"mlxQuantize": 8}));
+    assert!(crate::image_jobs::candle::candle_tier_pick_is_exact(
+        "z_image_turbo",
+        &web_bits_bound
+    ));
+    assert!(crate::image_jobs::mlx::mlx_tier_pick_is_exact(
+        &web_bits_bound
+    ));
+    assert!(!crate::image_jobs::candle::candle_tier_pick_is_exact(
+        "z_image_turbo",
+        &web_bits_unbound
+    ));
     assert!(!crate::image_jobs::mlx::mlx_tier_pick_is_exact(
-        &null_with_binding
+        &web_bits_unbound
     ));
 }
 

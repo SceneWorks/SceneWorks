@@ -1472,6 +1472,9 @@ fn prepare_portable_snapshot(
     // The one snapshot directory each in-place revision is served from, and the files in it.
     let mut in_place_roots: std::collections::BTreeMap<(String, String), (PathBuf, Vec<PathBuf>)> =
         std::collections::BTreeMap::new();
+    // Selected auxiliaries served in place: their files belong to the revision's served snapshot
+    // when they resolved in that same root (the load-boundary check reads that file list).
+    let mut in_place_aux = Vec::new();
     for (model_index, model) in route.models.iter().enumerate() {
         let entry = model_slots
             .iter()
@@ -1548,7 +1551,9 @@ fn prepare_portable_snapshot(
                 let key = (identity.repository.clone(), identity.revision.clone());
                 if is_selected_aux || !copied_revisions.contains(&key) {
                     in_place_files.extend(in_place_revision_files(snapshot, &member.files)?);
-                    if !is_selected_aux {
+                    if is_selected_aux {
+                        in_place_aux.push((key.clone(), snapshot.clone(), member.files.clone()));
+                    } else {
                         let (_, files) = in_place_roots
                             .entry(key)
                             .or_insert_with(|| (snapshot.clone(), Vec::new()));
@@ -1731,6 +1736,13 @@ fn prepare_portable_snapshot(
         route_loader_locator(job_type, dispatch_payload, slot, member, selected)?;
         if *is_selected_aux {
             rewrite_loader_locator(dispatch_payload, slot, member, selected, true)?;
+        }
+    }
+    for (key, snapshot, files) in in_place_aux {
+        if let Some((root, served)) = in_place_roots.get_mut(&key) {
+            if *root == snapshot {
+                served.extend(files.iter().map(|file| file.relative_path.clone()));
+            }
         }
     }
     let mut by_source: std::collections::BTreeMap<(String, String), LocalArtifactOverlayEntry> =
@@ -7493,9 +7505,99 @@ mod tests {
                         root.join(bound),
                         "the engine's implicit tier resolution lands on the bound tier"
                     );
+                    // The load boundary: while the guard serves this route, a loader handed a
+                    // sibling tier from the same hub snapshot is refused, naming the path; the
+                    // verified tier (and the snapshot root) load.
+                    let load = |path: &Path| {
+                        crate::inference_runtime::refuse_unverified_portable_sources(
+                            &gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(
+                                path.to_path_buf(),
+                            )),
+                        )
+                    };
+                    assert!(load(&root.join(bound)).is_ok());
+                    assert!(load(root).is_ok());
+                    for other in tiers.iter().filter(|tier| **tier != bound) {
+                        let error =
+                            load(&root.join(other)).expect_err("an unverified sibling tier");
+                        assert!(
+                            error
+                                .to_string()
+                                .contains(&root.join(other).display().to_string()),
+                            "{error}"
+                        );
+                    }
+                    let sibling = root.join("q4");
+                    drop(guard);
+                    // Once the job ends nothing is served: the same path is not checked.
+                    assert!(load(&sibling).is_ok());
                 }
             }
         });
+    }
+
+    /// The load-boundary check only governs paths inside a snapshot a PORTABLE scope serves: a
+    /// file must be a verified file, a directory must hold one. A non-portable (resolved-local)
+    /// scope and an unbound job are unaffected.
+    #[test]
+    fn the_load_boundary_refuses_only_unverified_paths_in_a_served_snapshot() {
+        use sceneworks_core::model_artifacts::local_preference::{
+            prefer_local_snapshots, prefer_portable_snapshots,
+        };
+        let temp = TempDir::new().unwrap();
+        let snapshot = temp
+            .path()
+            .join("hub/models--guardfx--boundary/snapshots")
+            .join(REV_A);
+        for tier in ["q4", "q8"] {
+            std::fs::create_dir_all(snapshot.join(tier)).unwrap();
+            std::fs::write(snapshot.join(tier).join("a.safetensors"), b"weights").unwrap();
+        }
+        let entry = LocalArtifactOverlayEntry {
+            repository: "guardfx/boundary".to_owned(),
+            revision: REV_A.to_owned(),
+            snapshot_root: snapshot.clone(),
+            files: vec!["q8/a.safetensors".into()],
+        };
+        let load = |source: gen_core::WeightsSource| {
+            crate::inference_runtime::refuse_unverified_portable_sources(&gen_core::LoadSpec::new(
+                source,
+            ))
+        };
+        let dir = |path: PathBuf| gen_core::WeightsSource::Dir(path);
+        let file = |path: PathBuf| gen_core::WeightsSource::File(path);
+        let _serialized = overlay_guard();
+        // Unbound: nothing is served, so nothing is refused.
+        assert!(load(dir(snapshot.join("q4"))).is_ok());
+        {
+            let _local = prefer_local_snapshots(vec![entry.clone()]).unwrap();
+            assert!(
+                load(dir(snapshot.join("q4"))).is_ok(),
+                "a non-portable scope is unaffected"
+            );
+        }
+        let _portable = prefer_portable_snapshots(vec![entry]).unwrap();
+        assert!(load(dir(snapshot.join("q8"))).is_ok());
+        assert!(load(file(snapshot.join("q8/a.safetensors"))).is_ok());
+        assert!(load(dir(snapshot.clone())).is_ok());
+        for refused in [
+            dir(snapshot.join("q4")),
+            file(snapshot.join("q4/a.safetensors")),
+        ] {
+            let error = load(refused.clone()).expect_err("an unverified path is refused");
+            let (gen_core::WeightsSource::Dir(path) | gen_core::WeightsSource::File(path)) =
+                &refused;
+            assert!(
+                error.to_string().contains(&path.display().to_string()),
+                "{error}"
+            );
+        }
+        // A control branch is held to the same rule.
+        let mut spec = gen_core::LoadSpec::new(dir(snapshot.join("q8")));
+        spec.control = Some(file(snapshot.join("q4/a.safetensors")));
+        assert!(crate::inference_runtime::refuse_unverified_portable_sources(&spec).is_err());
+        // A path outside every served snapshot is not checked.
+        assert!(load(dir(temp.path().join("elsewhere"))).is_ok());
     }
 
     /// Codex review of PR #3379 (4558615108): a resolved-cache snapshot can hold a model's hard

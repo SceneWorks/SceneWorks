@@ -121,6 +121,7 @@ pub(crate) fn audio() -> Option<&'static ProviderRegistry> {
 /// clearly when this build ships no audio lane, mirroring how [`load`] resolves a media generator —
 /// the audio worker turns this into a loud job failure rather than a silent no-op.
 pub(crate) fn load_audio(id: &str, spec: &LoadSpec) -> gen_core::Result<Box<dyn Generator>> {
+    refuse_unverified_portable_sources(spec)?;
     audio()
         .ok_or_else(|| {
             gen_core::Error::Msg(
@@ -219,6 +220,7 @@ pub(crate) fn load_audio_transform(
     id: &str,
     spec: &LoadSpec,
 ) -> gen_core::Result<Box<dyn AudioTransform>> {
+    refuse_unverified_portable_sources(spec)?;
     audio()
         .ok_or_else(|| {
             gen_core::Error::Msg(
@@ -240,6 +242,7 @@ pub(crate) fn load_voice_embedder(
     id: &str,
     spec: &LoadSpec,
 ) -> gen_core::Result<Box<dyn VoiceEmbedder>> {
+    refuse_unverified_portable_sources(spec)?;
     audio()
         .ok_or_else(|| {
             gen_core::Error::Msg(
@@ -332,6 +335,33 @@ pub(crate) fn media_encoder_contract(id: &str) -> Option<gen_core::EncoderContra
     Some(production_contract)
 }
 
+/// The load-boundary check for portable routes: every model source a [`LoadSpec`] hands an engine
+/// (primary weights, control and IP-Adapter branches, external text encoder) that lies inside a
+/// snapshot a portable scope serves in place must be covered by that route's verified files
+/// ([`sceneworks_core::model_artifacts::local_preference::portable_scope_covers`]). A resolver that
+/// picked another tier or an unverified file in the served hub snapshot fails here, naming the path,
+/// before any load. A non-portable job, and any source outside a served snapshot, is unaffected.
+pub(crate) fn refuse_unverified_portable_sources(spec: &LoadSpec) -> gen_core::Result<()> {
+    let sources = std::iter::once(&spec.weights)
+        .chain(spec.control.iter())
+        .chain(spec.extra_controls.iter())
+        .chain(spec.ip_adapter.iter())
+        .chain(spec.text_encoder.iter());
+    for source in sources {
+        let (gen_core::WeightsSource::Dir(path) | gen_core::WeightsSource::File(path)) = source;
+        if sceneworks_core::model_artifacts::local_preference::portable_scope_covers(path)
+            == Some(false)
+        {
+            return Err(gen_core::Error::Msg(format!(
+                "portable model binding: {} is not among the files this route verified; \
+                 refusing to load it",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 // Only the macOS prompt-refine tests iterate the TextLlm registry; on the Windows/candle build
 // nothing calls this, so gate it to match its callers and stay warning-clean under -D warnings.
 #[cfg(all(test, target_os = "macos"))]
@@ -340,6 +370,7 @@ pub(crate) fn textllms() -> impl ExactSizeIterator<Item = &'static TextLlmRegist
 }
 
 pub(crate) fn load(id: &str, spec: &LoadSpec) -> gen_core::Result<Box<dyn Generator>> {
+    refuse_unverified_portable_sources(spec)?;
     media().load(id, spec)
 }
 
@@ -350,6 +381,7 @@ pub(crate) fn load_transform(
     id: &str,
     spec: &LoadSpec,
 ) -> gen_core::Result<Box<dyn gen_core::Transform>> {
+    refuse_unverified_portable_sources(spec)?;
     media().load_transform(id, spec)
 }
 
@@ -410,11 +442,13 @@ pub(crate) const CHECKPOINT_BACKEND: gen_core::CheckpointBackend =
 
 #[cfg(native_lane)]
 pub(crate) fn load_trainer(id: &str, spec: &LoadSpec) -> gen_core::Result<Box<dyn Trainer>> {
+    refuse_unverified_portable_sources(spec)?;
     media().load_trainer(id, spec)
 }
 
 #[cfg(native_lane)]
 pub(crate) fn load_captioner(id: &str, spec: &LoadSpec) -> gen_core::Result<Box<dyn Captioner>> {
+    refuse_unverified_portable_sources(spec)?;
     media().load_captioner(id, spec)
 }
 
@@ -423,6 +457,7 @@ pub(crate) fn load_image_embedder(
     id: &str,
     spec: &LoadSpec,
 ) -> gen_core::Result<Box<dyn ImageEmbedder>> {
+    refuse_unverified_portable_sources(spec)?;
     media().load_image_embedder(id, spec)
 }
 
@@ -431,6 +466,7 @@ pub(crate) fn load_text_embedder(
     id: &str,
     spec: &LoadSpec,
 ) -> gen_core::Result<Box<dyn TextEmbedder>> {
+    refuse_unverified_portable_sources(spec)?;
     media().load_text_embedder(id, spec)
 }
 

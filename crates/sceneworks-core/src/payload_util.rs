@@ -115,12 +115,6 @@ pub(crate) fn request_quant_bits(advanced: &JsonObject) -> Option<i64> {
     }
 }
 
-/// Whether the request leaves its tier to the verified binding's frozen tier (no `mlxQuantize`
-/// key, and a frozen bf16/q8/q4 tier). A capability downtier must keep such a tier exactly.
-pub fn quant_is_bound(advanced: &JsonObject) -> bool {
-    matches!(quant_selection(advanced), QuantSelection::Bound(_))
-}
-
 pub(crate) fn optional_i64(payload: &JsonObject, key: &str) -> Option<i64> {
     payload.get(key).and_then(json_integer)
 }
@@ -349,12 +343,6 @@ mod tests {
             )),
             None
         );
-        assert!(quant_is_bound(&advanced(
-            json!({"__portableBoundTier": "q4"})
-        )));
-        assert!(!quant_is_bound(&advanced(
-            json!({"mlxQuantize": 8, "__portableBoundTier": "q4"})
-        )));
         assert_eq!(
             quant_selection(&advanced(
                 json!({"mlxQuantize": "8", "__portableBoundTier": "q4"})
