@@ -195,4 +195,44 @@ mod tests {
         assert_eq!(max_describe_prompt_chars(big), MAX_DESCRIBE_PROMPT_CHARS);
         assert_eq!(default_instruction_section(big), "SYSTEM");
     }
+
+    /// The source a describe job is admitted against is the tier it loads: the catalog row the
+    /// model-source seam selects for the job's `variant` is the re-host's tier folder on macOS and
+    /// the upstream repository for full precision, never a sibling tier.
+    #[test]
+    fn each_qwen38_tier_selects_its_own_catalog_download() {
+        use crate::model_artifacts::artifact_selection::selected_model_artifact_closure;
+        use serde_json::Value;
+
+        let entry = Value::Object(
+            crate::builtin_manifests::builtin_model_entry("vision_describe_qwen3_8_27b")
+                .expect("the 27B describer is a builtin")
+                .clone(),
+        );
+        let selected = |platform: &str, variant: Option<&str>| {
+            let closure = selected_model_artifact_closure(&entry, platform, variant);
+            let downloads = closure["downloads"].as_array().expect("downloads").clone();
+            assert_eq!(downloads.len(), 1, "{platform} {variant:?}: {downloads:?}");
+            (
+                downloads[0]["repo"].as_str().expect("repo").to_owned(),
+                downloads[0]["files"][0].as_str().expect("file").to_owned(),
+            )
+        };
+        for tier in ["q4", "q8"] {
+            let (repo, files) = selected("macos", Some(tier));
+            assert_eq!(repo, QWEN38_27B_DESCRIBER_MLX_REPO, "{tier}");
+            assert_eq!(files, format!("{tier}/*"));
+        }
+        assert_eq!(selected("macos", Some("bf16")).0, QWEN38_27B_DESCRIBER_REPO);
+        // A request without a variant gets the default tier's row, the tier the job defaults to.
+        assert_eq!(
+            selected("macos", None).1,
+            format!("{QWEN38_27B_DESCRIBER_DEFAULT_TIER}/*")
+        );
+        // Every tier in the request vocabulary has a row on macOS.
+        for tier in QWEN38_27B_DESCRIBER_TIERS {
+            let closure = selected_model_artifact_closure(&entry, "macos", Some(tier));
+            assert_eq!(closure["downloads"][0]["variant"], tier);
+        }
+    }
 }

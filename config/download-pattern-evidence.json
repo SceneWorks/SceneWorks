@@ -4038,6 +4038,32 @@
       ]
     },
     {
+      "key": "SceneWorks/qwen3.8-27b-abliterated-mlx@76f3c445cd5347fdb85fc24066350724fe272017",
+      "repo": "SceneWorks/qwen3.8-27b-abliterated-mlx",
+      "revision": "76f3c445cd5347fdb85fc24066350724fe272017",
+      "resolvedSha": "76f3c445cd5347fdb85fc24066350724fe272017",
+      "servedRepo": "SceneWorks/qwen3.8-27b-abliterated-mlx",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "LICENSE",
+        "README.md",
+        "SOURCE_REVISION.json",
+        "q4/chat_template.jinja",
+        "q4/config.json",
+        "q4/generation_config.json",
+        "q4/model.safetensors",
+        "q4/tokenizer.json",
+        "q4/tokenizer_config.json",
+        "q8/chat_template.jinja",
+        "q8/config.json",
+        "q8/generation_config.json",
+        "q8/model.safetensors",
+        "q8/tokenizer.json",
+        "q8/tokenizer_config.json"
+      ]
+    },
+    {
       "key": "SceneWorks/real-esrgan-onnx@09f741bac80a246b407da3ee902bf5f3291b602f",
       "repo": "SceneWorks/real-esrgan-onnx",
       "revision": "09f741bac80a246b407da3ee902bf5f3291b602f",

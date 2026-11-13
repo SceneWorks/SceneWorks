@@ -15627,10 +15627,17 @@
       // Hugging Face API on 2026-11-13 at the pinned revision). It runs on the same native TextLlm
       // path as the Vision Captioner: JSON-constrained decode, thinking off.
       //
-      // This row is the FULL-PRECISION tier (18 bf16 shards, 55.6 GB). The q4 and q8 tiers are
-      // quantised ahead of time and served from the SceneWorks re-host (SW-7120); their rows are
-      // added by SW-7121. Load-time quantisation is deliberately not offered: MLX load admission
-      // prices it at twice the bf16 source, and a q4 user must not download these 55.6 GB.
+      // TIERS. q4 (the default) and q8 are quantised ahead of time with mlx-llm's
+      // `prepare_snapshot` (inference 4a36a7f8) and served from the SceneWorks re-host
+      // `SceneWorks/qwen3.8-27b-abliterated-mlx` @ 76f3c445 as self-contained `q4/` and `q8/`
+      // folders (vision tower kept bf16). bf16 is the upstream repository (18 shards, 55.6 GB).
+      // Load-time quantisation is deliberately not offered: MLX load admission prices it at twice
+      // the bf16 source, and a q4 user must not download the 55.6 GB. A describe job names its
+      // tier as the request's `variant`, so source admission selects the row the worker loads.
+      //
+      // The re-host rows are `macos`-only because they are MLX snapshots. Candle's quantised
+      // snapshot is a different format and its rows are added when that re-host is published;
+      // until then a Windows/Linux worker has the bf16 row only.
       //
       // The file list names what the loader reads, so a metadata-only revision can never look
       // installed (the lesson recorded on `film_planner_qwen3_6_27b`).
@@ -15646,8 +15653,30 @@
       "downloads": [
         {
           "provider": "huggingface",
+          "repo": "SceneWorks/qwen3.8-27b-abliterated-mlx",
+          "revision": "76f3c445cd5347fdb85fc24066350724fe272017",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 19995477764,
+          "footprint": { "diskSizeBytes": 19995477764 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen3.8-27b-abliterated-mlx",
+          "revision": "76f3c445cd5347fdb85fc24066350724fe272017",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 32371297322,
+          "footprint": { "diskSizeBytes": 32371297322 }
+        },
+        {
+          "provider": "huggingface",
           "repo": "huihui-ai/Huihui-Qwen3.8-27B-abliterated",
           "revision": "739e3c5b89849f6c238ce1e5b70008612ae42cdd",
+          "variant": "bf16",
           "files": [
             "config.json",
             "generation_config.json",

@@ -200,10 +200,11 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 // sc-26234's whole-repository FLUX 3 download (files: []) adds no selective census row;
 // preserve main's honest evidence re-record and its pinned digest.
 // SW-7119 adds the Qwen3.8 27B describer's upstream listing
-// (huihui-ai/Huihui-Qwen3.8-27B-abliterated@739e3c5b…): 151 keys; every prior row is unchanged.
+// (huihui-ai/Huihui-Qwen3.8-27B-abliterated@739e3c5b…) and its MLX q4/q8 re-host
+// (SceneWorks/qwen3.8-27b-abliterated-mlx@76f3c445…): 152 keys; every prior row is unchanged.
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "7012ec04088052acfa094bebe97b16b5993b5de0da16c4e838706a7338508973";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "c9da8de9e5d0abfe84dc424c2068ccb5b130aa3b6773d2a8aec7cdaa1e2d743e";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 

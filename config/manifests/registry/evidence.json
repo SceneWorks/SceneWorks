@@ -45669,7 +45669,7 @@
   },
   "vision_describe_qwen3_8_27b": {
     "model": {
-      "minMemoryGb": 96
+      "minMemoryGb": 32
     }
   },
   "kokoro_82m": {
