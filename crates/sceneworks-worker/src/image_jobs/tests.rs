@@ -29879,6 +29879,81 @@ fn write_upscaled_asset_without_a_plane_still_writes_rgb() {
     assert_eq!(decoded.to_rgb8().as_raw(), upscaled.as_raw());
 }
 
+/// Codex review of PR #3379 (4559512305): the Candle FLUX.1 packed selector reads the verified
+/// binding's frozen tier when the request names none, and both capability downtiers (Candle and
+/// MLX) keep a bound tier instead of stepping down to an installed sibling the guard never
+/// verified. Malformed explicit values are still refused. Portable cores; they run everywhere.
+#[cfg(native_lane)]
+#[test]
+fn image_tier_selectors_honor_the_frozen_tier_and_refuse_malformed_values() {
+    let advanced = |value: Value| value.as_object().unwrap().clone();
+    let bound_q8 = advanced(json!({"__portableBoundTier": "q8"}));
+    let unselected = advanced(json!({}));
+    assert_eq!(
+        crate::image_jobs::artifact_resolution::candle_flux1_packed_tier_key(&unselected),
+        Some("q4")
+    );
+    assert_eq!(
+        crate::image_jobs::artifact_resolution::candle_flux1_packed_tier_key(&bound_q8),
+        Some("q8")
+    );
+    assert_eq!(
+        crate::image_jobs::artifact_resolution::candle_flux1_packed_tier_key(&advanced(
+            json!({"mlxQuantize": "x", "__portableBoundTier": "q8"})
+        )),
+        None
+    );
+    assert!(crate::image_jobs::candle::candle_tier_pick_is_exact(
+        "z_image_turbo",
+        &bound_q8
+    ));
+    assert!(!crate::image_jobs::candle::candle_tier_pick_is_exact(
+        "z_image_turbo",
+        &unselected
+    ));
+    assert!(crate::image_jobs::mlx::mlx_tier_pick_is_exact(&bound_q8));
+    assert!(!crate::image_jobs::mlx::mlx_tier_pick_is_exact(&unselected));
+
+    // An explicit `null` keeps each selector's original meaning and never takes the bound tier.
+    let null_with_binding = advanced(json!({"mlxQuantize": null, "__portableBoundTier": "q8"}));
+    assert_eq!(
+        crate::image_jobs::artifact_resolution::candle_flux1_packed_tier_key(&null_with_binding),
+        Some("q4"),
+        "FLUX.1 packed reads null as no tier named: the q4 default"
+    );
+    // A frozen tier is always exact, whatever else the request carries.
+    for model in ["flux_dev", "z_image_turbo"] {
+        assert!(crate::image_jobs::candle::candle_tier_pick_is_exact(
+            model,
+            &null_with_binding
+        ));
+    }
+    assert!(crate::image_jobs::mlx::mlx_tier_pick_is_exact(
+        &null_with_binding
+    ));
+
+    // Codex review of PR #3379 (4562495166): the web sends `mlxQuantize` bits WITHOUT
+    // `mlxQuantizeExplicit`. With a frozen q8, a q4 sibling installed and too little memory for
+    // q8, the capability downtier (gated by these predicates at image_jobs/candle.rs and
+    // image_jobs/mlx.rs, `downtier_candidate_tiers`) must not run; without a binding it still does.
+    let web_bits_bound = advanced(json!({"mlxQuantize": 8, "__portableBoundTier": "q8"}));
+    let web_bits_unbound = advanced(json!({"mlxQuantize": 8}));
+    assert!(crate::image_jobs::candle::candle_tier_pick_is_exact(
+        "z_image_turbo",
+        &web_bits_bound
+    ));
+    assert!(crate::image_jobs::mlx::mlx_tier_pick_is_exact(
+        &web_bits_bound
+    ));
+    assert!(!crate::image_jobs::candle::candle_tier_pick_is_exact(
+        "z_image_turbo",
+        &web_bits_unbound
+    ));
+    assert!(!crate::image_jobs::mlx::mlx_tier_pick_is_exact(
+        &web_bits_unbound
+    ));
+}
+
 /// sc-24112 — `qwen_image_2_1`'s SPLIT-REPO tier resolution, driven off the shipped catalog.
 ///
 /// Every other quant-matrix model puts its three tiers in one repo, so `standard_tier_subdir`
@@ -30121,6 +30196,55 @@ mod qwen_image_2_1_tiers {
 
     fn settings(data_dir: &Path) -> Settings {
         Settings::for_test(data_dir.to_path_buf())
+    }
+
+    /// Codex review of PR #3379 (4559512305): an untiered portable request whose verified binding
+    /// froze q4 resolves q4, although the manifest default q8 (and bf16) is installed beside it in
+    /// the snapshot it is served from. A malformed explicit value is still refused.
+    #[test]
+    fn an_untiered_request_resolves_the_tier_its_binding_froze() {
+        let _env = crate::test_env::isolate_hf_cache();
+        let data = tempfile::tempdir().expect("temp data dir");
+        let entry = entry_after_upload();
+        stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
+        stage_tier(data.path(), REHOST_REPO, REHOST_REVISION, Some("q8"));
+        stage_tier(data.path(), REHOST_REPO, REHOST_REVISION, Some("q4"));
+        let with_advanced = |advanced: Value| {
+            let mut payload = serde_json::Map::new();
+            payload.insert("projectId".to_owned(), json!("p"));
+            payload.insert("model".to_owned(), json!("qwen_image_2_1"));
+            payload.insert(
+                "modelManifestEntry".to_owned(),
+                Value::Object(entry.clone()),
+            );
+            payload.insert("advanced".to_owned(), advanced);
+            ImageRequest::from_payload(&payload)
+        };
+        assert_eq!(
+            resolved_with_tier(data.path(), &entry, None).map(|(_, tier)| tier),
+            Some("q8"),
+            "precondition: the unbound default is q8"
+        );
+        let bound = crate::image_jobs::artifact_resolution::qwen_image_2_1_tier_dir(
+            &settings(data.path()),
+            &with_advanced(json!({"__portableBoundTier": "q4"})),
+        )
+        .expect("the bound tier resolves");
+        assert_eq!(bound.map(|(_, tier)| tier), Some("q4"));
+        let error = crate::image_jobs::artifact_resolution::qwen_image_2_1_tier_dir(
+            &settings(data.path()),
+            &with_advanced(json!({"mlxQuantize": "four", "__portableBoundTier": "q4"})),
+        )
+        .expect_err("a malformed explicit value is refused, not replaced by the bound tier")
+        .to_string();
+        assert!(error.contains("must be an integer bit count"), "{error}");
+        // A present null has always meant "no tier named": the manifest default, not the bound tier.
+        let null = crate::image_jobs::artifact_resolution::qwen_image_2_1_tier_dir(
+            &settings(data.path()),
+            &with_advanced(json!({"mlxQuantize": null, "__portableBoundTier": "q4"})),
+        )
+        .expect("an explicit null resolves the default");
+        assert_eq!(null.map(|(_, tier)| tier), Some("q8"));
     }
 
     fn resolved(

@@ -2322,8 +2322,14 @@ async fn resolve_dynamic_hf_revision(
             return Ok(revision.to_owned());
         }
     }
-    let base_url = std::env::var("SCENEWORKS_HUGGINGFACE_BASE_URL")
-        .unwrap_or_else(|_| "https://huggingface.co".to_owned());
+    let base_url = huggingface_base_url(state);
+    #[cfg(test)]
+    if !test_network::is_loopback(&base_url) {
+        return Err(incomplete(format!(
+            "{repo}@{reference}: unit tests never resolve a mutable revision over the network; \
+             set test_hooks.dynamic_hf_revision_override"
+        )));
+    }
     let token = huggingface_token(state)?;
     resolve_dynamic_hf_revision_with_client(
         &state.http_client,
@@ -2962,8 +2968,7 @@ async fn resolve_trusted_pinned_files(
     if let Some(fixture) = state.test_hooks.pinned_metadata_override.lock().clone() {
         return Ok(fixture(repo, revision, selectors));
     }
-    let base_url = std::env::var("SCENEWORKS_HUGGINGFACE_BASE_URL")
-        .unwrap_or_else(|_| "https://huggingface.co".to_owned());
+    let base_url = huggingface_base_url(state);
     let key = format!("{base_url}\0{repo}\0{revision}\0{}", selectors.join("\0"));
     let cache = PINNED_METADATA_CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
     if let Some(files) = cache
@@ -3036,6 +3041,10 @@ async fn fetch_pinned_hf_files(
     if let Some(remote) = state.test_hooks.pinned_metadata_remote.lock().clone() {
         return remote(repo, revision, selectors);
     }
+    #[cfg(test)]
+    if !test_network::is_loopback(base_url) {
+        return test_network::offline_pinned_files(repo, revision, selectors);
+    }
     let credential = huggingface_token(state).map_err(|error| error.detail)?;
     resolve_pinned_hf_files(
         &state.http_client,
@@ -3047,6 +3056,78 @@ async fn fetch_pinned_hf_files(
     )
     .await
     .map_err(|error| error.to_string())
+}
+
+/// Unit tests never reach Hugging Face. A test that needs exact upstream metadata installs a
+/// `pinned_metadata_remote`/`pinned_metadata_override` hook or a loopback stub server
+/// (`SCENEWORKS_HUGGINGFACE_BASE_URL`); every other admission gets a deterministic offline
+/// ledger built from the request's own selectors, so a suite run is independent of the network,
+/// its latency and its rate limits.
+#[cfg(test)]
+pub(crate) mod test_network {
+    use sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile;
+    use sha2::{Digest, Sha256};
+
+    pub(crate) fn is_loopback(base_url: &str) -> bool {
+        reqwest::Url::parse(base_url).is_ok_and(|url| {
+            matches!(
+                url.host_str(),
+                Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
+            )
+        })
+    }
+
+    /// One concrete file per selector: the selector itself, or for a glob one name that matches
+    /// it. Content identity is a digest of the repository, revision and path, so every run and
+    /// every host admits the same frozen ledger.
+    pub(crate) fn offline_pinned_files(
+        repo: &str,
+        revision: &str,
+        selectors: &[String],
+    ) -> Result<Vec<PortableArtifactFile>, String> {
+        let mut files = std::collections::BTreeMap::new();
+        for selector in selectors {
+            let concrete = selector.replace('*', "fixture").replace('?', "x");
+            let matches = glob::Pattern::new(selector)
+                .map_err(|error| format!("offline fixture selector {selector}: {error}"))?
+                .matches(&concrete);
+            if !matches {
+                return Err(format!(
+                    "offline fixture cannot name a file for selector {selector}; install a \
+                     pinned_metadata_override"
+                ));
+            }
+            let digest = Sha256::digest(format!("{repo}@{revision}/{concrete}").as_bytes());
+            files.insert(
+                concrete.clone(),
+                PortableArtifactFile {
+                    relative_path: concrete.into(),
+                    size_bytes: 1 + u64::from(digest[0]),
+                    sha256: format!("sha256:{digest:x}"),
+                },
+            );
+        }
+        Ok(files.into_values().collect())
+    }
+}
+
+/// The Hugging Face endpoint for pinned metadata and mutable-revision resolution.
+fn huggingface_base_url(state: &AppState) -> String {
+    #[cfg(test)]
+    {
+        state
+            .test_hooks
+            .huggingface_base_url
+            .lock()
+            .clone()
+            .unwrap_or_else(|| "https://huggingface.co".to_owned())
+    }
+    #[cfg(not(test))]
+    {
+        let _ = state;
+        std::env::var("SCENEWORKS_HUGGINGFACE_BASE_URL")
+            .unwrap_or_else(|_| "https://huggingface.co".to_owned())
+    }
 }
 
 fn required_download_string<'a>(download: &'a Value, key: &str) -> Result<&'a str, ApiError> {
