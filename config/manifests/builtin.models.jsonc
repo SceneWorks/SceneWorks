@@ -15620,6 +15620,72 @@
       }
     },
     {
+      // Qwen3.8 27B describer (SW-F365, SW-7119): the larger describing model of the dataset
+      // batch describe job (`dataset_batch_describe`), selected by its repository as the job's
+      // `model`. `huihui-ai/Huihui-Qwen3.8-27B-abliterated` is an abliterated Qwen3.8-27B
+      // (`model_type: qwen3_5`, vision encoder kept, apache-2.0, not gated; verified against the
+      // Hugging Face API on 2026-11-13 at the pinned revision). It runs on the same native TextLlm
+      // path as the Vision Captioner: JSON-constrained decode, thinking off.
+      //
+      // This row is the FULL-PRECISION tier (18 bf16 shards, 55.6 GB). The q4 and q8 tiers are
+      // quantised ahead of time and served from the SceneWorks re-host (SW-7120); their rows are
+      // added by SW-7121. Load-time quantisation is deliberately not offered: MLX load admission
+      // prices it at twice the bf16 source, and a q4 user must not download these 55.6 GB.
+      //
+      // The file list names what the loader reads, so a metadata-only revision can never look
+      // installed (the lesson recorded on `film_planner_qwen3_6_27b`).
+      "id": "vision_describe_qwen3_8_27b",
+      "autoDownload": false,
+      "macOnly": false,
+
+      "name": "Vision Describer (Qwen3.8-27B)",
+      "family": "vision-caption",
+      "type": "utility",
+      "adapter": "prompt-refine",
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "huihui-ai/Huihui-Qwen3.8-27B-abliterated",
+          "revision": "739e3c5b89849f6c238ce1e5b70008612ae42cdd",
+          "files": [
+            "config.json",
+            "generation_config.json",
+            "chat_template.jinja",
+            "preprocessor_config.json",
+            "video_preprocessor_config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "model.safetensors.index.json",
+            "model-*.safetensors"
+          ],
+          "estimatedSizeBytes": 55575900000
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/huihui-ai/Huihui-Qwen3.8-27B-abliterated"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "Vision Describer (Qwen3.8-27B)",
+        "description": "Larger vision-language model for Create Prompt Batch from Dataset. It follows detailed describing instructions (exact pose, orientation, interactions) more closely than the 8B Vision Captioner. Optional download; runs in-process on the native worker.",
+        "recommendedFor": ["dataset_batch_describe"],
+        "promptGuide": {
+          "title": "Vision Captioner Guide",
+          "path": "/prompt-guides/vision-caption.md",
+          "sources": [
+            { "label": "Huihui Qwen3.8-27B-abliterated model card", "url": "https://huggingface.co/huihui-ai/Huihui-Qwen3.8-27B-abliterated" },
+            { "label": "Qwen3.8-27B (base) model card", "url": "https://huggingface.co/Qwen/Qwen3.8-27B" }
+          ]
+        }
+      }
+    },
+    {
       "id": "kokoro_82m",
       "name": "Kokoro 82M (Speech)",
       "family": "kokoro",

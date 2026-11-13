@@ -45667,6 +45667,11 @@
       "minMemoryGb": 64
     }
   },
+  "vision_describe_qwen3_8_27b": {
+    "model": {
+      "minMemoryGb": 96
+    }
+  },
   "kokoro_82m": {
     "candle": {
       "minMemoryGb": 2,

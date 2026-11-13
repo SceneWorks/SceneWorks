@@ -10,6 +10,61 @@ pub const VISION_CAPTIONER_REPO: &str = "huihui-ai/Huihui-Qwen3-VL-8B-Instruct-a
 /// JoyCaption's repository (catalog id `joycaption_beta_one`, the `training_caption` captioner).
 pub const JOYCAPTION_REPO: &str = "fancyfeast/llama-joycaption-beta-one-hf-llava";
 
+/// The Qwen3.8 27B describer's upstream repository (SW-F365): an abliterated Qwen3.8-27B that
+/// keeps its vision encoder. The request's `model` value for this describer on every tier. Its
+/// full-precision tier loads from this repository; the quantised tiers load from the re-host.
+pub const QWEN38_27B_DESCRIBER_REPO: &str = "huihui-ai/Huihui-Qwen3.8-27B-abliterated";
+
+/// The repositories the Qwen3.8 27B describer's quantised tiers are served from, one per engine.
+/// Each holds a `q4/` and a `q8/` snapshot folder quantised ahead of time, so a quantised tier never
+/// downloads or load-quantises the 57 GB full-precision files.
+pub const QWEN38_27B_DESCRIBER_MLX_REPO: &str = "SceneWorks/qwen3.8-27b-abliterated-mlx";
+pub const QWEN38_27B_DESCRIBER_CANDLE_REPO: &str = "SceneWorks/qwen3.8-27b-abliterated-candle";
+
+/// The Qwen3.8 27B describer's tiers, smallest first. `bf16` is full precision.
+pub const QWEN38_27B_DESCRIBER_TIERS: [&str; 3] = ["q4", "q8", "bf16"];
+
+/// The tier a Qwen3.8 27B request without a `tier` describes with.
+pub const QWEN38_27B_DESCRIBER_DEFAULT_TIER: &str = "q4";
+
+/// Whether `model` (the request's `model` value) selects the Qwen3.8 27B describer.
+pub fn is_qwen38_27b_describer(model: Option<&str>) -> bool {
+    model.map(str::trim) == Some(QWEN38_27B_DESCRIBER_REPO)
+}
+
+/// The tier a request describes with. Only the Qwen3.8 27B describer has tiers: for it an absent
+/// or blank `tier` is the default and an unknown one is refused; for every other model the answer
+/// is `None` and naming a tier is refused, so a typo never silently runs a different model size.
+pub fn resolve_describe_tier(
+    model: Option<&str>,
+    tier: Option<&str>,
+) -> Result<Option<&'static str>, String> {
+    let tier = tier.map(str::trim).filter(|tier| !tier.is_empty());
+    if !is_qwen38_27b_describer(model) {
+        return match tier {
+            None => Ok(None),
+            Some(tier) => Err(format!(
+                "Describe tier {tier:?} is not available for this model; only the Qwen3.8 27B \
+                 describer ({QWEN38_27B_DESCRIBER_REPO}) has tiers."
+            )),
+        };
+    }
+    match tier {
+        None => Ok(Some(QWEN38_27B_DESCRIBER_DEFAULT_TIER)),
+        Some(tier) => QWEN38_27B_DESCRIBER_TIERS
+            .iter()
+            .copied()
+            .find(|known| *known == tier)
+            .map(Some)
+            .ok_or_else(|| {
+                format!(
+                    "Unsupported describe tier {tier:?}. Use one of {}.",
+                    QWEN38_27B_DESCRIBER_TIERS.join(", ")
+                )
+            }),
+    }
+}
+
 /// The six description fields every described image carries, in output-contract order.
 pub const DESCRIBE_FIELDS: [&str; 6] = [
     "description",
@@ -122,5 +177,22 @@ mod tests {
         );
         assert_eq!(max_describe_prompt_chars(Some(JOYCAPTION_REPO)), 3_000);
         assert_eq!(max_describe_prompt_chars(None), 32_000);
+    }
+
+    #[test]
+    fn only_the_qwen38_27b_describer_has_tiers() {
+        let big = Some(QWEN38_27B_DESCRIBER_REPO);
+        assert_eq!(resolve_describe_tier(big, None), Ok(Some("q4")));
+        assert_eq!(resolve_describe_tier(big, Some("  ")), Ok(Some("q4")));
+        for tier in QWEN38_27B_DESCRIBER_TIERS {
+            assert_eq!(resolve_describe_tier(big, Some(tier)), Ok(Some(tier)));
+        }
+        assert!(resolve_describe_tier(big, Some("q2")).is_err());
+        assert_eq!(resolve_describe_tier(None, None), Ok(None));
+        assert_eq!(resolve_describe_tier(Some(JOYCAPTION_REPO), None), Ok(None));
+        assert!(resolve_describe_tier(Some(VISION_CAPTIONER_REPO), Some("q4")).is_err());
+        // The 27B is a Vision Captioner-class describer: full prompt, full limit.
+        assert_eq!(max_describe_prompt_chars(big), MAX_DESCRIBE_PROMPT_CHARS);
+        assert_eq!(default_instruction_section(big), "SYSTEM");
     }
 }

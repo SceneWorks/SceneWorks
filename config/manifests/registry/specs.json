@@ -66960,6 +66960,72 @@
     },
     "routes": {}
   },
+  "vision_describe_qwen3_8_27b": {
+    "evidence": {},
+    "modelEvidence": {
+      "minMemoryGb": 96
+    },
+    "product": {
+      "adapter": "prompt-refine",
+      "autoDownload": false,
+      "capabilities": [],
+      "defaults": {},
+      "downloads": [
+        {
+          "estimatedSizeBytes": 55575900000,
+          "files": [
+            "config.json",
+            "generation_config.json",
+            "chat_template.jinja",
+            "preprocessor_config.json",
+            "video_preprocessor_config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "model.safetensors.index.json",
+            "model-*.safetensors"
+          ],
+          "provider": "huggingface",
+          "repo": "huihui-ai/Huihui-Qwen3.8-27B-abliterated",
+          "revision": "739e3c5b89849f6c238ce1e5b70008612ae42cdd"
+        }
+      ],
+      "family": "vision-caption",
+      "id": "vision_describe_qwen3_8_27b",
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "macOnly": false,
+      "name": "Vision Describer (Qwen3.8-27B)",
+      "paths": {
+        "model": "${HF_CACHE}/huihui-ai/Huihui-Qwen3.8-27B-abliterated"
+      },
+      "type": "utility",
+      "ui": {
+        "description": "Larger vision-language model for Create Prompt Batch from Dataset. It follows detailed describing instructions (exact pose, orientation, interactions) more closely than the 8B Vision Captioner. Optional download; runs in-process on the native worker.",
+        "label": "Vision Describer (Qwen3.8-27B)",
+        "promptGuide": {
+          "path": "/prompt-guides/vision-caption.md",
+          "sources": [
+            {
+              "label": "Huihui Qwen3.8-27B-abliterated model card",
+              "url": "https://huggingface.co/huihui-ai/Huihui-Qwen3.8-27B-abliterated"
+            },
+            {
+              "label": "Qwen3.8-27B (base) model card",
+              "url": "https://huggingface.co/Qwen/Qwen3.8-27B"
+            }
+          ],
+          "title": "Vision Captioner Guide"
+        },
+        "recommendedFor": [
+          "dataset_batch_describe"
+        ]
+      }
+    },
+    "routes": {}
+  },
   "vitpose_plus_base": {
     "evidence": {},
     "product": {

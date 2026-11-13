@@ -46,7 +46,7 @@ use futures_util::future::BoxFuture;
 use gen_core::core_llm::CancelFlag;
 #[cfg(native_lane)]
 pub(crate) use sceneworks_core::dataset_batch_describe::{
-    DESCRIBE_FIELDS, JOYCAPTION_REPO, VISION_CAPTIONER_REPO,
+    DESCRIBE_FIELDS, JOYCAPTION_REPO, QWEN38_27B_DESCRIBER_REPO, VISION_CAPTIONER_REPO,
 };
 
 /// The batch describer prompt asset: `[SYSTEM]` is the default editable instruction, `[OUTPUT]` the
@@ -90,6 +90,9 @@ pub(crate) const MAX_DESCRIBE_FIELD_CHARS: usize = 16_000;
 pub(crate) enum DescribeModel {
     VisionCaptioner,
     JoyCaption,
+    /// The Qwen3.8 27B describer (SW-F365): the Vision Captioner's describing path (same prompt,
+    /// JSON-constrained decode, no thinking) over a larger model that comes in tiers.
+    Qwen38,
 }
 
 #[cfg(native_lane)]
@@ -100,9 +103,11 @@ impl DescribeModel {
         match model.map(str::trim).filter(|value| !value.is_empty()) {
             None | Some(VISION_CAPTIONER_REPO) => Ok(Self::VisionCaptioner),
             Some(JOYCAPTION_REPO) => Ok(Self::JoyCaption),
+            Some(QWEN38_27B_DESCRIBER_REPO) => Ok(Self::Qwen38),
             Some(other) => Err(WorkerError::InvalidPayload(format!(
                 "Dataset batch describe does not support model {other:?}; use the Vision Captioner \
-                 ({VISION_CAPTIONER_REPO}) or JoyCaption ({JOYCAPTION_REPO})."
+                 ({VISION_CAPTIONER_REPO}), JoyCaption ({JOYCAPTION_REPO}) or the Qwen3.8 27B \
+                 describer ({QWEN38_27B_DESCRIBER_REPO})."
             ))),
         }
     }
@@ -111,7 +116,36 @@ impl DescribeModel {
         match self {
             Self::VisionCaptioner => VISION_CAPTIONER_REPO,
             Self::JoyCaption => JOYCAPTION_REPO,
+            Self::Qwen38 => QWEN38_27B_DESCRIBER_REPO,
         }
+    }
+}
+
+/// Where a Qwen3.8 27B tier's snapshot lives. Full precision (`bf16`) is the upstream repository's
+/// snapshot. A quantised tier is the `<tier>/` folder of this engine's re-host repository: it was
+/// quantised ahead of time, so loading it never reads or load-quantises the full-precision files.
+#[cfg(native_lane)]
+fn qwen38_describer_weights_dir(settings: &Settings, tier: &str) -> WorkerResult<PathBuf> {
+    use sceneworks_core::dataset_batch_describe::{
+        QWEN38_27B_DESCRIBER_CANDLE_REPO, QWEN38_27B_DESCRIBER_MLX_REPO,
+    };
+    let label = "Qwen3.8 27B describer model path";
+    if tier == "bf16" {
+        return resolve_app_managed_model_dir(settings, QWEN38_27B_DESCRIBER_REPO, label);
+    }
+    let repo = if cfg!(target_os = "macos") {
+        QWEN38_27B_DESCRIBER_MLX_REPO
+    } else {
+        QWEN38_27B_DESCRIBER_CANDLE_REPO
+    };
+    let dir = resolve_app_managed_model_dir(settings, repo, label)?.join(tier);
+    if dir.join("config.json").is_file() {
+        Ok(dir)
+    } else {
+        Err(WorkerError::InvalidPayload(format!(
+            "The {tier} tier of the Qwen3.8 27B describer is not installed (no snapshot at {}).",
+            dir.display()
+        )))
     }
 }
 
@@ -652,6 +686,8 @@ async fn append_result_item(
 #[cfg(native_lane)]
 struct BatchDescribeRequest {
     model: DescribeModel,
+    /// The model tier described with: `Some` for the Qwen3.8 27B describer only.
+    tier: Option<&'static str>,
     prompt: DescribePrompt,
     default_prompt: bool,
     dataset_id: String,
@@ -665,6 +701,11 @@ fn parse_batch_describe_request(
     payload: &JsonObject,
 ) -> WorkerResult<BatchDescribeRequest> {
     let model = DescribeModel::from_payload(payload.get("model").and_then(Value::as_str))?;
+    let tier = sceneworks_core::dataset_batch_describe::resolve_describe_tier(
+        Some(model.repo()),
+        payload.get("tier").and_then(Value::as_str),
+    )
+    .map_err(WorkerError::InvalidPayload)?;
     let limit =
         sceneworks_core::dataset_batch_describe::max_describe_prompt_chars(Some(model.repo()));
     let instruction = match payload.get("prompt") {
@@ -709,6 +750,7 @@ fn parse_batch_describe_request(
     }
     Ok(BatchDescribeRequest {
         model,
+        tier,
         prompt,
         default_prompt,
         dataset_id: required_payload_string(payload, "datasetId")?.to_owned(),
@@ -734,6 +776,9 @@ fn batch_describe_result(
         .count();
     let mut result = JsonObject::new();
     result.insert("model".to_owned(), json!(request.model.repo()));
+    if let Some(tier) = request.tier {
+        result.insert("tier".to_owned(), json!(tier));
+    }
     result.insert("datasetId".to_owned(), json!(request.dataset_id));
     result.insert("datasetVersion".to_owned(), request.dataset_version.clone());
     result.insert("prompt".to_owned(), json!(request.prompt.instruction));
@@ -773,6 +818,15 @@ pub(crate) async fn run_dataset_batch_describe_job(
                 settings,
                 VISION_CAPTIONER_REPO,
                 "Vision Captioner model path",
+            )?,
+            job_id: job.id.clone(),
+        }),
+        DescribeModel::Qwen38 => Box::new(VisionCaptionerDescriber {
+            weights_dir: qwen38_describer_weights_dir(
+                settings,
+                request.tier.unwrap_or(
+                    sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_DEFAULT_TIER,
+                ),
             )?,
             job_id: job.id.clone(),
         }),

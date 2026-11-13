@@ -165,6 +165,7 @@ fn the_model_field_selects_the_vision_captioner_or_joycaption_and_refuses_others
             Some(" fancyfeast/llama-joycaption-beta-one-hf-llava "),
             DescribeModel::JoyCaption,
         ),
+        (Some(QWEN38_27B_DESCRIBER_REPO), DescribeModel::Qwen38),
     ] {
         assert_eq!(
             DescribeModel::from_payload(model).unwrap(),
@@ -740,6 +741,15 @@ fn the_request_refuses_other_models_unsafe_paths_and_oversized_prompts() {
     other_model["model"] = json!("someone/other-vlm");
     refuse(other_model, "does not support model");
 
+    // SW-7119: only the Qwen3.8 27B describer has tiers, and an unknown tier is refused.
+    let mut unknown_tier = base.clone();
+    unknown_tier["model"] = json!(QWEN38_27B_DESCRIBER_REPO);
+    unknown_tier["tier"] = json!("q2");
+    refuse(unknown_tier, "Unsupported describe tier");
+    let mut tier_on_the_8b = base.clone();
+    tier_on_the_8b["tier"] = json!("q4");
+    refuse(tier_on_the_8b, "not available for this model");
+
     let mut outside = base.clone();
     outside["items"] = json!([{
         "itemId": "item_1",
@@ -764,6 +774,41 @@ fn the_request_refuses_other_models_unsafe_paths_and_oversized_prompts() {
 // ── Parse retries (SW-7083) ───────────────────────────────────────────────────────────────────
 
 /// The payload with only item_1 (12x8), for `model`.
+#[test]
+fn a_qwen38_request_carries_its_tier_into_the_result_and_shares_the_vision_prompt() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let stage = Stage {
+        settings: test_settings(dir.path()),
+        dataset_root: dir.path().join("datasets").join("ds-1"),
+        _dir: dir,
+    };
+    let parse = |tier: Option<&str>| {
+        let mut payload = payload(&stage, None);
+        payload["model"] = json!(QWEN38_27B_DESCRIBER_REPO);
+        if let Some(tier) = tier {
+            payload["tier"] = json!(tier);
+        }
+        parse_batch_describe_request(&stage.settings, payload.as_object().expect("object"))
+            .expect("accepted")
+    };
+    let default_tier = parse(None);
+    assert_eq!(default_tier.model, DescribeModel::Qwen38);
+    assert_eq!(default_tier.tier, Some("q4"));
+    assert_eq!(
+        default_tier.prompt.instruction,
+        default_describe_instruction(DescribeModel::VisionCaptioner),
+        "the 27B describes with the Vision Captioner's full instruction"
+    );
+    let q8 = parse(Some("q8"));
+    let result = batch_describe_result(&q8, &[], false);
+    assert_eq!(result["model"], QWEN38_27B_DESCRIBER_REPO);
+    assert_eq!(result["tier"], "q8");
+
+    // A tier whose snapshot is absent is refused by name before any image is read.
+    let error = qwen38_describer_weights_dir(&stage.settings, "q4").expect_err("not installed");
+    assert!(matches!(error, WorkerError::InvalidPayload(_)), "{error}");
+}
+
 fn one_image_payload(stage: &Stage, model: &str) -> Value {
     let mut one = payload(stage, None);
     one["model"] = json!(model);
@@ -1271,4 +1316,45 @@ fn an_item_over_the_limit_is_stored_flagged_without_its_text() {
     assert_eq!(stored["failed"], true);
     assert_eq!(stored["width"], 10);
     assert_eq!(stored["description"], "");
+}
+
+/// SW-7119 real-weight smoke: the production describer (the same `VisionCaptionerDescriber` a job
+/// runs) describes one real image from a snapshot directory and the reply parses into the six
+/// fields. Its purpose is the Qwen3.8 27B describer's quantised tiers: a snapshot quantised ahead
+/// with inference's `prepare_snapshot` must still take an image under the JSON constraint with
+/// thinking off. `#[ignore]`: the weights live outside CI and the run needs a GPU.
+///   BATCH_DESCRIBE_SNAPSHOT=<snapshot dir> BATCH_DESCRIBE_IMAGE=<image path> \
+///   cargo test -p sceneworks-worker --lib -- --ignored \
+///     the_describer_describes_a_real_image_from_a_snapshot --nocapture
+#[tokio::test]
+#[ignore = "real-weight (SW-7119): set BATCH_DESCRIBE_SNAPSHOT to a vision model snapshot dir and BATCH_DESCRIBE_IMAGE to an image"]
+async fn the_describer_describes_a_real_image_from_a_snapshot() {
+    let snapshot = std::env::var("BATCH_DESCRIBE_SNAPSHOT")
+        .expect("set BATCH_DESCRIBE_SNAPSHOT to a vision model snapshot dir");
+    let image_path =
+        std::env::var("BATCH_DESCRIBE_IMAGE").expect("set BATCH_DESCRIBE_IMAGE to an image path");
+    let image = image::open(&image_path).expect("decode the image");
+    let describer = VisionCaptionerDescriber {
+        weights_dir: PathBuf::from(snapshot),
+        job_id: "sw-7119-smoke".to_owned(),
+    };
+    let (prompt, _) = DescribePrompt::for_instruction(DescribeModel::Qwen38, None);
+    let started = std::time::Instant::now();
+    let raw = describer
+        .describe(image, &prompt, CancelFlag::new())
+        .await
+        .expect("the model loads")
+        .expect("the model generates");
+    eprintln!(
+        "describe took {:.1}s\nraw reply:\n{raw}",
+        started.elapsed().as_secs_f64()
+    );
+    assert!(!raw.contains("<think>"), "thinking must be off: {raw}");
+    let parsed = describer
+        .parse(&raw)
+        .expect("the reply is the six-field JSON");
+    assert!(
+        !parsed.fields[0].is_empty(),
+        "the description field is filled"
+    );
 }
