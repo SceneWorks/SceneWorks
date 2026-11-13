@@ -161,13 +161,7 @@ fn redact_manifest_locators(value: &mut Value) {
                     .then(|| child.as_object_mut())
                     .flatten()
                     .and_then(|guide| guide.remove("path"))
-                    .and_then(|path| {
-                        if path.as_str().is_some_and(is_web_prompt_guide_path) {
-                            Some(path)
-                        } else {
-                            None
-                        }
-                    });
+                    .filter(|path| path.as_str().is_some_and(is_web_prompt_guide_path));
                 redact_manifest_locators(child);
                 if let (Some(path), Some(guide)) = (web_guide, child.as_object_mut()) {
                     guide.insert("path".to_owned(), path);
