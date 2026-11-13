@@ -13294,6 +13294,39 @@ fn ltx_gemma_override_path_requires_complete_dir() {
     assert!(ltx_gemma_override_path(None).is_none());
 }
 
+/// Codex review of PR #3379 (4559512305): the Candle LTX and SCAIL-2 tier selectors read the
+/// verified binding's frozen tier when the request names none, instead of their own default, so a
+/// sibling tier installed beside the served package is never selected. Malformed explicit values
+/// are still refused. Portable cores of Candle-only selectors, so they run on every native lane.
+#[cfg(native_lane)]
+#[test]
+fn candle_video_tier_selectors_honor_the_frozen_tier_and_refuse_malformed_values() {
+    let advanced = |value: Value| value.as_object().unwrap().clone();
+    let bound_q4 = advanced(json!({"__portableBoundTier": "q4"}));
+    let bound_q8 = advanced(json!({"__portableBoundTier": "q8"}));
+    let unselected = advanced(json!({}));
+    let malformed = advanced(json!({"mlxQuantize": "eight", "__portableBoundTier": "q4"}));
+
+    // SCAIL-2: the unselected baseline is dense bf16; a binding frozen at q4 runs q4.
+    assert_eq!(
+        super::candle::candle_scail2_tier_key(&unselected),
+        Ok("bf16")
+    );
+    assert_eq!(super::candle::candle_scail2_tier_key(&bound_q4), Ok("q4"));
+    assert_eq!(super::candle::candle_scail2_tier_key(&bound_q8), Ok("q8"));
+    assert!(super::candle::candle_scail2_tier_key(&malformed).is_err());
+    assert!(super::candle::candle_scail2_tier_key(&advanced(json!({"mlxQuantize": 6}))).is_err());
+
+    // LTX: the unselected default is q4; a binding frozen at q8 runs q8.
+    assert_eq!(super::candle::candle_ltx_tier_key(&unselected), Some("q4"));
+    assert_eq!(super::candle::candle_ltx_tier_key(&bound_q8), Some("q8"));
+    assert_eq!(
+        super::candle::candle_ltx_tier_key(&advanced(json!({"__portableBoundTier": "bf16"}))),
+        Some("bf16")
+    );
+    assert_eq!(super::candle::candle_ltx_tier_key(&malformed), None);
+}
+
 /// `resolve_ltx_eros_gemma_dir`: a complete `models/mlx/gemma` sibling of the eros checkpoint wins;
 /// an incomplete/absent sibling with no bundle snapshot → `None` (provider surfaces the clear
 /// "set LTX_GEMMA_DIR" error). The override path returning `None` by design is exercised by

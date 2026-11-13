@@ -798,12 +798,7 @@ pub(super) async fn generate_stream_using(
         })
     };
     let default_tier = tier_key_for_resolved_dir(&request.model_manifest_entry, &weights_dir);
-    let explicit_pick = flux3_plan.is_some()
-        || request
-            .advanced
-            .get("mlxQuantizeExplicit")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+    let explicit_pick = flux3_plan.is_some() || mlx_tier_pick_is_exact(&request.advanced);
     let tiers = default_tier
         .filter(|_| !explicit_pick)
         .map(|tier| downtier_candidate_tiers(request, settings, tier, min_quality_floor(request)))
@@ -1278,3 +1273,16 @@ pub(super) async fn generate_stream_using(
 #[cfg(test)]
 #[path = "tests/mlx_request_tier_tests.rs"]
 mod mlx_request_tier_tests;
+
+/// Whether the MLX capability downtier must keep the resolved tier: an explicit pick
+/// (`mlxQuantizeExplicit`), or a portable job whose verified binding froze a tier. The latter is
+/// served in place from the hub snapshot, so a downtier would load a sibling tier the guard never
+/// verified.
+#[cfg(any(test, target_os = "macos"))]
+pub(super) fn mlx_tier_pick_is_exact(advanced: &crate::JsonObject) -> bool {
+    advanced
+        .get("mlxQuantizeExplicit")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+        || sceneworks_core::payload_util::portable_bound_tier_bits(advanced).is_some()
+}

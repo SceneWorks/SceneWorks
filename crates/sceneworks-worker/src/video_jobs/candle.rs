@@ -291,15 +291,27 @@ enum CandleLtxTier {
 /// `mlxQuantize <= 0`, q4 as 4, and q8 as 8; all other explicit values fail closed.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_ltx_requested_tier(request: &VideoRequest) -> Option<CandleLtxTier> {
-    let Some(value) = request.advanced.get("mlxQuantize") else {
-        return Some(CandleLtxTier::Q4);
-    };
-    let bits = crate::payload::quant_int(value)?;
-    match bits {
-        i64::MIN..=0 => Some(CandleLtxTier::Bf16),
-        4 => Some(CandleLtxTier::Q4),
-        8 => Some(CandleLtxTier::Q8),
-        _ => None,
+    match candle_ltx_tier_key(&request.advanced)? {
+        "bf16" => Some(CandleLtxTier::Bf16),
+        "q8" => Some(CandleLtxTier::Q8),
+        _ => Some(CandleLtxTier::Q4),
+    }
+}
+
+/// Portable core of [`candle_ltx_requested_tier`]: an explicit value, else the verified binding's
+/// frozen tier, else the q4 default. A present malformed or unhosted value is `None` (refused).
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+pub(crate) fn candle_ltx_tier_key(advanced: &JsonObject) -> Option<&'static str> {
+    use sceneworks_core::payload_util::QuantSelection;
+    match sceneworks_core::payload_util::quant_selection(advanced) {
+        QuantSelection::Unselected => Some("q4"),
+        QuantSelection::Malformed(_) => None,
+        QuantSelection::Explicit(bits) | QuantSelection::Bound(bits) => match bits {
+            i64::MIN..=0 => Some("bf16"),
+            4 => Some("q4"),
+            8 => Some("q8"),
+            _ => None,
+        },
     }
 }
 
@@ -2130,31 +2142,12 @@ pub(super) fn resolve_candle_scail2_tier(
     request: &VideoRequest,
     has_adapters: bool,
 ) -> WorkerResult<Scail2CandleTier> {
-    let value = request.advanced.get("mlxQuantize");
-    let tier = match value {
-        // Keep the established dense Candle baseline when the payload names no tier. Q4/Q8 are
-        // explicit exact artifact selections, so a stale/default caller can never be promoted to
-        // packed weights merely because they happen to be installed.
-        None | Some(Value::Null) => Scail2CandleTier::Bf16,
-        Some(value) => {
-            let bits = crate::payload::quant_int(value).ok_or_else(|| {
-                WorkerError::InvalidPayload(
-                    "scail2 (candle): advanced.mlxQuantize must be exactly 4, 8, or <= 0 for bf16."
-                        .to_owned(),
-                )
-            })?;
-            match bits {
-                ..=0 => Scail2CandleTier::Bf16,
-                4 => Scail2CandleTier::Q4,
-                8 => Scail2CandleTier::Q8,
-                _ => {
-                    return Err(WorkerError::InvalidPayload(format!(
-                        "scail2 (candle): advanced.mlxQuantize={bits} has no exact hosted tier; choose q4 (4), q8 (8), or bf16 (<= 0)."
-                    )));
-                }
-            }
-        }
-    };
+    let tier =
+        match candle_scail2_tier_key(&request.advanced).map_err(WorkerError::InvalidPayload)? {
+            "q4" => Scail2CandleTier::Q4,
+            "q8" => Scail2CandleTier::Q8,
+            _ => Scail2CandleTier::Bf16,
+        };
     if has_adapters && tier != Scail2CandleTier::Bf16 {
         return Err(WorkerError::InvalidPayload(format!(
             "scail2 (candle): packed {} cannot merge adapters; select the bf16 tier (advanced.mlxQuantize <= 0).",
@@ -2162,6 +2155,34 @@ pub(super) fn resolve_candle_scail2_tier(
         )));
     }
     Ok(tier)
+}
+
+/// Portable core of [`resolve_candle_scail2_tier`]. An unselected request keeps the established
+/// dense bf16 Candle baseline; q4/q8 require an explicit selection, so a stale/default caller can
+/// never be promoted to packed weights merely because they happen to be installed. A portable job
+/// whose verified binding froze a tier runs exactly that tier: the package is served in place from
+/// the hub snapshot, where a sibling tier the guard did not verify may be installed.
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+pub(crate) fn candle_scail2_tier_key(advanced: &JsonObject) -> Result<&'static str, String> {
+    use sceneworks_core::payload_util::QuantSelection;
+    let bits = match sceneworks_core::payload_util::quant_selection(advanced) {
+        QuantSelection::Unselected => return Ok("bf16"),
+        QuantSelection::Malformed(_) => {
+            return Err(
+                "scail2 (candle): advanced.mlxQuantize must be exactly 4, 8, or <= 0 for bf16."
+                    .to_owned(),
+            );
+        }
+        QuantSelection::Explicit(bits) | QuantSelection::Bound(bits) => bits,
+    };
+    match bits {
+        ..=0 => Ok("bf16"),
+        4 => Ok("q4"),
+        8 => Ok("q8"),
+        _ => Err(format!(
+            "scail2 (candle): advanced.mlxQuantize={bits} has no exact hosted tier; choose q4 (4), q8 (8), or bf16 (<= 0)."
+        )),
+    }
 }
 
 /// Require both the pinned provider's complete six-file predicate and the package's explicit

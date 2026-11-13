@@ -55,24 +55,60 @@ pub(crate) fn optional_id(payload: &JsonObject, key: &str) -> Option<String> {
 
 /// Read an optional int that may arrive as a JSON number or a numeric string. `None`
 /// when absent or unparseable.
+/// What a tier selector must honour for `advanced.mlxQuantize`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuantSelection<'a> {
+    /// The request named these bits.
+    Explicit(i64),
+    /// The request named none; the verified portable binding froze this tier.
+    Bound(i64),
+    /// Neither: the selector's own default applies.
+    Unselected,
+    /// The request named a value that is not an integer bit count: refuse it.
+    Malformed(&'a Value),
+}
+
+/// The tier the worker's source guard froze for this job (`advanced.__portableBoundTier`, written
+/// only after the route was verified), as quantization bits. A pinned Hugging Face member is
+/// served in place from the worker's hub snapshot, which can hold other installed tiers beside the
+/// frozen one; a selector that falls back to its own default could load an unverified one. Any
+/// other bound tier name (a non-quant variant) selects nothing.
+pub fn portable_bound_tier_bits(advanced: &JsonObject) -> Option<i64> {
+    match advanced
+        .get("__portableBoundTier")
+        .and_then(Value::as_str)?
+    {
+        "q4" => Some(4),
+        "q8" => Some(8),
+        "bf16" => Some(0),
+        _ => None,
+    }
+}
+
+/// Classify `advanced.mlxQuantize` for a tier selector: an explicit value (absent and JSON `null`
+/// are both "not named") wins, then the verified binding's frozen tier. A present malformed value is
+/// reported, never replaced by the bound tier, so each selector keeps refusing it.
+pub fn quant_selection(advanced: &JsonObject) -> QuantSelection<'_> {
+    match advanced.get("mlxQuantize").filter(|value| !value.is_null()) {
+        Some(value) => match json_integer(value) {
+            Some(bits) => QuantSelection::Explicit(bits),
+            None => QuantSelection::Malformed(value),
+        },
+        None => match portable_bound_tier_bits(advanced) {
+            Some(bits) => QuantSelection::Bound(bits),
+            None => QuantSelection::Unselected,
+        },
+    }
+}
+
 /// The quantization bits a job runs: the request's explicit `mlxQuantize`, else the tier its
-/// verified portable binding froze (`advanced.__portableBoundTier`, written by the worker's source
-/// guard only after verifying the route). A pinned Hugging Face member is served in place from the
-/// worker's hub snapshot, which can hold other installed tiers beside the frozen one; every tier
-/// resolver reads its selection here, so none can fall back to its own default and pick an
-/// unverified tier. Any other bound tier name (a non-quant variant) selects nothing.
+/// verified portable binding froze ([`quant_selection`]). A malformed explicit value is `None`, as
+/// before, and is never replaced by the bound tier.
 pub(crate) fn request_quant_bits(advanced: &JsonObject) -> Option<i64> {
-    optional_i64(advanced, "mlxQuantize").or_else(|| {
-        match advanced
-            .get("__portableBoundTier")
-            .and_then(Value::as_str)?
-        {
-            "q4" => Some(4),
-            "q8" => Some(8),
-            "bf16" => Some(0),
-            _ => None,
-        }
-    })
+    match quant_selection(advanced) {
+        QuantSelection::Explicit(bits) | QuantSelection::Bound(bits) => Some(bits),
+        QuantSelection::Unselected | QuantSelection::Malformed(_) => None,
+    }
 }
 
 pub(crate) fn optional_i64(payload: &JsonObject, key: &str) -> Option<i64> {
@@ -281,6 +317,41 @@ mod tests {
         assert!(optional_id(&p, "blank").is_none());
         assert!(optional_id(&p, "n").is_none());
         assert!(optional_id(&p, "missing").is_none());
+    }
+
+    #[test]
+    fn quant_selection_prefers_explicit_then_the_bound_tier_and_reports_malformed_values() {
+        let advanced = |value: Value| value.as_object().unwrap().clone();
+        assert_eq!(
+            quant_selection(&advanced(json!({"__portableBoundTier": "q4"}))),
+            QuantSelection::Bound(4)
+        );
+        assert_eq!(
+            quant_selection(&advanced(
+                json!({"mlxQuantize": null, "__portableBoundTier": "bf16"})
+            )),
+            QuantSelection::Bound(0)
+        );
+        assert_eq!(
+            quant_selection(&advanced(
+                json!({"mlxQuantize": "8", "__portableBoundTier": "q4"})
+            )),
+            QuantSelection::Explicit(8)
+        );
+        let malformed = advanced(json!({"mlxQuantize": 4.5, "__portableBoundTier": "q4"}));
+        assert!(matches!(
+            quant_selection(&malformed),
+            QuantSelection::Malformed(_)
+        ));
+        assert_eq!(request_quant_bits(&malformed), None);
+        assert_eq!(
+            quant_selection(&advanced(json!({"__portableBoundTier": "default"}))),
+            QuantSelection::Unselected
+        );
+        assert_eq!(
+            quant_selection(&advanced(json!({}))),
+            QuantSelection::Unselected
+        );
     }
 
     #[test]

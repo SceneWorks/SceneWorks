@@ -1821,7 +1821,8 @@ fn record_route_frozen_sources(
 }
 
 /// Test support: record `reals` (read and hashed here) as a route's in-place frozen sources.
-#[cfg(test)]
+/// Its only caller links hub files with Unix symlinks, so it shares that test's `unix` gate.
+#[cfg(all(test, unix))]
 pub(crate) fn test_record_route_frozen_sources(route_dir: &Path, reals: &[&Path]) {
     std::fs::create_dir_all(route_dir).unwrap();
     let files = reals

@@ -656,21 +656,14 @@ pub(super) fn qwen_image_2_1_tier_dir(
             _ => "q8",
         }
     };
-    let explicit = request
-        .advanced
-        .get("mlxQuantize")
-        .filter(|value| !value.is_null())
-        .map(|value| {
-            crate::payload::quant_int(value)
-                .map(qwen_checkpoint_tier)
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload(format!(
-                        "{} advanced.mlxQuantize must be an integer bit count, got {value}",
-                        request.model
-                    ))
-                })
-        })
-        .transpose()?;
+    let explicit = qwen_image_2_1_selected_bits(&request.advanced)
+        .map_err(|value| {
+            WorkerError::InvalidPayload(format!(
+                "{} advanced.mlxQuantize must be an integer bit count, got {value}",
+                request.model
+            ))
+        })?
+        .map(qwen_checkpoint_tier);
     let installed = |tier: &'static str| -> Option<(PathBuf, &'static str)> {
         let dir = qwen_image_2_1_declared_tier_dir(settings, request, tier)?;
         qwen_image_2_1_has_loadable_transformer(&dir).then_some((dir, tier))
@@ -704,6 +697,20 @@ pub(super) fn qwen_image_2_1_tier_dir(
             .filter(|tier| *tier != default)
             .find_map(installed)
     }))
+}
+
+/// The bits a Qwen-Image 2.1 request selects exactly: an explicit value, else the verified
+/// binding's frozen tier (served in place, so it is never substituted by an installed sibling).
+/// `Ok(None)` leaves the manifest default with its installed fallback; a malformed explicit value
+/// is returned for refusal.
+#[cfg(native_lane)]
+fn qwen_image_2_1_selected_bits(advanced: &JsonObject) -> Result<Option<i64>, String> {
+    use sceneworks_core::payload_util::QuantSelection;
+    match sceneworks_core::payload_util::quant_selection(advanced) {
+        QuantSelection::Explicit(bits) | QuantSelection::Bound(bits) => Ok(Some(bits)),
+        QuantSelection::Unselected => Ok(None),
+        QuantSelection::Malformed(value) => Err(value.to_string()),
+    }
 }
 
 /// The "has a loadable backbone" probe the shared resolver applies, spelled for BOTH layouts this
@@ -911,16 +918,24 @@ fn qwen_image_2_1_declared_tier_dir(
 pub(super) fn candle_flux1_packed_requested_tier(
     request: &ImageRequest,
 ) -> WorkerResult<&'static str> {
-    match request.advanced.get("mlxQuantize") {
-        None | Some(Value::Null) => Ok("q4"),
-        Some(value) => match crate::payload::quant_int(value) {
-            Some(4) => Ok("q4"),
-            Some(8) => Ok("q8"),
-            _ => Err(WorkerError::InvalidPayload(format!(
-                "{} on Candle supports only its hosted packed q4 or q8 tiers",
-                request.model
-            ))),
-        },
+    candle_flux1_packed_tier_key(&request.advanced).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "{} on Candle supports only its hosted packed q4 or q8 tiers",
+            request.model
+        ))
+    })
+}
+
+/// Portable core of [`candle_flux1_packed_requested_tier`]: an explicit value, else the verified
+/// binding's frozen tier, else the q4 default; anything but q4/q8 is `None` (refused).
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+pub(crate) fn candle_flux1_packed_tier_key(advanced: &JsonObject) -> Option<&'static str> {
+    use sceneworks_core::payload_util::QuantSelection;
+    match sceneworks_core::payload_util::quant_selection(advanced) {
+        QuantSelection::Unselected => Some("q4"),
+        QuantSelection::Explicit(4) | QuantSelection::Bound(4) => Some("q4"),
+        QuantSelection::Explicit(8) | QuantSelection::Bound(8) => Some("q8"),
+        _ => None,
     }
 }
 
