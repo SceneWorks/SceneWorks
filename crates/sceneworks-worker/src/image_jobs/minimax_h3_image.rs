@@ -498,4 +498,44 @@ mod tests {
             resolve_weights_dir(&request(&entry, json!({"mlxQuantize": 4})), &settings).is_err()
         );
     }
+    /// SW-7102: a MiniMax-H3-Image job stages a resident prompt expander out of the refine cache
+    /// before it resolves (let alone loads or renders) its own weights. The job here has no weights
+    /// and an unroutable API, so it fails at route preparation — after the expander is already gone.
+    #[tokio::test]
+    async fn an_image_job_stages_the_resident_expander_out_before_generation() {
+        use crate::refine_model_cache::tests::{
+            global_refiner_is_resident, seed_global_resident_stub,
+        };
+        let temporary = tempfile::tempdir().unwrap();
+        let (data, _guard) = isolated_cache(temporary.path());
+        let mut settings = crate::test_env::offline_settings();
+        settings.data_dir = data.clone();
+        let project = crate::ProjectStore::new(data, "worker")
+            .create_project("sw-7102-expander-stage-out")
+            .unwrap();
+        let job: crate::JobSnapshot = serde_json::from_value(json!({
+            "id": "job_h3_image_stage_out", "type": "image_generate", "status": "queued",
+            "payload": {
+                "projectId": project.id, "model": MODEL_ID, "modelManifestEntry": shipped_entry(),
+                "prompt": "a lighthouse", "width": 2048, "height": 2048, "count": 1,
+            },
+            "result": {}, "requestedGpu": "auto", "progress": 0, "stage": "queued", "message": "",
+            "attempts": 1, "cancelRequested": false,
+            "createdAt": "2026-11-12T00:00:00Z", "updatedAt": "2026-11-12T00:00:00Z"
+        }))
+        .unwrap();
+
+        seed_global_resident_stub().await;
+        assert!(
+            global_refiner_is_resident().await,
+            "the expander is resident"
+        );
+        let api = crate::ApiClient::new(&settings);
+        let result = crate::image_jobs::run_image_generate_job(&api, &settings, &job).await;
+        assert!(result.is_err(), "no weights: the job cannot render");
+        assert!(
+            !global_refiner_is_resident().await,
+            "the image job evicted the expander before generation ({result:?})"
+        );
+    }
 }
