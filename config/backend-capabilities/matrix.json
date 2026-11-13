@@ -4,7 +4,7 @@
   "summary": {
     "modelCount": 145,
     "importedFamilyCount": 4,
-    "cellCount": 1137,
+    "cellCount": 1138,
     "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 86,
     "exceptionCount": 10
@@ -23,22 +23,22 @@
     "descriptorMlxRuntime": "3b6dd0db2d2377e46686aec93c4c85e5ffeece3b2c9f45dc47cde7f923cd7bb4",
     "descriptorPreviewFacts": "4a6759a870c34ab44b186caefd4c8ee5ae27e0ecb2526229b462c84ea0ffdf60",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "17d2c6437a78d71197d3dcc3ec4e7e7362f45e61f3dec35f39d255c31a857cf7",
-    "modelImportDefaults": "d95d2542aa20948e0697f3d01c043466f9dca722364b1f744c366b8fa75643e0",
-    "routerCandle": "cd66b397d9dd27183340d1c141edaa199a58f5165033d292b78035e4f97d96e3",
-    "routerCatalog": "a8c7cef027e57f6a5c7b51bbdd9b146103f4f24cfc83e7366e6f3b9e74c7b4b4",
-    "routerGaps": "7bbe9452f5d03b92530a8d1853a667011db7e79906ab1bd324cfb9e961906a71",
-    "routerMlx": "7dfabec9045d2ed990c60963af626334494c36c058ec07bce418660f58bb3333",
+    "manifest": "f74cfd71b743c014611619e238caf1a11c8c3e83859994128682bcbd78b8dcdb",
+    "modelImportDefaults": "84bc6c62dbac092c7284bc8808b347c09981795f65643d35b65a8a046b3e5736",
+    "routerCandle": "398d1da1e908bcc4348182cbde9873a2b9256786ca651a9b60861a9cacec2411",
+    "routerCatalog": "3c3f064c5970a4b620c100dd70cd8e8b8f6dfe97a6ddb940c71a24913d4f3115",
+    "routerGaps": "5adc566ed65d71f76177660a18541aad31d94fbb88b9409ae123e634760382eb",
+    "routerMlx": "fafea8db83ed1ed72b2dd57a61795a108e8470d150d90c5347aca06e132da8c7",
     "scheduler": "db2107f3468e9199486d2a8c30696ad02355e6fdd45060fa2b3b0373d581c88f",
     "trainingCatalog": "d01392a1be814e9c2bcb18c078e76c1ab20123544a27d9c365ca2ec3fd58b209",
     "webAudioStudio": "a93273c2ff57d6ad7ad8230b1ff5d2e83c6d63317b68888f1ef2f23c6967ff06",
     "webImageAdvanced": "cbb347eec4f03bde0444269afc13c0ee5437c738949eac1bfdbf332a8621e056",
-    "webImageRequest": "46b6e744ab89643662fd407be99d32b9a256fe5bac979386c9366fe7a7221f1a",
+    "webImageRequest": "db0709bc8f279471cfc90e7660be4ab0786bba3c1f70138bc4ad20fe854fb549",
     "webMacGating": "edd5caead44b6cd56f0306fbcf2078e2a6b391fcb130ad1f859cda6cc3aa9ae3",
     "webPreviewGating": "0db03f8997f27f8e205ed262ac2ed951d6002c29b53aeea4bae38da40739c077",
     "webSimpleAudio": "b2782f4e1363bfc0f5c71402261b8863cd7f47d0b5545fc975c1cd4dd87b03c4",
     "webSimpleAudioStudio": "7ffbd94e291de76958b928b467591f153116362400be9c7deaa730b925538ae5",
-    "webSimpleJobs": "929435ed99d7ab535a1dcf2fc7d5500c2ba3f7f130954cc7b067e017f7f0e667",
+    "webSimpleJobs": "95147291b3a94e18928a197b6acf88f1ed544ea98379a9bc84786915eb865649",
     "webSimpleVideo": "18138c6fbc12b37524e988557a5cc0f339da8cb863bf9487f9443ebe2de4d178",
     "webUpscaleEngines": "0d80f32e7e14a97773e5c8cc05a31c2dd9ea2657aa41904a5cc0123382dfee38",
     "webVideoStudio": "7a2b640272dc2d85c7fbb0113daa89905e0313d0078d2030f2f2b26b4b473646",
@@ -48,7 +48,7 @@
     "workerDispatch": "62fa843b9de78d1b1f3d993192b578a20fbf4dc3a3f92033eb1e0a142d12e034",
     "workerEngineTable": "bd98386e07cd4527477ac4567667fd7f7fb9e084560bcd761754a00c3ead6ccc",
     "workerGpuCapabilities": "1e2f8ad52c74a55e8471c69b11f894e428278e7ec09afcb9f32894ea99bfce3c",
-    "workerImageDispatch": "1be1804c9903bd76259123e2cfd84282fe160bf7f672539b7ce473bf4fd87801",
+    "workerImageDispatch": "b28a2ea140814b22ace6293d44b8bf16888cccf85fc18e09a3d0b7c6c06f0c68",
     "workerImageKreaImported": "68c5818216ad3e02fb50e3cb175b20381367b78e21175b2ec0de84624cf62026",
     "workerImageMageFinetuned": "91f1d6cb6df56bf25c37e85ef448b635f8241258b29e154805bf0fb193b5b365",
     "workerImagePulid": "b764f312b0996f4f22d61dce97341889ddb2a9bee8e74d7b7c4882a0de610099",
@@ -4182,12 +4182,19 @@
       "family": "minimax-h3-image",
       "modelType": "image",
       "manifestOperations": [
+        "edit_image",
         "text_to_image"
       ],
       "evaluatedOperations": [
+        "edit_image",
         "text_to_image"
       ],
       "operationAndMode": [
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": true
+        },
         {
           "capability": "text_to_image",
           "mlx": true,
@@ -4197,25 +4204,25 @@
       "conditioningShape": [
         {
           "capability": "multiReference",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "reference",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         }
       ],
       "userAdapters": [
         {
           "capability": "lora",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "lokr",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         }
       ],
       "precisionTier": [

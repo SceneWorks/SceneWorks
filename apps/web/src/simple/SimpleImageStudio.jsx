@@ -32,7 +32,7 @@ import { useSimpleRefine } from "./useSimpleRefine.js";
 // the same transparency toggle and the same rewrite affordance; what it does NOT get is a second,
 // simplified version of either, which is why both reuse the advanced modules verbatim.
 import { showTransparencyToggle, transparencyPromptSuggestion } from "../qwenAlpha.js";
-import { maxReferencesForModel } from "../imageReferenceLimits.js";
+import { appendPromptToken, maxReferencesForModel, referencePromptToken } from "../imageReferenceLimits.js";
 import { nativeTierEligibility } from "../quantTier.js";
 import { OrderedReferenceList } from "../components/OrderedReferenceList.jsx";
 import {
@@ -846,6 +846,9 @@ export function SimpleImageStudio() {
               <OrderedReferenceList
                 assetIds={orderedReferenceIds}
                 labelFor={(id) => assets.find((asset) => asset.id === id)?.name ?? id}
+                // SW-7101: MiniMax-H3-Image names each reference `<Picture N>` in its prompt.
+                tokenFor={(index) => referencePromptToken(selectedModel, index)}
+                onInsertToken={(token) => setPrompt((current) => appendPromptToken(current, token))}
                 onChange={(next) => {
                   // The tile owns the first slot, so a reorder writes back through BOTH pieces of
                   // state rather than letting them drift apart.

@@ -965,6 +965,15 @@ pub(super) fn qwen_image_2_1_reference_ids(request: &ImageRequest) -> Vec<String
     if !sceneworks_core::jobs_store::is_qwen_image_2_1_model(&request.model) {
         return Vec::new();
     }
+    ordered_reference_ids(request)
+}
+
+/// The ordered, first-occurrence-deduped reference list of [`qwen_image_2_1_reference_ids`] for
+/// any model: `sourceAssetId`, `maskAssetId`, every `referenceAssetIds` entry, `referenceAssetId`.
+/// The worker twin of `sceneworks_core::jobs_store::qwen_image_2_1_reference_ids`, which the API's
+/// `limits.maxReferenceAssets` gate counts for every model declaring that cap.
+#[cfg(native_lane)]
+fn ordered_reference_ids(request: &ImageRequest) -> Vec<String> {
     let scalar = |value: &Option<String>| -> Option<String> {
         value
             .as_deref()
@@ -980,6 +989,46 @@ pub(super) fn qwen_image_2_1_reference_ids(request: &ImageRequest) -> Vec<String
     let mut seen = std::collections::HashSet::with_capacity(ids.len());
     ids.retain(|id| seen.insert(id.clone()));
     ids
+}
+
+/// Is this a MiniMax-H3-Image edit (SW-7101)? The model's one engine call is text-to-image with an
+/// empty ordered reference list and the edit with 1..=16 references, so — as for Qwen-Image 2.1 —
+/// the list, not the mode, decides.
+#[cfg(native_lane)]
+pub(super) fn is_minimax_h3_image_edit(request: &ImageRequest) -> bool {
+    super::minimax_h3_image::is_model(&request.model) && !ordered_reference_ids(request).is_empty()
+}
+
+/// The MiniMax-H3-Image edit's references (SW-7101), resolved in request order at their NATIVE
+/// geometry: the engine resizes each one itself for its vision tower and its VAE
+/// (`reference_vision_size` / `reference_vae_size`), and `<Picture N>` in the prompt names the
+/// N-th. Nothing is fitted to the output size, and an alpha channel is dropped (`Truncate`, the
+/// upstream `convert("RGB")`): the engine declares only `Reference` / `MultiReference`.
+///
+/// The ceiling is the job's own `limits.maxReferenceAssets` — the SAME key the enqueue gate read —
+/// and an over-long list is refused, never truncated (truncating renumbers nothing here, but it
+/// renders a different request than the one asked for).
+#[cfg(native_lane)]
+pub(super) fn resolve_minimax_h3_image_edit(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+) -> WorkerResult<Vec<Image>> {
+    let ids = ordered_reference_ids(request);
+    if let Some(cap) =
+        sceneworks_core::video_request::image_max_reference_assets(&request.model_manifest_entry)
+    {
+        if ids.len() > cap {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{}: {} reference images were supplied; it edits from at most {cap}",
+                request.model,
+                ids.len()
+            )));
+        }
+    }
+    ids.iter()
+        .map(|id| load_reference_image(&settings.data_dir, &request.project_id, id, project_path))
+        .collect()
 }
 
 /// Resolve those ids into engine images at their NATIVE geometry, each with the alpha plane its
@@ -1185,6 +1234,10 @@ pub(super) fn resolve_generic_lane_inputs(
         let (images, alpha) = resolve_qwen_image_2_1_edit_images(request, settings, project_path)?;
         edit_ref_alpha = alpha;
         images
+    } else if is_minimax_h3_image_edit(request) {
+        // MiniMax-H3-Image edit (SW-7101): 1..=16 ordered references on the generic `Mlx` arm,
+        // sent as `Reference` (one) / `MultiReference` (many).
+        resolve_minimax_h3_image_edit(request, settings, project_path)?
     } else {
         Vec::new()
     };

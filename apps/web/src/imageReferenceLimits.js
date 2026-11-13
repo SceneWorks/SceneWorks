@@ -47,3 +47,19 @@ export function moveReference(ids, from, to) {
 export function referenceOrdinalLabel(index) {
   return `Image ${index + 1}`;
 }
+
+// SW-7101 — the token a model's prompt uses to NAME the reference at `index`, or null when the
+// model's prompts name none. MiniMax-H3-Image presents each reference to its text encoder as
+// `Picture i:` in request order (`<Picture 1>` is the first), so its prompts address them as
+// `<Picture N>`. Keyed on the family so an imported H3-Image fine-tune reads the same way.
+export function referencePromptToken(model, index) {
+  if (model?.family !== "minimax-h3-image" || !Number.isInteger(index) || index < 0) return null;
+  return `<Picture ${index + 1}>`;
+}
+
+// Append `token` to the prompt, separated by one space, so a click on "Insert" always lands the
+// reference's name where the user can see it and move it.
+export function appendPromptToken(prompt, token) {
+  const current = String(prompt ?? "").trimEnd();
+  return current ? `${current} ${token}` : token;
+}

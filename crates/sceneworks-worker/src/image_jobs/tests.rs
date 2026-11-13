@@ -162,6 +162,8 @@ use super::conditioning::identity_strength;
 #[cfg(target_os = "macos")]
 use super::conditioning::is_mage_edit_model;
 #[cfg(native_lane)]
+use super::conditioning::is_minimax_h3_image_edit;
+#[cfg(native_lane)]
 use super::conditioning::is_qwen_image_2_1_edit;
 #[cfg(target_os = "macos")]
 use super::conditioning::load_reference_alpha;
@@ -11332,6 +11334,149 @@ fn qwen_image_2_1_live_candle_image_to_image_emits_one_reference() {
         edit_mask.as_ref(),
     );
     assert_qwen_image_2_1_one_reference(&emitted, "candle");
+}
+
+/// SW-7101 — a project holding `count` solid-colour PNGs of distinct, readable colours, and a
+/// MiniMax-H3-Image edit request over all of them from the SHIPPED catalog entry (its
+/// `limits.maxReferenceAssets` is the ceiling the resolver reads). The assets are project files only:
+/// no Hugging Face snapshot is resolved.
+#[cfg(native_lane)]
+fn minimax_h3_image_edit_fixture(count: usize) -> (QwenImage21EditFixture, ImageRequest) {
+    let data = tempfile::tempdir().unwrap();
+    let mut settings = crate::test_env::offline_settings();
+    settings.data_dir = data.path().to_path_buf();
+    let store = ProjectStore::new(settings.data_dir.clone(), "worker");
+    let project = store
+        .create_project("sw7101-minimax-h3-image-edit")
+        .unwrap();
+    let mut ids = Vec::new();
+    for index in 0..count {
+        let file = data.path().join(format!("h3-edit-{index}.png"));
+        image::RgbImage::from_pixel(48, 32, image::Rgb([index as u8 * 10, 7, 200]))
+            .save(&file)
+            .unwrap();
+        let asset = store
+            .import_asset(
+                &project.id,
+                sceneworks_core::project_store::UploadAsset {
+                    filename: format!("h3-edit-{index}.png"),
+                    content_type: Some("image/png".to_owned()),
+                    source_path: file,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .unwrap();
+        ids.push(asset["id"].as_str().unwrap().to_owned());
+    }
+    let mut entry = sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+        .unwrap()["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == "minimax_h3_image")
+        .unwrap()
+        .clone();
+    sceneworks_core::model_artifacts::artifact_selection::retain_downloads_for_os(
+        &mut entry,
+        std::env::consts::OS,
+    );
+    let edit = request(json!({
+        "projectId": project.id,
+        "model": "minimax_h3_image",
+        "mode": "edit_image",
+        "prompt": "<Picture 1> wearing the hat from <Picture 2>",
+        "width": 2048,
+        "height": 2048,
+        "referenceAssetIds": ids,
+        "modelManifestEntry": entry,
+    }));
+    let fixture = QwenImage21EditFixture {
+        _data: data,
+        settings,
+        project_path: PathBuf::from(&project.path),
+        project_id: project.id,
+        ids,
+    };
+    (fixture, edit)
+}
+
+/// The ordered references a lane emitted, by the red channel their fixture index wrote.
+#[cfg(native_lane)]
+fn minimax_h3_image_emitted_order(emitted: &[Conditioning]) -> Vec<u8> {
+    let red = |image: &Image| image.pixels[0];
+    match emitted {
+        [Conditioning::Reference {
+            image,
+            strength: None,
+        }] => vec![red(image)],
+        [Conditioning::MultiReference { images }] => images.iter().map(red).collect(),
+        other => panic!("expected one Reference or one MultiReference, got {other:?}"),
+    }
+}
+
+/// SW-7101 — the H3-Image edit on the MLX path that RUNS: `resolve_generic_lane_inputs` over 1 and 16
+/// real assets yields them in request order at their native 48x32 geometry (the engine resizes
+/// each reference itself), the request `generate_one` builds carries them as one `Reference` / one
+/// `MultiReference` with no img2img slot and no mask, and a 17th is refused by the catalog cap.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_image_live_mlx_lane_sends_up_to_sixteen_ordered_references() {
+    for count in [1usize, 16] {
+        let (fixture, edit) = minimax_h3_image_edit_fixture(count);
+        assert!(is_minimax_h3_image_edit(&edit));
+        let (lane, edit_refs, edit_ref_alpha) =
+            resolve_generic_lane_inputs(&edit, &fixture.settings, &fixture.project_path, false)
+                .expect("the live MLX lane resolves the H3-Image edit");
+        assert!(lane.identity_init.is_none() && lane.ideogram_edit_mask.is_none());
+        assert!(edit_refs
+            .iter()
+            .all(|image| (image.width, image.height) == (48, 32)));
+        let emitted = build_lane_conditioning_with_alpha(
+            lane.identity_init.as_ref(),
+            &edit_refs,
+            &edit_ref_alpha,
+            lane.ideogram_edit_mask.as_ref(),
+        );
+        let expected: Vec<u8> = (0..count).map(|index| index as u8 * 10).collect();
+        assert_eq!(minimax_h3_image_emitted_order(&emitted), expected);
+    }
+    let (fixture, mut edit) = minimax_h3_image_edit_fixture(16);
+    edit.reference_asset_ids
+        .push(fixture.ids[0].clone() + "-17th");
+    let refused =
+        resolve_generic_lane_inputs(&edit, &fixture.settings, &fixture.project_path, false);
+    assert!(
+        matches!(&refused, Err(WorkerError::InvalidPayload(message)) if message.contains("at most 16")),
+        "a 17th reference must be refused by name"
+    );
+    // No reference is text-to-image, not an edit.
+    let (_, mut text) = minimax_h3_image_edit_fixture(0);
+    text.mode = "text_to_image".to_owned();
+    assert!(!is_minimax_h3_image_edit(&text));
+}
+
+/// SW-7101 — the candle twin: the same resolver on `resolve_candle_lane_inputs`, and the edit is
+/// claimed by its own route rather than falling through as plain text-to-image.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn minimax_h3_image_live_candle_lane_sends_up_to_sixteen_ordered_references() {
+    for count in [1usize, 16] {
+        let (fixture, edit) = minimax_h3_image_edit_fixture(count);
+        assert!(is_minimax_h3_image_edit(&edit));
+        let (edit_reference, edit_mask, edit_refs, edit_ref_alpha) =
+            resolve_candle_lane_inputs(&edit, &fixture.settings, &fixture.project_path, false)
+                .expect("the live candle lane resolves the H3-Image edit");
+        assert!(edit_reference.is_none() && edit_mask.is_none());
+        let emitted = build_lane_conditioning_with_alpha(
+            edit_reference.as_ref(),
+            &edit_refs,
+            &edit_ref_alpha,
+            edit_mask.as_ref(),
+        );
+        let expected: Vec<u8> = (0..count).map(|index| index as u8 * 10).collect();
+        assert_eq!(minimax_h3_image_emitted_order(&emitted), expected);
+    }
 }
 
 /// A generator that behaves like a real denoise under a user cancel: it reports a step, keeps
@@ -22918,6 +23063,9 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         // network overlaid, and the route reaches the generic `generate_candle_stream` base-model
         // admission gate. Structurally the SenseNova case, not the ControlNet case.
         "QwenImage21Edit",
+        // MiniMax-H3-Image edit (SW-7101): its references are read by the same base's own vision
+        // tower and VAE, and the route reaches the generic `generate_candle_stream` admission gate.
+        "MinimaxH3ImageEdit",
         // FLUX.3 references use the base autoencoder, not an additional conditioning network.
         "Flux3Reference",
         "KreaEdit",

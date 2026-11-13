@@ -1180,12 +1180,14 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // shape (`supra2_mlx_eligible`).
     ModelCaps::new("supra2_img", true, true, false, false, false),
     // MiniMax-H3-Image (SW-7100, feature SW-F363): `mlx-gen-minimax-h3` and
-    // `candle-gen-minimax-h3` register the SAME engine id `minimax_h3_image`, text-to-image only in
-    // this item. Both lanes take the pre-packed q8/q4 DiT tiers as a staged component (SW-7093), so
-    // Candle accepts a tier request; no adapters until SW-7101.
+    // `candle-gen-minimax-h3` register the SAME engine id `minimax_h3_image`. Both lanes take the
+    // pre-packed q8/q4 DiT tiers as a staged component (SW-7093), and both install user LoRA/LoKr
+    // as forward-time residuals on every tier, dense or packed (SW-7096), so the row is in the
+    // combined quant+adapter set (SW-7101). Plain text-to-image reaches the generic txt2img lane;
+    // an edit (1..=16 ordered references) is claimed by `CandleImageLane::MinimaxH3ImageEdit`.
     // `CandleImageRefusal::MinimaxH3ImageSurface` holds the candle gate to exactly the MLX arm's
     // shape (`minimax_h3_image_mlx_eligible`).
-    ModelCaps::new("minimax_h3_image", true, true, true, false, false),
+    ModelCaps::new("minimax_h3_image", true, true, false, false, true),
 ];
 
 /// The one-row-per-model VIDEO routing table (sc-9495) — the single source the video list constants
@@ -2776,6 +2778,8 @@ mod tests {
         "sd3_5_large_turbo",
         "sd3_5_medium",
         "iris_3b",
+        // SW-7101: H3-Image adapters are forward-time residuals on the dense and packed tiers.
+        "minimax_h3_image",
     ];
 
     // Z-Image Turbo/base select already-packed q4/q8/bf16 directories; this is not on-the-fly quant,
@@ -2810,8 +2814,6 @@ mod tests {
         "sensenova_u1_8b_infographic_v2_fast",
         "sensenova_u1_8b_infographic_v3",
         "sensenova_u1_8b_infographic_v3_fast",
-        // SW-7100: the pre-packed q8/q4 MiniMax-H3-Image DiT tiers (SW-7093) load on Candle.
-        "minimax_h3_image",
     ];
 
     // sc-9983: Krea moved to CANDLE_QUANT_LORA_MODELS (BOTH). sc-10676: Anima is the LoRA-only candle

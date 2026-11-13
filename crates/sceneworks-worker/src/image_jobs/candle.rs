@@ -29,6 +29,8 @@ use super::conditioning::guard_qwen_image_2_1_lane_slots;
 #[cfg(not(target_os = "macos"))]
 use super::conditioning::is_mage_edit_model;
 #[cfg(not(target_os = "macos"))]
+use super::conditioning::is_minimax_h3_image_edit;
+#[cfg(not(target_os = "macos"))]
 use super::conditioning::is_qwen_image_2_1_edit;
 #[cfg(not(target_os = "macos"))]
 use super::conditioning::is_sensenova_candle_model;
@@ -46,6 +48,8 @@ use super::conditioning::resolve_ideogram_edit;
 use super::conditioning::resolve_img2img_init_generic;
 #[cfg(not(target_os = "macos"))]
 use super::conditioning::resolve_mage_edit;
+#[cfg(not(target_os = "macos"))]
+use super::conditioning::resolve_minimax_h3_image_edit;
 #[cfg(not(target_os = "macos"))]
 use super::conditioning::resolve_qwen_image_2_1_edit_images;
 #[cfg(not(target_os = "macos"))]
@@ -425,6 +429,10 @@ pub(super) fn resolve_candle_lane_inputs(
         let (images, alpha) = resolve_qwen_image_2_1_edit_images(request, settings, project_path)?;
         edit_ref_alpha = alpha;
         images
+    } else if is_minimax_h3_image_edit(request) {
+        // MiniMax-H3-Image edit (SW-7101) — the SAME resolver as the MLX lane: one engine id, the
+        // same `Reference` + `MultiReference` conditioning on both backends.
+        resolve_minimax_h3_image_edit(request, settings, project_path)?
     } else if is_sensenova_candle_model(&request.model)
         && matches!(request.mode.as_str(), "edit_image" | "character_image")
     {

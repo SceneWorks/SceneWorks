@@ -16672,8 +16672,8 @@ async fn cross_selecting_a_minimax_h3_partition_lora_is_refused_by_the_video_job
 
     let lora_dir = temp_dir.path().join("data/loras");
     std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
-    // Real MiniMax-H3 diffusers keys, so `detect_lora_family` reports `minimax-h3` and the
-    // detected-family check is exercised rather than skipped on a `None`.
+    // Real MiniMax-H3 diffusers keys. They are the key space H3-Image shares, so detection is
+    // inconclusive (SW-7101) and the DECLARED partition gate is what this test exercises.
     let keys: Vec<String> = ["attn.to_q", "attn.to_out.0", "ff.net.0.proj", "ff.net.2"]
         .iter()
         .flat_map(|target| {

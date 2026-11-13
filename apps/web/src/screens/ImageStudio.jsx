@@ -46,7 +46,7 @@ import {
 import { OrderedReferenceList } from "../components/OrderedReferenceList.jsx";
 
 import { isFlux3LayoutModel, orderedLayoutAssetIds, reconcileLayoutReferences, moveLayoutReference, bindLayoutReferenceIds } from "../flux3Layout.js";
-import { maxReferencesForModel } from "../imageReferenceLimits.js";
+import { appendPromptToken, maxReferencesForModel, referencePromptToken } from "../imageReferenceLimits.js";
 import { pidDecodeHeadsUp } from "../pidDecodeNotice.js";
 import { promptEnhancementAvailable } from "../promptEnhancement.js";
 
@@ -3038,6 +3038,9 @@ export function ImageStudio() {
                     onRemove={flux3LayoutAvailable ? removeFlux3Reference : undefined}
                     labelFor={assetLabelFor}
                     onChange={changeReferenceAssetIds}
+                    // SW-7101: MiniMax-H3-Image names each reference `<Picture N>` in its prompt.
+                    tokenFor={(index) => referencePromptToken(selectedModel, index)}
+                    onInsertToken={(token) => setPrompt((current) => appendPromptToken(current, token))}
                   />
                 ) : (
                   <>

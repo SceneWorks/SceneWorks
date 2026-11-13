@@ -311,6 +311,7 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
             CandleImageLane::MageEdit,
             CandleImageLane::Flux3Reference,
             CandleImageLane::QwenImage21Edit,
+            CandleImageLane::MinimaxH3ImageEdit,
             CandleImageLane::BooguImg2Img,
             CandleImageLane::KreaEdit,
             CandleImageLane::BerniniEdit,
@@ -6276,9 +6277,10 @@ fn supra2_routes_to_candle_for_plain_text_to_image_only() {
     );
 }
 
-/// SW-7100: a MiniMax-H3-Image text-to-image job routes to the Candle worker, tier carrier
-/// included, and the Candle lane refuses exactly the carriers the MLX arm refuses — named by the
-/// MiniMax-H3-Image check when no generic check owns them.
+/// SW-7100 / SW-7101: a MiniMax-H3-Image job routes to the Candle worker — text-to-image (with a
+/// tier carrier and LoRAs) on the generic txt2img lane, an ordered-reference edit (1..=16) on
+/// `CandleImageLane::MinimaxH3ImageEdit` — and the Candle lane refuses exactly the carriers the
+/// MLX arm refuses, named by the MiniMax-H3-Image check when no generic check owns them.
 #[test]
 fn minimax_h3_image_routes_to_candle_for_text_to_image() {
     use crate::jobs_store::routing::gaps::classify_candle_image_gap;
@@ -6286,7 +6288,8 @@ fn minimax_h3_image_routes_to_candle_for_text_to_image() {
 
     assert!(CANDLE_ROUTED_MODELS.contains(&"minimax_h3_image"));
     assert!(candle_family_serves_quant("minimax_h3_image"));
-    assert!(!candle_family_serves_lora("minimax_h3_image"));
+    assert!(candle_family_serves_lora("minimax_h3_image"));
+    assert!(candle_family_serves_quant_lora("minimax_h3_image"));
     let eligible =
         |payload: Value| image_request_candle_eligible("minimax_h3_image", &object(payload));
     let normalized = json!({
@@ -6302,19 +6305,42 @@ fn minimax_h3_image_routes_to_candle_for_text_to_image() {
     assert!(eligible(
         json!({ "model": "minimax_h3_image", "advanced": { "quantTier": "q4" } })
     ));
+    assert!(eligible(json!({
+        "model": "minimax_h3_image",
+        "loras": [{ "id": "l", "weight": 0.8 }],
+        "advanced": { "mlxQuantize": 8 }
+    })));
     let candle = gpu_worker(CANDLE_CAPS);
     assert!(worker_supports_job(
         &candle,
         &image_generate_job(json!({ "model": "minimax_h3_image", "prompt": "a lighthouse" }))
     ));
+    // The edit: claimed by its own lane, one to sixteen ordered references, LoRAs included.
+    for count in [1usize, 2, 16] {
+        let ids: Vec<String> = (1..=count).map(|i| format!("ref{i}")).collect();
+        let payload = json!({
+            "model": "minimax_h3_image",
+            "mode": "edit_image",
+            "prompt": "<Picture 1> wearing the hat from <Picture 2>",
+            "referenceAssetIds": ids,
+            "loras": [{ "id": "l", "weight": 0.8 }],
+        });
+        for job in [
+            image_edit_job(payload.clone()),
+            image_generate_job(payload.clone()),
+        ] {
+            assert_eq!(
+                image_job_candle_lane(&job),
+                Some(CandleImageLane::MinimaxH3ImageEdit),
+                "{payload}"
+            );
+            assert!(worker_supports_job(&candle, &job), "{payload}");
+        }
+    }
     for refused in [
-        json!({ "mode": "edit_image", "sourceAssetId": "a" }),
         json!({ "mode": "image_to_image", "sourceAssetId": "a" }),
-        json!({ "referenceAssetId": "a" }),
-        json!({ "referenceAssetIds": ["a"] }),
-        json!({ "maskAssetId": "a" }),
+        json!({ "mode": "edit_image", "referenceAssetIds": [""] }),
         json!({ "controls": [{}] }),
-        json!({ "loras": [{ "id": "l", "weight": 0.8 }] }),
         json!({ "hiresFix": { "enabled": true } }),
     ] {
         let mut payload = refused.clone();
