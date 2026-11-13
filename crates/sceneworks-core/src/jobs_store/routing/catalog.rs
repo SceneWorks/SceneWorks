@@ -2417,6 +2417,10 @@ pub const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
     // Qwen Image 2.1 instruction-EDIT LoRA/LoKr (epic 24107 S13, sc-24161): the same MLX trainer in
     // edit mode. The Candle twin (sc-24162) is in the candle set too.
     "qwen_image_2_1_edit_lora",
+    // MiniMax-H3-Image T2I + edit-pair LoRA/LoKr (SW-7103): the native `mlx-gen-minimax-h3`
+    // trainer (`minimax_h3_image`, SW-7097). Its Candle twin (SW-7098) is in the candle set too.
+    "minimax_h3_image_lora",
+    "minimax_h3_image_edit_lora",
     "flux3_klein_lora",
     "flux3_klein_edit_lora",
 ];
@@ -2453,6 +2457,11 @@ pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
     // Qwen Image 2.1 instruction-EDIT LoRA/LoKr (epic 24107 S14, sc-24162): the same Candle trainer
     // in edit mode (`max_reference_images` 10), base-gated the same way.
     "qwen_image_2_1_edit_lora",
+    // MiniMax-H3-Image T2I + edit-pair LoRA/LoKr (SW-7103): the `candle-gen-minimax-h3` trainer
+    // (SW-7098), registered under the same engine id (`minimax_h3_image`) as the MLX one and
+    // base-gated to `minimax_h3_image` by [`training_job_is_candle_eligible`].
+    "minimax_h3_image_lora",
+    "minimax_h3_image_edit_lora",
     "flux3_klein_lora",
     "flux3_klein_edit_lora",
 ];
@@ -2514,6 +2523,9 @@ pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
     // Qwen Image 2.1 edit (sc-24161/sc-24162): native MLX + Candle trainers and no generic one, so
     // a generic worker refuses it while the candle exception admits it (it is candle-routed).
     "qwen_image_2_1_edit_lora",
+    // MiniMax-H3-Image (SW-7103): native MLX + Candle trainers and no generic one.
+    "minimax_h3_image_lora",
+    "minimax_h3_image_edit_lora",
     "flux3_klein_lora",
     "flux3_klein_edit_lora",
 ];
@@ -2898,6 +2910,9 @@ mod tests {
         "qwen_image_2_1_lora",
         // sc-24161: Qwen Image 2.1 instruction-edit LoRA/LoKr on the native MLX trainer.
         "qwen_image_2_1_edit_lora",
+        // SW-7103: MiniMax-H3-Image T2I + edit-pair LoRA/LoKr on the native MLX trainer.
+        "minimax_h3_image_lora",
+        "minimax_h3_image_edit_lora",
         "flux3_klein_lora",
         "flux3_klein_edit_lora",
     ];
@@ -2922,6 +2937,9 @@ mod tests {
         "qwen_image_2_1_lora",
         // sc-24162: Qwen Image 2.1 instruction-edit LoRA/LoKr on the native Candle trainer.
         "qwen_image_2_1_edit_lora",
+        // SW-7103: MiniMax-H3-Image T2I + edit-pair LoRA/LoKr on the native Candle trainer.
+        "minimax_h3_image_lora",
+        "minimax_h3_image_edit_lora",
         "flux3_klein_lora",
         "flux3_klein_edit_lora",
     ];
@@ -2940,6 +2958,9 @@ mod tests {
         "qwen_image_2_1_lora",
         // sc-24162: native-Rust-only like its T2I sibling, so it stays here although candle-routed.
         "qwen_image_2_1_edit_lora",
+        // SW-7103: MiniMax-H3-Image, native-Rust-only on both backends.
+        "minimax_h3_image_lora",
+        "minimax_h3_image_edit_lora",
         "flux3_klein_lora",
         "flux3_klein_edit_lora",
     ];

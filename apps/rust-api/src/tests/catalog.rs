@@ -1270,6 +1270,9 @@ async fn models_catalog_carries_mac_support_and_capabilities_endpoint() {
         .collect();
     assert!(candle_kernels.contains(&"qwen_image_2_1_lora"));
     assert!(candle_kernels.contains(&"qwen_image_2_1_edit_lora"));
+    // SW-7103: both MiniMax-H3-Image kernels have a Candle trainer (SW-7098).
+    assert!(candle_kernels.contains(&"minimax_h3_image_lora"));
+    assert!(candle_kernels.contains(&"minimax_h3_image_edit_lora"));
     for kernel in &candle_kernels {
         assert!(
             sceneworks_core::jobs_store::training_kernel_is_candle_routed(kernel),
@@ -1281,6 +1284,16 @@ async fn models_catalog_carries_mac_support_and_capabilities_endpoint() {
         .unwrap()
         .iter()
         .any(|k| k == "qwen_image_2_1_edit_lora"));
+    for kernel in ["minimax_h3_image_lora", "minimax_h3_image_edit_lora"] {
+        assert!(
+            caps["training"]["supportedKernels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|k| k == kernel),
+            "{kernel}"
+        );
+    }
 }
 
 #[tokio::test]

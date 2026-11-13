@@ -2640,6 +2640,13 @@ pub(crate) fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'
         // trainer — it trains edit mode when the items carry ordered references. Base-gated like
         // the T2I kernel so no other base can load the 2.1 trainer.
         "qwen_image_2_1_edit_lora" => (base_model == "qwen_image_2_1").then_some("qwen_image_2_1"),
+        // MiniMax-H3-Image T2I + edit-pair LoRA/LoKr (SW-7103): both kernels reach the one engine
+        // trainer registered under the generator id (`gen_core_train::h3_image::TRAINER_ID`, MLX
+        // SW-7097 / Candle SW-7098), which trains edit mode when the items carry references.
+        // Base-gated so no other base (MiniMax-H3 video included) can load it.
+        "minimax_h3_image_lora" | "minimax_h3_image_edit_lora" => {
+            (base_model == "minimax_h3_image").then_some(gen_core_train::h3_image::TRAINER_ID)
+        }
         _ => None,
     }
 }
@@ -2664,7 +2671,7 @@ fn ltx_2_5_trainer_id() -> &'static str {
 fn training_load_precision(engine_id: &str, train_dtype: &str) -> Precision {
     if !matches!(
         engine_id,
-        "qwen_image_2_1" | "moss_image_base" | "moss_image_sft"
+        "qwen_image_2_1" | "moss_image_base" | "moss_image_sft" | "minimax_h3_image"
     ) && train_dtype.trim().eq_ignore_ascii_case("f32")
     {
         Precision::Fp32
@@ -3202,6 +3209,9 @@ pub(crate) struct TrainerLoadInputs {
     weights_dir: PathBuf,
     text_encoder: Option<WeightsSource>,
     components: std::collections::BTreeMap<String, WeightsSource>,
+    /// The staged tier's load quant (MiniMax-H3-Image's packed q8/q4 DiT, SW-7103); `None` for
+    /// every dense base.
+    quantize: Option<gen_core::Quant>,
 }
 
 #[cfg(native_lane)]
@@ -3211,6 +3221,27 @@ impl TrainerLoadInputs {
         plan: &TrainingPlan,
         engine_id: &str,
     ) -> WorkerResult<Self> {
+        // MiniMax-H3-Image (SW-7103): the base is a tier the catalog rows resolve — the upstream
+        // snapshot root for bf16, the re-host's `{tier}/` for q8/q4 — plus MiniMax-H3's text encoder
+        // at that tier, staged exactly as a render of the same tier stages them. The plan's
+        // `baseModelPath` only names the bf16 snapshot, so the trainer resolves from the catalog.
+        if engine_id == gen_core_train::h3_image::TRAINER_ID {
+            let tier = sceneworks_core::training::minimax_h3_image_base_tier(&plan.config.advanced)
+                .map_err(WorkerError::InvalidPayload)?;
+            let spec =
+                crate::image_jobs::minimax_h3_image::training_load_spec(&settings.data_dir, tier)?;
+            let WeightsSource::Dir(weights_dir) = spec.weights else {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "{engine_id} training resolved a single-file base; expected its snapshot root"
+                )));
+            };
+            return Ok(Self {
+                weights_dir,
+                text_encoder: None,
+                components: spec.components,
+                quantize: spec.quantize,
+            });
+        }
         let weights_dir = resolve_app_managed_model_dir(
             settings,
             &plan.target.base_model_path,
@@ -3257,6 +3288,7 @@ impl TrainerLoadInputs {
             weights_dir,
             text_encoder,
             components,
+            quantize: None,
         })
     }
 
@@ -3271,6 +3303,7 @@ impl TrainerLoadInputs {
             text_encoder: training_text_encoder(engine_id, &weights_dir),
             weights_dir,
             components,
+            quantize: None,
         }
     }
 
@@ -3286,6 +3319,7 @@ impl TrainerLoadInputs {
         let load_precision = training_load_precision(engine_id, train_dtype);
         let mut spec = LoadSpec::new(WeightsSource::Dir(self.weights_dir));
         spec.precision = load_precision;
+        spec.quantize = self.quantize;
         // LTX-2.3's bundled Gemma-3 TE (sc-9989); `None` for every other family.
         spec.text_encoder = self.text_encoder;
         self.components
@@ -8814,6 +8848,7 @@ mod tests {
                             "moss-shared-snapshot".into(),
                             WeightsSource::Dir(shared.clone()),
                         )]),
+                        quantize: None,
                     };
                     let spec = inputs.load_spec(engine, &request.config.train_dtype);
                     assert!(
@@ -8850,15 +8885,15 @@ mod tests {
     #[test]
     fn training_load_precision_keeps_qwen_image_2_1_at_bf16() {
         // sc-24159: the 2.1 trainer refuses any LoadSpec precision but Bf16; f32 compute rides on
-        // train_dtype alone, so even an f32 (or free-text → f32) run loads at Bf16.
-        for dtype in ["f32", "F32", "bf16"] {
-            assert!(
-                matches!(
-                    training_load_precision("qwen_image_2_1", dtype),
-                    Precision::Bf16
-                ),
-                "{dtype}"
-            );
+        // train_dtype alone, so even an f32 (or free-text → f32) run loads at Bf16. SW-7103: the
+        // MiniMax-H3-Image trainer has the same contract on both backends.
+        for engine in ["qwen_image_2_1", "minimax_h3_image"] {
+            for dtype in ["f32", "F32", "bf16"] {
+                assert!(
+                    matches!(training_load_precision(engine, dtype), Precision::Bf16),
+                    "{engine}/{dtype}"
+                );
+            }
         }
         // Trainers without a fixed BF16 source contract keep tracking train_dtype.
         assert!(matches!(
@@ -8938,6 +8973,20 @@ mod tests {
             ),
             ("qwen_image_2_1_edit_lora", "qwen_image", None),
             ("qwen_image_2_1_edit_lora", "qwen_image_edit", None),
+            // MiniMax-H3-Image (SW-7103): both kernels reach the one `minimax_h3_image` trainer,
+            // base-gated so the MiniMax-H3 video base (or any other) never loads it.
+            (
+                "minimax_h3_image_lora",
+                "minimax_h3_image",
+                Some("minimax_h3_image"),
+            ),
+            (
+                "minimax_h3_image_edit_lora",
+                "minimax_h3_image",
+                Some("minimax_h3_image"),
+            ),
+            ("minimax_h3_image_lora", "minimax_h3", None),
+            ("minimax_h3_image_edit_lora", "qwen_image_2_1", None),
             // Unknown SD3.5 base model variant (e.g. Turbo is NOT a training base).
             ("sd3_lora", "sd3_5_large_turbo", None),
             // Unknown A14B base model variant.

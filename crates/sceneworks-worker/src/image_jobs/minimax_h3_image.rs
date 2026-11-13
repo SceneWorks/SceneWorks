@@ -79,10 +79,10 @@ fn row_tier_subdir(row: &Value) -> Option<String> {
 
 /// Where `tier`'s directory is in the cache, or `None` when the tier is not declared, pending, or
 /// its pinned snapshot is absent. The directory need not hold a complete DiT; see [`installed`].
-pub(crate) fn tier_dir(settings: &Settings, entry: &JsonObject, tier: &str) -> Option<PathBuf> {
+pub(crate) fn tier_dir(data_dir: &Path, entry: &JsonObject, tier: &str) -> Option<PathBuf> {
     let row = primary_row(entry, tier)?;
     let (repo, revision) = row_identity(&row)?;
-    let snapshot = huggingface_pinned_snapshot_dir(&settings.data_dir, repo, revision)?;
+    let snapshot = huggingface_pinned_snapshot_dir(data_dir, repo, revision)?;
     Some(match row_tier_subdir(&row) {
         Some(subdir) => snapshot.join(subdir),
         None => snapshot,
@@ -165,9 +165,24 @@ pub(crate) fn resolve_weights_dir(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
-    let entry = &request.model_manifest_entry;
-    let installed_dir = |tier: &str| tier_dir(settings, entry, tier).filter(|dir| installed(dir));
-    if let Some(tier) = explicit_tier(request)? {
+    resolve_tier_dir(
+        &request.model_manifest_entry,
+        &settings.data_dir,
+        explicit_tier(request)?,
+    )
+}
+
+/// [`resolve_weights_dir`] for a caller that already knows the explicit tier (or `None`): an
+/// explicit tier is honoured or refused by name, never substituted; with none, the densest
+/// installed tier. Shared with the H3-Image trainer (SW-7103), so training resolves the same tier
+/// directory a render of the same selection would.
+pub(crate) fn resolve_tier_dir(
+    entry: &JsonObject,
+    data_dir: &Path,
+    explicit: Option<&str>,
+) -> WorkerResult<Option<PathBuf>> {
+    let installed_dir = |tier: &str| tier_dir(data_dir, entry, tier).filter(|dir| installed(dir));
+    if let Some(tier) = explicit {
         if let Some(dir) = installed_dir(tier) {
             return Ok(Some(dir));
         }
@@ -189,7 +204,7 @@ pub(crate) fn resolve_weights_dir(
 
 /// The load root: the pinned snapshot of the tier-agnostic `image_vae` co-requisite, which must
 /// hold `vae_diffusers/` and `tokenizer/`.
-fn load_root(settings: &Settings, entry: &JsonObject) -> WorkerResult<PathBuf> {
+fn load_root(data_dir: &Path, entry: &JsonObject) -> WorkerResult<PathBuf> {
     let row = co_requisite_rows(entry, ROOT_COMPONENT)
         .next()
         .ok_or_else(|| {
@@ -203,7 +218,7 @@ fn load_root(settings: &Settings, entry: &JsonObject) -> WorkerResult<PathBuf> {
             "{MODEL_ID}: the `{ROOT_COMPONENT}` co-requisite declares no repo/revision"
         ))
     })?;
-    let root = huggingface_pinned_snapshot_dir(&settings.data_dir, repo, revision)
+    let root = huggingface_pinned_snapshot_dir(data_dir, repo, revision)
         .filter(|root| {
             root.join("vae_diffusers").join("config.json").is_file()
                 && root.join("tokenizer").join("tokenizer.json").is_file()
@@ -235,7 +250,7 @@ fn co_requisite_rows<'a>(
 /// MiniMax-H3's text encoder at `tier`: the tier-scoped `text_encoder` co-requisite row (one per
 /// tier on this host — the catalog is already narrowed to the running OS), its pinned snapshot
 /// narrowed by `subdir`.
-fn text_encoder_dir(settings: &Settings, entry: &JsonObject, tier: &str) -> WorkerResult<PathBuf> {
+fn text_encoder_dir(data_dir: &Path, entry: &JsonObject, tier: &str) -> WorkerResult<PathBuf> {
     let row = co_requisite_rows(entry, TEXT_ENCODER_COMPONENT)
         .find(|row| {
             row.get("variant")
@@ -257,7 +272,7 @@ fn text_encoder_dir(settings: &Settings, entry: &JsonObject, tier: &str) -> Work
         .get("subdir")
         .and_then(Value::as_str)
         .unwrap_or(TEXT_ENCODER_COMPONENT);
-    let dir = huggingface_pinned_snapshot_dir(&settings.data_dir, repo, revision)
+    let dir = huggingface_pinned_snapshot_dir(data_dir, repo, revision)
         .map(|snapshot| crate::safe_join(&snapshot, subdir))
         .transpose()?
         .filter(|dir| dir.join("config.json").is_file())
@@ -274,9 +289,18 @@ fn text_encoder_dir(settings: &Settings, entry: &JsonObject, tier: &str) -> Work
 /// stage the tier's DiT and MiniMax-H3's text encoder. The load quant names the staged tier (the
 /// engine's on-disk `quantization` marker stays authoritative).
 pub(crate) fn attach_components(
-    mut spec: LoadSpec,
+    spec: LoadSpec,
     entry: &JsonObject,
     settings: &Settings,
+) -> WorkerResult<LoadSpec> {
+    attach_components_in(spec, entry, &settings.data_dir)
+}
+
+/// [`attach_components`] against an app data directory.
+fn attach_components_in(
+    mut spec: LoadSpec,
+    entry: &JsonObject,
+    data_dir: &Path,
 ) -> WorkerResult<LoadSpec> {
     let WeightsSource::Dir(dir) = &spec.weights else {
         return Err(WorkerError::InvalidPayload(format!(
@@ -290,8 +314,8 @@ pub(crate) fn attach_components(
             tier_directory.display()
         ))
     })?;
-    let root = load_root(settings, entry)?;
-    let text_encoder = text_encoder_dir(settings, entry, tier)?;
+    let root = load_root(data_dir, entry)?;
+    let text_encoder = text_encoder_dir(data_dir, entry, tier)?;
     spec.weights = WeightsSource::Dir(root);
     spec.quantize = tier_quant(tier);
     let mut spec = spec.with_component(TEXT_ENCODER_COMPONENT, WeightsSource::Dir(text_encoder));
@@ -302,6 +326,48 @@ pub(crate) fn attach_components(
         );
     }
     Ok(spec)
+}
+
+/// The trainer's [`LoadSpec`] for a MiniMax-H3-Image LoRA/LoKr run (SW-7103): the shipped catalog
+/// entry narrowed to this OS, the tier [`resolve_tier_dir`] picks for `explicit` (the plan's
+/// `advanced.baseTier`; `None` = densest installed), re-rooted and staged by [`attach_components`]
+/// exactly as a render of that tier is — so the trainer sees the same snapshot root, DiT tier,
+/// text encoder and load quant the generator does. Refuses when no tier is installed.
+pub(crate) fn training_load_spec(
+    data_dir: &Path,
+    explicit: Option<&str>,
+) -> WorkerResult<LoadSpec> {
+    let mut entry =
+        crate::training_jobs::builtin_model_manifest_entry(MODEL_ID).ok_or_else(|| {
+            WorkerError::InvalidPayload(format!("{MODEL_ID} has no builtin catalog entry"))
+        })?;
+    sceneworks_core::model_artifacts::artifact_selection::retain_downloads_for_os(
+        &mut entry,
+        std::env::consts::OS,
+    );
+    let entry = entry.as_object().cloned().ok_or_else(|| {
+        WorkerError::InvalidPayload(format!("{MODEL_ID} catalog entry is not an object"))
+    })?;
+    training_load_spec_in(&entry, data_dir, explicit)
+}
+
+/// [`training_load_spec`] against an already-narrowed catalog entry.
+fn training_load_spec_in(
+    entry: &JsonObject,
+    data_dir: &Path,
+    explicit: Option<&str>,
+) -> WorkerResult<LoadSpec> {
+    let tier_directory = resolve_tier_dir(entry, data_dir, explicit)?.ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "{MODEL_ID} training needs an installed tier — install {MODEL_ID} from the Model \
+             Manager"
+        ))
+    })?;
+    attach_components_in(
+        LoadSpec::new(WeightsSource::Dir(tier_directory)),
+        entry,
+        data_dir,
+    )
 }
 
 #[cfg(test)]
@@ -498,9 +564,80 @@ mod tests {
             resolve_weights_dir(&request(&entry, json!({"mlxQuantize": 4})), &settings).is_err()
         );
     }
+    /// SW-7103: the trainer's load spec is the render's for the same tier — the upstream root, the
+    /// tier's staged DiT and same-tier text encoder, the tier's quant — chosen by the plan's
+    /// `baseTier` (or the densest installed tier), and refused by name when nothing (or not the
+    /// named tier) is installed, so a run never trains over a substituted base.
+    #[test]
+    fn the_training_load_spec_resolves_the_render_tier_and_refuses_an_uninstalled_one() {
+        let temporary = tempfile::tempdir().unwrap();
+        let (data, _guard) = isolated_cache(temporary.path());
+        let mut entry = shipped_entry();
+        let refused = training_load_spec_in(&entry, &data, None).unwrap_err();
+        assert!(
+            refused.to_string().contains("needs an installed tier"),
+            "{refused}"
+        );
+        let rehost_rev = "2222222222222222222222222222222222222222";
+        for row in entry["downloads"].as_array_mut().unwrap() {
+            if row.get("pendingArtifact").is_some() {
+                row.as_object_mut().unwrap().remove("pendingArtifact");
+                row["revision"] = json!(rehost_rev);
+            }
+        }
+        let root = snapshot(&data, IMAGE_REPO, IMAGE_REV);
+        assert!(root.starts_with(temporary.path()));
+        for file in [
+            "transformer_diffusers/config.json",
+            "vae_diffusers/config.json",
+            "tokenizer/tokenizer.json",
+        ] {
+            touch(root.join(file));
+        }
+        let rehost = snapshot(&data, "SceneWorks/minimax-h3-image-mlx", rehost_rev);
+        touch(rehost.join("q4/transformer_diffusers/config.json"));
+        let te_dir = |tier: &str| {
+            let row = co_requisite_rows(&entry, TEXT_ENCODER_COMPONENT)
+                .find(|row| row["variant"] == tier)
+                .unwrap()
+                .clone();
+            let snapshot = snapshot(
+                &data,
+                row["repo"].as_str().unwrap(),
+                row["revision"].as_str().unwrap(),
+            );
+            snapshot.join(row["subdir"].as_str().unwrap())
+        };
+        // The bf16 DiT is on disk but its text encoder is not: refused, never another tier.
+        let refused = training_load_spec_in(&entry, &data, None).unwrap_err();
+        assert!(refused.to_string().contains("text encoder"), "{refused}");
+        touch(te_dir("bf16").join("config.json"));
+        let spec = training_load_spec_in(&entry, &data, None).unwrap();
+        assert!(matches!(&spec.weights, WeightsSource::Dir(dir) if *dir == root));
+        assert_eq!(spec.quantize, None);
+        assert!(!spec.components.contains_key(DIT_COMPONENT));
+        // An explicit packed tier trains that tier frozen, with its own text encoder.
+        touch(te_dir("q4").join("config.json"));
+        let spec = training_load_spec_in(&entry, &data, Some("q4")).unwrap();
+        assert!(matches!(&spec.weights, WeightsSource::Dir(dir) if *dir == root));
+        assert_eq!(spec.quantize, Some(Quant::Q4));
+        assert!(matches!(
+            spec.components.get(DIT_COMPONENT),
+            Some(WeightsSource::Dir(dir)) if *dir == rehost.join("q4/transformer_diffusers")
+        ));
+        assert!(matches!(
+            spec.components.get(TEXT_ENCODER_COMPONENT),
+            Some(WeightsSource::Dir(dir)) if *dir == te_dir("q4")
+        ));
+        // q8 is declared but not installed: refused by name.
+        let refused = training_load_spec_in(&entry, &data, Some("q8")).unwrap_err();
+        assert!(refused.to_string().contains("q8"), "{refused}");
+    }
+
     /// SW-7102: a MiniMax-H3-Image job stages a resident prompt expander out of the refine cache
     /// before it resolves (let alone loads or renders) its own weights. The job here has no weights
     /// and an unroutable API, so it fails at route preparation — after the expander is already gone.
+    #[cfg(native_lane)]
     #[tokio::test]
     async fn an_image_job_stages_the_resident_expander_out_before_generation() {
         use crate::refine_model_cache::tests::{

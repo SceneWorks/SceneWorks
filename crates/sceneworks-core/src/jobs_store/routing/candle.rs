@@ -2314,6 +2314,11 @@ pub(crate) fn training_job_is_candle_eligible(job: &JobSnapshot) -> bool {
         "qwen_image_2_1_lora" | "qwen_image_2_1_edit_lora" => {
             base_model == "qwen_image_2_1" && is_adapter
         }
+        // MiniMax-H3-Image (SW-7103): LoRA/LoKr on the `minimax_h3_image` base only, both the T2I
+        // and the edit-pair kernel (one `candle-gen-minimax-h3` trainer, SW-7098).
+        "minimax_h3_image_lora" | "minimax_h3_image_edit_lora" => {
+            base_model == "minimax_h3_image" && is_adapter
+        }
         // Existing native families keep their established admission. Their trainers perform the
         // final typed validation; Krea ControlNet deliberately has no adapter-kind selector.
         _ => true,

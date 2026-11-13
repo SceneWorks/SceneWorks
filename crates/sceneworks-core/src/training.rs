@@ -995,6 +995,8 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
             moss_image_lora_target(true),
             qwen_image_2_1_lora_target(),
             qwen_image_2_1_edit_lora_target(),
+            minimax_h3_image_lora_target(),
+            minimax_h3_image_edit_lora_target(),
             flux3::target(false),
             flux3::target(true),
             ltx_video_lora_target(),
@@ -1082,6 +1084,10 @@ const NOISE_TARGETS: &[&str] = &[
     "mage_flow_base_lora",
     "qwen_image_2_1_lora",
     "qwen_image_2_1_edit_lora",
+    // SW-7103: the H3-Image trainer declares `TrainingTechniques::ADAPTER_NOISE` (weight and
+    // gradient noise at the shared adapter update) plus resolution buckets, and nothing else.
+    "minimax_h3_image_lora",
+    "minimax_h3_image_edit_lora",
     "moss_image_base_lora",
     "moss_image_sft_lora",
 ];
@@ -1158,6 +1164,8 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
     let anima_target = anima_base_lora_target();
     let qwen_image_2_1_target = qwen_image_2_1_lora_target();
     let qwen_image_2_1_edit_target = qwen_image_2_1_edit_lora_target();
+    let minimax_h3_image_target = minimax_h3_image_lora_target();
+    let minimax_h3_image_edit_target = minimax_h3_image_edit_lora_target();
     let wan_target = wan_lora_target();
     let wan_t2v_14b_target = wan_t2v_14b_lora_target();
     let wan_i2v_14b_target = wan_i2v_14b_lora_target();
@@ -1816,6 +1824,84 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 },
                 object(json!({
                     "description": "Lower-rank, lower-LR Qwen Image 2.1 edit preset for small or tightly consistent edit-pair datasets.",
+                    "order": 20
+                })),
+            ),
+            // MiniMax-H3-Image (SW-7103): the target defaults carry the 2048x2048 canvas,
+            // checkpointing and the flow-match knobs, so these only pick capacity/LR.
+            krea_preset(
+                &minimax_h3_image_target,
+                "minimax_h3_image_lora.character.adamw8bit.balanced",
+                "Character balanced",
+                &["character"],
+                ("adamw8bit", "balanced"),
+                |config| config,
+                object(json!({
+                    "description": "Balanced first run for 12-25 clean character images on MiniMax-H3-Image at its native 2048x2048 canvas (the adapter inherits the MiniMax-H3-Image Community License).",
+                    "default": true,
+                    "order": 10
+                })),
+            ),
+            krea_preset(
+                &minimax_h3_image_target,
+                "minimax_h3_image_lora.character.adamw8bit.conservative",
+                "Character conservative",
+                &["character"],
+                ("adamw8bit", "conservative"),
+                |mut config| {
+                    config.rank = 8;
+                    config.alpha = ContractNumber::from(8);
+                    config.learning_rate = number(0.00005);
+                    config
+                },
+                object(json!({
+                    "description": "Lower-rank, lower-LR MiniMax-H3-Image character preset for tight identity datasets.",
+                    "order": 20
+                })),
+            ),
+            krea_preset(
+                &minimax_h3_image_target,
+                "minimax_h3_image_lora.style.adamw8bit.balanced",
+                "Style balanced",
+                &["style"],
+                ("adamw8bit", "balanced"),
+                |mut config| {
+                    config.rank = 32;
+                    config.alpha = ContractNumber::from(16);
+                    config
+                },
+                object(json!({
+                    "description": "Higher-capacity MiniMax-H3-Image style LoRA for texture and look transfer.",
+                    "order": 30
+                })),
+            ),
+            krea_preset(
+                &minimax_h3_image_edit_target,
+                "minimax_h3_image_edit_lora.edit.adamw8bit.balanced",
+                "Edit balanced",
+                &["edit"],
+                ("adamw8bit", "balanced"),
+                |config| config,
+                object(json!({
+                    "description": "Balanced first run for 20-50 edit pairs (1-16 ordered references + target + instruction) on MiniMax-H3-Image (the adapter inherits the MiniMax-H3-Image Community License).",
+                    "default": true,
+                    "order": 10
+                })),
+            ),
+            krea_preset(
+                &minimax_h3_image_edit_target,
+                "minimax_h3_image_edit_lora.edit.adamw8bit.conservative",
+                "Edit conservative",
+                &["edit"],
+                ("adamw8bit", "conservative"),
+                |mut config| {
+                    config.rank = 8;
+                    config.alpha = ContractNumber::from(8);
+                    config.learning_rate = number(0.00005);
+                    config
+                },
+                object(json!({
+                    "description": "Lower-rank, lower-LR MiniMax-H3-Image edit preset for small or tightly consistent edit-pair datasets.",
                     "order": 20
                 })),
             ),
@@ -4047,6 +4133,23 @@ pub fn validate_training_config_for_target(
     if iris::is_iris_training_kernel(&target.kernel) {
         iris::validate_iris_training_config(target, config)?;
     }
+    if is_minimax_h3_image_training_kernel(&target.kernel) {
+        minimax_h3_image_base_tier(&config.advanced).map_err(|message| {
+            TrainingPlanError::InvalidField {
+                field: MINIMAX_H3_IMAGE_BASE_TIER_KEY.to_owned(),
+                message,
+            }
+        })?;
+    } else if config.advanced.contains_key(MINIMAX_H3_IMAGE_BASE_TIER_KEY) {
+        return Err(TrainingPlanError::InvalidField {
+            field: MINIMAX_H3_IMAGE_BASE_TIER_KEY.to_owned(),
+            message: format!(
+                "{} trains a fixed base; {MINIMAX_H3_IMAGE_BASE_TIER_KEY} selects a \
+                 MiniMax-H3-Image tier only.",
+                target.name
+            ),
+        });
+    }
     validate_resolution_buckets_for_target(target, config)?;
     validate_technique_support(target, config)?;
     depth_anchoring::validate_support(target, config)?;
@@ -5078,6 +5181,206 @@ fn qwen_image_2_1_edit_lora_target() -> TrainingTarget {
                  ordered reference images. Apple Silicon (native MLX) or Windows/Linux NVIDIA \
                  (candle/CUDA). Research/evaluation use \
                  only under the Qwen RESEARCH licence."
+            )),
+        ),
+        ("recommendedFor", json!(["edit"])),
+        ("datasetKind", json!("editPairs")),
+    ] {
+        target.ui.insert(key.to_owned(), value);
+    }
+    target
+}
+
+/// The SceneWorks LoRA family a MiniMax-H3-Image adapter is labelled with — the generator's own
+/// family token, which its catalog entry's `loraCompatibility` admits and which `lora_family.rs`
+/// reads back off a trained adapter.
+pub const MINIMAX_H3_IMAGE_LORA_FAMILY: &str = crate::model_family::MINIMAX_H3_IMAGE;
+
+/// The licence MiniMax-H3-Image's weights — and so every adapter trained from them, a Model
+/// Derivative — are under. The API records it on the trained adapter's library entry.
+pub const MINIMAX_H3_IMAGE_LICENSE: &str = "MiniMax-H3-Image Community License Agreement";
+
+/// The pinned licence text (the same revision as the catalog entry's bf16 download).
+pub const MINIMAX_H3_IMAGE_LICENSE_URL: &str =
+    "https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/492fd8c4eca666f1085f57e30738c1e0d86b3439/LICENSE";
+
+/// How many ordered reference images one MiniMax-H3-Image edit-pair training item may carry: the
+/// generator's own cap (`gen_core::h3_image::MAX_REFERENCES`), which is also the base model's
+/// `limits.maxReferenceAssets` and the engine trainer's `TrainerDescriptor::max_reference_images`
+/// — the contract tests pin the three together.
+pub const MINIMAX_H3_IMAGE_MAX_REFERENCE_IMAGES: u32 = 16;
+
+/// The default — and largest offered — square training edge: H3-Image's native 4 MP canvas
+/// (`gen_core_train::h3_image::DEFAULT_TRAINING_RESOLUTION`, feature SW-F363 E20).
+pub const MINIMAX_H3_IMAGE_TRAINING_RESOLUTION: u32 = 2048;
+
+/// `advanced` key naming the DiT tier a MiniMax-H3-Image run trains over: `"bf16"`, `"q8"` or
+/// `"q4"`, or absent / `"auto"` for the densest installed tier (the rule an Image Studio render
+/// without a tier selection follows). An explicit tier is honoured or refused by name, never
+/// substituted.
+pub const MINIMAX_H3_IMAGE_BASE_TIER_KEY: &str = "baseTier";
+
+/// The tiers [`MINIMAX_H3_IMAGE_BASE_TIER_KEY`] may name (the catalog entry's tier variants).
+pub const MINIMAX_H3_IMAGE_BASE_TIERS: [&str; 3] = ["bf16", "q8", "q4"];
+
+/// The explicit tier a MiniMax-H3-Image plan names, `Ok(None)` for absent / empty / `"auto"`, or the
+/// refusal for anything else.
+pub fn minimax_h3_image_base_tier(advanced: &JsonObject) -> Result<Option<&'static str>, String> {
+    let Some(value) = advanced.get(MINIMAX_H3_IMAGE_BASE_TIER_KEY) else {
+        return Ok(None);
+    };
+    let Some(text) = value.as_str() else {
+        return Err(format!(
+            "{MINIMAX_H3_IMAGE_BASE_TIER_KEY} must be a string (auto, bf16, q8 or q4)."
+        ));
+    };
+    let text = text.trim();
+    if text.is_empty() || text.eq_ignore_ascii_case("auto") {
+        return Ok(None);
+    }
+    MINIMAX_H3_IMAGE_BASE_TIERS
+        .into_iter()
+        .find(|tier| tier.eq_ignore_ascii_case(text))
+        .map(Some)
+        .ok_or_else(|| {
+            format!(
+                "{MINIMAX_H3_IMAGE_BASE_TIER_KEY} {text:?} is not a MiniMax-H3-Image tier (use auto, \
+                 bf16, q8 or q4)."
+            )
+        })
+}
+
+/// Whether `kernel` is one of the two MiniMax-H3-Image training kernels.
+pub fn is_minimax_h3_image_training_kernel(kernel: &str) -> bool {
+    matches!(
+        kernel,
+        "minimax_h3_image_lora" | "minimax_h3_image_edit_lora"
+    )
+}
+
+/// MiniMax-H3-Image text-to-image LoRA/LoKr training (SW-7103, feature SW-F363 E19/E20).
+///
+/// Trains over the installed DiT tier — the upstream bf16 checkpoint or a packed q8/q4 tier, frozen
+/// and used in its published form (a quantized frozen base by design, E20) — with MiniMax-H3's
+/// Qwen3-VL text encoder at the same tier. The worker resolves the tier the way an Image Studio
+/// render does: [`MINIMAX_H3_IMAGE_BASE_TIER_KEY`] when the plan names one, else the densest
+/// installed tier.
+///
+/// The `minimax_h3_image_lora` kernel maps to the engine trainer registered under the generator id,
+/// `minimax_h3_image` (`gen_core_train::h3_image::TRAINER_ID`), on MLX (SW-7097) and Candle
+/// (SW-7098). Fitting is by design: the DiT's blocks stream one at a time with checkpointing
+/// structural, and the trainer's own preflight — the train-step envelope priced from the staged
+/// tier's headers the same way inference admission prices a render — refuses a run the device
+/// cannot hold before any weight is read. So no training memory numbers are declared here.
+///
+/// Licensing: the base's MiniMax-H3-Image Community License binds derivatives, so
+/// `ui.requiresLicenseAcknowledgment` gates Start training and the API's real-run gate, and the
+/// trained adapter's library entry records `ui.license`.
+fn minimax_h3_image_lora_target() -> TrainingTarget {
+    TrainingTarget {
+        id: "minimax_h3_image_lora".to_owned(),
+        name: "MiniMax-H3-Image LoRA".to_owned(),
+        modality: TrainingModality::Image,
+        output_kind: TrainingOutputKind::Lora,
+        family: MINIMAX_H3_IMAGE_LORA_FAMILY.to_owned(),
+        base_model: "minimax_h3_image".to_owned(),
+        // The bf16 tier is this snapshot's root; the worker re-resolves the installed tier (and the
+        // q8/q4 re-host) from the catalog rows at run time.
+        base_model_repo: Some("MiniMaxAI/MiniMax-H3-Image".to_owned()),
+        kernel: "minimax_h3_image_lora".to_owned(),
+        defaults: TrainingConfig {
+            rank: 16,
+            alpha: ContractNumber::from(16),
+            learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
+            steps: 2000,
+            batch_size: 1,
+            gradient_accumulation: 1,
+            resolution: MINIMAX_H3_IMAGE_TRAINING_RESOLUTION,
+            save_every: 250,
+            seed: 42,
+            optimizer: "adamw8bit".to_owned(),
+            trigger_word: None,
+            advanced: object(json!({
+                "mixedPrecision": "bf16",
+                "cacheLatents": true,
+                "cacheTextEmbeddings": true,
+                // The configuration the trainer's memory preflight admits by design (streamed
+                // blocks). Off asks for the whole DiT resident, which the preflight refuses unless
+                // the device holds it.
+                "gradientCheckpointing": true,
+                "networkType": "lora",
+                "baseTier": "auto",
+                // The drawn noise level is quantized onto the six published sigmas the distilled
+                // heads were trained at (`gen_core_train::h3_image::training_step`).
+                "timestepType": "sigmoid",
+                "timestepBias": "balanced",
+                "lossType": "mse",
+                "weightDecay": 0.0001,
+                "lrScheduler": "constant",
+                // Previews render through the registered generator (fixed six steps, no guidance).
+                "sampleEvery": 500,
+                "qualityPreset": "balanced",
+                "outputScope": "project",
+                "requestedGpu": "auto"
+            })),
+            extra: ExtraFields::new(),
+        },
+        limits: object(json!({
+            "rank": [4, 128],
+            "alpha": [1, 128],
+            "steps": [200, 6000],
+            "resolutions": [1024, 1536, MINIMAX_H3_IMAGE_TRAINING_RESOLUTION],
+            "batchSize": [1, 4],
+            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
+            // Both install as forward-time residuals on every tier (SW-7096).
+            "networkTypes": ["lora", "lokr"],
+            "lrSchedulers": ["constant", "linear", "cosine"],
+            "outputScopes": ["project", "global"],
+            "baseTiers": ["auto", "bf16", "q8", "q4"],
+        })),
+        ui: object(json!({
+            "label": "MiniMax-H3-Image LoRA",
+            "description": "Train a text-to-image LoRA or LoKr for MiniMax-H3-Image at its native 2048x2048 canvas over an installed tier (bf16, or a packed q8/q4 tier used frozen). Apple Silicon (native MLX) or Windows/Linux NVIDIA (candle/CUDA). The run is checked against this machine's memory before any weight is read. Governed by the MiniMax-H3-Image Community License.",
+            "recommendedFor": ["character", "style"],
+            "datasetModality": "image",
+            "license": MINIMAX_H3_IMAGE_LICENSE,
+            "licenseUrl": MINIMAX_H3_IMAGE_LICENSE_URL,
+            "licenseNotice": "MiniMax-H3-Image is governed by the MiniMax-H3-Image Community License Agreement (dated November 10, 2026). An adapter you train from it is a Model Derivative and stays under that agreement: use it only within the Applicable Territory (worldwide excluding the European Union, the United Kingdom, the Republic of Korea and the United States of America) and under its Acceptable Use Policy, which includes disclosing machine-generated content you publish; obtain MiniMax's prior written authorization before commercial use above 1 million US dollars of annualized revenue or for any Hosted Service to third parties; and display \"MiniMax-H3-Image\" in a commercial product that uses it. Section V.3 lets you use the model and its Outputs to train only MiniMax-H3-Image and its Model Derivatives, never another AI model.",
+            "requiresLicenseAcknowledgment": true
+        })),
+        extra: ExtraFields::new(),
+    }
+}
+
+/// MiniMax-H3-Image edit-pair LoRA/LoKr training (SW-7103, E19): the same base, tier resolution,
+/// licence gate, family and network types as [`minimax_h3_image_lora_target`], trained on edit
+/// PAIRS — every dataset item is the edit TARGET (the item image), its INSTRUCTION (the caption)
+/// and 1..=16 ORDERED reference images (`TrainingDatasetItem::references`), presented to the model
+/// the way an Image Studio edit presents them.
+///
+/// The `minimax_h3_image_edit_lora` kernel maps to the SAME engine trainer, which trains edit mode
+/// when the items carry references and stamps `trainingMode=edit` on the adapter.
+fn minimax_h3_image_edit_lora_target() -> TrainingTarget {
+    let mut target = minimax_h3_image_lora_target();
+    target.id = "minimax_h3_image_edit_lora".to_owned();
+    target.name = "MiniMax-H3-Image Edit LoRA".to_owned();
+    target.kernel = "minimax_h3_image_edit_lora".to_owned();
+    target.limits.insert(
+        MAX_REFERENCE_IMAGES_LIMIT.to_owned(),
+        json!(MINIMAX_H3_IMAGE_MAX_REFERENCE_IMAGES),
+    );
+    for (key, value) in [
+        ("label", json!("MiniMax-H3-Image Edit LoRA")),
+        (
+            "description",
+            json!(format!(
+                "Train an edit LoRA or LoKr for MiniMax-H3-Image at its native 2048x2048 canvas \
+                 over an installed tier. Each dataset item is an edit pair: the item image is the \
+                 edit target, its caption is the edit instruction (name the references as \
+                 <Picture 1>, <Picture 2> and so on), and it carries \
+                 1-{MINIMAX_H3_IMAGE_MAX_REFERENCE_IMAGES} ordered reference images. Apple Silicon \
+                 (native MLX) or Windows/Linux NVIDIA (candle/CUDA). Governed by the \
+                 MiniMax-H3-Image Community License."
             )),
         ),
         ("recommendedFor", json!(["edit"])),

@@ -18,6 +18,7 @@ import {
   lossTypeOptions,
   ltx25WorkflowPlan,
   networkTypeLabel,
+  baseTierLabel,
   optimizerLabel,
   optionLabel,
   qualityPresetLabel,
@@ -207,6 +208,7 @@ export function ConfigureJobPanel({
   setShowAdvancedConfig,
   showNetworkType,
   networkTypeOptions,
+  baseTierOptions = [],
   macLokrOnWanBlocked,
   isLokrNetwork,
   isFullFinetune,
@@ -1026,6 +1028,21 @@ export function ConfigureJobPanel({
                         </option>
                       );
                     })}
+                  </select>
+                </label>
+              ) : null}
+              {baseTierOptions.length ? (
+                <label title="The base-model tier this run trains over, frozen. Auto picks the densest installed tier; a packed Q8/Q4 tier fits in less memory. An explicit tier must be installed — it is never swapped for another.">
+                  Base tier
+                  <select
+                    onChange={(event) => updateConfigDraft("baseTier", event.target.value)}
+                    value={configDraft.baseTier || "auto"}
+                  >
+                    {baseTierOptions.map((option) => (
+                      <option key={option} value={option}>
+                        {baseTierLabel(option)}
+                      </option>
+                    ))}
                   </select>
                 </label>
               ) : null}
