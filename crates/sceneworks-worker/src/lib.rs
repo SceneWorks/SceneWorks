@@ -71,6 +71,24 @@ pub fn flux3_receipted_snapshot(
         })
 }
 
+/// Why a MiniMax-H3-Image LoRA/LoKr training run (SW-7103) cannot start on this host's installs, or
+/// `None` when it can: the plan's `advanced.baseTier` (absent / `auto` = densest installed) must name
+/// an installed DiT tier, with the image VAE + tokenizer and MiniMax-H3's text encoder at that tier.
+/// The SAME resolution the worker hands the trainer, so the API's real-run gate cannot admit a run
+/// the worker would refuse at load. Backend-neutral (no weights are read).
+pub fn minimax_h3_image_training_install_refusal(
+    data_dir: &Path,
+    config: &sceneworks_core::training::TrainingConfig,
+) -> Option<String> {
+    let tier = match sceneworks_core::training::minimax_h3_image_base_tier(&config.advanced) {
+        Ok(tier) => tier,
+        Err(message) => return Some(message),
+    };
+    image_jobs::minimax_h3_image::training_load_spec(data_dir, tier)
+        .err()
+        .map(|error| error.to_string())
+}
+
 /// Validate the canonical FLUX 3 runtime payload independently of download selectors.
 /// This is filesystem/index integrity, not whole-repository download completion or a weights
 /// rehash. It stays backend-neutral so the catalog and neither-backend API can use the exact

@@ -1203,6 +1203,12 @@ pub(crate) fn expected_backend_local_trainer_id(
         | ("qwen_image_2_1_edit_lora", "qwen_image_2_1", "qwen_image_2_1_edit_lora") => {
             ("qwen_image_2_1", "qwen_image_2_1")
         }
+        // MiniMax-H3-Image (SW-7103): both kernels map to the one `minimax_h3_image` trainer
+        // (`gen_core_train::h3_image::TRAINER_ID`) on both backends.
+        ("minimax_h3_image_lora", "minimax_h3_image", "minimax_h3_image_lora")
+        | ("minimax_h3_image_edit_lora", "minimax_h3_image", "minimax_h3_image_edit_lora") => {
+            ("minimax_h3_image", "minimax_h3_image")
+        }
         _ => {
             return Err(format!(
                 "production training target {:?} (base {:?}, kernel {:?}) has no explicit backend-local trainer identity contract",
@@ -4325,6 +4331,46 @@ mod tests {
                         .any(|descriptor| descriptor.id == "qwen_image_2_1"
                             && descriptor.max_reference_images >= 10),
                     "{} runtime registers the edit-capable qwen_image_2_1 trainer",
+                    facts.snapshot.backend
+                );
+            }
+            let rows = training_rows(&mlx, &candle).unwrap();
+            let target_rows: Vec<_> = rows.iter().filter(|row| row.target == target).collect();
+            assert_eq!(target_rows.len(), 2, "{target} has lora + lokr rows");
+            for row in target_rows {
+                assert_eq!(
+                    (row.support.mlx, row.support.candle),
+                    (Some(true), Some(true)),
+                    "{target}/{}",
+                    row.network_type
+                );
+            }
+        }
+    }
+
+    /// SW-7103: at the pin both runtimes register the `minimax_h3_image` trainer (SW-7097 MLX,
+    /// SW-7098 Candle) with the generator's 16-reference edit cap, and both H3-Image targets map onto
+    /// it, so their LoRA and LoKr rows read supported on BOTH backends.
+    #[test]
+    fn minimax_h3_image_training_targets_are_supported_on_both_backends_at_the_pin() {
+        let (mlx, candle) = valid_runtime_pair();
+        validate_runtime_pair(&mlx, &candle).expect("committed pair validates");
+        for target in ["minimax_h3_image_lora", "minimax_h3_image_edit_lora"] {
+            for facts in [&mlx, &candle] {
+                assert_eq!(
+                    facts.trainer_mappings.get(target).map(String::as_str),
+                    Some("minimax_h3_image"),
+                    "{} runtime maps {target} onto its trainer",
+                    facts.snapshot.backend
+                );
+                assert!(
+                    facts
+                        .snapshot
+                        .trainer_capabilities
+                        .iter()
+                        .any(|descriptor| descriptor.id == "minimax_h3_image"
+                            && descriptor.max_reference_images >= 16),
+                    "{} runtime registers the edit-capable minimax_h3_image trainer",
                     facts.snapshot.backend
                 );
             }

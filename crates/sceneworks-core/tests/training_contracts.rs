@@ -156,6 +156,10 @@ fn builtin_targets_gate_network_types() {
             "qwen_image_2_1_lora",
             // sc-24161: the instruction-edit twin trains the same adapter kinds in edit mode.
             "qwen_image_2_1_edit_lora",
+            // SW-7103: the MiniMax-H3-Image trainer builds LoRA and LoKr on both backends, and the
+            // SW-7096 adapter install applies both on every tier.
+            "minimax_h3_image_lora",
+            "minimax_h3_image_edit_lora",
             // T2V-14B retains its existing Candle LoKr path. The single-DiT TI2V-5B and I2V-14B
             // generated-matrix obligations remain LoRA-only.
             "wan_t2v_14b_lora",
@@ -245,13 +249,12 @@ fn qwen_image_2_1_target_trains_dense_bf16_under_the_research_licence() {
             "licence notice must state {phrase:?}"
         );
     }
-    // Every other target is unrestricted, so the gate binds 2.1 alone (its T2I target and, since
-    // sc-24161, its instruction-edit twin on the same base).
-    for other in registry
-        .targets
-        .iter()
-        .filter(|other| other.base_model != target.base_model)
-    {
+    // Every other target is unrestricted, so the gate binds 2.1 (its T2I target and, since
+    // sc-24161, its instruction-edit twin on the same base) and MiniMax-H3-Image (SW-7103, whose
+    // community licence binds derivatives too) alone.
+    for other in registry.targets.iter().filter(|other| {
+        other.base_model != target.base_model && other.base_model != "minimax_h3_image"
+    }) {
         assert!(
             !sceneworks_core::training::training_target_requires_license_acknowledgment(other),
             "{}",
@@ -364,16 +367,18 @@ fn qwen_image_2_1_edit_target_mirrors_the_t2i_rules_and_caps_references_at_the_m
         training_target_max_reference_images(edit),
         QWEN_IMAGE_2_1_MAX_REFERENCE_IMAGES
     );
+    // The dataset store's ceiling is the largest edit cap: MiniMax-H3-Image's 16 (SW-7103).
     assert_eq!(
         max_training_reference_images(),
         QWEN_IMAGE_2_1_MAX_REFERENCE_IMAGES
+            .max(sceneworks_core::training::MINIMAX_H3_IMAGE_MAX_REFERENCE_IMAGES)
     );
-    // It is the ONLY edit-capable target; every other target trains captioned images only.
-    for other in registry
-        .targets
-        .iter()
-        .filter(|target| target.id != edit.id && target.id != "flux3_klein_edit_lora")
-    {
+    // The edit targets are the only edit-capable ones; every other target trains captioned images.
+    for other in registry.targets.iter().filter(|target| {
+        target.id != edit.id
+            && target.id != "flux3_klein_edit_lora"
+            && target.id != "minimax_h3_image_edit_lora"
+    }) {
         assert_eq!(
             training_target_max_reference_images(other),
             0,
@@ -406,6 +411,159 @@ fn qwen_image_2_1_edit_target_mirrors_the_t2i_rules_and_caps_references_at_the_m
             preset.id
         );
     }
+}
+
+/// SW-7103 (feature SW-F363 E19/E20): the two MiniMax-H3-Image targets — text-to-image and edit
+/// pairs — train the `minimax_h3_image` base at its native 2048² canvas by default (configurable),
+/// with checkpointing on, LoRA + LoKr, the generator's own LoRA family (so Image Studio's
+/// `loraCompatibility` applies the result), an edit cap that is the SAME fact as the model's
+/// `limits.maxReferenceAssets`, and the community-licence gate. No training memory numbers are
+/// declared: the engine trainer's preflight owns admission. `baseTier` is validated by name.
+#[test]
+fn minimax_h3_image_targets_train_t2i_and_edit_pairs_at_2048_under_the_community_licence() {
+    use sceneworks_core::training::{
+        training_target_max_reference_images, training_target_requires_license_acknowledgment,
+        validate_training_config_for_target, MINIMAX_H3_IMAGE_LICENSE,
+        MINIMAX_H3_IMAGE_LICENSE_URL, MINIMAX_H3_IMAGE_MAX_REFERENCE_IMAGES,
+    };
+    let registry = builtin_training_targets();
+    let find = |id: &str| {
+        registry
+            .targets
+            .iter()
+            .find(|target| target.id == id)
+            .unwrap_or_else(|| panic!("{id} registered"))
+    };
+    let t2i = find("minimax_h3_image_lora");
+    let edit = find("minimax_h3_image_edit_lora");
+    let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc embedded");
+    let catalog: Value =
+        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw)).unwrap();
+    let model = catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == json!("minimax_h3_image"))
+        .expect("minimax_h3_image ships")
+        .clone();
+    for target in [t2i, edit] {
+        assert_eq!(target.base_model, "minimax_h3_image");
+        assert_eq!(target.family, "minimax-h3-image");
+        assert!(
+            model["loraCompatibility"]["families"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(target.family)),
+            "Image Studio applies the trained adapter's family on {}",
+            target.base_model
+        );
+        assert_eq!(
+            target.defaults.resolution, 2048,
+            "{}: E20 default",
+            target.id
+        );
+        assert_eq!(
+            target.limits["resolutions"],
+            json!([1024, 1536, 2048]),
+            "{}: configurable",
+            target.id
+        );
+        assert_eq!(
+            target.defaults.advanced["gradientCheckpointing"],
+            json!(true)
+        );
+        assert_eq!(target.limits["networkTypes"], json!(["lora", "lokr"]));
+        assert!(training_target_requires_license_acknowledgment(target));
+        assert_eq!(target.ui["license"], json!(MINIMAX_H3_IMAGE_LICENSE));
+        assert_eq!(target.ui["licenseUrl"], json!(MINIMAX_H3_IMAGE_LICENSE_URL));
+        assert_eq!(target.ui["licenseUrl"], model["licenseUrl"]);
+        for key in [
+            "memory",
+            "minMemoryGb",
+            "trainingMemoryGb",
+            "peakMemoryBytes",
+        ] {
+            assert!(target.limits.get(key).is_none(), "{}: {key}", target.id);
+        }
+        // The H3-Image trainer declares adapter noise + resolution buckets and nothing else.
+        for (flag, declared) in [
+            ("supportsWeightNoise", true),
+            ("supportsGradientNoise", true),
+            ("supportsResolutionBuckets", true),
+            ("supportsSubjectMaskLoss", false),
+        ] {
+            assert_eq!(
+                target.limits.get(flag) == Some(&Value::Bool(true)),
+                declared,
+                "{}: {flag}",
+                target.id
+            );
+        }
+        let presets: Vec<_> = sceneworks_core::training::builtin_training_presets()
+            .presets
+            .into_iter()
+            .filter(|preset| preset.target_id == target.id)
+            .collect();
+        assert!(presets.len() >= 2, "{}", target.id);
+        assert_eq!(
+            presets
+                .iter()
+                .filter(|preset| preset.ui.get("default") == Some(&Value::Bool(true)))
+                .count(),
+            1,
+            "{}: exactly one default preset",
+            target.id
+        );
+        for preset in &presets {
+            validate_training_config_for_target(target, &preset.config)
+                .unwrap_or_else(|error| panic!("{} violates its target: {error}", preset.id));
+        }
+        // `baseTier`: auto or a named tier passes; anything else is a field error.
+        for (tier, ok) in [
+            ("auto", true),
+            ("bf16", true),
+            ("q8", true),
+            ("Q4", true),
+            ("q2", false),
+        ] {
+            let mut config = target.defaults.clone();
+            config.advanced.insert("baseTier".to_owned(), json!(tier));
+            assert_eq!(
+                validate_training_config_for_target(target, &config).is_ok(),
+                ok,
+                "{}: baseTier {tier}",
+                target.id
+            );
+        }
+    }
+    assert_ne!(t2i.kernel, edit.kernel, "edit training has its own kernel");
+    assert_eq!(training_target_max_reference_images(t2i), 0);
+    assert_eq!(
+        training_target_max_reference_images(edit),
+        MINIMAX_H3_IMAGE_MAX_REFERENCE_IMAGES
+    );
+    assert_eq!(
+        Some(u64::from(MINIMAX_H3_IMAGE_MAX_REFERENCE_IMAGES)),
+        model["limits"]["maxReferenceAssets"].as_u64(),
+        "the edit cap is the model's own reference cap"
+    );
+    assert_eq!(edit.ui["datasetKind"], json!("editPairs"));
+    // `baseTier` selects a MiniMax-H3-Image tier only.
+    let other = find("qwen_image_2_1_lora");
+    let mut config = other.defaults.clone();
+    config.advanced.insert("baseTier".to_owned(), json!("q4"));
+    assert!(validate_training_config_for_target(other, &config).is_err());
+
+    // Edit-pair shape floor on the H3-Image kernels: an edit item needs references, a T2I item none.
+    use sceneworks_core::training::edit_pair_kernel_shape_error;
+    assert!(edit_pair_kernel_shape_error("minimax_h3_image_edit_lora", [16, 1]).is_none());
+    assert!(edit_pair_kernel_shape_error("minimax_h3_image_edit_lora", [2, 0]).is_some());
+    assert!(edit_pair_kernel_shape_error("minimax_h3_image_lora", [0, 0]).is_none());
+    assert!(edit_pair_kernel_shape_error("minimax_h3_image_lora", [0, 1]).is_some());
 }
 
 fn edit_dataset(reference_counts: &[usize]) -> TrainingDataset {
@@ -589,7 +747,12 @@ fn kernel_edit_shape_floor_follows_the_targets_reference_caps() {
         "qwen_image_2_1_edit_lora"
     ));
     for target in builtin_training_targets().targets {
-        if !["qwen_image_2_1_edit_lora", "flux3_klein_edit_lora"].contains(&target.kernel.as_str())
+        if ![
+            "qwen_image_2_1_edit_lora",
+            "flux3_klein_edit_lora",
+            "minimax_h3_image_edit_lora",
+        ]
+        .contains(&target.kernel.as_str())
         {
             assert!(
                 !training_kernel_trains_edit_pairs(&target.kernel),
@@ -3248,6 +3411,8 @@ fn depth_anchoring_is_refused_at_submit_on_targets_that_do_not_advertise_it() {
             "krea_2_control",
             "moss_image_base_lora",
             "moss_image_sft_lora",
+            "minimax_h3_image_lora",
+            "minimax_h3_image_edit_lora",
             "flux3_klein_lora",
             "flux3_klein_edit_lora",
             "iris_3b_generation",
@@ -3302,6 +3467,8 @@ fn subject_mask_loss_is_refused_at_submit_on_targets_that_do_not_advertise_it() 
         unsupported,
         [
             "krea_2_control",
+            "minimax_h3_image_lora",
+            "minimax_h3_image_edit_lora",
             "flux3_klein_lora",
             "flux3_klein_edit_lora",
             "ltx_2_5_video_lora",
@@ -3855,6 +4022,8 @@ fn face_losses_are_refused_at_submit_on_targets_that_do_not_advertise_them() {
                 "krea_2_control",
                 "moss_image_base_lora",
                 "moss_image_sft_lora",
+                "minimax_h3_image_lora",
+                "minimax_h3_image_edit_lora",
                 "flux3_klein_lora",
                 "flux3_klein_edit_lora",
                 "iris_3b_generation",

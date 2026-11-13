@@ -2024,6 +2024,228 @@
         "description": "Lower-rank, lower-LR Qwen Image 2.1 edit preset for small or tightly consistent edit-pair datasets.",
         "order": 20
       }
+    },
+    {
+      "id": "minimax_h3_image_lora.character.adamw8bit.balanced",
+      "version": 1,
+      "targetId": "minimax_h3_image_lora",
+      "name": "Character balanced",
+      "recommendedFor": [
+        "character"
+      ],
+      "optimizer": "adamw8bit",
+      "qualityPreset": "balanced",
+      "config": {
+        "rank": 16,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 2000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 2048,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "baseTier": "auto",
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 500,
+          "timestepBias": "balanced",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
+        }
+      },
+      "ui": {
+        "default": true,
+        "description": "Balanced first run for 12-25 clean character images on MiniMax-H3-Image at its native 2048x2048 canvas (the adapter inherits the MiniMax-H3-Image Community License).",
+        "order": 10
+      }
+    },
+    {
+      "id": "minimax_h3_image_lora.character.adamw8bit.conservative",
+      "version": 1,
+      "targetId": "minimax_h3_image_lora",
+      "name": "Character conservative",
+      "recommendedFor": [
+        "character"
+      ],
+      "optimizer": "adamw8bit",
+      "qualityPreset": "conservative",
+      "config": {
+        "rank": 8,
+        "alpha": 8,
+        "learningRate": 0.00005,
+        "steps": 2000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 2048,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "baseTier": "auto",
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "qualityPreset": "conservative",
+          "requestedGpu": "auto",
+          "sampleEvery": 500,
+          "timestepBias": "balanced",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
+        }
+      },
+      "ui": {
+        "description": "Lower-rank, lower-LR MiniMax-H3-Image character preset for tight identity datasets.",
+        "order": 20
+      }
+    },
+    {
+      "id": "minimax_h3_image_lora.style.adamw8bit.balanced",
+      "version": 1,
+      "targetId": "minimax_h3_image_lora",
+      "name": "Style balanced",
+      "recommendedFor": [
+        "style"
+      ],
+      "optimizer": "adamw8bit",
+      "qualityPreset": "balanced",
+      "config": {
+        "rank": 32,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 2000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 2048,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "baseTier": "auto",
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 500,
+          "timestepBias": "balanced",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
+        }
+      },
+      "ui": {
+        "description": "Higher-capacity MiniMax-H3-Image style LoRA for texture and look transfer.",
+        "order": 30
+      }
+    },
+    {
+      "id": "minimax_h3_image_edit_lora.edit.adamw8bit.balanced",
+      "version": 1,
+      "targetId": "minimax_h3_image_edit_lora",
+      "name": "Edit balanced",
+      "recommendedFor": [
+        "edit"
+      ],
+      "optimizer": "adamw8bit",
+      "qualityPreset": "balanced",
+      "config": {
+        "rank": 16,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 2000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 2048,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "baseTier": "auto",
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 500,
+          "timestepBias": "balanced",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
+        }
+      },
+      "ui": {
+        "default": true,
+        "description": "Balanced first run for 20-50 edit pairs (1-16 ordered references + target + instruction) on MiniMax-H3-Image (the adapter inherits the MiniMax-H3-Image Community License).",
+        "order": 10
+      }
+    },
+    {
+      "id": "minimax_h3_image_edit_lora.edit.adamw8bit.conservative",
+      "version": 1,
+      "targetId": "minimax_h3_image_edit_lora",
+      "name": "Edit conservative",
+      "recommendedFor": [
+        "edit"
+      ],
+      "optimizer": "adamw8bit",
+      "qualityPreset": "conservative",
+      "config": {
+        "rank": 8,
+        "alpha": 8,
+        "learningRate": 0.00005,
+        "steps": 2000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 2048,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "baseTier": "auto",
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "qualityPreset": "conservative",
+          "requestedGpu": "auto",
+          "sampleEvery": 500,
+          "timestepBias": "balanced",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
+        }
+      },
+      "ui": {
+        "description": "Lower-rank, lower-LR MiniMax-H3-Image edit preset for small or tightly consistent edit-pair datasets.",
+        "order": 20
+      }
     }
   ]
 }

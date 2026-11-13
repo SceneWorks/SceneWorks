@@ -232,6 +232,8 @@ fn platform_effective_training_catalog_projects_depth_anchoring_support() {
                 && !id.starts_with("iris_3b")
                 && !matches!(id.as_str(), "moss_image_base_lora" | "moss_image_sft_lora")
                 && !id.starts_with("flux3_klein")
+                // SW-7103: the H3-Image trainer declares adapter noise and buckets only.
+                && !id.starts_with("minimax_h3_image")
         })
         .collect();
     assert_eq!(mlx, all);
@@ -8043,8 +8045,10 @@ async fn qwen_image_2_1_edit_dataset_round_trips_ordered_references_and_refuses_
         "{body}"
     );
 
-    // Over the cap: 11 references on one item is refused, and the message names the cap (10).
-    let (status, body) = request(
+    // Over the cap: 11 references on one item is refused, and the message names the cap (10). The
+    // dataset store holds up to the largest target cap (MiniMax-H3-Image's 16, SW-7103), so the
+    // 2.1 edit target's own cap refuses the run at plan time.
+    let (status, dataset) = request(
         app.clone(),
         "POST",
         &datasets_path,
@@ -8056,6 +8060,15 @@ async fn qwen_image_2_1_edit_dataset_round_trips_ordered_references_and_refuses_
                 "references": refs.iter().map(|id| json!({ "assetId": id })).collect::<Vec<_>>()
             }]
         }),
+    )
+    .await;
+    assert!(status.is_success(), "{dataset}");
+    let over_cap_id = dataset["id"].as_str().expect("dataset id").to_owned();
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        &jobs_path,
+        dry_run(&edit, &over_cap_id),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
@@ -8546,4 +8559,263 @@ async fn canceling_parquet_validation_cannot_commit_a_dataset() {
     assert_eq!(current["version"], fixture.payload["datasetVersion"]);
     assert_eq!(current["items"], json!([]));
     assert!(fixture.staged_path.is_file());
+}
+
+/// Seed a complete MiniMax-H3-Image bf16 install (the upstream snapshot's DiT, image VAE and
+/// tokenizer, and MiniMax-H3's bf16 text encoder) under `data_dir`, at the shipped catalog pins.
+fn seed_minimax_h3_image_bf16_install(data_dir: &std::path::Path) {
+    let touch = |path: std::path::PathBuf| {
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("parent dir");
+        std::fs::write(path, b"{}").expect("write marker");
+    };
+    let root = seed_hf_snapshot(
+        data_dir,
+        "MiniMaxAI/MiniMax-H3-Image",
+        "492fd8c4eca666f1085f57e30738c1e0d86b3439",
+    );
+    for file in [
+        "transformer_diffusers/config.json",
+        "vae_diffusers/config.json",
+        "tokenizer/tokenizer.json",
+    ] {
+        touch(root.join(file));
+    }
+    let text_encoder = seed_hf_snapshot(
+        data_dir,
+        "MiniMaxAI/MiniMax-H3",
+        "939557dc319dd91227e30195a763f272ba7f8765",
+    );
+    touch(text_encoder.join("text_encoder").join("config.json"));
+}
+
+fn minimax_h3_image_training_target(id: &str) -> sceneworks_core::training::TrainingTarget {
+    crate::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|target| target.id == id)
+        .unwrap_or_else(|| panic!("{id} ships"))
+}
+
+/// SW-7103 (E19/E20): a MiniMax-H3-Image run is gated on an installed tier (the worker's own tier
+/// resolution, so the gate and the trainer agree), refuses an explicit tier that is not installed,
+/// requires the community-licence acceptance, and its adapter's library entry records the
+/// `minimax-h3-image` family Image Studio's `loraCompatibility` admits, the base and the licence.
+#[tokio::test]
+async fn minimax_h3_image_real_training_needs_an_installed_tier_and_records_the_family() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).expect("app creates");
+    let (_, project) =
+        crate::tests::support::create_project_with_request(app.clone(), &"H3 Training", request)
+            .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let assets = upload_distinct_assets(&app, &project_id, "Portrait", 1).await;
+    let (_, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({
+            "name": "H3 set",
+            "items": [{ "assetId": assets[0], "caption": { "text": "h3style portrait" } }]
+        }),
+    )
+    .await;
+    let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+    let target = minimax_h3_image_training_target("minimax_h3_image_lora");
+    let jobs_path = format!("/api/v1/projects/{project_id}/training/jobs");
+    let body = |base_tier: Option<&str>, acknowledged: bool, dry_run: bool| {
+        let mut config = serde_json::to_value(&target.defaults).expect("defaults serialize");
+        if let Some(tier) = base_tier {
+            config["advanced"]["baseTier"] = json!(tier);
+        }
+        json!({
+            "targetId": target.id,
+            "datasetId": dataset_id,
+            "config": config,
+            "outputName": "H3 Style",
+            "dryRun": dry_run,
+            "licenseAcknowledged": acknowledged
+        })
+    };
+
+    // A dry run needs no install and records what the adapter's library entry will carry.
+    let (status, dry) = request(app.clone(), "POST", &jobs_path, body(None, true, true)).await;
+    assert_eq!(status, StatusCode::CREATED, "{dry}");
+    assert_eq!(
+        dry["payload"]["plan"]["target"]["kernel"],
+        "minimax_h3_image_lora"
+    );
+    assert_eq!(dry["payload"]["plan"]["config"]["resolution"], json!(2048));
+    let entry = &dry["payload"]["manifestEntry"];
+    assert_eq!(entry["family"], "minimax-h3-image");
+    assert_eq!(entry["baseModel"], "minimax_h3_image");
+    assert_eq!(
+        entry["license"],
+        json!(sceneworks_core::training::MINIMAX_H3_IMAGE_LICENSE)
+    );
+    assert!(
+        entry.get("trainingMode").is_none(),
+        "a T2I adapter: {entry}"
+    );
+
+    // The licence gate binds a real run.
+    let (status, refused) =
+        request(app.clone(), "POST", &jobs_path, body(None, false, false)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert_eq!(refused["code"], json!("license_acknowledgment_required"));
+
+    // Nothing installed: refused before a job exists.
+    let (status, refused) = request(app.clone(), "POST", &jobs_path, body(None, true, false)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert!(
+        refused["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("installed tier"),
+        "{refused}"
+    );
+
+    seed_minimax_h3_image_bf16_install(&settings.data_dir);
+    // An explicit packed tier that is not installed (q4 is not published) is refused by name.
+    let (status, refused) = request(
+        app.clone(),
+        "POST",
+        &jobs_path,
+        body(Some("q4"), true, false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert!(
+        refused["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("q4"),
+        "{refused}"
+    );
+    // A malformed tier is a field error on the typed route.
+    let (status, refused) = request(
+        app.clone(),
+        "POST",
+        &jobs_path,
+        body(Some("q2"), true, false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    // The installed bf16 tier (auto or named) queues a real run on every host: both native
+    // backends register the trainer.
+    for tier in [None, Some("bf16")] {
+        let (status, job) = request(app.clone(), "POST", &jobs_path, body(tier, true, false)).await;
+        assert_eq!(status, StatusCode::CREATED, "{tier:?}: {job}");
+        assert_eq!(
+            job["payload"]["manifestEntry"]["family"],
+            "minimax-h3-image"
+        );
+    }
+}
+
+/// SW-7103: an H3-Image edit-pair dataset trains on the edit target with its ordered references
+/// (up to the model's 16), recorded as an edit adapter; a 17th reference is refused naming the cap,
+/// and the T2I target refuses an edit dataset.
+#[tokio::test]
+async fn minimax_h3_image_edit_dataset_trains_up_to_sixteen_ordered_references() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = crate::tests::support::create_project_with_request(
+        app.clone(),
+        &"H3 Edit Training",
+        request,
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let targets = upload_distinct_assets(&app, &project_id, "Target", 1).await;
+    let refs = upload_distinct_assets(&app, &project_id, "Ref", 17).await;
+    let datasets_path = format!("/api/v1/projects/{project_id}/training/datasets");
+    let dataset_for = |name: &str, references: &[String]| {
+        json!({
+            "name": name,
+            "items": [{
+                "assetId": targets[0],
+                "caption": { "text": "Put the hat from <Picture 2> on the person in <Picture 1>" },
+                "references": references
+                    .iter()
+                    .map(|id| json!({ "assetId": id }))
+                    .collect::<Vec<_>>()
+            }]
+        })
+    };
+    let jobs_path = format!("/api/v1/projects/{project_id}/training/jobs");
+    let edit = minimax_h3_image_training_target("minimax_h3_image_edit_lora");
+    let t2i = minimax_h3_image_training_target("minimax_h3_image_lora");
+    let submit = |target: &sceneworks_core::training::TrainingTarget, dataset_id: &str| {
+        json!({
+            "targetId": target.id,
+            "datasetId": dataset_id,
+            "config": target.defaults,
+            "outputName": "H3 Edit",
+            "dryRun": true
+        })
+    };
+
+    let (status, dataset) = request(
+        app.clone(),
+        "POST",
+        &datasets_path,
+        dataset_for("Sixteen", &refs[..16]),
+    )
+    .await;
+    assert!(status.is_success(), "{dataset}");
+    let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+    let (status, job) = request(app.clone(), "POST", &jobs_path, submit(&edit, &dataset_id)).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let plan = &job["payload"]["plan"];
+    assert_eq!(plan["target"]["kernel"], "minimax_h3_image_edit_lora");
+    assert_eq!(
+        plan["dataset"]["items"][0]["referenceImagePaths"]
+            .as_array()
+            .map(Vec::len),
+        Some(16)
+    );
+    assert_eq!(job["payload"]["manifestEntry"]["trainingMode"], "edit");
+    assert_eq!(
+        job["payload"]["manifestEntry"]["family"],
+        "minimax-h3-image"
+    );
+    // The T2I target refuses an edit dataset.
+    let (status, refused) =
+        request(app.clone(), "POST", &jobs_path, submit(&t2i, &dataset_id)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+
+    // Seventeen references exceed the model's cap.
+    let (status, dataset) = request(
+        app.clone(),
+        "POST",
+        &datasets_path,
+        dataset_for("Seventeen", &refs),
+    )
+    .await;
+    if status.is_success() {
+        let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+        let (status, refused) =
+            request(app.clone(), "POST", &jobs_path, submit(&edit, &dataset_id)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+        assert!(
+            refused["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("16"),
+            "{refused}"
+        );
+    } else {
+        // The dataset store's ceiling is the largest target cap (16), so it refuses first.
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{dataset}");
+        assert!(
+            dataset["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("16"),
+            "{dataset}"
+        );
+    }
 }

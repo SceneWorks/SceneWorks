@@ -1666,6 +1666,215 @@
       }
     },
     {
+      "id": "minimax_h3_image_lora",
+      "name": "MiniMax-H3-Image LoRA",
+      "modality": "image",
+      "outputKind": "lora",
+      "family": "minimax-h3-image",
+      "baseModel": "minimax_h3_image",
+      "baseModelRepo": "MiniMaxAI/MiniMax-H3-Image",
+      "kernel": "minimax_h3_image_lora",
+      "defaults": {
+        "rank": 16,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 2000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 2048,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "baseTier": "auto",
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 500,
+          "timestepBias": "balanced",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
+        }
+      },
+      "limits": {
+        "alpha": [
+          1,
+          128
+        ],
+        "baseTiers": [
+          "auto",
+          "bf16",
+          "q8",
+          "q4"
+        ],
+        "batchSize": [
+          1,
+          4
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
+        "networkTypes": [
+          "lora",
+          "lokr"
+        ],
+        "optimizers": [
+          "adamw8bit",
+          "adamw",
+          "adam",
+          "prodigyopt",
+          "rose"
+        ],
+        "outputScopes": [
+          "project",
+          "global"
+        ],
+        "rank": [
+          4,
+          128
+        ],
+        "resolutions": [
+          1024,
+          1536,
+          2048
+        ],
+        "steps": [
+          200,
+          6000
+        ],
+        "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
+        "supportsWeightNoise": true
+      },
+      "ui": {
+        "datasetModality": "image",
+        "description": "Train a text-to-image LoRA or LoKr for MiniMax-H3-Image at its native 2048x2048 canvas over an installed tier (bf16, or a packed q8/q4 tier used frozen). Apple Silicon (native MLX) or Windows/Linux NVIDIA (candle/CUDA). The run is checked against this machine's memory before any weight is read. Governed by the MiniMax-H3-Image Community License.",
+        "label": "MiniMax-H3-Image LoRA",
+        "license": "MiniMax-H3-Image Community License Agreement",
+        "licenseNotice": "MiniMax-H3-Image is governed by the MiniMax-H3-Image Community License Agreement (dated November 10, 2026). An adapter you train from it is a Model Derivative and stays under that agreement: use it only within the Applicable Territory (worldwide excluding the European Union, the United Kingdom, the Republic of Korea and the United States of America) and under its Acceptable Use Policy, which includes disclosing machine-generated content you publish; obtain MiniMax's prior written authorization before commercial use above 1 million US dollars of annualized revenue or for any Hosted Service to third parties; and display \"MiniMax-H3-Image\" in a commercial product that uses it. Section V.3 lets you use the model and its Outputs to train only MiniMax-H3-Image and its Model Derivatives, never another AI model.",
+        "licenseUrl": "https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/492fd8c4eca666f1085f57e30738c1e0d86b3439/LICENSE",
+        "recommendedFor": [
+          "character",
+          "style"
+        ],
+        "requiresLicenseAcknowledgment": true
+      }
+    },
+    {
+      "id": "minimax_h3_image_edit_lora",
+      "name": "MiniMax-H3-Image Edit LoRA",
+      "modality": "image",
+      "outputKind": "lora",
+      "family": "minimax-h3-image",
+      "baseModel": "minimax_h3_image",
+      "baseModelRepo": "MiniMaxAI/MiniMax-H3-Image",
+      "kernel": "minimax_h3_image_edit_lora",
+      "defaults": {
+        "rank": 16,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 2000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 2048,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "baseTier": "auto",
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 500,
+          "timestepBias": "balanced",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
+        }
+      },
+      "limits": {
+        "alpha": [
+          1,
+          128
+        ],
+        "baseTiers": [
+          "auto",
+          "bf16",
+          "q8",
+          "q4"
+        ],
+        "batchSize": [
+          1,
+          4
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
+        "maxReferenceImages": 16,
+        "networkTypes": [
+          "lora",
+          "lokr"
+        ],
+        "optimizers": [
+          "adamw8bit",
+          "adamw",
+          "adam",
+          "prodigyopt",
+          "rose"
+        ],
+        "outputScopes": [
+          "project",
+          "global"
+        ],
+        "rank": [
+          4,
+          128
+        ],
+        "resolutions": [
+          1024,
+          1536,
+          2048
+        ],
+        "steps": [
+          200,
+          6000
+        ],
+        "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
+        "supportsWeightNoise": true
+      },
+      "ui": {
+        "datasetKind": "editPairs",
+        "datasetModality": "image",
+        "description": "Train an edit LoRA or LoKr for MiniMax-H3-Image at its native 2048x2048 canvas over an installed tier. Each dataset item is an edit pair: the item image is the edit target, its caption is the edit instruction (name the references as <Picture 1>, <Picture 2> and so on), and it carries 1-16 ordered reference images. Apple Silicon (native MLX) or Windows/Linux NVIDIA (candle/CUDA). Governed by the MiniMax-H3-Image Community License.",
+        "label": "MiniMax-H3-Image Edit LoRA",
+        "license": "MiniMax-H3-Image Community License Agreement",
+        "licenseNotice": "MiniMax-H3-Image is governed by the MiniMax-H3-Image Community License Agreement (dated November 10, 2026). An adapter you train from it is a Model Derivative and stays under that agreement: use it only within the Applicable Territory (worldwide excluding the European Union, the United Kingdom, the Republic of Korea and the United States of America) and under its Acceptable Use Policy, which includes disclosing machine-generated content you publish; obtain MiniMax's prior written authorization before commercial use above 1 million US dollars of annualized revenue or for any Hosted Service to third parties; and display \"MiniMax-H3-Image\" in a commercial product that uses it. Section V.3 lets you use the model and its Outputs to train only MiniMax-H3-Image and its Model Derivatives, never another AI model.",
+        "licenseUrl": "https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/492fd8c4eca666f1085f57e30738c1e0d86b3439/LICENSE",
+        "recommendedFor": [
+          "edit"
+        ],
+        "requiresLicenseAcknowledgment": true
+      }
+    },
+    {
       "id": "flux3_klein_lora",
       "name": "FLUX.3 Klein Base LoRA",
       "modality": "image",

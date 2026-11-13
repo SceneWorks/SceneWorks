@@ -2858,8 +2858,9 @@ mod iris;
 mod supra2;
 
 // MiniMax-H3-Image (SW-7100): tier resolution and component staging for `minimax_h3_image` (the
-// tier's DiT plus MiniMax-H3's own text encoder) on both native lanes.
-#[cfg(native_lane)]
+// tier's DiT plus MiniMax-H3's own text encoder) on both native lanes. Compiled on every build:
+// the API's training install gate resolves the same tier (SW-7103) without linking a backend.
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) mod minimax_h3_image;
 
 // The generic image lane's request controls beyond the positional knobs (CFG interval,

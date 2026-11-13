@@ -2267,6 +2267,16 @@ async fn prepare_training_submission(
             ) {
                 return Err(crate::iris_curricula::iris_install_refused(refusal));
             }
+        } else if sceneworks_core::training::is_minimax_h3_image_training_kernel(&target.kernel) {
+            // MiniMax-H3-Image (SW-7103) trains over whichever tier is installed (or the one
+            // `advanced.baseTier` names), with MiniMax-H3's text encoder at that tier — the worker's
+            // own resolution, so the gate and the trainer load agree on one tier.
+            if let Some(message) = sceneworks_worker::minimax_h3_image_training_install_refusal(
+                &data_dir,
+                &payload.config,
+            ) {
+                return Err(ApiError::bad_request(message));
+            }
         } else if let Some(message) = training_base_unavailable_message(
             training_base_model_status(&data_dir, target),
             &target.base_model,

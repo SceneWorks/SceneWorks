@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "bc7b8fd53e9dcd43ba57e2663ab27bd7e9f1ab96",
+    "inferenceRevision": "8fd05f79ef841a0d418fa1d5183b77992d8b7a42",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "modelMappings": {
@@ -389,6 +389,8 @@
     "ltx_2_5_video_lora": "ltx_2_5",
     "ltx_video_lora": "ltx_2_3",
     "mage_flow_base_lora": "mage_flow_base",
+    "minimax_h3_image_edit_lora": "minimax_h3_image",
+    "minimax_h3_image_lora": "minimax_h3_image",
     "moss_image_base_lora": "moss_image_base",
     "moss_image_sft_lora": "moss_image_sft",
     "qwen_image_2_1_edit_lora": "qwen_image_2_1",
@@ -3032,6 +3034,7 @@
       "ltx_2_3",
       "ltx_2_5",
       "mage_flow_base",
+      "minimax_h3_image",
       "moss_image_base",
       "moss_image_sft",
       "qwen_image_2_1",
@@ -3353,6 +3356,30 @@
         "supports_body_shape_loss": true,
         "supports_normal_loss": true,
         "supports_vae_anchor_loss": true,
+        "supports_latent_lpips_loss": false,
+        "supports_training_adapter": false
+      },
+      {
+        "id": "minimax_h3_image",
+        "family": "minimax_h3_image",
+        "backend": "mlx",
+        "modality": "image",
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supports_control": false,
+        "supports_full_finetune": false,
+        "max_reference_images": 16,
+        "supports_weight_noise": true,
+        "supports_depth_anchoring": false,
+        "supports_gradient_noise": true,
+        "supports_resolution_buckets": true,
+        "supports_subject_mask_loss": false,
+        "supports_identity_loss": false,
+        "supports_face_landmark_loss": false,
+        "supports_body_proportion_loss": false,
+        "supports_body_shape_loss": false,
+        "supports_normal_loss": false,
+        "supports_vae_anchor_loss": false,
         "supports_latent_lpips_loss": false,
         "supports_training_adapter": false
       },

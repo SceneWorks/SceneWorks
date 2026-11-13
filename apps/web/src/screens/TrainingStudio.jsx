@@ -682,6 +682,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // (more than just lora). LoKr targets gain the picker + the LoKr factor field.
   const networkTypeOptions = rangeOptions(selectedTarget?.limits, "networkTypes");
   const showNetworkType = networkTypeOptions.length > 1;
+  // SW-7103: the base tier picker, only on targets that advertise `limits.baseTiers`.
+  const baseTierOptions = rangeOptions(selectedTarget?.limits, "baseTiers");
   const isLokrNetwork = asText(configDraft.networkType).trim() === "lokr";
   // sc-14056 — the full base fine-tune. Not an adapter: it trains every base weight. Gradient
   // (activation) checkpointing has no full-tune implementation yet (sc-14989) and the engine hard-
@@ -2437,6 +2439,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   setShowAdvancedConfig={setShowAdvancedConfig}
                   showNetworkType={showNetworkType}
                   networkTypeOptions={networkTypeOptions}
+                  baseTierOptions={baseTierOptions}
                   macLokrOnWanBlocked={macLokrOnWanBlocked}
                   isLokrNetwork={isLokrNetwork}
                   isFullFinetune={isFullFinetune}
