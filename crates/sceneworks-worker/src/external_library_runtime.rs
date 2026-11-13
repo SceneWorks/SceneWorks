@@ -1524,7 +1524,7 @@ fn prepare_portable_snapshot(
                 let links = in_place_links.entry(key.clone()).or_default();
                 for file in in_place_revision_files(snapshot, &member.files)? {
                     match links.get(&file.expected.relative_path) {
-                        Some((_, sha256)) if *sha256 != file.expected.sha256 => {
+                        Some((_, sha256, _)) if *sha256 != file.expected.sha256 => {
                             return Err(invalid_binding(
                                 "one frozen revision file has two different ledgers",
                             ));
@@ -1533,7 +1533,11 @@ fn prepare_portable_snapshot(
                         None => {
                             links.insert(
                                 file.expected.relative_path.clone(),
-                                (file.real.clone(), file.expected.sha256.clone()),
+                                (
+                                    file.real.clone(),
+                                    file.expected.sha256.clone(),
+                                    file.expected.size_bytes,
+                                ),
                             );
                         }
                     }
@@ -1785,24 +1789,177 @@ fn prepare_portable_snapshot(
     }))
 }
 
-/// Frozen in-place files per (repository, revision): relative path -> (verified real path, SHA-256).
-type RevisionViewLinks = std::collections::BTreeMap<
+/// Frozen in-place files per (repository, revision): relative path -> (verified real path,
+/// SHA-256, size).
+pub(crate) type RevisionViewLinks = std::collections::BTreeMap<
     (String, String),
-    std::collections::BTreeMap<PathBuf, (PathBuf, String)>,
+    std::collections::BTreeMap<PathBuf, (PathBuf, String, u64)>,
 >;
 
-/// Publish (or reuse) the route's private view of its verified in-place files: one link per
-/// frozen file at `hf/<hub destination>/<relative path>`, pointing at the file's verified real
-/// path. A view is named by the digest of its link map and never changes once published; a later
-/// attempt whose sources resolve elsewhere gets a new view, and both are reclaimed with the route.
-fn publish_revision_view(route_dir: &Path, links: &RevisionViewLinks) -> WorkerResult<PathBuf> {
+/// Each published view records what every entry must back onto, so any consumer can resolve an
+/// entry to its verified file with [`revision_view_backing_file`] instead of re-deriving it.
+const REVISION_VIEW_LEDGER: &str = ".view-ledger.json";
+const REVISION_VIEW_LEDGER_SCHEMA: u32 = 1;
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RevisionViewLedgerEntry {
+    real_path: PathBuf,
+    sha256: String,
+    size_bytes: u64,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RevisionViewLedger {
+    schema_version: u32,
+    /// Keyed by the entry's path relative to the view root.
+    entries: std::collections::BTreeMap<PathBuf, RevisionViewLedgerEntry>,
+}
+
+/// How a view entry stands for its verified file. Unix uses a symlink; Windows falls back to a
+/// hard link and then a verified copy where symlinks are refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ViewEntryKind {
+    Symlink,
+    HardLink,
+    Copy,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test seam: drive the Windows fallbacks on any platform.
+    static FORCED_VIEW_ENTRY_KIND: std::cell::Cell<Option<ViewEntryKind>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn view_entry_kinds() -> Vec<ViewEntryKind> {
+    #[cfg(test)]
+    if let Some(kind) = FORCED_VIEW_ENTRY_KIND.with(std::cell::Cell::get) {
+        return vec![kind];
+    }
+    if cfg!(windows) {
+        vec![
+            ViewEntryKind::Symlink,
+            ViewEntryKind::HardLink,
+            ViewEntryKind::Copy,
+        ]
+    } else {
+        vec![ViewEntryKind::Symlink]
+    }
+}
+
+fn create_view_entry(kind: ViewEntryKind, real: &Path, target: &Path) -> io::Result<()> {
+    match kind {
+        ViewEntryKind::Symlink => {
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(real, target)
+            }
+            #[cfg(windows)]
+            {
+                std::os::windows::fs::symlink_file(real, target)
+            }
+        }
+        ViewEntryKind::HardLink => std::fs::hard_link(real, target),
+        ViewEntryKind::Copy => std::fs::copy(real, target).map(|_| ()),
+    }
+}
+
+/// The view root and entry-relative path of `path` when it lies in a published revision view
+/// (`portable-attempts/<route>/views/<digest>/...`), read lexically: view directories are real.
+fn enclosing_revision_view(path: &Path) -> Option<(&Path, &Path)> {
+    path.ancestors().skip(1).find_map(|view| {
+        (view.parent()?.file_name()? == "views" && view.join(REVISION_VIEW_LEDGER).is_file())
+            .then(|| Some((view, path.strip_prefix(view).ok()?)))
+            .flatten()
+    })
+}
+
+/// The one rule for a revision-view entry. It is valid when it is (a) a link whose target is the
+/// verified real file, (b) a hard link with that file's identity, or (c) a regular copy whose
+/// bytes match the frozen ledger (hashed at most once per host while unchanged). Returns the file
+/// to read: the verified real file for (a) and (b), the copy for (c).
+fn verify_view_entry(
+    view: &Path,
+    entry_path: &Path,
+    entry: &RevisionViewLedgerEntry,
+) -> WorkerResult<PathBuf> {
+    let differs = || invalid_binding("the verified source view differs from its frozen files");
+    let metadata = std::fs::symlink_metadata(entry_path).map_err(|_| differs())?;
+    if metadata.file_type().is_symlink() {
+        return match std::fs::canonicalize(entry_path) {
+            Ok(target) if target == entry.real_path => Ok(target),
+            _ => Err(differs()),
+        };
+    }
+    if !metadata.is_file() || metadata.len() != entry.size_bytes {
+        return Err(differs());
+    }
+    if same_file::is_same_file(entry_path, &entry.real_path).unwrap_or(false) {
+        return Ok(entry.real_path.clone());
+    }
+    let copy = std::fs::canonicalize(entry_path).map_err(|_| differs())?;
+    let cache_root = view
+        .ancestors()
+        .nth(3)
+        .ok_or_else(differs)?
+        .join(".verified-sources");
+    VerifiedSourceCache::new(cache_root)
+        .verify(&copy, &entry.sha256, &|| Ok(()))
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::InvalidData {
+                invalid_binding("a frozen member differs from its pinned ledger")
+            } else {
+                WorkerError::Io(error)
+            }
+        })?;
+    Ok(copy)
+}
+
+/// The verified file a revision-view entry stands for, or `None` when `path` is not a file entry
+/// of a published view (outside every view, or one of a view's own real directories). Every
+/// consumer that inspects, copies or confines a loader path from a portable route uses this
+/// instead of assuming the path is a regular private file.
+pub(crate) fn revision_view_backing_file(path: &Path) -> WorkerResult<Option<PathBuf>> {
+    let Some((view, relative)) = enclosing_revision_view(path) else {
+        return Ok(None);
+    };
+    if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
+        return Ok(None);
+    }
+    let ledger: RevisionViewLedger = serde_json::from_slice(
+        &std::fs::read(view.join(REVISION_VIEW_LEDGER)).map_err(WorkerError::Io)?,
+    )
+    .map_err(|_| invalid_binding("the verified source view ledger is unreadable"))?;
+    if ledger.schema_version != REVISION_VIEW_LEDGER_SCHEMA {
+        return Err(invalid_binding(
+            "the verified source view ledger is unreadable",
+        ));
+    }
+    let entry = ledger
+        .entries
+        .get(relative)
+        .ok_or_else(|| invalid_binding("a source view entry is not a frozen file"))?;
+    verify_view_entry(view, path, entry).map(Some)
+}
+
+/// Publish (or reuse) the route's private view of its verified in-place files: one entry per
+/// frozen file at `hf/<hub destination>/<relative path>` standing for the file's verified real
+/// path, plus a ledger of what each entry must back onto. A view is named by the digest of its
+/// link map and never changes once published; a later attempt whose sources resolve elsewhere
+/// gets a new view, and both are reclaimed with the route.
+pub(crate) fn publish_revision_view(
+    route_dir: &Path,
+    links: &RevisionViewLinks,
+) -> WorkerResult<PathBuf> {
     let mut digest = Sha256::new();
     digest.update(b"portable-revision-view-v1\0");
-    let mut entries = Vec::new();
+    let mut entries = std::collections::BTreeMap::new();
     for ((repository, revision), files) in links {
         let destination = hub_cache_member_destination(repository, revision, Path::new(""))
             .map_err(|error| invalid_binding(error.to_string()))?;
-        for (relative, (real, sha256)) in files {
+        for (relative, (real, sha256, size_bytes)) in files {
             for part in [
                 repository.as_bytes(),
                 revision.as_bytes(),
@@ -1812,7 +1969,14 @@ fn publish_revision_view(route_dir: &Path, links: &RevisionViewLinks) -> WorkerR
                 digest.update(part);
                 digest.update(b"\0");
             }
-            entries.push((destination.join(relative), real, sha256));
+            entries.insert(
+                Path::new("hf").join(&destination).join(relative),
+                RevisionViewLedgerEntry {
+                    real_path: real.clone(),
+                    sha256: sha256.clone(),
+                    size_bytes: *size_bytes,
+                },
+            );
         }
     }
     let views = route_dir.join("views");
@@ -1825,56 +1989,94 @@ fn publish_revision_view(route_dir: &Path, links: &RevisionViewLinks) -> WorkerR
             for entry in std::fs::read_dir(&views).map_err(WorkerError::Io)? {
                 let entry = entry.map_err(WorkerError::Io)?;
                 if entry.file_name().to_string_lossy().starts_with("staging-") {
+                    // Removes links and copies only; it never follows a link into the hub.
                     std::fs::remove_dir_all(entry.path()).map_err(WorkerError::Io)?;
                 }
             }
             let staging = views.join(format!("staging-{}", uuid::Uuid::new_v4()));
-            for (relative, real, sha256) in &entries {
-                let target = staging.join("hf").join(relative);
+            create_private_directory(&staging)?;
+            for (relative, entry) in &entries {
+                let target = staging.join(relative);
                 create_private_tree(target.parent().expect("view file has a parent"))?;
-                link_verified_file(real, &target, sha256)?;
+                let created = view_entry_kinds()
+                    .into_iter()
+                    .any(|kind| create_view_entry(kind, &entry.real_path, &target).is_ok());
+                if !created {
+                    return Err(invalid_binding(
+                        "a verified source view entry cannot be created",
+                    ));
+                }
             }
+            let ledger = RevisionViewLedger {
+                schema_version: REVISION_VIEW_LEDGER_SCHEMA,
+                entries,
+            };
+            std::fs::write(
+                staging.join(REVISION_VIEW_LEDGER),
+                serde_json::to_vec(&ledger).map_err(|error| WorkerError::Io(error.into()))?,
+            )
+            .map_err(WorkerError::Io)?;
             std::fs::rename(&staging, &view).map_err(WorkerError::Io)?;
+            for relative in ledger.entries.keys() {
+                revision_view_backing_file(&view.join(relative))?;
+            }
+            return Ok(view);
         }
     }
-    for (relative, real, _) in &entries {
-        if std::fs::canonicalize(view.join("hf").join(relative))
-            .ok()
-            .as_ref()
-            != Some(*real)
-        {
-            return Err(invalid_binding(
-                "the verified source view differs from its frozen files",
-            ));
-        }
+    for relative in entries.keys() {
+        revision_view_backing_file(&view.join(relative))?;
     }
     Ok(view)
 }
 
-/// Link `target` to the verified file `real`. Where the platform refuses links (Windows without
-/// symlink rights, across volumes), copy it and verify the copy against its ledger.
-fn link_verified_file(real: &Path, target: &Path, sha256: &str) -> WorkerResult<()> {
-    #[cfg(unix)]
-    {
-        let _ = sha256;
-        std::os::unix::fs::symlink(real, target).map_err(WorkerError::Io)
+/// Test support: publish a revision view over real files and return the root its entries share
+/// (`<view>/hf/<hub destination>`), as `prepare_portable_snapshot` hands it to loaders.
+#[cfg(test)]
+pub(crate) fn test_revision_view(
+    route_dir: &Path,
+    repository: &str,
+    revision: &str,
+    files: &[(&str, &Path)],
+) -> PathBuf {
+    let mut links: RevisionViewLinks = std::collections::BTreeMap::new();
+    let entry = links
+        .entry((repository.to_owned(), revision.to_owned()))
+        .or_default();
+    for (relative, real) in files {
+        let bytes = std::fs::read(real).unwrap();
+        entry.insert(
+            PathBuf::from(relative),
+            (
+                std::fs::canonicalize(real).unwrap(),
+                format!("sha256:{:x}", Sha256::digest(&bytes)),
+                bytes.len() as u64,
+            ),
+        );
     }
-    #[cfg(windows)]
-    {
-        if std::os::windows::fs::symlink_file(real, target).is_ok()
-            || std::fs::hard_link(real, target).is_ok()
-        {
-            return Ok(());
+    std::fs::create_dir_all(route_dir).unwrap();
+    publish_revision_view(route_dir, &links)
+        .unwrap()
+        .join("hf")
+        .join(hub_cache_member_destination(repository, revision, Path::new("")).unwrap())
+}
+
+#[cfg(test)]
+pub(crate) fn with_forced_view_entry_kind<T>(kind: &str, body: impl FnOnce() -> T) -> T {
+    let kind = match kind {
+        "symlink" => ViewEntryKind::Symlink,
+        "hard-link" => ViewEntryKind::HardLink,
+        "copy" => ViewEntryKind::Copy,
+        other => panic!("unknown view entry kind {other}"),
+    };
+    FORCED_VIEW_ENTRY_KIND.with(|forced| forced.set(Some(kind)));
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FORCED_VIEW_ENTRY_KIND.with(|forced| forced.set(None));
         }
-        std::fs::copy(real, target).map_err(WorkerError::Io)?;
-        let copied = sceneworks_core::hashing::sha256_file(target).map_err(WorkerError::Io)?;
-        if format!("sha256:{copied}") != sha256 {
-            return Err(invalid_binding(
-                "a frozen member differs from its pinned ledger",
-            ));
-        }
-        Ok(())
     }
+    let _reset = Reset;
+    body()
 }
 
 /// Utility jobs whose loader takes one directory path receive the verified primary's path.
@@ -7623,6 +7825,137 @@ mod tests {
                 "an unfrozen file is never visible to the loader"
             );
         });
+    }
+
+    /// One rule for every view entry kind: a symlink to the verified file, a hard link with its
+    /// identity (Windows fallback), or a copy whose bytes match the ledger (last fallback).
+    #[test]
+    fn view_entries_back_onto_their_verified_file_for_every_entry_kind() {
+        for kind in ["symlink", "hard-link", "copy"] {
+            let temp = TempDir::new().unwrap();
+            let hub = temp
+                .path()
+                .join("hub/models--guardfx--view/snapshots")
+                .join(REV_A);
+            std::fs::create_dir_all(&hub).unwrap();
+            std::fs::write(hub.join("model.safetensors"), b"weights").unwrap();
+            std::fs::write(hub.join("other.safetensors"), b"weights").unwrap();
+            let route = temp.path().join("data/models/portable-attempts/route");
+            let root = with_forced_view_entry_kind(kind, || {
+                test_revision_view(
+                    &route,
+                    "guardfx/view",
+                    REV_A,
+                    &[("model.safetensors", &hub.join("model.safetensors"))],
+                )
+            });
+            let entry = root.join("model.safetensors");
+            let real = std::fs::canonicalize(hub.join("model.safetensors")).unwrap();
+            let backing = revision_view_backing_file(&entry).unwrap().unwrap();
+            let is_link = std::fs::symlink_metadata(&entry)
+                .unwrap()
+                .file_type()
+                .is_symlink();
+            assert_eq!(is_link, kind == "symlink", "{kind}");
+            if kind == "copy" {
+                assert_eq!(backing, std::fs::canonicalize(&entry).unwrap());
+            } else {
+                assert_eq!(backing, real, "{kind}");
+            }
+            // Not entries: a path outside every view, and one of the view's own directories.
+            assert!(revision_view_backing_file(&real).unwrap().is_none());
+            assert!(revision_view_backing_file(&root).unwrap().is_none());
+            // A file the ledger does not freeze is refused.
+            std::fs::write(root.join("stray.safetensors"), b"weights").unwrap();
+            assert!(revision_view_backing_file(&root.join("stray.safetensors")).is_err());
+            // An entry that no longer stands for its verified bytes is refused.
+            std::fs::remove_file(&entry).unwrap();
+            if kind == "symlink" {
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(hub.join("other.safetensors"), &entry).unwrap();
+            } else {
+                std::fs::write(&entry, b"WEIGHTS").unwrap();
+            }
+            let error = revision_view_backing_file(&entry).expect_err(kind);
+            assert!(
+                error.to_string().contains("differs from"),
+                "{kind}: {error}"
+            );
+        }
+    }
+
+    /// Codex review of PR #3379: a Windows host without symlink rights publishes its view through
+    /// hard links or verified copies, and the guard must accept that view.
+    #[test]
+    fn the_guard_accepts_a_view_published_through_each_windows_fallback() {
+        for kind in ["hard-link", "copy"] {
+            let temp = TempDir::new().unwrap();
+            let (settings, library, payload) = installed_model(&temp);
+            let binding = portable_installed_model_binding();
+            with_library(&library, || {
+                with_forced_view_entry_kind(kind, || {
+                    let guard = RuntimeSourceGuard::begin_with_binding(
+                        &JobType::ImageGenerate,
+                        &payload,
+                        &settings,
+                        Some(&binding),
+                    )
+                    .unwrap_or_else(|error| panic!("{kind}: {error}"));
+                    let loaded = Path::new(
+                        guard.dispatch_payload()["modelManifestEntry"]["paths"]["model"]
+                            .as_str()
+                            .unwrap(),
+                    )
+                    .join("model.safetensors");
+                    assert!(!std::fs::symlink_metadata(&loaded)
+                        .unwrap()
+                        .file_type()
+                        .is_symlink());
+                    assert_eq!(std::fs::read(&loaded).unwrap(), b"weights");
+                    assert!(revision_view_backing_file(&loaded).unwrap().is_some());
+                });
+            });
+        }
+    }
+
+    /// Retention removes a route's view entries and never what they stand for.
+    #[test]
+    fn pruning_a_route_removes_its_view_and_never_its_hub_files() {
+        for kind in ["symlink", "hard-link"] {
+            let temp = TempDir::new().unwrap();
+            let (settings, library, payload) = installed_model(&temp);
+            let binding = portable_installed_model_binding();
+            let source = library
+                .join("models--guardfx--model/snapshots")
+                .join(REV_A)
+                .join("model.safetensors");
+            with_library(&library, || {
+                with_forced_view_entry_kind(kind, || {
+                    drop(
+                        RuntimeSourceGuard::begin_with_binding(
+                            &JobType::ImageGenerate,
+                            &payload,
+                            &settings,
+                            Some(&binding),
+                        )
+                        .unwrap(),
+                    );
+                });
+            });
+            let attempts = settings.data_dir.join("models/portable-attempts");
+            let routes = std::fs::read_dir(&attempts)
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.join("views").exists())
+                .collect::<Vec<_>>();
+            assert_eq!(routes.len(), 1, "{kind}");
+            // An unmarked route is an obsolete layout, so retention reclaims it at once.
+            std::fs::remove_file(routes[0].join(PORTABLE_BUNDLE_LAYOUT_MARKER)).unwrap();
+            prune_portable_snapshots(None, &settings).unwrap();
+            assert!(!routes[0].join("views").exists(), "{kind}");
+            assert_eq!(std::fs::read(&source).unwrap(), b"weights", "{kind}");
+        }
     }
 
     fn in_place_ledger(path: &str, size_bytes: u64) -> PortableArtifactFile {
