@@ -260,6 +260,33 @@ test("shipped catalogs at this checkout satisfy every default route's model and 
   }
 });
 
+test("CUDA video group: valid short-clip requests at this catalog, first present member runs", async (t) => {
+  assert.deepEqual(DEFAULT_ROUTE_IDS.cuda, ["cuda-sdxl-q4-t2i", "cuda-moss-image-t2i", "cuda-ltx23-distilled-t2v", "cuda-wan22-ti2v-5b-t2v"]);
+  assert.ok(!DEFAULT_ROUTE_IDS.cuda.includes("cuda-ltx25-distilled-t2v") && ROUTES["cuda-ltx25-distilled-t2v"], "LTX-2.5 stays selectable, not default, until the Candle provider declares a footprint");
+  const models = await readCatalog(root);
+  for (const [id, expected] of [["cuda-ltx23-distilled-t2v", { model: "ltx_2_3", duration: 4, fps: 24, width: 768, height: 512, steps: 8 }], ["cuda-wan22-ti2v-5b-t2v", { model: "wan_2_2", duration: 4, fps: 16, width: 832, height: 480, steps: 8 }]]) {
+    const route = ROUTES[id], body = route.body, model = models.find((entry) => entry.id === route.model);
+    assert.equal(route.group, "cuda-video"); assert.equal(route.kind, "video"); assert.equal(route.endpoint, "/api/v1/video/jobs"); assert.equal(route.tier, "q4");
+    assert.deepEqual({ model: body.model, duration: body.duration, fps: body.fps, width: body.width, height: body.height, steps: body.advanced.steps }, expected);
+    assert.equal(body.mode, "text_to_video"); assert.equal(typeof body.seed, "number");
+    assert.ok(model.capabilities.includes("text_to_video"), `${id} catalog offers t2v`);
+    assert.ok(model.limits.durations.includes(body.duration) && model.limits.fps.includes(body.fps) && model.limits.resolutions.includes(`${body.width}x${body.height}`), `${id} request inside catalog limits`);
+    if (model.limits.steps) assert.ok(model.limits.steps.includes(body.advanced.steps));
+    assert.ok(routeDownloadRows(model, { platform: "win32", tier: "q4" }).required.length > 0);
+    assert.ok(route.claimMinutes === 10 && route.timeoutMinutes === 45);
+  }
+  // Group selection against fake hubs: LTX-2.3 present wins; absent LTX-2.3 lets Wan run.
+  const dir = await mkdtemp(path.join(os.tmpdir(), "tier2-ab-video-")); t.after(() => rm(dir, { recursive: true, force: true }));
+  const place = async (hub, model) => { for (const row of routeDownloadRows(models.find((entry) => entry.id === model), { platform: "win32", tier: "q4" }).required) { for (const selector of row.files) { const target = path.join(hub, `models--${row.repo.replace("/", "--")}`, "snapshots", row.revision, ...selector.replace(/\/\*$/, "/w.bin").split("/")); await mkdir(path.dirname(target), { recursive: true }); await writeFile(target, "w"); } } };
+  const both = path.join(dir, "both"), wanOnly = path.join(dir, "wan");
+  await place(both, "ltx_2_3"); await place(both, "wan_2_2"); await place(wanOnly, "wan_2_2");
+  const video = [ROUTES["cuda-ltx23-distilled-t2v"], ROUTES["cuda-wan22-ti2v-5b-t2v"]];
+  const plannedBoth = await planRoutes({ routes: video, hubs: [both], baseCatalog: models, headCatalog: models, platform: "win32" });
+  assert.deepEqual(plannedBoth.map((item) => item.status), ["ready", "skipped"]); assert.match(plannedBoth[1].skipReason, /alternative cuda-ltx23-distilled-t2v of group cuda-video/);
+  const plannedWan = await planRoutes({ routes: video, hubs: [wanOnly], baseCatalog: models, headCatalog: models, platform: "win32" });
+  assert.deepEqual(plannedWan.map((item) => item.status), ["skipped", "ready"]); assert.match(plannedWan[0].skipReason, /weights absent/);
+});
+
 test("identity subset, path redaction and diff are stable and hub-relative", () => {
   const payload = { prompt: "secret prompt", seed: 3, model: "flux_dev", modelBinding: { artifact: { path: "E:\\huggingface\\hub\\models--O--m\\snapshots\\x\\q4", sha256: "abc" } }, advanced: { steps: 4, tier: "q4" }, output: { dir: "/tmp/state/data/projects/p" } };
   const subset = identitySubset(payload);
@@ -398,6 +425,7 @@ test("--run drives fake base/head services through the stop rule and writes evid
   assert.equal(route.comparison.payloadIdentityDiff.count, 1, "binding revision base->head is reported");
   assert.ok(route.runs.every((run) => run.timing.enqueueToCompleteSeconds > 0 && Number.isFinite(run.timing.loadSeconds) && run.memory.peakBytes > 0 && run.cleanup.every((c) => c.exited && !c.forced)));
   assert.equal(route.hubMutation.changed, false);
+  assert.ok(route.runs.every((run) => run.hubMutation && run.hubMutation.changed === false), "each run is fingerprinted on its own");
   const differs = await scenario("differs", 1);
   assert.equal(differs.status, 1); assert.match(differs.stderr, /head_differs/);
   assert.equal(differs.report.routes[0].verdict, "head_differs");

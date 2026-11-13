@@ -67,11 +67,24 @@ export const ROUTES = Object.freeze(Object.fromEntries([
   { id: "mlx-chatterbox-tts", backend: "mlx", model: "chatterbox_tts", kind: "audio", mode: "text_to_speech", tier: null, group: null, endpoint: "/api/v1/audio/jobs", claimMinutes: 5, timeoutMinutes: 15, referenceAudio: true, body: { model: "chatterbox_tts", prompt: "The red cup is on the table.", seed: 27980 } },
   IMAGE_ROUTE("cuda-sdxl-q4-t2i", "cuda", "sdxl", "q4", null, { model: "sdxl", mode: "text_to_image", prompt: "a photorealistic red apple on a wooden table, studio lighting", width: 1024, height: 1024, count: 1, seed: 16402, loras: [], advanced: { mlxQuantize: 4 } }),
   IMAGE_ROUTE("cuda-moss-image-t2i", "cuda", "moss_image_sft", null, null, { mode: "text_to_image", model: "moss_image_sft", prompt: "A red ceramic cup on a white table", width: 256, height: 256, count: 1, seed: 26325, advanced: { steps: 2, guidanceScale: 1.0, mossImage: { acceleration: "off", max_sequence_length: 64 } } }),
+  // CUDA video group (first present wins). LTX-2.3 maps to the Candle `ltx_2_3_distilled` provider,
+  // which registers its component footprint, so the worker's LTX admission can pass; Wan2.2 TI2V-5B
+  // maps to `wan2_2_ti2v_5b` (no LTX admission). Both have measured Candle memory anchors
+  // (config/memory-anchors.json: sc-20772 LTX-2.3 q4, sc-19223 Wan2.2 TI2V-5B q4), so their weights
+  // have been on the Windows box. Short clips: LTX-2.3 768x512, 4 s at 24 fps (97 frames), 8 steps;
+  // Wan2.2 TI2V-5B 832x480, 4 s at 16 fps (65 frames), 8 steps. GPU memory is the same nvidia-smi
+  // physical-GPU1 peak above the pre-request baseline as every CUDA route.
+  { id: "cuda-ltx23-distilled-t2v", backend: "cuda", model: "ltx_2_3", kind: "video", mode: "text_to_video", tier: "q4", group: "cuda-video", endpoint: "/api/v1/video/jobs", claimMinutes: 10, timeoutMinutes: 45, body: { mode: "text_to_video", model: "ltx_2_3", prompt: "A paper boat drifting across a calm pond, gentle morning light", negativePrompt: "", duration: 4, fps: 24, width: 768, height: 512, seed: 25001, loras: [], advanced: { steps: 8 } } },
+  { id: "cuda-wan22-ti2v-5b-t2v", backend: "cuda", model: "wan_2_2", kind: "video", mode: "text_to_video", tier: "q4", group: "cuda-video", endpoint: "/api/v1/video/jobs", claimMinutes: 10, timeoutMinutes: 45, body: { mode: "text_to_video", model: "wan_2_2", prompt: "A paper boat drifting across a calm pond, gentle morning light", negativePrompt: "", duration: 4, fps: 16, width: 832, height: 480, seed: 25001, loras: [], advanced: { steps: 8 } } },
+  // Not a default: at inference pin 4a36a7f8 the Candle `ltx_2_5_distilled` provider registers no
+  // component footprint (candle-gen-ltx lib.rs REGISTRATION_25), so the worker refuses every
+  // LTX-2.5 request at admission (video_jobs/candle.rs ltx_resident_weight_bytes) on base and head
+  // alike. Kept selectable for the run after that engine fix.
   { id: "cuda-ltx25-distilled-t2v", backend: "cuda", model: "ltx_2_5", kind: "video", mode: "text_to_video", tier: "q4", group: null, endpoint: "/api/v1/video/jobs", claimMinutes: 10, timeoutMinutes: 45, body: { mode: "text_to_video", model: "ltx_2_5", prompt: "A paper boat drifting across a calm pond, gentle morning light", negativePrompt: "", duration: 4, fps: 24, width: 768, height: 512, seed: 25001, loras: [], advanced: { transformerVariant: "distilled" } } },
 ].map((route) => [route.id, Object.freeze(route)])));
 export const DEFAULT_ROUTE_IDS = Object.freeze({
   mlx: Object.freeze(["mlx-flux1-dev-t2i", "mlx-flux3-klein-t2i", "mlx-moss-image-t2i", "mlx-ltx25-distilled-t2v", "mlx-chatterbox-tts"]),
-  cuda: Object.freeze(["cuda-sdxl-q4-t2i", "cuda-moss-image-t2i", "cuda-ltx25-distilled-t2v"]),
+  cuda: Object.freeze(["cuda-sdxl-q4-t2i", "cuda-moss-image-t2i", "cuda-ltx23-distilled-t2v", "cuda-wan22-ti2v-5b-t2v"]),
 });
 // Read-only hub roots tried in order per route. The first root holding every required file wins.
 export function defaultHubs(backend, home = os.homedir()) {
@@ -535,6 +548,7 @@ export function renderMarkdown(report) {
     for (const entry of (diff?.entries ?? []).slice(0, 40)) lines.push(`  - \`${entry.path}\`: base ${entry.base} → head ${entry.head}`);
     if (route.comparison?.numericDifference) lines.push(`- numeric difference (${route.comparison.numericDifferenceOf}): ${JSON.stringify(route.comparison.numericDifference)}`);
     if (route.hubMutation?.changed) lines.push(`- **hub mutation detected**: ${JSON.stringify(route.hubMutation.diff.entries.slice(0, 10))}`);
+    for (const runRecord of (route.runs ?? []).filter((item) => item.hubMutation?.changed)) lines.push(`- hub mutation during ${runRecord.label} (${runRecord.side}): ${runRecord.hubMutation.diff.count} change(s), e.g. ${JSON.stringify(runRecord.hubMutation.diff.entries.slice(0, 6))}`);
   }
   return lines.join("\n") + "\n";
 }
@@ -634,8 +648,19 @@ async function hubFingerprint(hub, repos) {
   const out = { root: { entries: await list(hub), mtime: await mtime(hub) }, hfHome: { entries: await list(path.dirname(hub)) }, repos: {} };
   for (const { repo, revision } of repos) {
     const dir = path.join(hub, `models--${repo.replace("/", "--")}`), snap = path.join(dir, "snapshots", revision);
+    // Every directory under the snapshot (bounded depth), with its own mtime and listing, and each
+    // entry's lstat mtime/ctime (a link is not followed), so a re-created entry is visible too.
     const nested = {};
-    for (const name of (await list(snap)) ?? []) nested[name] = { mtime: await mtime(path.join(snap, name)), entries: await list(path.join(snap, name)) };
+    const walk = async (dir, rel, depth) => {
+      let entries; try { entries = await readdir(dir, { withFileTypes: true }); } catch { nested[rel || "."] = null; return; }
+      nested[rel || "."] = { mtime: await mtime(dir), entries: entries.map((entry) => entry.name).sort() };
+      for (const entry of entries) {
+        const child = path.join(dir, entry.name), childRel = rel ? `${rel}/${entry.name}` : entry.name;
+        if (entry.isDirectory() && depth < 4) await walk(child, childRel, depth + 1);
+        else { try { const info = await lstat(child); nested[`${childRel}#entry`] = { mtime: info.mtimeMs, ctime: info.ctimeMs, link: info.isSymbolicLink(), size: info.size }; } catch { nested[`${childRel}#entry`] = null; } }
+      }
+    };
+    await walk(snap, "", 0);
     out.repos[`${repo}@${revision}`] = { dir: await list(dir), dirMtime: await mtime(dir), refs: await list(path.join(dir, "refs")), snapshots: await list(path.join(dir, "snapshots")), snapshot: nested, blobsMtime: await mtime(path.join(dir, "blobs")) };
   }
   return out;
@@ -903,7 +928,14 @@ async function runComparison(env, cfg, report, signal) {
     route.runs = []; route.status = "running";
     progress({ route: route.id, phase: "route_start", model: route.model, hub: route.hub, claim_min: cfg.claimMinutesOverride ?? definition.claimMinutes, exec_min: definition.timeoutMinutes });
     await writeReport(cfg, report);
-    const run = async (label) => { const record = await executeRun({ env, cfg, route: definition, plan: route, label, side: label.startsWith("base") ? "base" : "head", built, evidenceRoot: evidence, secrets, signal }); route.runs.push(record); await writeReport(cfg, report); return record; };
+    const run = async (label) => {
+      const runBefore = await hubFingerprint(route.hub, repos);
+      const record = await executeRun({ env, cfg, route: definition, plan: route, label, side: label.startsWith("base") ? "base" : "head", built, evidenceRoot: evidence, secrets, signal });
+      const runAfter = await hubFingerprint(route.hub, repos);
+      record.hubMutation = { changed: JSON.stringify(runBefore.repos) !== JSON.stringify(runAfter.repos), diff: diffObjects(runBefore.repos, runAfter.repos, 50) };
+      if (record.hubMutation.changed) progress({ route: route.id, run: label, phase: "hub_mutation", entries: record.hubMutation.diff.count });
+      route.runs.push(record); await writeReport(cfg, report); return record;
+    };
     const base1 = await run("base#1");
     // A worker that cannot register on the very first run will not register on the next five
     // either (same host, same launch); stop the whole comparison with that verdict.
