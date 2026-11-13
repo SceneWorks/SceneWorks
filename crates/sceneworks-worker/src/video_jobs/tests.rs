@@ -12714,16 +12714,6 @@ fn portable_ltx_primary_and_gemma_ignore_operator_overrides() {
         ..offline_settings()
     };
     write_complete_ltx_dir(&settings.data_dir.join("models/mlx/ltx_2_3_base_q4"));
-    let _frozen_scope =
-        sceneworks_core::model_artifacts::local_preference::prefer_portable_snapshots(vec![
-            sceneworks_core::model_artifacts::local_preference::LocalArtifactOverlayEntry {
-                repository: LTX_BUNDLE_REPO.to_owned(),
-                revision: LTX_BUNDLE_REVISION.to_owned(),
-                snapshot_root: frozen_snapshot,
-                files: Vec::new(),
-            },
-        ])
-        .unwrap();
     let request = request(json!({
         "projectId": "p", "model": "ltx_2_3", "prompt": "frozen",
         "advanced": {"__portableFrozenSources": true, "__portableBoundTier": "q4"},
@@ -12735,6 +12725,20 @@ fn portable_ltx_primary_and_gemma_ignore_operator_overrides() {
             ("LTX_GEMMA_DIR", override_gemma.to_str().unwrap()),
         ],
         || {
+            // The overlay is process-wide: install it under the crate env lock so a concurrent
+            // resolver test (resolve_ltx_eros_gemma_prefers_local_sibling) never observes it.
+            let _frozen_scope =
+                sceneworks_core::model_artifacts::local_preference::prefer_portable_snapshots(
+                    vec![
+                    sceneworks_core::model_artifacts::local_preference::LocalArtifactOverlayEntry {
+                        repository: LTX_BUNDLE_REPO.to_owned(),
+                        revision: LTX_BUNDLE_REVISION.to_owned(),
+                        snapshot_root: frozen_snapshot.clone(),
+                        files: Vec::new(),
+                    },
+                ],
+                )
+                .unwrap();
             assert_eq!(
                 resolve_ltx_model_dir(&settings, &request).unwrap(),
                 frozen_model
@@ -13288,6 +13292,73 @@ fn ltx_gemma_override_path_requires_complete_dir() {
 
     // Unset override → None (the bundled/cache resolution proceeds).
     assert!(ltx_gemma_override_path(None).is_none());
+}
+
+/// Codex review of PR #3379 (4559512305): the Candle LTX and SCAIL-2 tier selectors read the
+/// verified binding's frozen tier when the request names none, instead of their own default, so a
+/// sibling tier installed beside the served package is never selected. Malformed explicit values
+/// are still refused. Portable cores of Candle-only selectors, so they run on every native lane.
+#[cfg(native_lane)]
+#[test]
+fn candle_video_tier_selectors_honor_the_frozen_tier_and_refuse_malformed_values() {
+    let advanced = |value: Value| value.as_object().unwrap().clone();
+    let bound_q4 = advanced(json!({"__portableBoundTier": "q4"}));
+    let bound_q8 = advanced(json!({"__portableBoundTier": "q8"}));
+    let unselected = advanced(json!({}));
+    let malformed = advanced(json!({"mlxQuantize": "eight", "__portableBoundTier": "q4"}));
+
+    // SCAIL-2: the unselected baseline is dense bf16; a binding frozen at q4 runs q4.
+    assert_eq!(
+        super::candle::candle_scail2_tier_key(&unselected),
+        Ok("bf16")
+    );
+    assert_eq!(super::candle::candle_scail2_tier_key(&bound_q4), Ok("q4"));
+    assert_eq!(super::candle::candle_scail2_tier_key(&bound_q8), Ok("q8"));
+    assert!(super::candle::candle_scail2_tier_key(&malformed).is_err());
+    assert!(super::candle::candle_scail2_tier_key(&advanced(json!({"mlxQuantize": 6}))).is_err());
+
+    // LTX: the unselected default is q4; a binding frozen at q8 runs q8.
+    assert_eq!(super::candle::candle_ltx_tier_key(&unselected), Some("q4"));
+    assert_eq!(super::candle::candle_ltx_tier_key(&bound_q8), Some("q8"));
+    assert_eq!(
+        super::candle::candle_ltx_tier_key(&advanced(json!({"__portableBoundTier": "bf16"}))),
+        Some("bf16")
+    );
+    assert_eq!(super::candle::candle_ltx_tier_key(&malformed), None);
+
+    // An explicit `null` keeps each selector's original meaning and never takes the bound tier:
+    // SCAIL-2 reads it as "no tier named" (dense bf16); LTX fails it closed.
+    let null_with_binding = advanced(json!({"mlxQuantize": null, "__portableBoundTier": "q4"}));
+    assert_eq!(
+        super::candle::candle_scail2_tier_key(&null_with_binding),
+        Ok("bf16")
+    );
+    assert_eq!(super::candle::candle_ltx_tier_key(&null_with_binding), None);
+    assert_eq!(
+        super::candle::candle_ltx_tier_key(&advanced(json!({"mlxQuantize": null}))),
+        None
+    );
+    // Every value the Candle LTX source resolver test refuses still refuses (tests.rs, the
+    // `unsupported LTX Candle tier ... must fail closed` loop), except bits <= 0, which select bf16
+    // here and are refused by the bundle lookup, which has no bf16 tier.
+    for invalid in [
+        json!(5),
+        json!(7),
+        json!(9),
+        json!("bf16"),
+        json!("8.0"),
+        json!(8.0),
+    ] {
+        assert_eq!(
+            super::candle::candle_ltx_tier_key(&advanced(json!({"mlxQuantize": invalid.clone()}))),
+            None,
+            "{invalid}"
+        );
+    }
+    assert_eq!(
+        super::candle::candle_ltx_tier_key(&advanced(json!({"mlxQuantize": {"bits": 8}}))),
+        None
+    );
 }
 
 /// `resolve_ltx_eros_gemma_dir`: a complete `models/mlx/gemma` sibling of the eros checkpoint wins;

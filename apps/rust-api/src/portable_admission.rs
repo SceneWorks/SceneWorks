@@ -1554,6 +1554,73 @@ async fn verify_training_primary_path(
     Ok(())
 }
 
+/// The variant a model slot's binding freezes: the training plan's tier, else the request's explicit
+/// tier, else the tier the worker would run for an unselected image request.
+fn slot_requested_variant(
+    state: &AppState,
+    job_type: &JobType,
+    payload: &JsonObject,
+    slot: &str,
+    entry: &Value,
+    training: Option<&TrainingBaseSelection>,
+) -> Option<String> {
+    training
+        .map(|selection| selection.tier.clone())
+        .or_else(|| requested_runtime_variant(payload))
+        .or_else(|| implicit_standard_tier_variant(state, job_type, slot, entry))
+}
+
+/// The tier an image request that names none runs, so the binding freezes that tier rather than
+/// the catalog's default DOWNLOAD (the smallest install, often q4). For a standard quant-tier model
+/// the worker's implicit choice is the app-wide q8 default clamped up to `mlx.minQualityTier`,
+/// falling back q8 → bf16 → q4 to a tier that is installed (`tier_resolver::preferred_tier` and
+/// `standard_tier_subdir`). `None` when the request is not such an image, or no tier is installed
+/// on this host, which keeps the catalog default download.
+fn implicit_standard_tier_variant(
+    state: &AppState,
+    job_type: &JobType,
+    slot: &str,
+    entry: &Value,
+) -> Option<String> {
+    if slot != "modelManifestEntry"
+        || !matches!(
+            job_type,
+            JobType::ImageGenerate | JobType::ImageEdit | JobType::ImageDetail
+        )
+    {
+        return None;
+    }
+    let model_id = entry.get("id").and_then(Value::as_str)?;
+    let builtin = sceneworks_core::registry::builtin_model_spec(model_id);
+    let mlx = builtin
+        .and_then(|spec| spec.product.fields.get("mlx"))
+        .or_else(|| entry.get("mlx"));
+    if mlx
+        .and_then(|mlx| mlx.get("standardTierLayout"))
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return None;
+    }
+    let rank = |tier: &str| match tier {
+        "bf16" => 3,
+        "q8" => 2,
+        "q4" => 1,
+        _ => 0,
+    };
+    let preferred = entry
+        .pointer("/mlx/minQualityTier")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|floor| rank(floor) > rank("q8"))
+        .unwrap_or("q8");
+    let installed = crate::models::installed_variant_keys(entry, &state.settings.data_dir);
+    [preferred, "q8", "bf16", "q4"]
+        .into_iter()
+        .find(|tier| installed.iter().any(|variant| variant == tier))
+        .map(str::to_owned)
+}
+
 // The slot capture receives one explicit value for each independent source policy dimension.
 #[allow(clippy::too_many_arguments)]
 async fn capture_model_slot(
@@ -1576,10 +1643,8 @@ async fn capture_model_slot(
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| incomplete(format!("{slot} has no canonical model id")))?;
     let training = training_base_selection(job_type, payload, model_id)?;
-    let requested_variant = training
-        .as_ref()
-        .map(|selection| selection.tier.clone())
-        .or_else(|| requested_runtime_variant(payload));
+    let requested_variant =
+        slot_requested_variant(state, job_type, payload, slot, entry, training.as_ref());
     let selected = selected_portable_model_artifact_closure(
         entry,
         backend,
@@ -2257,8 +2322,14 @@ async fn resolve_dynamic_hf_revision(
             return Ok(revision.to_owned());
         }
     }
-    let base_url = std::env::var("SCENEWORKS_HUGGINGFACE_BASE_URL")
-        .unwrap_or_else(|_| "https://huggingface.co".to_owned());
+    let base_url = huggingface_base_url(state);
+    #[cfg(test)]
+    if !test_network::is_loopback(&base_url) {
+        return Err(incomplete(format!(
+            "{repo}@{reference}: unit tests never resolve a mutable revision over the network; \
+             set test_hooks.dynamic_hf_revision_override"
+        )));
+    }
     let token = huggingface_token(state)?;
     resolve_dynamic_hf_revision_with_client(
         &state.http_client,
@@ -2897,8 +2968,7 @@ async fn resolve_trusted_pinned_files(
     if let Some(fixture) = state.test_hooks.pinned_metadata_override.lock().clone() {
         return Ok(fixture(repo, revision, selectors));
     }
-    let base_url = std::env::var("SCENEWORKS_HUGGINGFACE_BASE_URL")
-        .unwrap_or_else(|_| "https://huggingface.co".to_owned());
+    let base_url = huggingface_base_url(state);
     let key = format!("{base_url}\0{repo}\0{revision}\0{}", selectors.join("\0"));
     let cache = PINNED_METADATA_CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
     if let Some(files) = cache
@@ -2971,6 +3041,10 @@ async fn fetch_pinned_hf_files(
     if let Some(remote) = state.test_hooks.pinned_metadata_remote.lock().clone() {
         return remote(repo, revision, selectors);
     }
+    #[cfg(test)]
+    if !test_network::is_loopback(base_url) {
+        return test_network::offline_pinned_files(repo, revision, selectors);
+    }
     let credential = huggingface_token(state).map_err(|error| error.detail)?;
     resolve_pinned_hf_files(
         &state.http_client,
@@ -2982,6 +3056,78 @@ async fn fetch_pinned_hf_files(
     )
     .await
     .map_err(|error| error.to_string())
+}
+
+/// Unit tests never reach Hugging Face. A test that needs exact upstream metadata installs a
+/// `pinned_metadata_remote`/`pinned_metadata_override` hook or a loopback stub server
+/// (`SCENEWORKS_HUGGINGFACE_BASE_URL`); every other admission gets a deterministic offline
+/// ledger built from the request's own selectors, so a suite run is independent of the network,
+/// its latency and its rate limits.
+#[cfg(test)]
+pub(crate) mod test_network {
+    use sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile;
+    use sha2::{Digest, Sha256};
+
+    pub(crate) fn is_loopback(base_url: &str) -> bool {
+        reqwest::Url::parse(base_url).is_ok_and(|url| {
+            matches!(
+                url.host_str(),
+                Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
+            )
+        })
+    }
+
+    /// One concrete file per selector: the selector itself, or for a glob one name that matches
+    /// it. Content identity is a digest of the repository, revision and path, so every run and
+    /// every host admits the same frozen ledger.
+    pub(crate) fn offline_pinned_files(
+        repo: &str,
+        revision: &str,
+        selectors: &[String],
+    ) -> Result<Vec<PortableArtifactFile>, String> {
+        let mut files = std::collections::BTreeMap::new();
+        for selector in selectors {
+            let concrete = selector.replace('*', "fixture").replace('?', "x");
+            let matches = glob::Pattern::new(selector)
+                .map_err(|error| format!("offline fixture selector {selector}: {error}"))?
+                .matches(&concrete);
+            if !matches {
+                return Err(format!(
+                    "offline fixture cannot name a file for selector {selector}; install a \
+                     pinned_metadata_override"
+                ));
+            }
+            let digest = Sha256::digest(format!("{repo}@{revision}/{concrete}").as_bytes());
+            files.insert(
+                concrete.clone(),
+                PortableArtifactFile {
+                    relative_path: concrete.into(),
+                    size_bytes: 1 + u64::from(digest[0]),
+                    sha256: format!("sha256:{digest:x}"),
+                },
+            );
+        }
+        Ok(files.into_values().collect())
+    }
+}
+
+/// The Hugging Face endpoint for pinned metadata and mutable-revision resolution.
+fn huggingface_base_url(state: &AppState) -> String {
+    #[cfg(test)]
+    {
+        state
+            .test_hooks
+            .huggingface_base_url
+            .lock()
+            .clone()
+            .unwrap_or_else(|| "https://huggingface.co".to_owned())
+    }
+    #[cfg(not(test))]
+    {
+        let _ = state;
+        std::env::var("SCENEWORKS_HUGGINGFACE_BASE_URL")
+            .unwrap_or_else(|_| "https://huggingface.co".to_owned())
+    }
 }
 
 fn required_download_string<'a>(download: &'a Value, key: &str) -> Result<&'a str, ApiError> {
@@ -4324,6 +4470,102 @@ mod tests {
             error.contains("outside every managed root"),
             "escaping link must stay refused: {error}"
         );
+    }
+
+    /// SW-7033 Tier 2 (MLX flux_dev, seed 33111): an image request that names no tier ran the
+    /// worker's implicit q8 default on main before the registry (q8 installed), but the binding
+    /// froze the catalog's default DOWNLOAD (q4), so the same request rendered a different tier.
+    /// The binding must freeze the tier the worker would run: q8 clamped up to the quality floor,
+    /// falling back q8 → bf16 → q4 to an installed tier; the default download only when none is.
+    #[tokio::test]
+    async fn an_unselected_standard_tier_image_freezes_the_workers_implicit_tier() {
+        let _hf_cache = crate::tests::support::isolate_hf_cache();
+        let root = tempfile::tempdir().unwrap();
+        let (_, state) = crate::create_app_with_state(crate::tests::support::test_settings(&root))
+            .expect("test API state");
+        let entry = Value::Object(
+            sceneworks_core::builtin_manifests::builtin_model_entry("flux_dev")
+                .expect("flux_dev is registered")
+                .clone(),
+        );
+        let primary = entry["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["variant"] == "q4")
+            .expect("flux_dev q4 download");
+        let repo = primary["repo"].as_str().unwrap();
+        let revision = primary["revision"].as_str().unwrap();
+        let install = |tier: &str| {
+            let snapshot = sceneworks_core::hf_home::huggingface_repo_cache_path(
+                &state.settings.data_dir,
+                repo,
+            )
+            .unwrap()
+            .join("snapshots")
+            .join(revision)
+            .join(tier);
+            for file in ["transformer/model.safetensors", "vae/model.safetensors"] {
+                let path = snapshot.join(file);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, b"weights").unwrap();
+            }
+        };
+        let unselected = json!({"model":"flux_dev","mode":"text_to_image","prompt":"p"});
+        let unselected = unselected.as_object().unwrap();
+        let variant = |job_type: &JobType, payload: &JsonObject, slot: &str| {
+            slot_requested_variant(&state, job_type, payload, slot, &entry, None)
+        };
+        let image = JobType::ImageGenerate;
+
+        // Nothing installed: keep the catalog default download.
+        assert_eq!(variant(&image, unselected, "modelManifestEntry"), None);
+        install("q4");
+        assert_eq!(
+            variant(&image, unselected, "modelManifestEntry").as_deref(),
+            Some("q4"),
+            "only q4 installed: the worker's fallback lands on q4"
+        );
+        install("q8");
+        assert_eq!(
+            variant(&image, unselected, "modelManifestEntry").as_deref(),
+            Some("q8"),
+            "q8 installed: the implicit default is q8, not the q4 default download"
+        );
+        install("bf16");
+        assert_eq!(
+            variant(&image, unselected, "modelManifestEntry").as_deref(),
+            Some("q8")
+        );
+        // An explicit tier is always the request's own.
+        let explicit = json!({"model":"flux_dev","advanced":{"mlxQuantize":4}});
+        assert_eq!(
+            variant(&image, explicit.as_object().unwrap(), "modelManifestEntry").as_deref(),
+            Some("q4")
+        );
+        // Only the primary image slot of an image job takes the implicit image default.
+        assert_eq!(variant(&image, unselected, "baseModelManifestEntry"), None);
+        assert_eq!(
+            variant(&JobType::VideoGenerate, unselected, "modelManifestEntry"),
+            None
+        );
+        // The frozen closure then names that tier's files only.
+        let selected = selected_portable_model_artifact_closure(
+            &entry,
+            "mlx",
+            "macos",
+            variant(&image, unselected, "modelManifestEntry").as_deref(),
+            unselected,
+        )
+        .unwrap();
+        let primary_files = selected["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| !is_co_requisite_download(row))
+            .flat_map(|row| row["files"].as_array().unwrap().clone())
+            .collect::<Vec<_>>();
+        assert_eq!(primary_files, vec![json!("q8/*")]);
     }
 
     #[test]

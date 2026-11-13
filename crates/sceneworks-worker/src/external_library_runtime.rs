@@ -52,11 +52,12 @@ use sceneworks_core::model_artifacts::portable_binding::{
 use sceneworks_core::model_artifacts::resolved_cache::{ResolvedCacheLease, ResolvedCacheStore};
 use sceneworks_core::model_artifacts::ModelArtifactResolver;
 use sceneworks_core::model_artifacts::{
-    ArtifactIdentity, ArtifactMemberRole, ArtifactSourceLibrary,
+    ArtifactContractError, ArtifactIdentity, ArtifactMemberRole, ArtifactSourceLibrary,
 };
 use sceneworks_core::portable_sources::{
     portable_aux_source_shape, required_portable_aux_source_ids, PortableAuxSourceShape,
 };
+use sceneworks_core::verified_source_cache::{SourceVerification, VerifiedSourceCache};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
@@ -322,13 +323,12 @@ impl RuntimeSourceGuard {
         let mut plans: Vec<EntryPlan> = Vec::new();
         let mut converted_co_requirements = Vec::new();
         for (slot, entry) in &model_entries {
-            let requested_variant = selected_runtime_variant(
+            let requested_variant = bound_runtime_variant(
                 job_type,
                 payload,
-                entry
-                    .get("id")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default(),
+                slot,
+                entry,
+                binding.and_then(|route| route.models.iter().find(|model| &model.slot == slot)),
             )?;
             let has_hf_downloads = entry
                 .get("downloads")
@@ -542,6 +542,7 @@ impl RuntimeSourceGuard {
                 settings,
                 &plans,
                 &converted_co_requirements,
+                cancellation,
             )?;
             let prepared = prepare_portable_snapshot(
                 binding,
@@ -549,6 +550,7 @@ impl RuntimeSourceGuard {
                 payload,
                 settings,
                 &mut dispatch_payload,
+                cancellation,
             )?;
             if let Some(prepared) = prepared {
                 local_scope = None;
@@ -742,13 +744,20 @@ impl RuntimeSourceGuard {
     }
 }
 
-/// Private content-addressed bundle used only for digest-backed local sources. The shared route
-/// lease remains held through dispatch, including loader reads, and prevents cooperative eviction
-/// (which needs the lease exclusively); other attempts on the same route read concurrently.
+/// Private content-addressed bundle used only for digest-backed local sources, worker claims and
+/// checkpoint-plan layers; pinned Hugging Face members are verified in place and never copied. The
+/// shared route lease remains held through dispatch, including loader reads, and prevents
+/// cooperative eviction (which needs the lease exclusively); other attempts on the same route read
+/// concurrently. `None` when the route needed no bundle.
 #[derive(Debug)]
 struct PortableAttemptSnapshot {
-    _lease: std::sync::Arc<FileLock>,
+    _lease: Option<std::sync::Arc<FileLock>>,
 }
+
+/// Written into every route-bundle directory this layout creates. A bundle without it was built by
+/// the earlier layout that also copied pinned Hugging Face members; nothing reads those any more,
+/// so retention reclaims them first, whatever the size and count targets.
+const PORTABLE_BUNDLE_LAYOUT_MARKER: &str = ".layout-v4";
 
 struct PreparedPortableSnapshot {
     snapshot: PortableAttemptSnapshot,
@@ -1051,6 +1060,165 @@ fn snapshot_matches_frozen_files(snapshot: &Path, files: &[PortableArtifactFile]
     })
 }
 
+/// One file of a pinned Hugging Face (Revision) member, resolved in its own hub snapshot.
+struct InPlaceRevisionFile {
+    real: PathBuf,
+    expected: PortableArtifactFile,
+}
+
+/// The generic progress label for in-place source verification; never a provider name.
+const IN_PLACE_VERIFICATION_COMPONENT: &str = "model files";
+
+#[cfg(test)]
+thread_local! {
+    static HASHED_SOURCE_FILES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Resolve every frozen file of a Revision member inside `snapshot` without copying it. A
+/// relative path that is not a plain descendant, a file whose real path leaves the snapshot's own
+/// hub repository directory (`models--<repo>`: its `snapshots/` links and `blobs/`), or a size
+/// that differs from the ledger is refused here, before any byte is read.
+fn in_place_revision_files(
+    snapshot: &Path,
+    files: &[PortableArtifactFile],
+) -> WorkerResult<Vec<InPlaceRevisionFile>> {
+    let repository_dir = snapshot
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| invalid_binding("frozen source snapshot has no hub repository"))?;
+    let repository_real = std::fs::canonicalize(repository_dir)
+        .map_err(|_| invalid_binding("frozen source snapshot is unavailable"))?;
+    files
+        .iter()
+        .map(|file| {
+            if file.relative_path.as_os_str().is_empty()
+                || !file
+                    .relative_path
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_)))
+            {
+                return Err(invalid_binding("a frozen member path escapes its snapshot"));
+            }
+            let real = std::fs::canonicalize(snapshot.join(&file.relative_path))
+                .map_err(|_| invalid_binding("a frozen member is missing from its snapshot"))?;
+            if !real.starts_with(&repository_real) {
+                return Err(invalid_binding(
+                    "a frozen member resolves outside its hub repository",
+                ));
+            }
+            let metadata = std::fs::metadata(&real).map_err(WorkerError::Io)?;
+            if !metadata.is_file() || metadata.len() != file.size_bytes {
+                return Err(invalid_binding(
+                    "a frozen member differs from its pinned ledger",
+                ));
+            }
+            Ok(InPlaceRevisionFile {
+                real,
+                expected: file.clone(),
+            })
+        })
+        .collect()
+}
+
+/// This host's hash-once verdict store ([`sceneworks_core::verified_source_cache`]).
+fn verified_source_cache(settings: &Settings) -> VerifiedSourceCache {
+    VerifiedSourceCache::new(
+        settings
+            .data_dir
+            .join("models/portable-attempts/.verified-sources"),
+    )
+}
+
+/// Run `body` with a load-progress context that reports `Verifying model files — read / total`
+/// over `files` (real path, size), so a long first verification is never silent.
+fn with_verification_progress<T>(
+    files: &[(PathBuf, u64)],
+    body: impl FnOnce(&gen_core::LoadActivityContext) -> T,
+) -> T {
+    let progress = gen_core::LoadActivityContext::capture().with_components(
+        files
+            .iter()
+            .map(|(path, _)| (path.clone(), IN_PLACE_VERIFICATION_COMPONENT.to_owned())),
+    );
+    progress.register_files(files.iter().cloned());
+    let _installed = progress.install();
+    body(&progress)
+}
+
+fn verification_canceled(cancellation: Option<&PortableOverlayWaitCancellation>) -> bool {
+    cancellation.is_some_and(PortableOverlayWaitCancellation::is_cancelled)
+}
+
+/// Verify one canonical file against its frozen ledger entry, hashing it at most once per host
+/// while its filesystem identity is unchanged. A mismatch is `InvalidData`; cancellation is
+/// `Interrupted`.
+fn verify_source_once(
+    cache: &VerifiedSourceCache,
+    progress: &gen_core::LoadActivityContext,
+    real: &Path,
+    expected: &PortableArtifactFile,
+    cancellation: Option<&PortableOverlayWaitCancellation>,
+) -> io::Result<()> {
+    let check = || {
+        if verification_canceled(cancellation) {
+            Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "frozen source verification canceled",
+            ))
+        } else {
+            Ok(())
+        }
+    };
+    match cache.verify(real, &expected.sha256, &check)? {
+        SourceVerification::Reused => {
+            let done = progress.file(
+                gen_core::LoadActivityPhase::Verifying,
+                real,
+                Some(expected.size_bytes),
+            );
+            done.update(expected.size_bytes);
+            done.finish();
+        }
+        SourceVerification::Hashed => {
+            #[cfg(test)]
+            HASHED_SOURCE_FILES.with(|count| count.set(count.get() + 1));
+        }
+    }
+    Ok(())
+}
+
+/// Verify in-place Revision files against their frozen SHA-256 ledger (normally a recorded
+/// verdict from the route check moments earlier, so no byte is read twice).
+fn verify_in_place_revision_files(
+    settings: &Settings,
+    files: &[InPlaceRevisionFile],
+    cancellation: Option<&PortableOverlayWaitCancellation>,
+) -> WorkerResult<()> {
+    if files.is_empty() {
+        return Ok(());
+    }
+    let cache = verified_source_cache(settings);
+    let sized = files
+        .iter()
+        .map(|file| (file.real.clone(), file.expected.size_bytes))
+        .collect::<Vec<_>>();
+    with_verification_progress(&sized, |progress| {
+        for file in files {
+            verify_source_once(&cache, progress, &file.real, &file.expected, cancellation)
+                .map_err(|error| {
+                    if verification_canceled(cancellation) {
+                        WorkerError::Canceled("frozen source verification canceled".to_owned())
+                    } else if error.kind() == io::ErrorKind::InvalidData {
+                        invalid_binding("a frozen member differs from its pinned ledger")
+                    } else {
+                        WorkerError::Io(error)
+                    }
+                })?;
+        }
+        Ok(())
+    })
+}
+
 fn selected_portable_aux_ids(
     job_type: &JobType,
     payload: &JsonObject,
@@ -1120,12 +1288,53 @@ fn selected_runtime_variant(
     ))
 }
 
+/// The tier this request runs. An image request that names no tier runs the worker's implicit
+/// standard tier, which the API froze into the admitted binding (`slot_requested_variant` in
+/// rust-api `portable_admission.rs`); the request itself carries no tier, so the binding's own tier
+/// is the selection. It applies only where that implicit rule applies (an image job's
+/// `modelManifestEntry` slot of a standard quant-tier model) and only to a bf16/q8/q4 tier; the
+/// selected closure is then verified against the binding like any explicit tier.
+fn bound_runtime_variant(
+    job_type: &JobType,
+    payload: &JsonObject,
+    slot: &str,
+    entry: &serde_json::Value,
+    binding: Option<&PortableModelBinding>,
+) -> WorkerResult<Option<String>> {
+    let model_id = entry
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if let Some(variant) = selected_runtime_variant(job_type, payload, model_id)? {
+        return Ok(Some(variant));
+    }
+    if slot != "modelManifestEntry"
+        || !matches!(
+            job_type,
+            JobType::ImageGenerate | JobType::ImageEdit | JobType::ImageDetail
+        )
+    {
+        return Ok(None);
+    }
+    let standard_tier_layout = sceneworks_core::registry::builtin_model_spec(model_id)
+        .and_then(|spec| spec.product.fields.get("mlx"))
+        .or_else(|| entry.get("mlx"))
+        .and_then(|mlx| mlx.get("standardTierLayout"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    Ok(binding
+        .filter(|binding| standard_tier_layout && binding.model_id == model_id)
+        .and_then(|binding| binding.tier.clone())
+        .filter(|tier| matches!(tier.as_str(), "bf16" | "q8" | "q4")))
+}
+
 fn prepare_portable_snapshot(
     route: &PortableRouteBinding,
     job_type: &JobType,
     payload: &JsonObject,
     settings: &Settings,
     dispatch_payload: &mut JsonObject,
+    cancellation: Option<&PortableOverlayWaitCancellation>,
 ) -> WorkerResult<Option<PreparedPortableSnapshot>> {
     let model_slots = payload_model_slots(payload);
     let selected_aux = route
@@ -1143,49 +1352,111 @@ fn prepare_portable_snapshot(
     if route.models.is_empty() {
         return Ok(None);
     }
-    // A supported route may itself exceed the retention target. It remains leased while active;
-    // prune removes other entries, and a later route can evict this one after the lease ends.
-    let route_digest = portable_cache_route_digest(route)?;
-    let parent = settings
-        .data_dir
-        .join("models/portable-attempts")
-        .join(route_digest);
-    create_private_directory(&settings.data_dir.join("models"))?;
+    // Pinned Hugging Face (Revision) members are verified and served IN PLACE from this worker's
+    // own hub snapshot: they are content-addressed and never copied, and the loader reads the
+    // hub's own layout (snapshot links into the repository's `blobs/`), which is what the
+    // inference shard-path check accepts. Only the rest (digest-backed local sources, worker
+    // claims and checkpoint-plan layers) is copied into a private, verified, leased route bundle.
+    //
+    // One revision can resolve in two roots (a resolved-cache snapshot holds the hard closure, the
+    // source library a soft companion). A selected auxiliary has its own per-component loader
+    // path and is served from its own root. When the members a loader reaches through the one
+    // snapshot directory of that revision span two roots, those members fall back to the
+    // copy-then-verify bundle, the only arrangement in which a pinned member is copied.
+    let mut plan_layers_by_member = Vec::new();
+    let mut revision_snapshots_by_member = Vec::new();
+    let mut directory_roots: std::collections::BTreeMap<(String, String), Vec<PathBuf>> =
+        std::collections::BTreeMap::new();
+    let mut needs_bundle = false;
+    for (model_index, model) in route.models.iter().enumerate() {
+        let entry = model_slots
+            .iter()
+            .find(|(slot, _)| slot == &model.slot)
+            .map(|(_, entry)| *entry)
+            .ok_or_else(|| invalid_binding("snapshot model slot is absent"))?;
+        let mut layers = Vec::new();
+        let mut snapshots = Vec::new();
+        for member in &model.members {
+            let plan_layer = selected_checkpoint_plan_layer(member, model, entry, settings)?;
+            needs_bundle |= plan_layer.is_some()
+                || !matches!(member.source, PortableSourceIdentity::Revision { .. });
+            let snapshot = if let PortableSourceIdentity::Revision { identity } = &member.source {
+                let snapshot = discover_frozen_member_snapshot(settings, identity, &member.files)?;
+                let is_selected_aux = member
+                    .component_id
+                    .as_ref()
+                    .is_some_and(|id| selected_aux[model_index].contains(id));
+                if plan_layer.is_none() && !is_selected_aux {
+                    let roots = directory_roots
+                        .entry((identity.repository.clone(), identity.revision.clone()))
+                        .or_default();
+                    if !roots.contains(&snapshot) {
+                        roots.push(snapshot.clone());
+                    }
+                }
+                Some(snapshot)
+            } else {
+                None
+            };
+            layers.push(plan_layer);
+            snapshots.push(snapshot);
+        }
+        needs_bundle |= model.checkpoint_plan.is_some();
+        debug_assert_eq!(plan_layers_by_member.len(), model_index);
+        plan_layers_by_member.push(layers);
+        revision_snapshots_by_member.push(snapshots);
+    }
+    let copied_revisions = directory_roots
+        .iter()
+        .filter(|(_, roots)| roots.len() > 1)
+        .map(|(key, _)| key.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    needs_bundle |= !copied_revisions.is_empty();
     let cache_root = settings.data_dir.join("models/portable-attempts");
+    create_private_directory(&settings.data_dir.join("models"))?;
     create_private_directory(&cache_root)?;
     ensure_private_directory(&cache_root)?;
-    create_private_directory(&parent)?;
-    ensure_private_directory(&parent)?;
+    // A supported route may itself exceed the retention target. It remains leased while active;
+    // prune removes other entries, and a later route can evict this one after the lease ends.
+    let route_dir = cache_root.join(portable_cache_route_digest(route)?);
+    create_private_directory(&route_dir)?;
+    ensure_private_directory(&route_dir)?;
     // Readers share the route lease for as long as they use the bundle; an evictor needs it
     // exclusively, so it never removes a bundle an attempt is reading. A published bundle is
     // immutable, so concurrent attempts on one route (GPUs sharing `data_dir`) read it at once.
-    let lease = std::sync::Arc::new(
+    let route_lease = std::sync::Arc::new(
         FileLock::shared(
-            sceneworks_core::file_lock::open_regular_lock_file(&parent.join(".lease"))
+            sceneworks_core::file_lock::open_regular_lock_file(&route_dir.join(".lease"))
                 .map_err(WorkerError::Io)?,
         )
         .map_err(WorkerError::Io)?,
     );
-    let snapshot = PortableAttemptSnapshot {
-        _lease: lease.clone(),
-    };
-    let published = parent.join("bundle");
+    std::fs::write(route_dir.join(PORTABLE_BUNDLE_LAYOUT_MARKER), b"").map_err(WorkerError::Io)?;
+    let bundle = needs_bundle.then(|| (route_dir.clone(), route_lease.clone()));
+    let published = bundle
+        .as_ref()
+        .map(|(parent, _)| parent.join("bundle"))
+        .unwrap_or_default();
     // Materialization is exclusive: one writer builds the staging tree and publishes it by
     // rename, so a reader only ever sees a complete, verified bundle or none. The writer lock is
     // held only until publication, never through dispatch.
-    let materializing = if published.exists() {
-        None
-    } else {
-        let writer =
-            FileLock::open_exclusive(&parent.join(".materialize")).map_err(WorkerError::Io)?;
-        (!published.exists()).then_some(writer)
+    let materializing = match &bundle {
+        Some((parent, _)) if !published.exists() => {
+            let writer =
+                FileLock::open_exclusive(&parent.join(".materialize")).map_err(WorkerError::Io)?;
+            (!published.exists()).then_some(writer)
+        }
+        _ => None,
     };
     let needs_copy = materializing.is_some();
-    let staging = parent.join(format!("staging-{}", uuid::Uuid::new_v4()));
-    if needs_copy {
+    let staging = bundle
+        .as_ref()
+        .map(|(parent, _)| parent.join(format!("staging-{}", uuid::Uuid::new_v4())))
+        .unwrap_or_default();
+    if let (true, Some((parent, _))) = (needs_copy, &bundle) {
         // A crashed first materialization leaves only a uniquely named staging tree; it never
         // becomes a load candidate. The writer lock makes cleanup exclusive with another writer.
-        for entry in std::fs::read_dir(&parent).map_err(WorkerError::Io)? {
+        for entry in std::fs::read_dir(parent).map_err(WorkerError::Io)? {
             let entry = entry.map_err(WorkerError::Io)?;
             if entry.file_name().to_string_lossy().starts_with("staging-") {
                 remove_private_snapshot(&entry.path()).map_err(WorkerError::Io)?;
@@ -1195,6 +1466,15 @@ fn prepare_portable_snapshot(
     }
     let mut allowed_roots = crate::paths::allowed_model_roots(settings)?;
     let mut rewrites = Vec::new();
+    // (slot, member, selected path, selected auxiliary) for in-place Revision members.
+    let mut in_place = Vec::new();
+    let mut in_place_files = Vec::new();
+    // The one snapshot directory each in-place revision is served from, and the files in it.
+    let mut in_place_roots: std::collections::BTreeMap<(String, String), (PathBuf, Vec<PathBuf>)> =
+        std::collections::BTreeMap::new();
+    // Selected auxiliaries served in place: their files belong to the revision's served snapshot
+    // when they resolved in that same root (the load-boundary check reads that file list).
+    let mut in_place_aux = Vec::new();
     for (model_index, model) in route.models.iter().enumerate() {
         let entry = model_slots
             .iter()
@@ -1203,7 +1483,7 @@ fn prepare_portable_snapshot(
             .ok_or_else(|| invalid_binding("snapshot model slot is absent"))?;
         let required_ids = &selected_aux[model_index];
         for (member_index, member) in model.members.iter().enumerate() {
-            let plan_layer = selected_checkpoint_plan_layer(member, model, entry, settings)?;
+            let plan_layer = plan_layers_by_member[model_index][member_index].take();
             if plan_layer.is_some() && member.files.len() != 1 {
                 return Err(invalid_binding(
                     "checkpoint plan layer is not one frozen file",
@@ -1213,16 +1493,7 @@ fn prepare_portable_snapshot(
                 .component_id
                 .as_ref()
                 .is_some_and(|id| required_ids.contains(id));
-            let revision_snapshot =
-                if let PortableSourceIdentity::Revision { identity } = &member.source {
-                    Some(discover_frozen_member_snapshot(
-                        settings,
-                        identity,
-                        &member.files,
-                    )?)
-                } else {
-                    None
-                };
+            let revision_snapshot = revision_snapshots_by_member[model_index][member_index].take();
             let selected = if let Some(snapshot) = &revision_snapshot {
                 if !is_selected_aux {
                     snapshot.clone()
@@ -1272,6 +1543,29 @@ fn prepare_portable_snapshot(
                     return Err(invalid_binding(
                         "selected auxiliary loader shape differs from its binding",
                     ));
+                }
+            }
+            if let (Some(snapshot), None, PortableSourceIdentity::Revision { identity }) =
+                (&revision_snapshot, &plan_layer, &member.source)
+            {
+                let key = (identity.repository.clone(), identity.revision.clone());
+                if is_selected_aux || !copied_revisions.contains(&key) {
+                    in_place_files.extend(in_place_revision_files(snapshot, &member.files)?);
+                    if is_selected_aux {
+                        in_place_aux.push((key.clone(), snapshot.clone(), member.files.clone()));
+                    } else {
+                        let (_, files) = in_place_roots
+                            .entry(key)
+                            .or_insert_with(|| (snapshot.clone(), Vec::new()));
+                        files.extend(member.files.iter().map(|file| file.relative_path.clone()));
+                    }
+                    in_place.push((
+                        model.slot.clone(),
+                        member.clone(),
+                        selected,
+                        is_selected_aux,
+                    ));
+                    continue;
                 }
             }
             let target_root = if let PortableSourceIdentity::Revision { identity } = &member.source
@@ -1356,6 +1650,12 @@ fn prepare_portable_snapshot(
             ));
         }
     }
+    // In-place Revision bytes are verified against the frozen ledger before any loader sees a
+    // path, hashing each file at most once per host while its filesystem identity is unchanged.
+    verify_in_place_revision_files(settings, &in_place_files, cancellation)?;
+    // Conversions publish regular copies of what they borrow from this route; record which hub
+    // files it verified so publication can recognize them however a converter names them.
+    record_route_frozen_sources(&route_dir, &in_place_files)?;
     if needs_copy {
         // A source can change after the first guard check while it is being copied. Never
         // publish those bytes as a reusable bundle until the complete staging tree matches the
@@ -1379,74 +1679,105 @@ fn prepare_portable_snapshot(
         freeze_private_snapshot(&published)?;
     }
     drop(materializing);
-    private_tree_bytes(&published)?;
-    // Copy-then-verify closes the race where the original changes after the first source check.
-    // The loader receives only these verified, private paths, never the original locator.
-    let mut verified_plan_layers = VerifiedPlanLayers::new(lease);
-    for model in &route.models {
-        if let Some(plan) = &model.checkpoint_plan {
-            let entry = model_slots
-                .iter()
-                .find(|(slot, _)| slot == &model.slot)
-                .map(|(_, entry)| *entry)
-                .ok_or_else(|| invalid_binding("snapshot model slot is absent"))?;
-            let checkpoint_id = entry
-                .pointer("/importPlan/checkpointId")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| invalid_binding("checkpoint plan has no job checkpoint ID"))?;
-            verified_plan_layers.add_plan(checkpoint_id, plan.clone())?;
+    let mut verified_plan_layers = None;
+    if let Some((_, lease)) = &bundle {
+        private_tree_bytes(&published)?;
+        // Copy-then-verify closes the race where the original changes after the first source
+        // check. The loader receives only these verified, private paths, never the original locator.
+        let mut layers = VerifiedPlanLayers::new(lease.clone());
+        for model in &route.models {
+            if let Some(plan) = &model.checkpoint_plan {
+                let entry = model_slots
+                    .iter()
+                    .find(|(slot, _)| slot == &model.slot)
+                    .map(|(_, entry)| *entry)
+                    .ok_or_else(|| invalid_binding("snapshot model slot is absent"))?;
+                let checkpoint_id = entry
+                    .pointer("/importPlan/checkpointId")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| invalid_binding("checkpoint plan has no job checkpoint ID"))?;
+                layers.add_plan(checkpoint_id, plan.clone())?;
+            }
+        }
+        for (slot, member, selected_relative, is_selected_aux, relative_root, plan_layer) in
+            &rewrites
+        {
+            if !needs_copy {
+                verify_private_snapshot_member(
+                    &published,
+                    member,
+                    selected_relative,
+                    relative_root,
+                    plan_layer.is_some(),
+                    &allowed_roots,
+                )?;
+            }
+            let target_root = published.join(relative_root);
+            let selected = target_root.join(selected_relative);
+            route_loader_locator(job_type, dispatch_payload, slot, member, &selected)?;
+            if let Some((checkpoint_id, layer_id)) = plan_layer {
+                layers.insert(checkpoint_id, layer_id, selected)?;
+            } else if *is_selected_aux
+                || !matches!(member.source, PortableSourceIdentity::Revision { .. })
+            {
+                rewrite_loader_locator(
+                    dispatch_payload,
+                    slot,
+                    member,
+                    &selected,
+                    *is_selected_aux,
+                )?;
+            }
+        }
+        freeze_private_snapshot(&published)?;
+        verified_plan_layers = Some(layers);
+    }
+    for (slot, member, selected, is_selected_aux) in &in_place {
+        route_loader_locator(job_type, dispatch_payload, slot, member, selected)?;
+        if *is_selected_aux {
+            rewrite_loader_locator(dispatch_payload, slot, member, selected, true)?;
         }
     }
-    for (slot, member, selected_relative, is_selected_aux, relative_root, plan_layer) in &rewrites {
-        if !needs_copy {
-            verify_private_snapshot_member(
-                &published,
-                member,
-                selected_relative,
-                relative_root,
-                plan_layer.is_some(),
-                &allowed_roots,
-            )?;
-        }
-        let target_root = published.join(relative_root);
-        let selected = target_root.join(selected_relative);
-        if matches!(
-            job_type,
-            JobType::DatasetAnalysis | JobType::TrainingCaption
-        ) && slot == "modelManifestEntries/0"
-            && member.role == ArtifactMemberRole::Primary
-        {
-            dispatch_payload.insert(
-                "modelNameOrPath".to_owned(),
-                serde_json::Value::String(selected.to_string_lossy().into_owned()),
-            );
-        }
-        if let Some((checkpoint_id, layer_id)) = plan_layer {
-            verified_plan_layers.insert(checkpoint_id, layer_id, selected)?;
-        } else if *is_selected_aux
-            || !matches!(member.source, PortableSourceIdentity::Revision { .. })
-        {
-            rewrite_loader_locator(dispatch_payload, slot, member, &selected, *is_selected_aux)?;
+    for (key, snapshot, files) in in_place_aux {
+        if let Some((root, served)) = in_place_roots.get_mut(&key) {
+            if *root == snapshot {
+                served.extend(files.iter().map(|file| file.relative_path.clone()));
+            }
         }
     }
-    freeze_private_snapshot(&published)?;
     let mut by_source: std::collections::BTreeMap<(String, String), LocalArtifactOverlayEntry> =
         std::collections::BTreeMap::new();
-    for member in route.models.iter().flat_map(|model| &model.members) {
+    for ((repository, revision), (snapshot_root, files)) in in_place_roots {
+        by_source.insert(
+            (repository.clone(), revision.clone()),
+            LocalArtifactOverlayEntry {
+                repository,
+                revision,
+                snapshot_root,
+                files,
+            },
+        );
+    }
+    for (_, member, _, is_selected_aux, _, plan_layer) in &rewrites {
         let PortableSourceIdentity::Revision { identity } = &member.source else {
             continue;
         };
-        let key = (identity.repository.clone(), identity.revision.clone());
-        let root = published.join("hf").join(
-            hub_cache_member_destination(&identity.repository, &identity.revision, Path::new(""))
-                .map_err(|error| invalid_binding(error.to_string()))?,
-        );
+        if *is_selected_aux || plan_layer.is_some() {
+            continue;
+        }
         let entry = by_source
-            .entry(key)
+            .entry((identity.repository.clone(), identity.revision.clone()))
             .or_insert_with(|| LocalArtifactOverlayEntry {
                 repository: identity.repository.clone(),
                 revision: identity.revision.clone(),
-                snapshot_root: root,
+                snapshot_root: published.join("hf").join(
+                    hub_cache_member_destination(
+                        &identity.repository,
+                        &identity.revision,
+                        Path::new(""),
+                    )
+                    .expect("a copied revision has a hub destination"),
+                ),
                 files: Vec::new(),
             });
         entry
@@ -1458,15 +1789,114 @@ fn prepare_portable_snapshot(
         entry.files.sort();
         entry.files.dedup();
     }
-    std::fs::write(parent.join(".last-used"), b"").map_err(WorkerError::Io)?;
-    prune_portable_snapshots(&parent, settings)?;
-    let plan_layers =
-        (!verified_plan_layers.plans.is_empty()).then(|| std::sync::Arc::new(verified_plan_layers));
+    std::fs::write(route_dir.join(".last-used"), b"").map_err(WorkerError::Io)?;
+    prune_portable_snapshots(Some(&route_dir), settings)?;
+    let plan_layers = verified_plan_layers
+        .filter(|layers| !layers.plans.is_empty())
+        .map(std::sync::Arc::new);
     Ok(Some(PreparedPortableSnapshot {
-        snapshot,
+        snapshot: PortableAttemptSnapshot {
+            _lease: Some(route_lease),
+        },
         overlays,
         plan_layers,
     }))
+}
+
+/// Every hub file this route verified in place, for conversion publication (see
+/// [`frozen_route_source`]). Rewritten on every attempt; removed with the route by retention.
+const ROUTE_FROZEN_SOURCES: &str = ".frozen-sources.json";
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RouteFrozenSource {
+    real_path: PathBuf,
+    sha256: String,
+    size_bytes: u64,
+}
+
+fn record_route_frozen_sources(
+    route_dir: &Path,
+    files: &[InPlaceRevisionFile],
+) -> WorkerResult<()> {
+    let record = files
+        .iter()
+        .map(|file| RouteFrozenSource {
+            real_path: file.real.clone(),
+            sha256: file.expected.sha256.clone(),
+            size_bytes: file.expected.size_bytes,
+        })
+        .collect::<Vec<_>>();
+    let body = serde_json::to_vec(&record).map_err(|error| WorkerError::Io(error.into()))?;
+    sceneworks_core::fsutil::write_atomic(&route_dir.join(ROUTE_FROZEN_SOURCES), &body)
+        .map_err(WorkerError::Io)
+}
+
+/// Test support: record `reals` (read and hashed here) as a route's in-place frozen sources.
+/// Its only caller links hub files with Unix symlinks, so it shares that test's `unix` gate.
+#[cfg(all(test, unix))]
+pub(crate) fn test_record_route_frozen_sources(route_dir: &Path, reals: &[&Path]) {
+    std::fs::create_dir_all(route_dir).unwrap();
+    let files = reals
+        .iter()
+        .map(|real| {
+            let bytes = std::fs::read(real).unwrap();
+            InPlaceRevisionFile {
+                real: std::fs::canonicalize(real).unwrap(),
+                expected: PortableArtifactFile {
+                    relative_path: real.file_name().unwrap().into(),
+                    size_bytes: bytes.len() as u64,
+                    sha256: format!("sha256:{:x}", Sha256::digest(&bytes)),
+                },
+            }
+        })
+        .collect::<Vec<_>>();
+    record_route_frozen_sources(route_dir, &files).unwrap();
+}
+
+/// The frozen ledger (SHA-256, size) of hub file `real` when a portable route under
+/// `attempts_root` (`models/portable-attempts`) verified it in place. Converters canonicalize what
+/// they borrow, so a converted layout links a route's hub file by its real path.
+pub(crate) fn frozen_route_source(
+    attempts_root: &Path,
+    real: &Path,
+) -> WorkerResult<Option<(String, u64)>> {
+    let Ok(routes) = std::fs::read_dir(attempts_root) else {
+        return Ok(None);
+    };
+    for route in routes.flatten() {
+        let Ok(body) = std::fs::read(route.path().join(ROUTE_FROZEN_SOURCES)) else {
+            continue;
+        };
+        let record: Vec<RouteFrozenSource> = serde_json::from_slice(&body)
+            .map_err(|_| invalid_binding("a route's frozen source record is unreadable"))?;
+        if let Some(source) = record.into_iter().find(|source| source.real_path == real) {
+            return Ok(Some((source.sha256, source.size_bytes)));
+        }
+    }
+    Ok(None)
+}
+
+/// Utility jobs whose loader takes one directory path receive the verified primary's path.
+fn route_loader_locator(
+    job_type: &JobType,
+    dispatch_payload: &mut JsonObject,
+    slot: &str,
+    member: &PortableArtifactMember,
+    selected: &Path,
+) -> WorkerResult<()> {
+    if matches!(
+        job_type,
+        JobType::DatasetAnalysis | JobType::TrainingCaption
+    ) && slot == "modelManifestEntries/0"
+        && member.role == ArtifactMemberRole::Primary
+    {
+        dispatch_payload.insert(
+            "modelNameOrPath".to_owned(),
+            serde_json::Value::String(selected.to_string_lossy().into_owned()),
+        );
+    }
+    Ok(())
 }
 
 fn publish_verified_snapshot(
@@ -1555,21 +1985,26 @@ fn portable_cache_route_digest(route: &PortableRouteBinding) -> WorkerResult<Str
     let encoded = serde_json::to_vec(route)
         .map_err(|error| invalid_binding(format!("cannot encode frozen route: {error}")))?;
     let mut digest = Sha256::new();
-    digest.update(b"portable-route-cache-v2\0");
+    digest.update(b"portable-route-cache-v4\0");
     digest.update(encoded);
     Ok(format!("{:x}", digest.finalize()))
 }
 
 /// Target at most eight route bundles and 256 GiB of reusable copies. The active entry always
 /// remains even when its frozen closure alone exceeds the target; a later route can evict it.
-fn prune_portable_snapshots(current: &Path, settings: &Settings) -> WorkerResult<()> {
+fn prune_portable_snapshots(current: Option<&Path>, settings: &Settings) -> WorkerResult<()> {
     let root = settings.data_dir.join("models/portable-attempts");
     let _prune_lock =
         FileLock::open_exclusive(&root.join(".prune.lock")).map_err(WorkerError::Io)?;
     let mut entries = Vec::new();
     for entry in std::fs::read_dir(&root).map_err(WorkerError::Io)? {
         let path = entry.map_err(WorkerError::Io)?.path();
-        if !path.is_dir() || path == current || !path.join("bundle").exists() {
+        if !path.is_dir()
+            || Some(path.as_path()) == current
+            || !(path.join("bundle").exists()
+                || path.join(ROUTE_FROZEN_SOURCES).exists()
+                || path.join(LEGACY_ROUTE_VIEWS).exists())
+        {
             continue;
         }
         if path
@@ -1582,25 +2017,42 @@ fn prune_portable_snapshots(current: &Path, settings: &Settings) -> WorkerResult
             let used = std::fs::metadata(path.join(".last-used"))
                 .and_then(|metadata| metadata.modified())
                 .unwrap_or(std::time::UNIX_EPOCH);
-            entries.push((used, path));
+            let obsolete = !path.join(PORTABLE_BUNDLE_LAYOUT_MARKER).exists();
+            entries.push((!obsolete, used, path));
         }
     }
-    entries.sort_by_key(|(used, _)| *used);
-    let mut total = private_tree_bytes(current)?;
-    let mut count = 1usize;
-    for (_, path) in &entries {
-        total = total.saturating_add(private_tree_bytes(path)?);
+    // Obsolete-layout bundles first (never read again), then least recently used.
+    entries.sort_by_key(|(current_layout, used, _)| (*current_layout, *used));
+    let mut total = match current {
+        Some(current) => route_entry_bytes(current)?,
+        None => 0,
+    };
+    let mut count = usize::from(current.is_some());
+    for (_, _, path) in &entries {
+        total = total.saturating_add(route_entry_bytes(path)?);
         count += 1;
     }
-    for (_, path) in entries {
-        if count <= PORTABLE_CACHE_MAX_ENTRIES && total <= PORTABLE_CACHE_MAX_BYTES {
+    for (current_layout, _, path) in entries {
+        if current_layout
+            && count <= PORTABLE_CACHE_MAX_ENTRIES
+            && total <= PORTABLE_CACHE_MAX_BYTES
+        {
             break;
         }
         let Ok(lease) = FileLock::try_open_exclusive(&path.join(".lease")) else {
             continue;
         };
-        let bytes = private_tree_bytes(&path)?;
+        let bytes = route_entry_bytes(&path)?;
         remove_private_snapshot(&path.join("bundle")).map_err(WorkerError::Io)?;
+        std::fs::remove_file(path.join(ROUTE_FROZEN_SOURCES)).ok();
+        // Leftover of the dropped link-view layout: a tree of links into the hub. Removing it
+        // never follows a link.
+        match std::fs::remove_dir_all(path.join(LEGACY_ROUTE_VIEWS)) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                return Err(WorkerError::Io(error));
+            }
+            _ => {}
+        }
         // Keep the lock file and directory: a concurrent claimant may already be waiting on it.
         std::fs::remove_file(path.join(".last-used")).ok();
         drop(lease);
@@ -1608,6 +2060,20 @@ fn prune_portable_snapshots(current: &Path, settings: &Settings) -> WorkerResult
         count -= 1;
     }
     Ok(())
+}
+
+/// A route directory left by the dropped link-view layout; retention reclaims it.
+const LEGACY_ROUTE_VIEWS: &str = "views";
+
+/// The bytes a route entry holds: its copied bundle. In-place members hold none here; lock,
+/// marker and record files are not counted.
+fn route_entry_bytes(route_dir: &Path) -> WorkerResult<u64> {
+    let bundle = route_dir.join("bundle");
+    if bundle.exists() {
+        private_tree_bytes(&bundle)
+    } else {
+        Ok(0)
+    }
 }
 
 pub(crate) fn private_tree_bytes(path: &Path) -> WorkerResult<u64> {
@@ -2104,6 +2570,7 @@ fn verify_portable_route(
     settings: &Settings,
     plans: &[EntryPlan],
     converted_co_requirements: &[ExternalArtifactRequirement],
+    cancellation: Option<&PortableOverlayWaitCancellation>,
 ) -> WorkerResult<()> {
     route
         .validate()
@@ -2244,7 +2711,16 @@ fn verify_portable_route(
                 ));
             }
         }
-        verify_portable_binding(model, entry, payload, settings, plans, &required, job_type)?;
+        verify_portable_binding(
+            model,
+            entry,
+            payload,
+            settings,
+            plans,
+            &required,
+            job_type,
+            cancellation,
+        )?;
     }
     // The complete route must cover each selected HF requirement, including the resident base of
     // an imported checkpoint. A valid primary cannot hide an omitted protected component.
@@ -2378,6 +2854,7 @@ fn is_portable_array_slot(id: &str) -> bool {
 
 /// Verify one named model slot against its own manifest entry, then hash the actual selected
 /// worker paths while the route's source lease is held.
+#[allow(clippy::too_many_arguments)]
 fn verify_portable_binding(
     binding: &PortableModelBinding,
     entry: &serde_json::Value,
@@ -2386,6 +2863,7 @@ fn verify_portable_binding(
     plans: &[EntryPlan],
     selected_aux_ids: &[String],
     job_type: &JobType,
+    cancellation: Option<&PortableOverlayWaitCancellation>,
 ) -> WorkerResult<()> {
     binding
         .validate()
@@ -2411,7 +2889,8 @@ fn verify_portable_binding(
                 .map(move |requirement| (requirement, plan.resident_base))
         })
         .collect();
-    let requested_variant = selected_runtime_variant(job_type, payload, &binding.model_id)?;
+    let requested_variant =
+        bound_runtime_variant(job_type, payload, &binding.slot, entry, Some(binding))?;
     let mut selected_manifest = selected_portable_model_artifact_closure(
         entry,
         binding.backend.as_str(),
@@ -2635,9 +3114,36 @@ fn verify_portable_binding(
             allowed_roots.push(selected.parent().unwrap_or(&selected).to_path_buf());
         }
     }
-    binding
-        .verify_local(&local, &allowed_roots)
-        .map_err(|error| invalid_binding(error.to_string()))?;
+    // Hash each frozen file at most once per host while it is unchanged; the in-place pass in
+    // `prepare_portable_snapshot` then reuses this verdict.
+    let cache = verified_source_cache(settings);
+    let sized = local
+        .iter()
+        .flat_map(|member| &member.files)
+        .filter_map(|file| {
+            let real = std::fs::canonicalize(&file.path).ok()?;
+            let size = std::fs::metadata(&real).ok()?.len();
+            Some((real, size))
+        })
+        .collect::<Vec<_>>();
+    with_verification_progress(&sized, |progress| {
+        binding.verify_local_with(&local, &allowed_roots, &|path, expected| {
+            verify_source_once(&cache, progress, path, expected, cancellation).map_err(|error| {
+                ArtifactContractError(if error.kind() == io::ErrorKind::InvalidData {
+                    "artifact file bytes differ from admitted identity".to_owned()
+                } else {
+                    format!("artifact file hash failed: {error}")
+                })
+            })
+        })
+    })
+    .map_err(|error| {
+        if verification_canceled(cancellation) {
+            WorkerError::Canceled("frozen source verification canceled".to_owned())
+        } else {
+            invalid_binding(error.to_string())
+        }
+    })?;
     let verified_derivative_primary =
         matches!(primary.source, PortableSourceIdentity::Digest { .. })
             && (crate::portable_source_claims::is_converted_builtin_model_id(&binding.model_id)
@@ -4957,6 +5463,7 @@ mod tests {
                 &payload,
                 &settings(data),
                 &mut dispatch,
+                None,
             )
             .unwrap();
             assert!(prepared.is_some());
@@ -4968,7 +5475,11 @@ mod tests {
                 std::fs::read(Path::new(selected).join(TAEF1_MODEL.file)).unwrap(),
                 b"taef1 bytes"
             );
-            assert_ne!(Path::new(selected), source.parent().unwrap());
+            // Verified in place: the loader's directory links to the pinned hub file itself.
+            assert_eq!(
+                std::fs::canonicalize(Path::new(selected).join(TAEF1_MODEL.file)).unwrap(),
+                std::fs::canonicalize(&source).unwrap()
+            );
         });
     }
 
@@ -5363,11 +5874,25 @@ mod tests {
                 .join("models--guardfx--model/snapshots")
                 .join(REV_A)
                 .join("model.safetensors");
-            std::fs::write(source, b"changed").unwrap();
             assert_eq!(
-                std::fs::read(Path::new(selected).join("model.safetensors")).unwrap(),
-                b"weights",
-                "dispatch must keep the verified private copy after the source changes"
+                std::fs::canonicalize(Path::new(selected).join("model.safetensors")).unwrap(),
+                std::fs::canonicalize(&source).unwrap(),
+                "the pinned snapshot is verified in place, not copied"
+            );
+            drop(guard);
+            std::fs::write(source, b"changed").unwrap();
+            let error = RuntimeSourceGuard::begin_with_binding(
+                &JobType::ImageGenerate,
+                &payload,
+                &settings,
+                Some(&binding),
+            )
+            .expect_err("changed source bytes must be refused");
+            assert!(
+                error
+                    .to_string()
+                    .contains("bytes differ from admitted identity"),
+                "{error}"
             );
         });
     }
@@ -5470,10 +5995,11 @@ mod tests {
             std::fs::create_dir_all(path.join("bundle")).unwrap();
             std::fs::write(path.join("bundle/file"), b"one").unwrap();
             std::fs::write(path.join(".last-used"), b"").unwrap();
+            std::fs::write(path.join(PORTABLE_BUNDLE_LAYOUT_MARKER), b"").unwrap();
             entries.push(path);
         }
         let active = FileLock::open_exclusive(&entries[1].join(".lease")).unwrap();
-        prune_portable_snapshots(&entries[0], &settings).unwrap();
+        prune_portable_snapshots(Some(&entries[0]), &settings).unwrap();
         assert!(entries[0].join("bundle/file").exists());
         assert!(entries[1].join("bundle/file").exists());
         assert_eq!(
@@ -5566,13 +6092,47 @@ mod tests {
         for path in [&current, &old] {
             std::fs::create_dir_all(path.join("bundle")).unwrap();
             std::fs::write(path.join(".last-used"), b"").unwrap();
+            std::fs::write(path.join(PORTABLE_BUNDLE_LAYOUT_MARKER), b"").unwrap();
         }
         let sparse = std::fs::File::create(current.join("bundle/weights")).unwrap();
         sparse.set_len(PORTABLE_CACHE_MAX_BYTES + 1).unwrap();
         std::fs::write(old.join("bundle/old"), b"old").unwrap();
-        prune_portable_snapshots(&current, &settings).unwrap();
+        prune_portable_snapshots(Some(&current), &settings).unwrap();
         assert!(current.join("bundle/weights").exists());
         assert!(!old.join("bundle/old").exists());
+    }
+
+    /// SW-7033 Tier 2: the earlier layout copied pinned Hugging Face members into route bundles
+    /// (an LTX-2.5 route held ~115 GB). Nothing reads those bundles any more, so retention reclaims
+    /// them first even under the size and count targets, from a route that needs no bundle at all;
+    /// a current-layout bundle and a leased obsolete one stay.
+    #[test]
+    fn obsolete_layout_bundles_are_reclaimed_under_the_retention_targets() {
+        let temp = TempDir::new().unwrap();
+        let settings = settings(temp.path().join("data"));
+        let root = settings.data_dir.join("models/portable-attempts");
+        let make = |index: u8, marked: bool| {
+            let path = root.join(format!("{index:064x}"));
+            std::fs::create_dir_all(path.join("bundle/hf")).unwrap();
+            std::fs::write(path.join("bundle/hf/weights"), b"copied").unwrap();
+            std::fs::write(path.join(".last-used"), b"").unwrap();
+            if marked {
+                std::fs::write(path.join(PORTABLE_BUNDLE_LAYOUT_MARKER), b"").unwrap();
+            }
+            path
+        };
+        let obsolete = make(1, false);
+        let leased_obsolete = make(2, false);
+        let current_layout = make(3, true);
+        let reading = FileLock::open_exclusive(&leased_obsolete.join(".lease")).unwrap();
+        prune_portable_snapshots(None, &settings).unwrap();
+        assert!(!obsolete.join("bundle").exists());
+        assert!(leased_obsolete.join("bundle/hf/weights").exists());
+        assert!(current_layout.join("bundle/hf/weights").exists());
+        drop(reading);
+        prune_portable_snapshots(None, &settings).unwrap();
+        assert!(!leased_obsolete.join("bundle").exists());
+        assert!(current_layout.join("bundle/hf/weights").exists());
     }
 
     #[test]
@@ -5676,7 +6236,7 @@ mod tests {
     }
 
     #[test]
-    fn portable_revision_auxiliary_is_copied_into_loader_path_map() {
+    fn portable_revision_auxiliary_is_verified_in_place_into_loader_path_map() {
         use sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile;
         use sceneworks_core::model_artifacts::ArtifactIdentity;
 
@@ -5785,7 +6345,7 @@ mod tests {
             let guard = RuntimeSourceGuard::begin_with_binding(
                 &JobType::ImageGenerate,
                 &payload,
-                &settings(data),
+                &settings(data.clone()),
                 Some(&binding),
             )
             .unwrap();
@@ -5793,9 +6353,26 @@ mod tests {
                 ["strict_control"]
                 .as_str()
                 .unwrap();
-            assert_ne!(mapped, source.to_str().unwrap());
+            assert_eq!(
+                std::fs::canonicalize(mapped).unwrap(),
+                std::fs::canonicalize(&source).unwrap(),
+                "the pinned auxiliary is verified in place, not copied"
+            );
+            drop(guard);
             std::fs::write(&source, b"changed").unwrap();
-            assert_eq!(std::fs::read(mapped).unwrap(), b"weights");
+            let error = RuntimeSourceGuard::begin_with_binding(
+                &JobType::ImageGenerate,
+                &payload,
+                &settings(data),
+                Some(&binding),
+            )
+            .expect_err("changed auxiliary bytes must be refused");
+            assert!(
+                error
+                    .to_string()
+                    .contains("bytes differ from admitted identity"),
+                "{error}"
+            );
         });
     }
 
@@ -6337,6 +6914,7 @@ mod tests {
                 &worker_settings,
                 &[],
                 &[],
+                None,
             )
             .expect("verification must use the complete source while a partial overlay is active");
 
@@ -6588,7 +7166,9 @@ mod tests {
                 .as_str()
                 .unwrap();
             assert!(
-                Path::new(selected).starts_with(temp.path().join("data/models/portable-attempts"))
+                std::fs::canonicalize(Path::new(selected).join("a.safetensors"))
+                    .unwrap()
+                    .starts_with(std::fs::canonicalize(&library).unwrap())
             );
             assert_ne!(selected, "/api-host/models/q4");
             assert_eq!(
@@ -6603,10 +7183,19 @@ mod tests {
                 b"changed",
             )
             .unwrap();
-            assert_eq!(
-                std::fs::read(Path::new(selected).join("a.safetensors")).unwrap(),
-                b"weights",
-                "loader must keep the verified copy after original HF bytes change"
+            drop(guard);
+            let error = RuntimeSourceGuard::begin_with_binding(
+                &JobType::ImageGenerate,
+                &remote_hint,
+                &settings(temp.path().join("data")),
+                Some(&route),
+            )
+            .expect_err("changed HF bytes must be refused");
+            assert!(
+                error
+                    .to_string()
+                    .contains("bytes differ from admitted identity"),
+                "{error}"
             );
         });
     }
@@ -6697,6 +7286,634 @@ mod tests {
         )
         .unwrap();
         PortableRouteBinding::new("cpu", std::env::consts::OS, vec![model]).unwrap()
+    }
+
+    /// Older than the verified-source stamp's racy window, so a recorded verdict may stand in
+    /// for a hash.
+    fn settle_mtime(path: &Path) {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(10))
+            .unwrap();
+    }
+
+    fn in_place_hashed_files() -> usize {
+        HASHED_SOURCE_FILES.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn a_pinned_revision_is_verified_in_place_and_hashed_once_per_unchanged_blob() {
+        let temp = TempDir::new().unwrap();
+        let (settings, library, payload) = installed_model(&temp);
+        let binding = portable_installed_model_binding();
+        let source = library
+            .join("models--guardfx--model/snapshots")
+            .join(REV_A)
+            .join("model.safetensors");
+        settle_mtime(&source);
+        let begin = || {
+            RuntimeSourceGuard::begin_with_binding(
+                &JobType::ImageGenerate,
+                &payload,
+                &settings,
+                Some(&binding),
+            )
+        };
+        with_library(&library, || {
+            let start = in_place_hashed_files();
+            let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let seen = events.clone();
+            let observer =
+                gen_core::LoadActivityObserver::new(move |event| seen.lock().unwrap().push(event));
+            let guard = begin().unwrap();
+            drop(observer);
+            let loaded = guard.dispatch_payload()["modelManifestEntry"]["paths"]["model"]
+                .as_str()
+                .unwrap();
+            assert_eq!(
+                std::fs::canonicalize(Path::new(loaded).join("model.safetensors")).unwrap(),
+                std::fs::canonicalize(&source).unwrap(),
+                "the loader reads the worker's own hub snapshot"
+            );
+            let attempts = settings.data_dir.join("models/portable-attempts");
+            assert!(
+                std::fs::read_dir(&attempts)
+                    .unwrap()
+                    .flatten()
+                    .all(|entry| !entry.path().join("bundle").exists()),
+                "a Revision-only route copies nothing"
+            );
+            let verifying = events
+                .lock()
+                .unwrap()
+                .iter()
+                .flatten()
+                .rfind(|activity| activity.phase == gen_core::LoadActivityPhase::Verifying)
+                .cloned()
+                .expect("in-place verification reports progress");
+            assert_eq!(verifying.component, IN_PLACE_VERIFICATION_COMPONENT);
+            assert_eq!(verifying.component_total_bytes, Some(7));
+            assert_eq!(verifying.component_bytes_read, 7);
+            assert_eq!(in_place_hashed_files(), start + 1);
+            drop(guard);
+
+            let guard = begin().unwrap();
+            assert_eq!(
+                in_place_hashed_files(),
+                start + 1,
+                "an unchanged blob is not hashed again"
+            );
+            drop(guard);
+
+            // Same size, different bytes: the stamp changes, so the blob is hashed and refused.
+            std::fs::write(&source, b"WEIGHTS").unwrap();
+            settle_mtime(&source);
+            let error = begin().expect_err("changed bytes must be refused");
+            assert!(
+                error
+                    .to_string()
+                    .contains("bytes differ from admitted identity"),
+                "{error}"
+            );
+            // Rewriting the pinned bytes is a new file identity: hashed again, then accepted.
+            std::fs::write(&source, b"weights").unwrap();
+            settle_mtime(&source);
+            drop(begin().unwrap());
+            assert_eq!(in_place_hashed_files(), start + 2);
+        });
+    }
+
+    fn tiered_route(repo: &str, tier: &str) -> PortableRouteBinding {
+        let member = PortableArtifactMember {
+            role: ArtifactMemberRole::Primary,
+            component_id: None,
+            source: PortableSourceIdentity::Revision {
+                identity: ArtifactIdentity::pinned(repo, REV_A, tier).unwrap(),
+            },
+            tier: Some(tier.to_owned()),
+            files: vec![PortableArtifactFile {
+                relative_path: format!("{tier}/a.safetensors").into(),
+                size_bytes: 7,
+                sha256: format!("sha256:{:x}", Sha256::digest(b"weights")),
+            }],
+        };
+        PortableRouteBinding::new(
+            "cpu",
+            std::env::consts::OS,
+            vec![PortableModelBinding::new(
+                "modelManifestEntry",
+                "m",
+                "cpu",
+                tier,
+                Some(tier.to_owned()),
+                canonical_authored_options_sha256(&json!({})).unwrap(),
+                vec![member],
+            )
+            .unwrap()],
+        )
+        .unwrap()
+    }
+
+    /// Codex review of PR #3379: the API freezes an untiered standard-tier image request's
+    /// implicit tier into the binding (not the catalog's default q4 download); the worker must
+    /// verify the request against that bound tier and load exactly its files, even when other
+    /// tiers are installed beside it.
+    #[test]
+    fn an_untiered_standard_tier_image_runs_its_bound_tier_through_verification_and_loading() {
+        let repo = "guardfx/tiers";
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let library = temp.path().join("external-hf");
+        let tiers = ["q4", "q8", "bf16"];
+        for tier in tiers {
+            seed_snapshot(&library, repo, REV_A, &format!("{tier}/a.safetensors"));
+        }
+        write_receipts(
+            &data,
+            repo,
+            json!(tiers
+                .iter()
+                .map(|tier| json!({
+                    "repo": repo, "modelId": "m", "variant": tier,
+                    "resolvedFiles": [format!("{tier}/a.safetensors")],
+                    "snapshotRevision": REV_A
+                }))
+                .collect::<Vec<_>>()),
+        );
+        let payload = json!({"model": "m", "modelManifestEntry": {
+            "id": "m",
+            "mlx": {"standardTierLayout": true},
+            "downloads": tiers.iter().map(|tier| json!({
+                "provider": "huggingface", "repo": repo, "revision": REV_A,
+                "variant": tier, "files": [format!("{tier}/a.safetensors")]
+            })).collect::<Vec<_>>()
+        }})
+        .as_object()
+        .unwrap()
+        .clone();
+        let snapshot = library.join("models--guardfx--tiers/snapshots").join(REV_A);
+        let _serialized = overlay_guard();
+        with_library(&library, || {
+            for job_type in [JobType::ImageGenerate, JobType::ImageEdit] {
+                for bound in ["q8", "bf16"] {
+                    let route = tiered_route(repo, bound);
+                    let guard = RuntimeSourceGuard::begin_with_binding(
+                        &job_type,
+                        &payload,
+                        &settings(data.clone()),
+                        Some(&route),
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!("{job_type:?} untiered request bound to {bound}: {error}")
+                    });
+                    let dispatch = guard.dispatch_payload();
+                    assert_eq!(dispatch["advanced"]["__portableBoundTier"], bound);
+                    let model = Path::new(
+                        dispatch["modelManifestEntry"]["paths"]["model"]
+                            .as_str()
+                            .unwrap(),
+                    );
+                    assert_eq!(model.file_name().unwrap(), bound);
+                    assert_eq!(
+                        std::fs::canonicalize(model.join("a.safetensors")).unwrap(),
+                        std::fs::canonicalize(snapshot.join(bound).join("a.safetensors")).unwrap()
+                    );
+                    // The loader is served the hub snapshot itself, where every tier is installed;
+                    // the bound tier is what tier resolution selects among them.
+                    let root = model.parent().unwrap();
+                    assert_eq!(
+                        std::fs::canonicalize(root).unwrap(),
+                        std::fs::canonicalize(&snapshot).unwrap()
+                    );
+                    for other in tiers.iter().filter(|tier| **tier != bound) {
+                        assert!(root.join(other).exists(), "{other} is installed beside it");
+                    }
+                    assert_eq!(
+                        sceneworks_core::image_request::ImageRequest::from_payload(dispatch)
+                            .quant_bits(),
+                        Some(if bound == "bf16" { 0 } else { 8 }),
+                        "every bits-driven tier resolver reads the bound tier"
+                    );
+                    #[cfg(native_lane)]
+                    assert_eq!(
+                        crate::image_jobs::standard_tier_subdir_for_test(
+                            root,
+                            &sceneworks_core::image_request::ImageRequest::from_payload(dispatch),
+                        ),
+                        root.join(bound),
+                        "the engine's implicit tier resolution lands on the bound tier"
+                    );
+                    // The load boundary: while the guard serves this route, a loader handed a
+                    // sibling tier from the same hub snapshot is refused, naming the path; the
+                    // verified tier (and the snapshot root) load.
+                    let load = |path: &Path| {
+                        crate::inference_runtime::refuse_unverified_portable_sources(
+                            &gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(
+                                path.to_path_buf(),
+                            )),
+                        )
+                    };
+                    assert!(load(&root.join(bound)).is_ok());
+                    assert!(load(root).is_ok());
+                    for other in tiers.iter().filter(|tier| **tier != bound) {
+                        let error =
+                            load(&root.join(other)).expect_err("an unverified sibling tier");
+                        assert!(
+                            error
+                                .to_string()
+                                .contains(&root.join(other).display().to_string()),
+                            "{error}"
+                        );
+                    }
+                    let sibling = root.join("q4");
+                    drop(guard);
+                    // Once the job ends nothing is served: the same path is not checked.
+                    assert!(load(&sibling).is_ok());
+                }
+            }
+        });
+    }
+
+    /// The load-boundary check only governs paths inside a snapshot a PORTABLE scope serves: a
+    /// file must be a verified file, a directory must hold one. A non-portable (resolved-local)
+    /// scope and an unbound job are unaffected.
+    #[test]
+    fn the_load_boundary_refuses_only_unverified_paths_in_a_served_snapshot() {
+        use sceneworks_core::model_artifacts::local_preference::{
+            prefer_local_snapshots, prefer_portable_snapshots,
+        };
+        let temp = TempDir::new().unwrap();
+        let snapshot = temp
+            .path()
+            .join("hub/models--guardfx--boundary/snapshots")
+            .join(REV_A);
+        for tier in ["q4", "q8"] {
+            std::fs::create_dir_all(snapshot.join(tier)).unwrap();
+            std::fs::write(snapshot.join(tier).join("a.safetensors"), b"weights").unwrap();
+        }
+        let entry = LocalArtifactOverlayEntry {
+            repository: "guardfx/boundary".to_owned(),
+            revision: REV_A.to_owned(),
+            snapshot_root: snapshot.clone(),
+            files: vec!["q8/a.safetensors".into()],
+        };
+        let load = |source: gen_core::WeightsSource| {
+            crate::inference_runtime::refuse_unverified_portable_sources(&gen_core::LoadSpec::new(
+                source,
+            ))
+        };
+        let dir = |path: PathBuf| gen_core::WeightsSource::Dir(path);
+        let file = |path: PathBuf| gen_core::WeightsSource::File(path);
+        let _serialized = overlay_guard();
+        // Unbound: nothing is served, so nothing is refused.
+        assert!(load(dir(snapshot.join("q4"))).is_ok());
+        {
+            let _local = prefer_local_snapshots(vec![entry.clone()]).unwrap();
+            assert!(
+                load(dir(snapshot.join("q4"))).is_ok(),
+                "a non-portable scope is unaffected"
+            );
+        }
+        let _portable = prefer_portable_snapshots(vec![entry]).unwrap();
+        assert!(load(dir(snapshot.join("q8"))).is_ok());
+        assert!(load(file(snapshot.join("q8/a.safetensors"))).is_ok());
+        assert!(load(dir(snapshot.clone())).is_ok());
+        for refused in [
+            dir(snapshot.join("q4")),
+            file(snapshot.join("q4/a.safetensors")),
+        ] {
+            let error = load(refused.clone()).expect_err("an unverified path is refused");
+            let (gen_core::WeightsSource::Dir(path) | gen_core::WeightsSource::File(path)) =
+                &refused;
+            assert!(
+                error.to_string().contains(&path.display().to_string()),
+                "{error}"
+            );
+        }
+        // A control branch is held to the same rule.
+        let mut spec = gen_core::LoadSpec::new(dir(snapshot.join("q8")));
+        spec.control = Some(file(snapshot.join("q4/a.safetensors")));
+        assert!(crate::inference_runtime::refuse_unverified_portable_sources(&spec).is_err());
+        // A path outside every served snapshot is not checked.
+        assert!(load(dir(temp.path().join("elsewhere"))).is_ok());
+    }
+
+    /// Codex review of PR #3379 (4558615108): a resolved-cache snapshot can hold a model's hard
+    /// closure while a soft companion of the same revision exists only in the source library. Both
+    /// are reached through the revision's one snapshot directory, so that route falls back to the
+    /// copy-then-verify bundle: one directory holding each file from its own verified root.
+    #[test]
+    fn one_revision_split_across_two_roots_is_served_from_a_verified_copy() {
+        let repo = "guardfx/split";
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let library = temp.path().join("external-hf");
+        for file in [
+            "model.safetensors",
+            "companion.safetensors",
+            "other.safetensors",
+        ] {
+            seed_snapshot(&library, repo, REV_A, file);
+        }
+        let resolved = data.join("models/resolved-test/hard-closure");
+        std::fs::create_dir_all(&resolved).unwrap();
+        std::fs::write(resolved.join("model.safetensors"), b"weights").unwrap();
+        let file = |name: &str| PortableArtifactFile {
+            relative_path: name.into(),
+            size_bytes: 7,
+            sha256: format!("sha256:{:x}", Sha256::digest(b"weights")),
+        };
+        let identity = ArtifactIdentity::pinned(repo, REV_A, "default").unwrap();
+        let members = vec![
+            PortableArtifactMember {
+                role: ArtifactMemberRole::Primary,
+                component_id: None,
+                source: PortableSourceIdentity::Revision {
+                    identity: identity.clone(),
+                },
+                tier: None,
+                files: vec![file("model.safetensors")],
+            },
+            PortableArtifactMember {
+                role: ArtifactMemberRole::CoRequisite,
+                component_id: Some("modelManifestEntry/downloads/1".to_owned()),
+                source: PortableSourceIdentity::Revision { identity },
+                tier: None,
+                files: vec![file("companion.safetensors")],
+            },
+        ];
+        let route = PortableRouteBinding::new(
+            "cpu",
+            std::env::consts::OS,
+            vec![PortableModelBinding::new(
+                "modelManifestEntry",
+                "m",
+                "cpu",
+                "default",
+                None,
+                canonical_authored_options_sha256(&json!({})).unwrap(),
+                members,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let payload = json!({"model": "m", "modelManifestEntry": {"id": "m", "downloads": []}})
+            .as_object()
+            .unwrap()
+            .clone();
+        let _serialized = overlay_guard();
+        with_library(&library, || {
+            let _resolved_cache =
+                sceneworks_core::model_artifacts::local_preference::prefer_local_snapshots(vec![
+                    LocalArtifactOverlayEntry {
+                        repository: repo.to_owned(),
+                        revision: REV_A.to_owned(),
+                        snapshot_root: resolved.clone(),
+                        files: vec!["model.safetensors".into()],
+                    },
+                ])
+                .unwrap();
+            let mut dispatch = payload.clone();
+            let prepared = prepare_portable_snapshot(
+                &route,
+                &JobType::ImageGenerate,
+                &payload,
+                &settings(data.clone()),
+                &mut dispatch,
+                None,
+            )
+            .expect("both members pass ledger verification in their own roots")
+            .unwrap();
+            assert_eq!(prepared.overlays.len(), 1);
+            let served = &prepared.overlays[0].snapshot_root;
+            assert_eq!(
+                prepared.overlays[0].files,
+                vec![
+                    PathBuf::from("companion.safetensors"),
+                    PathBuf::from("model.safetensors")
+                ]
+            );
+            assert!(served.starts_with(data.join("models/portable-attempts")));
+            for name in ["model.safetensors", "companion.safetensors"] {
+                let file = served.join(name);
+                assert!(
+                    std::fs::symlink_metadata(&file).unwrap().is_file(),
+                    "{name}"
+                );
+                assert_eq!(std::fs::read(file).unwrap(), b"weights");
+            }
+            assert!(
+                !served.join("other.safetensors").exists(),
+                "an unfrozen file is never copied"
+            );
+        });
+    }
+
+    /// A route left by the dropped link-view layout (no current layout marker, a `views/` tree of
+    /// links into the hub) is reclaimed by the existing retention prune, which removes the links
+    /// and never what they point at.
+    #[cfg(unix)]
+    #[test]
+    fn retention_reclaims_a_legacy_view_route_and_never_its_hub_files() {
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let hub = temp
+            .path()
+            .join("hub/models--guardfx--model/snapshots")
+            .join(REV_A);
+        std::fs::create_dir_all(&hub).unwrap();
+        std::fs::write(hub.join("model.safetensors"), b"weights").unwrap();
+        let legacy = data
+            .join("models/portable-attempts")
+            .join("a".repeat(64))
+            .join("views/0/hf/models--guardfx--model/snapshots")
+            .join(REV_A);
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::os::unix::fs::symlink(
+            hub.join("model.safetensors"),
+            legacy.join("model.safetensors"),
+        )
+        .unwrap();
+        let route = data.join("models/portable-attempts").join("a".repeat(64));
+        std::fs::write(route.join(".layout-v3"), b"").unwrap();
+        prune_portable_snapshots(None, &settings(data)).unwrap();
+        assert!(!route.join("views").exists());
+        assert_eq!(
+            std::fs::read(hub.join("model.safetensors")).unwrap(),
+            b"weights"
+        );
+    }
+
+    /// The path the guard hands a loader for a pinned Hugging Face member passes inference's own
+    /// shard-path check (`snapshot_shard_roots` + `resolve_safetensors_shards`): the hub layout's
+    /// snapshot links into the repository's `blobs/` are authorized, so an in-place member never
+    /// fails at load. No model compute.
+    #[cfg(unix)]
+    #[test]
+    fn a_pinned_member_served_in_place_passes_the_inference_shard_check() {
+        let temp = TempDir::new().unwrap();
+        let (settings, library, payload) = installed_model(&temp);
+        let repository = library.join("models--guardfx--model");
+        let snapshot = repository.join("snapshots").join(REV_A);
+        std::fs::create_dir_all(repository.join("blobs")).unwrap();
+        std::fs::rename(
+            snapshot.join("model.safetensors"),
+            repository.join("blobs/weights-blob"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            "../../blobs/weights-blob",
+            snapshot.join("model.safetensors"),
+        )
+        .unwrap();
+        let binding = portable_installed_model_binding();
+        with_library(&library, || {
+            let guard = RuntimeSourceGuard::begin_with_binding(
+                &JobType::ImageGenerate,
+                &payload,
+                &settings,
+                Some(&binding),
+            )
+            .unwrap();
+            let dir = Path::new(
+                guard.dispatch_payload()["modelManifestEntry"]["paths"]["model"]
+                    .as_str()
+                    .unwrap(),
+            );
+            let roots = gen_core::safetensors_shards::snapshot_shard_roots(dir).unwrap();
+            let shards =
+                gen_core::safetensors_shards::resolve_safetensors_shards(dir, "model", &roots)
+                    .expect("the inference shard check accepts the served member");
+            assert_eq!(
+                shards,
+                vec![std::fs::canonicalize(repository.join("blobs/weights-blob")).unwrap()]
+            );
+        });
+    }
+
+    /// Codex review of PR #3379: two in-process jobs on one pinned revision overlap. The first
+    /// job's process-wide overlay hands the second job's discovery the first job's view; the
+    /// second job resolves those entries through the view's ledger to their own sources.
+    #[test]
+    fn two_overlapping_guards_on_one_revision_both_bind() {
+        let temp = TempDir::new().unwrap();
+        let (settings, library, payload) = installed_model(&temp);
+        let binding = portable_installed_model_binding();
+        let source = library
+            .join("models--guardfx--model/snapshots")
+            .join(REV_A)
+            .join("model.safetensors");
+        let _serialized = overlay_guard();
+        with_library(&library, || {
+            let begin = || {
+                RuntimeSourceGuard::begin_with_binding(
+                    &JobType::ImageGenerate,
+                    &payload,
+                    &settings,
+                    Some(&binding),
+                )
+            };
+            let first = begin().expect("the first job binds");
+            let second = begin().expect("an overlapping job on the same revision binds");
+            for guard in [&first, &second] {
+                let loaded = Path::new(
+                    guard.dispatch_payload()["modelManifestEntry"]["paths"]["model"]
+                        .as_str()
+                        .unwrap(),
+                )
+                .join("model.safetensors");
+                assert_eq!(
+                    std::fs::canonicalize(&loaded).unwrap(),
+                    std::fs::canonicalize(&source).unwrap()
+                );
+            }
+            drop(first);
+            assert_eq!(
+                std::fs::read(
+                    Path::new(
+                        second.dispatch_payload()["modelManifestEntry"]["paths"]["model"]
+                            .as_str()
+                            .unwrap()
+                    )
+                    .join("model.safetensors")
+                )
+                .unwrap(),
+                b"weights"
+            );
+        });
+    }
+
+    fn in_place_ledger(path: &str, size_bytes: u64) -> PortableArtifactFile {
+        PortableArtifactFile {
+            relative_path: path.into(),
+            size_bytes,
+            sha256: format!("sha256:{:x}", Sha256::digest(b"weights")),
+        }
+    }
+
+    #[test]
+    fn in_place_revision_refuses_an_escaping_missing_or_resized_member() {
+        let temp = TempDir::new().unwrap();
+        let snapshot = temp
+            .path()
+            .join("hub/models--guardfx--model/snapshots")
+            .join(REV_A);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join("model.safetensors"), b"weights").unwrap();
+        std::fs::write(temp.path().join("hub/outside.safetensors"), b"weights").unwrap();
+        assert!(
+            in_place_revision_files(&snapshot, &[in_place_ledger("model.safetensors", 7)]).is_ok()
+        );
+        for (path, size, refusal) in [
+            ("../../../outside.safetensors", 7, "escapes its snapshot"),
+            ("./model.safetensors", 7, "escapes its snapshot"),
+            ("", 7, "escapes its snapshot"),
+            ("absent.safetensors", 7, "missing from its snapshot"),
+            ("model.safetensors", 8, "differs from its pinned ledger"),
+        ] {
+            let error = in_place_revision_files(&snapshot, &[in_place_ledger(path, size)])
+                .err()
+                .unwrap_or_else(|| panic!("{path:?} must be refused"));
+            assert!(error.to_string().contains(refusal), "{path:?}: {error}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn in_place_revision_follows_its_own_blob_links_and_refuses_links_outside_its_repository() {
+        let temp = TempDir::new().unwrap();
+        let repository = temp.path().join("hub/models--guardfx--model");
+        let snapshot = repository.join("snapshots").join(REV_A);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::create_dir_all(repository.join("blobs")).unwrap();
+        std::fs::write(repository.join("blobs/own"), b"weights").unwrap();
+        std::os::unix::fs::symlink("../../blobs/own", snapshot.join("model.safetensors")).unwrap();
+        let sibling = temp.path().join("hub/models--guardfx--other/blobs");
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(sibling.join("theirs"), b"weights").unwrap();
+        std::os::unix::fs::symlink(sibling.join("theirs"), snapshot.join("sibling.safetensors"))
+            .unwrap();
+        let outside = temp.path().join("outside.safetensors");
+        std::fs::write(&outside, b"weights").unwrap();
+        std::os::unix::fs::symlink(&outside, snapshot.join("leak.safetensors")).unwrap();
+
+        let own =
+            in_place_revision_files(&snapshot, &[in_place_ledger("model.safetensors", 7)]).unwrap();
+        assert_eq!(
+            own[0].real,
+            std::fs::canonicalize(repository.join("blobs/own")).unwrap()
+        );
+        for path in ["sibling.safetensors", "leak.safetensors"] {
+            let error = in_place_revision_files(&snapshot, &[in_place_ledger(path, 7)])
+                .err()
+                .unwrap_or_else(|| panic!("{path} must be refused"));
+            assert!(
+                error.to_string().contains("outside its hub repository"),
+                "{path}: {error}"
+            );
+        }
     }
 
     #[test]
@@ -6797,8 +8014,11 @@ mod tests {
             let loaded = guard.dispatch_payload()["modelNameOrPath"]
                 .as_str()
                 .unwrap();
+            // The loader directory is the route's private view; its file is the verified HF file.
             assert!(
-                Path::new(loaded).starts_with(settings.data_dir.join("models/portable-attempts"))
+                std::fs::canonicalize(Path::new(loaded).join("model.safetensors"))
+                    .unwrap()
+                    .starts_with(std::fs::canonicalize(&library).unwrap())
             );
             assert_eq!(
                 std::fs::read(Path::new(loaded).join("model.safetensors")).unwrap(),

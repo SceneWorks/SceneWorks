@@ -1220,6 +1220,15 @@ fn install_portable_gemma(
         .map_err(|error| WorkerError::Engine(error.to_string()))?;
     for (relative, file) in &members {
         let input = plain_member(source, relative)?;
+        // A pinned Gemma member is served in place from the hub snapshot, whose files are links
+        // into the repository's `blobs/`: read the file the link names, then hold it to this
+        // ledger as before (`verify_file` refuses anything that is not a regular file).
+        let input = std::fs::canonicalize(&input).map_err(|error| {
+            WorkerError::Engine(format!(
+                "frozen Gemma file {} unavailable: {error}",
+                input.display()
+            ))
+        })?;
         verify_file(&input, file)?;
         let output = staging.path().join(relative);
         if let Some(directory) = output.parent() {
@@ -1244,6 +1253,66 @@ fn install_portable_gemma(
 mod portable_gemma_tests {
     use super::*;
     use sha2::{Digest, Sha256};
+
+    /// Codex review of PR #3379: a portable LTX conversion hands the Gemma installer the pinned
+    /// member in place, in the hub's own layout (snapshot links into `blobs/`); it installs
+    /// regular copies of the linked bytes, held to the frozen ledger.
+    #[cfg(unix)]
+    #[test]
+    fn frozen_gemma_installs_from_the_hub_snapshot_in_place() {
+        use sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile;
+
+        let temp = tempfile::tempdir().unwrap();
+        let repository = temp.path().join("hub/models--SceneWorks--ltx-2.3-mlx");
+        let source = repository.join("snapshots/0123456789abcdef0123456789abcdef01234567/gemma");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(repository.join("blobs")).unwrap();
+        let mut weights = Vec::new();
+        let header = br#"{"weight":{"dtype":"U8","shape":[1],"data_offsets":[0,1]}}"#;
+        weights.extend_from_slice(&(header.len() as u64).to_le_bytes());
+        weights.extend_from_slice(header);
+        weights.push(7);
+        let sources = [
+            ("config.json", br#"{"model_type":"gemma3"}"#.to_vec()),
+            ("tokenizer.json", br#"{"model":{}}"#.to_vec()),
+            ("model.safetensors", weights),
+        ];
+        for (name, bytes) in &sources {
+            std::fs::write(repository.join("blobs").join(name), bytes).unwrap();
+            std::os::unix::fs::symlink(format!("../../../blobs/{name}"), source.join(name))
+                .unwrap();
+        }
+        let files: Vec<PortableGemmaFile> = serde_json::from_value(
+            serde_json::to_value(
+                sources
+                    .iter()
+                    .map(|(name, bytes)| PortableArtifactFile {
+                        relative_path: format!("gemma/{name}").into(),
+                        size_bytes: bytes.len() as u64,
+                        sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let data = temp.path().join("data");
+        install_portable_gemma(&source, &data, &files).unwrap();
+        let target = data.join("models/mlx/gemma");
+        for (name, bytes) in &sources {
+            let installed = target.join(name);
+            assert!(std::fs::symlink_metadata(&installed).unwrap().is_file());
+            assert_eq!(std::fs::read(installed).unwrap(), *bytes);
+        }
+        // A hub file that no longer matches its ledger is never installed.
+        std::fs::remove_dir_all(&target).unwrap();
+        std::fs::write(
+            repository.join("blobs/config.json"),
+            br#"{"model_type":"other"}"#,
+        )
+        .unwrap();
+        assert!(install_portable_gemma(&source, &data, &files).is_err());
+    }
 
     #[test]
     fn frozen_gemma_survives_source_removal_and_refuses_divergent_sibling() {

@@ -929,7 +929,8 @@ async fn prompt_vector_workflow_persists_a_nonclaimable_parent_and_cancel_cascad
         &temp_dir.path().join("config/manifests"),
         "2222222222222222222222222222222222222222",
     );
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (app, state) = create_app_with_state(test_settings(&temp_dir)).expect("app creates");
+    *state.test_hooks.huggingface_base_url.lock() = Some(base_url.clone());
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Prompt vectors").await;
     let project_id = project["id"].as_str().expect("project id");
 
@@ -1071,7 +1072,8 @@ async fn prompt_vector_replay_creates_both_stages_anew_and_revision_drift_is_typ
         &temp_dir.path().join("config/manifests"),
         "2222222222222222222222222222222222222222",
     );
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (app, state) = create_app_with_state(test_settings(&temp_dir)).expect("app creates");
+    *state.test_hooks.huggingface_base_url.lock() = Some(base_url.clone());
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Prompt replay").await;
     let project_id = project["id"].as_str().expect("project id");
     let body = json!({
@@ -1164,7 +1166,8 @@ async fn vector_parent_without_linked_child_replays_its_frozen_raster_after_cata
         "2222222222222222222222222222222222222222",
     );
     let settings = test_settings(&temp_dir);
-    let app = create_app(settings.clone()).expect("app creates");
+    let (app, state) = create_app_with_state(settings.clone()).expect("app creates");
+    *state.test_hooks.huggingface_base_url.lock() = Some(base_url.clone());
     let (_, project) = crate::tests::support::create_project(app.clone(), &"Frozen vector").await;
     let (status, original) = request(
         app,
@@ -2932,6 +2935,7 @@ async fn fresh_admission_requires_one_capable_worker_with_both_operator_sources(
     let _metadata_env = HfCacheEnvGuard::set(&[("SCENEWORKS_HUGGINGFACE_BASE_URL", &base_url)]);
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let (_, state) = create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    *state.test_hooks.huggingface_base_url.lock() = Some(base_url.clone());
     let payload = json!({
         "model":"instantid_realvisxl", "mode":"character_image",
         "referenceAssetId":"reference-asset",
@@ -3286,6 +3290,14 @@ async fn versionless_claim_never_reaches_an_unbound_historical_model_job() {
     )
     .unwrap();
     let (app, state) = create_app_with_state(test_settings(&temp)).unwrap();
+    // The claim migrates historical carriers first, which resolves pinned publisher metadata.
+    // Keep that lookup unreachable here: the real request read the process-wide
+    // SCENEWORKS_HUGGINGFACE_BASE_URL, which a concurrent test may point at its own stub
+    // metadata server (only under the shared env lock), so under suite load the carrier could
+    // bind. This test is about the claim protocol, not about metadata being unreachable.
+    *state.test_hooks.pinned_metadata_remote.lock() = Some(std::sync::Arc::new(|_, _, _| {
+        Err("publisher metadata is unreachable in this test".to_owned())
+    }));
     let (status, _) = request(
         app.clone(),
         "POST",
@@ -3589,7 +3601,8 @@ async fn raw_model_convert_rejects_unrecoverable_output_before_enqueue() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let conversion_root = settings.data_dir.join("models/mlx");
-    let app = create_app(settings.clone()).expect("app creates");
+    let (app, state) = create_app_with_state(settings.clone()).expect("app creates");
+    *state.test_hooks.huggingface_base_url.lock() = Some(base_url.clone());
 
     let request_convert = |output_dir: &std::path::Path| {
         json!({
@@ -13946,7 +13959,10 @@ async fn worker_heartbeat_broadcasts_job_updated_for_the_job_it_interrupts() {
         json!({ "type": "image_detail", "payload": {}, "requestedGpu": "auto" }),
     )
     .await;
-    let job_id = created["id"].as_str().expect("job id is string").to_owned();
+    let job_id = created["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("job create returned no id: {created}"))
+        .to_owned();
     request(
         app.clone(),
         "POST",

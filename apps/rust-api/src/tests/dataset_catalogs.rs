@@ -1520,7 +1520,8 @@ async fn catalog_analysis_uses_typed_revisioned_route_and_never_accepts_catalog_
     let _env = HfCacheEnvGuard::set(&[("SCENEWORKS_HUGGINGFACE_BASE_URL", &endpoint)]);
     let temporary = tempfile::tempdir().expect("temp directory");
     let settings = test_settings(&temporary);
-    let app = create_app(settings.clone()).expect("app creates");
+    let (app, state) = crate::create_app_with_state(settings.clone()).expect("app creates");
+    *state.test_hooks.huggingface_base_url.lock() = Some(endpoint.clone());
     let (status, created) = request(
         app.clone(),
         "POST",

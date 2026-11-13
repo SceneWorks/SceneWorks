@@ -3507,7 +3507,8 @@ async fn create_training_job_queues_real_run_when_not_dry_run() {
     std::fs::create_dir_all(bf16.join("vae")).expect("vae");
     std::fs::write(bf16.join("transformer/weights.safetensors"), b"x")
         .expect("pinned fixture bytes");
-    let app = create_app(settings.clone()).expect("app creates");
+    let (app, state) = crate::create_app_with_state(settings.clone()).expect("app creates");
+    *state.test_hooks.huggingface_base_url.lock() = Some(endpoint.clone());
     let (_, project) = crate::tests::support::create_project_with_request(
         app.clone(),
         &"Training Project",

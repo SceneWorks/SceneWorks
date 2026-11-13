@@ -41,6 +41,10 @@ pub(crate) struct TestHooks {
     /// Hold every pinned publisher metadata lookup until the watched value is `true`: a stalled
     /// Hugging Face answer, without a network endpoint or a real wait.
     pub(crate) pinned_metadata_gate: Arc<Mutex<Option<tokio::sync::watch::Receiver<bool>>>>,
+    /// The Hugging Face endpoint portable admission uses in this test (a loopback stub). Unit
+    /// tests never read `SCENEWORKS_HUGGINGFACE_BASE_URL` for admission: it is process-wide, so a
+    /// concurrent test would pick up another test's (possibly stopped) stub.
+    pub(crate) huggingface_base_url: Arc<Mutex<Option<String>>>,
     /// Freeze synthetic mutable repository refs in route tests without contacting Hugging Face.
     pub(crate) dynamic_hf_revision_override: Arc<Mutex<Option<DynamicHfRevisionFixture>>>,
     /// Deterministic catalog scheduler seams. Production has no hook fields or
