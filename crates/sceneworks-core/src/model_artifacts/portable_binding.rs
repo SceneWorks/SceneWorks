@@ -1137,6 +1137,24 @@ impl PortableModelBinding {
         local: &[LocalArtifactMember],
         allowed_roots: &[PathBuf],
     ) -> Result<(), ArtifactContractError> {
+        self.verify_local_with(local, allowed_roots, &|path, expected| {
+            if format!("sha256:{}", sceneworks_core_hash(path)?) != expected.sha256 {
+                return Err(error("artifact file bytes differ from admitted identity"));
+            }
+            Ok(())
+        })
+    }
+
+    /// [`Self::verify_local`] with the byte check supplied by the caller (for example a
+    /// hash-once-per-host verdict store). Every other check is unchanged: `verify_bytes` receives
+    /// only a canonical path that is confined to `allowed_roots` and already has the admitted
+    /// size, and must refuse any byte difference.
+    pub fn verify_local_with(
+        &self,
+        local: &[LocalArtifactMember],
+        allowed_roots: &[PathBuf],
+        verify_bytes: &dyn Fn(&Path, &PortableArtifactFile) -> Result<(), ArtifactContractError>,
+    ) -> Result<(), ArtifactContractError> {
         self.validate()?;
         if allowed_roots.is_empty() || local.len() != self.members.len() {
             return Err(error("portable artifact closure is incomplete"));
@@ -1173,7 +1191,7 @@ impl PortableModelBinding {
                 let path = files
                     .get(&file.relative_path)
                     .ok_or_else(|| error("admitted artifact file is missing locally"))?;
-                verify_file(path, file, allowed_roots)?;
+                verify_file(path, file, allowed_roots, verify_bytes)?;
             }
         }
         Ok(())
@@ -1418,6 +1436,7 @@ fn verify_file(
     path: &Path,
     expected: &PortableArtifactFile,
     allowed_roots: &[PathBuf],
+    verify_bytes: &dyn Fn(&Path, &PortableArtifactFile) -> Result<(), ArtifactContractError>,
 ) -> Result<(), ArtifactContractError> {
     let path = confine_artifact_path(path, allowed_roots)?;
     let metadata = std::fs::metadata(&path)
@@ -1425,10 +1444,7 @@ fn verify_file(
     if !metadata.is_file() || metadata.len() != expected.size_bytes {
         return Err(error("artifact file size differs from admitted identity"));
     }
-    if format!("sha256:{}", sceneworks_core_hash(&path)?) != expected.sha256 {
-        return Err(error("artifact file bytes differ from admitted identity"));
-    }
-    Ok(())
+    verify_bytes(&path, expected)
 }
 
 fn sceneworks_core_hash(path: &Path) -> Result<String, ArtifactContractError> {

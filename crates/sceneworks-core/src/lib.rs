@@ -97,6 +97,7 @@ pub mod time;
 pub mod training;
 pub mod training_store;
 pub mod training_subject_masks;
+pub mod verified_source_cache;
 pub mod video_memory_curves;
 pub mod video_request;
 pub mod voice_store;
