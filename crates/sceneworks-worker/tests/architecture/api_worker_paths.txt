@@ -229,4 +229,5 @@ apps/rust-api/src/training.rs sceneworks_worker::installed_aux_training_model_di
 apps/rust-api/src/training.rs sceneworks_worker::iris_plan_memory_error
 apps/rust-api/src/training.rs sceneworks_worker::iris_task_objective
 apps/rust-api/src/training.rs sceneworks_worker::iris_training_install_refusal
+apps/rust-api/src/training.rs sceneworks_worker::minimax_h3_image_training_install_refusal
 apps/rust-api/src/validators.rs sceneworks_worker::prompt_enhancement_max_tokens

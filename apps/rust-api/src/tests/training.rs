@@ -232,6 +232,8 @@ fn platform_effective_training_catalog_projects_depth_anchoring_support() {
                 && !id.starts_with("iris_3b")
                 && !matches!(id.as_str(), "moss_image_base_lora" | "moss_image_sft_lora")
                 && !id.starts_with("flux3_klein")
+                // SW-7103: the H3-Image trainer declares adapter noise and buckets only.
+                && !id.starts_with("minimax_h3_image")
         })
         .collect();
     assert_eq!(mlx, all);
@@ -8043,8 +8045,10 @@ async fn qwen_image_2_1_edit_dataset_round_trips_ordered_references_and_refuses_
         "{body}"
     );
 
-    // Over the cap: 11 references on one item is refused, and the message names the cap (10).
-    let (status, body) = request(
+    // Over the cap: 11 references on one item is refused, and the message names the cap (10). The
+    // dataset store holds up to the largest target cap (MiniMax-H3-Image's 16, SW-7103), so the
+    // 2.1 edit target's own cap refuses the run at plan time.
+    let (status, dataset) = request(
         app.clone(),
         "POST",
         &datasets_path,
@@ -8056,6 +8060,15 @@ async fn qwen_image_2_1_edit_dataset_round_trips_ordered_references_and_refuses_
                 "references": refs.iter().map(|id| json!({ "assetId": id })).collect::<Vec<_>>()
             }]
         }),
+    )
+    .await;
+    assert!(status.is_success(), "{dataset}");
+    let over_cap_id = dataset["id"].as_str().expect("dataset id").to_owned();
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        &jobs_path,
+        dry_run(&edit, &over_cap_id),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");

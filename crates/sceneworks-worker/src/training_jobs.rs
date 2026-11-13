@@ -2466,12 +2466,20 @@ async fn run_training_dry_run(
 /// The dry-run completion summary (keys mirror the Python `dry_run_training_summary`
 /// so the Training Studio reads an identical shape regardless of which worker runs it).
 fn dry_run_summary(settings: &Settings, plan: &TrainingPlan) -> JsonObject {
-    let base_model_installed = normalize_app_managed_model_path(
-        settings,
-        &plan.target.base_model_path,
-        "Training baseModelPath",
-    )
-    .is_ok_and(|path| path.exists());
+    // MiniMax-H3-Image (SW-7103) trains over the installed tier the catalog rows resolve, not the
+    // bf16 snapshot `baseModelPath` names, so its readiness is the trainer's own resolution.
+    let base_model_installed =
+        if sceneworks_core::training::is_minimax_h3_image_training_kernel(&plan.target.kernel) {
+            crate::minimax_h3_image_training_install_refusal(&settings.data_dir, &plan.config)
+                .is_none()
+        } else {
+            normalize_app_managed_model_path(
+                settings,
+                &plan.target.base_model_path,
+                "Training baseModelPath",
+            )
+            .is_ok_and(|path| path.exists())
+        };
     let mut summary = JsonObject::new();
     summary.insert("mode".to_owned(), json!("dry_run"));
     summary.insert("validated".to_owned(), json!(true));
@@ -6401,9 +6409,12 @@ mod tests {
             "only {checked} builtin targets resolved to a linked trainer"
         );
         // LTX-2.5 refuses on both backends; the Krea ControlNet trainer exists only on Candle; the
-        // Iris-3B trainers declare no epic 2123 technique on either backend.
+        // Iris-3B trainers declare no epic 2123 technique on either backend; the MiniMax-H3-Image
+        // trainer (SW-7103) declares adapter noise and resolution buckets only.
         let expected: &[&str] = if cfg!(target_os = "macos") {
             &[
+                "minimax_h3_image_lora",
+                "minimax_h3_image_edit_lora",
                 "flux3_klein_lora",
                 "flux3_klein_edit_lora",
                 "ltx_2_5_video_lora",
@@ -6414,6 +6425,8 @@ mod tests {
         } else {
             &[
                 "krea_2_control",
+                "minimax_h3_image_lora",
+                "minimax_h3_image_edit_lora",
                 "flux3_klein_lora",
                 "flux3_klein_edit_lora",
                 "ltx_2_5_video_lora",

@@ -156,6 +156,10 @@ fn builtin_targets_gate_network_types() {
             "qwen_image_2_1_lora",
             // sc-24161: the instruction-edit twin trains the same adapter kinds in edit mode.
             "qwen_image_2_1_edit_lora",
+            // SW-7103: the MiniMax-H3-Image trainer builds LoRA and LoKr on both backends, and the
+            // SW-7096 adapter install applies both on every tier.
+            "minimax_h3_image_lora",
+            "minimax_h3_image_edit_lora",
             // T2V-14B retains its existing Candle LoKr path. The single-DiT TI2V-5B and I2V-14B
             // generated-matrix obligations remain LoRA-only.
             "wan_t2v_14b_lora",
@@ -743,7 +747,12 @@ fn kernel_edit_shape_floor_follows_the_targets_reference_caps() {
         "qwen_image_2_1_edit_lora"
     ));
     for target in builtin_training_targets().targets {
-        if !["qwen_image_2_1_edit_lora", "flux3_klein_edit_lora"].contains(&target.kernel.as_str())
+        if ![
+            "qwen_image_2_1_edit_lora",
+            "flux3_klein_edit_lora",
+            "minimax_h3_image_edit_lora",
+        ]
+        .contains(&target.kernel.as_str())
         {
             assert!(
                 !training_kernel_trains_edit_pairs(&target.kernel),
@@ -3402,6 +3411,8 @@ fn depth_anchoring_is_refused_at_submit_on_targets_that_do_not_advertise_it() {
             "krea_2_control",
             "moss_image_base_lora",
             "moss_image_sft_lora",
+            "minimax_h3_image_lora",
+            "minimax_h3_image_edit_lora",
             "flux3_klein_lora",
             "flux3_klein_edit_lora",
             "iris_3b_generation",
@@ -3456,6 +3467,8 @@ fn subject_mask_loss_is_refused_at_submit_on_targets_that_do_not_advertise_it() 
         unsupported,
         [
             "krea_2_control",
+            "minimax_h3_image_lora",
+            "minimax_h3_image_edit_lora",
             "flux3_klein_lora",
             "flux3_klein_edit_lora",
             "ltx_2_5_video_lora",
@@ -4009,6 +4022,8 @@ fn face_losses_are_refused_at_submit_on_targets_that_do_not_advertise_them() {
                 "krea_2_control",
                 "moss_image_base_lora",
                 "moss_image_sft_lora",
+                "minimax_h3_image_lora",
+                "minimax_h3_image_edit_lora",
                 "flux3_klein_lora",
                 "flux3_klein_edit_lora",
                 "iris_3b_generation",
