@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { sha256 } from "./lib/file-sha256.mjs";
 import {
   DEFAULT_ROUTE_IDS, ROUTES, contentDigest, decodePng, decodedContent, descendants, diffObjects, dispatchOptions,
-  childEnvironments, childStdio, exitCodeFor, gpuInventory, HUB_MUTATION_LISTING_LIMIT, hubMutationAttribution, processState, identitySubset, jobClaimed, jobDiagnostics, jobProgressDecision, lastLines, numericDifference, progressLine, removeScratch, parseTopMem, parseWav, planRoutes, readCatalog, redactPaths, referenceWav,
+  childEnvironments, childStdio, exitCodeFor, ffprobePath, gpuInventory, hubFingerprint, memoryCell, streamShape, HUB_MUTATION_LISTING_LIMIT, hubMutationAttribution, processState, identitySubset, jobClaimed, jobDiagnostics, jobProgressDecision, lastLines, numericDifference, progressLine, removeScratch, parseTopMem, parseWav, planRoutes, readCatalog, redactPaths, referenceWav,
   renderMarkdown, reportName, requestBody, requestTemplate, resolveConfig, routeDownloadRows, routePresence, selectRoutes,
   summarize, verdictFor,
 } from "./tier2-ab.mjs";
@@ -219,6 +219,50 @@ test("WAV fidelity hashes PCM samples, not header or trailing chunks", async (t)
   assert.notEqual(contentDigest({ x: 1 }, Buffer.from([1])), contentDigest({ x: 2 }, Buffer.from([1])));
 });
 
+test("video fidelity digest covers stream geometry and timing, not only decoded bytes", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "tier2-ab-video-")); t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "clip.mp4"); await writeFile(file, "container");
+  const frames = Buffer.alloc(768 * 512 * 4 * 3, 7), pcm = Buffer.alloc(4800, 3);
+  const decode = async (_ffmpeg, _file, kind) => ({ ok: true, data: kind === "video-frames" ? frames : pcm });
+  const probe = (video, audio = { codec_type: "audio", sample_rate: "48000", channels: 2, channel_layout: "stereo", time_base: "1/48000", duration: "0.125" }) => async () => ({ ok: true, data: { streams: [{ codec_type: "video", ...video }, audio], format: { duration: "0.125" } } });
+  const base = { width: 768, height: 512, nb_frames: "3", r_frame_rate: "24/1", avg_frame_rate: "24/1", time_base: "1/12288", duration: "0.125" };
+  const digest = async (video, audio) => (await decodedContent(file, "video", { decode, probe: probe(video, audio) }));
+  const reference = await digest(base);
+  assert.equal(reference.method, "ffmpeg_rgba_frames+s16le_audio+ffprobe_streams");
+  assert.deepEqual(reference.shape.video, { width: 768, height: 512, decodedFrames: 3, nbFrames: "3", rFrameRate: "24/1", avgFrameRate: "24/1", timeBase: "1/12288", duration: "0.125" });
+  assert.deepEqual(reference.shape.audio, { sampleRate: 48000, channels: 2, channelLayout: "stereo", timeBase: "1/48000", duration: "0.125" });
+  assert.equal((await digest(base)).sha256, reference.sha256, "same stream and bytes stay equal");
+  assert.notEqual((await digest({ ...base, r_frame_rate: "25/1", avg_frame_rate: "25/1" })).sha256, reference.sha256, "equal bytes at another frame rate differ");
+  assert.notEqual((await digest({ ...base, width: 512, height: 768 })).sha256, reference.sha256, "equal bytes at another geometry of the same area differ");
+  assert.notEqual((await digest(base, { codec_type: "audio", sample_rate: "44100", channels: 2, channel_layout: "stereo" })).sha256, reference.sha256, "another audio sample rate differs");
+  const noProbe = await decodedContent(file, "video", { decode, probe: async () => ({ ok: false, error: "ffprobe missing" }) });
+  assert.equal(noProbe.method, "file_bytes_no_probe"); assert.equal(noProbe.sha256, sha256(Buffer.from("container")));
+  assert.equal(streamShape({ streams: [] }).video, null);
+  assert.equal(ffprobePath("ffmpeg"), "ffprobe"); assert.equal(ffprobePath("/opt/bin/ffmpeg"), "/opt/bin/ffprobe"); assert.equal(ffprobePath("/opt/bin/avconv"), "ffprobe");
+});
+
+test("hub fingerprint sees a same-length blob rewrite behind a snapshot link", async (t) => {
+  const hub = await mkdtemp(path.join(os.tmpdir(), "tier2-ab-blob-")); t.after(() => rm(hub, { recursive: true, force: true }));
+  const rev = "c".repeat(40), repoDir = path.join(hub, "models--O--m"), snap = path.join(repoDir, "snapshots", rev), blob = path.join(repoDir, "blobs", "abc123");
+  await mkdir(snap, { recursive: true }); await mkdir(path.dirname(blob), { recursive: true }); await writeFile(blob, "weights-v1");
+  const { symlink } = await import("node:fs/promises"); await symlink(path.relative(snap, blob), path.join(snap, "model.safetensors"));
+  const before = await hubFingerprint(hub, [{ repo: "O/m", revision: rev }]);
+  const entry = before.repos[`O/m@${rev}`].snapshot["model.safetensors#entry"];
+  assert.equal(entry.link, true); assert.equal(entry.target.size, 10);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await writeFile(blob, "weights-v2"); // same length, in place
+  const after = await hubFingerprint(hub, [{ repo: "O/m", revision: rev }]);
+  const diff = diffObjects(before.repos, after.repos);
+  assert.ok(diff.count > 0, "an in-place blob rewrite is a hub change");
+  assert.ok(diff.entries.every((item) => item.path.includes("model.safetensors#entry/target/")), JSON.stringify(diff.entries));
+});
+
+test("report memory cell: CUDA peak above baseline with the baseline, MLX own peak", () => {
+  assert.equal(memoryCell({ peakBytes: 17.45 * 1024 ** 3, peakAboveBaselineBytes: 9.32 * 1024 ** 3, gpuBaselineBytes: 8.13 * 1024 ** 3 }), "9.32 GiB (+ baseline 8.13 GiB)");
+  assert.equal(memoryCell({ peakBytes: 42 * 1024 ** 3 }), "42.00 GiB");
+  assert.equal(memoryCell(undefined), "–");
+});
+
 test("catalog rows: default or requested tier, platform filter, soft rows optional, derived tiers ignored", () => {
   const model = { id: "m", downloads: [
     { provider: "huggingface", repo: "o/m", revision: "1".repeat(40), variant: "q4", default: true, files: ["q4/*"] },
@@ -373,6 +417,7 @@ const server = http.createServer((req, res) => {
       // Immutable attempt bundle, as head's worker publishes under data/models (read-only dirs).
       const bundle = path.join(data, "models", "portable-attempts", "r", "bundle", "hf");
       if (!fs.existsSync(bundle)) { fs.mkdirSync(bundle, { recursive: true }); fs.writeFileSync(path.join(bundle, "f.bin"), "x"); if (mode.outside) fs.symlinkSync(mode.outside, path.join(bundle, "link")); fs.chmodSync(path.join(bundle, "f.bin"), 0o444); for (const d of [bundle, path.dirname(bundle), path.dirname(path.dirname(bundle))]) fs.chmodSync(d, 0o555); }
+      if (mode.overwrite && !mode.overwritten) { mode.overwritten = true; const size = fs.statSync(mode.overwrite).size; fs.writeFileSync(mode.overwrite, "x".repeat(size)); }
       if (mode.mutate && !mode.mutated) { mode.mutated = true; fs.unlinkSync(mode.mutate); fs.writeFileSync(mode.mutate, "w"); }
       const request = JSON.parse(body); const id = "job-" + Date.now() + "-" + jobs.size; jobs.set(id, { id, request, created: Date.now() }); return send(res, 201, { id, type: "image_generate", payload: request }); }
     const job = /^\/api\/v1\/jobs\/([^/]+)$/.exec(p);
@@ -410,6 +455,9 @@ test("--run drives fake base/head services through the stop rule and writes evid
   }
   const hub = path.join(dir, "hub"), snapshot = path.join(hub, "models--OpenMOSS-Team--MOSS-Image-SFT", "snapshots", revision);
   await mkdir(snapshot, { recursive: true }); await writeFile(path.join(snapshot, "a.bin"), "w");
+  // A snapshot entry that is a link to a blob, as the Hugging Face cache lays it out.
+  const blobFile = path.join(hub, "models--OpenMOSS-Team--MOSS-Image-SFT", "blobs", "b1"); await mkdir(path.dirname(blobFile), { recursive: true }); await writeFile(blobFile, "blob-bytes");
+  const { symlink: linkFile } = await import("node:fs/promises"); await linkFile(path.relative(snapshot, blobFile), path.join(snapshot, "linked.bin"));
   const fluxSnapshot = path.join(hub, "models--SceneWorks--flux1-dev-mlx", "snapshots", revision, "q4"); await mkdir(fluxSnapshot, { recursive: true }); await writeFile(path.join(fluxSnapshot, "w.bin"), "w");
   const outside = path.join(dir, "outside-hub-file"); await writeFile(outside, "hub bytes"); const { chmod: chmodFile, stat: statFile } = await import("node:fs/promises"); await chmodFile(outside, 0o444);
   const scenario = async (name, headOffset, headMode = {}, extraEnv = {}, baseMode = {}) => {
@@ -481,6 +529,12 @@ test("--run drives fake base/head services through the stop rule and writes evid
   const headMut = await scenario("headmut", 0, { mutate: mutated });
   assert.equal(headMut.status, 1); assert.equal(hubMutationAttribution(headMut.report.routes[0]), "head");
   assert.match(await readFile(path.join(headMut.work, "evidence", "report.md"), "utf8"), /hub mutation \(head; fails this comparison\)/);
+  // A same-length rewrite of the blob behind a snapshot link, done by the HEAD worker, is caught and attributed.
+  const blobMut = await scenario("blobmut", 0, { overwrite: blobFile });
+  assert.equal(blobMut.status, 1); const blobRoute = blobMut.report.routes[0];
+  assert.equal(hubMutationAttribution(blobRoute), "head");
+  assert.deepEqual(blobRoute.runs.map((run) => [run.label, run.hubMutation.changed]), [["base#1", false], ["head", true]]);
+  assert.ok(blobRoute.runs[1].hubMutation.diff.entries.some((item) => item.path.includes("linked.bin#entry/target/")));
   // A failed job stops immediately with the served error.
   const failed = await scenario("failed", 0, { fail: true });
   assert.match(failed.report.routes[0].runs.find((run) => run.label === "head").error, /^job failed: model_artifact_incomplete: fake refusal/);

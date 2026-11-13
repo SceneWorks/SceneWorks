@@ -311,17 +311,54 @@ async function ffmpegDecode(ffmpeg, file, kind) {
     child.once("close", (code) => resolve(code === 0 ? { ok: true, data: Buffer.concat(chunks) } : { ok: false, error: Buffer.concat(errors).toString().slice(0, 600) || `exit ${code}` }));
   });
 }
+// Stream geometry and timing from ffprobe. Decoding to raw RGBA/PCM drops frame rate, time base
+// and channel layout, so equal decoded bytes alone cannot prove two clips are equal.
+export function ffprobePath(ffmpeg) {
+  const base = path.basename(ffmpeg);
+  return /^ffmpeg(\.exe)?$/i.test(base) ? path.join(path.dirname(ffmpeg), base.replace(/^ffmpeg/i, "ffprobe")).replace(/^\.[\\/]/, "") : "ffprobe";
+}
+async function ffprobeStreams(ffprobe, file) {
+  try {
+    const { stdout } = await execFile(ffprobe, ["-v", "error", "-show_streams", "-show_format", "-of", "json", file], { timeout: 60_000, maxBuffer: 16 * 1024 * 1024, windowsHide: true });
+    return { ok: true, data: JSON.parse(stdout) };
+  } catch (error) { return { ok: false, error: String(error.message).slice(0, 600) }; }
+}
+// The comparable stream description: geometry, frame count, rate/time base, durations, and the
+// audio sample rate, channel count and layout. Encoder tags and bitrates are deliberately left out.
+export function streamShape(probe, { frameBytes = null, audioBytes = null } = {}) {
+  const video = probe?.streams?.find((stream) => stream.codec_type === "video") ?? null;
+  const audio = probe?.streams?.find((stream) => stream.codec_type === "audio") ?? null;
+  const pixels = video ? Number(video.width) * Number(video.height) : 0;
+  return {
+    video: video && { width: Number(video.width), height: Number(video.height), decodedFrames: frameBytes !== null && pixels ? frameBytes / (pixels * 4) : null, nbFrames: video.nb_frames ?? null, rFrameRate: video.r_frame_rate ?? null, avgFrameRate: video.avg_frame_rate ?? null, timeBase: video.time_base ?? null, duration: video.duration ?? null },
+    audio: audio && { sampleRate: Number(audio.sample_rate), channels: Number(audio.channels), channelLayout: audio.channel_layout ?? null, timeBase: audio.time_base ?? null, duration: audio.duration ?? null },
+    formatDuration: probe?.format?.duration ?? null,
+    decoded: { videoFormat: "rgba", audioFormat: "s16le", frameBytes, audioBytes },
+  };
+}
 // Returns { method, sha256, shape } plus the decoded buffer (not serialized) for difference metrics.
-export async function decodedContent(file, kind, { ffmpeg = "ffmpeg" } = {}) {
+// `decode` and `probe` are seams for tests; production uses ffmpeg/ffprobe.
+export async function decodedContent(file, kind, { ffmpeg = "ffmpeg", decode = ffmpegDecode, probe = (target) => ffprobeStreams(ffprobePath(ffmpeg), target) } = {}) {
   const bytes = await readFile(file);
   if (kind === "image") { const { width, height, rgba } = decodePng(bytes); return { method: "png_rgba8", shape: { width, height }, sha256: contentDigest({ width, height, format: "rgba8" }, rgba), buffer: rgba }; }
   if (kind === "audio" && bytes.toString("ascii", 0, 4) === "RIFF") { const wav = parseWav(bytes); const shape = { audioFormat: wav.audioFormat, channels: wav.channels, sampleRate: wav.sampleRate, bitsPerSample: wav.bitsPerSample, bytes: wav.data.length }; return { method: "wav_pcm_samples", shape, sha256: contentDigest(shape, wav.data), buffer: wav.data }; }
-  if (kind === "audio") { const pcm = await ffmpegDecode(ffmpeg, file, "audio"); if (pcm.ok) return { method: "ffmpeg_s16le", shape: { bytes: pcm.data.length }, sha256: contentDigest({ format: "s16le" }, pcm.data), buffer: pcm.data }; return { method: "file_bytes_no_decoder", decoderError: pcm.error, sha256: sha256(bytes), buffer: bytes }; }
-  const frames = await ffmpegDecode(ffmpeg, file, "video-frames");
+  if (kind === "audio") {
+    const pcm = await decode(ffmpeg, file, "audio");
+    if (!pcm.ok) return { method: "file_bytes_no_decoder", decoderError: pcm.error, sha256: sha256(bytes), buffer: bytes };
+    const probed = await probe(file);
+    if (!probed.ok) return { method: "file_bytes_no_probe", decoderError: probed.error, sha256: sha256(bytes), buffer: bytes };
+    const shape = streamShape(probed.data, { audioBytes: pcm.data.length });
+    return { method: "ffmpeg_s16le+ffprobe_streams", shape, sha256: contentDigest(shape, pcm.data), buffer: pcm.data };
+  }
+  const frames = await decode(ffmpeg, file, "video-frames");
   if (!frames.ok) return { method: "file_bytes_no_decoder", decoderError: frames.error, sha256: sha256(bytes), buffer: bytes };
-  const audio = await ffmpegDecode(ffmpeg, file, "audio");
-  const shape = { format: "rgba", frameBytes: frames.data.length, audioBytes: audio.ok ? audio.data.length : null };
-  return { method: "ffmpeg_rgba_frames+s16le_audio", shape, sha256: contentDigest(shape, frames.data, audio.ok ? audio.data : Buffer.alloc(0)), buffer: frames.data };
+  // Without the stream description equal bytes could hide another frame rate or geometry, so a
+  // missing probe falls back to the container bytes rather than a weaker decoded digest.
+  const probed = await probe(file);
+  if (!probed.ok) return { method: "file_bytes_no_probe", decoderError: probed.error, sha256: sha256(bytes), buffer: bytes };
+  const audio = await decode(ffmpeg, file, "audio");
+  const shape = streamShape(probed.data, { frameBytes: frames.data.length, audioBytes: audio.ok ? audio.data.length : null });
+  return { method: "ffmpeg_rgba_frames+s16le_audio+ffprobe_streams", shape, sha256: contentDigest(shape, frames.data, audio.ok ? audio.data : Buffer.alloc(0)), buffer: frames.data };
 }
 // One numeric difference metric over decoded bytes (RGBA8 channels, PCM bytes or raw frames).
 export function numericDifference(a, b) {
@@ -534,6 +571,13 @@ export function summarize(routes) {
   }
   return summary;
 }
+// CUDA memory is the peak above the pre-request baseline, shown with that baseline; MLX is the
+// worker's own peak footprint.
+export function memoryCell(memory) {
+  if (!memory) return "–";
+  if (Number.isFinite(memory.peakAboveBaselineBytes)) return `${gib(memory.peakAboveBaselineBytes)} (+ baseline ${gib(memory.gpuBaselineBytes)})`;
+  return gib(memory.peakBytes);
+}
 const gib = (bytes) => (Number.isFinite(bytes) ? `${(bytes / GIB).toFixed(2)} GiB` : "–");
 const secs = (value) => (Number.isFinite(value) ? `${value.toFixed(1)} s` : "–");
 export function renderMarkdown(report) {
@@ -550,7 +594,7 @@ export function renderMarkdown(report) {
   lines.push("| route | model | status | verdict | base#1 time | head time | base#2 time | base#1 mem | head mem | notes |", "|---|---|---|---|---|---|---|---|---|---|");
   for (const route of report.routes) {
     const run = (label) => route.runs?.find((item) => item.label === label);
-    const time = (label) => secs(run(label)?.timing?.enqueueToCompleteSeconds), mem = (label) => gib(run(label)?.memory?.peakBytes);
+    const time = (label) => secs(run(label)?.timing?.enqueueToCompleteSeconds), mem = (label) => memoryCell(run(label)?.memory);
     lines.push(`| ${route.id} | ${route.model} | ${route.status} | ${route.verdict ?? (route.status === "not_run" ? "not_run" : "–")} | ${time("base#1")} | ${time("head")} | ${time("base#2")} | ${mem("base#1")} | ${mem("head")} | ${(route.skipReason ?? route.verdictReason ?? "").replace(/\|/g, "/").slice(0, 300)} |`);
   }
   for (const route of report.routes.filter((item) => item.comparison || item.runs?.length)) {
@@ -599,7 +643,7 @@ async function preflight(env, cfg, report) {
   if (cfg.inferenceSha) for (const side of [report.base, report.head]) fact(side.inferencePin === cfg.inferenceSha, `inference pin ${side.inferencePin} differs from the requested ${cfg.inferenceSha}`);
   if (cfg.backend === "mlx") fact(report.base.pmetalSource && report.base.pmetalSource === report.head.pmetalSource, "base and head must pin the same pmetal-mlx-sys revision (one prebuilt MLX serves both builds)");
   const ffmpeg = env.SCENEWORKS_FFMPEG || "ffmpeg";
-  report.tools = { ffmpeg: { command: ffmpeg, ...(await tool(ffmpeg, ["-version"])) }, git: await tool("git", ["--version"]) };
+  report.tools = { ffmpeg: { command: ffmpeg, ...(await tool(ffmpeg, ["-version"])) }, ffprobe: { command: ffprobePath(ffmpeg), ...(await tool(ffprobePath(ffmpeg), ["-version"])) }, git: await tool("git", ["--version"]) };
   if (cfg.backend === "mlx") report.tools.python312 = await tool("python3.12", ["--version"]);
   if (cfg.backend === "cuda") {
     report.tools.nvidiaSmi = await tool(nvidiaSmiPath(env), ["-i", CUDA_PHYSICAL_GPU, "--query-gpu=index,uuid,name,memory.total", "--format=csv,noheader"]); fact(report.tools.nvidiaSmi.available, "nvidia-smi cannot query physical GPU1");
@@ -618,7 +662,10 @@ async function preflight(env, cfg, report) {
   fact(report.disk.workFreeBytes === null || report.disk.workFreeBytes >= 20 * GIB, `only ${gib(report.disk.workFreeBytes)} free for the shared build target and evidence; at least 20 GiB required`);
   const [baseCatalog, headCatalog] = await Promise.all([readCatalog(cfg.baseDir), readCatalog(cfg.headDir)]);
   report.routes = await planRoutes({ routes: cfg.routes, hubs: cfg.hubs, baseCatalog, headCatalog, platform });
-  for (const route of report.routes.filter((item) => item.kind === "video" && item.status === "ready")) if (!report.tools.ffmpeg.available) route.note = "ffmpeg unavailable: fidelity falls back to file bytes and the worker cannot mux video";
+  for (const route of report.routes.filter((item) => item.kind === "video" && item.status === "ready")) {
+    if (!report.tools.ffmpeg.available) route.note = "ffmpeg unavailable: fidelity falls back to file bytes and the worker cannot mux video";
+    else if (!report.tools.ffprobe.available) route.note = "ffprobe unavailable: video fidelity falls back to file bytes (no stream geometry/timing)";
+  }
 }
 
 // ---- build --------------------------------------------------------------------------------------
@@ -660,7 +707,7 @@ async function build(env, cfg, report) {
 }
 
 // ---- one run: fresh state, fresh API + worker, one project, one job ------------------------------
-async function hubFingerprint(hub, repos) {
+export async function hubFingerprint(hub, repos) {
   const list = async (dir) => { try { return (await readdir(dir, { withFileTypes: true })).map((entry) => entry.name).sort(); } catch { return null; } };
   const mtime = async (target) => { try { return (await stat(target)).mtimeMs; } catch { return null; } };
   const out = { root: { entries: await list(hub), mtime: await mtime(hub) }, hfHome: { entries: await list(path.dirname(hub)) }, repos: {} };
@@ -675,7 +722,16 @@ async function hubFingerprint(hub, repos) {
       for (const entry of entries) {
         const child = path.join(dir, entry.name), childRel = rel ? `${rel}/${entry.name}` : entry.name;
         if (entry.isDirectory() && depth < 4) await walk(child, childRel, depth + 1);
-        else { try { const info = await lstat(child); nested[`${childRel}#entry`] = { mtime: info.mtimeMs, ctime: info.ctimeMs, link: info.isSymbolicLink(), nlink: info.nlink, size: info.size }; } catch { nested[`${childRel}#entry`] = null; } }
+        else {
+          try {
+            const info = await lstat(child);
+            const record = { mtime: info.mtimeMs, ctime: info.ctimeMs, link: info.isSymbolicLink(), nlink: info.nlink, size: info.size };
+            // A link's own stat cannot see the blob it points at being rewritten in place, so the
+            // referenced file's metadata is recorded too (stat only, never its bytes).
+            if (record.link) { try { const target = await stat(child); record.target = { size: target.size, mtime: target.mtimeMs, ctime: target.ctimeMs, nlink: target.nlink, ino: target.ino }; } catch { record.target = null; } }
+            nested[`${childRel}#entry`] = record;
+          } catch { nested[`${childRel}#entry`] = null; }
+        }
       }
     };
     await walk(snap, "", 0);

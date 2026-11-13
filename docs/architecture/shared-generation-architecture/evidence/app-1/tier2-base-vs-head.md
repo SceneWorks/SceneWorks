@@ -32,8 +32,11 @@ only by the `tier2-ab` profile of `.github/workflows/memory-catalog-campaign.yml
   the route is `equal`. Otherwise base#2 runs once: base#1 ≠ base#2 is
   `nondeterministic_on_runner`; base#1 = base#2 is `head_differs`.
 - Fidelity is the SHA-256 of decoded content: PNG pixels as RGBA8, WAV PCM samples, video frames
-  decoded by ffmpeg to RGBA plus the s16le audio track. File hashes are recorded too; saved PNGs
-  carry a workflow metadata chunk, so file hashes differ between jobs with equal pixels.
+  decoded by ffmpeg to RGBA plus the s16le audio track. The current driver also includes the
+  ffprobe stream description in the video and non-WAV audio digest: width, height, frame count,
+  frame rate and time base, durations, and audio sample rate, channel count and layout. File hashes
+  are recorded too; saved PNGs carry a workflow metadata chunk that can make file hashes differ
+  between jobs with equal pixels.
 - Time is enqueue to completion, with a load/denoise split read from the job's stages at a
   500 ms polling interval.
 - Memory on MLX (nax-macos-2): the worker process's physical footprint from `top` MEM, which
@@ -66,11 +69,13 @@ only by the `tier2-ab` profile of `.github/workflows/memory-catalog-campaign.yml
 
 Run URL: `https://github.com/SceneWorks/SceneWorks/actions/runs/<run>`. Every run below pins
 inference `4a36a7f8` on both sides. Base is `d3f7b05bf2` (main before the feature) in every run.
-Times are enqueue → complete in seconds. MLX memory is the worker's peak footprint; CUDA memory is
-the peak above the pre-request baseline (baseline in parentheses). Values are copied from each
-run's `report.json`.
+Times are enqueue → complete in seconds. MLX memory is the worker's peak footprint. CUDA memory is
+`memory.used` on physical GPU1 **above the pre-request baseline**, with that baseline after "+";
+the device-wide peak is the sum of the two (for example SDXL base#1: 8.35 + 8.13 = 16.48 GiB).
+Values are copied from each run's `report.json` (`peakAboveBaselineBytes`, `gpuBaselineBytes`,
+`peakBytes`).
 
-| Run | Driver | Head | Runner | Route | Verdict | base#1 s | head s | base#2 s | Memory base#1 / head |
+| Run | Driver | Head | Runner | Route | Verdict | base#1 s | head s | base#2 s | Memory base#1 / head (MLX: peak; CUDA: above baseline + baseline) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 43287955401 | `c558340dea` | `d2b0c76c9b` | nax-macos-2 | mlx-flux1-dev-t2i | head_differs | 68.2 | 229.8 | 71.8 | 21.0 / 13.0 GiB |
 | | | | | mlx-ltx25-distilled-t2v | error (head timed out) | 436.1 | — | — | 65.0 / — GiB |
@@ -79,10 +84,16 @@ run's `report.json`.
 | | | | | mlx-ltx25-distilled-t2v | equal | 341.3 | 1602.0 | — | 65.0 / 65.0 GiB |
 | | | | | mlx-chatterbox-tts | equal | 30.1 | 11.2 | — | 3.88 / 3.91 GiB |
 | 43427303870 | `935821c3f8` | `f1de2e5997` | cuda-windows-2 | all three CUDA routes | invalid (driver defect, no model ran) | — | — | — | — |
-| 43441772001 | `8ffc3fc87b` | `f1de2e5997` | cuda-windows-2 | cuda-sdxl-q4-t2i | equal | 36.9 | 37.9 | — | 8.35 (8.13) / 9.32 (8.13) GiB |
-| | | | | cuda-moss-image-t2i | equal | 61.2 | 86.2 | — | 24.50 (8.00) / 24.49 (8.00) GiB |
+| 43441772001 | `8ffc3fc87b` | `f1de2e5997` | cuda-windows-2 | cuda-sdxl-q4-t2i | equal | 36.9 | 37.9 | — | 8.35 + 8.13 / 9.32 + 8.13 GiB |
+| | | | | cuda-moss-image-t2i | equal | 61.2 | 86.2 | — | 24.50 + 8.00 / 24.49 + 8.00 GiB |
 | | | | | cuda-ltx25-distilled-t2v | error on both sides (SW-7124) | — | — | — | — |
-| 43482734077 | `511d70f1d9` | `f1de2e5997` | cuda-windows | cuda-ltx23-distilled-t2v | equal | 87.4 | 128.5 | — | 55.14 (2.93) / 55.04 (2.97) GiB |
+| 43482734077 | `511d70f1d9` | `f1de2e5997` | cuda-windows | cuda-ltx23-distilled-t2v | equal | 87.4 | 128.5 | — | 55.14 + 2.93 / 55.04 + 2.97 GiB |
+
+The recorded video verdicts were produced by drivers up to `511d70f1d9`, whose video digest covered
+decoded frame and audio bytes without stream geometry or timing (later drivers add both). Both video
+`equal` verdicts are nevertheless backed by identical output files: the saved MP4 had the same
+SHA-256 on base and head (LTX-2.5 MLX in 43424868140: `6174642d…`, 880,163 bytes; LTX-2.3 CUDA in
+43482734077: `47cf1ed4…`, 566,995 bytes), so frame rate, size and duration are identical too.
 
 Skips: MOSS-Image on MLX in both MLX runs (weights absent from `/Volumes/Models/huggingface/hub`
 on nax-macos-2); FLUX.3 Klein in both MLX runs (alternative of FLUX.1, which ran); Wan2.2 TI2V-5B
