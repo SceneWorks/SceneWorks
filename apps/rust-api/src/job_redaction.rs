@@ -154,8 +154,24 @@ fn redact_manifest_locators(value: &mut Value) {
                 }
                 true
             });
-            for child in fields.values_mut() {
+            for (key, child) in fields.iter_mut() {
+                // A prompt guide's `path` is the web app's own asset URL (`/prompt-guides/…`,
+                // checked against the web assets at build time), not a host locator.
+                let web_guide = (key == "promptGuide")
+                    .then(|| child.as_object_mut())
+                    .flatten()
+                    .and_then(|guide| guide.remove("path"))
+                    .and_then(|path| {
+                        if path.as_str().is_some_and(is_web_prompt_guide_path) {
+                            Some(path)
+                        } else {
+                            None
+                        }
+                    });
                 redact_manifest_locators(child);
+                if let (Some(path), Some(guide)) = (web_guide, child.as_object_mut()) {
+                    guide.insert("path".to_owned(), path);
+                }
             }
         }
         Value::Array(entries) => {
@@ -165,6 +181,17 @@ fn redact_manifest_locators(value: &mut Value) {
         }
         _ => {}
     }
+}
+
+/// A web-app prompt-guide asset URL: `/prompt-guides/<name>.md`, one plain segment.
+fn is_web_prompt_guide_path(value: &str) -> bool {
+    value.strip_prefix("/prompt-guides/").is_some_and(|name| {
+        !name.is_empty()
+            && name.ends_with(".md")
+            && !name.contains(['/', '\\'])
+            && name != ".."
+            && !name.starts_with('.')
+    })
 }
 
 fn is_physical_path(value: &str) -> bool {
@@ -668,6 +695,47 @@ pub(super) fn redact_private_job_metadata_from_event(event: &str, value: &mut Va
 mod portable_redaction_tests {
     use super::*;
     use serde_json::json;
+
+    /// SW-7033 Tier 2: the public job kept dropping `ui.promptGuide.path` because the web asset
+    /// URL `/prompt-guides/flux-dev.md` starts with `/`. It is served data, not a host locator; a
+    /// host path placed in the same field is still removed, as is every real locator.
+    #[test]
+    fn public_job_keeps_the_web_prompt_guide_path_and_still_removes_host_paths() {
+        let mut payload = json!({
+            "modelManifestEntry":{
+                "id":"flux_dev", "paths":{"model":"${HF_CACHE}/SceneWorks/flux1-dev-mlx"},
+                "ui":{"promptGuide":{"path":"/prompt-guides/flux-dev.md",
+                    "sources":[{"label":"card","url":"https://example.invalid/card"}]}}
+            },
+            "modelManifestEntries":[
+                {"id":"user_model","ui":{"promptGuide":{"path":"/home/user/private/guide.md"}}},
+                {"id":"escape","ui":{"promptGuide":{"path":"/prompt-guides/../etc/passwd"}}}
+            ]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        redact_manifest_locators_from_job_payload(&mut payload);
+        let entry = &payload["modelManifestEntry"];
+        assert_eq!(
+            entry["ui"]["promptGuide"]["path"],
+            "/prompt-guides/flux-dev.md"
+        );
+        assert_eq!(
+            entry["ui"]["promptGuide"]["sources"][0]["url"],
+            "https://example.invalid/card"
+        );
+        assert!(entry.get("paths").is_none());
+        for index in [0, 1] {
+            assert!(
+                payload["modelManifestEntries"][index]["ui"]["promptGuide"]
+                    .get("path")
+                    .is_none(),
+                "{}",
+                payload["modelManifestEntries"][index]
+            );
+        }
+    }
 
     #[test]
     fn public_job_keeps_logical_identity_but_removes_all_manifest_and_adapter_locators() {

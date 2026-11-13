@@ -3286,6 +3286,14 @@ async fn versionless_claim_never_reaches_an_unbound_historical_model_job() {
     )
     .unwrap();
     let (app, state) = create_app_with_state(test_settings(&temp)).unwrap();
+    // The claim migrates historical carriers first, which resolves pinned publisher metadata.
+    // Keep that lookup unreachable here: the real request read the process-wide
+    // SCENEWORKS_HUGGINGFACE_BASE_URL, which a concurrent test may point at its own stub
+    // metadata server (only under the shared env lock), so under suite load the carrier could
+    // bind. This test is about the claim protocol, not about metadata being unreachable.
+    *state.test_hooks.pinned_metadata_remote.lock() = Some(std::sync::Arc::new(|_, _, _| {
+        Err("publisher metadata is unreachable in this test".to_owned())
+    }));
     let (status, _) = request(
         app.clone(),
         "POST",
