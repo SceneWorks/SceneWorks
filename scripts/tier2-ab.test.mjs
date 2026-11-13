@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { sha256 } from "./lib/file-sha256.mjs";
 import {
   DEFAULT_ROUTE_IDS, ROUTES, contentDigest, decodePng, decodedContent, descendants, diffObjects, dispatchOptions,
-  exitCodeFor, identitySubset, jobClaimed, jobDiagnostics, jobProgressDecision, lastLines, numericDifference, progressLine, removeScratch, parseTopMem, parseWav, planRoutes, readCatalog, redactPaths, referenceWav,
+  exitCodeFor, gpuInventory, identitySubset, jobClaimed, jobDiagnostics, jobProgressDecision, lastLines, numericDifference, progressLine, removeScratch, parseTopMem, parseWav, planRoutes, readCatalog, redactPaths, referenceWav,
   renderMarkdown, reportName, requestBody, requestTemplate, resolveConfig, routeDownloadRows, routePresence, selectRoutes,
   summarize, verdictFor,
 } from "./tier2-ab.mjs";
@@ -112,6 +112,15 @@ test("diagnostics keep the served job state and refusal fields; progress lines a
   assert.deepEqual(lastLines(Array.from({ length: 80 }, (_, i) => `l${i}`).join("\r\n") + "\n", 50), Array.from({ length: 50 }, (_, i) => `l${i + 30}`));
   const line = progressLine({ route: "r", run: "head", phase: "claimed", worker: "owned", empty: "", reason: "a\nb  c" }, new Date("2026-11-12T00:00:00Z"));
   assert.equal(line, "[tier2-ab] 2026-11-12T00:00:00.000Z route=r run=head phase=claimed worker=owned reason=a b c");
+});
+
+test("GPU inventory joins nvidia-smi index/bus with driver display, memory and typed processes", () => {
+  const xml = `<nvidia_smi_log><gpu id="00000000:21:00.0"><product_name>RTX</product_name><display_attached>No</display_attached><display_active>Disabled</display_active><driver_model><current_dm>WDDM</current_dm></driver_model><uuid>GPU-b1</uuid><fb_memory_usage><total>97887 MiB</total><used>50220 MiB</used><free>47219 MiB</free></fb_memory_usage><utilization><gpu_util>99 %</gpu_util></utilization><processes><process_info><pid>40052</pid><type>C</type><process_name>C:\\Apps\\sceneworks-api.exe</process_name><used_memory>N/A</used_memory></process_info></processes></gpu><gpu id="00000000:C1:00.0"><product_name>RTX</product_name><display_attached>Yes</display_attached><display_active>Disabled</display_active><driver_model><current_dm>WDDM</current_dm></driver_model><uuid>GPU-e4</uuid><fb_memory_usage><total>97887 MiB</total><used>5847 MiB</used><free>92040 MiB</free></fb_memory_usage><utilization><gpu_util>12 %</gpu_util></utilization><processes><process_info><pid>768</pid><type>C+G</type><process_name>C:\\x\\explorer.exe</process_name><used_memory>N/A</used_memory></process_info><process_info><pid>40068</pid><type>C</type><process_name>C:\\Apps\\sceneworks-api.exe</process_name><used_memory>N/A</used_memory></process_info></processes></gpu></nvidia_smi_log>`;
+  const gpus = gpuInventory("0, GPU-b1, 00000000:21:00.0, RTX\n1, GPU-e4, 00000000:C1:00.0, RTX\n", xml);
+  assert.deepEqual(gpus.map((gpu) => [gpu.index, gpu.uuid, gpu.pciBusId, gpu.displayAttached, gpu.memoryUsed]), [[0, "GPU-b1", "00000000:21:00.0", "No", "50220 MiB"], [1, "GPU-e4", "00000000:C1:00.0", "Yes", "5847 MiB"]]);
+  assert.deepEqual(gpus[1].processes.map((row) => `${row.type}:${row.name}:${row.usedMemory}`), ["C+G:explorer.exe:N/A", "C:sceneworks-api.exe:N/A"]);
+  const markdown = renderMarkdown({ backend: "cuda", mode: "preflight", status: "finished", exitCode: 0, base: { sha: BASE }, head: { sha: HEAD }, runner: { platform: "win32", arch: "x64" }, startedAt: "s", memoryMethod: "m", routes: [], gpus, gpuBinding: { policy: "shared-display" } });
+  assert.match(markdown, /physical GPU1 is the host's display GPU/); assert.match(markdown, /\| 1 \| 00000000:C1:00\.0 \| GPU-e4 \| Yes \| 5847 MiB \/ 97887 MiB \| 12 % \| C 1 \(sceneworks-api\.exe:40068\), G 0, C\+G 1 \|/);
 });
 
 test("scratch cleanup refuses roots outside scratch or overlapping a hub, and never changes a multiply linked Windows file", async () => {
@@ -453,7 +462,10 @@ test("tier2-ab jobs pin the isolated runners, physical GPU1, ceilings, Metal loc
   assert.doesNotMatch(reusable, /rm -rf -- "\$\{TIER2_AB_WORK/, "plain rm of the work dir fails on read-only bundles");
   assert.match(mlx, /phase=waiting_for_metal_lock/); assert.match(cuda, /phase=waiting_for_gpu1_lease/);
   for (const [key, value] of [["CUDA_VISIBLE_DEVICES", '"1"'], ["NVIDIA_VISIBLE_DEVICES", '"1"'], ["SCENEWORKS_GPU_ID", '"1"'], ["CUDA_DEVICE_ORDER", "PCI_BUS_ID"], ["RUSTC_WRAPPER", '""']]) assert.match(cuda, new RegExp(`\\n      ${key}: ${value}\\n`));
-  assert.match(cuda, /python -I scripts\/ci\/windows_cuda_execution\.py --actor tier2-ab-cuda --budget-minutes [0-9]+ --cuda-ordinals 0 -- node scripts\/tier2-ab\.mjs --run/);
+  assert.match(cuda, /python -I scripts\/ci\/windows_cuda_execution\.py --actor tier2-ab-cuda --admission-policy shared-display --min-free-mib 75776 --budget-minutes [0-9]+ --cuda-ordinals 0 -- node scripts\/tier2-ab\.mjs --run/);
+  assert.match(cuda, /\n      TIER2_AB_GPU_POLICY: shared-display\n/);
+  // shared-display is this profile's alone; every other wrapper caller keeps strict-idle or its own policy.
+  for (const name of ["windows-candle.yml", "memory-catalog-campaign.yml", "load-progress-acceptance.yml"]) assert.doesNotMatch(await workflowText(name), /shared-display/);
   assert.match(cuda, /Add-Content -Path \$env:GITHUB_ENV -Value 'RUSTC_WRAPPER='/);
   assert.match(cuda, /vcvars64\.bat/);
   assert.doesNotMatch(reusable, /download_missing|--download-missing|hf download|huggingface-cli/);

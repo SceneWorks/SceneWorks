@@ -187,6 +187,7 @@ jobs:
       CUDA_VISIBLE_DEVICES: "1"
       NVIDIA_VISIBLE_DEVICES: "1"
       SCENEWORKS_GPU_ID: "1"
+      TIER2_AB_GPU_POLICY: shared-display
       # Heavy candle lane: no sccache wrapper (windows-candle.yml / catalog walk, os error 10054).
       RUSTC_WRAPPER: ""
       CARGO_INCREMENTAL: "0"
@@ -254,11 +255,14 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          # The lease wrapper prints nothing while it waits. Strict-idle admission needs physical
-          # GPU1 under 2 GiB used, under 5% utilization and no compute process; the driver prints
-          # "[tier2-ab] ... phase=driver_started" once admitted, then one line per phase.
-          Write-Host "[tier2-ab] $([DateTime]::UtcNow.ToString('o')) phase=waiting_for_gpu1_lease policy=strict-idle budget_min=540"
-          python -I scripts/ci/windows_cuda_execution.py --actor tier2-ab-cuda --budget-minutes 540 --cuda-ordinals 0 -- node scripts/tier2-ab.mjs --run
+          # Physical GPU1 (nvidia-smi index 1, PCI C1:00.0) is the host's display GPU, so it is never
+          # strictly idle. This profile alone uses shared-display admission: after the exact-UUID
+          # lock, a 10 s window must show free memory >= 75776 MiB (largest route 66 GiB, the MLX
+          # LTX-2.5 q4 peak of run 43287955401 rounded up, + 8 GiB margin), stable memory.used and
+          # utilization, and no foreign compute footprint above 8 GiB. The wrapper prints nothing
+          # while it waits; the driver prints "phase=driver_started" once admitted.
+          Write-Host "[tier2-ab] $([DateTime]::UtcNow.ToString('o')) phase=waiting_for_gpu1_lease policy=shared-display min_free_mib=75776 budget_min=540"
+          python -I scripts/ci/windows_cuda_execution.py --actor tier2-ab-cuda --admission-policy shared-display --min-free-mib 75776 --budget-minutes 540 --cuda-ordinals 0 -- node scripts/tier2-ab.mjs --run
           if ($LASTEXITCODE -ne 0) { throw 'tier2-ab comparison failed; see the evidence artifact' }
       - name: Retain the A/B evidence
         if: ${{ always() }}

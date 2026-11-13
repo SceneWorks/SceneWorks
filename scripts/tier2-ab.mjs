@@ -485,6 +485,18 @@ async function sampleGpu(smi) {
   return { uuid: out[1], usedBytes: Number(out[2]) * 1024 ** 2, utilization: Number(out[3]) };
 }
 
+// Every GPU's identity from nvidia-smi CSV (index, bus id) joined with the driver XML (display,
+// memory, utilization and processes with C/G/C+G type). On Windows WDDM per-process memory is N/A.
+export function gpuInventory(csv, xml) {
+  const byUuid = new Map(csv.split(/\r?\n/).filter(Boolean).map((line) => { const [index, uuid, bus, ...name] = line.split(",").map((value) => value.trim()); return [uuid, { index: Number(index), pciBusId: bus, name: name.join(",") }]; }));
+  const field = (block, tag) => (new RegExp(`<${tag}>([^<]*)</${tag}>`).exec(block)?.[1] ?? "").trim();
+  return [...xml.matchAll(/<gpu id="([^"]+)">([\s\S]*?)<\/gpu>/g)].map(([, bus, block]) => {
+    const uuid = field(block, "uuid"), memory = /<fb_memory_usage>([\s\S]*?)<\/fb_memory_usage>/.exec(block)?.[1] ?? "", utilization = /<utilization>([\s\S]*?)<\/utilization>/.exec(block)?.[1] ?? "";
+    const processes = [...block.matchAll(/<process_info>([\s\S]*?)<\/process_info>/g)].map(([, row]) => ({ pid: field(row, "pid"), type: field(row, "type"), name: field(row, "process_name").split(/[\\/]/).pop(), usedMemory: field(row, "used_memory") }));
+    return { index: byUuid.get(uuid)?.index ?? null, uuid, pciBusId: byUuid.get(uuid)?.pciBusId ?? bus, name: field(block, "product_name"), displayAttached: field(block, "display_attached"), displayActive: field(block, "display_active"), displayMode: field(block, "display_mode"), driverModel: field(block, "current_dm"), memoryTotal: field(memory, "total"), memoryUsed: field(memory, "used"), memoryFree: field(memory, "free"), utilization: field(utilization, "gpu_util"), processes };
+  });
+}
+
 // ---- reporting ----------------------------------------------------------------------------------
 export function summarize(routes) {
   const summary = { routes: routes.length, ready: 0, ran: 0, skipped: 0 };
@@ -501,6 +513,12 @@ const gib = (bytes) => (Number.isFinite(bytes) ? `${(bytes / GIB).toFixed(2)} Gi
 const secs = (value) => (Number.isFinite(value) ? `${value.toFixed(1)} s` : "–");
 export function renderMarkdown(report) {
   const lines = [`# Tier 2 A/B (${report.backend}) — ${report.mode}`, "", `- status: **${report.status}** (exit ${report.exitCode})`, `- base: \`${report.base.sha}\` (inference ${report.base.inferencePin ?? "?"}, binary ${report.base.binarySha256 ?? "not built"})`, `- head: \`${report.head.sha}\` (inference ${report.head.inferencePin ?? "?"}, binary ${report.head.binarySha256 ?? "not built"})`, `- runner: ${report.runner.name ?? "local"} (${report.runner.platform}/${report.runner.arch}, ${gib(report.runner.totalMemoryBytes)} RAM)`, `- window: ${report.startedAt} → ${report.finishedAt ?? "running"}`, `- memory method: ${report.memoryMethod}`, `- fidelity method: decoded content (PNG→RGBA8, WAV→PCM samples, video→ffmpeg RGBA frames + s16le audio); file sha256 recorded separately`, ""];
+  if (report.gpuBinding?.policy === "shared-display") lines.push("- GPU sharing: physical GPU1 is the host's display GPU. Memory peaks are reported above each run's pre-request baseline (\"shared GPU, baseline N MiB\") and times were taken alongside display work. WDDM reports no per-process GPU memory, so admission and attribution use device memory.used/free and the driver's process types.", "");
+  if (Array.isArray(report.gpus)) {
+    lines.push("| nvidia-smi index | PCI bus | UUID | display attached | used / total | util | processes (C, G, C+G) |", "|---|---|---|---|---|---|---|");
+    for (const gpu of report.gpus) { const count = (type) => gpu.processes.filter((row) => row.type === type).length; lines.push(`| ${gpu.index} | ${gpu.pciBusId} | ${gpu.uuid} | ${gpu.displayAttached} | ${gpu.memoryUsed} / ${gpu.memoryTotal} | ${gpu.utilization} | C ${count("C")} (${gpu.processes.filter((row) => row.type === "C").map((row) => `${row.name}:${row.pid}`).join(" ")}), G ${count("G")}, C+G ${count("C+G")} |`); }
+    lines.push("");
+  }
   if (report.fatal) lines.push(`**Fatal:** ${report.fatal}`, "");
   lines.push("| route | model | status | verdict | base#1 time | head time | base#2 time | base#1 mem | head mem | notes |", "|---|---|---|---|---|---|---|---|---|---|");
   for (const route of report.routes) {
@@ -550,7 +568,17 @@ async function preflight(env, cfg, report) {
   const ffmpeg = env.SCENEWORKS_FFMPEG || "ffmpeg";
   report.tools = { ffmpeg: { command: ffmpeg, ...(await tool(ffmpeg, ["-version"])) }, git: await tool("git", ["--version"]) };
   if (cfg.backend === "mlx") report.tools.python312 = await tool("python3.12", ["--version"]);
-  if (cfg.backend === "cuda") { report.tools.nvidiaSmi = await tool(nvidiaSmiPath(env), ["-i", CUDA_PHYSICAL_GPU, "--query-gpu=index,uuid,name,memory.total", "--format=csv,noheader"]); fact(report.tools.nvidiaSmi.available, "nvidia-smi cannot query physical GPU1"); }
+  if (cfg.backend === "cuda") {
+    report.tools.nvidiaSmi = await tool(nvidiaSmiPath(env), ["-i", CUDA_PHYSICAL_GPU, "--query-gpu=index,uuid,name,memory.total", "--format=csv,noheader"]); fact(report.tools.nvidiaSmi.available, "nvidia-smi cannot query physical GPU1");
+    // Every GPU's identity, so one preflight answers which card the lease and the worker use.
+    try {
+      const smi = nvidiaSmiPath(env);
+      const csv = (await execFile(smi, ["--query-gpu=index,uuid,pci.bus_id,name", "--format=csv,noheader"], { timeout: 30_000, windowsHide: true })).stdout;
+      const xml = (await execFile(smi, ["-q", "-x"], { timeout: 30_000, windowsHide: true, maxBuffer: 64 * 1024 * 1024 })).stdout;
+      report.gpus = gpuInventory(csv, xml);
+      report.gpuBinding = { leasedPhysicalIndex: CUDA_PHYSICAL_GPU, cudaVisibleDevices: env.CUDA_VISIBLE_DEVICES, cudaDeviceOrder: env.CUDA_DEVICE_ORDER, note: "nvidia-smi index is PCI bus order; with CUDA_DEVICE_ORDER=PCI_BUS_ID, CUDA_VISIBLE_DEVICES=1 exposes that same card as the worker's logical CUDA 0", policy: env.TIER2_AB_GPU_POLICY || "strict-idle" };
+    } catch (error) { report.gpus = { error: error.message.slice(0, 300) }; }
+  }
   if (cfg.backend === "mlx") fact(report.tools.python312.available, "python3.12 is required by the shared Metal execution lock");
   await mkdir(cfg.work, { recursive: true });
   report.disk = { workFreeBytes: await freeBytes(cfg.work), note: "statfs available bytes; macOS purgeable space is not included" };
@@ -706,6 +734,7 @@ async function executeRun({ env, cfg, route, plan, label, side, built, evidenceR
       const baseline = []; for (let i = 0; i < 5; i++) { baseline.push((await sampleGpu(smi)).usedBytes); await delay(200); }
       memory.method = "nvidia-smi memory.used on physical GPU1 sampled every ~500 ms, peak minus the max of 5 pre-request samples (device-wide, not a per-process allocator peak); worker host working set via Get-Process every ~3 s";
       memory.gpuBaselineBytes = Math.max(...baseline);
+      if (env.TIER2_AB_GPU_POLICY === "shared-display") { memory.sharedGpu = `shared GPU, baseline ${Math.round(memory.gpuBaselineBytes / 1024 ** 2)} MiB`; record.timing.sharedGpu = "times taken on the host's display GPU, alongside display work"; }
       samplers.push((async () => { while (sampling) { try { const s = await sampleGpu(smi); memory.samples++; memory.gpuPeakBytes = Math.max(memory.gpuPeakBytes ?? 0, s.usedBytes); memory.gpuUuid = s.uuid; if (s.utilization > 0) memory.gpuActive = true; } catch { memory.errors++; } await delay(500); } })());
       samplers.push((async () => { while (sampling) { try { const s = await sampleWindowsProcess(worker.pid); memory.hostPeakWorkingSetBytes = Math.max(memory.hostPeakWorkingSetBytes ?? 0, s.peakWorkingSetBytes); if (s.workingSetBytes > cap) watchdog(`worker working set ${gib(s.workingSetBytes)} exceeded cap ${gib(cap)}`); } catch { memory.errors++; } await delay(3000); } })());
     }
