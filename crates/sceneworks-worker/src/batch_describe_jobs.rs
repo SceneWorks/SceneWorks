@@ -701,9 +701,19 @@ fn parse_batch_describe_request(
     payload: &JsonObject,
 ) -> WorkerResult<BatchDescribeRequest> {
     let model = DescribeModel::from_payload(payload.get("model").and_then(Value::as_str))?;
+    // A non-string tier is refused, never read as "no tier": that would run the default size.
+    let requested_tier = match payload.get("tier") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(tier)) => Some(tier.as_str()),
+        Some(other) => {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Dataset batch describe tier must be a string, got {other}."
+            )))
+        }
+    };
     let tier = sceneworks_core::dataset_batch_describe::resolve_describe_tier(
         Some(model.repo()),
-        payload.get("tier").and_then(Value::as_str),
+        requested_tier,
     )
     .map_err(WorkerError::InvalidPayload)?;
     let limit =

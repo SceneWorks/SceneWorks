@@ -749,6 +749,10 @@ fn the_request_refuses_other_models_unsafe_paths_and_oversized_prompts() {
     let mut tier_on_the_8b = base.clone();
     tier_on_the_8b["tier"] = json!("q4");
     refuse(tier_on_the_8b, "not available for this model");
+    let mut numeric_tier = base.clone();
+    numeric_tier["model"] = json!(QWEN38_27B_DESCRIBER_REPO);
+    numeric_tier["tier"] = json!(8);
+    refuse(numeric_tier, "tier must be a string");
 
     let mut outside = base.clone();
     outside["items"] = json!([{
@@ -803,10 +807,55 @@ fn a_qwen38_request_carries_its_tier_into_the_result_and_shares_the_vision_promp
     let result = batch_describe_result(&q8, &[], false);
     assert_eq!(result["model"], QWEN38_27B_DESCRIBER_REPO);
     assert_eq!(result["tier"], "q8");
+}
 
-    // A tier whose snapshot is absent is refused by name before any image is read.
-    let error = qwen38_describer_weights_dir(&stage.settings, "q4").expect_err("not installed");
+/// A quantised tier is the `<tier>/` folder of this engine's re-host snapshot and full precision is
+/// the upstream snapshot; a tier folder without its `config.json` is refused by name.
+#[test]
+fn each_qwen38_tier_resolves_to_its_own_snapshot_folder() {
+    use sceneworks_core::dataset_batch_describe::{
+        QWEN38_27B_DESCRIBER_CANDLE_REPO, QWEN38_27B_DESCRIBER_MLX_REPO,
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let hf_cache = tempfile::tempdir().expect("hf cache tempdir");
+    let settings = test_settings(dir.path());
+    let rehost_repo = if cfg!(target_os = "macos") {
+        QWEN38_27B_DESCRIBER_MLX_REPO
+    } else {
+        QWEN38_27B_DESCRIBER_CANDLE_REPO
+    };
+    let snapshot = |repo: &str, revision: &str| {
+        hf_cache
+            .path()
+            .join(format!("models--{}", repo.replace('/', "--")))
+            .join("snapshots")
+            .join(revision)
+    };
+    let rehost = snapshot(rehost_repo, "aaa111");
+    let upstream = snapshot(QWEN38_27B_DESCRIBER_REPO, "bbb222");
+    std::fs::create_dir_all(rehost.join("q4")).expect("q4 dir");
+    std::fs::write(rehost.join("q4").join("config.json"), b"{}").expect("q4 config");
+    // q8 exists as a folder but holds no snapshot: a partial download must not look installed.
+    std::fs::create_dir_all(rehost.join("q8")).expect("q8 dir");
+    std::fs::create_dir_all(&upstream).expect("upstream dir");
+    std::fs::write(upstream.join("config.json"), b"{}").expect("upstream config");
+
+    let _env = crate::test_env::EnvVars::set(&[(
+        "HF_HUB_CACHE",
+        hf_cache.path().to_str().expect("utf-8"),
+    )]);
+    let resolved = |tier: &str| qwen38_describer_weights_dir(&settings, tier);
+    let same = |left: &Path, right: &Path| {
+        left.canonicalize().expect("left exists") == right.canonicalize().expect("right exists")
+    };
+    assert!(same(
+        &resolved("q4").expect("q4 installed"),
+        &rehost.join("q4")
+    ));
+    assert!(same(&resolved("bf16").expect("bf16 installed"), &upstream));
+    let error = resolved("q8").expect_err("q8 has no snapshot");
     assert!(matches!(error, WorkerError::InvalidPayload(_)), "{error}");
+    assert!(error.to_string().contains("q8 tier"), "{error}");
 }
 
 fn one_image_payload(stage: &Stage, model: &str) -> Value {
