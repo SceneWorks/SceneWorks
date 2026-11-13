@@ -165,13 +165,13 @@ async fn batch_describe_refuses_other_models_unknown_items_and_oversized_prompts
             "Unsupported describe model",
         ),
         (
-            json!({ "model": QWEN38_27B_DESCRIBER_REPO, "tier": "q2" }),
-            "tier",
+            json!({ "model": QWEN38_27B_DESCRIBER_REPO, "variant": "q2" }),
+            "variant",
             "Unsupported describe tier",
         ),
         (
-            json!({ "tier": "q4" }),
-            "tier",
+            json!({ "variant": "q4" }),
+            "variant",
             "not available for this model",
         ),
         (
@@ -263,17 +263,17 @@ async fn batch_describe_accepts_the_qwen38_27b_describer_with_a_tier() {
     for (tier, expect) in [(None, "q4"), (Some("q8"), "q8"), (Some("bf16"), "bf16")] {
         let mut body = json!({ "model": QWEN38_27B_DESCRIBER_REPO });
         if let Some(tier) = tier {
-            body["tier"] = json!(tier);
+            body["variant"] = json!(tier);
         }
         let (status, job) = request(app.clone(), "POST", &route, body).await;
         assert_eq!(status, StatusCode::CREATED, "{job}");
         assert_eq!(job["payload"]["model"], QWEN38_27B_DESCRIBER_REPO);
-        assert_eq!(job["payload"]["tier"], expect);
+        assert_eq!(job["payload"]["variant"], expect);
     }
     // The other describers have no tier, so their jobs carry none.
     let (status, job) = request(app.clone(), "POST", &route, json!({})).await;
     assert_eq!(status, StatusCode::CREATED, "{job}");
-    assert!(job["payload"].get("tier").is_none());
+    assert!(job["payload"].get("variant").is_none());
 
     let (status, body) = request(
         app.clone(),

@@ -701,13 +701,15 @@ fn parse_batch_describe_request(
     payload: &JsonObject,
 ) -> WorkerResult<BatchDescribeRequest> {
     let model = DescribeModel::from_payload(payload.get("model").and_then(Value::as_str))?;
-    // A non-string tier is refused, never read as "no tier": that would run the default size.
-    let requested_tier = match payload.get("tier") {
+    // The tier travels as `variant`, the request vocabulary the model-source seam already reads
+    // (`requested_runtime_variant`), so the source a job is admitted against is the tier it loads.
+    // A non-string value is refused, never read as "no tier": that would run the default size.
+    let requested_tier = match payload.get("variant") {
         None | Some(Value::Null) => None,
         Some(Value::String(tier)) => Some(tier.as_str()),
         Some(other) => {
             return Err(WorkerError::InvalidPayload(format!(
-                "Dataset batch describe tier must be a string, got {other}."
+                "Dataset batch describe variant (the model tier) must be a string, got {other}."
             )))
         }
     };
@@ -787,7 +789,7 @@ fn batch_describe_result(
     let mut result = JsonObject::new();
     result.insert("model".to_owned(), json!(request.model.repo()));
     if let Some(tier) = request.tier {
-        result.insert("tier".to_owned(), json!(tier));
+        result.insert("variant".to_owned(), json!(tier));
     }
     result.insert("datasetId".to_owned(), json!(request.dataset_id));
     result.insert("datasetVersion".to_owned(), request.dataset_version.clone());

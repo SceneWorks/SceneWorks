@@ -744,15 +744,15 @@ fn the_request_refuses_other_models_unsafe_paths_and_oversized_prompts() {
     // SW-7119: only the Qwen3.8 27B describer has tiers, and an unknown tier is refused.
     let mut unknown_tier = base.clone();
     unknown_tier["model"] = json!(QWEN38_27B_DESCRIBER_REPO);
-    unknown_tier["tier"] = json!("q2");
+    unknown_tier["variant"] = json!("q2");
     refuse(unknown_tier, "Unsupported describe tier");
     let mut tier_on_the_8b = base.clone();
-    tier_on_the_8b["tier"] = json!("q4");
+    tier_on_the_8b["variant"] = json!("q4");
     refuse(tier_on_the_8b, "not available for this model");
     let mut numeric_tier = base.clone();
     numeric_tier["model"] = json!(QWEN38_27B_DESCRIBER_REPO);
-    numeric_tier["tier"] = json!(8);
-    refuse(numeric_tier, "tier must be a string");
+    numeric_tier["variant"] = json!(8);
+    refuse(numeric_tier, "must be a string");
 
     let mut outside = base.clone();
     outside["items"] = json!([{
@@ -790,7 +790,7 @@ fn a_qwen38_request_carries_its_tier_into_the_result_and_shares_the_vision_promp
         let mut payload = payload(&stage, None);
         payload["model"] = json!(QWEN38_27B_DESCRIBER_REPO);
         if let Some(tier) = tier {
-            payload["tier"] = json!(tier);
+            payload["variant"] = json!(tier);
         }
         parse_batch_describe_request(&stage.settings, payload.as_object().expect("object"))
             .expect("accepted")
@@ -806,7 +806,7 @@ fn a_qwen38_request_carries_its_tier_into_the_result_and_shares_the_vision_promp
     let q8 = parse(Some("q8"));
     let result = batch_describe_result(&q8, &[], false);
     assert_eq!(result["model"], QWEN38_27B_DESCRIBER_REPO);
-    assert_eq!(result["tier"], "q8");
+    assert_eq!(result["variant"], "q8");
 }
 
 /// A quantised tier is the `<tier>/` folder of this engine's re-host snapshot and full precision is

@@ -1543,7 +1543,7 @@ pub(crate) async fn create_training_dataset_batch_describe_job(
         }
     };
     if let Some(tier) = tier {
-        job_payload.insert("tier".to_owned(), json!(tier));
+        job_payload.insert("variant".to_owned(), json!(tier));
     }
     if let Some(prompt) = prompt {
         job_payload.insert("prompt".to_owned(), json!(prompt));
@@ -1610,8 +1610,8 @@ pub(crate) fn validate_batch_describe_request(
         max_describe_prompt_chars, resolve_describe_tier,
     };
     let model = resolve_describe_model(payload.model.as_deref())?;
-    let tier = resolve_describe_tier(Some(model), payload.tier.as_deref())
-        .map_err(|message| training_field_error("tier", message))?;
+    let tier = resolve_describe_tier(Some(model), payload.variant.as_deref())
+        .map_err(|message| training_field_error("variant", message))?;
     let prompt = payload
         .prompt
         .as_deref()

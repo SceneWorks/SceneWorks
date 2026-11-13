@@ -638,10 +638,11 @@ pub(crate) struct DatasetFaceAnalysisJobRequest {
 pub(crate) struct DatasetBatchDescribeJobRequest {
     #[serde(default)]
     pub(crate) model: Option<String>,
-    /// The model tier (`q4`, `q8`, `bf16`). Only the Qwen3.8 27B describer has tiers; absent is its
-    /// default (`q4`), and naming a tier for any other model is refused.
+    /// The model tier (`q4`, `q8`, `bf16`), named `variant` like every other request that picks a
+    /// tier. Only the Qwen3.8 27B describer has tiers; absent is its default (`q4`), and naming
+    /// one for any other model is refused.
     #[serde(default)]
-    pub(crate) tier: Option<String>,
+    pub(crate) variant: Option<String>,
     /// The user's describing instruction. The JSON output contract is always appended by the
     /// worker and is not part of this text.
     #[serde(default)]
