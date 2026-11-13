@@ -29913,6 +29913,25 @@ fn image_tier_selectors_honor_the_frozen_tier_and_refuse_malformed_values() {
     ));
     assert!(crate::image_jobs::mlx::mlx_tier_pick_is_exact(&bound_q8));
     assert!(!crate::image_jobs::mlx::mlx_tier_pick_is_exact(&unselected));
+
+    // An explicit `null` keeps each selector's original meaning and never takes the bound tier.
+    let null_with_binding = advanced(json!({"mlxQuantize": null, "__portableBoundTier": "q8"}));
+    assert_eq!(
+        crate::image_jobs::artifact_resolution::candle_flux1_packed_tier_key(&null_with_binding),
+        Some("q4"),
+        "FLUX.1 packed reads null as no tier named: the q4 default"
+    );
+    assert!(
+        crate::image_jobs::candle::candle_tier_pick_is_exact("flux_dev", &null_with_binding),
+        "a present mlxQuantize key, even null, has always made a FLUX.1 pick exact"
+    );
+    assert!(!crate::image_jobs::candle::candle_tier_pick_is_exact(
+        "z_image_turbo",
+        &null_with_binding
+    ));
+    assert!(!crate::image_jobs::mlx::mlx_tier_pick_is_exact(
+        &null_with_binding
+    ));
 }
 
 /// sc-24112 — `qwen_image_2_1`'s SPLIT-REPO tier resolution, driven off the shipped catalog.
@@ -30199,6 +30218,13 @@ mod qwen_image_2_1_tiers {
         .expect_err("a malformed explicit value is refused, not replaced by the bound tier")
         .to_string();
         assert!(error.contains("must be an integer bit count"), "{error}");
+        // A present null has always meant "no tier named": the manifest default, not the bound tier.
+        let null = crate::image_jobs::artifact_resolution::qwen_image_2_1_tier_dir(
+            &settings(data.path()),
+            &with_advanced(json!({"mlxQuantize": null, "__portableBoundTier": "q4"})),
+        )
+        .expect("an explicit null resolves the default");
+        assert_eq!(null.map(|(_, tier)| tier), Some("q8"));
     }
 
     fn resolved(

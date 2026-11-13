@@ -708,7 +708,8 @@ fn qwen_image_2_1_selected_bits(advanced: &JsonObject) -> Result<Option<i64>, St
     use sceneworks_core::payload_util::QuantSelection;
     match sceneworks_core::payload_util::quant_selection(advanced) {
         QuantSelection::Explicit(bits) | QuantSelection::Bound(bits) => Ok(Some(bits)),
-        QuantSelection::Unselected => Ok(None),
+        // A present `null` has always meant "no tier named" here.
+        QuantSelection::Unselected | QuantSelection::Null => Ok(None),
         QuantSelection::Malformed(value) => Err(value.to_string()),
     }
 }
@@ -932,7 +933,8 @@ pub(super) fn candle_flux1_packed_requested_tier(
 pub(crate) fn candle_flux1_packed_tier_key(advanced: &JsonObject) -> Option<&'static str> {
     use sceneworks_core::payload_util::QuantSelection;
     match sceneworks_core::payload_util::quant_selection(advanced) {
-        QuantSelection::Unselected => Some("q4"),
+        // A present `null` has always meant "no tier named" here: the q4 default.
+        QuantSelection::Unselected | QuantSelection::Null => Some("q4"),
         QuantSelection::Explicit(4) | QuantSelection::Bound(4) => Some("q4"),
         QuantSelection::Explicit(8) | QuantSelection::Bound(8) => Some("q8"),
         _ => None,

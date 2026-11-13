@@ -2740,5 +2740,5 @@ pub(crate) fn candle_tier_pick_is_exact(model: &str, advanced: &crate::JsonObjec
             .get("mlxQuantizeExplicit")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false)
-        || sceneworks_core::payload_util::portable_bound_tier_bits(advanced).is_some()
+        || sceneworks_core::payload_util::quant_is_bound(advanced)
 }

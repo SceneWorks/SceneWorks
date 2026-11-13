@@ -13325,6 +13325,40 @@ fn candle_video_tier_selectors_honor_the_frozen_tier_and_refuse_malformed_values
         Some("bf16")
     );
     assert_eq!(super::candle::candle_ltx_tier_key(&malformed), None);
+
+    // An explicit `null` keeps each selector's original meaning and never takes the bound tier:
+    // SCAIL-2 reads it as "no tier named" (dense bf16); LTX fails it closed.
+    let null_with_binding = advanced(json!({"mlxQuantize": null, "__portableBoundTier": "q4"}));
+    assert_eq!(
+        super::candle::candle_scail2_tier_key(&null_with_binding),
+        Ok("bf16")
+    );
+    assert_eq!(super::candle::candle_ltx_tier_key(&null_with_binding), None);
+    assert_eq!(
+        super::candle::candle_ltx_tier_key(&advanced(json!({"mlxQuantize": null}))),
+        None
+    );
+    // Every value the Candle LTX source resolver test refuses still refuses (tests.rs, the
+    // `unsupported LTX Candle tier ... must fail closed` loop), except bits <= 0, which select bf16
+    // here and are refused by the bundle lookup, which has no bf16 tier.
+    for invalid in [
+        json!(5),
+        json!(7),
+        json!(9),
+        json!("bf16"),
+        json!("8.0"),
+        json!(8.0),
+    ] {
+        assert_eq!(
+            super::candle::candle_ltx_tier_key(&advanced(json!({"mlxQuantize": invalid.clone()}))),
+            None,
+            "{invalid}"
+        );
+    }
+    assert_eq!(
+        super::candle::candle_ltx_tier_key(&advanced(json!({"mlxQuantize": {"bits": 8}}))),
+        None
+    );
 }
 
 /// `resolve_ltx_eros_gemma_dir`: a complete `models/mlx/gemma` sibling of the eros checkpoint wins;

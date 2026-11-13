@@ -305,7 +305,8 @@ pub(crate) fn candle_ltx_tier_key(advanced: &JsonObject) -> Option<&'static str>
     use sceneworks_core::payload_util::QuantSelection;
     match sceneworks_core::payload_util::quant_selection(advanced) {
         QuantSelection::Unselected => Some("q4"),
-        QuantSelection::Malformed(_) => None,
+        // A present `null` was never "no override" here: it fails closed, as it always has.
+        QuantSelection::Null | QuantSelection::Malformed(_) => None,
         QuantSelection::Explicit(bits) | QuantSelection::Bound(bits) => match bits {
             i64::MIN..=0 => Some("bf16"),
             4 => Some("q4"),
@@ -2166,7 +2167,8 @@ pub(super) fn resolve_candle_scail2_tier(
 pub(crate) fn candle_scail2_tier_key(advanced: &JsonObject) -> Result<&'static str, String> {
     use sceneworks_core::payload_util::QuantSelection;
     let bits = match sceneworks_core::payload_util::quant_selection(advanced) {
-        QuantSelection::Unselected => return Ok("bf16"),
+        // A present `null` has always meant "no tier named" here: the dense baseline.
+        QuantSelection::Unselected | QuantSelection::Null => return Ok("bf16"),
         QuantSelection::Malformed(_) => {
             return Err(
                 "scail2 (candle): advanced.mlxQuantize must be exactly 4, 8, or <= 0 for bf16."
