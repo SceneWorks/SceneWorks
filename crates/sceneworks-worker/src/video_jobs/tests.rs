@@ -12714,16 +12714,6 @@ fn portable_ltx_primary_and_gemma_ignore_operator_overrides() {
         ..offline_settings()
     };
     write_complete_ltx_dir(&settings.data_dir.join("models/mlx/ltx_2_3_base_q4"));
-    let _frozen_scope =
-        sceneworks_core::model_artifacts::local_preference::prefer_portable_snapshots(vec![
-            sceneworks_core::model_artifacts::local_preference::LocalArtifactOverlayEntry {
-                repository: LTX_BUNDLE_REPO.to_owned(),
-                revision: LTX_BUNDLE_REVISION.to_owned(),
-                snapshot_root: frozen_snapshot,
-                files: Vec::new(),
-            },
-        ])
-        .unwrap();
     let request = request(json!({
         "projectId": "p", "model": "ltx_2_3", "prompt": "frozen",
         "advanced": {"__portableFrozenSources": true, "__portableBoundTier": "q4"},
@@ -12735,6 +12725,20 @@ fn portable_ltx_primary_and_gemma_ignore_operator_overrides() {
             ("LTX_GEMMA_DIR", override_gemma.to_str().unwrap()),
         ],
         || {
+            // The overlay is process-wide: install it under the crate env lock so a concurrent
+            // resolver test (resolve_ltx_eros_gemma_prefers_local_sibling) never observes it.
+            let _frozen_scope =
+                sceneworks_core::model_artifacts::local_preference::prefer_portable_snapshots(
+                    vec![
+                    sceneworks_core::model_artifacts::local_preference::LocalArtifactOverlayEntry {
+                        repository: LTX_BUNDLE_REPO.to_owned(),
+                        revision: LTX_BUNDLE_REVISION.to_owned(),
+                        snapshot_root: frozen_snapshot.clone(),
+                        files: Vec::new(),
+                    },
+                ],
+                )
+                .unwrap();
             assert_eq!(
                 resolve_ltx_model_dir(&settings, &request).unwrap(),
                 frozen_model

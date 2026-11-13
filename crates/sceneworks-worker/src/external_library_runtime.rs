@@ -757,7 +757,7 @@ struct PortableAttemptSnapshot {
 /// Written into every route-bundle directory this layout creates. A bundle without it was built by
 /// the earlier layout that also copied pinned Hugging Face members; nothing reads those any more,
 /// so retention reclaims them first, whatever the size and count targets.
-const PORTABLE_BUNDLE_LAYOUT_MARKER: &str = ".layout-v3";
+const PORTABLE_BUNDLE_LAYOUT_MARKER: &str = ".layout-v4";
 
 struct PreparedPortableSnapshot {
     snapshot: PortableAttemptSnapshot,
@@ -1099,16 +1099,9 @@ fn in_place_revision_files(
             {
                 return Err(invalid_binding("a frozen member path escapes its snapshot"));
             }
-            let candidate = snapshot.join(&file.relative_path);
-            // Another job's verified view (handed over by its process-wide overlay): use the
-            // source its ledger recorded, which that job confined to its own hub repository.
-            let from_view = revision_view_entry_source(&candidate)?;
-            let real = match &from_view {
-                Some(source) => source.clone(),
-                None => std::fs::canonicalize(&candidate)
-                    .map_err(|_| invalid_binding("a frozen member is missing from its snapshot"))?,
-            };
-            if from_view.is_none() && !real.starts_with(&repository_real) {
+            let real = std::fs::canonicalize(snapshot.join(&file.relative_path))
+                .map_err(|_| invalid_binding("a frozen member is missing from its snapshot"))?;
+            if !real.starts_with(&repository_real) {
                 return Err(invalid_binding(
                     "a frozen member resolves outside its hub repository",
                 ));
@@ -1360,10 +1353,20 @@ fn prepare_portable_snapshot(
         return Ok(None);
     }
     // Pinned Hugging Face (Revision) members are verified and served IN PLACE from this worker's
-    // own hub snapshot: they are content-addressed and never copied. Only the rest (digest-backed
-    // local sources, worker claims and checkpoint-plan layers) is copied into a private, verified,
-    // leased route bundle. A route with no such member needs no bundle at all.
+    // own hub snapshot: they are content-addressed and never copied, and the loader reads the
+    // hub's own layout (snapshot links into the repository's `blobs/`), which is what the
+    // inference shard-path check accepts. Only the rest (digest-backed local sources, worker
+    // claims and checkpoint-plan layers) is copied into a private, verified, leased route bundle.
+    //
+    // One revision can resolve in two roots (a resolved-cache snapshot holds the hard closure, the
+    // source library a soft companion). A selected auxiliary has its own per-component loader
+    // path and is served from its own root. When the members a loader reaches through the one
+    // snapshot directory of that revision span two roots, those members fall back to the
+    // copy-then-verify bundle, the only arrangement in which a pinned member is copied.
     let mut plan_layers_by_member = Vec::new();
+    let mut revision_snapshots_by_member = Vec::new();
+    let mut directory_roots: std::collections::BTreeMap<(String, String), Vec<PathBuf>> =
+        std::collections::BTreeMap::new();
     let mut needs_bundle = false;
     for (model_index, model) in route.models.iter().enumerate() {
         let entry = model_slots
@@ -1372,16 +1375,43 @@ fn prepare_portable_snapshot(
             .map(|(_, entry)| *entry)
             .ok_or_else(|| invalid_binding("snapshot model slot is absent"))?;
         let mut layers = Vec::new();
+        let mut snapshots = Vec::new();
         for member in &model.members {
             let plan_layer = selected_checkpoint_plan_layer(member, model, entry, settings)?;
             needs_bundle |= plan_layer.is_some()
                 || !matches!(member.source, PortableSourceIdentity::Revision { .. });
+            let snapshot = if let PortableSourceIdentity::Revision { identity } = &member.source {
+                let snapshot = discover_frozen_member_snapshot(settings, identity, &member.files)?;
+                let is_selected_aux = member
+                    .component_id
+                    .as_ref()
+                    .is_some_and(|id| selected_aux[model_index].contains(id));
+                if plan_layer.is_none() && !is_selected_aux {
+                    let roots = directory_roots
+                        .entry((identity.repository.clone(), identity.revision.clone()))
+                        .or_default();
+                    if !roots.contains(&snapshot) {
+                        roots.push(snapshot.clone());
+                    }
+                }
+                Some(snapshot)
+            } else {
+                None
+            };
             layers.push(plan_layer);
+            snapshots.push(snapshot);
         }
         needs_bundle |= model.checkpoint_plan.is_some();
         debug_assert_eq!(plan_layers_by_member.len(), model_index);
         plan_layers_by_member.push(layers);
+        revision_snapshots_by_member.push(snapshots);
     }
+    let copied_revisions = directory_roots
+        .iter()
+        .filter(|(_, roots)| roots.len() > 1)
+        .map(|(key, _)| key.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    needs_bundle |= !copied_revisions.is_empty();
     let cache_root = settings.data_dir.join("models/portable-attempts");
     create_private_directory(&settings.data_dir.join("models"))?;
     create_private_directory(&cache_root)?;
@@ -1391,10 +1421,9 @@ fn prepare_portable_snapshot(
     let route_dir = cache_root.join(portable_cache_route_digest(route)?);
     create_private_directory(&route_dir)?;
     ensure_private_directory(&route_dir)?;
-    // Readers share the route lease for as long as they use the bundle or source view; an evictor
-    // needs it exclusively, so it never removes either while an attempt is reading. Both are
-    // immutable once published, so concurrent attempts on one route (GPUs sharing `data_dir`)
-    // read them at once.
+    // Readers share the route lease for as long as they use the bundle; an evictor needs it
+    // exclusively, so it never removes a bundle an attempt is reading. A published bundle is
+    // immutable, so concurrent attempts on one route (GPUs sharing `data_dir`) read it at once.
     let route_lease = std::sync::Arc::new(
         FileLock::shared(
             sceneworks_core::file_lock::open_regular_lock_file(&route_dir.join(".lease"))
@@ -1437,14 +1466,12 @@ fn prepare_portable_snapshot(
     }
     let mut allowed_roots = crate::paths::allowed_model_roots(settings)?;
     let mut rewrites = Vec::new();
-    // (slot, member, source key, selected path relative to the snapshot, selected auxiliary) for
-    // in-place Revision members.
+    // (slot, member, selected path, selected auxiliary) for in-place Revision members.
     let mut in_place = Vec::new();
     let mut in_place_files = Vec::new();
-    // Every frozen file of each (repository, revision), by relative path, with its verified real
-    // path. Members of one revision may resolve in different roots (a resolved-cache snapshot holds
-    // the hard closure, the source library a soft companion); each file keeps its own source.
-    let mut in_place_links: RevisionViewLinks = std::collections::BTreeMap::new();
+    // The one snapshot directory each in-place revision is served from, and the files in it.
+    let mut in_place_roots: std::collections::BTreeMap<(String, String), (PathBuf, Vec<PathBuf>)> =
+        std::collections::BTreeMap::new();
     for (model_index, model) in route.models.iter().enumerate() {
         let entry = model_slots
             .iter()
@@ -1463,16 +1490,7 @@ fn prepare_portable_snapshot(
                 .component_id
                 .as_ref()
                 .is_some_and(|id| required_ids.contains(id));
-            let revision_snapshot =
-                if let PortableSourceIdentity::Revision { identity } = &member.source {
-                    Some(discover_frozen_member_snapshot(
-                        settings,
-                        identity,
-                        &member.files,
-                    )?)
-                } else {
-                    None
-                };
+            let revision_snapshot = revision_snapshots_by_member[model_index][member_index].take();
             let selected = if let Some(snapshot) = &revision_snapshot {
                 if !is_selected_aux {
                     snapshot.clone()
@@ -1528,39 +1546,22 @@ fn prepare_portable_snapshot(
                 (&revision_snapshot, &plan_layer, &member.source)
             {
                 let key = (identity.repository.clone(), identity.revision.clone());
-                let links = in_place_links.entry(key.clone()).or_default();
-                for file in in_place_revision_files(snapshot, &member.files)? {
-                    match links.get(&file.expected.relative_path) {
-                        Some((_, sha256, _)) if *sha256 != file.expected.sha256 => {
-                            return Err(invalid_binding(
-                                "one frozen revision file has two different ledgers",
-                            ));
-                        }
-                        Some(_) => {}
-                        None => {
-                            links.insert(
-                                file.expected.relative_path.clone(),
-                                (
-                                    file.real.clone(),
-                                    file.expected.sha256.clone(),
-                                    file.expected.size_bytes,
-                                ),
-                            );
-                        }
+                if is_selected_aux || !copied_revisions.contains(&key) {
+                    in_place_files.extend(in_place_revision_files(snapshot, &member.files)?);
+                    if !is_selected_aux {
+                        let (_, files) = in_place_roots
+                            .entry(key)
+                            .or_insert_with(|| (snapshot.clone(), Vec::new()));
+                        files.extend(member.files.iter().map(|file| file.relative_path.clone()));
                     }
-                    in_place_files.push(file);
+                    in_place.push((
+                        model.slot.clone(),
+                        member.clone(),
+                        selected,
+                        is_selected_aux,
+                    ));
+                    continue;
                 }
-                in_place.push((
-                    model.slot.clone(),
-                    member.clone(),
-                    key,
-                    selected
-                        .strip_prefix(snapshot)
-                        .expect("selected revision source is inside snapshot")
-                        .to_path_buf(),
-                    is_selected_aux,
-                ));
-                continue;
             }
             let target_root = if let PortableSourceIdentity::Revision { identity } = &member.source
             {
@@ -1647,23 +1648,9 @@ fn prepare_portable_snapshot(
     // In-place Revision bytes are verified against the frozen ledger before any loader sees a
     // path, hashing each file at most once per host while its filesystem identity is unchanged.
     verify_in_place_revision_files(settings, &in_place_files, cancellation)?;
-    // The loader sees exactly the verified frozen files: a private view of links to them, so a
-    // tier or companion installed beside them in the hub snapshot is never a load candidate.
-    let view = if in_place_links.is_empty() {
-        None
-    } else {
-        Some(publish_revision_view(&route_dir, &in_place_links)?)
-    };
-    let view_root = |repository: &str, revision: &str| -> WorkerResult<PathBuf> {
-        Ok(view
-            .as_deref()
-            .expect("an in-place revision has a published view")
-            .join("hf")
-            .join(
-                hub_cache_member_destination(repository, revision, Path::new(""))
-                    .map_err(|error| invalid_binding(error.to_string()))?,
-            ))
-    };
+    // Conversions publish regular copies of what they borrow from this route; record which hub
+    // files it verified so publication can recognize them however a converter names them.
+    record_route_frozen_sources(&route_dir, &in_place_files)?;
     if needs_copy {
         // A source can change after the first guard check while it is being copied. Never
         // publish those bytes as a reusable bundle until the complete staging tree matches the
@@ -1740,37 +1727,45 @@ fn prepare_portable_snapshot(
         freeze_private_snapshot(&published)?;
         verified_plan_layers = Some(layers);
     }
-    for (slot, member, (repository, revision), selected_relative, is_selected_aux) in &in_place {
-        let selected = view_root(repository, revision)?.join(selected_relative);
-        route_loader_locator(job_type, dispatch_payload, slot, member, &selected)?;
+    for (slot, member, selected, is_selected_aux) in &in_place {
+        route_loader_locator(job_type, dispatch_payload, slot, member, selected)?;
         if *is_selected_aux {
-            rewrite_loader_locator(dispatch_payload, slot, member, &selected, true)?;
+            rewrite_loader_locator(dispatch_payload, slot, member, selected, true)?;
         }
     }
     let mut by_source: std::collections::BTreeMap<(String, String), LocalArtifactOverlayEntry> =
         std::collections::BTreeMap::new();
-    for member in route.models.iter().flat_map(|model| &model.members) {
+    for ((repository, revision), (snapshot_root, files)) in in_place_roots {
+        by_source.insert(
+            (repository.clone(), revision.clone()),
+            LocalArtifactOverlayEntry {
+                repository,
+                revision,
+                snapshot_root,
+                files,
+            },
+        );
+    }
+    for (_, member, _, is_selected_aux, _, plan_layer) in &rewrites {
         let PortableSourceIdentity::Revision { identity } = &member.source else {
             continue;
         };
-        let key = (identity.repository.clone(), identity.revision.clone());
-        let root = match in_place_links.contains_key(&key) {
-            true => view_root(&identity.repository, &identity.revision)?,
-            false => published.join("hf").join(
-                hub_cache_member_destination(
-                    &identity.repository,
-                    &identity.revision,
-                    Path::new(""),
-                )
-                .map_err(|error| invalid_binding(error.to_string()))?,
-            ),
-        };
+        if *is_selected_aux || plan_layer.is_some() {
+            continue;
+        }
         let entry = by_source
-            .entry(key)
+            .entry((identity.repository.clone(), identity.revision.clone()))
             .or_insert_with(|| LocalArtifactOverlayEntry {
                 repository: identity.repository.clone(),
                 revision: identity.revision.clone(),
-                snapshot_root: root,
+                snapshot_root: published.join("hf").join(
+                    hub_cache_member_destination(
+                        &identity.repository,
+                        &identity.revision,
+                        Path::new(""),
+                    )
+                    .expect("a copied revision has a hub destination"),
+                ),
                 files: Vec::new(),
             });
         entry
@@ -1796,183 +1791,60 @@ fn prepare_portable_snapshot(
     }))
 }
 
-/// Frozen in-place files per (repository, revision): relative path -> (verified real path,
-/// SHA-256, size).
-pub(crate) type RevisionViewLinks = std::collections::BTreeMap<
-    (String, String),
-    std::collections::BTreeMap<PathBuf, (PathBuf, String, u64)>,
->;
-
-/// Each published view records what every entry must back onto, so any consumer can resolve an
-/// entry to its verified file with [`revision_view_backing_file`] instead of re-deriving it.
-const REVISION_VIEW_LEDGER: &str = ".view-ledger.json";
-const REVISION_VIEW_LEDGER_SCHEMA: u32 = 1;
+/// Every hub file this route verified in place, for conversion publication (see
+/// [`frozen_route_source`]). Rewritten on every attempt; removed with the route by retention.
+const ROUTE_FROZEN_SOURCES: &str = ".frozen-sources.json";
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RevisionViewLedgerEntry {
+struct RouteFrozenSource {
     real_path: PathBuf,
     sha256: String,
     size_bytes: u64,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RevisionViewLedger {
-    schema_version: u32,
-    /// Keyed by the entry's path relative to the view root.
-    entries: std::collections::BTreeMap<PathBuf, RevisionViewLedgerEntry>,
+fn record_route_frozen_sources(
+    route_dir: &Path,
+    files: &[InPlaceRevisionFile],
+) -> WorkerResult<()> {
+    let record = files
+        .iter()
+        .map(|file| RouteFrozenSource {
+            real_path: file.real.clone(),
+            sha256: file.expected.sha256.clone(),
+            size_bytes: file.expected.size_bytes,
+        })
+        .collect::<Vec<_>>();
+    let body = serde_json::to_vec(&record).map_err(|error| WorkerError::Io(error.into()))?;
+    sceneworks_core::fsutil::write_atomic(&route_dir.join(ROUTE_FROZEN_SOURCES), &body)
+        .map_err(WorkerError::Io)
 }
 
-/// How a view entry stands for its verified file. Unix uses a symlink; Windows falls back to a
-/// hard link and then a verified copy where symlinks are refused.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ViewEntryKind {
-    Symlink,
-    HardLink,
-    Copy,
-}
-
+/// Test support: record `reals` (read and hashed here) as a route's in-place frozen sources.
 #[cfg(test)]
-thread_local! {
-    /// Test seam: drive the Windows fallbacks on any platform.
-    static FORCED_VIEW_ENTRY_KIND: std::cell::Cell<Option<ViewEntryKind>> =
-        const { std::cell::Cell::new(None) };
-}
-
-fn view_entry_kinds() -> Vec<ViewEntryKind> {
-    #[cfg(test)]
-    if let Some(kind) = FORCED_VIEW_ENTRY_KIND.with(std::cell::Cell::get) {
-        return vec![kind];
-    }
-    if cfg!(windows) {
-        vec![
-            ViewEntryKind::Symlink,
-            ViewEntryKind::HardLink,
-            ViewEntryKind::Copy,
-        ]
-    } else {
-        vec![ViewEntryKind::Symlink]
-    }
-}
-
-fn create_view_entry(kind: ViewEntryKind, real: &Path, target: &Path) -> io::Result<()> {
-    match kind {
-        ViewEntryKind::Symlink => {
-            #[cfg(unix)]
-            {
-                std::os::unix::fs::symlink(real, target)
+pub(crate) fn test_record_route_frozen_sources(route_dir: &Path, reals: &[&Path]) {
+    std::fs::create_dir_all(route_dir).unwrap();
+    let files = reals
+        .iter()
+        .map(|real| {
+            let bytes = std::fs::read(real).unwrap();
+            InPlaceRevisionFile {
+                real: std::fs::canonicalize(real).unwrap(),
+                expected: PortableArtifactFile {
+                    relative_path: real.file_name().unwrap().into(),
+                    size_bytes: bytes.len() as u64,
+                    sha256: format!("sha256:{:x}", Sha256::digest(&bytes)),
+                },
             }
-            #[cfg(windows)]
-            {
-                std::os::windows::fs::symlink_file(real, target)
-            }
-        }
-        ViewEntryKind::HardLink => std::fs::hard_link(real, target),
-        ViewEntryKind::Copy => std::fs::copy(real, target).map(|_| ()),
-    }
+        })
+        .collect::<Vec<_>>();
+    record_route_frozen_sources(route_dir, &files).unwrap();
 }
 
-/// The view root and entry-relative path of `path` when it lies in a published revision view
-/// (`portable-attempts/<route>/views/<digest>/...`), read lexically: view directories are real.
-fn enclosing_revision_view(path: &Path) -> Option<(&Path, &Path)> {
-    path.ancestors().skip(1).find_map(|view| {
-        (view.parent()?.file_name()? == "views" && view.join(REVISION_VIEW_LEDGER).is_file())
-            .then(|| Some((view, path.strip_prefix(view).ok()?)))
-            .flatten()
-    })
-}
-
-/// The one rule for a revision-view entry. It is valid when it is (a) a link whose target is the
-/// verified real file, (b) a hard link with that file's identity, or (c) a regular copy whose
-/// bytes match the frozen ledger (hashed at most once per host while unchanged). Returns the file
-/// to read: the verified real file for (a) and (b), the copy for (c).
-fn verify_view_entry(
-    view: &Path,
-    entry_path: &Path,
-    entry: &RevisionViewLedgerEntry,
-) -> WorkerResult<PathBuf> {
-    let differs = || invalid_binding("the verified source view differs from its frozen files");
-    let metadata = std::fs::symlink_metadata(entry_path).map_err(|_| differs())?;
-    if metadata.file_type().is_symlink() {
-        return match std::fs::canonicalize(entry_path) {
-            Ok(target) if target == entry.real_path => Ok(target),
-            _ => Err(differs()),
-        };
-    }
-    if !metadata.is_file() || metadata.len() != entry.size_bytes {
-        return Err(differs());
-    }
-    if same_file::is_same_file(entry_path, &entry.real_path).unwrap_or(false) {
-        return Ok(entry.real_path.clone());
-    }
-    let copy = std::fs::canonicalize(entry_path).map_err(|_| differs())?;
-    let cache_root = view
-        .ancestors()
-        .nth(3)
-        .ok_or_else(differs)?
-        .join(".verified-sources");
-    VerifiedSourceCache::new(cache_root)
-        .verify(&copy, &entry.sha256, &|| Ok(()))
-        .map_err(|error| {
-            if error.kind() == io::ErrorKind::InvalidData {
-                invalid_binding("a frozen member differs from its pinned ledger")
-            } else {
-                WorkerError::Io(error)
-            }
-        })?;
-    Ok(copy)
-}
-
-/// The verified file a revision-view entry stands for, or `None` when `path` is not a file entry
-/// of a published view (outside every view, or one of a view's own real directories). Every
-/// consumer that inspects, copies or confines a loader path from a portable route uses this
-/// instead of assuming the path is a regular private file.
-pub(crate) fn revision_view_backing_file(path: &Path) -> WorkerResult<Option<PathBuf>> {
-    Ok(verified_view_entry(path)?.map(|(backing, _)| backing))
-}
-
-/// The verified view entry at `path`: the file to read and the frozen ledger entry it satisfies.
-fn verified_view_entry(path: &Path) -> WorkerResult<Option<(PathBuf, RevisionViewLedgerEntry)>> {
-    let Some((view, relative)) = enclosing_revision_view(path) else {
-        return Ok(None);
-    };
-    if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
-        return Ok(None);
-    }
-    let mut ledger = read_revision_view_ledger(view)?;
-    let entry = ledger
-        .entries
-        .remove(relative)
-        .ok_or_else(|| invalid_binding("a source view entry is not a frozen file"))?;
-    let backing = verify_view_entry(view, path, &entry)?;
-    Ok(Some((backing, entry)))
-}
-
-fn read_revision_view_ledger(view: &Path) -> WorkerResult<RevisionViewLedger> {
-    let ledger: RevisionViewLedger = serde_json::from_slice(
-        &std::fs::read(view.join(REVISION_VIEW_LEDGER)).map_err(WorkerError::Io)?,
-    )
-    .map_err(|_| invalid_binding("the verified source view ledger is unreadable"))?;
-    if ledger.schema_version != REVISION_VIEW_LEDGER_SCHEMA {
-        return Err(invalid_binding(
-            "the verified source view ledger is unreadable",
-        ));
-    }
-    Ok(ledger)
-}
-
-/// The original source file a view entry stands for (the ledger's verified real path, never a
-/// view-local copy), after checking the entry still stands for it. Another job's process-wide
-/// overlay can hand discovery that job's view; its entries resolve to their own sources here.
-fn revision_view_entry_source(path: &Path) -> WorkerResult<Option<PathBuf>> {
-    Ok(verified_view_entry(path)?.map(|(_, entry)| entry.real_path))
-}
-
-/// The frozen ledger (SHA-256, size) of `real` when a published view under `attempts_root`
-/// (`models/portable-attempts`) stands for it. Converters canonicalize what they borrow, so a
-/// converted layout can link straight to a view's hub file instead of to the view entry.
-pub(crate) fn frozen_view_source(
+/// The frozen ledger (SHA-256, size) of hub file `real` when a portable route under
+/// `attempts_root` (`models/portable-attempts`) verified it in place. Converters canonicalize what
+/// they borrow, so a converted layout links a route's hub file by its real path.
+pub(crate) fn frozen_route_source(
     attempts_root: &Path,
     real: &Path,
 ) -> WorkerResult<Option<(String, u64)>> {
@@ -1980,160 +1852,16 @@ pub(crate) fn frozen_view_source(
         return Ok(None);
     };
     for route in routes.flatten() {
-        let Ok(views) = std::fs::read_dir(route.path().join("views")) else {
+        let Ok(body) = std::fs::read(route.path().join(ROUTE_FROZEN_SOURCES)) else {
             continue;
         };
-        for view in views.flatten() {
-            let view = view.path();
-            if !view.join(REVISION_VIEW_LEDGER).is_file() {
-                continue;
-            }
-            let ledger = read_revision_view_ledger(&view)?;
-            if let Some(entry) = ledger
-                .entries
-                .values()
-                .find(|entry| entry.real_path == real)
-            {
-                return Ok(Some((entry.sha256.clone(), entry.size_bytes)));
-            }
+        let record: Vec<RouteFrozenSource> = serde_json::from_slice(&body)
+            .map_err(|_| invalid_binding("a route's frozen source record is unreadable"))?;
+        if let Some(source) = record.into_iter().find(|source| source.real_path == real) {
+            return Ok(Some((source.sha256, source.size_bytes)));
         }
     }
     Ok(None)
-}
-
-/// Publish (or reuse) the route's private view of its verified in-place files: one entry per
-/// frozen file at `hf/<hub destination>/<relative path>` standing for the file's verified real
-/// path, plus a ledger of what each entry must back onto. A view is named by the digest of its
-/// link map and never changes once published; a later attempt whose sources resolve elsewhere
-/// gets a new view, and both are reclaimed with the route.
-pub(crate) fn publish_revision_view(
-    route_dir: &Path,
-    links: &RevisionViewLinks,
-) -> WorkerResult<PathBuf> {
-    let mut digest = Sha256::new();
-    digest.update(b"portable-revision-view-v1\0");
-    let mut entries = std::collections::BTreeMap::new();
-    for ((repository, revision), files) in links {
-        let destination = hub_cache_member_destination(repository, revision, Path::new(""))
-            .map_err(|error| invalid_binding(error.to_string()))?;
-        for (relative, (real, sha256, size_bytes)) in files {
-            for part in [
-                repository.as_bytes(),
-                revision.as_bytes(),
-                relative.as_os_str().as_encoded_bytes(),
-                real.as_os_str().as_encoded_bytes(),
-            ] {
-                digest.update(part);
-                digest.update(b"\0");
-            }
-            entries.insert(
-                Path::new("hf").join(&destination).join(relative),
-                RevisionViewLedgerEntry {
-                    real_path: real.clone(),
-                    sha256: sha256.clone(),
-                    size_bytes: *size_bytes,
-                },
-            );
-        }
-    }
-    let views = route_dir.join("views");
-    create_private_directory(&views)?;
-    let view = views.join(format!("{:x}", digest.finalize()));
-    if !view.exists() {
-        let _writer =
-            FileLock::open_exclusive(&views.join(".materialize")).map_err(WorkerError::Io)?;
-        if !view.exists() {
-            for entry in std::fs::read_dir(&views).map_err(WorkerError::Io)? {
-                let entry = entry.map_err(WorkerError::Io)?;
-                if entry.file_name().to_string_lossy().starts_with("staging-") {
-                    // Removes links and copies only; it never follows a link into the hub.
-                    std::fs::remove_dir_all(entry.path()).map_err(WorkerError::Io)?;
-                }
-            }
-            let staging = views.join(format!("staging-{}", uuid::Uuid::new_v4()));
-            create_private_directory(&staging)?;
-            for (relative, entry) in &entries {
-                let target = staging.join(relative);
-                create_private_tree(target.parent().expect("view file has a parent"))?;
-                let created = view_entry_kinds()
-                    .into_iter()
-                    .any(|kind| create_view_entry(kind, &entry.real_path, &target).is_ok());
-                if !created {
-                    return Err(invalid_binding(
-                        "a verified source view entry cannot be created",
-                    ));
-                }
-            }
-            let ledger = RevisionViewLedger {
-                schema_version: REVISION_VIEW_LEDGER_SCHEMA,
-                entries,
-            };
-            std::fs::write(
-                staging.join(REVISION_VIEW_LEDGER),
-                serde_json::to_vec(&ledger).map_err(|error| WorkerError::Io(error.into()))?,
-            )
-            .map_err(WorkerError::Io)?;
-            std::fs::rename(&staging, &view).map_err(WorkerError::Io)?;
-            for relative in ledger.entries.keys() {
-                revision_view_backing_file(&view.join(relative))?;
-            }
-            return Ok(view);
-        }
-    }
-    for relative in entries.keys() {
-        revision_view_backing_file(&view.join(relative))?;
-    }
-    Ok(view)
-}
-
-/// Test support: publish a revision view over real files and return the root its entries share
-/// (`<view>/hf/<hub destination>`), as `prepare_portable_snapshot` hands it to loaders.
-#[cfg(test)]
-pub(crate) fn test_revision_view(
-    route_dir: &Path,
-    repository: &str,
-    revision: &str,
-    files: &[(&str, &Path)],
-) -> PathBuf {
-    let mut links: RevisionViewLinks = std::collections::BTreeMap::new();
-    let entry = links
-        .entry((repository.to_owned(), revision.to_owned()))
-        .or_default();
-    for (relative, real) in files {
-        let bytes = std::fs::read(real).unwrap();
-        entry.insert(
-            PathBuf::from(relative),
-            (
-                std::fs::canonicalize(real).unwrap(),
-                format!("sha256:{:x}", Sha256::digest(&bytes)),
-                bytes.len() as u64,
-            ),
-        );
-    }
-    std::fs::create_dir_all(route_dir).unwrap();
-    publish_revision_view(route_dir, &links)
-        .unwrap()
-        .join("hf")
-        .join(hub_cache_member_destination(repository, revision, Path::new("")).unwrap())
-}
-
-#[cfg(test)]
-pub(crate) fn with_forced_view_entry_kind<T>(kind: &str, body: impl FnOnce() -> T) -> T {
-    let kind = match kind {
-        "symlink" => ViewEntryKind::Symlink,
-        "hard-link" => ViewEntryKind::HardLink,
-        "copy" => ViewEntryKind::Copy,
-        other => panic!("unknown view entry kind {other}"),
-    };
-    FORCED_VIEW_ENTRY_KIND.with(|forced| forced.set(Some(kind)));
-    struct Reset;
-    impl Drop for Reset {
-        fn drop(&mut self) {
-            FORCED_VIEW_ENTRY_KIND.with(|forced| forced.set(None));
-        }
-    }
-    let _reset = Reset;
-    body()
 }
 
 /// Utility jobs whose loader takes one directory path receive the verified primary's path.
@@ -2244,7 +1972,7 @@ fn portable_cache_route_digest(route: &PortableRouteBinding) -> WorkerResult<Str
     let encoded = serde_json::to_vec(route)
         .map_err(|error| invalid_binding(format!("cannot encode frozen route: {error}")))?;
     let mut digest = Sha256::new();
-    digest.update(b"portable-route-cache-v3\0");
+    digest.update(b"portable-route-cache-v4\0");
     digest.update(encoded);
     Ok(format!("{:x}", digest.finalize()))
 }
@@ -2260,7 +1988,9 @@ fn prune_portable_snapshots(current: Option<&Path>, settings: &Settings) -> Work
         let path = entry.map_err(WorkerError::Io)?.path();
         if !path.is_dir()
             || Some(path.as_path()) == current
-            || !(path.join("bundle").exists() || path.join("views").exists())
+            || !(path.join("bundle").exists()
+                || path.join(ROUTE_FROZEN_SOURCES).exists()
+                || path.join(LEGACY_ROUTE_VIEWS).exists())
         {
             continue;
         }
@@ -2301,9 +2031,10 @@ fn prune_portable_snapshots(current: Option<&Path>, settings: &Settings) -> Work
         };
         let bytes = route_entry_bytes(&path)?;
         remove_private_snapshot(&path.join("bundle")).map_err(WorkerError::Io)?;
-        // A view holds links (or, where links are refused, verified copies); removing it never
-        // follows a link into the hub.
-        match std::fs::remove_dir_all(path.join("views")) {
+        std::fs::remove_file(path.join(ROUTE_FROZEN_SOURCES)).ok();
+        // Leftover of the dropped link-view layout: a tree of links into the hub. Removing it
+        // never follows a link.
+        match std::fs::remove_dir_all(path.join(LEGACY_ROUTE_VIEWS)) {
             Err(error) if error.kind() != io::ErrorKind::NotFound => {
                 return Err(WorkerError::Io(error));
             }
@@ -2318,31 +2049,18 @@ fn prune_portable_snapshots(current: Option<&Path>, settings: &Settings) -> Work
     Ok(())
 }
 
-/// The bytes a route entry holds: its copied bundle, plus any file copies in its source views
-/// (links themselves hold none). Lock and marker files are not counted.
+/// A route directory left by the dropped link-view layout; retention reclaims it.
+const LEGACY_ROUTE_VIEWS: &str = "views";
+
+/// The bytes a route entry holds: its copied bundle. In-place members hold none here; lock,
+/// marker and record files are not counted.
 fn route_entry_bytes(route_dir: &Path) -> WorkerResult<u64> {
     let bundle = route_dir.join("bundle");
-    let mut total = if bundle.exists() {
-        private_tree_bytes(&bundle)?
+    if bundle.exists() {
+        private_tree_bytes(&bundle)
     } else {
-        0
-    };
-    let mut pending = vec![route_dir.join("views")];
-    while let Some(dir) = pending.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries {
-            let entry = entry.map_err(WorkerError::Io)?;
-            let metadata = std::fs::symlink_metadata(entry.path()).map_err(WorkerError::Io)?;
-            if metadata.is_dir() {
-                pending.push(entry.path());
-            } else if metadata.is_file() {
-                total = total.saturating_add(metadata.len());
-            }
-        }
+        Ok(0)
     }
-    Ok(total)
 }
 
 pub(crate) fn private_tree_bytes(path: &Path) -> WorkerResult<u64> {
@@ -7749,15 +7467,22 @@ mod tests {
                         std::fs::canonicalize(model.join("a.safetensors")).unwrap(),
                         std::fs::canonicalize(snapshot.join(bound).join("a.safetensors")).unwrap()
                     );
-                    // The loader's snapshot holds only the bound tier, although every tier is
-                    // installed in the hub snapshot.
+                    // The loader is served the hub snapshot itself, where every tier is installed;
+                    // the bound tier is what tier resolution selects among them.
                     let root = model.parent().unwrap();
+                    assert_eq!(
+                        std::fs::canonicalize(root).unwrap(),
+                        std::fs::canonicalize(&snapshot).unwrap()
+                    );
                     for other in tiers.iter().filter(|tier| **tier != bound) {
-                        assert!(
-                            !root.join(other).exists(),
-                            "{other} is visible to the loader"
-                        );
+                        assert!(root.join(other).exists(), "{other} is installed beside it");
                     }
+                    assert_eq!(
+                        sceneworks_core::image_request::ImageRequest::from_payload(dispatch)
+                            .quant_bits(),
+                        Some(if bound == "bf16" { 0 } else { 8 }),
+                        "every bits-driven tier resolver reads the bound tier"
+                    );
                     #[cfg(native_lane)]
                     assert_eq!(
                         crate::image_jobs::standard_tier_subdir_for_test(
@@ -7772,11 +7497,12 @@ mod tests {
         });
     }
 
-    /// Codex review of PR #3379: a resolved-cache snapshot can hold a model's hard closure while a
-    /// selected soft companion of the same revision exists only in the source library. Each member
-    /// keeps its own verified source, and the loader sees both through one view.
+    /// Codex review of PR #3379 (4558615108): a resolved-cache snapshot can hold a model's hard
+    /// closure while a soft companion of the same revision exists only in the source library. Both
+    /// are reached through the revision's one snapshot directory, so that route falls back to the
+    /// copy-then-verify bundle: one directory holding each file from its own verified root.
     #[test]
-    fn one_revision_split_across_two_roots_is_served_as_one_verified_view() {
+    fn one_revision_split_across_two_roots_is_served_from_a_verified_copy() {
         let repo = "guardfx/split";
         let temp = TempDir::new().unwrap();
         let data = temp.path().join("data");
@@ -7858,7 +7584,7 @@ mod tests {
             .expect("both members pass ledger verification in their own roots")
             .unwrap();
             assert_eq!(prepared.overlays.len(), 1);
-            let view = &prepared.overlays[0].snapshot_root;
+            let served = &prepared.overlays[0].snapshot_root;
             assert_eq!(
                 prepared.overlays[0].files,
                 vec![
@@ -7866,153 +7592,102 @@ mod tests {
                     PathBuf::from("model.safetensors")
                 ]
             );
-            let snapshot = library.join("models--guardfx--split/snapshots").join(REV_A);
-            assert_eq!(
-                std::fs::canonicalize(view.join("model.safetensors")).unwrap(),
-                std::fs::canonicalize(resolved.join("model.safetensors")).unwrap(),
-                "the hard closure is served from the resolved-cache snapshot"
-            );
-            assert_eq!(
-                std::fs::canonicalize(view.join("companion.safetensors")).unwrap(),
-                std::fs::canonicalize(snapshot.join("companion.safetensors")).unwrap(),
-                "the soft companion is served from the source library"
-            );
+            assert!(served.starts_with(data.join("models/portable-attempts")));
+            for name in ["model.safetensors", "companion.safetensors"] {
+                let file = served.join(name);
+                assert!(
+                    std::fs::symlink_metadata(&file).unwrap().is_file(),
+                    "{name}"
+                );
+                assert_eq!(std::fs::read(file).unwrap(), b"weights");
+            }
             assert!(
-                !view.join("other.safetensors").exists(),
-                "an unfrozen file is never visible to the loader"
+                !served.join("other.safetensors").exists(),
+                "an unfrozen file is never copied"
             );
         });
     }
 
-    /// One rule for every view entry kind: a symlink to the verified file, a hard link with its
-    /// identity (Windows fallback), or a copy whose bytes match the ledger (last fallback).
+    /// A route left by the dropped link-view layout (no current layout marker, a `views/` tree of
+    /// links into the hub) is reclaimed by the existing retention prune, which removes the links
+    /// and never what they point at.
+    #[cfg(unix)]
     #[test]
-    fn view_entries_back_onto_their_verified_file_for_every_entry_kind() {
-        for kind in ["symlink", "hard-link", "copy"] {
-            let temp = TempDir::new().unwrap();
-            let hub = temp
-                .path()
-                .join("hub/models--guardfx--view/snapshots")
-                .join(REV_A);
-            std::fs::create_dir_all(&hub).unwrap();
-            std::fs::write(hub.join("model.safetensors"), b"weights").unwrap();
-            std::fs::write(hub.join("other.safetensors"), b"weights").unwrap();
-            let route = temp.path().join("data/models/portable-attempts/route");
-            let root = with_forced_view_entry_kind(kind, || {
-                test_revision_view(
-                    &route,
-                    "guardfx/view",
-                    REV_A,
-                    &[("model.safetensors", &hub.join("model.safetensors"))],
-                )
-            });
-            let entry = root.join("model.safetensors");
-            let real = std::fs::canonicalize(hub.join("model.safetensors")).unwrap();
-            let backing = revision_view_backing_file(&entry).unwrap().unwrap();
-            let is_link = std::fs::symlink_metadata(&entry)
-                .unwrap()
-                .file_type()
-                .is_symlink();
-            assert_eq!(is_link, kind == "symlink", "{kind}");
-            if kind == "copy" {
-                assert_eq!(backing, std::fs::canonicalize(&entry).unwrap());
-            } else {
-                assert_eq!(backing, real, "{kind}");
-            }
-            // Not entries: a path outside every view, and one of the view's own directories.
-            assert!(revision_view_backing_file(&real).unwrap().is_none());
-            assert!(revision_view_backing_file(&root).unwrap().is_none());
-            // A file the ledger does not freeze is refused.
-            std::fs::write(root.join("stray.safetensors"), b"weights").unwrap();
-            assert!(revision_view_backing_file(&root.join("stray.safetensors")).is_err());
-            // An entry that no longer stands for its verified bytes is refused.
-            std::fs::remove_file(&entry).unwrap();
-            if kind == "symlink" {
-                #[cfg(unix)]
-                std::os::unix::fs::symlink(hub.join("other.safetensors"), &entry).unwrap();
-            } else {
-                std::fs::write(&entry, b"WEIGHTS").unwrap();
-            }
-            let error = revision_view_backing_file(&entry).expect_err(kind);
-            assert!(
-                error.to_string().contains("differs from"),
-                "{kind}: {error}"
+    fn retention_reclaims_a_legacy_view_route_and_never_its_hub_files() {
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let hub = temp
+            .path()
+            .join("hub/models--guardfx--model/snapshots")
+            .join(REV_A);
+        std::fs::create_dir_all(&hub).unwrap();
+        std::fs::write(hub.join("model.safetensors"), b"weights").unwrap();
+        let legacy = data
+            .join("models/portable-attempts")
+            .join("a".repeat(64))
+            .join("views/0/hf/models--guardfx--model/snapshots")
+            .join(REV_A);
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::os::unix::fs::symlink(
+            hub.join("model.safetensors"),
+            legacy.join("model.safetensors"),
+        )
+        .unwrap();
+        let route = data.join("models/portable-attempts").join("a".repeat(64));
+        std::fs::write(route.join(".layout-v3"), b"").unwrap();
+        prune_portable_snapshots(None, &settings(data)).unwrap();
+        assert!(!route.join("views").exists());
+        assert_eq!(
+            std::fs::read(hub.join("model.safetensors")).unwrap(),
+            b"weights"
+        );
+    }
+
+    /// The path the guard hands a loader for a pinned Hugging Face member passes inference's own
+    /// shard-path check (`snapshot_shard_roots` + `resolve_safetensors_shards`): the hub layout's
+    /// snapshot links into the repository's `blobs/` are authorized, so an in-place member never
+    /// fails at load. No model compute.
+    #[cfg(unix)]
+    #[test]
+    fn a_pinned_member_served_in_place_passes_the_inference_shard_check() {
+        let temp = TempDir::new().unwrap();
+        let (settings, library, payload) = installed_model(&temp);
+        let repository = library.join("models--guardfx--model");
+        let snapshot = repository.join("snapshots").join(REV_A);
+        std::fs::create_dir_all(repository.join("blobs")).unwrap();
+        std::fs::rename(
+            snapshot.join("model.safetensors"),
+            repository.join("blobs/weights-blob"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            "../../blobs/weights-blob",
+            snapshot.join("model.safetensors"),
+        )
+        .unwrap();
+        let binding = portable_installed_model_binding();
+        with_library(&library, || {
+            let guard = RuntimeSourceGuard::begin_with_binding(
+                &JobType::ImageGenerate,
+                &payload,
+                &settings,
+                Some(&binding),
+            )
+            .unwrap();
+            let dir = Path::new(
+                guard.dispatch_payload()["modelManifestEntry"]["paths"]["model"]
+                    .as_str()
+                    .unwrap(),
             );
-        }
-    }
-
-    /// Codex review of PR #3379: a Windows host without symlink rights publishes its view through
-    /// hard links or verified copies, and the guard must accept that view.
-    #[test]
-    fn the_guard_accepts_a_view_published_through_each_windows_fallback() {
-        for kind in ["hard-link", "copy"] {
-            let temp = TempDir::new().unwrap();
-            let (settings, library, payload) = installed_model(&temp);
-            let binding = portable_installed_model_binding();
-            with_library(&library, || {
-                with_forced_view_entry_kind(kind, || {
-                    let guard = RuntimeSourceGuard::begin_with_binding(
-                        &JobType::ImageGenerate,
-                        &payload,
-                        &settings,
-                        Some(&binding),
-                    )
-                    .unwrap_or_else(|error| panic!("{kind}: {error}"));
-                    let loaded = Path::new(
-                        guard.dispatch_payload()["modelManifestEntry"]["paths"]["model"]
-                            .as_str()
-                            .unwrap(),
-                    )
-                    .join("model.safetensors");
-                    assert!(!std::fs::symlink_metadata(&loaded)
-                        .unwrap()
-                        .file_type()
-                        .is_symlink());
-                    assert_eq!(std::fs::read(&loaded).unwrap(), b"weights");
-                    assert!(revision_view_backing_file(&loaded).unwrap().is_some());
-                });
-            });
-        }
-    }
-
-    /// Retention removes a route's view entries and never what they stand for.
-    #[test]
-    fn pruning_a_route_removes_its_view_and_never_its_hub_files() {
-        for kind in ["symlink", "hard-link"] {
-            let temp = TempDir::new().unwrap();
-            let (settings, library, payload) = installed_model(&temp);
-            let binding = portable_installed_model_binding();
-            let source = library
-                .join("models--guardfx--model/snapshots")
-                .join(REV_A)
-                .join("model.safetensors");
-            with_library(&library, || {
-                with_forced_view_entry_kind(kind, || {
-                    drop(
-                        RuntimeSourceGuard::begin_with_binding(
-                            &JobType::ImageGenerate,
-                            &payload,
-                            &settings,
-                            Some(&binding),
-                        )
-                        .unwrap(),
-                    );
-                });
-            });
-            let attempts = settings.data_dir.join("models/portable-attempts");
-            let routes = std::fs::read_dir(&attempts)
-                .unwrap()
-                .flatten()
-                .map(|entry| entry.path())
-                .filter(|path| path.join("views").exists())
-                .collect::<Vec<_>>();
-            assert_eq!(routes.len(), 1, "{kind}");
-            // An unmarked route is an obsolete layout, so retention reclaims it at once.
-            std::fs::remove_file(routes[0].join(PORTABLE_BUNDLE_LAYOUT_MARKER)).unwrap();
-            prune_portable_snapshots(None, &settings).unwrap();
-            assert!(!routes[0].join("views").exists(), "{kind}");
-            assert_eq!(std::fs::read(&source).unwrap(), b"weights", "{kind}");
-        }
+            let roots = gen_core::safetensors_shards::snapshot_shard_roots(dir).unwrap();
+            let shards =
+                gen_core::safetensors_shards::resolve_safetensors_shards(dir, "model", &roots)
+                    .expect("the inference shard check accepts the served member");
+            assert_eq!(
+                shards,
+                vec![std::fs::canonicalize(repository.join("blobs/weights-blob")).unwrap()]
+            );
+        });
     }
 
     /// Codex review of PR #3379: two in-process jobs on one pinned revision overlap. The first

@@ -55,6 +55,26 @@ pub(crate) fn optional_id(payload: &JsonObject, key: &str) -> Option<String> {
 
 /// Read an optional int that may arrive as a JSON number or a numeric string. `None`
 /// when absent or unparseable.
+/// The quantization bits a job runs: the request's explicit `mlxQuantize`, else the tier its
+/// verified portable binding froze (`advanced.__portableBoundTier`, written by the worker's source
+/// guard only after verifying the route). A pinned Hugging Face member is served in place from the
+/// worker's hub snapshot, which can hold other installed tiers beside the frozen one; every tier
+/// resolver reads its selection here, so none can fall back to its own default and pick an
+/// unverified tier. Any other bound tier name (a non-quant variant) selects nothing.
+pub(crate) fn request_quant_bits(advanced: &JsonObject) -> Option<i64> {
+    optional_i64(advanced, "mlxQuantize").or_else(|| {
+        match advanced
+            .get("__portableBoundTier")
+            .and_then(Value::as_str)?
+        {
+            "q4" => Some(4),
+            "q8" => Some(8),
+            "bf16" => Some(0),
+            _ => None,
+        }
+    })
+}
+
 pub(crate) fn optional_i64(payload: &JsonObject, key: &str) -> Option<i64> {
     payload.get(key).and_then(json_integer)
 }

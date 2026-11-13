@@ -1220,10 +1220,15 @@ fn install_portable_gemma(
         .map_err(|error| WorkerError::Engine(error.to_string()))?;
     for (relative, file) in &members {
         let input = plain_member(source, relative)?;
-        // A pinned Gemma member reaches here as an entry of the route's verified source view;
-        // read the file it stands for, then hold it to this ledger as before.
-        let input =
-            crate::external_library_runtime::revision_view_backing_file(&input)?.unwrap_or(input);
+        // A pinned Gemma member is served in place from the hub snapshot, whose files are links
+        // into the repository's `blobs/`: read the file the link names, then hold it to this
+        // ledger as before (`verify_file` refuses anything that is not a regular file).
+        let input = std::fs::canonicalize(&input).map_err(|error| {
+            WorkerError::Engine(format!(
+                "frozen Gemma file {} unavailable: {error}",
+                input.display()
+            ))
+        })?;
         verify_file(&input, file)?;
         let output = staging.path().join(relative);
         if let Some(directory) = output.parent() {
@@ -1249,17 +1254,19 @@ mod portable_gemma_tests {
     use super::*;
     use sha2::{Digest, Sha256};
 
-    /// Codex review of PR #3379: a portable LTX conversion hands the Gemma installer the route's
-    /// verified source view, whose entries are links to the hub; it installs their verified bytes.
+    /// Codex review of PR #3379: a portable LTX conversion hands the Gemma installer the pinned
+    /// member in place, in the hub's own layout (snapshot links into `blobs/`); it installs
+    /// regular copies of the linked bytes, held to the frozen ledger.
+    #[cfg(unix)]
     #[test]
-    fn frozen_gemma_installs_from_a_verified_source_view() {
+    fn frozen_gemma_installs_from_the_hub_snapshot_in_place() {
         use sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile;
 
         let temp = tempfile::tempdir().unwrap();
-        let hub = temp
-            .path()
-            .join("hub/models--SceneWorks--ltx-2.3-mlx/snapshots/0123456789abcdef0123456789abcdef01234567/gemma");
-        std::fs::create_dir_all(&hub).unwrap();
+        let repository = temp.path().join("hub/models--SceneWorks--ltx-2.3-mlx");
+        let source = repository.join("snapshots/0123456789abcdef0123456789abcdef01234567/gemma");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(repository.join("blobs")).unwrap();
         let mut weights = Vec::new();
         let header = br#"{"weight":{"dtype":"U8","shape":[1],"data_offsets":[0,1]}}"#;
         weights.extend_from_slice(&(header.len() as u64).to_le_bytes());
@@ -1271,27 +1278,10 @@ mod portable_gemma_tests {
             ("model.safetensors", weights),
         ];
         for (name, bytes) in &sources {
-            std::fs::write(hub.join(name), bytes).unwrap();
+            std::fs::write(repository.join("blobs").join(name), bytes).unwrap();
+            std::os::unix::fs::symlink(format!("../../../blobs/{name}"), source.join(name))
+                .unwrap();
         }
-        let data = temp.path().join("data");
-        let names = sources
-            .iter()
-            .map(|(name, _)| (format!("gemma/{name}"), hub.join(name)))
-            .collect::<Vec<_>>();
-        let root = crate::external_library_runtime::test_revision_view(
-            &data.join("models/portable-attempts/route"),
-            "SceneWorks/ltx-2.3-mlx",
-            "0123456789abcdef0123456789abcdef01234567",
-            &names
-                .iter()
-                .map(|(name, path)| (name.as_str(), path.as_path()))
-                .collect::<Vec<_>>(),
-        );
-        let source = root.join("gemma");
-        assert!(std::fs::symlink_metadata(source.join("config.json"))
-            .unwrap()
-            .file_type()
-            .is_symlink());
         let files: Vec<PortableGemmaFile> = serde_json::from_value(
             serde_json::to_value(
                 sources
@@ -1306,6 +1296,7 @@ mod portable_gemma_tests {
             .unwrap(),
         )
         .unwrap();
+        let data = temp.path().join("data");
         install_portable_gemma(&source, &data, &files).unwrap();
         let target = data.join("models/mlx/gemma");
         for (name, bytes) in &sources {
@@ -1313,6 +1304,14 @@ mod portable_gemma_tests {
             assert!(std::fs::symlink_metadata(&installed).unwrap().is_file());
             assert_eq!(std::fs::read(installed).unwrap(), *bytes);
         }
+        // A hub file that no longer matches its ledger is never installed.
+        std::fs::remove_dir_all(&target).unwrap();
+        std::fs::write(
+            repository.join("blobs/config.json"),
+            br#"{"model_type":"other"}"#,
+        )
+        .unwrap();
+        assert!(install_portable_gemma(&source, &data, &files).is_err());
     }
 
     #[test]
