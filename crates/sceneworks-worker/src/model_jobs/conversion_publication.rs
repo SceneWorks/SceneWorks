@@ -206,6 +206,36 @@ fn materialize_portable_conversion_links(temp_dir: &Path, data_dir: &Path) -> Wo
                     .is_some()
                 {
                     Some(named)
+                } else if let Some((sha256, size_bytes)) =
+                    crate::external_library_runtime::frozen_view_source(cache_root, &canonical)?
+                {
+                    // Converters canonicalize what they borrow, so their links name a view
+                    // entry's hub file directly. Publish a copy of it, held to its frozen ledger.
+                    let replacement = path.with_file_name(format!(
+                        ".portable-copy-{}",
+                        Uuid::new_v4()
+                    ));
+                    let copied = std::fs::copy(&canonical, &replacement).map_err(Into::into).and_then(
+                        |_| -> WorkerResult<()> {
+                            let digest = sceneworks_core::hashing::sha256_file(&replacement)?;
+                            if std::fs::metadata(&replacement)?.len() != size_bytes
+                                || format!("sha256:{digest}") != sha256
+                            {
+                                return Err(WorkerError::InvalidPayload(format!(
+                                    "Portable conversion source {} differs from its pinned ledger",
+                                    canonical.display()
+                                )));
+                            }
+                            Ok(())
+                        },
+                    );
+                    if let Err(error) = copied {
+                        let _ = std::fs::remove_file(&replacement);
+                        return Err(error);
+                    }
+                    std::fs::remove_file(&path)?;
+                    std::fs::rename(replacement, path)?;
+                    continue;
                 } else {
                     None
                 };
@@ -247,6 +277,84 @@ fn materialize_portable_conversion_links(temp_dir: &Path, data_dir: &Path) -> Wo
 mod conversion_lock_tests {
     use super::*;
     use fs2::FileExt as _;
+
+    /// Codex review of PR #3379: the real converters canonicalize what they borrow before linking
+    /// it, so their output links name a view entry's hub file (or the view's own directory)
+    /// rather than the entry. Publication still holds a verified regular copy of everything
+    /// borrowed from the route, and refuses a hub file whose bytes no longer match its ledger.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn converted_install_copies_canonicalized_links_to_view_sources() {
+        use std::os::unix::fs::symlink;
+
+        let rev = "0123456789abcdef0123456789abcdef01234567";
+        let root = tempfile::tempdir().expect("data dir");
+        let data_dir = root.path();
+        let hub = data_dir.join("hub/models--guardfx--flux/snapshots").join(rev);
+        std::fs::create_dir_all(hub.join("vae")).unwrap();
+        std::fs::write(hub.join("vae/model.safetensors"), b"vae bytes").unwrap();
+        std::fs::write(hub.join("model_index.json"), b"index bytes").unwrap();
+        std::fs::write(hub.join("unrouted.json"), b"stable bytes").unwrap();
+        let view = crate::external_library_runtime::test_revision_view(
+            &data_dir.join("models/portable-attempts/route"),
+            "guardfx/flux",
+            rev,
+            &[
+                ("vae/model.safetensors", &hub.join("vae/model.safetensors")),
+                ("model_index.json", &hub.join("model_index.json")),
+            ],
+        );
+        let conversion_root = data_dir.join("models/mlx");
+        std::fs::create_dir_all(&conversion_root).unwrap();
+        let staged = conversion_root.join("staged");
+        std::fs::create_dir(&staged).unwrap();
+        // Exactly as `convert_flux2_dev_prequant` links its borrowed modules.
+        for sub in ["vae", "model_index.json"] {
+            symlink(std::fs::canonicalize(view.join(sub)).unwrap(), staged.join(sub)).unwrap();
+        }
+        symlink(
+            std::fs::canonicalize(hub.join("unrouted.json")).unwrap(),
+            staged.join("unrouted.json"),
+        )
+        .unwrap();
+        let installed = conversion_root.join("converted");
+        finalize_converted_dir(&staged, &installed, data_dir)
+            .await
+            .expect("publish a conversion that canonicalized its borrowed sources");
+        for (name, bytes) in [
+            ("vae/model.safetensors", b"vae bytes".as_slice()),
+            ("model_index.json", b"index bytes".as_slice()),
+        ] {
+            let path = installed.join(name);
+            assert!(
+                !std::fs::symlink_metadata(&path)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "{name} must be a regular copy"
+            );
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+        // A file no route froze is not a borrowed private source and keeps its stable link.
+        assert!(std::fs::symlink_metadata(installed.join("unrouted.json"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        // A hub file changed after verification is refused, never published.
+        std::fs::write(hub.join("model_index.json"), b"INDEX BYTES").unwrap();
+        let staged = conversion_root.join("staged-changed");
+        std::fs::create_dir(&staged).unwrap();
+        symlink(
+            std::fs::canonicalize(view.join("model_index.json")).unwrap(),
+            staged.join("model_index.json"),
+        )
+        .unwrap();
+        let error = finalize_converted_dir(&staged, &conversion_root.join("changed"), data_dir)
+            .await
+            .expect_err("changed borrowed bytes are refused");
+        assert!(error.to_string().contains("differs from its pinned ledger"), "{error}");
+    }
 
     /// Codex review of PR #3379: a conversion that borrows component directories and files from
     /// the route's verified source view (entries are links to the hub) publishes real copies of

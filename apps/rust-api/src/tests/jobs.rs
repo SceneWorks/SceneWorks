@@ -13954,7 +13954,10 @@ async fn worker_heartbeat_broadcasts_job_updated_for_the_job_it_interrupts() {
         json!({ "type": "image_detail", "payload": {}, "requestedGpu": "auto" }),
     )
     .await;
-    let job_id = created["id"].as_str().expect("job id is string").to_owned();
+    let job_id = created["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("job create returned no id: {created}"))
+        .to_owned();
     request(
         app.clone(),
         "POST",

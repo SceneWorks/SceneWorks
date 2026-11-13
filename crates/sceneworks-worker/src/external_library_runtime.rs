@@ -1099,9 +1099,16 @@ fn in_place_revision_files(
             {
                 return Err(invalid_binding("a frozen member path escapes its snapshot"));
             }
-            let real = std::fs::canonicalize(snapshot.join(&file.relative_path))
-                .map_err(|_| invalid_binding("a frozen member is missing from its snapshot"))?;
-            if !real.starts_with(&repository_real) {
+            let candidate = snapshot.join(&file.relative_path);
+            // Another job's verified view (handed over by its process-wide overlay): use the
+            // source its ledger recorded, which that job confined to its own hub repository.
+            let from_view = revision_view_entry_source(&candidate)?;
+            let real = match &from_view {
+                Some(source) => source.clone(),
+                None => std::fs::canonicalize(&candidate)
+                    .map_err(|_| invalid_binding("a frozen member is missing from its snapshot"))?,
+            };
+            if from_view.is_none() && !real.starts_with(&repository_real) {
                 return Err(invalid_binding(
                     "a frozen member resolves outside its hub repository",
                 ));
@@ -1922,12 +1929,27 @@ fn verify_view_entry(
 /// consumer that inspects, copies or confines a loader path from a portable route uses this
 /// instead of assuming the path is a regular private file.
 pub(crate) fn revision_view_backing_file(path: &Path) -> WorkerResult<Option<PathBuf>> {
+    Ok(verified_view_entry(path)?.map(|(backing, _)| backing))
+}
+
+/// The verified view entry at `path`: the file to read and the frozen ledger entry it satisfies.
+fn verified_view_entry(path: &Path) -> WorkerResult<Option<(PathBuf, RevisionViewLedgerEntry)>> {
     let Some((view, relative)) = enclosing_revision_view(path) else {
         return Ok(None);
     };
     if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
         return Ok(None);
     }
+    let mut ledger = read_revision_view_ledger(view)?;
+    let entry = ledger
+        .entries
+        .remove(relative)
+        .ok_or_else(|| invalid_binding("a source view entry is not a frozen file"))?;
+    let backing = verify_view_entry(view, path, &entry)?;
+    Ok(Some((backing, entry)))
+}
+
+fn read_revision_view_ledger(view: &Path) -> WorkerResult<RevisionViewLedger> {
     let ledger: RevisionViewLedger = serde_json::from_slice(
         &std::fs::read(view.join(REVISION_VIEW_LEDGER)).map_err(WorkerError::Io)?,
     )
@@ -1937,11 +1959,46 @@ pub(crate) fn revision_view_backing_file(path: &Path) -> WorkerResult<Option<Pat
             "the verified source view ledger is unreadable",
         ));
     }
-    let entry = ledger
-        .entries
-        .get(relative)
-        .ok_or_else(|| invalid_binding("a source view entry is not a frozen file"))?;
-    verify_view_entry(view, path, entry).map(Some)
+    Ok(ledger)
+}
+
+/// The original source file a view entry stands for (the ledger's verified real path, never a
+/// view-local copy), after checking the entry still stands for it. Another job's process-wide
+/// overlay can hand discovery that job's view; its entries resolve to their own sources here.
+fn revision_view_entry_source(path: &Path) -> WorkerResult<Option<PathBuf>> {
+    Ok(verified_view_entry(path)?.map(|(_, entry)| entry.real_path))
+}
+
+/// The frozen ledger (SHA-256, size) of `real` when a published view under `attempts_root`
+/// (`models/portable-attempts`) stands for it. Converters canonicalize what they borrow, so a
+/// converted layout can link straight to a view's hub file instead of to the view entry.
+pub(crate) fn frozen_view_source(
+    attempts_root: &Path,
+    real: &Path,
+) -> WorkerResult<Option<(String, u64)>> {
+    let Ok(routes) = std::fs::read_dir(attempts_root) else {
+        return Ok(None);
+    };
+    for route in routes.flatten() {
+        let Ok(views) = std::fs::read_dir(route.path().join("views")) else {
+            continue;
+        };
+        for view in views.flatten() {
+            let view = view.path();
+            if !view.join(REVISION_VIEW_LEDGER).is_file() {
+                continue;
+            }
+            let ledger = read_revision_view_ledger(&view)?;
+            if let Some(entry) = ledger
+                .entries
+                .values()
+                .find(|entry| entry.real_path == real)
+            {
+                return Ok(Some((entry.sha256.clone(), entry.size_bytes)));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Publish (or reuse) the route's private view of its verified in-place files: one entry per
@@ -7956,6 +8013,58 @@ mod tests {
             assert!(!routes[0].join("views").exists(), "{kind}");
             assert_eq!(std::fs::read(&source).unwrap(), b"weights", "{kind}");
         }
+    }
+
+    /// Codex review of PR #3379: two in-process jobs on one pinned revision overlap. The first
+    /// job's process-wide overlay hands the second job's discovery the first job's view; the
+    /// second job resolves those entries through the view's ledger to their own sources.
+    #[test]
+    fn two_overlapping_guards_on_one_revision_both_bind() {
+        let temp = TempDir::new().unwrap();
+        let (settings, library, payload) = installed_model(&temp);
+        let binding = portable_installed_model_binding();
+        let source = library
+            .join("models--guardfx--model/snapshots")
+            .join(REV_A)
+            .join("model.safetensors");
+        let _serialized = overlay_guard();
+        with_library(&library, || {
+            let begin = || {
+                RuntimeSourceGuard::begin_with_binding(
+                    &JobType::ImageGenerate,
+                    &payload,
+                    &settings,
+                    Some(&binding),
+                )
+            };
+            let first = begin().expect("the first job binds");
+            let second = begin().expect("an overlapping job on the same revision binds");
+            for guard in [&first, &second] {
+                let loaded = Path::new(
+                    guard.dispatch_payload()["modelManifestEntry"]["paths"]["model"]
+                        .as_str()
+                        .unwrap(),
+                )
+                .join("model.safetensors");
+                assert_eq!(
+                    std::fs::canonicalize(&loaded).unwrap(),
+                    std::fs::canonicalize(&source).unwrap()
+                );
+            }
+            drop(first);
+            assert_eq!(
+                std::fs::read(
+                    Path::new(
+                        second.dispatch_payload()["modelManifestEntry"]["paths"]["model"]
+                            .as_str()
+                            .unwrap()
+                    )
+                    .join("model.safetensors")
+                )
+                .unwrap(),
+                b"weights"
+            );
+        });
     }
 
     fn in_place_ledger(path: &str, size_bytes: u64) -> PortableArtifactFile {
