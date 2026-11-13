@@ -145,7 +145,7 @@ fn explicit_tier(request: &ImageRequest) -> WorkerResult<Option<&'static str>> {
     else {
         return Ok(None);
     };
-    let bits = crate::payload::quant_int(value).ok_or_else(|| {
+    let bits = sceneworks_core::payload_util::json_integer(value).ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
             "{MODEL_ID} advanced.mlxQuantize must be an integer bit count, got {value}"
         ))
