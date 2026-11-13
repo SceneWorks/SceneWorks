@@ -67005,6 +67005,41 @@
           "variant": "q8"
         },
         {
+          "default": true,
+          "estimatedSizeBytes": 19995370331,
+          "files": [
+            "q4/*"
+          ],
+          "footprint": {
+            "diskSizeBytes": 19995370331
+          },
+          "platforms": [
+            "windows",
+            "linux"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen3.8-27b-abliterated-candle",
+          "revision": "accaccc109912b9b194f7d5a47f2123fdc70672e",
+          "variant": "q4"
+        },
+        {
+          "estimatedSizeBytes": 32371188675,
+          "files": [
+            "q8/*"
+          ],
+          "footprint": {
+            "diskSizeBytes": 32371188675
+          },
+          "platforms": [
+            "windows",
+            "linux"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen3.8-27b-abliterated-candle",
+          "revision": "accaccc109912b9b194f7d5a47f2123fdc70672e",
+          "variant": "q8"
+        },
+        {
           "estimatedSizeBytes": 55575900000,
           "files": [
             "config.json",

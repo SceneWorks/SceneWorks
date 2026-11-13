@@ -15635,9 +15635,12 @@
       // the bf16 source, and a q4 user must not download the 55.6 GB. A describe job names its
       // tier as the request's `variant`, so source admission selects the row the worker loads.
       //
-      // The re-host rows are `macos`-only because they are MLX snapshots. Candle's quantised
-      // snapshot is a different format and its rows are added when that re-host is published;
-      // until then a Windows/Linux worker has the bf16 row only.
+      // MLX and Candle store a quantised tier in different formats, so each engine has its own
+      // re-host: the `macos` rows above are MLX snapshots, and the `windows`/`linux` rows are
+      // candle-llm `prepare_snapshot` tiers (stored GGML blocks) from
+      // `SceneWorks/qwen3.8-27b-abliterated-candle` @ accaccc1. Exactly one q4 and one q8 row is in
+      // scope on any platform. Candle q4 was loaded on Metal and grounded on an image (peak
+      // footprint 41 GB); neither Candle tier has been measured on CUDA yet.
       //
       // The file list names what the loader reads, so a metadata-only revision can never look
       // installed (the lesson recorded on `film_planner_qwen3_6_27b`).
@@ -15671,6 +15674,27 @@
           "platforms": ["macos"],
           "estimatedSizeBytes": 32371297322,
           "footprint": { "diskSizeBytes": 32371297322 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen3.8-27b-abliterated-candle",
+          "revision": "accaccc109912b9b194f7d5a47f2123fdc70672e",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 19995370331,
+          "footprint": { "diskSizeBytes": 19995370331 }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen3.8-27b-abliterated-candle",
+          "revision": "accaccc109912b9b194f7d5a47f2123fdc70672e",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 32371188675,
+          "footprint": { "diskSizeBytes": 32371188675 }
         },
         {
           "provider": "huggingface",

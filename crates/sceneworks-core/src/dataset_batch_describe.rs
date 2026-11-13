@@ -218,21 +218,35 @@ mod tests {
                 downloads[0]["files"][0].as_str().expect("file").to_owned(),
             )
         };
-        for tier in ["q4", "q8"] {
-            let (repo, files) = selected("macos", Some(tier));
-            assert_eq!(repo, QWEN38_27B_DESCRIBER_MLX_REPO, "{tier}");
-            assert_eq!(files, format!("{tier}/*"));
-        }
-        assert_eq!(selected("macos", Some("bf16")).0, QWEN38_27B_DESCRIBER_REPO);
-        // A request without a variant gets the default tier's row, the tier the job defaults to.
-        assert_eq!(
-            selected("macos", None).1,
-            format!("{QWEN38_27B_DESCRIBER_DEFAULT_TIER}/*")
-        );
-        // Every tier in the request vocabulary has a row on macOS.
-        for tier in QWEN38_27B_DESCRIBER_TIERS {
-            let closure = selected_model_artifact_closure(&entry, "macos", Some(tier));
-            assert_eq!(closure["downloads"][0]["variant"], tier);
+        // Each engine stores a quantised tier in its own format, so each platform selects its
+        // engine's re-host: the repository the worker on that platform loads from.
+        for (platform, rehost) in [
+            ("macos", QWEN38_27B_DESCRIBER_MLX_REPO),
+            ("windows", QWEN38_27B_DESCRIBER_CANDLE_REPO),
+            ("linux", QWEN38_27B_DESCRIBER_CANDLE_REPO),
+        ] {
+            for tier in ["q4", "q8"] {
+                let (repo, files) = selected(platform, Some(tier));
+                assert_eq!(repo, rehost, "{platform} {tier}");
+                assert_eq!(files, format!("{tier}/*"));
+            }
+            assert_eq!(
+                selected(platform, Some("bf16")).0,
+                QWEN38_27B_DESCRIBER_REPO,
+                "{platform}"
+            );
+            // A request without a variant gets the default tier's row, the tier the job
+            // defaults to.
+            assert_eq!(
+                selected(platform, None).1,
+                format!("{QWEN38_27B_DESCRIBER_DEFAULT_TIER}/*"),
+                "{platform}"
+            );
+            // Every tier in the request vocabulary has a row.
+            for tier in QWEN38_27B_DESCRIBER_TIERS {
+                let closure = selected_model_artifact_closure(&entry, platform, Some(tier));
+                assert_eq!(closure["downloads"][0]["variant"], tier, "{platform}");
+            }
         }
     }
 }
