@@ -66960,6 +66960,141 @@
     },
     "routes": {}
   },
+  "vision_describe_qwen3_8_27b": {
+    "evidence": {},
+    "modelEvidence": {
+      "minMemoryGb": 32
+    },
+    "product": {
+      "adapter": "prompt-refine",
+      "autoDownload": false,
+      "capabilities": [],
+      "defaults": {},
+      "downloads": [
+        {
+          "default": true,
+          "estimatedSizeBytes": 19995477764,
+          "files": [
+            "q4/*"
+          ],
+          "footprint": {
+            "diskSizeBytes": 19995477764
+          },
+          "platforms": [
+            "macos"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen3.8-27b-abliterated-mlx",
+          "revision": "76f3c445cd5347fdb85fc24066350724fe272017",
+          "variant": "q4"
+        },
+        {
+          "estimatedSizeBytes": 32371297322,
+          "files": [
+            "q8/*"
+          ],
+          "footprint": {
+            "diskSizeBytes": 32371297322
+          },
+          "platforms": [
+            "macos"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen3.8-27b-abliterated-mlx",
+          "revision": "76f3c445cd5347fdb85fc24066350724fe272017",
+          "variant": "q8"
+        },
+        {
+          "default": true,
+          "estimatedSizeBytes": 19995370331,
+          "files": [
+            "q4/*"
+          ],
+          "footprint": {
+            "diskSizeBytes": 19995370331
+          },
+          "platforms": [
+            "windows",
+            "linux"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen3.8-27b-abliterated-candle",
+          "revision": "accaccc109912b9b194f7d5a47f2123fdc70672e",
+          "variant": "q4"
+        },
+        {
+          "estimatedSizeBytes": 32371188675,
+          "files": [
+            "q8/*"
+          ],
+          "footprint": {
+            "diskSizeBytes": 32371188675
+          },
+          "platforms": [
+            "windows",
+            "linux"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen3.8-27b-abliterated-candle",
+          "revision": "accaccc109912b9b194f7d5a47f2123fdc70672e",
+          "variant": "q8"
+        },
+        {
+          "estimatedSizeBytes": 55575900000,
+          "files": [
+            "config.json",
+            "generation_config.json",
+            "chat_template.jinja",
+            "preprocessor_config.json",
+            "video_preprocessor_config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "model.safetensors.index.json",
+            "model-*.safetensors"
+          ],
+          "provider": "huggingface",
+          "repo": "huihui-ai/Huihui-Qwen3.8-27B-abliterated",
+          "revision": "739e3c5b89849f6c238ce1e5b70008612ae42cdd",
+          "variant": "bf16"
+        }
+      ],
+      "family": "vision-caption",
+      "id": "vision_describe_qwen3_8_27b",
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "macOnly": false,
+      "name": "Vision Describer (Qwen3.8-27B)",
+      "paths": {
+        "model": "${HF_CACHE}/huihui-ai/Huihui-Qwen3.8-27B-abliterated"
+      },
+      "type": "utility",
+      "ui": {
+        "description": "Larger vision-language model for Create Prompt Batch from Dataset. It follows detailed describing instructions (exact pose, orientation, interactions) more closely than the 8B Vision Captioner. Optional download; runs in-process on the native worker.",
+        "label": "Vision Describer (Qwen3.8-27B)",
+        "promptGuide": {
+          "path": "/prompt-guides/vision-caption.md",
+          "sources": [
+            {
+              "label": "Huihui Qwen3.8-27B-abliterated model card",
+              "url": "https://huggingface.co/huihui-ai/Huihui-Qwen3.8-27B-abliterated"
+            },
+            {
+              "label": "Qwen3.8-27B (base) model card",
+              "url": "https://huggingface.co/Qwen/Qwen3.8-27B"
+            }
+          ],
+          "title": "Vision Captioner Guide"
+        },
+        "recommendedFor": [
+          "dataset_batch_describe"
+        ]
+      }
+    },
+    "routes": {}
+  },
   "vitpose_plus_base": {
     "evidence": {},
     "product": {

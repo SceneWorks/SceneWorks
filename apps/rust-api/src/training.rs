@@ -1516,7 +1516,7 @@ pub(crate) async fn create_training_dataset_batch_describe_job(
     Path((project_id, dataset_id)): Path<(String, String)>,
     ApiJson(payload): ApiJson<DatasetBatchDescribeJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
-    let (model, prompt) = validate_batch_describe_request(&payload)?;
+    let (model, tier, prompt) = validate_batch_describe_request(&payload)?;
     let (dataset, dataset_root, project_name) = project_call(state.clone(), {
         let project_id = project_id.clone();
         let dataset_id = dataset_id.clone();
@@ -1542,6 +1542,9 @@ pub(crate) async fn create_training_dataset_batch_describe_job(
             ))
         }
     };
+    if let Some(tier) = tier {
+        job_payload.insert("variant".to_owned(), json!(tier));
+    }
     if let Some(prompt) = prompt {
         job_payload.insert("prompt".to_owned(), json!(prompt));
     }
@@ -1602,9 +1605,13 @@ pub(crate) async fn list_training_dataset_batch_describe_jobs(
 /// model repo and the trimmed instruction, `None` when the worker's default instruction applies.
 pub(crate) fn validate_batch_describe_request(
     payload: &DatasetBatchDescribeJobRequest,
-) -> Result<(&'static str, Option<String>), ApiError> {
-    use sceneworks_core::dataset_batch_describe::max_describe_prompt_chars;
+) -> Result<(&'static str, Option<&'static str>, Option<String>), ApiError> {
+    use sceneworks_core::dataset_batch_describe::{
+        max_describe_prompt_chars, resolve_describe_tier,
+    };
     let model = resolve_describe_model(payload.model.as_deref())?;
+    let tier = resolve_describe_tier(Some(model), payload.variant.as_deref())
+        .map_err(|message| training_field_error("variant", message))?;
     let prompt = payload
         .prompt
         .as_deref()
@@ -1617,22 +1624,26 @@ pub(crate) fn validate_batch_describe_request(
             format!("The describing prompt must be at most {limit} characters for this model."),
         ));
     }
-    Ok((model, prompt.map(str::to_owned)))
+    Ok((model, tier, prompt.map(str::to_owned)))
 }
 
 /// The describe model a request names: absent or blank is the Vision Captioner, JoyCaption is the
 /// other accepted describer, anything else is refused. Shared by the describe job and the default
 /// describing prompt route so both accept exactly the same `model` values.
 pub(crate) fn resolve_describe_model(model: Option<&str>) -> Result<&'static str, ApiError> {
-    use sceneworks_core::dataset_batch_describe::{JOYCAPTION_REPO, VISION_CAPTIONER_REPO};
+    use sceneworks_core::dataset_batch_describe::{
+        JOYCAPTION_REPO, QWEN38_27B_DESCRIBER_REPO, VISION_CAPTIONER_REPO,
+    };
     match model.map(str::trim) {
         None | Some("") | Some(VISION_CAPTIONER_REPO) => Ok(VISION_CAPTIONER_REPO),
         Some(JOYCAPTION_REPO) => Ok(JOYCAPTION_REPO),
+        Some(QWEN38_27B_DESCRIBER_REPO) => Ok(QWEN38_27B_DESCRIBER_REPO),
         Some(other) => Err(training_field_error(
             "model",
             format!(
                 "Unsupported describe model {other:?}. Use the Vision Captioner \
-                 ({VISION_CAPTIONER_REPO}) or JoyCaption ({JOYCAPTION_REPO})."
+                 ({VISION_CAPTIONER_REPO}), JoyCaption ({JOYCAPTION_REPO}) or the Qwen3.8 27B \
+                 describer ({QWEN38_27B_DESCRIBER_REPO})."
             ),
         )),
     }

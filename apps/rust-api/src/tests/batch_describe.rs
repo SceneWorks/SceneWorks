@@ -4,7 +4,7 @@
 use super::support::*;
 use sceneworks_core::dataset_batch_describe::{
     JOYCAPTION_REPO, MAX_DESCRIBE_PROMPT_CHARS, MAX_JOYCAPTION_DESCRIBE_PROMPT_CHARS,
-    VISION_CAPTIONER_REPO,
+    QWEN38_27B_DESCRIBER_REPO, VISION_CAPTIONER_REPO,
 };
 
 fn png_rgb(w: u32, h: u32, shade: u8) -> Vec<u8> {
@@ -165,6 +165,16 @@ async fn batch_describe_refuses_other_models_unknown_items_and_oversized_prompts
             "Unsupported describe model",
         ),
         (
+            json!({ "model": QWEN38_27B_DESCRIBER_REPO, "variant": "q2" }),
+            "variant",
+            "Unsupported describe tier",
+        ),
+        (
+            json!({ "variant": "q4" }),
+            "variant",
+            "not available for this model",
+        ),
+        (
             json!({ "itemIds": ["not_an_item"] }),
             "itemIds",
             "Unknown dataset item id(s): not_an_item.",
@@ -240,6 +250,40 @@ async fn batch_describe_accepts_joycaption_with_its_own_prompt_limit() {
         job["payload"]["prompt"].as_str().unwrap().chars().count(),
         MAX_JOYCAPTION_DESCRIBE_PROMPT_CHARS
     );
+}
+
+/// SW-7119: the Qwen3.8 27B describer is the third accepted model. Its job carries the tier (the
+/// default when the request names none) and it takes the Vision Captioner's prompt limit.
+#[tokio::test]
+async fn batch_describe_accepts_the_qwen38_27b_describer_with_a_tier() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id, dataset_id, _, _, _) = dataset_fixture(&temp_dir).await;
+    let route =
+        format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
+    for (tier, expect) in [(None, "q4"), (Some("q8"), "q8"), (Some("bf16"), "bf16")] {
+        let mut body = json!({ "model": QWEN38_27B_DESCRIBER_REPO });
+        if let Some(tier) = tier {
+            body["variant"] = json!(tier);
+        }
+        let (status, job) = request(app.clone(), "POST", &route, body).await;
+        assert_eq!(status, StatusCode::CREATED, "{job}");
+        assert_eq!(job["payload"]["model"], QWEN38_27B_DESCRIBER_REPO);
+        assert_eq!(job["payload"]["variant"], expect);
+    }
+    // The other describers have no tier, so their jobs carry none.
+    let (status, job) = request(app.clone(), "POST", &route, json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert!(job["payload"].get("variant").is_none());
+
+    let (status, body) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/training/describe-prompt/default?model={QWEN38_27B_DESCRIBER_REPO}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["maxChars"], MAX_DESCRIBE_PROMPT_CHARS);
 }
 
 /// SW-7082: the describe worker appends each finished image to `/result-items` (its progress
