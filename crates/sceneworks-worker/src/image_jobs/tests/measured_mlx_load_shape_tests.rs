@@ -2,7 +2,6 @@ use super::super::LoadSpec;
 use super::super::WeightsSource;
 use super::apply_measured_mlx_load_shape;
 use super::apply_measured_mlx_load_shape_for_request;
-use crate::Value;
 use gen_core::{
     AdapterKind, AdapterSpec, MemoryContractSurfaceTier, MemoryProviderContract, MemoryStrategy,
     MemoryStrategySupport, OffloadPolicy, Quant, TransformerComponent,
@@ -253,20 +252,9 @@ fn worker_qwen_specs_reach_the_shared_base_edit_and_lightning_contract() {
 
 #[test]
 fn worker_krea_declarations_reach_the_full_ladder_without_legacy_shaping() {
-    let source = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-        .iter()
-        .find(|(name, _)| *name == "builtin.models.jsonc")
-        .expect("builtin model manifest")
-        .1;
-    let manifest: Value =
-        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(source))
-            .expect("builtin model manifest parses");
-    let turbo_manifest = manifest["models"]
-        .as_array()
-        .expect("model rows")
-        .iter()
-        .find(|model| model["id"] == "krea_2_turbo")
-        .and_then(Value::as_object)
+    // The production accessor: the shipped row with its typed memory evidence projected in, which
+    // is the `modelManifestEntry` a Krea job carries (SW-7031).
+    let turbo_manifest = sceneworks_core::builtin_manifests::builtin_model_entry("krea_2_turbo")
         .expect("Krea Turbo row");
     let context = crate::memory_route_registry::MemoryRouteRequestContext {
         mode: crate::memory_route_registry::MemoryRouteMode::TextToImage,

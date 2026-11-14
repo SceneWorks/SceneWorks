@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { candleTrainingKernelBlocked } from "./candleGating.js";
+import { candleTrainingKernelBlocked } from "./modelEligibility.js";
 
 // sc-24161: off-Mac, a training target whose kernel has no candle trainer is blocked, read from the
 // server's candle-routed set (never a hardcoded kernel), and the gate is inert on Mac / when the

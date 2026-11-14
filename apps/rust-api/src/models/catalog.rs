@@ -1,6 +1,15 @@
 use super::*;
 
+/// Import request types are an API policy, not the builtin catalog's model-type vocabulary.
+/// A builtin vector model does not provide a generic vector checkpoint import path.
 pub(super) const ALLOWED_MODEL_TYPES: &[&str] = &["image", "video", "audio", "utility"];
+
+#[cfg(test)]
+#[test]
+fn import_type_vocabulary_remains_separate_from_builtin_types() {
+    assert_eq!(ALLOWED_MODEL_TYPES, ["image", "video", "audio", "utility"]);
+    assert!(!ALLOWED_MODEL_TYPES.contains(&"vector"));
+}
 pub(crate) const MODEL_CATALOG_PROBE_CONCURRENCY: usize = 16;
 pub(super) static MODEL_CATALOG_PROBE_PERMITS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
     std::sync::OnceLock::new();
@@ -74,7 +83,17 @@ impl ModelCatalogCache {
 pub(crate) async fn list_models(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<Value>>, ApiError> {
-    Ok(Json(model_catalog_sized(&state).await?))
+    let mut models = model_catalog_sized(&state).await?;
+    // Presentation-only hide for converted builtins. Keep the internal snapshot intact so
+    // explicit-id admission and unfiltered license/source checks still see the model.
+    models.retain(|model| {
+        let Some(id) = model.get("id").and_then(Value::as_str) else {
+            return true;
+        };
+        sceneworks_core::registry::builtin_model_spec(id).is_none()
+            || model.get("hidden").and_then(Value::as_bool) != Some(true)
+    });
+    Ok(Json(models))
 }
 
 /// Select from the current shared catalog before cloning. Linked-source availability is probed
@@ -1541,7 +1560,16 @@ pub(super) fn apply_model_catalog_size_fields(
             Value::Bool(download_size_estimated),
         );
     }
-    refresh_variant_download_sizes(model)
+    refresh_variant_download_sizes(model)?;
+    // SW-7032: the API owns every tier-suggestion / host-floor / resolution memory number the
+    // web shows. Computed last, after the variant, convert-tier, runtime-tier and size
+    // projections it reads; a platform-cleanup tombstone has no tier surface to guide.
+    if let Some(object) = model.as_object_mut() {
+        if object.get("platformCleanupOnly").and_then(Value::as_bool) != Some(true) {
+            sceneworks_core::memory_guidance::apply_to_model_entry(object);
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn apply_model_catalog_entry(
@@ -1777,6 +1805,15 @@ pub(super) fn apply_last_only_video_capability(object: &mut JsonObject) {
     object.insert(
         "supportsLastOnlyImageToVideo".to_owned(),
         Value::Bool(accepts_last_only),
+    );
+    // SW-7032: the MiniMax-H3 turbo adapter surface is the server's own H3 predicate (typed
+    // family for a registered builtin, legacy id prefix otherwise), served so the web does not
+    // restate it.
+    object.insert(
+        "supportsMinimaxH3Turbo".to_owned(),
+        Value::Bool(sceneworks_core::video_request::is_minimax_h3_model(
+            object.get("id").and_then(Value::as_str).unwrap_or_default(),
+        )),
     );
 }
 
@@ -2033,6 +2070,35 @@ pub(super) fn stamp_legacy_import_source_shape(
 
 pub(super) type ModelCatalogWorkItem = (Value, Option<DownloadContext>);
 
+/// Registered builtins use one field-authority rule for catalog, license, and job reads.
+/// Other rows keep the existing manifest merge until they enter the registry.
+pub(crate) fn merge_model_entries_with_registry(
+    builtin: Vec<Value>,
+    user: Vec<Value>,
+) -> Vec<Value> {
+    let builtin_ids: std::collections::HashSet<String> = builtin
+        .iter()
+        .filter_map(|entry| entry.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect();
+    let mut merged = merge_entries_by_id(builtin, user.clone());
+    for entry in &mut merged {
+        let Some(id) = entry.get("id").and_then(Value::as_str).map(str::to_owned) else {
+            continue;
+        };
+        if let Some(spec) = sceneworks_core::registry::builtin_model_spec(&id) {
+            let user_entry = user
+                .iter()
+                .find(|candidate| candidate.get("id").and_then(Value::as_str) == Some(id.as_str()));
+            *entry = spec.project(user_entry);
+        }
+        if builtin_ids.contains(&id) {
+            sceneworks_core::registry::project_builtin_memory_evidence(entry)
+                .expect("validated builtin memory evidence projection");
+        }
+    }
+    merged
+}
+
 pub(super) fn group_model_catalog_work_items(
     work_items: Vec<ModelCatalogWorkItem>,
 ) -> Vec<Vec<ModelCatalogWorkItem>> {
@@ -2062,7 +2128,7 @@ pub(super) fn group_model_catalog_work_items(
 /// this; [`license_acknowledgment_repo_index`] deliberately reads it unfiltered, because a licence
 /// requirement must not depend on which OS is asking. Both manifest reads are mtime/size-cached
 /// (`load_manifest_entries`), so the second consumer costs a stat and a clone.
-pub(super) async fn merged_model_manifest_entries(
+pub(crate) async fn merged_model_manifest_entries(
     state: &AppState,
 ) -> Result<(Vec<Value>, std::collections::HashSet<String>), ApiError> {
     let manifest_dir = state.settings.config_dir.join("manifests");
@@ -2074,7 +2140,10 @@ pub(super) async fn merged_model_manifest_entries(
         .iter()
         .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
         .collect::<std::collections::HashSet<_>>();
-    Ok((merge_entries_by_id(builtin, user), user_model_ids))
+    Ok((
+        merge_model_entries_with_registry(builtin, user),
+        user_model_ids,
+    ))
 }
 
 pub(super) async fn load_model_catalog_inputs(
@@ -2097,12 +2166,19 @@ pub(super) async fn load_model_catalog_inputs(
         .iter()
         .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
         .collect::<std::collections::HashSet<_>>();
-    let decoder_providers = builtin.clone();
-    let builtin_model_ids = builtin
+    let decoder_providers = merge_model_entries_with_registry(builtin.clone(), Vec::new());
+    let mut builtin_model_ids = builtin
         .iter()
         .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
         .collect::<std::collections::HashSet<_>>();
-    let mut models = merge_entries_by_id(builtin, user);
+    let mut models = merge_model_entries_with_registry(builtin, user);
+    for model in &models {
+        if let Some(id) = model.get("id").and_then(Value::as_str) {
+            if sceneworks_core::registry::builtin_model_spec(id).is_some() {
+                builtin_model_ids.insert(id.to_owned());
+            }
+        }
+    }
     // A trained checkpoint (Iris full export) takes its generation surface from its engine's entry
     // on every read, never from a registration-time snapshot.
     for model in &mut models {
@@ -2194,6 +2270,7 @@ pub(super) async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec
         if let Some(object) = model.as_object_mut() {
             apply_imported_provider_surface(object);
             apply_imported_lora_advertisement(object);
+            sceneworks_core::memory_guidance::apply_to_model_entry(object);
         }
     }
     models.extend(external);
@@ -2262,14 +2339,22 @@ pub(crate) async fn resolve_model_manifest_entry(
     };
     let builtin_entry = find(&builtin);
     let user_entry = find(&user);
-    let mut catalog_scope = if builtin_entry.is_some() {
-        Some("builtin")
-    } else if user_entry.is_some() {
-        Some("user")
+    let registered = sceneworks_core::registry::builtin_model_spec(model_id);
+    let mut catalog_scope =
+        if builtin_entry.is_some() || (registered.is_some() && user_entry.is_some()) {
+            Some("builtin")
+        } else if user_entry.is_some() {
+            Some("user")
+        } else {
+            None
+        };
+    let mut entry = if let Some(spec) =
+        registered.filter(|_| builtin_entry.is_some() || user_entry.is_some())
+    {
+        spec.project(user_entry.as_ref())
     } else {
-        None
+        merge_model_manifest_entry(builtin_entry, user_entry)
     };
-    let mut entry = merge_model_manifest_entry(builtin_entry, user_entry);
     if catalog_scope == Some("user") {
         crate::iris_training::overlay_trained_checkpoint_surface(&mut entry, &builtin)?;
     }

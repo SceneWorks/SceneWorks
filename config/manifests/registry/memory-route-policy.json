@@ -1,0 +1,991 @@
+{
+  "schemaVersion": 1,
+  "declaredRoutes": [
+    {
+      "backend": "mlx",
+      "provider": "qwen_image_2_1",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "text_to_image",
+        "edit_image",
+        "image_to_image",
+        "character_image"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "candle",
+      "provider": "qwen_image_2_1",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "text_to_image",
+        "edit_image",
+        "image_to_image",
+        "character_image"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "mlx",
+      "provider": "qwen_image_2_1_turbo",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "text_to_image",
+        "edit_image",
+        "image_to_image",
+        "character_image"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "candle",
+      "provider": "qwen_image_2_1_turbo",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "text_to_image",
+        "edit_image",
+        "image_to_image",
+        "character_image"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "mlx",
+      "provider": "mage_flow_base",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "text_to_image"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "mlx",
+      "provider": "mage_flow",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "text_to_image"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "mlx",
+      "provider": "mage_flow_turbo",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "text_to_image"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "mlx",
+      "provider": "mage_flow_edit_base",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "edit_image"
+      ],
+      "loadProfiles": [
+        "plain"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "mlx",
+      "provider": "mage_flow_edit",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "edit_image"
+      ],
+      "loadProfiles": [
+        "plain"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "mlx",
+      "provider": "mage_flow_edit_turbo",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "edit_image"
+      ],
+      "loadProfiles": [
+        "plain"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "mlx",
+      "provider": "krea_2_turbo",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8",
+        "nvfp4"
+      ],
+      "modes": [
+        "text_to_image"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora",
+        "lora_pid",
+        "pid"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "mlx",
+      "provider": "krea_2_raw",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8",
+        "nvfp4"
+      ],
+      "modes": [
+        "text_to_image"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora",
+        "lora_pid",
+        "pid"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "mlx",
+      "provider": "krea_2_edit",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8",
+        "nvfp4"
+      ],
+      "modes": [
+        "edit_image",
+        "image_to_image"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora",
+        "lora_pid",
+        "pid"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "mlx",
+      "provider": "krea_2_turbo_edit",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8",
+        "nvfp4"
+      ],
+      "modes": [
+        "edit_image",
+        "image_to_image"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora",
+        "lora_pid",
+        "pid"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "mlx",
+      "provider": "flux1_schnell",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8",
+        "nvfp4"
+      ],
+      "modes": [
+        "text_to_image",
+        "style_variations"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora",
+        "lora_pid",
+        "pid"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "mlx",
+      "provider": "flux1_dev",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8",
+        "nvfp4"
+      ],
+      "modes": [
+        "text_to_image",
+        "style_variations"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora",
+        "lora_pid",
+        "pid"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "mlx",
+      "provider": "flux1_dev",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8",
+        "nvfp4"
+      ],
+      "modes": [
+        "character_image"
+      ],
+      "loadProfiles": [
+        "ip_adapter",
+        "lora_ip_adapter",
+        "ip_adapter_pid",
+        "lora_ip_adapter_pid"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "mlx",
+      "provider": "flux1_dev_control",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8",
+        "nvfp4"
+      ],
+      "modes": [
+        "text_to_image",
+        "style_variations",
+        "character_image"
+      ],
+      "loadProfiles": [
+        "single_control",
+        "lora_single_control"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "mlx",
+      "provider": "pulid_flux",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8",
+        "nvfp4"
+      ],
+      "modes": [
+        "character_image"
+      ],
+      "loadProfiles": [
+        "identity"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "mlx",
+      "provider": "flux2_dev",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "text_to_image"
+      ],
+      "loadProfiles": [
+        "plain"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "mlx",
+      "provider": "flux2_dev_edit",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "edit_image",
+        "image_to_image",
+        "character_image",
+        "style_variations"
+      ],
+      "loadProfiles": [
+        "plain"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "mlx",
+      "provider": "flux2_dev_control",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "text_to_image"
+      ],
+      "loadProfiles": [
+        "single_control"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "mlx",
+      "provider": "flux2_klein_9b",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8",
+        "nvfp4"
+      ],
+      "modes": [
+        "text_to_image",
+        "image_to_image"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora",
+        "lora_pid",
+        "pid"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "mlx",
+      "provider": "flux2_klein_9b_edit",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8",
+        "nvfp4"
+      ],
+      "modes": [
+        "edit_image",
+        "character_image",
+        "style_variations"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora",
+        "lora_pid",
+        "pid"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "mlx",
+      "provider": "flux2_klein_9b_kv_edit",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8",
+        "nvfp4"
+      ],
+      "modes": [
+        "edit_image",
+        "character_image",
+        "style_variations"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora",
+        "lora_pid",
+        "pid"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "candle",
+      "provider": "sdxl",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "text_to_image",
+        "style_variations",
+        "edit_image",
+        "image_to_image",
+        "image_inpaint",
+        "image_detail",
+        "character_image"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora",
+        "pid",
+        "lora_pid",
+        "single_control",
+        "lora_single_control",
+        "ip_adapter",
+        "lora_ip_adapter",
+        "ip_adapter_pid",
+        "lora_ip_adapter_pid"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "mlx",
+      "provider": "sana_1600m",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8",
+        "nvfp4"
+      ],
+      "modes": [
+        "text_to_image",
+        "image_to_image"
+      ],
+      "loadProfiles": [
+        "plain"
+      ],
+      "requiresSequentialSelection": true
+    },
+    {
+      "backend": "mlx",
+      "provider": "sana_sprint_1600m",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8",
+        "nvfp4"
+      ],
+      "modes": [
+        "text_to_image",
+        "image_to_image"
+      ],
+      "loadProfiles": [
+        "plain"
+      ],
+      "requiresSequentialSelection": true
+    },
+    {
+      "backend": "candle",
+      "provider": "z_image",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8",
+        "nvfp4"
+      ],
+      "modes": [
+        "text_to_image",
+        "style_variations"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "candle",
+      "provider": "sana_1600m",
+      "tiers": [
+        "bf16"
+      ],
+      "modes": [
+        "text_to_image",
+        "image_to_image"
+      ],
+      "loadProfiles": [
+        "plain"
+      ],
+      "requiresSequentialSelection": true
+    },
+    {
+      "backend": "candle",
+      "provider": "sana_sprint_1600m",
+      "tiers": [
+        "bf16"
+      ],
+      "modes": [
+        "text_to_image",
+        "image_to_image"
+      ],
+      "loadProfiles": [
+        "plain"
+      ],
+      "requiresSequentialSelection": true
+    },
+    {
+      "backend": "candle",
+      "provider": "anima_base",
+      "tiers": [
+        "bf16"
+      ],
+      "modes": [
+        "text_to_image"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "candle",
+      "provider": "anima_aesthetic",
+      "tiers": [
+        "bf16"
+      ],
+      "modes": [
+        "text_to_image"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "candle",
+      "provider": "anima_turbo",
+      "tiers": [
+        "bf16"
+      ],
+      "modes": [
+        "text_to_image"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "candle",
+      "provider": "boogu_image",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "text_to_image"
+      ],
+      "loadProfiles": [
+        "plain"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "candle",
+      "provider": "boogu_image_turbo",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "text_to_image"
+      ],
+      "loadProfiles": [
+        "plain"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "candle",
+      "provider": "boogu_image_edit",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "edit_image"
+      ],
+      "loadProfiles": [
+        "plain"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "candle",
+      "provider": "bernini",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "text_to_image",
+        "edit_image"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "candle",
+      "provider": "chroma1_hd",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "text_to_image"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora",
+        "lora_pid",
+        "pid"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "candle",
+      "provider": "chroma1_base",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "text_to_image"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora",
+        "lora_pid",
+        "pid"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "candle",
+      "provider": "chroma1_flash",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "text_to_image"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora",
+        "lora_pid",
+        "pid"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "candle",
+      "provider": "kolors",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "text_to_image",
+        "edit_image"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora",
+        "lora_pid",
+        "pid"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "candle",
+      "provider": "candle_kolors_ipadapter",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "character_image"
+      ],
+      "loadProfiles": [
+        "ip_adapter",
+        "lora_ip_adapter"
+      ],
+      "requiresSequentialSelection": false,
+      "modelId": "kolors"
+    },
+    {
+      "backend": "candle",
+      "provider": "candle_kolors_control",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "text_to_image",
+        "style_variations",
+        "character_image"
+      ],
+      "loadProfiles": [
+        "single_control",
+        "single_control_pid",
+        "lora_single_control",
+        "lora_single_control_pid"
+      ],
+      "requiresSequentialSelection": false,
+      "modelId": "kolors"
+    },
+    {
+      "backend": "candle",
+      "provider": "ideogram_4",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "text_to_image",
+        "image_to_image",
+        "edit_image",
+        "image_inpaint"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora",
+        "lora_pid",
+        "pid"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "candle",
+      "provider": "ideogram_4_turbo",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "text_to_image",
+        "image_to_image",
+        "edit_image",
+        "image_inpaint"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora",
+        "lora_pid",
+        "pid"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "candle",
+      "provider": "z_image_turbo",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8",
+        "nvfp4"
+      ],
+      "modes": [
+        "text_to_image",
+        "style_variations"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "candle",
+      "provider": "z_image_turbo",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8",
+        "nvfp4"
+      ],
+      "modes": [
+        "edit_image",
+        "image_to_image"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "candle",
+      "provider": "z_image_control",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8",
+        "nvfp4"
+      ],
+      "modes": [
+        "text_to_image",
+        "style_variations"
+      ],
+      "loadProfiles": [
+        "single_control"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "candle",
+      "provider": "z_image_turbo_control",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8",
+        "nvfp4"
+      ],
+      "modes": [
+        "text_to_image",
+        "style_variations"
+      ],
+      "loadProfiles": [
+        "single_control"
+      ],
+      "requiresSequentialSelection": false
+    },
+    {
+      "backend": "candle",
+      "provider": "lens",
+      "tiers": [
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "text_to_image"
+      ],
+      "loadProfiles": [
+        "plain"
+      ],
+      "requiresSequentialSelection": true
+    },
+    {
+      "backend": "candle",
+      "provider": "lens_turbo",
+      "tiers": [
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "text_to_image"
+      ],
+      "loadProfiles": [
+        "plain"
+      ],
+      "requiresSequentialSelection": true
+    },
+    {
+      "backend": "candle",
+      "provider": "qwen_image_edit",
+      "tiers": [
+        "bf16",
+        "q4",
+        "q8"
+      ],
+      "modes": [
+        "edit_image",
+        "character_image"
+      ],
+      "loadProfiles": [
+        "plain",
+        "lora"
+      ],
+      "requiresSequentialSelection": false
+    }
+  ]
+}

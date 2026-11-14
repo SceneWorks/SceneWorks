@@ -69,6 +69,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { recordsNeedingDigest, stampManifest } from "./backfill-closure-digests.mjs";
+import { projectBuiltinMemoryEvidence } from "./lib/builtin-memory-evidence.mjs";
 import { deriveMargins } from "./derive-ladder-margins.mjs";
 import { inferencePinFromCargo } from "./inference-closure-digest.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
@@ -80,6 +81,7 @@ export const SOURCE_PATHS = Object.freeze({
   closures: "config/inference-provider-closures.json",
   evidence: "docs/generated/memory-calibration-evidence.json",
   manifest: "config/manifests/builtin.models.jsonc",
+  registryEvidence: "config/manifests/registry/evidence.json",
   cargo: "Cargo.toml",
   plan: "config/memory-calibration-plan.json",
   mlxAdapter: "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
@@ -1106,6 +1108,7 @@ export async function loadSources(root = ROOT) {
     closuresBody,
     evidenceBody,
     manifestBody,
+    registryEvidenceBody,
     cargoBody,
     planBody,
     mlxAdapter,
@@ -1127,8 +1130,11 @@ export async function loadSources(root = ROOT) {
     liveDigests: validatedInferenceClosures(closuresBody),
     declarations: closures.providers,
     records: JSON.parse(evidenceBody).records,
-    manifest: JSON.parse(stripJsoncComments(manifestBody)),
-    manifestBody,
+    manifest: projectBuiltinMemoryEvidence(
+      JSON.parse(stripJsoncComments(manifestBody)),
+      JSON.parse(registryEvidenceBody),
+    ),
+    manifestBody: registryEvidenceBody,
     plan: JSON.parse(planBody),
     adapterSources: { mlx: mlxAdapter, candle: candleAdapter },
     controlWeightsSource,

@@ -1,5 +1,166 @@
+#[path = "src/registry/assemble.rs"]
+mod assemble;
+#[path = "src/registry/evidence.rs"]
+#[allow(dead_code)]
+mod evidence;
+#[path = "src/registry/exceptions.rs"]
+#[allow(dead_code)]
+mod exceptions;
+#[path = "src/hf_repo_id.rs"]
+mod hf_repo_id;
+#[path = "src/jsonc.rs"]
+mod jsonc;
+#[path = "src/registry/memory_route_policy.rs"]
+mod memory_route_policy;
+#[path = "src/registry/policy.rs"]
+mod policy;
+#[path = "src/registry/spec.rs"]
+#[allow(dead_code)]
+mod spec;
+
+use std::path::{Path, PathBuf};
+
+fn build_registry() {
+    let read = |name: &str| {
+        let path = Path::new("../../config").join(name);
+        println!("cargo:rerun-if-changed={}", path.display());
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    };
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=src/hf_repo_id.rs");
+    println!("cargo:rerun-if-changed=src/registry/assemble.rs");
+    println!("cargo:rerun-if-changed=src/registry/spec.rs");
+    println!("cargo:rerun-if-changed=src/registry/policy.rs");
+    let product_manifest = read("manifests/builtin.models.jsonc");
+    let product_json = jsonc::strip_jsonc_comments(&product_manifest);
+    jsonc::reject_duplicate_keys(&product_json).expect("duplicate builtin manifest key");
+    let product_rows: serde_json::Value =
+        serde_json::from_str(&product_json).expect("invalid builtin model manifest");
+    let evidence_json = read("manifests/registry/evidence.json");
+    let route_policy_json = read("manifests/registry/route-policy.json");
+    let route_policy = policy::parse(&route_policy_json).expect("invalid router product policy");
+    let memory_route_policy =
+        memory_route_policy::parse(&read("manifests/registry/memory-route-policy.json"))
+            .expect("invalid memory route product policy");
+    let preview_json =
+        jsonc::strip_jsonc_comments(&read("manifests/builtin.preview-support.jsonc"));
+    jsonc::reject_duplicate_keys(&preview_json).expect("duplicate preview feature key");
+    let _approved_decisions = exceptions::approved_backend_exceptions();
+    println!("cargo:rerun-if-changed=../../config/manifests/registry/approved-exceptions.json");
+    jsonc::reject_duplicate_keys(&evidence_json).expect("duplicate memory evidence key");
+    evidence::validate_evidence_document(&evidence_json, &product_rows)
+        .expect("invalid builtin memory evidence");
+    let schema: serde_json::Value =
+        serde_json::from_str(&read("../packages/schemas/model-manifest.schema.json"))
+            .expect("invalid model manifest schema");
+    let validator = jsonschema::validator_for(&schema).expect("invalid model manifest schema");
+    if let Some(error) = validator.iter_errors(&product_rows).next() {
+        panic!("invalid v2 product manifest: {error}");
+    }
+    let mut effective = product_rows.clone();
+    effective["schemaVersion"] = serde_json::json!(1);
+    for row in effective["models"]
+        .as_array_mut()
+        .expect("validated model rows")
+    {
+        evidence::project_builtin_memory_evidence(row)
+            .expect("invalid builtin evidence projection");
+    }
+    if let Some(error) = validator.iter_errors(&effective).next() {
+        panic!("invalid effective builtin memory evidence: {error}");
+    }
+    let specs = assemble::assemble(
+        &product_json,
+        &evidence_json,
+        &route_policy_json,
+        &preview_json,
+        &[
+            (
+                "mlx",
+                &read("engine-capabilities/runtime/capabilities.mlx.json"),
+            ),
+            (
+                "candle",
+                &read("engine-capabilities/runtime/capabilities.candle.json"),
+            ),
+        ],
+    )
+    .expect("invalid static model registry");
+    for rule in &memory_route_policy.declared_routes {
+        let known_provider = specs.values().any(|spec| {
+            spec.routes
+                .get(&rule.backend)
+                .is_some_and(|route| route.id == rule.provider)
+                || spec.evidence.get(&rule.backend).is_some_and(|evidence| {
+                    evidence
+                        .memory_strategy_contract
+                        .as_ref()
+                        .is_some_and(|contract| {
+                            contract.get("provider").and_then(serde_json::Value::as_str)
+                                == Some(rule.provider.as_str())
+                                || contract
+                                    .get("implementations")
+                                    .and_then(serde_json::Value::as_array)
+                                    .is_some_and(|implementations| {
+                                        implementations.iter().any(|implementation| {
+                                            implementation
+                                                .get("runtimeProvider")
+                                                .and_then(serde_json::Value::as_str)
+                                                == Some(rule.provider.as_str())
+                                        })
+                                    })
+                        })
+                })
+        });
+        if !known_provider {
+            let linked_model = rule.model_id.as_ref().and_then(|id| specs.get(id));
+            assert!(
+                linked_model.is_some_and(|spec| spec.routes.contains_key(&rule.backend)),
+                "memory route provider {} has no typed native/evidence owner on {}",
+                rule.provider,
+                rule.backend
+            );
+        }
+    }
+    std::fs::write(
+        PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("memory-route-policy.json"),
+        serde_json::to_vec(&memory_route_policy).expect("serialize typed memory route policy"),
+    )
+    .expect("write typed memory route policy");
+    let preview: serde_json::Value =
+        serde_json::from_str(&preview_json).expect("validated preview feature export");
+    let legacy_preview: std::collections::BTreeMap<_, _> = preview["models"]
+        .as_object()
+        .expect("validated preview models")
+        .iter()
+        .filter(|(id, _)| !specs.contains_key(id.as_str()))
+        .map(|(id, lanes)| (id.clone(), lanes.clone()))
+        .collect();
+    std::fs::write(
+        PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("legacy-model-preview.json"),
+        serde_json::to_vec(&legacy_preview).expect("serialize legacy preview features"),
+    )
+    .expect("write legacy preview features");
+    std::fs::write(
+        PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("model-route-policy.rs"),
+        route_policy.rust_constants(),
+    )
+    .expect("write typed route policy constants");
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("model-registry.json");
+    // A host build dependency can enable serde_json's preserve_order feature. The shipped
+    // snapshot has the same bytes under either Cargo feature set.
+    let mut snapshot = serde_json::to_value(&specs).expect("serialize model registry");
+    snapshot.sort_all_objects();
+    std::fs::write(
+        out,
+        serde_json::to_vec_pretty(&snapshot).expect("serialize model registry"),
+    )
+    .expect("write model registry");
+}
+
 // Derive new evidence provenance from the dependency actually selected by this crate.
 fn main() {
+    build_registry();
     println!("cargo:rerun-if-changed=Cargo.toml");
     let manifest = std::fs::read_to_string("Cargo.toml").expect("core manifest");
     let declaration = manifest

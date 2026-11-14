@@ -472,10 +472,10 @@ fn flux2_specs_are_the_resident_rungs_shape_and_are_deliberately_not_streamable(
 /// Flip any arm flag without the manifest or the plan moving and this reds.
 #[test]
 fn the_flux2_arm_table_agrees_with_the_shipped_manifest_and_the_anchor_plan() {
-    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
-        include_str!("../../../../config/manifests/builtin.models.jsonc"),
-    ))
-    .expect("the shipped models manifest parses");
+    let manifest: Value =
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("the shipped models manifest parses")
+            .clone();
     let plan: Value = serde_json::from_str(include_str!(
         "../../../../config/memory-calibration-plan.json"
     ))

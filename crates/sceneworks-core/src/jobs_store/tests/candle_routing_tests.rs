@@ -2263,14 +2263,10 @@ fn qwen_image_2_1_declares_each_lanes_tier_surface_without_merging_them() {
         &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": 4 } }))
     ));
 
-    let manifest: Value = serde_json::from_str(&crate::jsonc::strip_jsonc_comments(
-        crate::builtin_manifests::BUILTIN_MANIFESTS
-            .iter()
-            .find(|(name, _)| *name == "builtin.models.jsonc")
-            .expect("builtin.models.jsonc embedded")
-            .1,
-    ))
-    .expect("builtin.models.jsonc parses");
+    // The production projection, with typed memory evidence merged in (SW-7031), so the
+    // no-measured-ladder assertion below reads the facts a consumer actually receives.
+    let manifest = crate::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+        .expect("builtin.models.jsonc parses");
     let entry = manifest["models"]
         .as_array()
         .expect("models array")

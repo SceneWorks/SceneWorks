@@ -64,28 +64,6 @@ use serde_json::Value;
 // exactly like the wan consts above.
 use platform_runtime::providers::minimax_h3::pipeline::CANVAS_MAX_PIXELS;
 
-/// Every video model in the shipped `builtin.models.jsonc`. A model added or removed without
-/// updating this list trips the count guard in each test, so the check cannot silently stop
-/// covering a model — the same tripwire the sibling
-/// [`shipped_manifest_matches_each_engines_real_geometry`] uses (`models.len() == …`).
-const EXPECTED_VIDEO_IDS: &[&str] = &[
-    "ltx_2_5",
-    "ltx_2_3",
-    "ltx_2_3_eros",
-    "svd",
-    "wan_2_2",
-    "wan_2_2_t2v_14b",
-    "wan_2_2_i2v_14b",
-    "wan_2_2_vace_fun_14b",
-    "bernini",
-    "scail2_14b",
-    "krea_realtime_14b",
-    // MiniMax-H3, both partitions (epic 17137, sc-17158). Both are now tied to the pinned
-    // engine's own `CANVAS_MAX_PIXELS` (sc-19721).
-    "minimax_h3",
-    "minimax_h3_ref",
-];
-
 /// What this guard can say about one model's `limits.maxPixels`.
 ///
 /// The two-state `Option<u64>` this used to be conflated "the manifest must declare exactly this
@@ -211,29 +189,24 @@ fn shipped_video_models() -> Vec<Value> {
         .collect()
 }
 
-/// Assert the shipped video set is exactly [`EXPECTED_VIDEO_IDS`] and return each entry's `limits`
-/// object keyed by id. The count guard catches a model added or removed from the manifest so this
-/// test can't silently stop covering one; the per-id lookup catches a rename.
+/// Check every shipped video against its compiled product identity and return its limits.
+/// `expected_max_pixels` fails closed for a newly shipped model with no pinned engine mapping.
 fn shipped_video_limits() -> std::collections::HashMap<String, Value> {
     let models = shipped_video_models();
-    assert_eq!(
-        models.len(),
-        EXPECTED_VIDEO_IDS.len(),
-        "a video model was added/removed in builtin.models.jsonc — update EXPECTED_VIDEO_IDS and \
-         map its cap/stride to its engine const (sc-12409); do not let it go unchecked"
-    );
-    EXPECTED_VIDEO_IDS
+    models
         .iter()
-        .map(|id| {
-            let entry = models
-                .iter()
-                .find(|m| m.get("id").and_then(Value::as_str) == Some(*id))
-                .unwrap_or_else(|| panic!("{id} present in builtin.models.jsonc"));
-            let limits = entry
+        .map(|entry| {
+            let id = entry.get("id").and_then(Value::as_str).expect("video id");
+            let spec = sceneworks_core::registry::builtin_model_spec(id)
+                .unwrap_or_else(|| panic!("{id} has compiled ModelSpec"));
+            assert_eq!(spec.product.model_type, "video");
+            let limits = spec
+                .product
+                .fields
                 .get("limits")
                 .cloned()
                 .unwrap_or_else(|| panic!("{id} declares a limits object"));
-            ((*id).to_owned(), limits)
+            (id.to_owned(), limits)
         })
         .collect()
 }

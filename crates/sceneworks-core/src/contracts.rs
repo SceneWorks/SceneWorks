@@ -1065,6 +1065,11 @@ pub fn default_video_upscale_model() -> String {
 pub struct WorkerRegisterRequest {
     pub worker_id: String,
     pub gpu_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portable_source_claims:
+        Option<Vec<crate::model_artifacts::portable_binding::PortableSourceClaim>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gpu_name: Option<String>,
     pub capabilities: Vec<WorkerCapability>,
@@ -1079,6 +1084,9 @@ pub struct WorkerRegisterRequest {
 #[serde(rename_all = "camelCase")]
 pub struct WorkerHeartbeatRequest {
     pub status: WorkerStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portable_source_claims:
+        Option<Vec<crate::model_artifacts::portable_binding::PortableSourceClaim>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_job_id: Option<String>,
     pub loaded_models: Vec<String>,
@@ -1366,6 +1374,8 @@ pub struct QueueSummary {
 pub struct WorkerSnapshot {
     pub id: String,
     pub gpu_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
     pub gpu_name: Option<String>,
     pub status: WorkerStatus,
     pub current_job_id: Option<String>,
@@ -1401,6 +1411,12 @@ pub struct WorkerUtilizationSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct ClaimRequest {
     pub worker_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portable_model_binding_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portable_backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portable_platform: Option<String>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }
@@ -1409,6 +1425,9 @@ pub struct ClaimRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ClaimResponse {
     pub job: Option<JobSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portable_model_binding:
+        Option<crate::model_artifacts::portable_binding::PortableRouteBinding>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }

@@ -34,7 +34,169 @@ pub(super) fn public_job_snapshot(mut job: JobSnapshot) -> JobSnapshot {
         redact_selected_text_encoder_paths_in_map(&mut job.result, &selected_paths);
         redact_selected_text_encoder_paths_in_btree_map(&mut job.extra, &selected_paths);
     }
+    redact_manifest_locators_from_job_payload(&mut job.payload);
+    redact_manifest_locators_from_job_payload(&mut job.result);
+    for map in [&mut job.payload, &mut job.result] {
+        map.remove("portableModelBinding");
+        map.remove("portableJobBinding");
+        map.remove(sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY);
+        for value in map.values_mut() {
+            redact_private_binding_markers(value);
+        }
+    }
+    job.extra.remove("portableModelBinding");
+    job.extra.remove("portableJobBinding");
+    job.extra
+        .remove(sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY);
+    for value in job.extra.values_mut() {
+        redact_private_binding_markers(value);
+    }
+    // Worker source guards may include an OS path in a refusal. Public diagnostics keep the
+    // actionable prefix while removing the path and any following private detail.
+    redact_absolute_paths_with(&mut job.message, "[redacted path]");
+    if let Some(error) = job.error.as_mut() {
+        redact_absolute_paths_with(error, "[redacted path]");
+    }
+    if let Some(title) = job.title.as_mut() {
+        redact_absolute_paths_with(title, "[redacted path]");
+    }
     job
+}
+
+pub(super) fn redact_private_binding_markers(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            fields.remove("portableModelBinding");
+            fields.remove("portableJobBinding");
+            fields.remove(sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY);
+            fields.remove("__portableAuxPaths");
+            for child in fields.values_mut() {
+                redact_private_binding_markers(child);
+            }
+        }
+        Value::Array(entries) => {
+            for entry in entries {
+                redact_private_binding_markers(entry);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Worker-local model paths are never part of the public job contract. Keep logical model ids,
+/// component roles, revisions and relative file names while dropping physical install hints from
+/// every resolved model carrier, including companions and trained checkpoint entries.
+fn redact_manifest_locators_from_job_payload(payload: &mut JsonObject) {
+    payload.remove("modelPath");
+    payload.remove("installedPath");
+    payload.remove("sourcePath");
+    payload.remove("secondarySourcePath");
+    payload.remove("targetDir");
+    payload.remove("manifestPath");
+    for (key, value) in payload {
+        redact_nested_manifest_carriers(key, value);
+    }
+}
+
+fn redact_nested_manifest_carriers(key: &str, value: &mut Value) {
+    if matches!(
+        key,
+        "modelManifestEntry"
+            | "baseModelManifestEntry"
+            | "modelManifestEntries"
+            | "loras"
+            | "adapters"
+            | "controls"
+            | "advanced"
+            | "plan"
+    ) {
+        redact_manifest_locators(value);
+        return;
+    }
+    match value {
+        Value::Object(fields) => {
+            for (key, child) in fields {
+                redact_nested_manifest_carriers(key, child);
+            }
+        }
+        Value::Array(entries) => {
+            for entry in entries {
+                redact_nested_manifest_carriers("", entry);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redact_manifest_locators(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            fields.retain(|key, value| {
+                if matches!(
+                    key.as_str(),
+                    "paths"
+                        | "modelPath"
+                        | "installedPath"
+                        | "sourcePath"
+                        | "resolvedTextEncoder"
+                        | "installationRoot"
+                        | "cacheRoot"
+                ) {
+                    return false;
+                }
+                if key.eq_ignore_ascii_case("path") || key.eq_ignore_ascii_case("directory") {
+                    return !value.as_str().is_some_and(is_physical_path);
+                }
+                if (key.ends_with("Path") || key.ends_with("Dir") || key.ends_with("Root"))
+                    && value.as_str().is_some_and(is_physical_path)
+                {
+                    return false;
+                }
+                true
+            });
+            for (key, child) in fields.iter_mut() {
+                // A prompt guide's `path` is the web app's own asset URL (`/prompt-guides/…`,
+                // checked against the web assets at build time), not a host locator.
+                let web_guide = (key == "promptGuide")
+                    .then(|| child.as_object_mut())
+                    .flatten()
+                    .and_then(|guide| guide.remove("path"))
+                    .filter(|path| path.as_str().is_some_and(is_web_prompt_guide_path));
+                redact_manifest_locators(child);
+                if let (Some(path), Some(guide)) = (web_guide, child.as_object_mut()) {
+                    guide.insert("path".to_owned(), path);
+                }
+            }
+        }
+        Value::Array(entries) => {
+            for entry in entries {
+                redact_manifest_locators(entry);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A web-app prompt-guide asset URL: `/prompt-guides/<name>.md`, one plain segment.
+fn is_web_prompt_guide_path(value: &str) -> bool {
+    value.strip_prefix("/prompt-guides/").is_some_and(|name| {
+        !name.is_empty()
+            && name.ends_with(".md")
+            && !name.contains(['/', '\\'])
+            && name != ".."
+            && !name.starts_with('.')
+    })
+}
+
+fn is_physical_path(value: &str) -> bool {
+    value.starts_with('/')
+        || value.starts_with("\\\\")
+        || value.starts_with("file://")
+        || (value.as_bytes().get(1) == Some(&b':')
+            && value
+                .as_bytes()
+                .get(2)
+                .is_some_and(|separator| matches!(separator, b'/' | b'\\')))
 }
 
 #[derive(Clone, Debug)]
@@ -277,7 +439,10 @@ pub(super) fn redact_selected_text_encoder_paths(
 /// Web URLs and relative paths remain intact, while `file://` URLs are filesystem locations and
 /// are therefore private.
 pub(super) fn redact_absolute_paths(value: &mut String) {
-    const REDACTED: &str = "[selected text encoder]";
+    redact_absolute_paths_with(value, "[selected text encoder]");
+}
+
+fn redact_absolute_paths_with(value: &mut String, replacement: &str) {
     let bytes = value.as_bytes();
     let boundary = |index: usize| match index.checked_sub(1).and_then(|i| bytes.get(i)) {
         None => true,
@@ -385,7 +550,7 @@ pub(super) fn redact_absolute_paths(value: &mut String) {
             .checked_sub(1)
             .filter(|previous| matches!(bytes[*previous], b'"' | b'\'' | b'`' | b'<'));
         value.truncate(prefix_end.unwrap_or(index));
-        value.push_str(REDACTED);
+        value.push_str(replacement);
         return;
     }
 }
@@ -517,5 +682,193 @@ pub(super) fn redact_private_job_metadata_from_event(event: &str, value: &mut Va
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod portable_redaction_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// SW-7033 Tier 2: the public job kept dropping `ui.promptGuide.path` because the web asset
+    /// URL `/prompt-guides/flux-dev.md` starts with `/`. It is served data, not a host locator; a
+    /// host path placed in the same field is still removed, as is every real locator.
+    #[test]
+    fn public_job_keeps_the_web_prompt_guide_path_and_still_removes_host_paths() {
+        let mut payload = json!({
+            "modelManifestEntry":{
+                "id":"flux_dev", "paths":{"model":"${HF_CACHE}/SceneWorks/flux1-dev-mlx"},
+                "ui":{"promptGuide":{"path":"/prompt-guides/flux-dev.md",
+                    "sources":[{"label":"card","url":"https://example.invalid/card"}]}}
+            },
+            "modelManifestEntries":[
+                {"id":"user_model","ui":{"promptGuide":{"path":"/home/user/private/guide.md"}}},
+                {"id":"escape","ui":{"promptGuide":{"path":"/prompt-guides/../etc/passwd"}}}
+            ]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        redact_manifest_locators_from_job_payload(&mut payload);
+        let entry = &payload["modelManifestEntry"];
+        assert_eq!(
+            entry["ui"]["promptGuide"]["path"],
+            "/prompt-guides/flux-dev.md"
+        );
+        assert_eq!(
+            entry["ui"]["promptGuide"]["sources"][0]["url"],
+            "https://example.invalid/card"
+        );
+        assert!(entry.get("paths").is_none());
+        for index in [0, 1] {
+            assert!(
+                payload["modelManifestEntries"][index]["ui"]["promptGuide"]
+                    .get("path")
+                    .is_none(),
+                "{}",
+                payload["modelManifestEntries"][index]
+            );
+        }
+    }
+
+    #[test]
+    fn public_job_keeps_logical_identity_but_removes_all_manifest_and_adapter_locators() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = sceneworks_core::jobs_store::JobsStore::new(temp.path().join("jobs.db"));
+        store.initialize().unwrap();
+        let payload = json!({
+            "model":"trained_iris",
+            "modelManifestEntry":{
+                "id":"trained_iris", "modelPath":"/private/trained.safetensors",
+                "installedPath":"C:\\Models\\trained", "paths":{"model":"/private/trained"},
+                "source":{"provider":"local","path":"/private/source"},
+                "components":[{"componentId":"text_encoder","role":"required","path":"/private/encoder"}],
+                "downloads":[{"repo":"owner/model","revision":"a".repeat(40),"files":["q4/weights.safetensors"]}]
+            },
+            "baseModelManifestEntry":{"id":"builtin_base","paths":{"model":"${HF_CACHE}/base"}},
+            "modelManifestEntries":[{"id":"comfy_base","components":[{"componentId":"vae","path":"D:\\Comfy\\vae.safetensors","files":["vae.safetensors"]}]}],
+            "upscale":{"modelManifestEntry":{"id":"iris_restore","modelPath":"/private/restorer.safetensors"}},
+            "loras":[{"id":"adapter","installedPath":"/private/adapter.safetensors"}]
+            ,"plan":{"target":{"baseModel":"builtin_base","baseModelPath":"/private/training-base"}}
+        });
+        let raw = store
+            .create_job(sceneworks_core::jobs_store::CreateJob {
+                job_type: JobType::ImageGenerate,
+                project_id: None,
+                project_name: None,
+                payload: payload.as_object().unwrap().clone(),
+                requested_gpu: "auto".into(),
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+                initial_status: None,
+            })
+            .unwrap();
+        let mut raw_with_echo = raw.clone();
+        raw_with_echo.message =
+            "Portable source refused: /private/worker/weights.safetensors".into();
+        raw_with_echo.error = Some("Cannot confine C:\\private\\worker\\model.safetensors".into());
+        raw_with_echo.title = Some("Source \\\\worker\\share\\model refused".into());
+        raw_with_echo.payload.insert(
+            sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY.into(),
+            json!("private-import-proof"),
+        );
+        raw_with_echo.result.insert(
+            "nested".into(),
+            json!({"portableModelBinding":{"secret":"must-not-leak"},"importClaimCapability":"private-import-proof"}),
+        );
+        let public = public_job_snapshot(raw_with_echo);
+        let encoded = serde_json::to_string(&public.payload).unwrap();
+        for private in ["/private", "C:\\\\Models", "D:\\\\Comfy", "${HF_CACHE}"] {
+            assert!(!encoded.contains(private), "leaked {private}: {encoded}");
+        }
+        assert!(!serde_json::to_string(&public)
+            .unwrap()
+            .contains("must-not-leak"));
+        assert!(!serde_json::to_string(&public)
+            .unwrap()
+            .contains("private-import-proof"));
+        let diagnostics = format!("{} {:?} {:?}", public.message, public.error, public.title);
+        assert!(!diagnostics.contains("/private/worker"));
+        assert!(!diagnostics.contains("C:\\private"));
+        assert!(!diagnostics.contains("\\\\worker"));
+        assert!(diagnostics.contains("[redacted path]"));
+        assert_eq!(public.payload["modelManifestEntry"]["id"], "trained_iris");
+        assert_eq!(
+            public.payload["modelManifestEntry"]["components"][0]["componentId"],
+            "text_encoder"
+        );
+        assert_eq!(
+            public.payload["modelManifestEntry"]["downloads"][0]["files"][0],
+            "q4/weights.safetensors"
+        );
+        assert_eq!(
+            public.payload["baseModelManifestEntry"]["id"],
+            "builtin_base"
+        );
+        assert_eq!(
+            public.payload["modelManifestEntries"][0]["components"][0]["files"][0],
+            "vae.safetensors"
+        );
+        assert_eq!(public.payload["loras"][0]["id"], "adapter");
+        assert_eq!(
+            public.payload["plan"]["target"]["baseModel"],
+            "builtin_base"
+        );
+        assert!(public.payload["plan"]["target"]
+            .get("baseModelPath")
+            .is_none());
+        assert_eq!(
+            public.payload["upscale"]["modelManifestEntry"]["id"],
+            "iris_restore"
+        );
+        assert_eq!(
+            raw.payload["modelManifestEntry"]["modelPath"],
+            "/private/trained.safetensors"
+        );
+        let share = sceneworks_core::workflow_share::build_workflow_share_from(
+            &sceneworks_core::workflow_share::WorkflowAssetFacts {
+                mode: "text_to_image".into(),
+                model: "trained_iris".into(),
+                prompt: "a lighthouse".into(),
+                negative_prompt: String::new(),
+                seed: 7,
+                width: Some(512),
+                height: Some(512),
+            },
+            &raw.payload,
+        );
+        let shared = serde_json::to_string(&share).unwrap();
+        assert_eq!(share.model, "trained_iris");
+        assert!(!shared.contains("/private") && !shared.contains("Comfy"));
+        assert!(!shared.contains("portableModelBinding"));
+        let mut receipt = json!({
+            "model":"trained_iris",
+            "rawAdapterSettings":{
+                "portableModelBinding":{"secret":"must-not-leak"},
+                "advanced":{"__portableAuxPaths":{"reference":"/private/worker/reference.safetensors"}}
+            },
+            "modelProvenance":{"modelId":"trained_iris"}
+        });
+        redact_private_binding_markers(&mut receipt);
+        assert_eq!(receipt["model"], "trained_iris");
+        assert_eq!(receipt["modelProvenance"]["modelId"], "trained_iris");
+        assert!(!serde_json::to_string(&receipt)
+            .unwrap()
+            .contains("must-not-leak"));
+        assert!(!serde_json::to_string(&receipt)
+            .unwrap()
+            .contains("/private/worker/reference.safetensors"));
+        let mut event = serde_json::to_value(raw).unwrap();
+        event["payload"][sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY] =
+            json!("private-import-proof");
+        event["message"] = json!("Portable source refused: /private/worker/weights.safetensors");
+        event["error"] = json!("Cannot confine C:\\private\\worker\\model.safetensors");
+        redact_private_job_metadata_from_event("job.updated", &mut event);
+        assert!(!event.to_string().contains("private-import-proof"));
+        assert!(!serde_json::to_string(&event).unwrap().contains("/private"));
+        assert!(!serde_json::to_string(&event)
+            .unwrap()
+            .contains("C:\\\\private"));
     }
 }

@@ -29,6 +29,21 @@ WINDOWS_SHA = "b50647bb1566df498f8cf4b57fa9288278e8ee1301de37afec3da478783123dd"
 
 STRICT_POLICY = "strict-idle"
 FUNCTIONAL_POLICY = "functional-coexistence"
+# SW-7033 Tier 2 A/B only: physical GPU1 is the host's display GPU, so it is never strictly idle
+# while the desktop session runs. Admit it when it has room for the largest route and is quiet.
+SHARED_DISPLAY_POLICY = "shared-display"
+SHARED_DISPLAY_ACTORS = ("tier2-ab-cuda",)
+SHARED_WINDOW_SAMPLES = 10            # one inventory per second after the UUID lock is held
+SHARED_WINDOW_INTERVAL_SECONDS = 1.0
+SHARED_MAX_SPREAD_MIB = 256           # max - min device memory.used across the window
+SHARED_MAX_GROWTH_MIB = 128           # last - first device memory.used across the window
+SHARED_MAX_UTILIZATION_PERCENT = 30   # display composition stays far below this
+SHARED_MAX_UTILIZATION_SPREAD = 15
+# WDDM reports per-process used_memory as N/A, so a foreign compute ("C"/unknown) process is
+# bounded by the DEVICE memory.used instead: a context holder fits under this, a real job does not.
+SHARED_FOREIGN_COMPUTE_DEVICE_MAX_MIB = 8192
+# Where the driver does report per-process memory, any foreign compute process above this refuses.
+SHARED_FOREIGN_COMPUTE_PROCESS_MAX_MIB = 1024
 
 
 class DeviceIdentity:
@@ -56,6 +71,19 @@ class DeviceIdentity:
 def require_admission_policy(policy, actor, environment, physical_indices, cuda_ordinals, probe_visible):
     if policy == STRICT_POLICY:
         return
+    if policy == SHARED_DISPLAY_POLICY:
+        if actor not in SHARED_DISPLAY_ACTORS:
+            raise RuntimeError("shared-display admission is restricted to the Tier 2 A/B actor")
+        if (environment.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
+                or not environment.get("GITHUB_WORKFLOW_REF", "").startswith(
+                    "SceneWorks/SceneWorks/.github/workflows/memory-catalog-campaign.yml@")):
+            raise RuntimeError("shared-display admission requires the dispatched campaign workflow")
+        if (physical_indices is not None or cuda_ordinals != "0" or probe_visible not in (None, "1")
+                or environment.get("CUDA_DEVICE_ORDER") != "PCI_BUS_ID"
+                or any(environment.get(key) != "1" for key in
+                       ("SCENEWORKS_GPU_ID", "CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"))):
+            raise RuntimeError("shared-display admission requires logical CUDA 0 masked to physical GPU1")
+        return
     if policy != FUNCTIONAL_POLICY or actor != "load-progress-acceptance":
         raise RuntimeError("functional coexistence is restricted to load-progress acceptance")
     workflows = ("memory-catalog-campaign.yml", "load-progress-acceptance.yml")
@@ -80,6 +108,104 @@ def require_functional_binding(binding):
         raise RuntimeError("functional acceptance physical GPU1/UUID mapping is unavailable")
 
 
+def process_memory_mib(xml_text):
+    """Per-(gpu uuid, pid) used_memory in MiB from the driver XML; None where WDDM says N/A."""
+    import xml.etree.ElementTree as ET
+    result = {}
+    for gpu in ET.fromstring(xml_text).findall("gpu"):
+        uuid = (gpu.findtext("uuid") or "").strip()
+        for process in gpu.findall("processes/process_info"):
+            text = (process.findtext("used_memory") or "").strip()
+            match = re.fullmatch(r"([0-9]+) MiB", text)
+            result[(uuid, (process.findtext("pid") or "").strip())] = int(match.group(1)) if match else None
+    return result
+
+
+def gpu_identities(xml_text):
+    """Every GPU's full driver identity for the receipt: bus, UUID, name, display, memory, processes."""
+    import xml.etree.ElementTree as ET
+    rows = []
+    for gpu in ET.fromstring(xml_text).findall("gpu"):
+        text = lambda path: (gpu.findtext(path) or "").strip()
+        rows.append({"pci_bus_id": gpu.get("id"), "uuid": text("uuid"), "name": text("product_name"),
+                     "display_attached": text("display_attached"), "display_active": text("display_active"),
+                     "display_mode": text("display_mode"), "driver_model": text("driver_model/current_dm"),
+                     "memory_total": text("fb_memory_usage/total"), "memory_used": text("fb_memory_usage/used"),
+                     "memory_free": text("fb_memory_usage/free"), "utilization": text("utilization/gpu_util"),
+                     "processes": [{"pid": (p.findtext("pid") or "").strip(), "type": (p.findtext("type") or "").strip(),
+                                    "name": (p.findtext("process_name") or "").strip(),
+                                    "used_memory": (p.findtext("used_memory") or "").strip()}
+                                   for p in gpu.findall("processes/process_info")]})
+    return rows
+
+
+def shared_display_decision(samples, uuid, min_free_mib):
+    """Pure admission rule over a window of (devices, processes, per-process MiB) samples.
+
+    Tolerates display/graphics processes (G, C+G) and a foreign compute process that only holds a
+    context; refuses a large or growing foreign compute footprint, an unstable device, or too
+    little free memory for the largest route plus its margin.
+    """
+    reasons = []
+    rows = []
+    for devices, processes, memory in samples:
+        matches = [row for row in devices if row["uuid"].casefold() == uuid.casefold()]
+        if len(matches) != 1:
+            return False, ["leased GPU UUID missing from a sample"], {}
+        device = matches[0]
+        foreign = [row for row in processes if row[0].casefold() == uuid.casefold()
+                   and (len(row) != 4 or row[3] not in ("G", "C+G"))]
+        rows.append((device, foreign, memory or {}))
+    if len(rows) < 2:
+        return False, ["sampling window too short"], {}
+    used = [device["used_mib"] for device, _, _ in rows]
+    utilization = [device["utilization_percent"] for device, _, _ in rows]
+    last, foreign_last, memory_last = rows[-1]
+    free = last["total_mib"] - last["used_mib"]
+    summary = {"samples": len(rows), "baseline_used_mib": max(used), "min_used_mib": min(used),
+               "free_mib": free, "min_free_mib": min_free_mib, "max_utilization_percent": max(utilization),
+               "foreign_compute": sorted({(row[1], row[2], row[3] if len(row) == 4 else "unknown")
+                                          for _, foreign, _ in rows for row in foreign}),
+               "per_process_memory_reported": any(value is not None for _, _, memory in rows for value in memory.values())}
+    if free < min_free_mib:
+        reasons.append(f"free {free} MiB < required {min_free_mib} MiB")
+    if max(used) - min(used) > SHARED_MAX_SPREAD_MIB:
+        reasons.append(f"memory.used unstable: spread {max(used) - min(used)} MiB > {SHARED_MAX_SPREAD_MIB}")
+    if used[-1] - used[0] > SHARED_MAX_GROWTH_MIB:
+        reasons.append(f"memory.used growing: +{used[-1] - used[0]} MiB over the window")
+    if max(utilization) > SHARED_MAX_UTILIZATION_PERCENT:
+        reasons.append(f"utilization {max(utilization)}% > {SHARED_MAX_UTILIZATION_PERCENT}%")
+    if max(utilization) - min(utilization) > SHARED_MAX_UTILIZATION_SPREAD:
+        reasons.append(f"utilization unstable: spread {max(utilization) - min(utilization)} points")
+    if any(foreign for _, foreign, _ in rows):
+        if max(used) > SHARED_FOREIGN_COMPUTE_DEVICE_MAX_MIB:
+            reasons.append(f"foreign compute process present with device memory.used {max(used)} MiB > "
+                           f"{SHARED_FOREIGN_COMPUTE_DEVICE_MAX_MIB} MiB (per-process memory not attributable)")
+        for _, foreign, memory in rows:
+            for row in foreign:
+                value = memory.get((row[0], row[1]))
+                if value is not None and value > SHARED_FOREIGN_COMPUTE_PROCESS_MAX_MIB:
+                    reasons.append(f"foreign compute pid {row[1]} uses {value} MiB")
+    return not reasons, sorted(set(reasons)), summary
+
+
+def sample_shared_window(guard, out, deadline, uuid, min_free_mib, phase, clock=time.monotonic, sleep=time.sleep):
+    samples = []
+    for index in range(SHARED_WINDOW_SAMPLES):
+        if index:
+            sleep(SHARED_WINDOW_INTERVAL_SECONDS)
+        label = f"{phase}-shared-{index + 1}"
+        devices, processes = guard.inventory(out, label, deadline)
+        xml_file = out / f"{label}-nvidia-smi.xml"
+        memory = process_memory_mib(xml_file.read_text(encoding="utf-8")) if xml_file.exists() else {}
+        samples.append((devices, processes, memory))
+    admitted, reasons, summary = shared_display_decision(samples, uuid, min_free_mib)
+    (out / f"{phase}-shared-window.json").write_text(json.dumps(
+        {"admitted": admitted, "reasons": reasons, "summary": summary}, indent=2, default=list),
+        encoding="utf-8", newline="\n")
+    return admitted, reasons, summary
+
+
 def resource_receipt(actor, command, policy):
     receipt = {"schema_version": 1, "kind": "cuda-execution-resource-lease-v1", "model_inference_proof": False,
                "resource_completed": False, "actor": actor, "argv": command,
@@ -88,10 +214,18 @@ def resource_receipt(actor, command, policy):
     if policy == FUNCTIONAL_POLICY:
         receipt.update(shared_device=True, isolated_device=False, vram_measurement=False,
                        performance_measurement=False, post_child_idle_verified=False)
+    if policy == SHARED_DISPLAY_POLICY:
+        receipt.update(shared_device=True, isolated_device=False, post_child_idle_verified=False,
+                       observation_note="shared display GPU: memory peaks are attributable only above the recorded baseline; times were taken alongside display work")
     return receipt
 
 
 def complete_resource(receipt, result, devices, guard, out, baselines, policy):
+    if policy == SHARED_DISPLAY_POLICY:
+        receipt["post_child_idle_verified"] = False
+        receipt["resource_completed"] = (result["returncode"] == 0 and result["timeout"] is False
+                                         and result.get("owned_tree_empty") is True)
+        return result["returncode"] if result["returncode"] is not None else 124
     if policy == STRICT_POLICY:
         for device in devices:
             guard.verify_idle(device, out, f'after-child-{device["index"]}', baselines[device["uuid"]])
@@ -178,8 +312,10 @@ def release_all(handles, locker):
 
 def claim_uuids(uuids, guard, out, deadline, public, locker,
                 required_indices=None, phase_names=None, clock=time.monotonic, sleep=time.sleep,
-                admission_policy=STRICT_POLICY):
+                admission_policy=STRICT_POLICY, min_free_mib=None):
     expected = sorted(uuids, key=str.casefold)
+    if admission_policy == SHARED_DISPLAY_POLICY and min_free_mib is None:
+        raise RuntimeError("shared-display admission needs --min-free-mib")
     if not expected or len({value.casefold() for value in expected}) != len(expected):
         raise RuntimeError("explicit unique CUDA UUID set is required")
     if not public.is_absolute():
@@ -232,6 +368,16 @@ def claim_uuids(uuids, guard, out, deadline, public, locker,
         try:
             if admission_policy == FUNCTIONAL_POLICY:
                 return selected, handles, {}, clock() - started
+            if admission_policy == SHARED_DISPLAY_POLICY:
+                baselines = {}
+                for device in selected:
+                    phase = (phase_names or {}).get(device["uuid"], f'claimed-device-{device["index"]}')
+                    admitted, reasons, summary = sample_shared_window(guard, out, deadline, device["uuid"],
+                                                                      min_free_mib, phase, clock, sleep)
+                    if not admitted:
+                        raise RuntimeError("shared display GPU not admitted: " + "; ".join(reasons))
+                    baselines[device["uuid"]] = summary
+                return selected, handles, baselines, clock() - started
             baselines = {}
             checked = []
             for device in selected:
@@ -248,6 +394,8 @@ def claim_uuids(uuids, guard, out, deadline, public, locker,
             raise
     if admission_policy == FUNCTIONAL_POLICY:
         raise TimeoutError("exact GPU UUID lock wait exhausted the existing execution budget")
+    if admission_policy == SHARED_DISPLAY_POLICY:
+        raise TimeoutError("shared display GPU never became quiet with enough free memory within the budget")
     raise TimeoutError("exact GPU UUID lock/idle wait exhausted the existing execution budget")
 
 
@@ -384,7 +532,8 @@ def main():
     modes.add_argument("--physical-indices")
     modes.add_argument("--cuda-ordinals", default="0")
     parser.add_argument("--probe-visible")
-    parser.add_argument("--admission-policy", choices=(STRICT_POLICY, FUNCTIONAL_POLICY), default=STRICT_POLICY)
+    parser.add_argument("--admission-policy", choices=(STRICT_POLICY, FUNCTIONAL_POLICY, SHARED_DISPLAY_POLICY), default=STRICT_POLICY)
+    parser.add_argument("--min-free-mib", type=int, help="shared-display only: free memory the largest route needs plus its margin")
     parser.add_argument("--service-url", help="actual loopback service URL; optional host transaction lock")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
@@ -395,6 +544,10 @@ def main():
     require_outermost(environment)
     require_admission_policy(args.admission_policy, args.actor, environment,
                              args.physical_indices, args.cuda_ordinals, args.probe_visible)
+    if (args.admission_policy == SHARED_DISPLAY_POLICY) != (args.min_free_mib is not None):
+        raise RuntimeError("--min-free-mib is required with, and only with, shared-display admission")
+    if args.min_free_mib is not None and not 0 < args.min_free_mib < 1 << 20:
+        raise RuntimeError("--min-free-mib must be a positive MiB count")
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
         raise RuntimeError("original actor argv is required")
@@ -420,14 +573,20 @@ def main():
         binding = resolve_binding(guard, out, deadline, environment, args.physical_indices,
                                   args.cuda_ordinals, args.probe_visible)
         receipt["binding"] = binding
+        if args.admission_policy == SHARED_DISPLAY_POLICY:
+            xml_file = out / "binding-nvidia-smi.xml"
+            if xml_file.exists():
+                receipt["gpu_identities"] = gpu_identities(xml_file.read_text(encoding="utf-8"))
         if args.admission_policy == FUNCTIONAL_POLICY:
             require_functional_binding(binding)
         devices, handles, baselines, waited = claim_uuids([row["uuid"] for row in binding["devices"]],
             guard, out, deadline, Path(os.environ["PUBLIC"]), msvcrt,
             required_indices={row["uuid"]: row["index"] for row in binding["devices"]}
                 if args.admission_policy == FUNCTIONAL_POLICY else None,
-            admission_policy=args.admission_policy)
+            admission_policy=args.admission_policy, min_free_mib=args.min_free_mib)
         receipt["lock_wait_seconds"] = waited
+        if args.admission_policy == SHARED_DISPLAY_POLICY:
+            receipt["shared_admission"] = baselines
         rechecked = resolve_binding(guard, out, deadline, environment, args.physical_indices,
                                     args.cuda_ordinals, args.probe_visible)
         if args.admission_policy == FUNCTIONAL_POLICY:

@@ -1477,8 +1477,51 @@ async fn analyzer_configuration_is_typed_validated_revisioned_and_persistent() {
 
 #[tokio::test]
 async fn catalog_analysis_uses_typed_revisioned_route_and_never_accepts_catalog_paths() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("pinned metadata listener");
+    let address = listener.local_addr().expect("listener address");
+    let metadata = axum::Router::new().fallback(|uri: axum::http::Uri| async move {
+        let path = uri.path();
+        let files: &[&str] = if path.contains("SceneWorks/yolo11m-person-detect-mlx/") {
+            &["yolo11m_fused_mlx.safetensors"]
+        } else if path.contains("SceneWorks/yolo11m-person-detect-onnx/") {
+            &["yolo11m.onnx"]
+        } else if path.contains("SceneWorks/dwpose-onnx/") {
+            &[
+                "yolox_m_8xb8-300e_humanart-c2c7a14a.onnx",
+                "rtmw-dw-x-l_simcc-cocktail14_270e-384x288_20231122.onnx",
+            ]
+        } else if path.contains("SceneWorks/instantid-mlx/") {
+            &["scrfd_10g.safetensors", "arcface_iresnet100.safetensors"]
+        } else {
+            &[]
+        };
+        axum::Json(Value::Array(
+            files
+                .iter()
+                .map(|file| {
+                    json!({
+                        "type": "file",
+                        "path": file,
+                        "size": 1,
+                        "lfs": { "oid": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881" }
+                    })
+                })
+                .collect(),
+        ))
+    });
+    let metadata_server = tokio::spawn(async move {
+        axum::serve(listener, metadata)
+            .await
+            .expect("metadata server");
+    });
+    let endpoint = format!("http://{address}");
+    let _env = HfCacheEnvGuard::set(&[("SCENEWORKS_HUGGINGFACE_BASE_URL", &endpoint)]);
     let temporary = tempfile::tempdir().expect("temp directory");
-    let app = create_app(test_settings(&temporary)).expect("app creates");
+    let settings = test_settings(&temporary);
+    let (app, state) = crate::create_app_with_state(settings.clone()).expect("app creates");
+    *state.test_hooks.huggingface_base_url.lock() = Some(endpoint.clone());
     let (status, created) = request(
         app.clone(),
         "POST",
@@ -1509,6 +1552,35 @@ async fn catalog_analysis_uses_typed_revisioned_route_and_never_accepts_catalog_
     assert_eq!(job["payload"]["catalogId"], id);
     assert_eq!(job["payload"]["analyzerConfigRevision"], 0);
     assert_eq!(job["payload"]["batchSize"], 8);
+    let connection = rusqlite::Connection::open(&settings.jobs_db_path).expect("jobs db opens");
+    let binding_json: String = connection
+        .query_row(
+            "SELECT portable_model_binding_json FROM jobs WHERE id = ?1",
+            [job["id"].as_str().expect("analysis job id")],
+            |row| row.get(0),
+        )
+        .expect("analysis job exists");
+    let binding: Value = serde_json::from_str(&binding_json).expect("catalog binding JSON");
+    let routes = binding["routes"].as_object().expect("frozen worker routes");
+    assert!(!routes.is_empty());
+    for route in routes.values() {
+        let model_ids = route["models"]
+            .as_array()
+            .expect("bound catalog components")
+            .iter()
+            .map(|model| model["modelId"].as_str().expect("bound model id"))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            model_ids,
+            [
+                "person_detector",
+                "dwpose_pose_detector",
+                "instantid_face_stack"
+            ]
+            .into()
+        );
+    }
+    metadata_server.abort();
     assert!(
         job["payload"].get("catalogRoot").is_none() && job["payload"].get("path").is_none(),
         "the worker must resolve catalog identity only through the attached registry"
@@ -1541,6 +1613,56 @@ async fn catalog_analysis_uses_typed_revisioned_route_and_never_accepts_catalog_
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{raw}");
+}
+
+#[tokio::test]
+async fn metadata_only_catalog_analysis_queues_without_model_binding() {
+    let temporary = tempfile::tempdir().expect("temp directory");
+    let settings = test_settings(&temporary);
+    let app = create_app(settings.clone()).expect("app creates");
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/catalogs",
+        json!({"name":"Metadata only","path":temporary.path().join("catalog")}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().expect("catalog id");
+    let mut analyzer = created["analyzerConfig"]["settings"].clone();
+    for key in [
+        "structuredAnalysisEnabled",
+        "visionAnalysisEnabled",
+        "semanticEmbeddingsEnabled",
+    ] {
+        analyzer[key] = json!(false);
+    }
+    let (status, updated) = request(
+        app.clone(),
+        "PUT",
+        &format!("/api/v1/catalogs/{id}/analyzer-config"),
+        json!({"expectedRevision":0,"settings":analyzer}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    let (status, job) = request(
+        app,
+        "POST",
+        &format!("/api/v1/catalogs/{id}/analyze"),
+        json!({"expectedAnalyzerConfigRevision":1,"requestedGpu":"auto"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["type"], "catalog_analysis");
+    let connection = rusqlite::Connection::open(&settings.jobs_db_path).expect("jobs db opens");
+    let binding: Option<String> = connection
+        .query_row(
+            "SELECT portable_model_binding_json FROM jobs WHERE id = ?1",
+            [job["id"].as_str().expect("job id")],
+            |row| row.get(0),
+        )
+        .expect("analysis job exists");
+    assert!(binding.is_none());
 }
 
 #[tokio::test]

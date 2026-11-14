@@ -2817,17 +2817,8 @@ test("Rust Docker builders copy every production generated embed from sceneworks
   }
 });
 
-test("both Rust Docker builders carry the mechanically digested web capability sources", async () => {
+test("both Rust Docker builders carry typed registry inputs", async () => {
   const dockerfile = await source("docker/rust.Dockerfile");
-  const matrix = await source(
-    "crates/sceneworks-core/src/jobs_store/routing/matrix.rs",
-  );
-  const webEmbeds = [
-    ...matrix.matchAll(
-      /include_str!\(\s*"\.\.\/\.\.\/\.\.\/\.\.\/\.\.\/apps\/web\/src\/([^"\n]+)"\s*\)/g,
-    ),
-  ].map((match) => match[1]);
-  assert.ok(webEmbeds.length > 0, "matrix must retain its production web source inputs");
   const stage = (name) => {
     const heading = new RegExp(`^FROM [^\\r\\n]+ AS ${name}\\r?$`, "m").exec(
       dockerfile,
@@ -2840,12 +2831,9 @@ test("both Rust Docker builders carry the mechanically digested web capability s
   for (const name of ["builder", "candle-builder"]) {
     assert.match(
       stage(name),
-      /^COPY apps\/web\/src \.\/apps\/web\/src$/m,
-      `${name} must copy the whole owning source root`,
+      /^COPY config \.\/config$/m,
+      `${name} must copy the product manifest, evidence, and typed runtime exports`,
     );
-  }
-  for (const relative of webEmbeds) {
-    assert.doesNotMatch(relative, /(?:^|\/)\.\.(?:\/|$)/, relative);
   }
 });
 
@@ -3623,9 +3611,9 @@ test("Windows preserves fresh capability facts when content verification fails",
   // The whole scratch DIRECTORY, not an enumerated file list, and that distinction has already
   // been load-bearing once. The dumper writes three files — `capabilities.candle.json`,
   // `audio/capabilities.candle.json`, and the rich `runtime/capabilities.candle.json` — and the
-  // runtime descriptor is the one the backend capability matrix cannot be rebuilt without. The
-  // enumerated two-file spelling this used to assert predates that third file, so an artifact
-  // produced under it looks complete and silently cannot repair the matrix. Pin the directory and
+  // runtime descriptor is an input to the typed model registry. The enumerated two-file spelling
+  // this used to assert predates that third file, so an artifact produced under it looks complete
+  // and silently cannot repair the registry input. Pin the directory and
   // the artifact name the repair instructions actually tell you to download.
   assert.match(tail, /name: backend-capability-facts-candle/);
   assert.match(tail, /path: \$\{\{ runner\.temp \}\}\/engine-capability-facts-verify\s/);

@@ -343,7 +343,8 @@ pub(super) fn krea_control_payload_overlay_path(
 }
 
 /// Resolve the MLX control-branch overlay the `KreaTurboControl` provider loads, downloading on first use.
-/// Order (most specific wins): the `SCENEWORKS_CONTROLNET_KREA` env → an `advanced.controlWeights.path`
+/// Order (most specific wins): the verified portable strict-control path, then the
+/// `SCENEWORKS_CONTROLNET_KREA` env → an `advanced.controlWeights.path`
 /// (a studio-trained / registered LOCAL overlay the API resolved, B4/sc-10165) → an
 /// `advanced.controlWeights.{repo,filename}` hosted override / the default published MLX overlay, fetched
 /// into the app cache. The MLX twin of the candle `ensure_krea_control_weights`.
@@ -353,11 +354,12 @@ pub(super) async fn ensure_krea_control_weights(
     job: &JobSnapshot,
     request: &ImageRequest,
 ) -> WorkerResult<(PathBuf, bool)> {
-    if let Ok(p) = std::env::var(KREA_CONTROL_WEIGHTS_ENV) {
-        let p = PathBuf::from(p.trim());
-        if p.is_file() {
-            return Ok((p, false));
-        }
+    let env_override = std::env::var(KREA_CONTROL_WEIGHTS_ENV).ok();
+    if let Some(path) = crate::portable_aux_sources::selected_krea_control_override(
+        &request.advanced,
+        env_override.as_deref(),
+    )? {
+        return Ok((path, false));
     }
     if let Some(p) = krea_control_payload_overlay_path(settings, request)? {
         if p.is_file() {

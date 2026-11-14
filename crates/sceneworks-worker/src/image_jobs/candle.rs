@@ -1022,13 +1022,7 @@ async fn generate_candle_registry_stream_using(
     // `Keep`. Downtiering NVFP4 to q4/q8 would silently swap the numerics of an explicitly-picked tier —
     // exactly the creative-choice violation SC#5 forbids. Pinned by
     // `nvfp4_tier_is_never_downtiered_by_the_capability_clamp`.
-    let explicit_pick = (matches!(request.model.as_str(), "flux_schnell" | "flux_dev")
-        && request.advanced.contains_key("mlxQuantize"))
-        || request
-            .advanced
-            .get("mlxQuantizeExplicit")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+    let explicit_pick = candle_tier_pick_is_exact(&request.model, &request.advanced);
     // FLUX 3's package is request-named and is gated as named: rejected before load if it does
     // not fit, never downtiered to a package the request did not choose.
     if convrot.is_none() && !explicit_pick && flux3_plan.is_none() {
@@ -2732,4 +2726,19 @@ async fn generate_candle_registry_stream_using(
         asset_writes,
     )
     .await
+}
+
+/// Whether the Candle capability downtier must keep the resolved tier: an explicit pick
+/// (`mlxQuantizeExplicit`, or any `mlxQuantize` on the FLUX.1 packed turnkeys), or a portable job
+/// whose verified binding froze a tier. The latter is served in place from the hub snapshot, so a
+/// downtier would load a sibling tier the guard never verified; such a job is gated as bound
+/// (fits, or is refused before load).
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+pub(crate) fn candle_tier_pick_is_exact(model: &str, advanced: &crate::JsonObject) -> bool {
+    (matches!(model, "flux_schnell" | "flux_dev") && advanced.contains_key("mlxQuantize"))
+        || advanced
+            .get("mlxQuantizeExplicit")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        || sceneworks_core::payload_util::portable_bound_tier_bits(advanced).is_some()
 }

@@ -17,6 +17,49 @@ struct Fixture {
 
 const WORKER: &str = "worker-1";
 
+/// The portable source binding the API freezes at admission. Since the typed model registry an
+/// unbound model job is unclaimable, so the fixture job carries a pinned-revision binding for the
+/// one route its worker speaks (Candle on Linux), as `create_image_job` stores it.
+fn admitted_binding(model_id: &str) -> Value {
+    use sceneworks_core::model_artifacts::portable_binding::{
+        canonical_authored_options_sha256, PortableArtifactFile, PortableArtifactMember,
+        PortableJobBinding, PortableModelBinding, PortableRouteBinding, PortableSourceIdentity,
+    };
+    use sceneworks_core::model_artifacts::{ArtifactIdentity, ArtifactMemberRole};
+    let authored = json!({ "model": model_id });
+    let member = PortableArtifactMember {
+        role: ArtifactMemberRole::Primary,
+        component_id: None,
+        source: PortableSourceIdentity::Revision {
+            identity: ArtifactIdentity::pinned("fixture/model", "1".repeat(40), "default")
+                .expect("pinned fixture identity"),
+        },
+        tier: None,
+        files: vec![PortableArtifactFile {
+            relative_path: "weights.safetensors".into(),
+            size_bytes: 1,
+            sha256: format!("sha256:{}", "a".repeat(64)),
+        }],
+    };
+    let model = PortableModelBinding::new(
+        "modelManifestEntry",
+        model_id,
+        "candle",
+        "default",
+        None,
+        canonical_authored_options_sha256(&authored).expect("authored digest"),
+        vec![member],
+    )
+    .expect("fixture model binding");
+    let route = PortableRouteBinding::new("candle", "linux", vec![model]).expect("fixture route");
+    let routes = [(route.key(), route)].into_iter().collect();
+    serde_json::to_value(PortableJobBinding::new(authored, routes).expect("fixture binding"))
+        .expect("fixture binding serializes")
+}
+
+/// A shipped model the Candle image lane serves; these tests are about result items, not routing.
+const FIXTURE_MODEL: &str = "z_image_turbo";
+
 /// A store with one image job claimed by `WORKER`.
 fn fixture() -> Fixture {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -24,36 +67,52 @@ fn fixture() -> Fixture {
     let store = JobsStore::new(&db_path);
     store.initialize().expect("store initializes");
     store
-        .register_worker(RegisterWorker {
-            worker_id: WORKER.to_owned(),
-            gpu_id: "gpu-0".to_owned(),
-            gpu_name: None,
-            capabilities: vec![WorkerCapability::ImageGenerate],
-            loaded_models: Vec::new(),
-            utilization: None,
-        })
+        .register_worker_with_platform(
+            RegisterWorker {
+                worker_id: WORKER.to_owned(),
+                gpu_id: "gpu-0".to_owned(),
+                gpu_name: None,
+                capabilities: vec![
+                    WorkerCapability::ImageGenerate,
+                    WorkerCapability::Unknown("candle".to_owned()),
+                ],
+                loaded_models: Vec::new(),
+                utilization: None,
+            },
+            Some("linux"),
+        )
         .expect("worker registers");
     store
-        .create_job(CreateJob {
-            job_type: JobType::ImageGenerate,
-            project_id: None,
-            project_name: None,
-            payload: json!({ "prompt": "mist over hills" })
-                .as_object()
-                .expect("object")
-                .clone(),
-            requested_gpu: "auto".to_owned(),
-            source_job_id: None,
-            duplicate_of_job_id: None,
-            attempts: 1,
-            initial_status: None,
-        })
+        .create_job_with_portable_binding(
+            CreateJob {
+                job_type: JobType::ImageGenerate,
+                project_id: None,
+                project_name: None,
+                payload: json!({ "prompt": "mist over hills", "model": FIXTURE_MODEL })
+                    .as_object()
+                    .expect("object")
+                    .clone(),
+                requested_gpu: "auto".to_owned(),
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+                initial_status: None,
+            },
+            None,
+            None,
+            Some(&admitted_binding(FIXTURE_MODEL)),
+        )
         .expect("job creates");
-    let job_id = store
-        .claim_next_job(WORKER)
-        .expect("claim succeeds")
-        .expect("job claimed")
-        .id;
+    let (claimed, _, _) = store
+        .claim_next_job_routed_with_portable_binding(
+            WORKER,
+            false,
+            sceneworks_core::model_artifacts::portable_binding::PORTABLE_MODEL_BINDING_VERSION,
+            Some("candle"),
+            Some("linux"),
+        )
+        .expect("claim succeeds");
+    let job_id = claimed.expect("job claimed").id;
     Fixture {
         store,
         db_path,

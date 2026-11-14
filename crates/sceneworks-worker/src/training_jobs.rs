@@ -2089,18 +2089,36 @@ fn apply_latent_perceptual(
         // decoder, or none for a trainer that decodes through its own VAE.
         config.perceptual_decoder_dir =
             perceptual_decoder_dir(settings, engine_id, "The VAE anchor loss")?;
-        let vae_dir = crate::model_jobs::huggingface_pinned_snapshot_dir(
-            &settings.data_dir,
-            FLUX2_VAE_MODEL.repo,
-            FLUX2_VAE_MODEL.revision,
-        )
-        .and_then(|snapshot| {
-            FLUX2_VAE_TIER_DIRS
-                .iter()
-                .map(|tier| snapshot.join(tier))
-                .find(|dir| dir.join("diffusion_pytorch_model.safetensors").is_file())
-        })
-        .ok_or_else(|| not_installed(&FLUX2_VAE_MODEL, "The VAE anchor loss"))?;
+        let vae_dir = if let Some(paths) = plan.extra.get("__portableAuxPaths") {
+            let path = paths
+                .get(FLUX2_VAE_MODEL.id)
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload(
+                        "portable FLUX.2 VAE anchor is not bound".to_owned(),
+                    )
+                })?;
+            if !path.join("diffusion_pytorch_model.safetensors").is_file() {
+                return Err(WorkerError::InvalidPayload(
+                    "portable FLUX.2 VAE anchor has no weight file".to_owned(),
+                ));
+            }
+            path
+        } else {
+            crate::model_jobs::huggingface_pinned_snapshot_dir(
+                &settings.data_dir,
+                FLUX2_VAE_MODEL.repo,
+                FLUX2_VAE_MODEL.revision,
+            )
+            .and_then(|snapshot| {
+                FLUX2_VAE_TIER_DIRS
+                    .iter()
+                    .map(|tier| snapshot.join(tier))
+                    .find(|dir| dir.join("diffusion_pytorch_model.safetensors").is_file())
+            })
+            .ok_or_else(|| not_installed(&FLUX2_VAE_MODEL, "The VAE anchor loss"))?
+        };
         config.vae_anchor = gen_core::VaeAnchorConfig {
             schedule: schedule(va),
             model_dir: Some(vae_dir),
@@ -2542,7 +2560,7 @@ fn engine_trainer_id(plan: &TrainingPlan) -> Option<&'static str> {
 }
 
 /// Pure production mapping used by both dispatch and matching-platform capability facts.
-pub(crate) fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'static str> {
+pub fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'static str> {
     match kernel {
         "moss_image_lora" => match base_model {
             "moss_image_base" => Some("moss_image_base"),
@@ -3104,38 +3122,23 @@ fn training_text_encoder(engine_id: &str, weights_dir: &std::path::Path) -> Opti
     None
 }
 
-/// The shipped `builtin.models.jsonc` entry for `model_id`, parsed from the embedded manifest — the
+/// The shipped builtin entry for `model_id`, as the shared embedded catalog projects it — the
 /// source of truth for a base model's pinned `coRequisite` downloads (the app seeds its live catalog
-/// from these bytes). The training plan carries the base model id, not its manifest entry, so the trainer
-/// resolves components off this. `None` when the id is not a builtin model.
+/// from the same projection). The training plan carries the base model id, not its manifest entry,
+/// so the trainer resolves components off this. `None` when the id is not a builtin model.
 ///
 /// Compiled on every build (not just the macOS/candle trainer lanes): the pre-loader model-source
 /// guard resolves a plan-backed imported checkpoint's resident base model off this too
-/// (sc-22329), and the guard runs everywhere.
-///
-/// The parse is memoized because that guard call is on the PER-JOB path — including for imported
-/// jobs whose row is discarded moments later for missing receipts — where it would otherwise
-/// comment-strip and parse the whole embedded catalog every time. The bytes are a compile-time
-/// constant, so one parse can serve the process.
+/// (sc-22329), and the guard runs everywhere. The core accessor memoizes its parse, so this per-job
+/// call does not re-parse the catalog.
 pub(crate) fn builtin_model_manifest_entry(model_id: &str) -> Option<serde_json::Value> {
-    static MODELS: std::sync::OnceLock<Option<serde_json::Value>> = std::sync::OnceLock::new();
-    MODELS
-        .get_or_init(|| {
-            let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-                .iter()
-                .find(|(name, _)| *name == "builtin.models.jsonc")
-                .map(|(_, contents)| *contents)?;
-            serde_json::from_str::<serde_json::Value>(
-                &sceneworks_core::jsonc::strip_jsonc_comments(raw),
-            )
-            .ok()
-        })
-        .as_ref()?
-        .get("models")?
-        .as_array()?
-        .iter()
-        .find(|entry| entry.get("id").and_then(serde_json::Value::as_str) == Some(model_id))
+    // The shared, memoized production projection: product row plus its typed memory and download
+    // evidence (`config/manifests/registry/evidence.json`). The raw jsonc bytes no longer carry
+    // measured memory facts or download footprints (SW-7031), so reading them here would hand a
+    // consumer an entry with those facts silently missing.
+    sceneworks_core::builtin_manifests::builtin_model_entry(model_id)
         .cloned()
+        .map(serde_json::Value::Object)
 }
 
 /// Resolve a trainer's caller-staged components (epic 13657, sc-13682) from the base model's pinned
@@ -3171,12 +3174,51 @@ fn resolve_trainer_components(
     engine_id: &str,
     base_model_id: &str,
     settings: &Settings,
+    bound_aux_paths: Option<&Value>,
 ) -> WorkerResult<std::collections::BTreeMap<String, WeightsSource>> {
+    // Seed any component the portable guard already verified and staged into
+    // `__portableAuxPaths` BEFORE consulting the HF cache (SW-7030, reviews
+    // 4533688101 & 4533885136): Iris rank processes construct fresh settings
+    // and do not inherit the coordinator's process-global overlay, so
+    // disconnecting or mutating the original HF library after staging must
+    // neither fail rank startup nor substitute unverified bytes.
+    let mut prebound = std::collections::BTreeMap::new();
+    if let Some(paths) = bound_aux_paths.and_then(Value::as_object) {
+        if let Some(descriptor) = crate::inference_runtime::media_descriptor(engine_id) {
+            for &component_id in descriptor.required_components {
+                if let Some(source) = paths
+                    .get(component_id)
+                    .and_then(Value::as_str)
+                    .map(PathBuf::from)
+                    .map(bound_component_weights_source)
+                {
+                    prebound.insert(component_id.to_owned(), source);
+                }
+            }
+        }
+        if !prebound.contains_key("text_encoder") {
+            if let Some(source) = paths
+                .get("text_encoder")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+                .map(bound_component_weights_source)
+            {
+                prebound.insert("text_encoder".to_owned(), source);
+            }
+        }
+    }
     let Some(descriptor) = crate::inference_runtime::media_descriptor(engine_id) else {
-        return Ok(std::collections::BTreeMap::new());
+        return Ok(prebound);
     };
     if descriptor.required_components.is_empty() {
-        return Ok(std::collections::BTreeMap::new());
+        return Ok(prebound);
+    }
+    if descriptor
+        .required_components
+        .iter()
+        .all(|component_id| prebound.contains_key(*component_id))
+    {
+        return Ok(prebound);
     }
     let manifest_entry = builtin_model_manifest_entry(base_model_id).ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
@@ -3184,12 +3226,22 @@ fn resolve_trainer_components(
              '{engine_id}' components from"
         ))
     })?;
-    crate::model_jobs::resolve_co_requisites_for_tier(
+    crate::model_jobs::resolve_co_requisites_for_tier_with_prebound(
         &descriptor,
         &manifest_entry,
         settings,
         Some(TRAINING_COMPONENT_TIER),
+        &prebound,
     )
+}
+
+#[cfg(native_lane)]
+fn bound_component_weights_source(path: PathBuf) -> WeightsSource {
+    if path.is_file() {
+        WeightsSource::File(path)
+    } else {
+        WeightsSource::Dir(path)
+    }
 }
 
 /// Everything a trainer's [`LoadSpec`] is built from, resolved from the plan before any weights
@@ -3197,6 +3249,32 @@ fn resolve_trainer_components(
 /// components (the base model's pinned `coRequisite`s and, for an Iris REPA run, the integrity-checked
 /// DINOv2 teacher TRAINING resource). Shared by the in-process trainer and every Iris rank process
 /// (sc-25689), so they can never load different inputs.
+#[cfg(native_lane)]
+fn flux3_trusted_training_base(settings: &Settings, weights_dir: &Path) -> WorkerResult<PathBuf> {
+    use sceneworks_core::training::flux3::{BASE_ID, BASE_REPO, BASE_REVISION};
+    let trusted = settings
+        .verified_revision_source(BASE_ID, BASE_REPO, BASE_REVISION)
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            crate::flux3_receipted_snapshot(&settings.data_dir, BASE_REPO, BASE_REVISION, BASE_ID)
+        })
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "FLUX.3 training requires the installed receipt-backed publisher base or a verified portable source at its pinned revision.".to_owned(),
+            )
+        })?;
+    let actual = std::fs::canonicalize(weights_dir)
+        .map_err(|error| WorkerError::InvalidPayload(format!("FLUX.3 baseModelPath: {error}")))?;
+    let expected = std::fs::canonicalize(&trusted)
+        .map_err(|error| WorkerError::InvalidPayload(format!("FLUX.3 publisher base: {error}")))?;
+    if actual != expected {
+        return Err(WorkerError::InvalidPayload(
+            "FLUX.3 baseModelPath does not name the pinned publisher training base.".to_owned(),
+        ));
+    }
+    Ok(trusted)
+}
+
 #[cfg(native_lane)]
 pub(crate) struct TrainerLoadInputs {
     weights_dir: PathBuf,
@@ -3217,37 +3295,80 @@ impl TrainerLoadInputs {
             "Training baseModelPath",
         )?;
         if engine_id == "flux3_klein_base" {
-            use sceneworks_core::training::flux3::{BASE_ID, BASE_REPO, BASE_REVISION};
-            let trusted = crate::flux3_receipted_snapshot(&settings.data_dir, BASE_REPO, BASE_REVISION, BASE_ID)
-                .ok_or_else(|| WorkerError::InvalidPayload("FLUX.3 training requires the installed receipt-backed publisher base at its pinned revision.".to_owned()))?;
-            let actual = std::fs::canonicalize(&weights_dir).map_err(|error| {
-                WorkerError::InvalidPayload(format!("FLUX.3 baseModelPath: {error}"))
-            })?;
-            let expected = std::fs::canonicalize(&trusted).map_err(|error| {
-                WorkerError::InvalidPayload(format!("FLUX.3 publisher base: {error}"))
-            })?;
-            if actual != expected {
-                return Err(WorkerError::InvalidPayload(
-                    "FLUX.3 baseModelPath does not name the pinned publisher training base."
-                        .to_owned(),
-                ));
-            }
-            crate::flux3_runtime_bundle_check(&trusted, BASE_ID)
+            let trusted = flux3_trusted_training_base(settings, &weights_dir)?;
+            crate::flux3_runtime_bundle_check(&trusted, sceneworks_core::training::flux3::BASE_ID)
                 .map_err(WorkerError::InvalidPayload)?;
         }
         // LTX-2.3's Gemma-3 text encoder lives OUTSIDE `weights_dir` — thread the bundled sibling onto
         // the trainer `LoadSpec` so a self-contained install trains without a separate gemma download
         // (sc-9989).
-        let text_encoder = training_text_encoder(engine_id, &weights_dir);
+        let text_encoder =
+            if engine_id == "ltx_2_3" && plan.extra.contains_key("__portableAuxPaths") {
+                let path = plan
+                    .extra
+                    .get("__portableAuxPaths")
+                    .and_then(|paths| paths.get("ltx_training_text_encoder"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        WorkerError::InvalidPayload(
+                            "portable LTX training text encoder is not bound".to_owned(),
+                        )
+                    })?;
+                Some(WeightsSource::Dir(PathBuf::from(path)))
+            } else {
+                training_text_encoder(engine_id, &weights_dir)
+            };
         // Caller-staged model components (epic 13657, sc-13682): the base model's pinned
         // `coRequisite` downloads the trainer's engine consumes — SDXL's CLIP-L/bigG tokenizers +
         // fp16-fix VAE on candle, Iris' Qwen3-VL text encoder. A missing one fails the job with an
         // actionable error naming the component id + repo.
-        let mut components =
-            resolve_trainer_components(engine_id, &plan.target.base_model, settings)?;
+        let mut components = resolve_trainer_components(
+            engine_id,
+            &plan.target.base_model,
+            settings,
+            plan.extra.get("__portableAuxPaths"),
+        )?;
         // Iris REPA (sc-25689): the frozen teacher is a separately installed TRAINING resource,
         // re-verified (size + sha256) before every run and never downloaded here.
-        if let Some(teacher) = crate::iris_curricula::repa_teacher_component(settings, plan)? {
+        let bound_teacher = plan
+            .extra
+            .get("__portableAuxPaths")
+            .and_then(|paths| paths.get("repa_teacher"))
+            .and_then(Value::as_str)
+            .map(PathBuf::from);
+        if plan.extra.contains_key("__portableAuxPaths")
+            && sceneworks_core::training::iris::is_iris_training_kernel(&plan.target.kernel)
+            && sceneworks_core::training::iris::curricula::iris_repa_enabled(
+                &sceneworks_core::training::iris::iris_options(&plan.config)
+                    .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?,
+            )
+            && bound_teacher.is_none()
+        {
+            return Err(WorkerError::InvalidPayload(
+                "portable Iris REPA teacher is not bound".to_owned(),
+            ));
+        }
+        let teacher = if let Some(path) = bound_teacher {
+            let dir = if path.is_file() {
+                path.parent()
+                    .ok_or_else(|| {
+                        WorkerError::InvalidPayload(
+                            "portable REPA teacher path has no parent".to_owned(),
+                        )
+                    })?
+                    .to_path_buf()
+            } else {
+                path
+            };
+            crate::iris_curricula::verify_repa_teacher_file(
+                &dir.join(sceneworks_core::training::iris::curricula::IRIS_REPA_TEACHER_FILE),
+            )
+            .map_err(WorkerError::InvalidPayload)?;
+            Some(WeightsSource::Dir(dir))
+        } else {
+            crate::iris_curricula::repa_teacher_component(settings, plan)?
+        };
+        if let Some(teacher) = teacher {
             components.insert(
                 gen_core_iris::train::repa::TEACHER_COMPONENT.to_owned(),
                 teacher,
@@ -3470,8 +3591,14 @@ pub(crate) async fn run_training_execution_drive_observing_cancel(
         Some(objective) => {
             let task_settings = settings.clone();
             let config = plan.config.clone();
+            let bound_aux_paths = plan.extra.get("__portableAuxPaths").cloned();
             let resolved = crate::load_progress::spawn_blocking(move || {
-                crate::iris_task_training::task_load_inputs(&task_settings, objective, &config)
+                crate::iris_task_training::task_load_inputs_bound(
+                    &task_settings,
+                    objective,
+                    &config,
+                    bound_aux_paths.as_ref(),
+                )
             })
             .await
             .map_err(|error| task_join_error("Iris training resource check", error))
@@ -6604,31 +6731,10 @@ mod tests {
         assert_eq!(mapped.gradient_noise_gamma, 0.75);
     }
 
-    /// Every SceneWorks training kernel the worker can route, with a base model it accepts.
-    #[cfg(native_lane)]
-    const ROUTED_TRAINING_TARGETS: &[(&str, &str)] = &[
-        ("z_image_lora", "z_image_turbo"),
-        ("sdxl_lora", "sdxl"),
-        ("kolors_lora", "kolors"),
-        ("lens_lora", "lens"),
-        ("krea_lora", "krea_2_raw"),
-        ("krea_control", "krea_2_raw"),
-        ("sd3_lora", "sd3_5_large"),
-        ("sd3_lora", "sd3_5_medium"),
-        ("ltx_mlx_lora", "ltx_2_3"),
-        ("ltx_mlx_lora", "ltx_2_5"),
-        ("wan_lora", "wan_2_2"),
-        ("wan_moe_lora", "wan_2_2_t2v_14b"),
-        ("wan_moe_lora", "wan_2_2_i2v_14b"),
-        ("anima_lora", "anima_base"),
-        ("mage_flow_lora", "mage_flow_base"),
-    ];
-
     /// sc-24826/sc-24827 (epic 2123 E3/E5): the shared dry/real preflight admits weight noise and
-    /// gradient noise on every LoRA/LoKr trainer the active runtime registers (S2 put both on every
-    /// trainer, both backends), refuses them on a trainer that does not declare them (the Krea
-    /// control-branch trainer), refuses them with a full base fine-tune, and refuses out-of-range /
-    /// malformed values.
+    /// gradient noise on every target that advertises them and whose trainer is registered on this
+    /// backend, refuses them on the Krea control-branch trainer, refuses them with a full base
+    /// fine-tune, and refuses out-of-range / malformed values.
     #[cfg(native_lane)]
     #[test]
     fn preflight_gates_adapter_noise_on_the_trainer_descriptor() {
@@ -6651,10 +6757,36 @@ mod tests {
 
         let mut admitted = 0;
         let mut refused = 0;
-        for &(kernel, base) in ROUTED_TRAINING_TARGETS {
+        for target in sceneworks_core::training::builtin_training_targets()
+            .targets
+            .into_iter()
+            .filter(|target| {
+                sceneworks_core::training::target_supports_weight_noise(target)
+                    || sceneworks_core::training::target_supports_gradient_noise(target)
+                    || target.output_kind
+                        == sceneworks_core::training::TrainingOutputKind::ControlBranch
+            })
+        {
+            let kernel = target.kernel.as_str();
+            let base = target.base_model.as_str();
             let engine_id = engine_trainer_id_for(kernel, base).expect("routed kernel");
             let Some(descriptor) = crate::inference_runtime::trainer_descriptor(engine_id) else {
                 continue; // not registered on this backend (e.g. the candle-only Krea control trainer)
+            };
+            // The target defaults as this backend's API serves them: a Candle host projects them
+            // onto what its trainer executes (no checkpointing or previews for the dense trainers).
+            let mut defaults = target.defaults.clone();
+            if descriptor.backend == "candle" {
+                sceneworks_core::training::apply_candle_training_defaults(kernel, &mut defaults);
+            }
+            let target_plan = |network: &str, key: &str, technique_value: Value| {
+                let mut value = plan_json(dir.path(), kernel, base, network, &[&image]);
+                value["target"]["targetId"] = json!(target.id);
+                value["target"]["baseModelRepo"] = json!(target.base_model_repo);
+                value["config"] = serde_json::to_value(&defaults).expect("target defaults");
+                value["config"]["advanced"]["networkType"] = json!(network);
+                value["config"]["advanced"][key] = technique_value;
+                parse(value)
             };
             let network = if descriptor.supports_lora {
                 "lora"
@@ -6663,18 +6795,21 @@ mod tests {
             };
             // Off is always admitted — the gate must not refuse a plan that does not ask for it.
             for (key, _, _) in techniques.clone() {
-                validate_training_target_config(&plan(kernel, base, network, key, json!(0)))
+                validate_training_target_config(&target_plan(network, key, json!(0)))
                     .unwrap_or_else(|e| panic!("{kernel}/{base}: {key}=0 refused: {e}"));
             }
-            let adapter_trainer = descriptor.supports_lora || descriptor.supports_lokr;
+            let adapter_trainer = sceneworks_core::training::target_supports_weight_noise(&target)
+                && sceneworks_core::training::target_supports_gradient_noise(&target);
             assert_eq!(
-                descriptor.techniques.weight_noise && descriptor.techniques.gradient_noise,
-                adapter_trainer,
-                "{engine_id}: every LoRA/LoKr trainer declares both adapter-noise techniques; a \
-                 non-adapter trainer declares neither"
+                descriptor.techniques.weight_noise, adapter_trainer,
+                "{engine_id}: trainer weight-noise capability disagrees with the target"
+            );
+            assert_eq!(
+                descriptor.techniques.gradient_noise, adapter_trainer,
+                "{engine_id}: trainer gradient-noise capability disagrees with the target"
             );
             for (key, on, name) in techniques.clone() {
-                let request = plan(kernel, base, network, key, on);
+                let request = target_plan(network, key, on);
                 if adapter_trainer {
                     validate_training_target_config(&request)
                         .unwrap_or_else(|e| panic!("{kernel}/{base}: {name} refused: {e}"));
@@ -9524,7 +9659,7 @@ mod tests {
         let mut covered: BTreeSet<&str> = BTreeSet::new();
         for target in &registry.targets {
             let kernel = target.kernel.as_str();
-            if !MLX_ROUTED_TRAINING_KERNELS.contains(&kernel) {
+            if !MLX_ROUTED_TRAINING_KERNELS.contains(kernel) {
                 continue;
             }
             covered.insert(kernel);
@@ -9567,7 +9702,10 @@ mod tests {
             }
         }
 
-        let routed: BTreeSet<&str> = MLX_ROUTED_TRAINING_KERNELS.iter().copied().collect();
+        let routed: BTreeSet<&str> = MLX_ROUTED_TRAINING_KERNELS
+            .iter()
+            .map(String::as_str)
+            .collect();
         assert_eq!(
             covered, routed,
             "every MLX-routed training kernel must be reachable from at least one built-in \
@@ -9625,6 +9763,74 @@ mod tests {
                 .get("ltxValidation")
                 .and_then(|value| value.get("frames")),
             Some(&json!(89))
+        );
+    }
+
+    #[cfg(native_lane)]
+    #[test]
+    fn flux3_training_accepts_only_exact_guard_verified_publisher_path() {
+        use sceneworks_core::training::flux3::{BASE_ID, BASE_REPO, BASE_REVISION};
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("models/portable-attempts/base");
+        let other = temp.path().join("models/portable-attempts/other");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let mut settings = test_settings(temp.path());
+        assert!(flux3_trusted_training_base(&settings, &path).is_err());
+        settings.verified_revision_sources.push(
+            crate::external_library_runtime::VerifiedRevisionSource {
+                model_id: BASE_ID.to_owned(),
+                repository: BASE_REPO.to_owned(),
+                revision: BASE_REVISION.to_owned(),
+                path: path.clone(),
+            },
+        );
+        assert_eq!(flux3_trusted_training_base(&settings, &path).unwrap(), path);
+        assert!(flux3_trusted_training_base(&settings, &other).is_err());
+        settings.verified_revision_sources[0].revision = "wrong-revision".to_owned();
+        assert!(flux3_trusted_training_base(&settings, &path).is_err());
+    }
+
+    #[cfg(native_lane)]
+    #[test]
+    fn trainer_load_inputs_prefer_the_bound_portable_text_encoder() {
+        // SW-7030 (review 4533688101): a caller-staged text encoder in the
+        // serialized portable aux paths wins over reopening the HF library, so
+        // Iris rank processes (which re-resolve with fresh settings) load the
+        // exact verified bytes the coordinator staged.
+        let dir = tempfile::tempdir().unwrap();
+        let settings = test_settings(dir.path());
+        let base = dir.path().join("models/base-installed");
+        std::fs::create_dir_all(&base).unwrap();
+        let staged = dir
+            .path()
+            .join("models/portable-attempts/route/text_encoder");
+        std::fs::create_dir_all(&staged).unwrap();
+        // Real descriptor with `required_components: ["text_encoder"]` (`iris_3b`),
+        // empty HF cache: without pre-seeding, `resolve_co_requisites_for_tier`
+        // fails before the bound path is ever consulted (review 4533885136).
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HOME", ""),
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+        ]);
+        let mut value = plan_json(dir.path(), "iris_train", "iris_3b", "lora", &[]);
+        value["__portableAuxPaths"] = json!({"text_encoder": staged.display().to_string()});
+        let mut plan = parse(value);
+        plan.target.base_model_path = base.display().to_string();
+
+        let inputs = TrainerLoadInputs::resolve(&settings, &plan, "iris_3b").unwrap();
+        assert_eq!(
+            inputs.components.get("text_encoder"),
+            Some(&WeightsSource::Dir(staged)),
+            "the bound staged encoder satisfies iris_3b's required_components without the HF cache"
+        );
+
+        let mut unbound = plan.clone();
+        unbound.extra.remove("__portableAuxPaths");
+        assert!(
+            TrainerLoadInputs::resolve(&settings, &unbound, "iris_3b").is_err(),
+            "without a bound path an uninstalled required component still fails"
         );
     }
 
@@ -10041,7 +10247,7 @@ mod tests {
         let dense_settings = test_settings(dense.path());
         stage(&dense_settings, "bf16");
         let components =
-            resolve_trainer_components("mage_flow_base", "mage_flow_base", &dense_settings)
+            resolve_trainer_components("mage_flow_base", "mage_flow_base", &dense_settings, None)
                 .expect("the bf16 shared components are staged");
         let keys: Vec<&str> = components.keys().map(String::as_str).collect();
         assert_eq!(keys, vec!["text_encoder", "vae"]);
@@ -10062,7 +10268,7 @@ mod tests {
         let settings = test_settings(temp.path());
         stage(&settings, "q4");
 
-        let error = resolve_trainer_components("mage_flow_base", "mage_flow_base", &settings)
+        let error = resolve_trainer_components("mage_flow_base", "mage_flow_base", &settings, None)
             .expect_err(
                 "only the q4 shared components are installed, so a training run — which needs the \
                  DENSE base — must be refused",

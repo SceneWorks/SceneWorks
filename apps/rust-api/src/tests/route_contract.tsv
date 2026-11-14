@@ -329,6 +329,7 @@ POST	/api/v1/jobs/:job_id/cancel	token
 POST	/api/v1/jobs/:job_id/clear	token
 POST	/api/v1/jobs/:job_id/retry	token
 POST	/api/v1/jobs/:job_id/duplicate	token
+POST	/api/v1/jobs/:job_id/import-claim	token
 POST	/api/v1/jobs/:job_id/progress	token
 GET	/api/v1/jobs/:job_id/metrics	token
 HEAD	/api/v1/jobs/:job_id/metrics	token
@@ -353,4 +354,6 @@ HEAD	/api/v1/host-capabilities	token
 POST	/api/v1/worker/restart	token
 POST	/api/v1/workers/register	token
 POST	/api/v1/workers/:worker_id/heartbeat	token
+POST	/api/v1/workers/:worker_id/portable-source-challenges	token
+POST	/api/v1/workers/:worker_id/portable-source-proof	token
 POST	/api/v1/workers/:worker_id/terminated	token

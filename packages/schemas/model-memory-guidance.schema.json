@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.local/schemas/model-memory-guidance.schema.json",
+  "title": "SceneWorks catalog memory guidance",
+  "description": "The `memoryGuidance` object the API serves on every model catalog row (SW-7032, `sceneworks_core::memory_guidance`). Every value is host-independent: each threshold is the minimum host memory (GB, base 1024^3; unified memory on the MLX lane, dedicated VRAM on the Candle lane) at which the client's own host probe satisfies the API's fit rule. A null threshold means no basis to predict, which the client treats as fitting. The web holds no memory policy of its own; it compares these values with its host probe and selects the rows of the tiers it has installed.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["mlx", "candle"],
+  "properties": {
+    "mlx": { "$ref": "#/$defs/lane" },
+    "candle": { "$ref": "#/$defs/lane" }
+  },
+  "$defs": {
+    "hostGb": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+    "resolutionThresholds": {
+      "type": "object",
+      "description": "Declared `limits.resolutions` buckets above the 1536x1536 baseline that have a prediction, mapped to their minimum host GB. A bucket that is absent always fits.",
+      "additionalProperties": { "type": "number", "exclusiveMinimum": 0 }
+    },
+    "lane": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["suggestion", "tiers", "blanketGb", "entryFloorGb", "uncalibrated", "resolutionMinHostGb"],
+      "properties": {
+        "suggestion": {
+          "type": "array",
+          "description": "The declared quant tiers in fidelity order (highest first) with each tier's fit threshold. The suggestion is the first tier whose threshold the host meets, else the last.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["tier", "minHostGb"],
+            "properties": {
+              "tier": { "enum": ["bf16", "q8", "q4"] },
+              "minHostGb": { "$ref": "#/$defs/hostGb" }
+            }
+          }
+        },
+        "tiers": {
+          "type": "object",
+          "description": "Per tier key (every variant, runtime quant tier, convert-output tier and lane per-tier evidence row).",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["installedHostGb", "installedEstimated", "floorGb", "measuredHostGb"],
+            "properties": {
+              "minHostGb": { "$ref": "#/$defs/hostGb", "description": "Fit threshold for this variant (present for variant rows only)." },
+              "installedHostGb": { "$ref": "#/$defs/hostGb", "description": "Host GB this tier contributes to an installed set's requirement: its own lane evidence, the Candle q8 proxy for a candle-only tier, or the MLX estimate." },
+              "installedEstimated": { "type": "boolean", "description": "True when installedHostGb is a proxy or an estimate rather than the tier's own lane evidence; the blanket floor then still applies." },
+              "floorGb": { "$ref": "#/$defs/hostGb", "description": "The lane's declared floor for this tier (its per-tier row, else the scalar)." },
+              "measuredHostGb": { "$ref": "#/$defs/hostGb", "description": "Host GB of the tier's own measured lane peak, the basis of a not-installed entry floor." },
+              "resolutionMinHostGb": { "$ref": "#/$defs/resolutionThresholds" }
+            }
+          }
+        },
+        "blanketGb": { "$ref": "#/$defs/hostGb", "description": "The lane's scalar declared floor." },
+        "entryFloorGb": { "$ref": "#/$defs/hostGb", "description": "The lane's declared floor for the lightest installable tier." },
+        "uncalibrated": { "type": "boolean", "description": "The lane flags its numbers uncalibrated (`candle.measured: false`)." },
+        "resolutionMinHostGb": { "$ref": "#/$defs/resolutionThresholds" },
+        "endpointEstimate": {
+          "type": "object",
+          "description": "Candle only: the packaged measured SDXL endpoint guidance for its one measured tier.",
+          "additionalProperties": false,
+          "required": ["tier", "optimizedHostGb", "label", "description"],
+          "properties": {
+            "tier": { "type": "string", "minLength": 1 },
+            "optimizedHostGb": { "type": "number", "exclusiveMinimum": 0 },
+            "label": { "type": "string", "minLength": 1 },
+            "description": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    }
+  }
+}

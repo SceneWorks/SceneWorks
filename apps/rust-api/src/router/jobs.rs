@@ -1,4 +1,5 @@
 use super::*;
+use crate::jobs::verify_model_import_claim;
 
 pub(super) fn routes() -> Router<AppState> {
     Router::new()
@@ -20,6 +21,10 @@ pub(super) fn routes() -> Router<AppState> {
         .route("/api/v1/jobs/events", get(job_events))
         .route("/api/v1/jobs/events/ticket", post(create_event_ticket))
         .route("/api/v1/jobs/:job_id", get(get_job))
+        .route(
+            "/api/v1/jobs/:job_id/import-claim",
+            post(verify_model_import_claim),
+        )
         .route("/api/v1/jobs/:job_id/cancel", post(cancel_job))
         // Per-job "clear" (sc-12231, issue #1556) — the per-card × dismiss. Distinct
         // from the bulk `/api/v1/jobs/clear` above (2 segments vs 3, no conflict).

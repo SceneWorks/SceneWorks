@@ -1,0 +1,94 @@
+name: Qwen3.8 27B describer CUDA validation
+
+# Real model inference is opt-in, never ordinary PR/main CI (SW-7120). Describes one synthetic scene
+# with the worker's Qwen3.8 27B describer on a provisioned Candle tier (see
+# qwen38-describer-provision.yml) and uploads the six described fields, wall time and peak GPU
+# memory. Fails if any field is empty.
+on:
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: Pre-quantised Candle tier to describe with
+        required: true
+        type: choice
+        options: [q4, q8]
+        default: q4
+
+permissions:
+  contents: read
+
+jobs:
+  qwen38-describer-smoke:
+    # Per-run Actions keys preserve requests; the UUID guard owns physical exclusion.
+    concurrency:
+      group: qwen38-describer-proof-${{ github.run_id }}-${{ github.run_attempt }}
+      cancel-in-progress: false
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    timeout-minutes: 180
+    env:
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_VISIBLE_DEVICES: "1"
+      CUDA_COMPUTE_CAP: "120"
+      CARGO_NET_OFFLINE: "true"
+      HF_HUB_CACHE: 'E:\huggingface\hub'
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      SCENEWORKS_QWEN38_DESCRIBER_TIER: ${{ inputs.tier }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/prepare-rust-runner
+      - name: Disable unstable sccache wrapper for the describer smoke
+        shell: powershell
+        run: |
+          Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
+          Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
+      - name: Set up Node for Cargo cache selection
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Isolate Cargo dependency checkout for the describer smoke
+        shell: powershell
+        run: |
+          node scripts/select-windows-cargo-cache.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'isolated persistent Cargo cache selection failed' }
+      - name: Test the evidence validator without running a model
+        run: node --test scripts/ci/qwen38-describer-evidence.test.mjs
+      - name: Fetch the pinned inference release for the describer smoke
+        env:
+          CARGO_NET_OFFLINE: "false"
+        run: cargo fetch --locked
+      # Compile before taking the GPU so the guarded step holds the card only for the model run.
+      - name: Build the describer smoke
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          cargo test --locked -p sceneworks-worker --features backend-candle --release --lib --no-run
+      - name: Run the describer smoke under the CUDA guard
+        shell: cmd
+        env:
+          MODEL_PROOF_OUTPUT_DIR: '${{ runner.temp }}\qwen38-describer-proof-${{ github.run_id }}-${{ github.run_attempt }}'
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          if exist "%MODEL_PROOF_OUTPUT_DIR%" exit /b 1
+          mkdir "%MODEL_PROOF_OUTPUT_DIR%"
+          nvidia-smi
+          python -I scripts/ci/windows_cuda_execution.py --actor qwen38-describer --budget-minutes 60 --cuda-ordinals 0 -- cargo test --locked -p sceneworks-worker --features backend-candle --release --lib qwen38_describer_gpu_smoke::qwen38_describer_describes_a_synthetic_scene_on_cuda -- --exact --ignored --nocapture --test-threads=1
+          if errorlevel 1 exit /b 1
+      # Runs even when the smoke failed, so the receipt and the reason are uploaded. An exact-filter
+      # mismatch (zero tests run, exit 0) also fails here: only the completed smoke body writes the result.
+      - name: Validate and stage bounded describer evidence
+        if: ${{ always() }}
+        env:
+          MODEL_PROOF_OUTPUT_DIR: '${{ runner.temp }}\qwen38-describer-proof-${{ github.run_id }}-${{ github.run_attempt }}'
+        run: node scripts/ci/qwen38-describer-evidence.mjs
+      - name: Upload only bounded describer evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qwen38-describer-proof-${{ inputs.tier }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}\qwen38-describer-proof-${{ github.run_id }}-${{ github.run_attempt }}\artifact
+          if-no-files-found: error

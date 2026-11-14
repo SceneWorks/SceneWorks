@@ -33,6 +33,7 @@ const enginesSource = readRepositoryFile("crates/sceneworks-worker/src/engines.r
 const qwenEditCandleSource = readRepositoryFile(
   "crates/sceneworks-worker/src/image_jobs/qwen_edit_candle.rs",
 );
+const registrySpecs = JSON.parse(readRepositoryFile("config/manifests/registry/specs.json"));
 const pulidMlxSource = readRepositoryFile("crates/sceneworks-worker/src/image_jobs/pulid.rs");
 const pulidCandleSource = readRepositoryFile("crates/sceneworks-worker/src/image_jobs/pulid_candle.rs");
 const previewSupportManifestRaw = readRepositoryFile(
@@ -67,7 +68,7 @@ const audioFactsEntries = readCapabilityFacts("config/engine-capabilities/audio/
 const audioFactsFiles = audioFactsEntries.map((entry) => entry.facts);
 
 const rows = parseEngineModelTable(enginesSource);
-const qwenPreviewRoutes = parseBespokePreviewRoutes(qwenEditCandleSource);
+const qwenPreviewRoutes = parseBespokePreviewRoutes(qwenEditCandleSource, registrySpecs);
 const pulidPreviewRoutes = parsePulidPreviewRoutes(pulidMlxSource, pulidCandleSource);
 const bespokePreviewRoutes = [
   ...qwenPreviewRoutes,
@@ -177,7 +178,7 @@ describe("preview-support catalog: bespoke Candle Qwen-Edit preview", () => {
       "\n                        ..Default::default()\n                    };",
     );
     expect(withoutSink).not.toBe(qwenEditCandleSource);
-    expect(() => parseBespokePreviewRoutes(withoutSink)).toThrow(/live preview sink/);
+    expect(() => parseBespokePreviewRoutes(withoutSink, registrySpecs)).toThrow(/live preview sink/);
   });
 
   it("refuses a declared route that has no MODEL_TABLE authority", () => {

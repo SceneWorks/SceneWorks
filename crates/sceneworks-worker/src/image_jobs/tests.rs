@@ -668,6 +668,10 @@ use super::routing::resolve_candle_image_route;
 #[cfg(target_os = "macos")]
 use super::routing::resolve_image_route;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use super::routing::wired_pose_families;
+#[cfg(target_os = "macos")]
+use super::routing::wired_pose_families;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::routing::CandleImageRoute;
 #[cfg(target_os = "macos")]
 use super::routing::ImageRoute;
@@ -675,10 +679,6 @@ use super::routing::ImageRoute;
 use super::routing::PreparedCandleImageRoute;
 #[cfg(target_os = "macos")]
 use super::routing::PreparedImageRoute;
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use super::routing::WIRED_CANDLE_POSE_FAMILIES;
-#[cfg(target_os = "macos")]
-use super::routing::WIRED_MLX_POSE_FAMILIES;
 #[cfg(native_lane)]
 use super::sampling::mlx_raw_settings;
 #[cfg(target_os = "macos")]
@@ -710,7 +710,6 @@ use super::sdxl::SdxlSubMode;
 #[cfg(native_lane)]
 use super::sdxl_control::SDXL_CONTROL_ENGINE_ID;
 #[cfg(native_lane)]
-use super::sdxl_control::SDXL_CONTROL_MODELS;
 #[cfg(native_lane)]
 use super::sdxl_control::SDXL_CONTROL_REPO;
 #[cfg(native_lane)]
@@ -12294,7 +12293,7 @@ fn candle_conditioned_angle_work_uses_eleven_prompts_one_seed_and_route_total() 
     assert_eq!(resolve_sensenova_candle_true_cfg(&req), 1.5);
 }
 
-// sc-11814: a strict-pose job on any WIRED MLX pose family (`WIRED_MLX_POSE_FAMILIES`) whose control
+// sc-11814: a strict-pose job on any WIRED MLX pose family (derived wired MLX pose family) whose control
 // base/overlay is NOT installed must route to a loud reject, NOT fall through to the plain MLX txt2img
 // lane (`ImageRoute::Mlx`), which would silently render an unconditioned image and drop the poses.
 // `flux_dev` with a reference is the sc-21673 exception: the requested IP-Adapter + pose combination is
@@ -12311,7 +12310,7 @@ fn image_route_rejects_wired_pose_when_control_base_absent() {
     // `mlx_available`) resolves nothing, so each wired-family pose job falls through to the reject arm.
     settings.data_dir = dir.path().to_path_buf();
 
-    for model in WIRED_MLX_POSE_FAMILIES {
+    for model in wired_pose_families("mlx") {
         // A `referenceAssetId` is present so the `kolors` lane (which additionally requires a reference)
         // is proven to reject on the ABSENT BASE, not the missing reference; it is inert for the others.
         let pose = request(json!({
@@ -12320,7 +12319,7 @@ fn image_route_rejects_wired_pose_when_control_base_absent() {
             "advanced": { "poses": [{ "id": "a" }] }
         }));
         let route = resolve_image_route(&pose, &settings);
-        let expected = if *model == "flux_dev" {
+        let expected = if model == "flux_dev" {
             ImageRoute::FluxIpAdapterPoseReject
         } else {
             ImageRoute::PoseControlBaseMissing
@@ -12438,7 +12437,13 @@ fn image_route_sends_exact_sdxl_pose_family_to_control_before_other_conditioning
     settings.data_dir = dir.path().to_path_buf();
     let model_path = dir.path().to_string_lossy().to_string();
 
-    for model in SDXL_CONTROL_MODELS {
+    for model in [
+        "sdxl",
+        "realvisxl",
+        "realvisxl_lightning",
+        "illustrious_xl_v1",
+        "illustrious_xl_v2",
+    ] {
         let pose = request(json!({
             "projectId": "p", "model": model, "count": 1,
             "advanced": { "modelPath": model_path.clone(), "poses": [{ "id": "a" }] }
@@ -13025,7 +13030,13 @@ fn candle_image_route_gates_on_flag_then_sdxl_control_then_txt2img() {
     );
 
     // Every shipped SDXL-family pose job uses the dedicated shared ControlNet route.
-    for model in SDXL_CONTROL_MODELS {
+    for model in [
+        "sdxl",
+        "realvisxl",
+        "realvisxl_lightning",
+        "illustrious_xl_v1",
+        "illustrious_xl_v2",
+    ] {
         let pose = request(json!({
             "projectId": "p", "model": model, "count": 1,
             "advanced": { "poses": [{ "id": "a" }] }
@@ -22695,12 +22706,12 @@ fn sc_8253_8278_identity_angle_ab() {
 /// The generator now keys the overlay off a DECLARED lane list (`CONTROL_LANE_MODELS`). A declaration in a
 /// different language from the router is only as good as the guard that ties them together, so this is that
 /// guard: add an `else if …_control_available` arm to `resolve_candle_image_route` and a
-/// `WIRED_CANDLE_POSE_FAMILIES` id without declaring it to the matrix, and this test goes red naming the
+/// the derived Candle pose set id without declaring it to the matrix, and this test goes red naming the
 /// missing id. The generator carries the reverse check itself (`assertDeclaredControlLanes` throws when a
 /// measurement block exists for an undeclared lane, i.e. orphaned evidence).
 ///
-/// `WIRED_CANDLE_POSE_FAMILIES` is the right Rust anchor because `base.rs` already documents
-/// `WIRED_MLX_POSE_FAMILIES` as "the MLX twin … and the SAME id set", so one list covers both backends.
+/// the derived Candle pose set is the right Rust anchor because `base.rs` already documents
+/// the derived MLX pose set as "the MLX twin … and the SAME id set", so one list covers both backends.
 /// The second assertion closes the one-level-up blind spot from sc-16095: declaration alone is not
 /// enough if the generated model omits the Candle backend entirely, because then the per-backend loop
 /// still emits no Candle control cells.
@@ -22720,14 +22731,15 @@ fn wired_candle_control_lanes_are_declared_and_emitted_by_the_evidence_matrix() 
         .split_once("];")
         .expect("CONTROL_LANE_MODELS must be a closed array literal")
         .0;
-    let declared: std::collections::BTreeSet<&str> = declared_block
+    let declared: std::collections::BTreeSet<String> = declared_block
         .split('"')
         // A `"a", "b"` list alternates between separators and values, so the values are the odd indices.
         .skip(1)
         .step_by(2)
+        .map(str::to_owned)
         .collect();
-    let wired: std::collections::BTreeSet<&str> =
-        WIRED_CANDLE_POSE_FAMILIES.iter().copied().collect();
+    let wired: std::collections::BTreeSet<String> =
+        wired_pose_families("candle").into_iter().collect();
     assert_eq!(
         declared, wired,
         "the candle control lanes the worker wires and the model ids the memory matrix declares a control \
@@ -22742,7 +22754,7 @@ fn wired_candle_control_lanes_are_declared_and_emitted_by_the_evidence_matrix() 
         "../../../../docs/generated/memory-matrix.json"
     ))
     .expect("generated memory matrix must be valid JSON");
-    let candle_backends: std::collections::BTreeSet<&str> = matrix["models"]
+    let candle_backends: std::collections::BTreeSet<String> = matrix["models"]
         .as_array()
         .expect("memory matrix models must be an array")
         .iter()
@@ -22751,9 +22763,9 @@ fn wired_candle_control_lanes_are_declared_and_emitted_by_the_evidence_matrix() 
                 .as_array()
                 .is_some_and(|backends| backends.iter().any(|backend| backend == "candle"))
         })
-        .filter_map(|model| model["id"].as_str())
+        .filter_map(|model| model["id"].as_str().map(str::to_owned))
         .collect();
-    let omitted: Vec<_> = wired.difference(&candle_backends).copied().collect();
+    let omitted: Vec<_> = wired.difference(&candle_backends).cloned().collect();
     assert!(
         omitted.is_empty(),
         "wired Candle pose families omitted from the generated matrix's Candle backends: {omitted:?}. \
@@ -22790,7 +22802,7 @@ fn wired_candle_control_lanes_are_declared_and_emitted_by_the_evidence_matrix() 
 /// site in the shared strict-control driver — fails here as well. A test that still passed with the
 /// gates deleted would be a false green, which is the failure mode this whole guard exists to prevent.
 ///
-/// This is the same shape as `WIRED_CANDLE_POSE_FAMILIES` (sc-11171, F-008), which exists because this
+/// This is the same shape as the derived Candle pose set (sc-11171, F-008), which exists because this
 /// exact ladder had already drifted once. Deliberately NOT cfg-gated to the candle build: it is a pure
 /// text scan, so it runs in the Linux parity and macOS suites too, not only `windows-candle`.
 #[test]
@@ -29867,6 +29879,81 @@ fn write_upscaled_asset_without_a_plane_still_writes_rgb() {
     assert_eq!(decoded.to_rgb8().as_raw(), upscaled.as_raw());
 }
 
+/// Codex review of PR #3379 (4559512305): the Candle FLUX.1 packed selector reads the verified
+/// binding's frozen tier when the request names none, and both capability downtiers (Candle and
+/// MLX) keep a bound tier instead of stepping down to an installed sibling the guard never
+/// verified. Malformed explicit values are still refused. Portable cores; they run everywhere.
+#[cfg(native_lane)]
+#[test]
+fn image_tier_selectors_honor_the_frozen_tier_and_refuse_malformed_values() {
+    let advanced = |value: Value| value.as_object().unwrap().clone();
+    let bound_q8 = advanced(json!({"__portableBoundTier": "q8"}));
+    let unselected = advanced(json!({}));
+    assert_eq!(
+        crate::image_jobs::artifact_resolution::candle_flux1_packed_tier_key(&unselected),
+        Some("q4")
+    );
+    assert_eq!(
+        crate::image_jobs::artifact_resolution::candle_flux1_packed_tier_key(&bound_q8),
+        Some("q8")
+    );
+    assert_eq!(
+        crate::image_jobs::artifact_resolution::candle_flux1_packed_tier_key(&advanced(
+            json!({"mlxQuantize": "x", "__portableBoundTier": "q8"})
+        )),
+        None
+    );
+    assert!(crate::image_jobs::candle::candle_tier_pick_is_exact(
+        "z_image_turbo",
+        &bound_q8
+    ));
+    assert!(!crate::image_jobs::candle::candle_tier_pick_is_exact(
+        "z_image_turbo",
+        &unselected
+    ));
+    assert!(crate::image_jobs::mlx::mlx_tier_pick_is_exact(&bound_q8));
+    assert!(!crate::image_jobs::mlx::mlx_tier_pick_is_exact(&unselected));
+
+    // An explicit `null` keeps each selector's original meaning and never takes the bound tier.
+    let null_with_binding = advanced(json!({"mlxQuantize": null, "__portableBoundTier": "q8"}));
+    assert_eq!(
+        crate::image_jobs::artifact_resolution::candle_flux1_packed_tier_key(&null_with_binding),
+        Some("q4"),
+        "FLUX.1 packed reads null as no tier named: the q4 default"
+    );
+    // A frozen tier is always exact, whatever else the request carries.
+    for model in ["flux_dev", "z_image_turbo"] {
+        assert!(crate::image_jobs::candle::candle_tier_pick_is_exact(
+            model,
+            &null_with_binding
+        ));
+    }
+    assert!(crate::image_jobs::mlx::mlx_tier_pick_is_exact(
+        &null_with_binding
+    ));
+
+    // Codex review of PR #3379 (4562495166): the web sends `mlxQuantize` bits WITHOUT
+    // `mlxQuantizeExplicit`. With a frozen q8, a q4 sibling installed and too little memory for
+    // q8, the capability downtier (gated by these predicates at image_jobs/candle.rs and
+    // image_jobs/mlx.rs, `downtier_candidate_tiers`) must not run; without a binding it still does.
+    let web_bits_bound = advanced(json!({"mlxQuantize": 8, "__portableBoundTier": "q8"}));
+    let web_bits_unbound = advanced(json!({"mlxQuantize": 8}));
+    assert!(crate::image_jobs::candle::candle_tier_pick_is_exact(
+        "z_image_turbo",
+        &web_bits_bound
+    ));
+    assert!(crate::image_jobs::mlx::mlx_tier_pick_is_exact(
+        &web_bits_bound
+    ));
+    assert!(!crate::image_jobs::candle::candle_tier_pick_is_exact(
+        "z_image_turbo",
+        &web_bits_unbound
+    ));
+    assert!(!crate::image_jobs::mlx::mlx_tier_pick_is_exact(
+        &web_bits_unbound
+    ));
+}
+
 /// sc-24112 — `qwen_image_2_1`'s SPLIT-REPO tier resolution, driven off the shipped catalog.
 ///
 /// Every other quant-matrix model puts its three tiers in one repo, so `standard_tier_subdir`
@@ -30109,6 +30196,55 @@ mod qwen_image_2_1_tiers {
 
     fn settings(data_dir: &Path) -> Settings {
         Settings::for_test(data_dir.to_path_buf())
+    }
+
+    /// Codex review of PR #3379 (4559512305): an untiered portable request whose verified binding
+    /// froze q4 resolves q4, although the manifest default q8 (and bf16) is installed beside it in
+    /// the snapshot it is served from. A malformed explicit value is still refused.
+    #[test]
+    fn an_untiered_request_resolves_the_tier_its_binding_froze() {
+        let _env = crate::test_env::isolate_hf_cache();
+        let data = tempfile::tempdir().expect("temp data dir");
+        let entry = entry_after_upload();
+        stage_tier(data.path(), UPSTREAM_REPO, UPSTREAM_REVISION, None);
+        stage_tier(data.path(), REHOST_REPO, REHOST_REVISION, Some("q8"));
+        stage_tier(data.path(), REHOST_REPO, REHOST_REVISION, Some("q4"));
+        let with_advanced = |advanced: Value| {
+            let mut payload = serde_json::Map::new();
+            payload.insert("projectId".to_owned(), json!("p"));
+            payload.insert("model".to_owned(), json!("qwen_image_2_1"));
+            payload.insert(
+                "modelManifestEntry".to_owned(),
+                Value::Object(entry.clone()),
+            );
+            payload.insert("advanced".to_owned(), advanced);
+            ImageRequest::from_payload(&payload)
+        };
+        assert_eq!(
+            resolved_with_tier(data.path(), &entry, None).map(|(_, tier)| tier),
+            Some("q8"),
+            "precondition: the unbound default is q8"
+        );
+        let bound = crate::image_jobs::artifact_resolution::qwen_image_2_1_tier_dir(
+            &settings(data.path()),
+            &with_advanced(json!({"__portableBoundTier": "q4"})),
+        )
+        .expect("the bound tier resolves");
+        assert_eq!(bound.map(|(_, tier)| tier), Some("q4"));
+        let error = crate::image_jobs::artifact_resolution::qwen_image_2_1_tier_dir(
+            &settings(data.path()),
+            &with_advanced(json!({"mlxQuantize": "four", "__portableBoundTier": "q4"})),
+        )
+        .expect_err("a malformed explicit value is refused, not replaced by the bound tier")
+        .to_string();
+        assert!(error.contains("must be an integer bit count"), "{error}");
+        // A present null has always meant "no tier named": the manifest default, not the bound tier.
+        let null = crate::image_jobs::artifact_resolution::qwen_image_2_1_tier_dir(
+            &settings(data.path()),
+            &with_advanced(json!({"mlxQuantize": null, "__portableBoundTier": "q4"})),
+        )
+        .expect("an explicit null resolves the default");
+        assert_eq!(null.map(|(_, tier)| tier), Some("q8"));
     }
 
     fn resolved(

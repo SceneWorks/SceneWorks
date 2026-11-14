@@ -178,18 +178,9 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let hub = data.path().join("hub");
         let _env = crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().unwrap())]);
-        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
-            include_str!("../../../../config/manifests/builtin.models.jsonc"),
-        ))
-        .unwrap();
-        let model = manifest["models"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|row| row["id"] == "sdxl")
-            .unwrap()
-            .as_object()
-            .unwrap();
+        // The production accessor: the shipped row with its typed memory evidence projected in
+        // (SW-7031), which is what a job carries as its `modelManifestEntry`.
+        let model = sceneworks_core::builtin_manifests::builtin_model_entry("sdxl").unwrap();
         let download = model["downloads"]
             .as_array()
             .unwrap()

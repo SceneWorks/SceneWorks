@@ -425,7 +425,8 @@ pub(super) fn ltx_bundle_subdir_across_revisions(
     })
 }
 
-/// Resolve the converted LTX MLX snapshot dir. Env override (`SCENEWORKS_MLX_LTX_DIR` /
+/// Resolve the converted LTX MLX snapshot dir. A portable job uses the guard's verified private
+/// manifest locator and bound tier exclusively. Ordinary jobs retain env override (`SCENEWORKS_MLX_LTX_DIR` /
 /// `…_EROS_DIR`) → `<data>/models/mlx/<candidate>` → (base only) the turnkey SceneWorks bundle
 /// [`LTX_BUNDLE_REPO`], descending into its `q4/`/`q8/` subdir. Only a dir **complete for the
 /// current engine** ([`ltx_dir_is_complete`]) counts, so a stale local conversion is skipped. For
@@ -436,6 +437,45 @@ pub(super) fn resolve_ltx_model_dir(
     settings: &Settings,
     request: &VideoRequest,
 ) -> WorkerResult<PathBuf> {
+    if portable_ltx_sources_bound(request) {
+        let root = request
+            .model_manifest_entry
+            .get("paths")
+            .and_then(Value::as_object)
+            .and_then(|paths| paths.get("model"))
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("portable LTX primary has no verified path".to_owned())
+            })?;
+        let dir = if request.model == "ltx_2_5" {
+            let tier = request
+                .advanced
+                .get("__portableBoundTier")
+                .and_then(Value::as_str)
+                .filter(|tier| matches!(*tier, "q4" | "q8" | "bf16"))
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload(
+                        "portable LTX-2.5 primary has no verified tier".to_owned(),
+                    )
+                })?;
+            root.join(ltx25_transformer_variant(request)?.component_dir())
+                .join(tier)
+        } else {
+            root
+        };
+        let complete = if request.model == "ltx_2_5" {
+            ltx25_dir_is_complete(&dir)
+        } else {
+            ltx_dir_is_complete(&dir)
+        };
+        return complete.then_some(dir).ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "portable LTX primary is incomplete at its verified path".to_owned(),
+            )
+        });
+    }
     if request.model == "ltx_2_5" {
         let variant = ltx25_transformer_variant(request)?;
         let tier = ltx_bundle_tier_order(request)
@@ -516,6 +556,33 @@ pub(super) fn resolve_ltx_model_dir(
     )))
 }
 
+#[cfg(target_os = "macos")]
+fn portable_ltx_sources_bound(request: &VideoRequest) -> bool {
+    request.advanced.get("__portableFrozenSources") == Some(&Value::Bool(true))
+}
+
+/// The required Gemma encoder must come from the verified portable publisher snapshot.
+/// Both base and Eros routes bind that co-requisite, including when their primary is converted.
+#[cfg(target_os = "macos")]
+pub(super) fn portable_ltx_gemma_dir() -> WorkerResult<PathBuf> {
+    let (_, snapshot) =
+        sceneworks_core::model_artifacts::local_preference::unique_portable_snapshot(
+            LTX_BUNDLE_REPO,
+        )
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload("portable LTX Gemma has no verified source".to_owned())
+        })?;
+    let gemma = snapshot.join("gemma");
+    ltx_gemma_dir_is_complete(&gemma)
+        .then_some(gemma)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "portable LTX Gemma is incomplete at its verified path".to_owned(),
+            )
+        })
+}
+
 /// The complete Gemma-3 text encoder managed with a resolved LTX dir, if present (sc-5608).
 ///
 /// Normally the SceneWorks bundle ships it beside the selected `q4/`/`q8/` checkpoint dir as
@@ -565,7 +632,7 @@ pub(super) fn ltx_gemma_override_path(raw: Option<std::ffi::OsString>) -> Option
 
 /// [`ltx_gemma_override_path`] applied to the live `$LTX_GEMMA_DIR`.
 #[cfg(native_lane)]
-fn ltx_gemma_env_override() -> Option<PathBuf> {
+pub(crate) fn ltx_gemma_env_override() -> Option<PathBuf> {
     ltx_gemma_override_path(std::env::var_os("LTX_GEMMA_DIR"))
 }
 
@@ -695,7 +762,7 @@ pub fn text_encoder_options_for_adapter(adapter: &str, data_dir: &Path) -> Vec<T
 /// [`ltx_gemma_dir_is_complete`] (an mlx_lm gemma snapshot is `config.json` + shards, same shape as the
 /// TE), so a partial/half-downloaded dir never wins.
 #[cfg(target_os = "macos")]
-fn resolve_ltx_uncensored_enhancer_dir(data_dir: &Path) -> Option<PathBuf> {
+pub(crate) fn resolve_ltx_uncensored_enhancer_dir(data_dir: &Path) -> Option<PathBuf> {
     if let Some(raw) = std::env::var_os("LTX_UNCENSORED_GEMMA_DIR") {
         let dir = PathBuf::from(raw);
         if ltx_gemma_dir_is_complete(&dir) {
@@ -919,6 +986,45 @@ pub(crate) async fn ensure_ltx_bundle_gemma_present(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
+    // A portable convert already admitted the exact pinned Gemma co-requisite
+    // and installed its verified mini-HF overlay. Do not let the legacy
+    // provisioning fallback fetch a different revision after that guard.
+    if job
+        .payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .is_some_and(crate::portable_aux_sources::has_bound_aux_paths)
+    {
+        let source = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO)
+            .map(|root| root.join("gemma"))
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "portable LTX conversion lacks its verified pinned Gemma source".to_owned(),
+                )
+            })?;
+        let files: Vec<PortableGemmaFile> =
+            serde_json::from_value(job.payload["advanced"]["__portableGemmaFiles"].clone())
+                .map_err(|error| {
+                    WorkerError::InvalidPayload(format!(
+                        "portable LTX conversion lacks its frozen Gemma ledger: {error}"
+                    ))
+                })?;
+        let data_dir = settings.data_dir.clone();
+        let task = crate::load_progress::spawn_blocking(move || {
+            install_portable_gemma(&source, &data_dir, &files)
+        });
+        return crate::run_blocking_with_heartbeat_keeping_ok(
+            api,
+            settings,
+            &job.id,
+            None,
+            "LTX Gemma installation canceled by user.",
+            "portable LTX Gemma installation",
+            None::<fn() -> std::future::Ready<WorkerResult<()>>>,
+            task,
+        )
+        .await;
+    }
     if std::env::var_os("LTX_GEMMA_DIR").is_some() {
         return Ok(());
     }
@@ -950,6 +1056,312 @@ pub(crate) async fn ensure_ltx_bundle_gemma_present(
     )
     .await
     .map(|_| ())
+}
+
+#[cfg(target_os = "macos")]
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PortableGemmaFile {
+    relative_path: String,
+    size_bytes: u64,
+    sha256: String,
+}
+
+/// Publish a copy of the frozen Gemma closure outside the evictable portable attempt cache.
+#[cfg(target_os = "macos")]
+fn install_portable_gemma(
+    source: &Path,
+    data_dir: &Path,
+    files: &[PortableGemmaFile],
+) -> WorkerResult<()> {
+    fn verify_file(path: &Path, expected: &PortableGemmaFile) -> WorkerResult<()> {
+        use sha2::{Digest, Sha256};
+        use std::io::Read;
+        let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+            WorkerError::Engine(format!(
+                "frozen Gemma file {} unavailable: {error}",
+                path.display()
+            ))
+        })?;
+        if !metadata.is_file() || metadata.len() != expected.size_bytes {
+            return Err(WorkerError::Engine(format!(
+                "frozen Gemma file {} has different bytes",
+                path.display()
+            )));
+        }
+        let mut input =
+            std::fs::File::open(path).map_err(|error| WorkerError::Engine(error.to_string()))?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 1024 * 1024];
+        loop {
+            let count = input
+                .read(&mut buffer)
+                .map_err(|error| WorkerError::Engine(error.to_string()))?;
+            if count == 0 {
+                break;
+            }
+            hasher.update(&buffer[..count]);
+        }
+        if format!("sha256:{:x}", hasher.finalize()) != expected.sha256 {
+            return Err(WorkerError::Engine(format!(
+                "frozen Gemma file {} has different bytes",
+                path.display()
+            )));
+        }
+        Ok(())
+    }
+
+    fn plain_member(root: &Path, relative: &Path) -> WorkerResult<PathBuf> {
+        let mut directory = root.to_path_buf();
+        let mut ancestors = vec![directory.clone()];
+        if let Some(parent) = relative.parent() {
+            for component in parent.components() {
+                directory.push(component.as_os_str());
+                ancestors.push(directory.clone());
+            }
+        }
+        for component in ancestors {
+            // The staged source and published sibling must not escape through directory links.
+            if std::fs::symlink_metadata(&component)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                return Err(WorkerError::Engine(format!(
+                    "Gemma directory {} is a symlink",
+                    component.display()
+                )));
+            }
+        }
+        Ok(root.join(relative))
+    }
+
+    if files.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "portable Gemma ledger is empty".to_owned(),
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut members = Vec::with_capacity(files.len());
+    for file in files {
+        let relative = file.relative_path.strip_prefix("gemma/").ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "portable Gemma ledger contains a non-Gemma file".to_owned(),
+            )
+        })?;
+        let path = Path::new(relative);
+        if relative.is_empty()
+            || !path
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_)))
+            || file.sha256.strip_prefix("sha256:").is_none_or(|digest| {
+                digest.len() != 64
+                    || !digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+            || !seen.insert(relative.to_owned())
+        {
+            return Err(WorkerError::InvalidPayload(
+                "portable Gemma ledger contains an unsafe member".to_owned(),
+            ));
+        }
+        members.push((path.to_path_buf(), file));
+    }
+    let parent = data_dir.join("models").join("mlx");
+    std::fs::create_dir_all(&parent).map_err(|error| WorkerError::Engine(error.to_string()))?;
+    let _lock =
+        sceneworks_core::file_lock::FileLock::open_exclusive(&parent.join(".gemma.portable.lock"))
+            .map_err(|error| {
+                WorkerError::Engine(format!("Gemma installation lock failed: {error}"))
+            })?;
+    let target = parent.join("gemma");
+    if target.exists() {
+        if !ltx_gemma_dir_is_complete(&target) {
+            return Err(WorkerError::Engine(
+                "existing Gemma installation is incomplete".to_owned(),
+            ));
+        }
+        let mut pending = vec![target.clone()];
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(&directory)
+                .map_err(|error| WorkerError::Engine(error.to_string()))?
+            {
+                let entry = entry.map_err(|error| WorkerError::Engine(error.to_string()))?;
+                let kind = entry
+                    .file_type()
+                    .map_err(|error| WorkerError::Engine(error.to_string()))?;
+                if kind.is_dir() {
+                    pending.push(entry.path());
+                } else if !kind.is_file()
+                    || !seen.contains(
+                        entry
+                            .path()
+                            .strip_prefix(&target)
+                            .map_err(|error| WorkerError::Engine(error.to_string()))?
+                            .to_str()
+                            .ok_or_else(|| {
+                                WorkerError::Engine("non-UTF-8 Gemma member".to_owned())
+                            })?,
+                    )
+                {
+                    return Err(WorkerError::Engine(
+                        "existing Gemma installation differs from the frozen closure".to_owned(),
+                    ));
+                }
+            }
+        }
+        for (relative, file) in &members {
+            verify_file(&plain_member(&target, relative)?, file)?;
+        }
+        return Ok(());
+    }
+    let staging = tempfile::Builder::new()
+        .prefix(".gemma-portable-")
+        .tempdir_in(&parent)
+        .map_err(|error| WorkerError::Engine(error.to_string()))?;
+    for (relative, file) in &members {
+        let input = plain_member(source, relative)?;
+        // A pinned Gemma member is served in place from the hub snapshot, whose files are links
+        // into the repository's `blobs/`: read the file the link names, then hold it to this
+        // ledger as before (`verify_file` refuses anything that is not a regular file).
+        let input = std::fs::canonicalize(&input).map_err(|error| {
+            WorkerError::Engine(format!(
+                "frozen Gemma file {} unavailable: {error}",
+                input.display()
+            ))
+        })?;
+        verify_file(&input, file)?;
+        let output = staging.path().join(relative);
+        if let Some(directory) = output.parent() {
+            std::fs::create_dir_all(directory)
+                .map_err(|error| WorkerError::Engine(error.to_string()))?;
+        }
+        std::fs::copy(&input, &output).map_err(|error| WorkerError::Engine(error.to_string()))?;
+        verify_file(&output, file)?;
+    }
+    if !ltx_gemma_dir_is_complete(staging.path()) {
+        return Err(WorkerError::Engine(
+            "frozen Gemma ledger does not form a complete installation".to_owned(),
+        ));
+    }
+    std::fs::rename(staging.path(), &target).map_err(|error| {
+        WorkerError::Engine(format!("Gemma installation publish failed: {error}"))
+    })?;
+    Ok(())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod portable_gemma_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    /// Codex review of PR #3379: a portable LTX conversion hands the Gemma installer the pinned
+    /// member in place, in the hub's own layout (snapshot links into `blobs/`); it installs
+    /// regular copies of the linked bytes, held to the frozen ledger.
+    #[cfg(unix)]
+    #[test]
+    fn frozen_gemma_installs_from_the_hub_snapshot_in_place() {
+        use sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile;
+
+        let temp = tempfile::tempdir().unwrap();
+        let repository = temp.path().join("hub/models--SceneWorks--ltx-2.3-mlx");
+        let source = repository.join("snapshots/0123456789abcdef0123456789abcdef01234567/gemma");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(repository.join("blobs")).unwrap();
+        let mut weights = Vec::new();
+        let header = br#"{"weight":{"dtype":"U8","shape":[1],"data_offsets":[0,1]}}"#;
+        weights.extend_from_slice(&(header.len() as u64).to_le_bytes());
+        weights.extend_from_slice(header);
+        weights.push(7);
+        let sources = [
+            ("config.json", br#"{"model_type":"gemma3"}"#.to_vec()),
+            ("tokenizer.json", br#"{"model":{}}"#.to_vec()),
+            ("model.safetensors", weights),
+        ];
+        for (name, bytes) in &sources {
+            std::fs::write(repository.join("blobs").join(name), bytes).unwrap();
+            std::os::unix::fs::symlink(format!("../../../blobs/{name}"), source.join(name))
+                .unwrap();
+        }
+        let files: Vec<PortableGemmaFile> = serde_json::from_value(
+            serde_json::to_value(
+                sources
+                    .iter()
+                    .map(|(name, bytes)| PortableArtifactFile {
+                        relative_path: format!("gemma/{name}").into(),
+                        size_bytes: bytes.len() as u64,
+                        sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let data = temp.path().join("data");
+        install_portable_gemma(&source, &data, &files).unwrap();
+        let target = data.join("models/mlx/gemma");
+        for (name, bytes) in &sources {
+            let installed = target.join(name);
+            assert!(std::fs::symlink_metadata(&installed).unwrap().is_file());
+            assert_eq!(std::fs::read(installed).unwrap(), *bytes);
+        }
+        // A hub file that no longer matches its ledger is never installed.
+        std::fs::remove_dir_all(&target).unwrap();
+        std::fs::write(
+            repository.join("blobs/config.json"),
+            br#"{"model_type":"other"}"#,
+        )
+        .unwrap();
+        assert!(install_portable_gemma(&source, &data, &files).is_err());
+    }
+
+    #[test]
+    fn frozen_gemma_survives_source_removal_and_refuses_divergent_sibling() {
+        use sceneworks_core::model_artifacts::portable_binding::PortableArtifactFile;
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("attempt/gemma");
+        std::fs::create_dir_all(&source).unwrap();
+        let mut weights = Vec::new();
+        let header = br#"{"weight":{"dtype":"U8","shape":[1],"data_offsets":[0,1]}}"#;
+        weights.extend_from_slice(&(header.len() as u64).to_le_bytes());
+        weights.extend_from_slice(header);
+        weights.push(7);
+        let sources = [
+            ("config.json", br#"{"model_type":"gemma3"}"#.to_vec()),
+            ("tokenizer.json", br#"{"model":{}}"#.to_vec()),
+            ("model.safetensors", weights),
+        ];
+        let frozen: Vec<_> = sources
+            .iter()
+            .map(|(name, bytes)| {
+                std::fs::write(source.join(name), bytes).unwrap();
+                PortableArtifactFile {
+                    relative_path: format!("gemma/{name}").into(),
+                    size_bytes: bytes.len() as u64,
+                    sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
+                }
+            })
+            .collect();
+        let files: Vec<PortableGemmaFile> =
+            serde_json::from_value(serde_json::to_value(frozen).unwrap()).unwrap();
+        let data = temp.path().join("data");
+        install_portable_gemma(&source, &data, &files).unwrap();
+        std::fs::remove_dir_all(source.parent().unwrap()).unwrap();
+        let target = data.join("models/mlx/gemma");
+        assert!(ltx_gemma_dir_is_complete(&target));
+        let converted = data.join("models/mlx/ltx_2_3_eros");
+        std::fs::create_dir_all(&converted).unwrap();
+        assert_eq!(bundled_ltx_gemma_dir(&converted), Some(target.clone()));
+        for (name, bytes) in &sources {
+            assert_eq!(std::fs::read(target.join(name)).unwrap(), *bytes);
+        }
+        install_portable_gemma(&source, &data, &files).unwrap();
+        std::fs::write(target.join("unexpected.bin"), b"other").unwrap();
+        assert!(install_portable_gemma(&source, &data, &files).is_err());
+        std::fs::remove_file(target.join("unexpected.bin")).unwrap();
+        std::fs::write(target.join("config.json"), b"{} ").unwrap();
+        assert!(install_portable_gemma(&source, &data, &files).is_err());
+    }
 }
 
 /// LoRAs for an LTX generation: the manifest-declared auto distill LoRA (when present) followed by
@@ -1794,7 +2206,11 @@ pub(super) async fn generate_ltx(
     let (use_uncensored_enhancer, uncensored_enhancer_dir) = resolve_ltx_text_encoder_for_model(
         &request.model,
         &request.advanced,
-        resolve_ltx_uncensored_enhancer_dir(&settings.data_dir),
+        if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
+            crate::portable_aux_sources::bound_aux_path(&request.advanced, "ltx_amoral_gemma_3_12b")
+        } else {
+            resolve_ltx_uncensored_enhancer_dir(&settings.data_dir)
+        },
     )?;
     let enhance_prompt = advanced::bool(&request.advanced, "enhancePrompt");
     let video_mode = advanced::bool(&request.advanced, "noAudio").then(|| "no_audio".to_owned());
@@ -1837,11 +2253,15 @@ pub(super) async fn generate_ltx(
     // The macOS default download is lean (q4 + gemma); a Q8 / bf16 job fetches the bundle's q8/ or
     // bf16/ on demand before resolving (sc-5679 / sc-8513). No-op unless that tier is requested and
     // its subdir is absent.
-    ensure_ltx_q8_present(api, settings, job, request).await?;
-    ensure_ltx_bf16_present(api, settings, job, request).await?;
+    if !portable_ltx_sources_bound(request) {
+        ensure_ltx_q8_present(api, settings, job, request).await?;
+        ensure_ltx_bf16_present(api, settings, job, request).await?;
+    }
     // The eros install ships no bundled TE, so provision the bundle's `gemma/` on demand (no-op for
     // the base model, which bundles gemma with its checkpoint). Self-heals installs that predate this.
-    ensure_ltx_gemma_present(api, settings, job, request).await?;
+    if !portable_ltx_sources_bound(request) {
+        ensure_ltx_gemma_present(api, settings, job, request).await?;
+    }
     let model_dir = resolve_ltx_model_dir(settings, request)?;
     // Thread the Gemma-3 text encoder onto the 2.3 LoadSpec (sc-8827, was `$LTX_GEMMA_DIR`).
     // LTX-2.5 deliberately leaves this slot empty: its self-contained Gemma-4 encoder is the
@@ -1849,6 +2269,8 @@ pub(super) async fn generate_ltx(
     // engine. The separate `enhancer/` directory is the stock prompt enhancer, not this slot.
     let text_encoder_dir = if request.model == "ltx_2_5" {
         None
+    } else if portable_ltx_sources_bound(request) {
+        Some(portable_ltx_gemma_dir()?)
     } else if request.model == "ltx_2_3_eros" {
         resolve_ltx_eros_gemma_dir(settings, &model_dir)
     } else {

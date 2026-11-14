@@ -1,7 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { buildImageJobRequest } from "./imageJobRequest.js";
-import { mossDefaults, mossWireOptions, mossComponentState, mossSeededRecipeReplay } from "./mossImage.js";
+import { mossAccelerationAvailable, mossDefaults, mossWireOptions, mossComponentState, mossSeededRecipeReplay } from "./mossImage.js";
+import candidate from "./testUtils/catalogBaseline/candidate-catalog.json";
 const state = (more = {}) => ({ model: "moss_image_sft", mode: "text_to_image", promptToSend: '日本語 <tag> {"items": [{"yxyx": [0,0,1,1]}]}', resolution: "1024x1024", width: 1024, height: 1024, count: 2, seed: "42", posePayload: [], referenceAssetIds: [], loras: [], sampler: "default", scheduler: "default", schedulerShift: 5, supportsSchedulerShift: true, guidanceOverride: 3, stepsOverride: 50, guidanceMethod: "cfg", negativePrompt: "", flashAttn: true, ...more });
+// SW-7032: the 8-step control is offered by the served catalog fact (the package the checkbox selects
+// is a declared conditional purpose of the entry), never by a model-id literal.
+describe("MOSS 8-step acceleration availability", () => {
+  const purposes = (id) => {
+    const entry = candidate.models.find((model) => model.id === id);
+    return Object.fromEntries((entry.conditionalComponents ?? []).flatMap((component) =>
+      (component.requiredFor ?? []).map((purpose) => [purpose, { installState: "missing" }])));
+  };
+  it("follows the declared package, not the checkpoint id", () => {
+    expect(mossAccelerationAvailable({ id: "moss_image_sft", conditionalPurposes: purposes("moss_image_sft") })).toBe(true);
+    expect(mossAccelerationAvailable({ id: "moss_image_base", conditionalPurposes: purposes("moss_image_base") })).toBe(false);
+    expect(mossAccelerationAvailable({ id: "moss_image_sft" })).toBe(false);
+    expect(mossAccelerationAvailable({ id: "imported_moss", conditionalPurposes: { moss_dmd_unmerged_bf16: {} } })).toBe(true);
+  });
+});
 describe("MOSS product transport", () => {
  it("preserves exact multilingual/tag/JSON prompt and explicit OFF for normal/batch", () => { const input=state(), normal=buildImageJobRequest(input); expect(buildImageJobRequest({...input})).toEqual(normal); expect(normal.prompt).toBe(input.promptToSend); expect(normal.advanced.mossImage).toEqual(mossDefaults()); expect(normal.advanced.steps).toBe(50); });
  it.each(["unmerged_bf16", "full_fp32"])("transports %s without incompatible hidden controls", (acceleration) => { const result=buildImageJobRequest(state({mossImage:{acceleration,uncond_skip_layers:[],training_shift:1,slg:{layers:[22],scale:1,start:0,stop:1}},mossDmdSteps:6})); expect(result.advanced.mossImage).toEqual({acceleration,max_sequence_length:4096}); expect(result.advanced.steps).toBe(6); for(const key of ["sampler","scheduler","guidanceScale","schedulerShift","guidanceMethod"]) expect(result.advanced).not.toHaveProperty(key); });
@@ -14,7 +30,7 @@ describe("MOSS product transport", () => {
  it("never emits stale MOSS options for another model", () => { expect(buildImageJobRequest(state({model:"iris_3b",mossImage:{acceleration:"full_fp32"}})).advanced).not.toHaveProperty("mossImage"); });
  it("keeps the integrated FLUX3 and MOSS transports independent without dropping reference or nullable-axis intent", () => {
   const layout={version:1,boxes:[{id:"remove",desc:"vase",from:"ref_image_0",reference_id:"slot-a",src_bbox:[0,0,0.5,0.5],tgt_bbox:null}]};
-  const flux=buildImageJobRequest(state({model:"flux3_klein",mode:"edit_image",multiReference:true,supportsImg2img:false,width:null,height:1024,referenceAssetIds:["same-asset","same-asset"],flux3ReferenceIds:["slot-a","slot-b"],flux3Layout:layout,mossImage:{acceleration:"full_fp32"}}));
+  const flux=buildImageJobRequest(state({model:"flux3_klein",selectedModel:{id:"flux3_klein",family:"flux3",type:"image"},mode:"edit_image",multiReference:true,supportsImg2img:false,width:null,height:1024,referenceAssetIds:["same-asset","same-asset"],flux3ReferenceIds:["slot-a","slot-b"],flux3Layout:layout,mossImage:{acceleration:"full_fp32"}}));
   expect(flux.referenceAssetIds).toEqual(["same-asset","same-asset"]);expect(flux.advanced.flux3_reference_ids).toEqual(["slot-a","slot-b"]);expect(flux.advanced.flux3_layout).toEqual(layout);expect(flux).not.toHaveProperty("width");expect(flux.height).toBe(1024);expect(flux.advanced).not.toHaveProperty("mossImage");expect(flux.advanced).not.toHaveProperty("img2imgStrength");
   const moss=buildImageJobRequest(state({mossImage:{acceleration:"full_fp32"},mossDmdSteps:6,flux3Layout:layout,flux3ReferenceIds:["slot-a","slot-b"]}));
   expect(moss.advanced.mossImage.acceleration).toBe("full_fp32");expect(moss.advanced.steps).toBe(6);expect(moss.advanced).not.toHaveProperty("flux3_layout");expect(moss.advanced).not.toHaveProperty("flux3_reference_ids");

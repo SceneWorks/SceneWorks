@@ -24,6 +24,33 @@ fn builtin_model(id: &str) -> Value {
         .clone()
 }
 
+/// A registered builtin's licence terms come from the compiled registry (APPREG-1), so they
+/// change only with a release; a config-dir copy of the row cannot change them. The state a
+/// release leaves behind is a stored acceptance that names the PREVIOUS terms. Recreate exactly
+/// that state: rewrite the stored acceptance of `model_id` to the terms hash of `entry` with a
+/// different `licenseNotice`, and return that previous-terms hash (what an old browser tab
+/// would send as its `If-Match`).
+pub(super) fn age_stored_license_acceptance(
+    temp: &tempfile::TempDir,
+    model_id: &str,
+    entry: &Value,
+) -> String {
+    let mut previous = entry.clone();
+    previous["licenseNotice"] = json!("Previously accepted terms (superseded by this release)");
+    let previous_sha = sceneworks_core::license_acknowledgments::terms_sha256(&previous);
+    let path = sceneworks_core::license_acknowledgments::acknowledgments_file(
+        &test_settings(temp).config_dir,
+    );
+    let mut record: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(
+        record["acknowledgments"][model_id].is_object(),
+        "{model_id} has a stored acceptance to age: {record}"
+    );
+    record["acknowledgments"][model_id]["termsSha256"] = json!(previous_sha);
+    std::fs::write(&path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    previous_sha
+}
+
 pub(super) fn builtin_yue2() -> Value {
     builtin_model("yue2")
 }
@@ -551,7 +578,11 @@ async fn a_verified_derived_snapshot_installs_the_tier_and_its_delete_spares_the
     // Re-pin q4's derivation to a small, locally written weights file.
     let weights = b"derived q4 weights (test fixture)";
     let digest = format!("{:x}", sha2::Sha256::digest(weights));
+    // The re-pinned derivation is a manifest-row fact, and a registered builtin's row comes from
+    // the compiled registry (a config-dir copy cannot re-pin it). Exercise the generic
+    // derived-tier verification on an unregistered copy of the YuE2 row instead.
     let mut yue2 = builtin_yue2();
+    yue2["id"] = json!("yue2_tier_fixture");
     for row in yue2["downloads"].as_array_mut().unwrap() {
         if row["variant"] == "q4" {
             row["localDerivation"]["weightsBytes"] = json!(weights.len());
@@ -567,7 +598,7 @@ async fn a_verified_derived_snapshot_installs_the_tier_and_its_delete_spares_the
         .join("data")
         .join("models")
         .join("derived")
-        .join("yue2")
+        .join("yue2_tier_fixture")
         .join("q4")
         .join("yue2-ggml-tier-v1");
     std::fs::create_dir_all(&derived_dir).unwrap();
@@ -576,7 +607,7 @@ async fn a_verified_derived_snapshot_installs_the_tier_and_its_delete_spares_the
     let corrupt = vec![b'x'; weights.len()];
     std::fs::write(derived_dir.join("model.safetensors"), &corrupt).unwrap();
     let (_, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
-    let q4 = variant_row(&catalog_entry(&models, "yue2"), "q4");
+    let q4 = variant_row(&catalog_entry(&models, "yue2_tier_fixture"), "q4");
     assert_eq!(q4["installed"], false, "{q4}");
     assert_eq!(q4["derivationPending"], true, "{q4}");
     assert_eq!(
@@ -593,7 +624,7 @@ async fn a_verified_derived_snapshot_installs_the_tier_and_its_delete_spares_the
     // invalidates it, and a fresh app reads the verified snapshot.
     let app = app_with_yue1_and(&temp_dir, yue2.clone());
     let (_, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
-    let q4 = variant_row(&catalog_entry(&models, "yue2"), "q4");
+    let q4 = variant_row(&catalog_entry(&models, "yue2_tier_fixture"), "q4");
     assert_eq!(q4["installed"], true, "{q4}");
     assert_eq!(q4["derivationPending"], false, "{q4}");
     assert_eq!(
@@ -604,7 +635,7 @@ async fn a_verified_derived_snapshot_installs_the_tier_and_its_delete_spares_the
     let (status, body) = request(
         app.clone(),
         "DELETE",
-        "/api/v1/models/yue2/variants/q4",
+        "/api/v1/models/yue2_tier_fixture/variants/q4",
         Value::Null,
     )
     .await;
@@ -700,9 +731,9 @@ async fn downloads_use_current_server_license_acknowledgment_without_reasserting
         assert_eq!(body["code"], "license_acknowledgment_required");
     }
     request(app.clone(), "PUT", ack_route, Value::Null).await;
-    let mut changed = builtin_yue2();
-    changed["licenseNotice"] = json!("New terms require another explicit acceptance");
-    let changed_app = app_with_yue1_and(&temp, changed);
+    // The server's terms changed since that acceptance (a release shipped new terms).
+    age_stored_license_acceptance(&temp, "yue2", &builtin_yue2());
+    let changed_app = app_with_yue1_and_yue2(&temp);
     let (_, view) = request(changed_app.clone(), "GET", ack_route, Value::Null).await;
     assert_eq!(view["acknowledged"], false);
     let (status, body) = request(
@@ -799,9 +830,12 @@ async fn accepting_a_license_can_bind_the_exact_terms_the_browser_reviewed() {
     .await;
     assert_eq!(status, StatusCode::OK, "{accepted}");
     assert_eq!(accepted["acknowledged"], true);
-    let mut changed = builtin_yue2();
-    changed["licenseNotice"] = json!("New terms not yet reviewed in the browser");
-    let changed_app = app_with_yue1_and(&temp, changed);
+    // The browser reviewed terms the server has since replaced: its stored acceptance and its
+    // If-Match both name the previous terms.
+    let previous = age_stored_license_acceptance(&temp, "yue2", &builtin_yue2());
+    assert_ne!(format!("\"{previous}\""), header);
+    let header = format!("\"{previous}\"");
+    let changed_app = app_with_yue1_and_yue2(&temp);
     let (status, error) = request_with_headers(
         changed_app.clone(),
         "PUT",
@@ -881,10 +915,9 @@ async fn selected_h3_model_uses_its_own_current_terms_for_shared_repositories() 
         assert_eq!(status, StatusCode::FORBIDDEN, "{selected}: {body}");
         assert_eq!(body["code"], "license_acknowledgment_required");
         request(app, "PUT", &ack, Value::Null).await;
-        let mut changed = models;
-        changed.iter_mut().find(|m| m["id"] == selected).unwrap()["licenseNotice"] =
-            json!("Changed terms require fresh acceptance");
-        let (app, _) = app_with_licensed_models(&temp, changed);
+        let selected_entry = models.iter().find(|m| m["id"] == selected).unwrap();
+        age_stored_license_acceptance(&temp, selected, selected_entry);
+        let (app, _) = app_with_licensed_models(&temp, models);
         let (_, view) = request(app.clone(), "GET", &ack, Value::Null).await;
         assert_eq!(view["acknowledged"], false);
         let (status, body) = request(app.clone(), "POST", &download, json!({"variant":"q4"})).await;
@@ -929,9 +962,20 @@ async fn h3_ref_acceptance_does_not_grant_an_unselected_raw_repository_request()
 async fn selected_h3_terms_never_unblock_a_shared_blocked_component() {
     let _env = isolate_hf_cache();
     let temp = tempfile::tempdir().unwrap();
-    let mut base = builtin_model("minimax_h3");
-    base["conditionalComponents"] = json!([{"componentId":"blocked_fixture","repo":"SceneWorks/minimax-h3-mlx","purpose":"fixture","blocked":{"reason":"not licensed","unblock":"explicit upstream release"}}]);
-    let (app, _) = app_with_licensed_models(&temp, vec![base, builtin_model("minimax_h3_ref")]);
+    // A registered builtin's row comes from the compiled registry, so the blocked component cannot
+    // be injected into `minimax_h3` itself. A blocked component declared by ANY catalog entry wins
+    // over every acknowledgment, so declare it on an unregistered sibling row sharing the H3 repo.
+    let mut blocker = builtin_model("minimax_h3");
+    blocker["id"] = json!("h3_blocked_component_fixture");
+    blocker["conditionalComponents"] = json!([{"componentId":"blocked_fixture","repo":"SceneWorks/minimax-h3-mlx","purpose":"fixture","blocked":{"reason":"not licensed","unblock":"explicit upstream release"}}]);
+    let (app, _) = app_with_licensed_models(
+        &temp,
+        vec![
+            builtin_model("minimax_h3"),
+            blocker,
+            builtin_model("minimax_h3_ref"),
+        ],
+    );
     let (status, _) = request(
         app.clone(),
         "PUT",
@@ -1084,9 +1128,8 @@ async fn selected_download_replays_revalidate_receipts_and_preserve_private_bind
         assert_eq!(body["code"], "license_acknowledgment_required");
     }
     request(app.clone(), "PUT", ack, Value::Null).await;
-    let mut changed = models;
-    changed[1]["licenseNotice"] = json!("Changed terms");
-    let (updated, _) = app_with_licensed_models(&temp, changed);
+    age_stored_license_acceptance(&temp, "minimax_h3_ref", &models[1]);
+    let (updated, _) = app_with_licensed_models(&temp, models);
     let (status, body) = request(
         updated,
         "POST",

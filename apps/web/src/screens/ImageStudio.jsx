@@ -45,7 +45,7 @@ import {
 
 import { OrderedReferenceList } from "../components/OrderedReferenceList.jsx";
 
-import { isFlux3LayoutModel, orderedLayoutAssetIds, reconcileLayoutReferences, moveLayoutReference, bindLayoutReferenceIds } from "../flux3Layout.js";
+import { orderedLayoutAssetIds, reconcileLayoutReferences, moveLayoutReference, bindLayoutReferenceIds } from "../flux3Layout.js";
 import { maxReferencesForModel } from "../imageReferenceLimits.js";
 import { pidDecodeHeadsUp } from "../pidDecodeNotice.js";
 import { promptEnhancementAvailable } from "../promptEnhancement.js";
@@ -136,8 +136,7 @@ import {
 } from "../modelEligibility.js";
 import { ControlPanel } from "../components/ControlPanel.jsx";
 import { pidToggleVisible } from "../pidEligibility.js";
-import { allPossibleTiers, installedTiers, isBelowFloor, modelQualityFloor, nativeTierEligibility, tierPickerOptions } from "../quantTier.js";
-import { suggestTier } from "../tierSuggestion.js";
+import { allPossibleTiers, installedTiers, isBelowFloor, modelQualityFloor, nativeTierEligibility, suggestTier, tierPickerOptions } from "../quantTier.js";
 import { useHostMemory } from "../hooks/useHostMemory.js";
 import { hostMemoryGbForBackend } from "../hostMemory.js";
 import { MAX_LISTED_JOBS, PROMPT_REFINE_MODEL_ID, qwenRewriterAppliesTo, QWEN_REWRITE_I2I_MODEL_ID, QWEN_REWRITE_T2I_MODEL_ID, VISION_CAPTION_MODEL_ID } from "../constants.js";
@@ -148,8 +147,10 @@ import {
   DEFAULT_MAC_CAPABILITIES,
   macAvailableModels,
   macGatingActive,
+  hiresFixUnsupported,
+  isFlux3ImageModel,
   macModelFeatureBlock,
-} from "../macGating.js";
+} from "../modelEligibility.js";
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
 import { resolutionUniverseKey, useReferenceAspectSnap } from "../hooks/useReferenceAspectSnap.js";
 import { resolveJobResultAssets } from "../jobResultAssets.js";
@@ -743,6 +744,15 @@ export function ImageStudio() {
     }
   }, [mode, selectedAssetEditableSourceId, changeSourceAssetId]);
 
+  // Derived outside the launch effect so a catalog refresh cannot re-fire the launch. The
+  // launch's model can name an id the catalog has not delivered yet: the FLUX.3 reference binding
+  // then stays pending (see the effect after the launch effect) and applies only if the model
+  // resolves to a FLUX.3 image model.
+  const launchTargetId = launchRequest?.model ?? referenceChangeState.current?.model;
+  const launchTargetModel = models.find((entry) => entry.id === launchTargetId);
+  const launchTargetsFlux3 = isFlux3ImageModel(launchTargetModel);
+  const launchTargetPending = Boolean(launchTargetId) && !launchTargetModel;
+  const pendingFlux3Binding = useRef(null);
   useEffect(() => {
     if (launchRequest?.view !== "Image") {
       return;
@@ -788,13 +798,41 @@ export function ImageStudio() {
     }
     if (launchRequest.mode === "edit_image" && selectedAssetEditableSourceId) {
       changeSourceAssetId(selectedAssetEditableSourceId);
-      if (isFlux3LayoutModel(launchRequest.model ?? referenceChangeState.current?.model)) {
+      pendingFlux3Binding.current = null;
+      if (launchTargetsFlux3) {
         // A launch can switch models in this same commit, before changeSource sees the new model.
         setReferenceAssetIds([selectedAssetEditableSourceId]);
         setFlux3ReferenceSlots(reconcileLayoutReferences([], [selectedAssetEditableSourceId]));
+      } else if (launchTargetPending) {
+        pendingFlux3Binding.current = {
+          launchId: launchRequest.id, targetId: launchTargetId, sourceId: selectedAssetEditableSourceId,
+          mode: normalizeImageMode(launchRequest.mode),
+        };
       }
     }
+    // launchTargetsFlux3 / launchTargetPending are read at launch time; the pending binding below
+    // finishes the loading-catalog case without re-running the launch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [launchRequest, selectedAsset?.id, selectedAssetEditableSourceId, changeSourceAssetId]);
+  useEffect(() => {
+    const pending = pendingFlux3Binding.current;
+    if (!pending) return;
+    // The first model other than the launch's target is the automatic fallback while the target is
+    // missing from the catalog; a later different model is the user's choice.
+    if (launchTargetPending) {
+      if (model === pending.targetId) pending.seenTarget = true;
+      else if (pending.seenTarget && pending.snapModel === undefined) pending.snapModel = model;
+      return;
+    }
+    pendingFlux3Binding.current = null;
+    if (launchRequest?.id !== pending.launchId || !launchTargetsFlux3) return;
+    // A user change of model, mode or source after the launch wins over the deferred binding.
+    if ((model !== pending.targetId && model !== pending.snapModel) ||
+        mode !== pending.mode || sourceAssetId !== pending.sourceId) return;
+    setModel(pending.targetId);
+    setReferenceAssetIds([pending.sourceId]);
+    setFlux3ReferenceSlots(reconcileLayoutReferences([], [pending.sourceId]));
+  }, [launchTargetPending, launchTargetsFlux3, launchRequest?.id, model, mode, sourceAssetId]);
 
   // Mac UI gating (sc-3486): on a Mac in MLX-required mode, hide torch-only models from the
   // picker so the user can't select something that would only error. Inert elsewhere.
@@ -1350,14 +1388,14 @@ export function ImageStudio() {
   // Keep the selected reference valid: default to the first approved reference when
   // none is chosen or the current one no longer belongs to this character.
   useEffect(() => {
-    if (mode !== "character_image" || (isFlux3LayoutModel(model) && orderedCharacterReferences)) {
+    if (mode !== "character_image" || (isFlux3ImageModel(selectedModel) && orderedCharacterReferences)) {
       return;
     }
     if (characterReferences.some((reference) => reference.assetId === referenceAssetId)) {
       return;
     }
     changeReferenceAssetId(characterReferences[0]?.assetId ?? "", false);
-  }, [mode, model, orderedCharacterReferences, characterReferences, referenceAssetId, changeReferenceAssetId]);
+  }, [mode, model, selectedModel, orderedCharacterReferences, characterReferences, referenceAssetId, changeReferenceAssetId]);
   // Seed a character-appropriate default prompt when entering character mode, unless
   // the user has already typed/picked their own. The generic text-to-image default
   // ("neon street at midnight") makes no sense for character variations.
@@ -1531,7 +1569,8 @@ export function ImageStudio() {
     supportsImg2img || selectedModel?.family === "sdxl",
   );
   const hiresFixAccelerationBlocked =
-    model === "realvisxl_lightning" || ["lightning", "lcm", "hyper"].includes(sampler);
+    hiresFixUnsupported(selectedModel) ||
+    ["lightning", "lcm", "hyper"].includes(sampler);
   const hiresFixInputBlocked =
     Boolean(img2imgReferenceAssetId) ||
     posePayload.length > 0 ||
@@ -1867,6 +1906,9 @@ export function ImageStudio() {
   }, [launchRequest?.id]);
   useImageRecipeReplay({
     model,
+    models,
+    mode,
+    referenceAssetIds,
     launchRequest,
   setRecipeTierRequest,
   setFlux3Layout,
@@ -1962,7 +2004,7 @@ export function ImageStudio() {
   // families (Mage-Flow) declare a ÷16 stride and a 512–2048 native range; every other model keeps the
   // global 256–4096 envelope with no stride. Drives the override inputs' min/max/step affordance below.
   // Match the references actually emitted by buildImageJobRequest, not hidden/stale picker state.
-  const jobReferences = imageJobReferences({ model, mode, multiReference, orderedCharacterReferences, sourceWithMultiReference,
+  const jobReferences = imageJobReferences({ selectedModel, mode, multiReference, orderedCharacterReferences, sourceWithMultiReference,
     editSecondPair, sourceAssetId, controlPreprocessSourceId, referenceAssetIds, referenceAssetId,
     supportsImg2img, img2imgReferenceAssetId });
   const imageReference = useImageReferenceStatus({
@@ -1971,7 +2013,7 @@ export function ImageStudio() {
     projectId: activeProject?.id,
     assets,
   });
-  const flux3LayoutAvailable = isFlux3LayoutModel(selectedModel);
+  const flux3LayoutAvailable = isFlux3ImageModel(selectedModel);
   const layoutAssetIds = orderedLayoutAssetIds(jobReferences);
   const layoutReferences = flux3LayoutAvailable
     ? reconcileLayoutReferences(flux3ReferenceSlots, layoutAssetIds) : [];
@@ -2014,7 +2056,7 @@ export function ImageStudio() {
     setReferenceAssetIds(ids);
     if (orderedCharacterActive) setReferenceAssetId(ids[0] ?? "");
   };
-  const flux3ReferenceRequest = isFlux3ReferenceRequest(model, Object.values(jobReferences).flat());
+  const flux3ReferenceRequest = isFlux3ReferenceRequest(selectedModel, Object.values(jobReferences).flat());
   const activeDimensionIntent = flux3ReferenceRequest && referenceDimensionIntent?.model === model &&
     referenceDimensionIntent?.mode === mode ? referenceDimensionIntent : null;
   useEffect(() => {
@@ -2238,7 +2280,7 @@ export function ImageStudio() {
     referenceAssetIds,
     referenceDimensionIntent,
     orderedCharacterReferences,
-    ...(isFlux3LayoutModel(model) && mode === "character_image" ? { characterId, characterLookId, referenceAssetId } : {}),
+    ...(isFlux3ImageModel(selectedModel) && mode === "character_image" ? { characterId, characterLookId, referenceAssetId } : {}),
     flux3Layout,
     flux3ReferenceSlots,
     ipAdapterScale,

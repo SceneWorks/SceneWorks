@@ -1,0 +1,282 @@
+# SW-7033 (feature SW-F348): Tier 2 base/head A/B over the production API/worker path.
+#
+# Called ONLY by memory-catalog-campaign.yml (workflow_dispatch, profile `tier2-ab`). This file has
+# no dispatch, push, pull_request, schedule or merge trigger, so no ordinary CI event can reach it.
+# One job per backend checks out the dispatched driver plus the two exact SHAs into separate
+# directories, builds the release API/worker of each into one shared scratch target, then runs
+# scripts/tier2-ab.mjs: base#1, head, and (only when head differs) base#2 per route, against the
+# same read-only model hub on the same runner. It writes JSON + Markdown evidence as an artifact.
+# The DEC-7 stop rule, skip-with-reason for absent weights, watchdogs and decoded-content
+# comparison live in the driver. All scratch (checkouts, cargo target, API data dirs) is removed at
+# the end of the job; the model hub is never written or deleted and nothing is downloaded.
+#
+# No secrets are declared or passed: base and head are operator-chosen commits (restricted by the
+# selector's trusted-ref rule), and their builds and processes receive no credential.
+#
+# CI_IMPACT: manual only. Ordinary CI runs only scripts/tier2-ab.test.mjs (pure functions and
+# static workflow contracts) through `npm run check`.
+name: Tier 2 A/B (base vs head)
+
+on:
+  workflow_call:
+    inputs:
+      base_sha:
+        required: true
+        type: string
+      head_sha:
+        required: true
+        type: string
+      backend:
+        description: "mlx (nax-macos-2 via rw-mage) or cuda (Windows real-weights listener, physical GPU1)"
+        required: true
+        type: string
+      routes:
+        description: "JSON array of route ids; empty selects the backend's default routes"
+        required: false
+        type: string
+        default: ""
+      hubs:
+        description: "JSON array of read-only hub roots tried in order; empty selects the backend defaults"
+        required: false
+        type: string
+        default: ""
+      inference_sha:
+        description: "Optional cross-check: both checkouts must pin this inference revision"
+        required: false
+        type: string
+        default: ""
+      preflight_only:
+        description: "Validate inputs, checkouts, pins, tools and hub presence without building or loading a model"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  mlx:
+    if: ${{ inputs.backend == 'mlx' }}
+    # rw-mage isolates nax-macos-2. Never `nax`, `weights`, `real-weights` or `rw-starvector`:
+    # those also match the owner's desktop Mac.
+    runs-on: [self-hosted, macOS, ARM64, rw-mage]
+    # Two release builds (the second reuses the first's dependency units) plus at most three cold
+    # runs per route; each run has its own driver timeout. This is a wedge ceiling.
+    timeout-minutes: 600
+    concurrency:
+      group: tier2-ab-mlx-${{ github.run_id }}-${{ github.run_attempt }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+    env:
+      TIER2_AB_BACKEND: mlx
+      TIER2_AB_BASE_SHA: ${{ inputs.base_sha }}
+      TIER2_AB_HEAD_SHA: ${{ inputs.head_sha }}
+      TIER2_AB_BASE_DIR: ${{ github.workspace }}/tier2-ab-base
+      TIER2_AB_HEAD_DIR: ${{ github.workspace }}/tier2-ab-head
+      TIER2_AB_ROUTES: ${{ inputs.routes }}
+      TIER2_AB_HUBS: ${{ inputs.hubs }}
+      TIER2_AB_INFERENCE_SHA: ${{ inputs.inference_sha }}
+      # Same reason as the other release MLX producers on these Macs (iris, qwen/flux app proofs).
+      CARGO_PROFILE_RELEASE_STRIP: none
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    steps:
+      - name: Set attempt-owned scratch directory
+        run: echo "TIER2_AB_WORK=$RUNNER_TEMP/t2ab-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
+      - name: Check out the dispatched driver
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: tier2-ab-driver
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.base_sha }}
+          path: tier2-ab-base
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.head_sha }}
+          path: tier2-ab-head
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Preflight (inputs, checkouts, pins, tools, hub presence; no build, no model)
+        run: node tier2-ab-driver/scripts/tier2-ab.mjs --preflight-only
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        if: ${{ !inputs.preflight_only }}
+        with:
+          toolchain: "1.98.0"
+      - name: Fetch Release libmlx for the pinned mlx-rs (or fall back to its source build)
+        if: ${{ !inputs.preflight_only }}
+        working-directory: tier2-ab-head
+        run: |
+          set +e
+          scripts/fetch-prebuilt-mlx.sh --build-type Release --github-env
+          rc=$?
+          set -e
+          if [ "$rc" = 1 ]; then
+            echo "PMETAL_MLX_PREBUILT_DIR=" >> "$GITHUB_ENV"
+            echo "PMETAL_METALLIB_PATH=" >> "$GITHUB_ENV"
+          elif [ "$rc" != 0 ]; then
+            exit "$rc"
+          fi
+      - name: Build base then head release API/worker into one shared scratch target
+        if: ${{ !inputs.preflight_only }}
+        run: node tier2-ab-driver/scripts/tier2-ab.mjs --build-only
+      - name: Run base#1, head and (if needed) base#2 per route under the shared Metal lock
+        if: ${{ !inputs.preflight_only }}
+        run: |
+          echo "[tier2-ab] $(date -u +%Y-%m-%dT%H:%M:%SZ) phase=waiting_for_metal_lock wait_s=7200"
+          source tier2-ab-driver/scripts/ci/metal_execution_entry.sh
+          metal_execution_entry 7200 node tier2-ab-driver/scripts/tier2-ab.mjs --run
+      - name: Retain the A/B evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tier2-ab-mlx-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.TIER2_AB_WORK }}/evidence/
+          if-no-files-found: warn
+          retention-days: 30
+      # Head writes read-only attempt bundles under the run's own state dir. The driver restores
+      # owner write permission inside the scratch roots only (never following a link, never a hub
+      # root) before removing them; the driver checkout goes last.
+      - name: Remove every scratch directory
+        if: ${{ always() }}
+        run: |
+          status=0
+          if [ -f tier2-ab-driver/scripts/tier2-ab.mjs ]; then node tier2-ab-driver/scripts/tier2-ab.mjs --cleanup || status=$?; fi
+          rm -rf -- "$GITHUB_WORKSPACE/tier2-ab-driver"
+          exit "$status"
+
+  cuda:
+    if: ${{ inputs.backend == 'cuda' }}
+    # Only the first two Windows listeners carry real-weights; all four share one physical box.
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    timeout-minutes: 720
+    concurrency:
+      # Distinct pending requests stay queued. Physical exclusion is the exact-UUID lease taken by
+      # windows_cuda_execution.py around the model-running step, as in the other CUDA lanes.
+      group: tier2-ab-cuda-${{ github.run_id }}-${{ github.run_attempt }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: powershell
+    env:
+      TIER2_AB_BACKEND: cuda
+      TIER2_AB_BASE_SHA: ${{ inputs.base_sha }}
+      TIER2_AB_HEAD_SHA: ${{ inputs.head_sha }}
+      TIER2_AB_BASE_DIR: ${{ github.workspace }}\tier2-ab-base
+      TIER2_AB_HEAD_DIR: ${{ github.workspace }}\tier2-ab-head
+      TIER2_AB_ROUTES: ${{ inputs.routes }}
+      TIER2_AB_HUBS: ${{ inputs.hubs }}
+      TIER2_AB_INFERENCE_SHA: ${{ inputs.inference_sha }}
+      # Native sm_120 and the physical GPU1 binding every real-weight CUDA acceptance lane uses.
+      CUDA_COMPUTE_CAP: "120"
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_VISIBLE_DEVICES: "1"
+      NVIDIA_VISIBLE_DEVICES: "1"
+      SCENEWORKS_GPU_ID: "1"
+      TIER2_AB_GPU_POLICY: shared-display
+      # Heavy candle lane: no sccache wrapper (windows-candle.yml / catalog walk, os error 10054).
+      RUSTC_WRAPPER: ""
+      CARGO_INCREMENTAL: "0"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    steps:
+      - name: Set attempt-owned scratch directory
+        run: Add-Content -Path $env:GITHUB_ENV -Value "TIER2_AB_WORK=$env:RUNNER_TEMP\t2ab-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+      - name: Check out the dispatched driver
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: tier2-ab-driver
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.base_sha }}
+          path: tier2-ab-base
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check out head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.head_sha }}
+          path: tier2-ab-head
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Preflight (inputs, checkouts, pins, tools, hub presence; no build, no model)
+        run: |
+          node tier2-ab-driver/scripts/tier2-ab.mjs --preflight-only
+          if ($LASTEXITCODE -ne 0) { throw 'tier2-ab preflight failed' }
+      - name: Prepare the Rust toolchain
+        if: ${{ !inputs.preflight_only }}
+        uses: ./tier2-ab-driver/.github/actions/prepare-rust-runner
+        with:
+          workspace-directory: tier2-ab-head
+      - name: Disable unstable sccache wrapper for the heavy Candle lane
+        if: ${{ !inputs.preflight_only }}
+        run: |
+          Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
+          Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
+      - name: Preserve listener-owned Cargo dependency and kernel build caches
+        if: ${{ !inputs.preflight_only }}
+        working-directory: tier2-ab-head
+        run: |
+          node ..\tier2-ab-driver\scripts\select-windows-cargo-cache.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'isolated persistent Cargo cache selection failed' }
+      - name: Build base then head release API/worker into one shared scratch target
+        if: ${{ !inputs.preflight_only }}
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b %errorlevel%
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          node tier2-ab-driver\scripts\tier2-ab.mjs --build-only
+          if errorlevel 1 exit /b 1
+      - name: Run base#1, head and (if needed) base#2 per route under the physical GPU1 lease
+        if: ${{ !inputs.preflight_only }}
+        working-directory: tier2-ab-driver
+        run: |
+          # Physical GPU1 (nvidia-smi index 1, PCI C1:00.0) is the host's display GPU, so it is never
+          # strictly idle. This profile alone uses shared-display admission: after the exact-UUID
+          # lock, a 10 s window must show free memory >= 75776 MiB (largest route 66 GiB, the MLX
+          # LTX-2.5 q4 peak of run 43287955401 rounded up, + 8 GiB margin), stable memory.used and
+          # utilization, and no foreign compute footprint above 8 GiB. The wrapper prints nothing
+          # while it waits; the driver prints "phase=driver_started" once admitted.
+          Write-Host "[tier2-ab] $([DateTime]::UtcNow.ToString('o')) phase=waiting_for_gpu1_lease policy=shared-display min_free_mib=75776 budget_min=540"
+          python -I scripts/ci/windows_cuda_execution.py --actor tier2-ab-cuda --admission-policy shared-display --min-free-mib 75776 --budget-minutes 540 --cuda-ordinals 0 -- node scripts/tier2-ab.mjs --run
+          if ($LASTEXITCODE -ne 0) { throw 'tier2-ab comparison failed; see the evidence artifact' }
+      - name: Retain the A/B evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tier2-ab-cuda-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.TIER2_AB_WORK }}/evidence/
+            ${{ runner.temp }}/sceneworks-cuda-execution-${{ github.run_id }}-${{ github.run_attempt }}-tier2-ab-cuda/
+          if-no-files-found: warn
+          retention-days: 30
+      # Same read-only-bundle restore as the mlx job; multiply linked read-only files are refused
+      # rather than changed, because they may share bytes with the hub.
+      - name: Remove every scratch directory
+        if: ${{ always() }}
+        run: |
+          $status = 0
+          if (Test-Path -LiteralPath 'tier2-ab-driver\scripts\tier2-ab.mjs') { node tier2-ab-driver\scripts\tier2-ab.mjs --cleanup; $status = $LASTEXITCODE }
+          $driver = "$env:GITHUB_WORKSPACE\tier2-ab-driver"
+          if (Test-Path -LiteralPath $driver) { cmd /c rmdir /s /q "$driver" }
+          exit $status

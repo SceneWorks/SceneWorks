@@ -1,34 +1,16 @@
 //! Model/kernel routing catalog: the per-backend routed-model and training-kernel lists,
 //! the Mac support/capability probes, and their supporting types. Moved out of
-//! `jobs_store.rs` (sc-8816) with no behavior change. List membership is pinned by the
-//! snapshot tests at the bottom of this file.
+//! `jobs_store.rs` (sc-8816) with no behavior change. Image/video membership comes from typed
+//! route policy; native training membership joins product targets with runtime trainer exports.
 
-use std::collections::BTreeMap;
-use std::sync::OnceLock;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{LazyLock, OnceLock};
 
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use crate::checkpoint_weight_facts::NVFP4_CODEC_ID;
 use crate::contracts::JobType;
-
-/// Video capabilities a shipped manifest entry advertises that NO lane can currently claim.
-///
-/// Promoted out of the test module by the sc-19721 main sync, because two checks need it and only
-/// one could see it: the class guard in this file's tests, and `matrix::canonical_model_request`,
-/// which `main` added later and which errors on a video entry with no routed mode. One row is the
-/// single place saying "advertised, knowingly unroutable, and why"; duplicating it would let the
-/// two drift apart.
-///
-/// EXACT, not a suppression list — the class guard fails if a row here is no longer needed, so a
-/// capability that becomes claimable forces its row to be deleted.
-///
-/// EMPTY is the goal state and the current state. The last row —
-/// `("minimax_h3_ref", "reference_to_video")`, filed while the MLX Ref2VA declaration was
-/// withheld pending a `MultiReference` conditioning declaration — was deleted by sc-18650, which
-/// instead aligned `video_mode_conditioning_requirements` to the ordered omni-reference surface
-/// the pinned engines actually declare and restored the `minimax_h3_ref` arm in `routing/mlx.rs`.
-pub(super) const KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES: &[(&str, &str, &str)] = &[];
 
 use crate::jobs_store::routing::candle::video_mode_is_candle_eligible;
 use crate::jobs_store::routing::gaps::{
@@ -125,7 +107,17 @@ pub fn model_mac_support(
 /// the API replaces this provisional verdict with exact provider-derived support during catalog
 /// projection; the family argument is intentionally insufficient here.
 pub(crate) fn image_model_mac_support(model: &str, _family: Option<&str>) -> ModelMacSupport {
-    if !MLX_ROUTED_MODELS.contains(&model) {
+    let supported = crate::registry::builtin_model_spec(model).map_or_else(
+        || LEGACY_IMAGE_MLX_ROUTED.contains(&model),
+        // Exactly the claim gate's authority, as for video: a builtin with no route-policy row is
+        // refused by the router, so it must not read as MLX-supported in the catalog.
+        |spec| {
+            spec.routing
+                .as_ref()
+                .is_some_and(crate::registry::RoutePolicy::mlx_routed)
+        },
+    );
+    if !supported {
         // A family token is not enough to choose an imported loader: source shape is mandatory.
         // Catalog projection applies exact provider facts once it has the full manifest entry.
         return ModelMacSupport {
@@ -188,6 +180,8 @@ pub(crate) fn image_model_mac_support(model: &str, _family: Option<&str>) -> Mod
         reason: None,
         features: ModelMacFeatures {
             pose,
+            // Product admission probes include supplemental reference adapters that are not
+            // declared by the primary generator descriptor.
             reference,
             edit,
             // Third-party LyCORIS applies on every MLX provider now (epic 3641).
@@ -225,7 +219,15 @@ pub(crate) const VIDEO_UI_MODES: &[&str] = &[
 ];
 
 pub(crate) fn video_model_mac_support(model: &str) -> ModelMacSupport {
-    if !VIDEO_MLX_ROUTED_MODELS.contains(&model) {
+    let routed = crate::registry::builtin_model_spec(model).map_or_else(
+        || LEGACY_VIDEO_MLX_ROUTED.contains(&model),
+        |spec| {
+            spec.routing
+                .as_ref()
+                .is_some_and(crate::registry::RoutePolicy::mlx_routed)
+        },
+    );
+    if !routed {
         return ModelMacSupport {
             supported: false,
             reason: Some(classify_video_gap(&probe_payload(model, &[]))),
@@ -391,11 +393,21 @@ pub struct ModelCandleFeatures {
 }
 
 /// Off-Mac (candle) UI gating support for a model id of the given catalog `model_type` — the
-/// sibling of [`model_mac_support`] (sc-19570). Only `"video"` carries a verdict; every other type
-/// is reported `supported` with an empty feature set, because the measured off-Mac reachability gap
-/// this block closes is per-video-mode. A caller must therefore read `features.video_modes` for the
-/// per-mode answer and treat an empty map as "this block says nothing about that model".
+/// sibling of [`model_mac_support`] (sc-19570). Converted builtins take availability from their
+/// static Candle route. Legacy video models expose per-mode verdicts in `features.video_modes`;
+/// other legacy rows keep their original supported/empty-features projection.
 pub fn model_candle_support(model_id: &str, model_type: &str) -> ModelCandleSupport {
+    if model_type == "image" {
+        if let Some(spec) = crate::registry::builtin_model_spec(model_id) {
+            if spec.routes.contains_key("candle") {
+                return ModelCandleSupport {
+                    supported: true,
+                    reason: None,
+                    features: ModelCandleFeatures::default(),
+                };
+            }
+        }
+    }
     match model_type {
         "video" => video_model_candle_support(model_id),
         _ => ModelCandleSupport {
@@ -699,14 +711,11 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
         not_available_label: MAC_NOT_AVAILABLE_LABEL.to_owned(),
         features,
         training: MacTrainingSupport {
-            supported_kernels: MLX_ROUTED_TRAINING_KERNELS
-                .iter()
-                .map(|kernel| (*kernel).to_owned())
-                .collect(),
-            candle_supported_kernels: CANDLE_ROUTED_TRAINING_KERNELS
-                .iter()
-                .map(|kernel| (*kernel).to_owned())
-                .collect(),
+            supported_kernels: ordered_training_kernels(&MLX_ROUTED_TRAINING_KERNELS, "mlx"),
+            candle_supported_kernels: ordered_training_kernels(
+                &CANDLE_ROUTED_TRAINING_KERNELS,
+                "candle",
+            ),
             lokr_on_wan_supported: false,
         },
     }
@@ -716,22 +725,13 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
 // Per-model routing capability tables (sc-9495)
 // ---------------------------------------------------------------------------------------------
 //
-// F-014 follow-up: the per-backend routed-model lists used to live as ~9 parallel `&[&str]`
-// constants (MLX_ROUTED_MODELS, CANDLE_ROUTED_MODELS, CANDLE_QUANT_LORA_MODELS,
-// CANDLE_QUANT_MODELS, CANDLE_LORA_MODELS + the 4 video variants), so a single model's routing
-// facts were scattered across up to five edit sites — the "engine wired but router half missed"
-// bug class (chroma sc-5576, krea sc-7836). They are now collapsed into ONE row per model in the
-// tables below, and every legacy list constant is DERIVED from a table column at compile time via
-// [`derive_model_list!`] — so adding or changing a model's routing is a single-row edit, and the
-// list constants (which the routing predicates + oracles still `.contains()`/iterate exactly as
-// before) can never drift from one another. The membership-parity test at the bottom of this file
-// pins each derived constant against the pre-collapse snapshot (zero-diff guardrail), and a
-// superset test asserts the quant/lora columns imply the candle-routed column.
+// The schema-validated route-policy.json owns SceneWorks router admission. Build.rs compiles its
+// typed rows to the static slices consumed by existing job predicates; the native descriptor
+// export separately owns engine breadth. route-policy.json carries the former IMAGE_MODEL_CAPS
+// and VIDEO_MODEL_CAPS rows unchanged; the migration added and repaired no route.
 
-/// One image model's per-backend routing capabilities (sc-9495). Each boolean is the model's
-/// membership in what used to be a standalone routing list; the predicates in `mlx.rs` / `candle.rs`
-/// / `gaps.rs` consult the DERIVED list constants below (byte-identical membership), so behavior is
-/// unchanged — this struct is purely the single source those constants are generated from.
+/// One image model's SceneWorks router admission policy. Build.rs derives the static list
+/// constants from these generated rows; the checked-in typed JSON is the sole authored owner.
 ///
 /// **Superset invariant (enforced):** `candle_quant`, `candle_lora`, and `candle_quant_lora` all
 /// imply `candle_routed` — a model can only advertise a quant tier/select or inference LoRA on the
@@ -828,460 +828,8 @@ impl VideoModelCaps {
     }
 }
 
-/// The one-row-per-model image routing table (sc-9495) — the single source the image list constants
-/// below are derived from. Column meanings + the porting-story history that used to live as inline
-/// comments on each standalone list are documented per-row here; each model is now ONE edit site.
-///
-/// Legend for the [`ModelCaps::new`] positional args:
-/// `new(id, mlx_routed, candle_routed, candle_quant, candle_lora, candle_quant_lora)`.
-pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
-    // Mage-Flow generation + instruction-edit (sc-14053): all six registry descriptors are linked by
-    // runtime-cuda and advertise Q4/Q8 over the same complete dense snapshots (load-time DiT fold;
-    // BF16 stays dense). User LoRA/LoKr now applies on both dense and packed tiers.
-    ModelCaps::new("mage_flow_base", true, true, false, false, true),
-    ModelCaps::new("mage_flow", true, true, false, false, true),
-    ModelCaps::new("mage_flow_turbo", true, true, false, false, true),
-    ModelCaps::new("mage_flow_edit_base", true, true, false, false, true),
-    ModelCaps::new("mage_flow_edit", true, true, false, false, true),
-    ModelCaps::new("mage_flow_edit_turbo", true, true, false, false, true),
-    // sc-3022 Z-Image / sc-3023 FLUX.1 / sc-3024 Qwen / sc-3025 FLUX.2 / sc-3026 SDXL — the founding
-    // MLX-routed families (grows one family story at a time as each lands real generation in
-    // `sceneworks-worker::image_jobs`). CANDLE: SDXL sc-3678, the four families sc-5096.
-    //
-    // Z-Image's candle descriptor deliberately keeps `supported_quants: []`: it does not quantize a
-    // dense checkpoint on the fly. That is NOT the capability this routing bit represents for its
-    // turnkey. `advanced.mlxQuantize` selects an already-packed q4/q8/bf16 directory, and
-    // candle-gen-z-image packed-detects those components from their config. The manifests advertise
-    // `standardTierLayout` and measured candle Q4/BF16 VRAM. Keeping `candle_quant = false` therefore
-    // rejected a valid Q4 tier select as `candle_unsupported` before the worker could load it.
-    ModelCaps::new("z_image_turbo", true, true, false, false, true),
-    // Base (non-distilled, full-CFG) Z-Image (epic 8236, sc-8379 control + sc-8679 txt2img). MLX-routed
-    // on macOS AND candle-routed off-Mac. The worker registers a real `z_image` MLX engine (MODEL_TABLE:
-    // shift-6.0 / ~50-step / real CFG, `mlx_z_image` adapter) plus base strict-control on Mac
-    // (`ImageRoute::ZImageBaseControl`, `WIRED_MLX_POSE_FAMILIES`), and the manifest carries a full `mlx`
-    // block — so a Mac generates base Z-Image in-process just like Turbo. The prior `mlx_routed: false`
-    // here was a wiring gap left by sc-8320/sc-8251 (the base MLX engine + control landed, but this row
-    // and `image_request_mlx_eligible` were never updated), so `model_mac_support` hid the model behind
-    // "Not available on Mac (MLX only)" even though the Mac worker fully supports it.
-    ModelCaps::new("z_image", true, true, false, false, true),
-    // `z_image_edit` (epic 3529 / sc-3923): MLX-only edit id on Turbo weights.
-    ModelCaps::new("z_image_edit", true, false, false, false, false),
-    // sc-20969: terminal-CUDA acceptance admits the reviewed packaged q4/q8 FLUX.1 routes. Keep
-    // adapter-on-packed independently fail-closed: the established dense LoRA/LoKr route remains,
-    // but a packed tier plus adapter does not become admissible through this promotion.
-    ModelCaps::new("flux_schnell", true, true, true, true, false),
-    ModelCaps::new("flux_dev", true, true, true, true, false),
-    // Base `qwen_image` candle txt2img is a turnkey packed-quant family (sc-8669 wired the q4/q8/bf16
-    // subdirs into `STANDARD_TIER_MODELS`; sc-10969 measured the tiers), so a tier-select `mlxQuantize`
-    // stays on candle — `candle_quant` is set (sc-11020, the routing half previously missed by sc-9983,
-    // which flipped krea/ideogram/boogu but not qwen). User LoRA/LoKr applies on the packed tiers.
-    ModelCaps::new("qwen_image", true, true, false, false, true),
-    // Qwen-Image 2.1 (sc-24108 MLX / sc-24109 Candle, epic 24107): a SEPARATE model from the
-    // 2512-weights `qwen_image` row above — different snapshot, different latent space, different
-    // licence, and NOT a shared quant surface with it.
-    //
-    // `candle_routed` (sc-24109): the native Candle/CUDA port registers the SAME engine id
-    // `qwen_image_2_1`, so the one request contract that routes to MLX on a Mac routes off-Mac too.
-    // It takes TWO candle lanes to do that, and the split is not cosmetic (sc-24110): plain
-    // text-to-image reaches the generic txt2img lane, while a CONDITIONED request — the same
-    // upstream call with 1..N ordered condition images — is claimed by the bespoke
-    // `CandleImageLane::QwenImage21Edit` BEFORE the generic gate, because `CANDLE_IMAGE_CHECKS`
-    // refuses `edit_image` and every conditioning carrier for every family. The MLX arm makes the
-    // same two-shapes-one-contract decision in a single predicate.
-    //
-    // `candle_quant` FLIPS TO TRUE at sc-24112, and the reason is a change in the ENGINE, not a
-    // wiring catch-up. At sc-24109 the candle provider declared `supported_quants: []` and refused
-    // an on-the-fly quantize with a typed Unsupported at load, so `false` was the truthful column.
-    // Inference PR #1007 ports the packed loader to candle — `AdaptLinear::linear_detect_gs` reads
-    // the same packed triples on the DiT and the Qwen3 tower that MLX does — and the provider now
-    // declares `supported_quants: [Q4, Q8]`. `advanced.mlxQuantize` off-Mac is therefore a tier
-    // SELECT into an already-packed q4/q8 snapshot, exactly as on Mac, and the loader serves it.
-    // (A DENSE snapshot plus a quantize request is still a typed refusal on CANDLE: `spec.quantize`
-    // selects a tier there, it does not transform weights. MLX is different — against the dense
-    // snapshot it load-time quantizes — which is why the worker derives the load quant from the
-    // resolved artifact and sends none against the bf16 root on either lane.)
-    //
-    // This is NOT a merge of the two backends' surfaces. `candle_quant` is the CANDLE column and
-    // nothing else; the MLX lane's tier surface is the manifest's own `mlx` block; there is still
-    // no per-model-id quant field for the two to collapse into. They agree today because both
-    // providers happen to declare [Q4, Q8] — `qwen_image_2_1_declares_each_lanes_tier_surface_without_merging_them`
-    // is where a merge, rather than an agreement, would show up.
-    //
-    // sc-24158 (epic 24107, E9): the row moves from quant-only to the combined `candle_quant_lora`
-    // column — the same shape as the 2512 `qwen_image` row above — because the ENGINE changed, not
-    // the wiring. The candle provider (inference sc-24157, `candle-gen-qwen-image-2-1/src/adapters.rs`)
-    // now installs user LoRA/LoKr as stacked additive residuals over the dense bf16 AND the packed
-    // q8/q4 DiT and declares `supports_lora`/`supports_lokr` true, so a tier select and an adapter
-    // compose. (LoHa folds into the dense weight only; on a packed tier it is the engine's typed
-    // `Unsupported`, raised at load preflight — an actionable job failure, not a routing verdict.)
-    // `candle_quant` goes false only because the combined column must not be duplicated into the
-    // standalone ones (`capability_table_encodes_superset_invariant`); quant routing is unchanged.
-    // Before this, a LoRA-carrying 2.1 text-to-image job was the typed `CandleImageRefusal::UserLora`
-    // and no Windows/Linux worker claimed it. (The worker's memory-route `lora` load profile for
-    // this provider is published in the engine capability dumps, so it landed with the epic's
-    // terminal pin bump and re-dump, sc-24163, rather than here — see `memory_route_registry`.)
-    ModelCaps::new("qwen_image_2_1", true, true, false, false, true),
-    // Qwen-Image 2.1 Turbo (sc-25907, epic 25899): the distilled checkpoint, registered by the SAME
-    // two provider crates under its own engine id `qwen_image_2_1_turbo` beside the base id. One
-    // descriptor under a second id — the same conditioning, the same `supported_quants: [Q4, Q8]`
-    // tier select on both lanes, the same LoRA/LoKr on dense and packed tiers — so its row is the
-    // base row's columns verbatim, for the base row's reasons above. No trainer is registered under
-    // this id, so it appears in no training-target list below.
-    ModelCaps::new("qwen_image_2_1_turbo", true, true, false, false, true),
-    // Qwen-Image-Edit ids (sc-3397/3398): MLX edit siblings; candle serves them via the bespoke
-    // `qwen_edit_candle_eligible` lane (NOT the txt2img gate), so they are NOT candle-routed txt2img ids.
-    ModelCaps::new("qwen_image_edit", true, false, false, false, false),
-    ModelCaps::new("qwen_image_edit_2509", true, false, false, false, false),
-    ModelCaps::new("qwen_image_edit_2511", true, false, false, false, false),
-    ModelCaps::new(
-        "qwen_image_edit_2511_lightning",
-        true,
-        false,
-        false,
-        false,
-        false,
-    ),
-    // FLUX.2-klein-9B + the `_kv` / `_true_v2` weight variants share the candle `flux2_klein_9b` loader
-    // (sc-7459, a weights swap). The klein/dev `edit_image` shapes do NOT reach this gate — they are
-    // branched out to the bespoke candle `Flux2Edit` lane above (`flux2_edit_candle_eligible`), so these
-    // caps describe the txt2img surface only.
-    //
-    // sc-10222 (epic 9083): `candle_quant = true` for the two ids that actually ship the standard
-    // q4/q8/bf16 turnkey. Both are worker `STANDARD_TIER_MODELS` members whose manifests carry a
-    // MEASURED `candle.vramGbByTier` (klein 46.2/50.6/75.5, dev 44.0/70.7/128.0) — the worker has served
-    // those tiers on the candle txt2img lane since sc-9092, but this row still said `false`, so
-    // `image_request_candle_eligible`'s `!supports_quant && candle_request_wants_quant` arm bounced every
-    // explicit `advanced.mlxQuantize > 0` tier-select off the candle lane into the retired torch
-    // fallback — and FLUX.2-klein has NO torch path at all. Cruelly, dev's own fit-gate tells a 48 GB
-    // user to pick q4 (44.0) instead of the q8 default (70.7): the only tier that fits was the one tier
-    // that could not be routed. This is the identical "engine wired, router half missed" skew sc-9983
-    // (krea/ideogram/boogu) and sc-11020 (qwen_image) each closed; the diagnostic tell is exactly the one
-    // recorded there — a family in `STANDARD_TIER_MODELS` with a `candle.vramGbByTier` block that is not
-    // in a quant-capable routing set. sc-18477 adds user LoRA/LoKr on every published tier.
-    //
-    // The load `Quant` stays `None` on klein regardless (its `mlx.denseTextEncoderTier` declaration keeps its bf16 Qwen3 text
-    // encoder full-precision); `mlxQuantize` here is a turnkey tier-SELECT — which pre-quantized subdir
-    // `standard_tier_subdir` descends into — not an on-the-fly quantize.
-    ModelCaps::new("flux2_klein_9b", true, true, false, false, true),
-    ModelCaps::new("flux2_klein_9b_kv", true, true, false, false, true),
-    // `_true_v2` stays `candle_quant = false`: it is the wikeeyang community fine-tune, installed by
-    // convert-at-install from a single bf16 file into a FLAT `modelPath` dir. It ships no q4/q8/bf16
-    // tier matrix (one `downloads[]` entry, `mlx.quantize: 8` on-the-fly), so there is no tier for a
-    // pick to select — admitting one would only hand the dense converted tree to the legacy CPU-stage →
-    // quantize-onto-GPU path on a shape nothing has validated.
-    ModelCaps::new("flux2_klein_9b_true_v2", true, true, false, true, false),
-    // FLUX.2-dev (epic 5914 MLX / epic 6564 sc-7458 candle) — the guidance-distilled 32B flagship.
-    // A SEPARATE candle engine from klein (Mistral3 TE + 48/48/15360 DiT). Same sc-10222 tier-select
-    // flip as klein above; its `SceneWorks/flux2-dev-mlx` turnkey is where the epic's headline
-    // "packed Q4 load kills the ~105 GB dense CPU-staging peak" claim actually lands.
-    ModelCaps::new("flux2_dev", true, true, false, false, true),
-    // SDXL family (sc-10767, epic 9083 full-catalog parity): the candle lane serves the packed q4/q8
-    // MLX tiers end-to-end — packed UNet (sc-9416), packed dual-CLIP (sc-9527), and LoRA/LoKr fold on a
-    // packed tier (sc-9528) — and `candle-gen-sdxl` now advertises `supported_quants: [Q4, Q8]`. So
-    // BOTH a quant tier-select AND an inference LoRA stay on candle → `candle_quant_lora`. Previously
-    // `false, false, false` bounced quant requests (the sc-10726 q8 default) AND LoRA requests off the
-    // candle lane into the retired torch fallback. bf16 still resolves to Quant::None (dense), verbatim.
-    ModelCaps::new("sdxl", true, true, false, false, true),
-    ModelCaps::new("realvisxl", true, true, false, false, true),
-    // Illustrious-XL v1.0 / v2.0 (epic 10609): vanilla-SDXL anime finetunes on the shared `sdxl`
-    // engine. Same routing surface as `realvisxl` — MLX + candle txt2img + packed q4/q8 (sc-10767).
-    ModelCaps::new("illustrious_xl_v1", true, true, false, false, true),
-    ModelCaps::new("illustrious_xl_v2", true, true, false, false, true),
-    // RealVisXL Lightning (MLX sc-6075 / candle sc-7176): standalone few-step distilled SDXL checkpoint
-    // on the shared `sdxl` engine, few-step `lightning` accel sampler. **txt2img only** on both backends —
-    // edit / reference / mask / pose shapes are refused and remain queued (the accel sampler is
-    // conditioning-incompatible).
-    // sc-10812 (epic 9083): shares `candle-gen-sdxl`, which advertises `supported_quants: [Q4, Q8]` +
-    // inference LoRA-on-packed after sc-10767 (packed UNet sc-9416 / dual-CLIP sc-9527 / adapter fold
-    // sc-9528). Its `SceneWorks/realvisxl-lightning-mlx` turnkey ships the standard q4/q8/bf16 tiers
-    // (standard_tier_subdir), so a quant tier-select AND a LoRA both stay on the candle lane for the
-    // plain few-step txt2img shape → `candle_quant_lora`. bf16 still resolves to Quant::None (dense).
-    ModelCaps::new("realvisxl_lightning", true, true, false, false, true),
-    // InstantID on RealVisXL (sc-3345): identity-only id — single-identity + the 11-view angle set use
-    // native MLX on Mac and the bespoke `instantid_candle_eligible` lane off-Mac. It is intentionally
-    // NOT a candle-routed plain-txt2img id.
-    ModelCaps::new("instantid_realvisxl", true, false, false, false, false),
-    // PuLID-FLUX on FLUX.1-dev (sc-3344): `character_image` with a reference face runs through native
-    // MLX or the bespoke `pulid_flux_candle_eligible` lane, not the plain txt2img gate.
-    ModelCaps::new("pulid_flux_dev", true, false, false, false, false),
-    // sc-20969: terminal-CUDA acceptance admits the reviewed packaged q4/q8 Chroma routes. As with
-    // FLUX.1, dense LoRA/LoKr is preserved while packed tier plus adapter stays independently
-    // fail-closed.
-    ModelCaps::new("chroma1_hd", true, true, true, true, false),
-    ModelCaps::new("chroma1_base", true, true, true, true, false),
-    ModelCaps::new("chroma1_flash", true, true, true, true, false),
-    // SenseNova-U1 (epic 3180 / sc-3900 MLX; sc-5576 candle). Pure txt2img on candle.
-    //
-    // sc-14249 (epic 9083): `candle_quant = true` across the whole family. `candle-gen-sensenova`
-    // used to mmap its backbone at a hardcoded F32 and hard-reject `spec.quantize`, so the candle
-    // lane could read only the dense `bf16/` tier — at DOUBLE its on-disk size (a measured 70.5 GB
-    // peak on sm_120 for a 32.7 GiB checkpoint). It now packed-detects each of the 588 backbone
-    // projections off the `.scales` sibling in the weights, so the turnkey's `q4/` and `q8/` tiers
-    // load natively and an `advanced.mlxQuantize` is a turnkey tier-SELECT. Without this flip
-    // `image_request_candle_eligible` would keep bouncing every tier pick off the candle lane, and
-    // the worker's `standard_tier_subdir` descent could never reach the cheap tiers.
-    //
-    // NOT `candle_quant_lora`: the family advertises no candle inference LoRA (the fast ids' 8-step
-    // distill LoRA is merged internally by the loader, never user-supplied).
-    ModelCaps::new("sensenova_u1_8b", true, true, true, false, false),
-    // Infographic-V2 (epic 9959): coexisting checkpoint refresh of the SAME NEO-unify engine as the
-    // base id — routes identically (MLX full surface; candle txt2img + the sc-14249 tier matrix).
-    ModelCaps::new(
-        "sensenova_u1_8b_infographic_v2",
-        true,
-        true,
-        true,
-        false,
-        false,
-    ),
-    // Infographic-V3 (epic 13095): tensor-identical checkpoint refresh of the SAME NEO-unify engine
-    // (config + 1,116 tensor keys byte-identical to V2, verified) — routes identically to the base/V2
-    // ids. Coexists with V2 (new id; V2 stays loadable for pinned recipes).
-    ModelCaps::new(
-        "sensenova_u1_8b_infographic_v3",
-        true,
-        true,
-        true,
-        false,
-        false,
-    ),
-    ModelCaps::new("sensenova_u1_8b_fast", true, true, true, false, false),
-    // Infographic-V2 8-step distilled variant (epic 9959): same fast engine, routes like the base fast.
-    ModelCaps::new(
-        "sensenova_u1_8b_infographic_v2_fast",
-        true,
-        true,
-        true,
-        false,
-        false,
-    ),
-    // Infographic-V3 8-step distilled variant (epic 13095): same fast engine, routes like the base fast.
-    ModelCaps::new(
-        "sensenova_u1_8b_infographic_v3_fast",
-        true,
-        true,
-        true,
-        false,
-        false,
-    ),
-    // Kolors (epic 3090): full surface on the Rust `kolors` engine (SDXL-family U-Net + ChatGLM3);
-    // candle serves txt2img + bespoke IP/pose lanes (sc-5488/sc-5489). sc-10819 (epic 9083): the candle
-    // `candle-gen-kolors` lane now serves the packed q4/q8 `SceneWorks/kolors-mlx` tiers end-to-end —
-    // packed ChatGLM3 (the four GLM projections) + the vendored packed-detecting SDXL UNet, VAE dense —
-    // and advertises `supported_quants: [Q4, Q8]`. So a quant tier-select stays on candle → `candle_quant`.
-    // Kolors now applies LoRA/LoKr through the vendored adaptable SDXL UNet on dense and packed tiers;
-    // bf16 still resolves to Quant::None (dense), verbatim.
-    ModelCaps::new("kolors", true, true, false, false, true),
-    // Microsoft Lens / Lens-Turbo (epic 3164 / sc-5105 MLX; sc-5126 candle): pure T2I family. It
-    // advertises on-the-fly quant AND LoRA/LoKr, so `candle_quant_lora` is set. Lens was the LAST
-    // whole-model torch-only image family — once it routed, the per-model
-    // torch-only image epic seam matched nothing and was retired (sc-8951).
-    ModelCaps::new("lens", true, true, false, false, true),
-    ModelCaps::new("lens_turbo", true, true, false, false, true),
-    // Bernini still-image companion (epic 4699 / sc-5424 MLX; sc-10996 candle): `engine_id:"bernini"`
-    // planner+renderer with `frames:1`. Both backends wired — `mlx-gen-bernini` (macOS) +
-    // `candle-gen-bernini` (Windows/CUDA, sc-10996 epic 6562: the full planner+renderer `bernini`
-    // generator, `gen_core::load("bernini")` with `frames:1`), so `candle_routed = true`. Both still
-    // tasks route to candle: t2i via the generic `image_request_candle_eligible` gate, i2i via the
-    // `bernini_image` `edit_image` branch in `image_job_is_candle_eligible` (a `sourceAssetId` edit, the
-    // bespoke `generate_candle_bernini_image_stream` lane — like the MLX `bernini_image_mlx_eligible`).
-    // `candle_quant = true`: the descriptor advertises Q4/Q8 and the off-Mac worker resolves the
-    // published `SceneWorks/bernini` bf16/q8/q4 tier subdirectories (sc-11003) in both its still and
-    // video lanes. User adapters route to the renderer's high/low experts on every tier.
-    ModelCaps::new("bernini_image", true, true, false, false, true),
-    // Ideogram 4 + Turbo (epic 4725 MLX; sc-6597 candle): 9.3B flow DiT + Qwen3-VL-8B TE. T2I + edit on
-    // MLX (sc-6303); candle serves txt2img + the in-lane edit path (sc-6598) via the generic stream.
-    // Candle advertises Q4/Q8 (sc-9607 flipped `supported_quants: [Q4, Q8]`, dropping the loader's
-    // `spec.quantize` reject — a no-op on the already-packed q4/q8 turnkey), so `candle_quant` is set
-    // (sc-9983 — the routing half of sc-9607, previously missed): a tier-select `mlxQuantize` stays on
-    // candle. User LoRA/LoKr stacks after the bundled TurboTime adapter when Turbo is selected.
-    ModelCaps::new("ideogram_4", true, true, false, false, true),
-    ModelCaps::new("ideogram_4_turbo", true, true, false, false, true),
-    // Boogu-Image-0.1 (epic 6387 MLX; sc-7524 candle): ~10.3B flow DiT + Qwen3-VL-8B + FLUX.1 VAE. Base +
-    // Turbo are txt2img; Edit adds the instruction image-edit path. Candle advertises Q4/Q8 (sc-9607
-    // flipped `supported_quants: [Q4, Q8]`, the packed-tier no-op), so `candle_quant` is set (sc-9983 —
-    // the routing half of sc-9607). No inference LoRA on candle, so NOT quant/lora-exempt.
-    ModelCaps::new("boogu_image", true, true, true, false, false),
-    ModelCaps::new("boogu_image_turbo", true, true, true, false, false),
-    ModelCaps::new("boogu_image_edit", true, true, true, false, false),
-    // Krea 2 Turbo (epic 7565 / sc-7572 MLX; sc-7581 candle): 12B rectified-flow DiT, TDM-distilled
-    // CFG-free. Candle advertises inference LoRA/LoKr (sc-7836 — merges a `krea_2_raw`-trained adapter at
-    // Turbo inference) AND, since sc-9607, on-the-fly Q4/Q8 (`supported_quants: [Q4, Q8]`, a no-op on the
-    // already-packed q4/q8 turnkey), so `candle_quant_lora` is set (sc-9983 — the routing half of sc-9607,
-    // moving Krea from `candle_lora` to BOTH): a tier-select `mlxQuantize` AND a LoRA both stay on candle.
-    ModelCaps::new("krea_2_turbo", true, true, false, false, true),
-    // Krea 2 Raw (epic 9992) — the undistilled 12B DiT exposed as a full-CFG generation model (52 steps /
-    // guidance 3.5 + negative prompt), alongside the distilled Turbo (the Boogu base/turbo precedent).
-    // Both backends wired: `mlx-gen-krea` (PR #656) + `candle-gen-krea` (sc-9994, candle-gen #350 —
-    // `render_base`, two DiT forwards/step, the reference `sampling.py:129` CFG combine). Candle
-    // advertises inference LoRA/LoKr (the shared Krea merge, sc-7836) AND on-the-fly Q4/Q8 (a no-op on
-    // the already-packed q4/q8 turnkey, sc-9607), so `candle_quant_lora` is set — mirroring `krea_2_turbo`
-    // exactly (Raw + Turbo share the arch / loader; only the DiT weights differ). `krea_2_raw` is ALSO the
-    // LoRA-training base id (Path 1 unify); training routes via the trainer registry, independent of this
-    // image-caps row.
-    ModelCaps::new("krea_2_raw", true, true, false, false, true),
-    // Stable Diffusion 3.5 Large / Large Turbo / Medium (epic 7841 / sc-7871 MLX; sc-7880 candle):
-    // txt2img plus singular-reference latent-init img2img (epic 8588 A4 / sc-10189). Candle advertises
-    // Q4/Q8 (sc-7879) and applies LoRA/LoKr on every tier.
-    ModelCaps::new("sd3_5_large", true, true, false, false, true),
-    ModelCaps::new("sd3_5_large_turbo", true, true, false, false, true),
-    ModelCaps::new("sd3_5_medium", true, true, false, false, true),
-    // SANA 1600M (epic 8485 / sc-8489 MLX; sc-11780/sc-18475 candle): NVIDIA's 1.6B Linear-DiT
-    // true-CFG txt2img plus singular-reference non-edit img2img.
-    // Both backends wired — `mlx-gen-sana` (macOS, MLX-packed q4/q8/bf16 turnkey) + `candle-gen-sana`
-    // (Windows/CUDA + Linux, candle-gen #495 — loads the whole `Efficient-Large-Model/
-    // Sana_1600M_1024px_diffusers` HF snapshot dense), so `candle_routed = true`. NOT
-    // `candle_quant` / `candle_lora`: the candle base path advertises neither (dense bf16, no adapter
-    // fold) — an `mlxQuantize` or LoRA request is refused off-Mac and remains queued.
-    ModelCaps::new("sana_1600m", true, true, false, false, false),
-    // SANA-Sprint 1.6B (epic 8485 / sc-8490 MLX; sc-11781 candle): NVIDIA's few-step CFG-FREE distill of
-    // SANA — the SAME 1.6B Linear-DiT trunk with a guidance embedder, sampled by the SCM/TrigFlow
-    // continuous-time consistency loop in 1–4 steps. Both backends wired — `mlx-gen-sana` (macOS,
-    // MLX-packed q4/q8/bf16 turnkey) + `candle-gen-sana`'s Sprint pipeline (Windows/CUDA + Linux,
-    // candle-gen #498 — loads the whole `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` HF
-    // snapshot dense), so `candle_routed = true`, including singular-reference non-edit img2img. NOT
-    // `candle_quant` / `candle_lora`: the
-    // candle Sprint path advertises neither (the adapter rejects quant / LoRA / control) — an `mlxQuantize`
-    // or LoRA request is refused off-Mac and remains queued.
-    ModelCaps::new("sana_sprint_1600m", true, true, false, false, false),
-    // Anima base / aesthetic / turbo (epic 10512): anime txt2img on BOTH backends — native-MLX (macOS,
-    // install-time Q4/Q8 quant) and the candle off-Mac lane (sc-10676), which sc-10625 GPU-validated on
-    // real CUDA (candle-gen #380). `candle_routed = true`; `candle_lora = true` because the candle engine
-    // dense-folds a LoRA/LoKr onto the split_files/ DiT (descriptor `supports_lora`/`supports_lokr`,
-    // validated in the anima GPU smoke). `candle_quant = false`: there is NO packed Q4/Q8 tier off-Mac —
-    // the `anima_quant` converter is macOS-only and the NC license bars publishing one, and the candle
-    // loader only CONSUMES an MLX-packed tier (it hard-rejects a quant request against the dense DiT). So
-    // a deliberate `mlxQuantize` request stays off candle (defers rather than silently running dense —
-    // the sc-10515 anti-lie posture); the worker also force-dense-loads Anima regardless of the manifest
-    // default. `candle_quant_lora = false`: quant+LoRA together is unsupported on both lanes (sc-10578 —
-    // folding an adapter into u32-packed codes is a separate additive-branch job). candle_lora ⟹
-    // candle_routed keeps the sc-9495 superset invariant satisfied.
-    ModelCaps::new("anima_base", true, true, false, true, false),
-    ModelCaps::new("anima_aesthetic", true, true, false, true, false),
-    ModelCaps::new("anima_turbo", true, true, false, true, false),
-    ModelCaps::new("moss_image_base", true, true, false, true, false),
-    ModelCaps::new("moss_image_sft", true, true, false, true, false),
-    // Iris-3B generation (sc-25679 MLX / sc-25680 Candle, epic 25678): the native Candle/CUDA port
-    // (`candle-gen-iris`) registers the SAME engine id `iris_3b`, so the one plain text-to-image
-    // contract that routes to MLX on a Mac routes off-Mac too, through the generic candle txt2img
-    // lane. Both engines support load-time q4/q8 for backbone and text encoder (sc-26266),
-    // including generation-task LoRA / LoKr adapters. `IrisSurface` keeps the request shapes
-    // identical across backends (`iris_mlx_eligible`).
-    ModelCaps::new("iris_3b", true, true, false, false, true),
-    // FLUX 3 Image Klein, distilled (sc-26234/5): the same plain text-to-image request on native
-    // MLX and Candle/CUDA. S6 adds the base checkpoint and exact-identity LoRA; S8 owns
-    // native precision packages. Missing base converted pins never become a dense fallback.
-    ModelCaps::new("flux3_klein", true, true, false, false, true),
-    ModelCaps::new("flux3_klein_base", true, true, false, false, true),
-    // Supra2-IMG (sc-24213 MLX / sc-24214 Candle, epic 24212): `candle-gen-supra2` registers the SAME
-    // engine id `supra2_img` as `mlx-gen-supra2`, so the one plain text-to-image contract that routes
-    // to MLX on a Mac routes off-Mac too, through the generic candle txt2img lane. No quant tier, no
-    // adapters; `CandleImageRefusal::Supra2Surface` holds the candle gate to exactly the MLX arm's
-    // shape (`supra2_mlx_eligible`).
-    ModelCaps::new("supra2_img", true, true, false, false, false),
-];
-
-/// The one-row-per-model VIDEO routing table (sc-9495) — the single source the video list constants
-/// below are derived from.
-///
-/// Legend for the [`VideoModelCaps::new`] positional args:
-/// `new(id, video_mlx_routed, candle_video_routed, candle_video_i2v, candle_video_vace)`.
-pub(crate) const VIDEO_MODEL_CAPS: &[VideoModelCaps] = &[
-    // LTX-2.5 (epic 18755): both native backends serve the full LTX mode surface.
-    VideoModelCaps::new("ltx_2_5", true, true, false, false),
-    // LTX-2.3 base (sc-18478): both native backends serve the provider's current mode surface.
-    VideoModelCaps::new("ltx_2_3", true, true, false, false),
-    // 10Eros remains MLX-only (sc-18902). Exact-head Candle/CUDA acceptance run 31766800005
-    // rendered the dense, undistilled checkpoint through the single-pass distilled engine at the
-    // shipped 8-step defaults and produced unresolved noise with no prompt subject. The required
-    // cond_safe distill LoRA is a two-pass MLX recipe and only 768/3,320 keys match Candle's adapter
-    // surface, so Candle must not claim this model until it has a complete validated recipe.
-    VideoModelCaps::new("ltx_2_3_eros", true, false, false, false),
-    // Wan2.2 TI2V-5B (sc-18478): T2V plus native I2V/FLF and user adapters on both backends. Its
-    // legacy VACE membership remains for the established extend/bridge fallback.
-    VideoModelCaps::new("wan_2_2", true, true, false, true),
-    // Wan2.2 14B MoE (sc-5175): T2V-14B is text-only; I2V-14B is image→video ONLY (candle_video_i2v).
-    // Both are VACE-capable on candle.
-    VideoModelCaps::new("wan_2_2_t2v_14b", true, true, false, true),
-    VideoModelCaps::new("wan_2_2_i2v_14b", true, true, true, true),
-    // SVD (`svd` → `svd_xt`, sc-3523 MLX; sc-5493 candle): image→video ONLY. Not a VACE model.
-    VideoModelCaps::new("svd", true, true, true, false),
-    // Bernini (epic 4699 / sc-4707 MLX; sc-10997 candle): Qwen2.5-VL planner + Wan2.2-T2V-A14B
-    // renderer. Both backends wired — `mlx-gen-bernini` (macOS) + `candle-gen-bernini` (Windows/CUDA,
-    // the full planner+renderer `bernini` generator, `gen_core::load("bernini")`), so
-    // `candle_video_routed = true`. Serves t2v + the editing/reference/multi-source modes (v2v / r2v /
-    // rv2v / mv2v / ads2v) on both lanes; the candle worker routes those via the dedicated
-    // `bernini_video_candle_eligible` gate + the `CandleVideoRoute::Bernini` dispatch (NOT the generic
-    // wan/ltx txt2video arm — Bernini is a distinct engine). Not an i2v/VACE model, so those columns
-    // stay false. Off-Mac packed-tier select is deferred until the `SceneWorks/bernini` tier
-    // layout lands (sc-11003) — the candle lane loads the converted snapshot dense today.
-    VideoModelCaps::new("bernini", true, true, false, false),
-    // SCAIL-2 (epic 5439 / sc-5448): MLX end-to-end character animation; the candle SCAIL-2 engine
-    // (sc-6837) is a DISTINCT engine gated by its own predicates, NOT Wan-VACE membership — so its
-    // candle-video columns are all false (it is deliberately absent from `CANDLE_VIDEO_*`).
-    VideoModelCaps::new("scail2_14b", true, false, false, false),
-    // Mochi 1 (epic 1788 / sc-11991): 10B AsymmDiT text-to-video on BOTH backends — `mlx-gen-mochi`
-    // (macOS) and `candle-gen-mochi` (Windows/CUDA + Linux), which ingests the SAME mlx-affine tiers
-    // via the A6 `.scales`-detect seam. Both register the SAME engine id (`mochi_1`), unlike LTX's
-    // `ltx_2_3` + `ltx_2_3_distilled` split.
-    //
-    // `candle_video_routed = true` is load-bearing: the MLX descriptor is `mac_only: true` but the
-    // CANDLE descriptor is `mac_only: false`, so Mochi must NOT be hard mac-gated app-side — the
-    // off-Mac lane is real and CUDA-validated on Blackwell (sc-11990). Per-backend gating is exactly
-    // what this table's two routed columns express, so no new mechanism is needed.
-    //
-    // t2v ONLY (`conditioning: []` on both descriptors): NOT an i2v model and NOT a VACE model, so
-    // those columns stay false — `video_request_candle_eligible`'s non-i2v arm then requires an
-    // explicit `text_to_video` mode and rejects a stray source image, and `video_mode_is_mlx_eligible`
-    // carries the matching t2v-only arm. Absent from `CANDLE_VIDEO_LORA_MODELS` because both
-    // descriptors set `supports_lora`/`supports_lokr` = false, so a LoRA-carrying job is refused.
-    VideoModelCaps::new("mochi_1", true, true, false, false),
-    // Krea Realtime 14B (epic 8431 / sc-8444): the autoregressive Self-Forcing Wan-2.1-14B video
-    // engine. `video_mlx_routed = true` — S10 (sc-8443) wired the real MLX route
-    // (`video_jobs/krea_realtime.rs` + the `resolve_video_route` arm), so without this row
-    // `video_job_is_mlx_eligible` refuses the job AND `video_model_mac_support` reports the
-    // `classify_video_gap` "no MLX engine" reason, which is simply untrue for this model.
-    //
-    // Every CANDLE column is false, and that is load-bearing rather than a default: there is no
-    // `candle-gen-krea-realtime` at all (parity is a deliberately separate follow-up epic), the MLX
-    // descriptor is `mac_only: true`, and `run_video_generate_job` already fails a non-mac krea job
-    // loudly rather than routing it elsewhere. So it is neither candle-routed nor a candle i2v/VACE
-    // model. The positional row has the same all-false Candle shape as `scail2_14b`, but NOT the same
-    // meaning: SCAIL-2 is unioned through its distinct-engine predicate below; Krea has no such lane.
-    VideoModelCaps::new("krea_realtime_14b", true, false, false, false),
-    // Wan2.2 VACE-Fun A14B (epic 3456 / sc-3458): the dual-expert control checkpoint, exposed for
-    // `replace_person` alone. It had NO row at all until sc-17159, which is the GH #2074 shape
-    // exactly — the worker's `resolve_video_route` has carried a dedicated
-    // `VideoRoute::ReplacePersonWanVaceFun` arm (`generate_wan_vace_fun`, sc-3459) since it shipped,
-    // and the manifest ships a macOS MLX download for it, yet with no row here
-    // `VIDEO_MLX_ROUTED_MODELS` missed the id, so `video_job_is_mlx_eligible` refused every job
-    // (queued forever, never claimed) AND `video_model_mac_support` reported the `classify_video_gap`
-    // "this video model has no MLX engine" reason — untrue for a model whose engine arm is right
-    // there. Every candle column is false and load-bearing: it is in none of the `CANDLE_VIDEO_*`
-    // sets (the candle VACE lane runs the Wan2.1-VACE-14B tree under `wan_2_2` / the 14B pair), so
-    // the MLX lane is the only lane it has. sc-18478 recorded the same row independently on `main`,
-    // phrased as "like SCAIL-2, deliberately absent from the base Candle and generic single-expert
-    // VACE columns: its dedicated predicate admits PersonReplace only" — same claim, and the two
-    // additions merged into a duplicate row that this sync collapsed back to one.
-    VideoModelCaps::new("wan_2_2_vace_fun_14b", true, false, false, false),
-    // MiniMax-H3 / Hailuo 3.0, both partitions (epic 17137, sc-17158 manifest / sc-17159 routing):
-    // joint audio+video generation. `minimax_h3` serves t2va + fl2va (`text_to_video` /
-    // `image_to_video` / `first_last_frame`); `minimax_h3_ref` serves Ref2VA
-    // (`reference_to_video`) off the `transformer_ref` checkpoint. The per-partition mode split is
-    // in `video_mode_is_mlx_eligible` — the generic arm would have handed `minimax_h3_ref` the
-    // t2v/i2v it cannot do while refusing the one mode it can.
-    //
-    // The base entry is Candle-routed as of sc-20755: sc-20753 supplied the real direct/replay
-    // dispatch, sc-20754 supplied measured q4/q8/bf16 ceilings, and this story binds the route to
-    // the matching tier resolver and fail-closed fit gate. Its t2va + fl2va modes therefore use the
-    // base partition on both lanes; it is not a generic Candle i2v/VACE model.
-    //
-    // Same all-false candle shape `scail2_14b` / `krea_realtime_14b` carry.
-    VideoModelCaps::new("minimax_h3", true, true, false, false),
-    // MiniMax-H3 reference partition (sc-20756): dedicated Ref2VA Candle route over the hosted
-    // transformer_ref tiers, sharing the provider and accepted q4/q8/bf16 ceilings with base.
-    VideoModelCaps::new("minimax_h3_ref", true, true, false, false),
-];
+// Generated from the schema-validated router product policy in the static ModelSpec build.
+include!(concat!(env!("OUT_DIR"), "/model-route-policy.rs"));
 
 /// Derive a `&'static [&'static str]` list constant from a boolean column of one of the capability
 /// tables above (sc-9495). Expands to a compile-time-built array of exactly the ids whose column is
@@ -1329,25 +877,11 @@ derive_model_list! {
     pub(crate) MLX_ROUTED_MODELS, IMAGE_MODEL_CAPS, mlx_routed
 }
 
-/// Historical architecture-family surface retained only for test oracles that compare the former
-/// family gate with the import compatibility allow-list. Production imported routing does not read
-/// this list: it selects an exact backend + family + `importSourceShape` + operation row from the
-/// checked-in provider facts below. Builtins remain id-routed through [`MLX_ROUTED_MODELS`]. Keep
-/// this test fixture aligned with the importable families and with at least one exact MLX provider
-/// registration for each listed family.
-///
-/// `mage-flow` (sc-15036, epic 14034 F6) joins for a different reason than the other two: its
-/// non-builtin ids are not community imports but this app's OWN full base fine-tunes — the
-/// `transformer/`-shaped checkpoint a `networkType: "full"` training run produces, registered into
-/// the model catalog and loaded by `image_jobs::mage_finetuned` against the installed base's shared
-/// text encoder + VAE. The pinned MLX and Candle runtimes both expose the same `load_finetuned`
-/// seam, so this family is listed for both native backends in these fixtures. Production still
-/// admits one only when the stamped source is the registered `transformer_directory` shape, and the
-/// exact provider-facts route below is what decides per backend.
-/// The token is the MANIFEST family spelling (`mage-flow`), matching the builtin entries — not the
-/// underscored id prefix.
+/// Legacy family-gate test fixtures derive from the exact imported-provider registrations.
+/// Production imported routing also selects the provider by source and operation.
 #[cfg(test)]
-pub(crate) const MLX_ROUTED_FAMILIES: &[&str] = &["krea_2", "mage-flow", "sdxl"];
+pub(crate) static MLX_ROUTED_FAMILIES: std::sync::LazyLock<Vec<&'static str>> =
+    std::sync::LazyLock::new(|| legacy_test_routed_families("mlx"));
 
 /// Test oracle for whether the generated provider facts contain at least one MLX route for a
 /// family. It does not authorize a request without an exact source-shaped provider match.
@@ -1355,18 +889,18 @@ pub(crate) fn image_family_is_mlx_routed(family: &str) -> bool {
     imported_provider_routes("mlx", family).next().is_some()
 }
 
-/// Architecture families whose existing Candle engine can serve a non-builtin imported/user
-/// same-family model. This is deliberately separate from [`CANDLE_ROUTED_MODELS`]: imported
-/// checkpoints have novel ids and are claimed only after the scheduler validates their manifest
-/// family and supported request shape. Seeded by the descriptor-gated Krea single-file lane
-/// (sc-14023).
 #[cfg(test)]
-/// `flux2` (sc-11043, epic 11037) is Candle-only and NVFP4-only: the single-file Klein import is
-/// served through the shared codec and the Klein dialect, and MLX has no consumer for its packed
-/// E2M1 weights — which is exactly why it is NOT in [`MLX_ROUTED_FAMILIES`]. Family membership is
-/// not a claim about encodings; `base_weights::import_supported` still refuses every non-NVFP4
-/// FLUX.2 single file.
-pub(crate) const CANDLE_ROUTED_FAMILIES: &[&str] = &["flux2", "krea_2", "mage-flow", "sdxl"];
+pub(crate) static CANDLE_ROUTED_FAMILIES: std::sync::LazyLock<Vec<&'static str>> =
+    std::sync::LazyLock::new(|| legacy_test_routed_families("candle"));
+
+#[cfg(test)]
+fn legacy_test_routed_families(backend: &str) -> Vec<&'static str> {
+    crate::base_weights::IMPORT_SUPPORTED_FAMILIES
+        .iter()
+        .copied()
+        .filter(|family| imported_provider_routes(backend, family).next().is_some())
+        .collect()
+}
 
 /// Whether `id` names a builtin image model (a row in [`IMAGE_MODEL_CAPS`]). The route-by-family
 /// path applies only to non-builtin (imported/user) ids, so a builtin's id-keyed routing is never
@@ -1470,10 +1004,9 @@ fn imported_payload_operation(payload: &Map<String, Value>) -> &'static str {
 /// (family, source, operation) this payload selects.
 ///
 /// Declaration only. It deliberately stops short of the adapter / quant / conditioning checks
-/// [`imported_image_request_provider_eligible`] goes on to make, so a caller can compare "the facts
-/// say this backend serves this shape" against an independently measured "the worker actually
-/// routes it". That comparison is what lets the capability matrix prove a declared lane is really
-/// reachable instead of restating one side of the same lookup.
+/// [`imported_image_request_provider_eligible`] goes on to make. The focused test compares
+/// descriptor declaration with the production route claim for every imported source and operation.
+#[cfg(test)]
 pub fn imported_backend_declared_route(
     payload: &Map<String, Value>,
     backend: &str,
@@ -1487,6 +1020,7 @@ pub fn imported_backend_declared_route(
 }
 
 /// Convenience form of [`imported_backend_declared_route`] for callers that only need existence.
+#[cfg(test)]
 pub fn imported_backend_declares_route(payload: &Map<String, Value>, backend: &str) -> bool {
     imported_backend_declared_route(payload, backend).is_some()
 }
@@ -2366,93 +1900,74 @@ pub(crate) fn video_model_is_mlx_video_routed(model: &str) -> bool {
 /// Pinned against the per-model predicates by `crate::video_request`'s
 /// `video_admission_surface_matches_the_routing_catalog`.
 pub(crate) fn video_model_has_candle_video_route(model: &str) -> bool {
-    CANDLE_VIDEO_ROUTED_MODELS.contains(&model) || CANDLE_SCAIL2_VIDEO_MODELS.contains(&model)
+    CANDLE_VIDEO_ROUTED_MODELS.contains(&model)
+        || crate::registry::builtin_model_spec(model).is_some_and(|spec| {
+            spec.product.family == "scail2"
+                && spec
+                    .video_routes
+                    .get("candle")
+                    .is_some_and(|routes| !routes.is_empty())
+        })
 }
 
-/// Video models served off-Mac by a DISTINCT candle engine that is deliberately absent from
-/// [`CANDLE_VIDEO_ROUTED_MODELS`] (sc-6837): the candle SCAIL-2 engine, gated by
-/// [`super::candle::scail2_animate_candle_eligible`] /
-/// [`super::candle::scail2_replace_candle_eligible`] rather than by table membership.
-pub(crate) const CANDLE_SCAIL2_VIDEO_MODELS: &[&str] = &["scail2_14b"];
-
-/// SceneWorks training kernels with a native mlx-gen Rust trainer (epic 3039):
-/// the engine registers `z_image_turbo`/`sdxl`/`kolors`/`ltx_2_3`/`wan2_2_*` trainers,
-/// which the worker reaches via these SceneWorks kernel ids (the mlx worker maps the
-/// kernel and base model onto an engine trainer id). This list describes MLX routing only; several
-/// entries also have Candle trainers. A kernel absent here is never routed to the MLX worker.
+/// SceneWorks training kernels with a registered MLX trainer supporting at least one technique
+/// offered by a shipped target. The product target owns its kernel and offered techniques; the
+/// runtime export owns the backend-local trainer identity and executable descriptor.
 ///
-/// Public (sc-15277) so the worker's `engine_trainer_id` invariant can be DERIVED from this list
+/// Public (sc-15277) so the worker's `engine_trainer_id` invariant can be checked from this set
 /// rather than restating it: a kernel that is routed here but has no trainer mapping is claimed by
 /// the mlx worker and then immediately failed, which is exactly how `mage_flow_lora` shipped broken.
-pub const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
-    "moss_image_lora",
-    "z_image_lora",
-    "sdxl_lora",
-    "kolors_lora",
-    "lens_lora",
-    "krea_lora",
-    "sd3_lora",
-    "wan_lora",
-    "wan_moe_lora",
-    "ltx_mlx_lora",
-    // Anima (epic 10512, sc-10522): the native `mlx-gen-anima` LoRA/LoKr trainer (DiT + `llm_adapter`
-    // conditioner). Candle reached parity in sc-18479.
-    "anima_lora",
-    // Mage-Flow adapters and full base fine-tunes have native MLX and Candle trainers.
-    "mage_flow_lora",
-    // Iris-3B generation (epic 25678, sc-25685): the native `mlx-gen-iris` LoRA/LoKr/full trainer.
-    "iris_train",
-    // Qwen Image 2.1 T2I LoRA/LoKr (epic 24107 S11, sc-24159): the native `mlx-gen-qwen-image-2-1`
-    // trainer. The Candle twin (sc-24160) is in the candle set too.
-    "qwen_image_2_1_lora",
-    // Qwen Image 2.1 instruction-EDIT LoRA/LoKr (epic 24107 S13, sc-24161): the same MLX trainer in
-    // edit mode. The Candle twin (sc-24162) is in the candle set too.
-    "qwen_image_2_1_edit_lora",
-    "flux3_klein_lora",
-    "flux3_klein_edit_lora",
+pub static MLX_ROUTED_TRAINING_KERNELS: LazyLock<BTreeSet<String>> =
+    LazyLock::new(|| crate::registry::native_training_kernels("mlx"));
+
+/// Off-Mac twin of [`MLX_ROUTED_TRAINING_KERNELS`], projected from the Candle trainer export.
+/// Families sharing a kernel remain base-model gated by [`training_job_is_candle_eligible`].
+/// `krea_control` has a Candle control trainer but no MLX control trainer.
+pub(crate) static CANDLE_ROUTED_TRAINING_KERNELS: LazyLock<BTreeSet<String>> =
+    LazyLock::new(|| crate::registry::native_training_kernels("candle"));
+
+/// Public capability-array order captured before the native route tables were derived. Only
+/// ordering lives here: the set supplied to `ordered_training_kernels` decides membership. The
+/// two ranks differ for LTX/Wan because the historical arrays had different backend ordering.
+const TRAINING_KERNEL_PRESENTATION_ORDER: &[(&str, u8, u8)] = &[
+    ("moss_image_lora", 0, 0),
+    ("z_image_lora", 1, 1),
+    ("sdxl_lora", 2, 2),
+    ("kolors_lora", 3, 3),
+    ("lens_lora", 4, 4),
+    ("krea_lora", 5, 5),
+    ("krea_control", u8::MAX, 6),
+    ("sd3_lora", 6, 7),
+    ("wan_lora", 7, 9),
+    ("wan_moe_lora", 8, 10),
+    ("ltx_mlx_lora", 9, 8),
+    ("anima_lora", 10, 11),
+    ("mage_flow_lora", 11, 12),
+    ("iris_train", 12, 13),
+    ("qwen_image_2_1_lora", 13, 14),
+    ("qwen_image_2_1_edit_lora", 14, 15),
+    ("flux3_klein_lora", 15, 16),
+    ("flux3_klein_edit_lora", 16, 17),
 ];
 
-/// SceneWorks training kernels with a native candle trainer that needs no base-model disambiguation
-/// (sc-7817, epic 5164) — the off-Mac twin of [`MLX_ROUTED_TRAINING_KERNELS`]. The registry includes
-/// Kolors, SD3.5, Anima, Mage, Wan TI2V-5B, and both Wan A14B experts as of sc-18479. Families that
-/// share a kernel remain base-model gated by [`training_job_is_candle_eligible`]. LTX keeps its
-/// historical `ltx_mlx_lora` kernel name on both native backends.
-/// `krea_control` (epic 10159, B2 sc-10163 / B1 sc-10162) is the Krea 2 pose-ControlNet branch trainer
-/// (candle-gen-krea `ControlTrainer`, dispatched under `krea_2_control`); it has no MLX trainer, so —
-/// like `krea_lora` — it is also in [`MLX_ONLY_TRAINING_KERNELS`] but NOT
-/// [`MLX_ROUTED_TRAINING_KERNELS`] (the MLX control lane is B5/sc-10177).
-pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
-    "moss_image_lora",
-    "z_image_lora",
-    "sdxl_lora",
-    "kolors_lora",
-    "lens_lora",
-    "krea_lora",
-    "krea_control",
-    "sd3_lora",
-    "ltx_mlx_lora",
-    "wan_lora",
-    "wan_moe_lora",
-    "anima_lora",
-    "mage_flow_lora",
-    // Iris-3B generation (epic 25678, sc-25686): the native `candle-gen-iris` trainer.
-    "iris_train",
-    // Qwen Image 2.1 T2I LoRA/LoKr (epic 24107 S12, sc-24160): the `candle-gen-qwen-image-2-1`
-    // trainer, registered under the same engine id (`qwen_image_2_1`) as the MLX one. Base-gated to
-    // `qwen_image_2_1` by [`training_job_is_candle_eligible`].
-    "qwen_image_2_1_lora",
-    // Qwen Image 2.1 instruction-EDIT LoRA/LoKr (epic 24107 S14, sc-24162): the same Candle trainer
-    // in edit mode (`max_reference_images` 10), base-gated the same way.
-    "qwen_image_2_1_edit_lora",
-    "flux3_klein_lora",
-    "flux3_klein_edit_lora",
-];
+fn ordered_training_kernels(kernels: &BTreeSet<String>, backend: &str) -> Vec<String> {
+    let rank = |kernel: &str| {
+        TRAINING_KERNEL_PRESENTATION_ORDER
+            .iter()
+            .find(|(id, _, _)| *id == kernel)
+            .map(|(_, mlx, candle)| if backend == "mlx" { *mlx } else { *candle })
+            .unwrap_or(u8::MAX)
+    };
+    let mut ordered: Vec<_> = kernels.iter().cloned().collect();
+    ordered.sort_by(|left, right| rank(left).cmp(&rank(right)).then_with(|| left.cmp(right)));
+    ordered
+}
 
 /// Whether an off-Mac (candle) worker can run this training kernel at all. A real training run on a
 /// non-macOS host for a kernel that is NOT candle-routed has no worker that will ever claim it, so the
 /// submit path refuses it up front instead of leaving it queued forever (sc-24159).
 pub fn training_kernel_is_candle_routed(kernel: &str) -> bool {
-    CANDLE_ROUTED_TRAINING_KERNELS.contains(&kernel)
+    CANDLE_ROUTED_TRAINING_KERNELS.contains(kernel)
 }
 
 /// Both native MOSS lanes train adapters for the exact selected Base/SFT checkpoint only.
@@ -2483,13 +1998,15 @@ pub(crate) fn moss_training_plan_is_supported(plan: &Map<String, Value>) -> bool
     method.eq_ignore_ascii_case("lora") || method.eq_ignore_ascii_case("lokr")
 }
 
-/// Native-only training kernels — only a Rust worker can run them, so a generic worker descriptor
+/// Native-only training policy — only a Rust worker can run these kernels, so a generic descriptor
 /// must refuse the job (leaving it queued for a Rust worker) rather than claim it and fail with "no
 /// training kernel". Despite the constant's historical name, this means native-Rust-only rather than
 /// MLX-backend-only: most members have both MLX and Candle trainers. Candle workers are admitted
 /// by the [`worker_supports_job`] exception when the kernel is also in
 /// [`CANDLE_ROUTED_TRAINING_KERNELS`], while a generic worker remains refused. `krea_control` is the
 /// intentional Candle-only exception; the historical constant name remains for compatibility.
+/// Native runtime exports cannot derive this policy: registration of a native trainer does not
+/// establish whether a separate generic trainer is absent.
 pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
     "moss_image_lora",
     "ltx_mlx_lora",
@@ -2511,8 +2028,7 @@ pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
 
 #[cfg(test)]
 mod tests {
-    //! Membership-parity regression guard (sc-8816, strengthened sc-9495): every routed-model /
-    //! routed-kernel list is pinned to a snapshot of its pre-collapse contents. The model lists are
+    //! Membership-parity regression guard (sc-8816, strengthened sc-9495): model lists are
     //! now DERIVED from [`IMAGE_MODEL_CAPS`] / [`VIDEO_MODEL_CAPS`] (sc-9495), so the parity test is
     //! the zero-diff proof that the table-driven derivation reproduces the OLD membership EXACTLY
     //! before the standalone lists were removed. Membership is compared as a SET (same elements, same
@@ -2531,10 +2047,9 @@ mod tests {
         video_job_type_for_mode, video_mode_probe_payload, video_model_candle_support,
         video_model_mac_support, CANDLE_IMPORTED_CAPS, CANDLE_LORA_MODELS,
         CANDLE_QUANT_LORA_MODELS, CANDLE_QUANT_MODELS, CANDLE_ROUTED_FAMILIES,
-        CANDLE_ROUTED_MODELS, CANDLE_ROUTED_TRAINING_KERNELS, CANDLE_VIDEO_I2V_ROUTED_MODELS,
-        CANDLE_VIDEO_ROUTED_MODELS, CANDLE_VIDEO_VACE_MODELS, IMAGE_MODEL_CAPS, MLX_IMPORTED_CAPS,
-        MLX_ONLY_TRAINING_KERNELS, MLX_ROUTED_FAMILIES, MLX_ROUTED_MODELS,
-        MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS, VIDEO_MODEL_CAPS, VIDEO_UI_MODES,
+        CANDLE_ROUTED_MODELS, CANDLE_VIDEO_I2V_ROUTED_MODELS, CANDLE_VIDEO_ROUTED_MODELS,
+        CANDLE_VIDEO_VACE_MODELS, IMAGE_MODEL_CAPS, MLX_IMPORTED_CAPS, MLX_ROUTED_FAMILIES,
+        MLX_ROUTED_MODELS, VIDEO_MLX_ROUTED_MODELS, VIDEO_MODEL_CAPS, VIDEO_UI_MODES,
     };
     use crate::contracts::JobType;
     use crate::jobs_store::routing::gaps::video_request_is_claimable_on_platform;
@@ -2566,434 +2081,88 @@ mod tests {
         }
     }
 
-    /// Assert a table-derived list reproduces its pre-collapse snapshot EXACTLY as a set: same
-    /// membership, same length (so no id was dropped, added, or duplicated). Order is intentionally
-    /// not compared — see the module doc.
-    fn assert_membership_parity(name: &str, derived: &[&str], expected: &[&str]) {
-        let derived_set: BTreeSet<&str> = derived.iter().copied().collect();
-        let expected_set: BTreeSet<&str> = expected.iter().copied().collect();
-        assert_eq!(
-            derived_set, expected_set,
-            "{name}: table-derived membership must equal the pre-collapse snapshot (sc-9495 zero-diff)"
-        );
-        assert_eq!(
-            derived.len(),
-            derived_set.len(),
-            "{name}: derived list has duplicate ids"
-        );
-        assert_eq!(
-            derived.len(),
-            expected.len(),
-            "{name}: derived list length must equal the pre-collapse snapshot length"
-        );
+    #[test]
+    fn routed_model_lists_match_typed_policy() {
+        // The generated compatibility lists must be exact projections of the sole authored
+        // route policy, including its legacy aliases. No second model-ID snapshot is needed.
+        let policy: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../config/manifests/registry/route-policy.json"
+        ))
+        .unwrap();
+        for (rows, field, list) in [
+            ("image", "mlxRouted", MLX_ROUTED_MODELS),
+            ("image", "candleRouted", CANDLE_ROUTED_MODELS),
+            ("image", "candleQuantLora", CANDLE_QUANT_LORA_MODELS),
+            ("image", "candleQuant", CANDLE_QUANT_MODELS),
+            ("image", "candleLora", CANDLE_LORA_MODELS),
+            ("video", "candleVideoRouted", CANDLE_VIDEO_ROUTED_MODELS),
+            ("video", "candleVideoI2v", CANDLE_VIDEO_I2V_ROUTED_MODELS),
+            ("video", "candleVideoVace", CANDLE_VIDEO_VACE_MODELS),
+            ("video", "videoMlxRouted", VIDEO_MLX_ROUTED_MODELS),
+        ] {
+            let expected: BTreeSet<_> = policy[rows]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|row| row[field] == true)
+                .map(|row| row["id"].as_str().unwrap())
+                .collect();
+            let actual: BTreeSet<_> = list.iter().copied().collect();
+            assert_eq!(actual, expected, "{rows}/{field} route-policy projection");
+            assert_eq!(
+                actual.len(),
+                list.len(),
+                "{rows}/{field} duplicate route id"
+            );
+        }
     }
 
-    const EXPECTED_MLX_ROUTED_MODELS: &[&str] = &[
-        "mage_flow_base",
-        "mage_flow",
-        "mage_flow_turbo",
-        "mage_flow_edit_base",
-        "mage_flow_edit",
-        "mage_flow_edit_turbo",
-        "z_image_turbo",
-        "z_image",
-        "z_image_edit",
-        "flux_schnell",
-        "flux_dev",
-        "qwen_image",
-        "qwen_image_2_1",
-        "qwen_image_2_1_turbo",
-        "qwen_image_edit",
-        "qwen_image_edit_2509",
-        "qwen_image_edit_2511",
-        "qwen_image_edit_2511_lightning",
-        "flux2_klein_9b",
-        "flux2_klein_9b_kv",
-        "flux2_klein_9b_true_v2",
-        "flux2_dev",
-        "sdxl",
-        "realvisxl",
-        "illustrious_xl_v1",
-        "illustrious_xl_v2",
-        "realvisxl_lightning",
-        "instantid_realvisxl",
-        "pulid_flux_dev",
-        "chroma1_hd",
-        "chroma1_base",
-        "chroma1_flash",
-        "sensenova_u1_8b",
-        "sensenova_u1_8b_fast",
-        "sensenova_u1_8b_infographic_v2",
-        "sensenova_u1_8b_infographic_v2_fast",
-        "sensenova_u1_8b_infographic_v3",
-        "sensenova_u1_8b_infographic_v3_fast",
-        "kolors",
-        "lens",
-        "lens_turbo",
-        "bernini_image",
-        "ideogram_4",
-        "ideogram_4_turbo",
-        "boogu_image",
-        "boogu_image_turbo",
-        "boogu_image_edit",
-        "krea_2_turbo",
-        "krea_2_raw",
-        "sd3_5_large",
-        "sd3_5_large_turbo",
-        "sd3_5_medium",
-        "sana_1600m",
-        "sana_sprint_1600m",
-        "anima_base",
-        "anima_aesthetic",
-        "anima_turbo",
-        "iris_3b",
-        "flux3_klein",
-        "flux3_klein_base",
-        "moss_image_base",
-        "moss_image_sft",
-        "supra2_img",
-    ];
-
-    const EXPECTED_CANDLE_ROUTED_MODELS: &[&str] = &[
-        "flux3_klein",
-        "flux3_klein_base",
-        "mage_flow_base",
-        "mage_flow",
-        "mage_flow_turbo",
-        "mage_flow_edit_base",
-        "mage_flow_edit",
-        "mage_flow_edit_turbo",
-        "sdxl",
-        "realvisxl",
-        "illustrious_xl_v1",
-        "illustrious_xl_v2",
-        "realvisxl_lightning",
-        "z_image_turbo",
-        "z_image",
-        "flux_schnell",
-        "flux_dev",
-        "flux2_klein_9b",
-        "flux2_klein_9b_kv",
-        "flux2_klein_9b_true_v2",
-        "flux2_dev",
-        "qwen_image",
-        // sc-24109: the native Candle/CUDA port of Qwen-Image 2.1. Its own id, right after the
-        // 2512 row it shares nothing with.
-        "qwen_image_2_1",
-        // sc-25907: its distilled Turbo sibling, registered by the same Candle crate.
-        "qwen_image_2_1_turbo",
-        "lens",
-        "lens_turbo",
-        // sc-10996 (epic 6562): the candle Bernini still-image companion joins the routed set.
-        "bernini_image",
-        "chroma1_hd",
-        "chroma1_base",
-        "chroma1_flash",
-        "kolors",
-        "sensenova_u1_8b",
-        "sensenova_u1_8b_infographic_v2",
-        "sensenova_u1_8b_infographic_v3",
-        "sensenova_u1_8b_fast",
-        "sensenova_u1_8b_infographic_v2_fast",
-        "sensenova_u1_8b_infographic_v3_fast",
-        "ideogram_4",
-        "ideogram_4_turbo",
-        "boogu_image",
-        "boogu_image_turbo",
-        "boogu_image_edit",
-        "krea_2_turbo",
-        "krea_2_raw",
-        "sd3_5_large",
-        "sd3_5_large_turbo",
-        "sd3_5_medium",
-        // sc-11780 (epic 8485): the candle SANA 1600M provider (candle-gen #495) joins the routed set —
-        // true-CFG txt2img plus singular-reference img2img on the whole
-        // `Efficient-Large-Model/Sana_1600M_1024px_diffusers` snapshot.
-        "sana_1600m",
-        // sc-11781 (epic 8485): the candle SANA-Sprint provider (candle-gen #498) joins the routed set too —
-        // CFG-free 1–4 step SCM/TrigFlow txt2img plus singular-reference img2img on the whole
-        // `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` snapshot.
-        "sana_sprint_1600m",
-        "anima_base",
-        "anima_aesthetic",
-        "anima_turbo",
-        "iris_3b",
-        "moss_image_base",
-        "moss_image_sft",
-        "supra2_img",
-    ];
-
-    // sc-9983: Krea joins Lens as a BOTH-quant-and-LoRA candle family (sc-9607 flipped its
-    // `supported_quants` to [Q4, Q8]; it already advertised inference LoRA via sc-7836). sc-9994 adds the
-    // Raw variant (candle-gen #350) with the same both-set advertisement. sc-10767: the SDXL family
-    // (sdxl/realvisxl/illustrious v1+v2) joins the both-set — the candle packed q4/q8 tier (sc-9416/9527)
-    // + adapter-on-packed fold (sc-9528) are wired and now advertised. sc-10812: realvisxl_lightning (the
-    // few-step distilled sibling on the SAME `sdxl` engine / descriptor) joins the both-set too — quant +
-    // LoRA stay on candle for its plain txt2img shape.
-    const EXPECTED_CANDLE_QUANT_LORA_MODELS: &[&str] = &[
-        "bernini_image",
-        "mage_flow_base",
-        "mage_flow",
-        "mage_flow_turbo",
-        "mage_flow_edit_base",
-        "mage_flow_edit",
-        "mage_flow_edit_turbo",
-        "z_image_turbo",
-        "z_image",
-        "qwen_image",
-        // sc-24158: the candle 2.1 provider applies LoRA/LoKr on dense AND packed tiers.
-        "qwen_image_2_1",
-        // sc-25907: the same adapter path under the Turbo id.
-        "qwen_image_2_1_turbo",
-        "flux2_klein_9b",
-        "flux2_klein_9b_kv",
-        "flux2_dev",
-        // sc-26239 + sc-26241: additive LoRA on every native FLUX 3 package.
-        "flux3_klein",
-        "flux3_klein_base",
-        "sdxl",
-        "realvisxl",
-        "illustrious_xl_v1",
-        "illustrious_xl_v2",
-        "realvisxl_lightning",
-        "lens",
-        "lens_turbo",
-        "krea_2_turbo",
-        "krea_2_raw",
-        "kolors",
-        "ideogram_4",
-        "ideogram_4_turbo",
-        "sd3_5_large",
-        "sd3_5_large_turbo",
-        "sd3_5_medium",
-        "iris_3b",
-    ];
-
-    // Z-Image Turbo/base select already-packed q4/q8/bf16 directories; this is not on-the-fly quant,
-    // but it is still a valid `mlxQuantize` request and therefore belongs in the quant routing set.
-    // The adapter-capable packed families moved to `EXPECTED_CANDLE_QUANT_LORA_MODELS` above;
-    // this list retains families that accept quant requests without user adapters. Historically,
-    // these rows covered Ideogram, Kolors, Qwen, FLUX.2, SD3.5, and Z-Image as quant-only.
-    const EXPECTED_CANDLE_QUANT_MODELS: &[&str] = &[
-        "boogu_image",
-        "boogu_image_turbo",
-        "boogu_image_edit",
-        "flux_schnell",
-        "flux_dev",
-        "chroma1_hd",
-        "chroma1_base",
-        "chroma1_flash",
-        // sc-11020: qwen_image's turnkey q4/q8/bf16 packed tiers (sc-8669, measured sc-10969) load on
-        // the candle txt2img lane, so a tier-select stays on candle. Qwen now appears in the combined
-        // quant+adapter list above.
-        // sc-10222: FLUX.2-klein 9B/`_kv` + FLUX.2-dev — the same missed router half, for the last
-        // `STANDARD_TIER_MODELS` families still carrying it. `_true_v2` is deliberately absent (a flat
-        // convert-at-install dir with no tier matrix); see the caps rows for the full reasoning.
-        // sc-14249: the whole SenseNova-U1 family, once `candle-gen-sensenova` gained the packed
-        // q4/q8 load path (it was dense-f32-only, and only the bf16 tier was readable at all).
-        //
-        // sc-24112 added `qwen_image_2_1` here once `candle-gen-qwen-image-2-1` gained the packed
-        // load path (inference #1007); sc-24158 moved it to the combined quant+adapter list above
-        // once the same provider gained LoRA/LoKr on those tiers (inference sc-24157).
-        "sensenova_u1_8b",
-        "sensenova_u1_8b_fast",
-        "sensenova_u1_8b_infographic_v2",
-        "sensenova_u1_8b_infographic_v2_fast",
-        "sensenova_u1_8b_infographic_v3",
-        "sensenova_u1_8b_infographic_v3_fast",
-    ];
-
-    // sc-9983: Krea moved to CANDLE_QUANT_LORA_MODELS (BOTH). sc-10676: Anima is the LoRA-only candle
-    // family — the off-Mac engine dense-folds a LoRA/LoKr onto the split_files/ DiT, but advertises NO
-    // candle quant (no packed tier off-Mac), so it is LoRA-only rather than BOTH.
-    const EXPECTED_CANDLE_LORA_MODELS: &[&str] = &[
-        "flux_schnell",
-        "flux_dev",
-        "flux2_klein_9b_true_v2",
-        "chroma1_hd",
-        "chroma1_base",
-        "chroma1_flash",
-        "anima_base",
-        "anima_aesthetic",
-        "anima_turbo",
-        "moss_image_base",
-        "moss_image_sft",
-    ];
-
-    const EXPECTED_CANDLE_VIDEO_ROUTED_MODELS: &[&str] = &[
-        "wan_2_2",
-        "ltx_2_5",
-        "ltx_2_3",
-        "wan_2_2_t2v_14b",
-        "wan_2_2_i2v_14b",
-        "svd",
-        // Bernini VIDEO lane (sc-10997, epic 6562): the full candle planner+renderer serves t2v + the
-        // editing/reference/multi-source modes. Not in the i2v/VACE subsets (a distinct engine).
-        "bernini",
-        // Mochi 1 (sc-11991): the candle descriptor is `mac_only: false` and ingests the same hosted
-        // mlx-affine tiers, so the off-Mac t2v lane is real. Not in the i2v/VACE subsets (t2v only).
-        "mochi_1",
-        // MiniMax-H3 partitions: base t2va/fl2va (sc-20755) plus Ref2VA (sc-20756), both using
-        // the dedicated provider route and accepted q4/q8/bf16 admission ceilings.
-        "minimax_h3",
-        "minimax_h3_ref",
-    ];
-
-    const EXPECTED_CANDLE_VIDEO_I2V_ROUTED_MODELS: &[&str] = &["wan_2_2_i2v_14b", "svd"];
-
-    const EXPECTED_CANDLE_VIDEO_VACE_MODELS: &[&str] =
-        &["wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b"];
-
-    const EXPECTED_VIDEO_MLX_ROUTED_MODELS: &[&str] = &[
-        "ltx_2_5",
-        "ltx_2_3",
-        "ltx_2_3_eros",
-        "wan_2_2",
-        "wan_2_2_t2v_14b",
-        "wan_2_2_i2v_14b",
-        "svd",
-        "bernini",
-        "scail2_14b",
-        "mochi_1",
-        "krea_realtime_14b",
-        // sc-17159 — three ids that had a worker dispatch arm and/or a shipped macOS download but
-        // no row in the table, so nothing on the MLX lane could claim them.
-        "wan_2_2_vace_fun_14b",
-        "minimax_h3",
-        "minimax_h3_ref",
-    ];
-
-    const EXPECTED_MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
-        "moss_image_lora",
-        "z_image_lora",
-        "sdxl_lora",
-        "kolors_lora",
-        "lens_lora",
-        "krea_lora",
-        "sd3_lora",
-        "wan_lora",
-        "wan_moe_lora",
-        "ltx_mlx_lora",
-        "anima_lora",
-        // sc-14056: Mage-Flow's native mlx trainer is routed to the mlx worker. Before this, the
-        // kernel was in `MLX_ONLY_TRAINING_KERNELS` but in NO routed set, so every worker refused it
-        // and Mage training jobs queued forever.
-        "mage_flow_lora",
-        // sc-25685: the native Iris-3B generation trainer.
-        "iris_train",
-        // sc-24159: Qwen Image 2.1 T2I LoRA/LoKr on the native MLX trainer.
-        "qwen_image_2_1_lora",
-        // sc-24161: Qwen Image 2.1 instruction-edit LoRA/LoKr on the native MLX trainer.
-        "qwen_image_2_1_edit_lora",
-        "flux3_klein_lora",
-        "flux3_klein_edit_lora",
-    ];
-
-    const EXPECTED_CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
-        "moss_image_lora",
-        "z_image_lora",
-        "sdxl_lora",
-        "kolors_lora",
-        "lens_lora",
-        "krea_lora",
-        "krea_control",
-        "sd3_lora",
-        "ltx_mlx_lora",
-        "wan_lora",
-        "wan_moe_lora",
-        "anima_lora",
-        "mage_flow_lora",
-        // sc-25686: the native Iris-3B generation trainer (Candle/CUDA).
-        "iris_train",
-        // sc-24160: Qwen Image 2.1 T2I LoRA/LoKr on the native Candle trainer.
-        "qwen_image_2_1_lora",
-        // sc-24162: Qwen Image 2.1 instruction-edit LoRA/LoKr on the native Candle trainer.
-        "qwen_image_2_1_edit_lora",
-        "flux3_klein_lora",
-        "flux3_klein_edit_lora",
-    ];
-
-    const EXPECTED_MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
-        "moss_image_lora",
-        "ltx_mlx_lora",
-        "krea_lora",
-        "sd3_lora",
-        "anima_lora",
-        "krea_control",
-        "mage_flow_lora",
-        "iris_train",
-        // sc-24160: native-Rust-only (MLX + Candle trainers, no generic trainer), like Anima/Mage —
-        // so it stays here even though it is now candle-routed: a generic worker must still refuse it.
-        "qwen_image_2_1_lora",
-        // sc-24162: native-Rust-only like its T2I sibling, so it stays here although candle-routed.
-        "qwen_image_2_1_edit_lora",
-        "flux3_klein_lora",
-        "flux3_klein_edit_lora",
-    ];
+    #[test]
+    fn native_training_capability_arrays_keep_the_frozen_public_order() {
+        let old: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../apps/web/src/testUtils/catalogBaseline/old-catalog.json"
+        ))
+        .unwrap();
+        let actual = serde_json::to_value(super::mac_capabilities("macos", true)).unwrap();
+        for key in ["supportedKernels", "candleSupportedKernels"] {
+            assert_eq!(
+                actual["training"][key], old["catalog"]["platforms"]["macos"]["training"][key],
+                "{key} public order"
+            );
+        }
+    }
 
     #[test]
-    fn routed_model_lists_match_snapshot() {
-        // The nine model lists are table-DERIVED (sc-9495): assert each reproduces the pre-collapse
-        // snapshot EXACTLY as a set (zero membership diff) — this is the guardrail that proves the
-        // collapse changed no routing decision.
-        assert_membership_parity(
-            "MLX_ROUTED_MODELS",
-            MLX_ROUTED_MODELS,
-            EXPECTED_MLX_ROUTED_MODELS,
-        );
-        assert_membership_parity(
-            "CANDLE_ROUTED_MODELS",
-            CANDLE_ROUTED_MODELS,
-            EXPECTED_CANDLE_ROUTED_MODELS,
-        );
-        assert_membership_parity(
-            "CANDLE_QUANT_LORA_MODELS",
-            CANDLE_QUANT_LORA_MODELS,
-            EXPECTED_CANDLE_QUANT_LORA_MODELS,
-        );
-        assert_membership_parity(
-            "CANDLE_QUANT_MODELS",
-            CANDLE_QUANT_MODELS,
-            EXPECTED_CANDLE_QUANT_MODELS,
-        );
-        assert_membership_parity(
-            "CANDLE_LORA_MODELS",
-            CANDLE_LORA_MODELS,
-            EXPECTED_CANDLE_LORA_MODELS,
-        );
-        assert_membership_parity(
-            "CANDLE_VIDEO_ROUTED_MODELS",
-            CANDLE_VIDEO_ROUTED_MODELS,
-            EXPECTED_CANDLE_VIDEO_ROUTED_MODELS,
-        );
-        assert_membership_parity(
-            "CANDLE_VIDEO_I2V_ROUTED_MODELS",
-            CANDLE_VIDEO_I2V_ROUTED_MODELS,
-            EXPECTED_CANDLE_VIDEO_I2V_ROUTED_MODELS,
-        );
-        assert_membership_parity(
-            "CANDLE_VIDEO_VACE_MODELS",
-            CANDLE_VIDEO_VACE_MODELS,
-            EXPECTED_CANDLE_VIDEO_VACE_MODELS,
-        );
-        assert_membership_parity(
-            "VIDEO_MLX_ROUTED_MODELS",
-            VIDEO_MLX_ROUTED_MODELS,
-            EXPECTED_VIDEO_MLX_ROUTED_MODELS,
-        );
-        // The training-kernel lists are keyed by kernel id (a separate namespace) and were NOT
-        // collapsed into the per-model tables (sc-9495); they stay hand-written, still order-pinned.
-        assert_eq!(
-            MLX_ROUTED_TRAINING_KERNELS,
-            EXPECTED_MLX_ROUTED_TRAINING_KERNELS
-        );
-        assert_eq!(
-            CANDLE_ROUTED_TRAINING_KERNELS,
-            EXPECTED_CANDLE_ROUTED_TRAINING_KERNELS
-        );
-        assert_eq!(
-            MLX_ONLY_TRAINING_KERNELS,
-            EXPECTED_MLX_ONLY_TRAINING_KERNELS
+    fn frozen_ui_models_with_missing_old_rows_reach_the_native_mlx_predicate() {
+        for id in [
+            "sensenova_u1_8b_infographic_v2",
+            "sensenova_u1_8b_infographic_v2_fast",
+            "sensenova_u1_8b_infographic_v3",
+            "sensenova_u1_8b_infographic_v3_fast",
+        ] {
+            assert!(MLX_ROUTED_MODELS.contains(&id), "{id} router policy");
+            assert!(
+                crate::jobs_store::routing::mlx::image_request_mlx_eligible(
+                    id,
+                    &super::probe_payload(id, &[])
+                ),
+                "{id} native MLX request"
+            );
+        }
+        let id = "qwen_image_edit_2511_lightning";
+        assert!(MLX_ROUTED_MODELS.contains(&id));
+        assert!(
+            crate::jobs_store::routing::mlx::image_request_mlx_eligible(
+                id,
+                &super::probe_payload(
+                    id,
+                    &[
+                        ("mode", serde_json::json!("edit_image")),
+                        ("sourceAssetId", serde_json::json!("asset")),
+                    ]
+                )
+            ),
+            "{id} native MLX edit request"
         );
     }
 
@@ -3066,24 +2235,6 @@ mod tests {
 
     // --- route-by-family for imported models (sc-14019, epic 14015) -------------
 
-    /// The MLX-routed *family* allow-list, pinned like the model lists above. Adding a family here is
-    /// a deliberate edit (it makes every imported same-family checkpoint Mac-routable), so it must be
-    /// mirrored here — the guardrail that a family is never silently added to the import surface.
-    const EXPECTED_MLX_ROUTED_FAMILIES: &[&str] = &["krea_2", "mage-flow", "sdxl"];
-    const EXPECTED_CANDLE_ROUTED_FAMILIES: &[&str] = &["flux2", "krea_2", "mage-flow", "sdxl"];
-
-    #[test]
-    fn mlx_routed_families_match_snapshot() {
-        assert_eq!(MLX_ROUTED_FAMILIES, EXPECTED_MLX_ROUTED_FAMILIES);
-    }
-
-    #[test]
-    fn candle_routed_families_match_snapshot() {
-        assert_eq!(CANDLE_ROUTED_FAMILIES, EXPECTED_CANDLE_ROUTED_FAMILIES);
-        assert!(CANDLE_ROUTED_FAMILIES.contains(&"krea_2"));
-        assert!(!CANDLE_ROUTED_FAMILIES.contains(&"z-image"));
-    }
-
     #[test]
     fn mlx_routed_families_have_a_same_family_builtin_engine() {
         // Every allow-listed family must actually be one an MLX-routed builtin defines an engine for
@@ -3097,7 +2248,7 @@ mod tests {
         // prefix check so the guard keeps asserting "this family token names a real MLX-routed
         // builtin" instead of accidentally asserting "the family token happens to be spelled with
         // underscores".
-        for family in MLX_ROUTED_FAMILIES {
+        for family in MLX_ROUTED_FAMILIES.iter() {
             let prefix = family.replace('-', "_");
             let has_routed_builtin = MLX_ROUTED_MODELS
                 .iter()
@@ -3111,7 +2262,7 @@ mod tests {
 
     #[test]
     fn candle_routed_families_have_a_same_family_builtin_engine() {
-        for family in CANDLE_ROUTED_FAMILIES {
+        for family in CANDLE_ROUTED_FAMILIES.iter() {
             let prefix = family.replace('-', "_");
             let has_routed_builtin = CANDLE_ROUTED_MODELS
                 .iter()
@@ -3488,7 +2639,7 @@ mod tests {
             imported_image_request_family_eligible(
                 imported_id,
                 p,
-                MLX_ROUTED_FAMILIES,
+                MLX_ROUTED_FAMILIES.as_slice(),
                 MLX_IMPORTED_CAPS,
             )
         };
@@ -3496,7 +2647,7 @@ mod tests {
             imported_image_request_family_eligible(
                 imported_id,
                 p,
-                CANDLE_ROUTED_FAMILIES,
+                CANDLE_ROUTED_FAMILIES.as_slice(),
                 CANDLE_IMPORTED_CAPS,
             )
         };
@@ -3686,7 +2837,7 @@ mod tests {
             imported_image_request_family_eligible(
                 finetune_id,
                 p,
-                CANDLE_ROUTED_FAMILIES,
+                CANDLE_ROUTED_FAMILIES.as_slice(),
                 CANDLE_IMPORTED_CAPS,
             )
         };
@@ -3703,8 +2854,8 @@ mod tests {
             "plain txt2img is the shape the MLX fine-tuned lane serves"
         );
         assert!(
-            candle(&payload(serde_json::json!({ "mode": "text_to_image" }))),
-            "plain txt2img is the shape the Candle fine-tuned lane serves"
+            !candle(&payload(serde_json::json!({ "mode": "text_to_image" }))),
+            "Candle has no registered Mage imported provider"
         );
 
         for (label, extra) in [
@@ -3740,14 +2891,12 @@ mod tests {
             );
         }
 
-        // The generated Mage full-fine-tune seam is present on both pinned runtimes.
+        // The generated Mage full-fine-tune seam exists in the pinned Candle runtime, but no
+        // imported-provider registration currently makes that source claimable there.
         assert!(
-            CANDLE_ROUTED_FAMILIES.contains(&"mage-flow"),
-            "Candle must advertise the generated Mage full-fine-tune family"
+            !CANDLE_ROUTED_FAMILIES.contains(&"mage-flow"),
+            "test family projection must follow registered imported providers"
         );
-        // ...but the family fixture is only an oracle. Production selects an EXACT provider-facts
-        // route, and the checked-in candle facts register no `mage-flow` import row, so the
-        // provider path stays closed on candle even though the runtime exposes the seam.
         assert!(
             !imported_image_request_provider_eligible(
                 finetune_id,
@@ -3789,13 +2938,13 @@ mod tests {
                 imported_image_request_family_eligible(
                     imported_id,
                     p,
-                    MLX_ROUTED_FAMILIES,
+                    MLX_ROUTED_FAMILIES.as_slice(),
                     MLX_IMPORTED_CAPS,
                 ),
                 imported_image_request_family_eligible(
                     imported_id,
                     p,
-                    CANDLE_ROUTED_FAMILIES,
+                    CANDLE_ROUTED_FAMILIES.as_slice(),
                     CANDLE_IMPORTED_CAPS,
                 ),
             )
@@ -3911,8 +3060,6 @@ mod tests {
     /// to latent frame 0 — and the checkpoint's `in_dim 36` patch embedding was trained on
     /// "frame 0 image, rest zeros", so a second pinned frame is out-of-distribution rather than an
     /// unwired flag. The 5B's FLF rides a mask-blend architecture the A14B does not have.
-    use super::KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES;
-
     /// **THE CLASS GUARD (sc-17159, GH #2074).** A video mode in a shipped model's `capabilities`
     /// is a promise to the user — the Video Studio builds its mode tabs from that array. This
     /// asserts the promise is keepable: every advertised capability is a mode the Mac gate can
@@ -3991,18 +3138,10 @@ mod tests {
              wrong and this guard is vacuous"
         );
 
-        let known: BTreeSet<(String, String)> = KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES
-            .iter()
-            .map(|(id, mode, _)| ((*id).to_owned(), (*mode).to_owned()))
-            .collect();
         let found: BTreeSet<(String, String)> = unclaimable.into_iter().collect();
-        assert_eq!(
-            found, known,
-            "the set of advertised-but-unclaimable video capabilities changed. A pair present in \
-             `found` and absent from `KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES` is a mode the Video \
-             Studio offers and NO lane will claim — the job queues forever next to an idle worker, \
-             with no error (GH #2074). A pair in the constant and not in `found` has been fixed: \
-             delete its row."
+        assert!(
+            found.is_empty(),
+            "advertised video modes have no claiming lane: {found:?} (GH #2074)"
         );
     }
 
@@ -4014,8 +3153,7 @@ mod tests {
     /// `videoModelServesMode` collapsed to `capabilities.includes(mode)`), and submitting one
     /// produced a job that sat `queued` / "Waiting for an available worker." with no terminal state.
     ///
-    /// The inventory is EXACT, like `KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES`: it is not a suppression
-    /// list, it is the measured set, and every member must be BOTH hidden (a `false` in the model's
+    /// The inventory is exact: it is not a suppression list, it is the measured set, and every member must be BOTH hidden (a `false` in the model's
     /// `candleSupport.features.videoModes`, which `candleVideoModeBlock` reads) AND judged
     /// unreachable on both off-Mac platforms (`video_request_is_claimable_on_platform`). Hiding
     /// alone would not do: `VIDEO_JOB_MODES` is global and the MCP tool, a raw REST caller or a
@@ -4035,52 +3173,6 @@ mod tests {
     /// bytes, and the verdicts come from the real predicates. Nothing here restates a mode list.
     #[test]
     fn every_declared_video_mode_with_no_off_mac_lane_is_hidden_and_unreachable() {
-        /// The measured MLX-only, candle-unclaimable pairs a shipped model ADVERTISES (sc-19570).
-        /// A pair leaving this set has gained an off-Mac lane; a pair joining it is a new tab that
-        /// hangs on Windows and Linux.
-        const MLX_ONLY_ADVERTISED_PAIRS: &[(&str, &str)] = &[
-            // THIRTEEN PAIRS LEFT THIS SET when `main` was synced into the epic branch, which is the
-            // "has gained an off-Mac lane — delete its row" case the panic below names. They were
-            // measured on the epic branch, where those candle lanes did not exist yet; `main` ships
-            // them, so the rows were facts about a tree that no longer exists rather than
-            // suppressions worth keeping:
-            //
-            //   * `ltx_2_3` / `ltx_2_3_eros` × image_to_video, first_last_frame, extend_clip,
-            //     video_bridge, replace_person (10) — `candle_video_engine_id` resolves the LTX pair
-            //     to `ltx_2_3_distilled`, and `video_request_candle_eligible` /
-            //     `ltx_replace_candle_eligible` serve those modes. The advanced three additionally
-            //     require an IC-LoRA on BOTH lanes, which is why `video_mode_probe_payload` now
-            //     supplies one for exactly this pair of models — without it these three would still
-            //     read as stranded and the Studio would hide tabs candle genuinely serves.
-            //   * `wan_2_2` × image_to_video, first_last_frame (2) — native TI2V-5B keyframe
-            //     conditioning on the candle lane.
-            //   * `wan_2_2_vace_fun_14b` × replace_person (1) — the dedicated dual-expert arm in
-            //     `video_request_candle_vace_eligible`.
-            //
-            // What remains is the genuinely MLX-only inventory. The three families whose every
-            // download is `platforms: ["macos"]`. They are
-            // in the set because they are the same defect — an advertised mode with no off-Mac
-            // lane — even though the catalog's own `retain_downloads_for_os` already leaves them
-            // uninstallable off-Mac, which is why sc-19570's measured list (scoped to
-            // Windows/Linux-INSTALLABLE models) did not name them. They are covered rather than
-            // exempted: install state is not a reachability gate, a mac-only download list is one
-            // manifest edit from changing, and a raw REST call for a pair no worker on this host
-            // can claim must still terminate regardless of what is on disk.
-            ("krea_realtime_14b", "text_to_video"),
-            ("krea_realtime_14b", "image_to_video"),
-            ("krea_realtime_14b", "video_to_video"),
-            // SC-18902 (main) withdrew the WHOLE Eros candle route after the exact-head CUDA
-            // acceptance run produced unusable output, so every advertised Eros mode is back to
-            // MLX-only. The previous sync had deleted these rows when the candle lane existed;
-            // this is the same measurement moving the other way, not a suppression.
-            ("ltx_2_3_eros", "text_to_video"),
-            ("ltx_2_3_eros", "image_to_video"),
-            ("ltx_2_3_eros", "first_last_frame"),
-            ("ltx_2_3_eros", "extend_clip"),
-            ("ltx_2_3_eros", "video_bridge"),
-            ("ltx_2_3_eros", "replace_person"),
-        ];
-
         let models = builtin_video_models();
         assert!(
             models.len() >= 12,
@@ -4089,11 +3181,6 @@ mod tests {
             models.len()
         );
 
-        let expected: BTreeSet<(String, String)> = MLX_ONLY_ADVERTISED_PAIRS
-            .iter()
-            .map(|(id, mode)| ((*id).to_owned(), (*mode).to_owned()))
-            .collect();
-        let mut found: BTreeSet<(String, String)> = BTreeSet::new();
         let mut checked = 0_usize;
         for model in &models {
             let id = model
@@ -4132,7 +3219,6 @@ mod tests {
                 if !(mlx && !candle) {
                     continue;
                 }
-                found.insert((id.to_owned(), mode.to_owned()));
                 // 1. HIDDEN off-Mac: either the whole model is candle-unsupported (so the picker
                 //    drops it) or this specific mode is `false` (so the tab never renders).
                 assert!(
@@ -4167,12 +3253,6 @@ mod tests {
             checked >= 30,
             "only {checked} advertised (model, mode) pairs were probed — the manifest read is \
              wrong and this guard is vacuous"
-        );
-        assert_eq!(
-            found, expected,
-            "the set of advertised video modes with no off-Mac lane changed. A pair in `found` and \
-             not in `MLX_ONLY_ADVERTISED_PAIRS` is a NEW Windows/Linux hang; a pair in the constant \
-             and not in `found` has gained a candle lane — delete its row."
         );
     }
 

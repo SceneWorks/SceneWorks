@@ -17,6 +17,7 @@ import JSON5 from "json5";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppContext } from "../context/AppContext.js";
 import { SimpleShell } from "./SimpleShell.jsx";
+import { servedCatalogFacts } from "../testUtils/servedCatalogFacts.js";
 import { click, mountRoot, unmountRoot } from "../testUtils/dom.js";
 import { readSimpleStudioSnapshot } from "../simpleStudioStore.js";
 
@@ -40,6 +41,7 @@ const manifestModels = (() => {
 })();
 const MINIMAX = {
   ...manifestModels.find((model) => model.id === "minimax_h3"),
+  ...servedCatalogFacts("minimax_h3"),
   installState: "installed",
   supportsLastOnlyImageToVideo: true,
   usable: true,

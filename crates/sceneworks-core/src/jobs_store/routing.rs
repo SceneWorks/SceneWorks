@@ -7,8 +7,12 @@
 pub(crate) mod candle;
 pub(crate) mod catalog;
 pub(crate) mod gaps;
-pub(crate) mod matrix;
 pub(crate) mod mlx;
+mod portable;
+pub use portable::native_route_claims_request;
+
+#[cfg(test)]
+mod typed_registry_contract_tests;
 
 use std::collections::BTreeMap;
 
@@ -19,19 +23,18 @@ use crate::contracts::{ContractNumber, JobSnapshot, JobStatus, JobType, Progress
 /// Every built-in SenseNova-U1 variant. Keep routing, understanding, and gap
 /// classification on one list so adding an Infographic/distilled tier cannot
 /// silently fall through to a generic unsupported reason.
-pub(crate) const SENSENOVA_MODEL_IDS: &[&str] = &[
-    "sensenova_u1_8b",
-    "sensenova_u1_8b_infographic_v2",
-    "sensenova_u1_8b_infographic_v3",
-    "sensenova_u1_8b_fast",
-    "sensenova_u1_8b_infographic_v2_fast",
-    "sensenova_u1_8b_infographic_v3_fast",
-];
+pub(crate) static SENSENOVA_MODEL_IDS: std::sync::LazyLock<Vec<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        crate::registry::builtin_model_specs()
+            .filter(|spec| spec.product.family == "sensenova-u1")
+            .map(|spec| spec.product.id.as_str())
+            .collect()
+    });
 
 /// Every video mode exposed by the production UI/router catalog.
 ///
-/// The capability dumper consumes this accessor instead of carrying a second mode list, so a newly
-/// shipped mode cannot be omitted from matching-platform descriptor evidence.
+/// The typed video-route contract test consumes this accessor so newly shipped modes
+/// cannot be omitted from descriptor evidence.
 pub fn video_ui_modes() -> &'static [&'static str] {
     catalog::VIDEO_UI_MODES
 }
@@ -284,11 +287,27 @@ pub(super) fn has_nonempty_string_array(payload: &Map<String, Value>, key: &str)
 /// the same LoRA family — so every route, guard and resolver that keys on the 2.1 request shape
 /// keys on this list rather than on the base id alone. Where the two ids genuinely differ (the
 /// trainer, the defaults, the memory figures, the recipe stamp) the code names the id it means.
-pub const QWEN_IMAGE_2_1_MODEL_IDS: &[&str] = &["qwen_image_2_1", "qwen_image_2_1_turbo"];
+pub static QWEN_IMAGE_2_1_MODEL_IDS: std::sync::LazyLock<Vec<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        crate::registry::builtin_model_specs()
+            .filter(|spec| spec.product.family == "qwen-image-2-1")
+            .map(|spec| spec.product.id.as_str())
+            .collect()
+    });
 
 /// Whether `model` is one of [`QWEN_IMAGE_2_1_MODEL_IDS`].
 pub fn is_qwen_image_2_1_model(model: &str) -> bool {
     QWEN_IMAGE_2_1_MODEL_IDS.contains(&model)
+}
+
+#[cfg(test)]
+#[test]
+fn image_family_selectors_include_shipped_variants_without_claiming_neighbors() {
+    assert!(SENSENOVA_MODEL_IDS.contains(&"sensenova_u1_8b_infographic_v3_fast"));
+    assert!(!SENSENOVA_MODEL_IDS.contains(&"qwen_image"));
+    assert!(is_qwen_image_2_1_model("qwen_image_2_1"));
+    assert!(is_qwen_image_2_1_model("qwen_image_2_1_turbo"));
+    assert!(!is_qwen_image_2_1_model("qwen_image"));
 }
 
 /// The ORDERED condition-image asset ids a Qwen-Image 2.1 request carries, or `None` when a carrier

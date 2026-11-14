@@ -138,16 +138,16 @@ pub(crate) async fn create_job(
             payload.job_type.as_str()
         )));
     }
-    if matches!(payload.job_type, JobType::ImageDetail) {
-        // Raw callers never mint the private carrier, including resolved text-encoder paths.
-        for key in [
-            "modelManifestEntry",
-            "baseModelManifestEntry",
-            "modelManifestEntries",
-            "modelProvenance",
-        ] {
-            payload.payload.remove(key);
-        }
+    // The raw queue endpoint accepts authored IDs/options, never source metadata. Every carrier
+    // below is resolved by the server after validation; a caller-supplied path or download must
+    // not short-circuit the catalog lookup in ensure_runtime_model_sources.
+    for key in [
+        "modelManifestEntry",
+        "baseModelManifestEntry",
+        "modelManifestEntries",
+        "modelProvenance",
+    ] {
+        payload.payload.remove(key);
     }
     validate_raw_job_payload(
         &state,
@@ -164,6 +164,15 @@ pub(crate) async fn create_job(
         &mut payload.payload,
     )
     .await?;
+    if matches!(payload.job_type, JobType::ImageDetail) {
+        validate_job_lora_compatibility(
+            &state,
+            payload.project_id.as_deref(),
+            &mut payload.payload,
+            false,
+        )
+        .await?;
+    }
     let selected_entry = canonical_entry.as_ref().or_else(|| {
         if crate::model_sources::canonical_utility_model_carrier(&payload.job_type) {
             payload.payload.get("modelManifestEntry")
@@ -173,8 +182,21 @@ pub(crate) async fn create_job(
     });
     let model_provenance =
         canonical_model_provenance(&state, selected_entry, &payload.payload).await?;
+    let portable_binding = crate::portable_admission::capture_portable_model_binding(
+        &state,
+        &payload.job_type,
+        &payload.payload,
+        &payload.requested_gpu,
+    )
+    .await?
+    .map(|binding| {
+        serde_json::to_value(binding).map_err(|error| {
+            ApiError::internal(format!("Serialize portable model binding: {error}"))
+        })
+    })
+    .transpose()?;
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.create_job_with_model_provenance(
+        store.create_job_with_portable_binding(
             CreateJob {
                 job_type: payload.job_type,
                 project_id: payload.project_id,
@@ -187,6 +209,8 @@ pub(crate) async fn create_job(
                 initial_status: None,
             },
             model_provenance.as_ref(),
+            None,
+            portable_binding.as_ref(),
         )
     })
     .await?;
@@ -199,11 +223,24 @@ pub(crate) async fn claim_job(
     State(state): State<AppState>,
     ApiJson(payload): ApiJson<ClaimRequest>,
 ) -> Result<Json<ClaimResponse>, ApiError> {
+    let keyed = crate::workers::presented_worker_proof(&state, &payload.worker_id, &payload.extra)?;
+    if state
+        .authenticated_worker_claims
+        .lock()
+        .await
+        .contains_key(&payload.worker_id)
+        && !keyed
+    {
+        return Err(ApiError::bad_request("Worker source proof is required"));
+    }
+    let historical_changed = upgrade_historical_queued_carriers(&state).await?;
     let mlx_required = state.settings.mlx_required;
     let enforce_unsupported = state.settings.mlx_enforce_unsupported;
     let candle_required = state.settings.candle_required;
     let candle_enforce = state.settings.candle_enforce_unsupported;
     let host_os = state.settings.host_os.clone();
+    let portable_backend = payload.portable_backend.clone();
+    let portable_platform = payload.portable_platform.clone();
     let (stale_sweep, claim_result) = store_call(state.clone(), move |store, timeout| {
         let stale_sweep = store.mark_stale_workers_interrupted(timeout)?;
         let claim_result = (|| {
@@ -230,10 +267,19 @@ pub(crate) async fn claim_job(
             // worker ever polls; this arm covers the raw `POST /api/v1/jobs`, retry and duplicate
             // paths that never pass through that route.
             let platform_unreachable = store.fail_platform_unreachable_jobs(&host_os)?;
-            let (job, decision) = store.claim_next_job_routed(&payload.worker_id, mlx_required)?;
+            let (job, decision, portable_binding) = store
+                .claim_next_job_routed_with_portable_binding_authenticated(
+                    &payload.worker_id,
+                    mlx_required,
+                    payload.portable_model_binding_version.unwrap_or(0),
+                    payload.portable_backend.as_deref(),
+                    payload.portable_platform.as_deref(),
+                    keyed,
+                )?;
             Ok::<_, JobsStoreError>((
                 job,
                 decision,
+                portable_binding,
                 stranded,
                 unsupported,
                 candle_stranded,
@@ -248,12 +294,35 @@ pub(crate) async fn claim_job(
     let (
         response,
         decision,
+        portable_binding,
         stranded,
         unsupported,
         candle_stranded,
         candle_unsupported,
         platform_unreachable,
     ) = claim_result?;
+    let portable_model_binding = portable_binding
+        .map(
+            serde_json::from_value::<
+                sceneworks_core::model_artifacts::portable_binding::PortableJobBinding,
+            >,
+        )
+        .transpose()
+        .map_err(|error| {
+            ApiError::internal(format!("Invalid stored portable model binding: {error}"))
+        })?
+        .map(|envelope| {
+            envelope
+                .select_route(
+                    portable_backend.as_deref().unwrap_or_default(),
+                    portable_platform.as_deref().unwrap_or_default(),
+                )
+                .cloned()
+                .map_err(|error| {
+                    ApiError::internal(format!("Invalid claimed portable route: {error}"))
+                })
+        })
+        .transpose()?;
     for job in &stranded {
         emit_mlx_unavailable(job);
         publish(&state, "job.updated", job);
@@ -297,6 +366,7 @@ pub(crate) async fn claim_job(
         publish(&state, "job.updated", job);
     }
     if response.is_some()
+        || historical_changed
         || !stale_sweep.workers.is_empty()
         || !stale_sweep.jobs.is_empty()
         || !stranded.is_empty()
@@ -314,8 +384,225 @@ pub(crate) async fn claim_job(
     }
     Ok(Json(ClaimResponse {
         job: response,
+        portable_model_binding,
         extra: Default::default(),
     }))
+}
+
+/// Older queued jobs have no private portable ledger. Rebuild a small batch from their original
+/// immutable carrier before selecting a claim; the store independently excludes every unbound
+/// model-backed row from every claim, whatever protocol version (or none) the worker sends, so an
+/// unavailable source or a concurrent poll can never reach a worker.
+///
+/// The upgrade runs inside the claim request, whose worker gives the WHOLE request
+/// [`CONTROL_REQUEST_TIMEOUT`](sceneworks_core::network_policy::CONTROL_REQUEST_TIMEOUT), while one
+/// carrier's pinned publisher metadata lookup may take the API's much longer outbound timeout. So
+/// the batch shares [`HISTORICAL_UPGRADE_CLAIM_BUDGET`]: a carrier still unresolved when it runs out
+/// is deferred exactly like any other transient source failure (queued, unbound, so unclaimable),
+/// never failed, and the claim proceeds to runnable work. A later claim retries it.
+async fn upgrade_historical_queued_carriers(state: &AppState) -> Result<bool, ApiError> {
+    let deadline = tokio::time::Instant::now() + HISTORICAL_UPGRADE_CLAIM_BUDGET;
+    let originals =
+        store_call(state.clone(), |store, _| store.unbound_queued_model_jobs(8)).await?;
+    let mut changed = false;
+    for original in originals {
+        match tokio::time::timeout_at(deadline, upgrade_historical_carrier(state, &original)).await
+        {
+            Ok(upgraded) => changed |= upgraded?,
+            Err(_) => {
+                // Every write the abandoned upgrade could have reached is a single conditional store
+                // transaction, so the row is either untouched or already bound/failed; deferring
+                // only touches a row that is still queued and unbound.
+                defer_historical_carrier(state, &original).await?;
+                break;
+            }
+        }
+    }
+    Ok(changed)
+}
+
+/// The share of the worker's claim deadline that historical carrier upgrades may spend before the
+/// claim itself runs, leaving the rest for the claim transaction and the response.
+const HISTORICAL_UPGRADE_CLAIM_BUDGET: std::time::Duration = std::time::Duration::from_secs(
+    sceneworks_core::network_policy::CONTROL_REQUEST_TIMEOUT.as_secs() / 3,
+);
+
+/// Rebuild one historical carrier and bind, fail or defer it. `Ok(true)` when a row changed in a
+/// way the queue must publish.
+async fn upgrade_historical_carrier(
+    state: &AppState,
+    original: &JobSnapshot,
+) -> Result<bool, ApiError> {
+    let mut current = original.payload.clone();
+    let canonical = match original.job_type {
+        JobType::ImageGenerate | JobType::ImageEdit | JobType::ImageDetail => {
+            upgrade_historical_image_carrier(state, &original.job_type, &mut current).await
+        }
+        JobType::VideoGenerate
+        | JobType::VideoExtend
+        | JobType::VideoBridge
+        | JobType::PersonReplace => {
+            let model_id = current
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let entry = resolve_model_manifest_entry(state, model_id).await;
+            entry.map(|entry| {
+                current.insert("modelManifestEntry".to_owned(), entry);
+            })
+        }
+        // Every other model-backed carrier (audio, vector, conversion, training bases, fixed
+        // utilities and reference models) re-resolves each slot from the current catalog, so a
+        // same-ID replacement is compared like an image or video one instead of against itself.
+        _ => reresolve_historical_entries(state, &original.job_type, &mut current).await,
+    };
+    if let Err(error) = canonical {
+        if error.status == axum::http::StatusCode::BAD_REQUEST {
+            // The current catalog refuses this carrier outright (a removed model, a trained
+            // checkpoint whose output directory is gone, an unavailable authored choice): the
+            // same request would be refused at create/retry, so it can never run.
+            return fail_historical_carrier(state, original, error.detail).await;
+        }
+        // A disconnected library or other transient catalog resolution failure cannot
+        // establish a replacement. The row remains unbound and unclaimable for retry.
+        defer_historical_carrier(state, original).await?;
+        return Ok(false);
+    }
+    let authority = crate::portable_admission::validate_historical_source_carrier(
+        state,
+        &original.payload,
+        &current,
+    )
+    .await;
+    if let Err(conflict) = authority {
+        // An identity or byte conflict is permanent: the original declaration can never be
+        // satisfied again, so the job fails with the reason instead of waiting forever.
+        return fail_historical_carrier(state, original, conflict.detail).await;
+    }
+    let Some(binding) = crate::portable_admission::capture_portable_model_binding(
+        state,
+        &original.job_type,
+        &current,
+        &original.requested_gpu,
+    )
+    .await
+    .ok()
+    .flatten() else {
+        // The original authority, including its local bytes, was verified above, so a capture
+        // failure here is about proving a route now: no eligible worker has advertised the
+        // exact closure yet, proof capacity is busy, or pinned publisher metadata is
+        // unreachable. Leave the row unbound and unclaimable; a later poll retries it.
+        defer_historical_carrier(state, original).await?;
+        return Ok(false);
+    };
+    let binding = serde_json::to_value(binding)
+        .map_err(|error| ApiError::internal(format!("Serialize historical source: {error}")))?;
+    let original_for_store = original.clone();
+    store_call(state.clone(), move |store, _| {
+        store.bind_historical_queued_job(&original_for_store, &current, &binding)
+    })
+    .await
+}
+
+async fn fail_historical_carrier(
+    state: &AppState,
+    original: &JobSnapshot,
+    detail: String,
+) -> Result<bool, ApiError> {
+    let original_for_store = original.clone();
+    let failed = store_call(state.clone(), move |store, _| {
+        store.fail_historical_unbound_queued_job(&original_for_store, &detail)
+    })
+    .await?;
+    let changed = failed.is_some();
+    if let Some(failed) = failed {
+        publish(state, "job.updated", &failed);
+    }
+    Ok(changed)
+}
+
+async fn defer_historical_carrier(
+    state: &AppState,
+    original: &JobSnapshot,
+) -> Result<(), ApiError> {
+    let original_for_store = original.clone();
+    store_call(state.clone(), move |store, _| {
+        store.defer_historical_queued_job(&original_for_store)
+    })
+    .await
+}
+
+/// Rebuild an image carrier exactly as create/retry/duplicate do: the current catalog entry, then
+/// the server-owned resolution of the authored text-encoder choice. Without the second stamp a
+/// historical job that chose a non-default encoder could never match its original carrier.
+async fn upgrade_historical_image_carrier(
+    state: &AppState,
+    job_type: &JobType,
+    payload: &mut JsonObject,
+) -> Result<(), ApiError> {
+    let Some(mut entry) = canonicalize_image_model_payload(state, job_type, payload).await? else {
+        return Ok(());
+    };
+    if matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
+        let model_id = payload
+            .get("model")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ApiError::bad_request("model must be a string"))?
+            .to_owned();
+        resolve_selected_image_text_encoder(state, payload, &model_id, &mut entry).await?;
+        payload.insert("modelManifestEntry".to_owned(), entry);
+    }
+    Ok(())
+}
+
+/// Replace each model carrier slot of a non-image/video historical job with the current catalog's
+/// entry for the same id. A slot without an id has nothing to re-resolve; it becomes `null`, so the
+/// identity comparison refuses it rather than trusting the stored carrier (fail closed).
+async fn reresolve_historical_entries(
+    state: &AppState,
+    job_type: &JobType,
+    payload: &mut JsonObject,
+) -> Result<(), ApiError> {
+    async fn current_entry(
+        state: &AppState,
+        job_type: &JobType,
+        entry: &Value,
+    ) -> Result<Value, ApiError> {
+        let Some(id) = entry
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            return Ok(Value::Null);
+        };
+        validate_model_id(id)?;
+        if *job_type == JobType::VectorGenerate {
+            // Vector admission stamps the public catalog row (`create_vector_job`).
+            return Ok(crate::models::find_model_by_id(state, id)
+                .await?
+                .unwrap_or_else(|| json!({})));
+        }
+        resolve_model_manifest_entry(state, id).await
+    }
+    for key in ["modelManifestEntry", "baseModelManifestEntry"] {
+        if let Some(entry) = payload.get(key).filter(|entry| !entry.is_null()).cloned() {
+            let replacement = current_entry(state, job_type, &entry).await?;
+            payload.insert(key.to_owned(), replacement);
+        }
+    }
+    if let Some(entries) = payload
+        .get("modelManifestEntries")
+        .and_then(Value::as_array)
+        .cloned()
+    {
+        let mut rebuilt = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            rebuilt.push(current_entry(state, job_type, entry).await?);
+        }
+        payload.insert("modelManifestEntries".to_owned(), Value::Array(rebuilt));
+    }
+    Ok(())
 }
 
 /// Emit the macOS `mlx_unsupported` gap event (epic 3482 / sc-3484) as a structured JSON line
@@ -457,6 +744,91 @@ pub(crate) async fn get_job(
     )))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ImportClaimProbeRequest {
+    worker_id: String,
+    target_job_id: String,
+    commitment: String,
+    capability: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ImportClaimProbeResponse {
+    job: JobSnapshot,
+    payload_matches: bool,
+}
+
+/// Worker-only read of a claimed import or its retry ancestry. The public snapshot keeps its
+/// source-path redaction; the comparison reads the same stored row before that redaction. A worker
+/// must own the active claimed job, and the target must lie on that job's server-owned retry chain.
+pub(crate) async fn verify_model_import_claim(
+    State(state): State<AppState>,
+    Path(claimed_job_id): Path<String>,
+    ApiJson(request): ApiJson<ImportClaimProbeRequest>,
+) -> Result<Json<ImportClaimProbeResponse>, ApiError> {
+    use subtle::ConstantTimeEq;
+
+    if !sceneworks_core::ids::is_safe_id(&request.target_job_id)
+        || !request.commitment.starts_with("sha256:")
+        || request.commitment.len() != 71
+        || !request.commitment[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(ApiError::bad_request("Invalid import claim probe"));
+    }
+    let target_id = request.target_job_id;
+    let worker_id = request.worker_id;
+    let capability = request.capability;
+    let candidate = store_call(state.clone(), move |store, _| {
+        let mut current = store.get_job(&claimed_job_id)?;
+        if current.job_type != JobType::ModelImport
+            || current.worker_id.as_deref() != Some(worker_id.as_str())
+            || !sceneworks_core::jobs_store::ACTIVE_STATUSES.contains(&current.status.as_str())
+            || current
+                .payload
+                .get(sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY)
+                .and_then(Value::as_str)
+                .is_none_or(|expected| {
+                    expected.len() != 64
+                        || capability.len() != 64
+                        || !bool::from(expected.as_bytes().ct_eq(capability.as_bytes()))
+                })
+        {
+            return Ok(None);
+        }
+        for _ in 0..64 {
+            if current.id == target_id {
+                return Ok(Some(current));
+            }
+            let Some(parent) = current.source_job_id.as_deref() else {
+                break;
+            };
+            if !sceneworks_core::ids::is_safe_id(parent) {
+                break;
+            }
+            current = store.get_job(parent)?;
+        }
+        Ok(None)
+    })
+    .await?
+    .ok_or_else(|| ApiError::forbidden("Import claim is not owned by this worker"))?;
+    let mut authored_payload = candidate.payload.clone();
+    authored_payload.remove(sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY);
+    let payload_matches =
+        sceneworks_core::model_artifacts::portable_binding::canonical_object_sha256(
+            &Value::Object(authored_payload),
+        )
+        .map_err(|error| ApiError::internal(error.to_string()))?
+            == request.commitment;
+    Ok(Json(ImportClaimProbeResponse {
+        job: public_job_snapshot(candidate),
+        payload_matches,
+    }))
+}
+
 pub(crate) async fn cancel_job(
     State(state): State<AppState>,
     Path(job_id): Path<String>,
@@ -496,23 +868,25 @@ pub(crate) async fn retry_job(
     {
         return Ok((StatusCode::CREATED, Json(public_job_snapshot(job))));
     }
-    let (canonical_payload, model_provenance, download_binding) =
+    let (canonical_payload, model_provenance, download_binding, portable_binding, _) =
         validate_and_canonicalize_merged_generation_payload(
             &state,
             &job_id,
             &payload.payload_changes,
             true,
+            None,
         )
         .await?;
     payload.payload_changes = canonical_payload;
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.retry_job_with_download_binding(
+        store.retry_job_with_portable_binding(
             &job_id,
             RetryJob {
                 payload_changes: payload.payload_changes,
             },
             model_provenance.as_ref(),
             download_binding.as_ref(),
+            portable_binding.as_ref(),
         )
     })
     .await?;
@@ -767,14 +1141,20 @@ pub(crate) async fn duplicate_job(
     {
         return Ok((StatusCode::CREATED, Json(public_job_snapshot(job))));
     }
-    let (canonical_payload, model_provenance, download_binding) =
-        validate_and_canonicalize_merged_generation_payload(
-            &state,
-            &job_id,
-            &payload.payload_changes,
-            false,
-        )
-        .await?;
+    let (
+        canonical_payload,
+        model_provenance,
+        download_binding,
+        portable_binding,
+        fresh_portable_selection,
+    ) = validate_and_canonicalize_merged_generation_payload(
+        &state,
+        &job_id,
+        &payload.payload_changes,
+        false,
+        payload.requested_gpu.as_deref(),
+    )
+    .await?;
     payload.payload_changes = canonical_payload;
     // An Iris training duplicate trains under its own output id (merged last: never overridable).
     if let Some(fresh_output) = fresh_output {
@@ -794,7 +1174,7 @@ pub(crate) async fn duplicate_job(
     let job = store_call(state.clone(), move |store, _timeout| {
         // Both halves: main's preallocated id for a freshened FLUX.3 training duplicate, and the
         // feature's canonical-admission source provenance (never read from payload metadata).
-        store.duplicate_job_with_download_binding(
+        store.duplicate_job_with_portable_binding(
             fresh_job_id,
             &job_id,
             DuplicateJob {
@@ -803,6 +1183,10 @@ pub(crate) async fn duplicate_job(
             },
             model_provenance.as_ref(),
             download_binding.as_ref(),
+            DuplicatePortableBinding {
+                binding: portable_binding.as_ref(),
+                allow_rebind: fresh_portable_selection,
+            },
         )
     })
     .await?;
@@ -870,11 +1254,10 @@ fn persisted_character_inline_loras(persisted_payload: &JsonObject) -> Vec<Value
 /// Whether `candidate` IS one of the persisted character links in `permitted`, and therefore may be
 /// hydrated inline.
 ///
-/// Identity is the link id AND agreement on every path field the candidate carries. Matching on the
-/// id alone would leave the narrowing hollow: `normalize_inline_job_lora` passes a caller's object
-/// through almost verbatim, so replaying a persisted link id with a swapped `sourcePath` would carry
-/// an arbitrary file into the enqueued payload. A candidate that omits a path field is still a match
-/// — it is asking for the persisted link, not redirecting it.
+/// Identity is the link id AND agreement on every loader locator the candidate carries. Matching
+/// on the id alone would let `normalize_inline_job_lora` retain a caller's `installedPath`, `path`,
+/// `source.path`, or file selector instead of the admitted source. Omitted locators ask for the
+/// persisted link; supplied locators must agree exactly.
 fn matches_permitted_inline_lora(candidate: &Value, permitted: &[Value]) -> bool {
     let Some(candidate_id) = job_lora_id(candidate) else {
         return false;
@@ -883,18 +1266,21 @@ fn matches_permitted_inline_lora(candidate: &Value, permitted: &[Value]) -> bool
         if job_lora_id(link) != Some(candidate_id) {
             return false;
         }
-        ["sourcePath", "projectPath"].iter().all(|field| {
-            match (
-                candidate.get(*field).and_then(Value::as_str),
-                link.get(*field).and_then(Value::as_str),
-            ) {
-                (Some(requested), Some(persisted)) => requested == persisted,
-                // The candidate names no path for this field, so it cannot redirect it.
-                (None, _) => true,
-                // The candidate names a path the persisted link does not have at all.
-                (Some(_), None) => false,
-            }
-        })
+        [
+            "installedPath",
+            "sourcePath",
+            "projectPath",
+            "path",
+            "files",
+        ]
+        .iter()
+        .all(|field| {
+            candidate
+                .get(*field)
+                .is_none_or(|value| link.get(*field) == Some(value))
+        }) && candidate
+            .pointer("/source/path")
+            .is_none_or(|value| link.pointer("/source/path") == Some(value))
     })
 }
 
@@ -932,7 +1318,35 @@ async fn validate_merged_job_loras(
     let mut catalog_slots = Vec::new();
     for (slot, lora) in loras.iter().enumerate() {
         if matches_permitted_inline_lora(lora, permitted_inline) {
-            inline_slots.push((slot, lora.clone()));
+            // Public job snapshots redact private locators. Restore every loader locator from
+            // the persisted link after the exact-id/locator check, including aliases that the
+            // safetensors header inspector would otherwise prefer over `sourcePath`.
+            let admitted = permitted_inline
+                .iter()
+                .find(|link| job_lora_id(link) == job_lora_id(lora))
+                .expect("matched persisted inline LoRA");
+            let mut hydrated = if lora.is_object() {
+                lora.clone()
+            } else {
+                admitted.clone()
+            };
+            if let Some(fields) = hydrated.as_object_mut() {
+                for key in [
+                    "installedPath",
+                    "sourcePath",
+                    "projectPath",
+                    "path",
+                    "source",
+                    "files",
+                ] {
+                    if let Some(value) = admitted.get(key) {
+                        fields.insert(key.to_owned(), value.clone());
+                    } else {
+                        fields.remove(key);
+                    }
+                }
+            }
+            inline_slots.push((slot, hydrated));
         } else {
             catalog_slots.push((slot, lora.clone()));
         }
@@ -977,13 +1391,31 @@ async fn validate_and_canonicalize_merged_generation_payload(
     job_id: &str,
     payload_changes: &JsonObject,
     retry: bool,
-) -> Result<(JsonObject, Option<Value>, Option<Value>), ApiError> {
+    requested_gpu_override: Option<&str>,
+) -> Result<
+    (
+        JsonObject,
+        Option<Value>,
+        Option<Value>,
+        Option<Value>,
+        bool,
+    ),
+    ApiError,
+> {
     let job_id = job_id.to_owned();
-    let (job, download_binding) = store_call(state.clone(), move |store, _timeout| {
-        Ok((store.get_job(&job_id)?, store.download_binding(&job_id)?))
-    })
-    .await?;
+    let (job, download_binding, frozen_portable_binding) =
+        store_call(state.clone(), move |store, _timeout| {
+            Ok((
+                store.get_job(&job_id)?,
+                store.download_binding(&job_id)?,
+                store.portable_model_binding(&job_id)?,
+            ))
+        })
+        .await?;
     let job_type = job.job_type.clone();
+    let requested_gpu = requested_gpu_override
+        .unwrap_or(&job.requested_gpu)
+        .to_owned();
     let project_id = job.project_id.clone();
     // sc-26691: only a job that actually rendered can be a legacy (pre-resize-mode) render.
     let persisted_rendered = matches!(job.status, JobStatus::Completed);
@@ -1020,13 +1452,17 @@ async fn validate_and_canonicalize_merged_generation_payload(
             merged.remove(key);
         }
     }
+    let mut canonical_audio_selection = false;
     if generation_job_model_is_path_backed(&job_type) {
         validate_payload_model(&merged)?;
         // A YuE2 retry/duplicate is held to the contract the worker enforces (sc-22999): the block
         // cannot be injected, removed or pointed at another model, and a block-less replay cannot
         // name a symbolic-song model the generic audio route refuses.
         if matches!(job_type, JobType::AudioGenerate) {
-            crate::yue2_jobs::canonicalize_replayed_audio_payload(
+            // The canonicalizer re-resolves a YuE2 replay's manifest carrier from the live
+            // catalog, so its stamped carrier is server-selected evidence like the video branch's
+            // `canonical_selection = true` stamp below.
+            canonical_audio_selection = crate::yue2_jobs::canonicalize_replayed_audio_payload(
                 state,
                 &persisted,
                 &mut merged,
@@ -1109,7 +1545,7 @@ async fn validate_and_canonicalize_merged_generation_payload(
     let canonical_model_entry =
         canonicalize_image_model_payload(state, &job_type, &mut merged).await?;
     // Local control-flow evidence, never a serialized/caller-supplied trust marker.
-    let mut canonical_selection = canonical_model_entry.is_some();
+    let mut canonical_selection = canonical_model_entry.is_some() || canonical_audio_selection;
     // The store SHALLOW-merges this object over the persisted payload, so a recorded checkpoint
     // alias the canonicalizer dropped (the replay picked another model) must be cleared explicitly
     // or the persisted value would survive the merge.
@@ -1309,6 +1745,10 @@ async fn validate_and_canonicalize_merged_generation_payload(
     }
     if canonical_raw_image {
         crate::model_sources::ensure_runtime_model_sources(state, &job_type, &mut merged).await?;
+        if matches!(job_type, JobType::ImageDetail) {
+            validate_job_lora_compatibility(state, project_id.as_deref(), &mut merged, false)
+                .await?;
+        }
         if crate::model_sources::canonical_utility_model_carrier(&job_type) {
             canonical_selection = true;
         }
@@ -1323,13 +1763,172 @@ async fn validate_and_canonicalize_merged_generation_payload(
             }
         }
     }
+    // A duplicate with an explicitly changed source selection is a new admission. Only a
+    // server-canonicalized carrier can take this path; retries and prompt-only duplicates keep
+    // the original frozen source even if the catalog has changed since their first admission.
+    let fresh_portable_selection = !retry
+        && canonical_selection
+        && frozen_portable_binding.is_some()
+        && crate::portable_admission::portable_authored_options(&merged)
+            != crate::portable_admission::portable_authored_options(&persisted);
+    let historical_new_selection = !retry
+        && frozen_portable_binding.is_none()
+        && merged.get("model") != persisted.get("model");
+    let historical_same_selection = frozen_portable_binding.is_none()
+        && !historical_new_selection
+        && !sceneworks_core::model_artifacts::portable_binding::model_free_job(&job_type, &merged)
+        && crate::portable_admission::portable_authored_options(&merged)
+            == crate::portable_admission::portable_authored_options(&persisted);
+    if historical_same_selection {
+        crate::portable_admission::validate_historical_source_carrier(state, &persisted, &merged)
+            .await?;
+    }
+    if frozen_portable_binding.is_some() {
+        let license_acknowledged = merged
+            .get(crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        for entry in [
+            merged.get("modelManifestEntry"),
+            merged.get("baseModelManifestEntry"),
+        ]
+        .into_iter()
+        .flatten()
+        .chain(
+            merged
+                .get("modelManifestEntries")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten(),
+        ) {
+            if let Some(entry) = entry.as_object() {
+                crate::models::ensure_inherited_component_licenses_acknowledged(
+                    state,
+                    entry,
+                    license_acknowledged,
+                )
+                .await?;
+            }
+        }
+        // The persisted carrier was minted by the server at the original admission. Preserve its
+        // revision and logical slots across a mutable catalog/HF HEAD change. The frozen replay
+        // validator below checks authored choices and re-verifies the exact bound sources against
+        // current local paths or worker claims; it never treats these old locators as authority.
+        if !fresh_portable_selection {
+            for key in [
+                "modelManifestEntry",
+                "baseModelManifestEntry",
+                "modelManifestEntries",
+            ] {
+                if let Some(original) = persisted.get(key) {
+                    merged.insert(key.to_owned(), original.clone());
+                } else {
+                    merged.remove(key);
+                }
+            }
+        }
+    }
     let selected_entry = if canonical_selection {
         merged.get("modelManifestEntry")
     } else {
         None
     };
     let provenance = canonical_model_provenance(state, selected_entry, &merged).await?;
-    Ok((merged, provenance, download_binding))
+    let candidate = if let Some(frozen) = frozen_portable_binding
+        .as_ref()
+        .filter(|_| !fresh_portable_selection)
+    {
+        let frozen: sceneworks_core::model_artifacts::portable_binding::PortableJobBinding =
+            serde_json::from_value(frozen.clone()).map_err(|error| {
+                ApiError::bad_request(format!("Invalid saved source binding: {error}"))
+            })?;
+        Some(
+            crate::portable_admission::validate_frozen_replay_binding(
+                state,
+                &job_type,
+                &merged,
+                &requested_gpu,
+                &frozen,
+            )
+            .await?,
+        )
+    } else {
+        crate::portable_admission::capture_portable_model_binding(
+            state,
+            &job_type,
+            &merged,
+            &requested_gpu,
+        )
+        .await?
+    };
+    let candidate = candidate
+        .map(|binding| {
+            serde_json::to_value(binding).map_err(|error| {
+                ApiError::internal(format!("Serialize portable model binding: {error}"))
+            })
+        })
+        .transpose()?;
+    match (&frozen_portable_binding, &candidate) {
+        (Some(_), Some(_)) if fresh_portable_selection => {}
+        (Some(expected), Some(actual))
+            if portable_replay_matches_frozen(
+                expected,
+                actual,
+                true,
+            )? => {}
+        (Some(_), _) => return Err(ApiError::bad_request(
+            "The model source changed since this job was admitted. Restore the original source bytes before replaying.",
+        )),
+        (None, Some(_)) if historical_same_selection || historical_new_selection => {}
+        (None, Some(_)) => return Err(ApiError::bad_request(
+            "This historical job has no portable source binding. Upgrade its manifest before retrying.",
+        )),
+        (None, None) => {}
+    }
+    let portable_binding =
+        if fresh_portable_selection || historical_same_selection || historical_new_selection {
+            candidate
+        } else {
+            frozen_portable_binding
+        };
+    Ok((
+        merged,
+        provenance,
+        download_binding,
+        portable_binding,
+        fresh_portable_selection,
+    ))
+}
+
+/// Replay validation may find only a subset of the original frozen routes currently available.
+/// Every accepted route must retain the original bytes and authored intent; the persisted job
+/// continues carrying the original envelope so later worker availability can recover.
+fn portable_replay_matches_frozen(
+    frozen: &Value,
+    candidate: &Value,
+    allow_route_subset: bool,
+) -> Result<bool, ApiError> {
+    use sceneworks_core::model_artifacts::portable_binding::PortableJobBinding;
+    let frozen: PortableJobBinding = serde_json::from_value(frozen.clone())
+        .map_err(|error| ApiError::bad_request(format!("Invalid saved source binding: {error}")))?;
+    frozen
+        .validate()
+        .map_err(|error| ApiError::bad_request(format!("Invalid saved source binding: {error}")))?;
+    let candidate: PortableJobBinding =
+        serde_json::from_value(candidate.clone()).map_err(|error| {
+            ApiError::bad_request(format!("Invalid replay source binding: {error}"))
+        })?;
+    candidate.validate().map_err(|error| {
+        ApiError::bad_request(format!("Invalid replay source binding: {error}"))
+    })?;
+    if !allow_route_subset {
+        return Ok(frozen == candidate);
+    }
+    Ok(frozen.authored_options == candidate.authored_options
+        && candidate
+            .routes
+            .iter()
+            .all(|(key, route)| frozen.routes.get(key) == Some(route)))
 }
 
 /// Accept only the entry returned by an actual server canonicalizer. Presence in an incoming or
@@ -2514,6 +3113,9 @@ pub(crate) async fn persist_reported_assets(
         return Ok(());
     }
     let mut asset_writes = asset_writes.clone();
+    for asset_write in &mut asset_writes {
+        redact_private_binding_markers(asset_write);
+    }
     let generation_set_id = result
         .get("generationSetId")
         .and_then(Value::as_str)
@@ -2913,6 +3515,13 @@ pub(crate) async fn register_trained_base_checkpoint(
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::internal("Training manifest entry requires an id"))?
         .to_owned();
+    let source_model_id = job
+        .payload
+        .get("plan")
+        .and_then(|plan| plan.pointer("/target/baseModel"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| ApiError::internal("Training plan requires a base model identity"))?;
     validate_lora_id_component(&model_id)?;
     let (output_dir, manifest_path) = resolve_finetune_output_location(state, &model_id);
 
@@ -2951,6 +3560,13 @@ pub(crate) async fn register_trained_base_checkpoint(
                 export.display()
             ))
         })?;
+        sceneworks_worker::write_produced_artifact_receipt(
+            &export,
+            &job.id,
+            source_model_id,
+            &model_id,
+        )
+        .map_err(|error| ApiError::internal(format!("Could not attest Iris export: {error}")))?;
         let upsert_id = model_id.clone();
         mutate_manifest_entries(state, &manifest_path, "models", move |entries| {
             let created_at = entries
@@ -3004,6 +3620,13 @@ pub(crate) async fn register_trained_base_checkpoint(
             output_dir.display()
         ))
     })?;
+    sceneworks_worker::write_produced_artifact_receipt(
+        &output_dir,
+        &job.id,
+        source_model_id,
+        &model_id,
+    )
+    .map_err(|error| ApiError::internal(format!("Could not attest trained checkpoint: {error}")))?;
 
     let model_type = manifest_entry
         .get("type")
@@ -3227,6 +3850,69 @@ pub(crate) async fn register_trained_control_overlay(
     })
     .await?;
     Ok(Some((overlay_id, manifest_path)))
+}
+
+#[cfg(test)]
+mod portable_replay_tests {
+    use super::*;
+    use sceneworks_core::model_artifacts::portable_binding::{
+        canonical_authored_options_sha256, PortableArtifactFile, PortableArtifactMember,
+        PortableJobBinding, PortableModelBinding, PortableRouteBinding, PortableSourceIdentity,
+    };
+    use sceneworks_core::model_artifacts::{ArtifactIdentity, ArtifactMemberRole};
+    use std::collections::BTreeMap;
+
+    fn binding(backends: &[(&str, &str)], digest: &str) -> Value {
+        let authored = json!({"model":"fixture"});
+        let authored_hash = canonical_authored_options_sha256(&authored).unwrap();
+        let routes = backends
+            .iter()
+            .map(|(backend, platform)| {
+                let model = PortableModelBinding::new(
+                    "modelManifestEntry",
+                    "fixture",
+                    *backend,
+                    "default",
+                    None,
+                    &authored_hash,
+                    vec![PortableArtifactMember {
+                        role: ArtifactMemberRole::Primary,
+                        component_id: None,
+                        source: PortableSourceIdentity::Revision {
+                            identity: ArtifactIdentity::pinned(
+                                "fixture/model",
+                                "1".repeat(40),
+                                "default",
+                            )
+                            .unwrap(),
+                        },
+                        tier: None,
+                        files: vec![PortableArtifactFile {
+                            relative_path: "weights.safetensors".into(),
+                            size_bytes: 1,
+                            sha256: format!("sha256:{digest}"),
+                        }],
+                    }],
+                )
+                .unwrap();
+                let route = PortableRouteBinding::new(*backend, *platform, vec![model]).unwrap();
+                (route.key(), route)
+            })
+            .collect::<BTreeMap<_, _>>();
+        serde_json::to_value(PortableJobBinding::new(authored, routes).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn duplicate_can_narrow_only_to_an_original_frozen_route() {
+        let frozen = binding(&[("mlx", "macos"), ("candle", "linux")], &"a".repeat(64));
+        let narrow = binding(&[("mlx", "macos")], &"a".repeat(64));
+        let new_route = binding(&[("candle", "windows")], &"a".repeat(64));
+        let changed_bytes = binding(&[("mlx", "macos")], &"b".repeat(64));
+        assert!(portable_replay_matches_frozen(&frozen, &narrow, true).unwrap());
+        assert!(!portable_replay_matches_frozen(&frozen, &narrow, false).unwrap());
+        assert!(!portable_replay_matches_frozen(&frozen, &new_route, true).unwrap());
+        assert!(!portable_replay_matches_frozen(&frozen, &changed_bytes, true).unwrap());
+    }
 }
 
 #[cfg(test)]

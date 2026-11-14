@@ -35,6 +35,25 @@ fn create_job(store: &JobsStore, job_type: JobType, payload: Value) -> JobSnapsh
 }
 
 #[test]
+fn removing_worker_upscale_capability_revokes_the_live_claim() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = JobsStore::new(directory.path().join("jobs.db"));
+    store.initialize().unwrap();
+    let job = create_job(
+        &store,
+        JobType::ImageUpscale,
+        json!({ "sourceAssetId": "probe", "engine": "real-esrgan" }),
+    );
+    let capable = worker("mlx", &["gpu", "image_upscale"], &[]);
+    let missing = worker("mlx", &["gpu"], &[]);
+    let facts = ClaimRoutingFacts::from_job(&job);
+    assert!(worker_supports_job(&capable, &job));
+    assert!(worker_supports_claim_routing_facts(&capable, &facts));
+    assert!(!worker_supports_job(&missing, &job));
+    assert!(!worker_supports_claim_routing_facts(&missing, &facts));
+}
+
+#[test]
 fn persisted_claim_projection_matches_full_worker_policy_for_routing_corpus() {
     let directory = tempfile::tempdir().expect("temp directory");
     let db_path = directory.path().join("jobs.db");

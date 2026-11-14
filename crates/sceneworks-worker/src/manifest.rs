@@ -70,9 +70,11 @@ pub(crate) async fn publish_model_import_manifest(
         let _guard = ManifestLock::acquire(&path)?;
         let mut manifest: Value = match std::fs::read_to_string(&path) {
             Ok(text) => serde_json::from_str(&strip_jsonc_comments(&text))?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => json!({"schemaVersion":1,"models":[]}),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => json!({"schemaVersion":2,"models":[]}),
             Err(error) => return Err(error.into()),
         };
+        sceneworks_core::model_manifest_version::normalize_user_model_manifest(&mut manifest)
+            .map_err(WorkerError::InvalidPayload)?;
         let models = manifest.get_mut("models").and_then(Value::as_array_mut)
             .ok_or_else(|| WorkerError::InvalidPayload("models manifest must contain an array".into()))?;
         let current = models.iter().position(|model| model.get("id").and_then(Value::as_str) == Some(id));
@@ -163,12 +165,19 @@ fn merge_manifest_entry_locked(
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let mut object = serde_json::Map::new();
-            object.insert("schemaVersion".to_owned(), json!(1));
+            object.insert(
+                "schemaVersion".to_owned(),
+                json!(if collection_key == "models" { 2 } else { 1 }),
+            );
             object.insert(collection_key.to_owned(), Value::Array(Vec::new()));
             Value::Object(object)
         }
         Err(error) => return Err(error.into()),
     };
+    if collection_key == "models" {
+        sceneworks_core::model_manifest_version::normalize_user_model_manifest(&mut manifest)
+            .map_err(WorkerError::InvalidPayload)?;
+    }
     // Re-fetch under the lock; validated above, so this is infallible in practice.
     let entry_id = entry.get("id").and_then(Value::as_str).ok_or_else(|| {
         WorkerError::InvalidPayload(format!("{collection_key} manifest entry requires id"))
@@ -589,6 +598,36 @@ mod tests {
         assert_eq!(m1["createdAt"], json!("2020-01-01"), "createdAt preserved");
         assert_eq!(m1["name"], json!("renamed"), "incoming fields win");
         assert_eq!(m1["keep"], json!("original"), "prior fields retained");
+    }
+
+    #[tokio::test]
+    async fn model_upsert_upgrades_v1_jsonc_under_the_shared_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("user.models.jsonc");
+        std::fs::write(
+            &path,
+            "// old user catalog\n{\"schemaVersion\":1,\"models\":[{\"id\":\"old\",\"hidden\":true}]}\n",
+        )
+        .unwrap();
+        upsert_manifest_entry(&path, "models", entry("new"))
+            .await
+            .unwrap();
+        let root: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(root["schemaVersion"], 2);
+        assert_eq!(root["models"][0], json!({"id":"old","hidden":true}));
+        assert_eq!(root["models"][1]["id"], "new");
+    }
+
+    #[tokio::test]
+    async fn model_upsert_refuses_future_version_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("user.models.jsonc");
+        let before = "{\"schemaVersion\":3,\"models\":[{\"id\":\"future\"}]}";
+        std::fs::write(&path, before).unwrap();
+        assert!(upsert_manifest_entry(&path, "models", entry("new"))
+            .await
+            .is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     }
 
     /// A lock timeout surfaces a clear error rather than silently skipping the write.

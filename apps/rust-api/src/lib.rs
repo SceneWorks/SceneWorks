@@ -39,9 +39,9 @@ use sceneworks_core::image_request::{
 use sceneworks_core::jobs_store::{
     candle_supported, mac_capabilities, mac_rust_supported, model_candle_support,
     model_mac_support, video_job_type_for_mode, video_request_is_claimable_by_any_lane, CreateJob,
-    DuplicateJob, JobResultItemWrite, JobResultItemsPage, JobsStore, JobsStoreError,
-    MacCapabilities, ProgressUpdate, RegisterWorker, RetryJob, RouteDecision, StaleSweep,
-    UnsupportedReason, WorkerHeartbeat, JOB_STATUSES, MAX_LISTED_JOBS,
+    DuplicateJob, DuplicatePortableBinding, JobResultItemWrite, JobResultItemsPage, JobsStore,
+    JobsStoreError, MacCapabilities, ProgressUpdate, RegisterWorker, RetryJob, RouteDecision,
+    StaleSweep, UnsupportedReason, WorkerHeartbeat, JOB_STATUSES, MAX_LISTED_JOBS,
 };
 use sceneworks_core::limits::{requested_steps, steps_limit_error};
 use sceneworks_core::lora_family::{
@@ -96,6 +96,7 @@ use uuid::Uuid;
 mod auth;
 mod file_serving;
 mod job_redaction;
+mod portable_routes;
 mod project_files;
 mod router;
 mod uploads;
@@ -206,8 +207,8 @@ use jobs::{
 mod workers;
 use workers::{
     heartbeat_worker, host_capabilities, list_workers, mac_capability_support,
-    person_capability_readiness, queue_summary, register_worker, request_worker_restart,
-    worker_terminated,
+    person_capability_readiness, portable_source_challenges, publish_portable_source_proof,
+    queue_summary, register_worker, request_worker_restart, worker_terminated,
 };
 mod events;
 use events::{create_event_ticket, job_events, EventHub, EventMessage};
@@ -244,6 +245,7 @@ mod checkpoint_library;
 // attachment + typed external-library availability preflight, all data-driven.
 mod model_library;
 mod model_sources;
+mod portable_admission;
 // Read + control surface for the app-owned resolved-model hot cache (sc-19711): status for the
 // Settings storage card, and the per-model keep/remove operations the Model Manager drives.
 mod model_cache;
@@ -1369,6 +1371,8 @@ fn create_app_with_state_mode(
             JobsStore::new(&settings.jobs_db_path).with_session_started_at(now_unix_seconds()),
         );
         jobs_store.initialize()?;
+        // Authentication evidence belongs to this API process, not to a durable worker row.
+        jobs_store.clear_worker_source_proof_authentication()?;
         let purged_terminal_jobs =
             jobs_store.purge_terminal_jobs_older_than(settings.jobs_retention_days)?;
         tracing::info!(
@@ -1457,10 +1461,20 @@ fn create_app_with_state_mode(
         settings.port,
         &configured_hosts,
     ));
+    let portable_worker_proof_master = sceneworks_core::worker_proof::load_or_create_master(
+        &settings.credentials_dir,
+    )
+    .map_err(|error| {
+        JobsStoreError::InvalidStatus(format!("worker proof initialization failed: {error}"))
+    })?;
     let state = AppState {
         allowed_hosts,
         settings,
         jobs_store,
+        portable_source_challenges: Arc::new(Mutex::new(HashMap::new())),
+        portable_worker_proof_master: Arc::new(portable_worker_proof_master),
+        authenticated_worker_claims: Arc::new(AsyncMutex::new(HashMap::new())),
+        portable_source_probe_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         project_store,
         events: Arc::new(EventHub::default()),
         queue_snapshot_lock: Arc::new(AsyncMutex::new(())),

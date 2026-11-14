@@ -22,6 +22,9 @@ use sceneworks_core::lora_family::{
     first_safetensors_path, inspect_adapter_in_dir, reconcile_detected_family,
     validate_minimax_h3_trainer_header, FamilyMismatch, SafetensorsHeaderError,
 };
+use sceneworks_core::model_artifacts::portable_binding::{
+    PortableRouteBinding, PORTABLE_MODEL_BINDING_VERSION,
+};
 // Only the cfg-gated adapter resolvers (image `resolve_adapters` / `classify_adapter`, video
 // `resolve_lora_file`) use these, so gate the import identically or the parity
 // build (no `backend-candle`) trips `-D unused-imports` (sc-10221).
@@ -45,6 +48,46 @@ use tokio::process::{Child, Command};
 use tokio::time::MissedTickBehavior;
 use tracing::Level;
 use uuid::Uuid;
+
+fn portable_challenge_capability(settings: &Settings) -> Option<String> {
+    sceneworks_core::worker_proof::worker_key_from_env_or_file(
+        &settings.credentials_dir,
+        &settings.worker_id,
+    )
+    .ok()
+    .flatten()
+}
+
+fn portable_worker_proof_extra(settings: &Settings) -> BTreeMap<String, Value> {
+    let mut extra = BTreeMap::new();
+    if let Some(key) = portable_challenge_capability(settings) {
+        extra.insert("portableProofKey".to_owned(), Value::String(key));
+    }
+    extra
+}
+
+async fn poll_portable_source_challenges(api: &ApiClient, settings: &Settings) {
+    let Some(capability) = portable_challenge_capability(settings) else {
+        return;
+    };
+    let outcome: WorkerResult<Vec<portable_source_claims::PortableSourceChallenge>> = api
+        .post_json(
+            &format!(
+                "/api/v1/workers/{}/portable-source-challenges",
+                settings.worker_id
+            ),
+            &json!({"capability": capability}),
+        )
+        .await;
+    if let Ok(challenges) = outcome {
+        portable_source_claims::start_app_managed_challenges(
+            api.clone(),
+            settings.clone(),
+            challenges,
+            capability,
+        );
+    }
+}
 
 /// Resolve the same trusted receipt-backed immutable snapshot used by native generation.
 /// May baseline an unstamped, fully identified v2 source receipt; never mints a download receipt
@@ -378,6 +421,7 @@ pub use iris_curricula::{resolve_iris_config, resolve_iris_plan};
 mod iris_dist;
 pub use iris_dist::iris_rank_entry;
 // The auxiliary-training-model install check (sc-25213), shared with the rust-api submit gate.
+pub use training_jobs::engine_trainer_id_for as portable_trainer_engine_id_for;
 pub use training_jobs::{flux3_training_config_witness, installed_aux_training_model_dir};
 // CUDA/candle VRAM fit-gate + small-card emulation (epic 10765 Phase 0, sc-10766). Pure helpers wired
 // into `generate_candle_stream`; gated to the same candle lane as that consumer so the pub(crate)
@@ -407,7 +451,12 @@ mod worker_loop;
 pub use worker_loop::run_worker_loop;
 mod converted_install;
 mod model_jobs;
+mod portable_aux_sources;
+mod portable_source_claims;
 pub use model_jobs::recover_stranded_model_conversions;
+pub use model_jobs::{
+    verify_produced_artifact_receipt, write_produced_artifact_receipt, ProducedArtifactReceipt,
+};
 // The convert pre-flight the rust-api calls before queueing a `model_convert` job, so a convert
 // requested against a still-downloading source is refused at the request boundary instead of failing
 // in the worker (see `convert_source_state`).
@@ -805,8 +854,8 @@ mod voiceclone_smoke;
 // #[ignore]d real-weight smokes that drive `crate::inference_runtime::load(id)` + ONE generation while sampling the MLX
 // process-global memory counters (mlx_rs::memory::{reset_peak_memory, get_active_memory, get_peak_memory})
 // generator_cache.rs already publishes — producing measured resident + peak footprint per (model, tier)
-// to calibrate the sc-8509 RAM→tier suggestion (apps/web/src/tierSuggestion.js) and backfill the sc-8508
-// manifest footprint fields.
+// to calibrate the sc-8509 RAM→tier suggestion (computed by `sceneworks_core::memory_guidance` and served
+// as the catalog's `memoryGuidance`) and backfill the sc-8508 per-download footprint fields it reads.
 #[cfg(all(test, target_os = "macos"))]
 mod footprint_measure;
 // FLUX 3 Image Klein on the Candle/CUDA lane (sc-26243): the off-macOS half of the footprint campaign.
@@ -1734,6 +1783,25 @@ enum JobOutcome {
     ShutdownDuringJob,
 }
 
+/// A private claim receipt. The portable binding is deliberately separate from the public job
+/// snapshot and its payload; it must not be persisted in a share or emitted in a job event.
+struct ClaimedJob {
+    job: JobSnapshot,
+    portable_model_binding: Option<PortableRouteBinding>,
+}
+
+/// Runtime backend advertised to the private portable-source claim. The worker repeats this
+/// check at its pre-loader guard; the server cannot select a different backend's artifact closure.
+fn portable_runtime_backend(settings: &Settings) -> &'static str {
+    if settings.gpu_id == "mlx" {
+        "mlx"
+    } else if cfg!(feature = "backend-candle") && !is_cpu_worker(&settings.gpu_id) {
+        "candle"
+    } else {
+        "cpu"
+    }
+}
+
 /// Run one claimed job while keeping shutdown observable WITHOUT dropping the in-flight future
 /// (sc-8845, F-043).
 ///
@@ -1758,11 +1826,18 @@ async fn run_job_with_shutdown(
     api: &ApiClient,
     settings: &Settings,
     http_client: &reqwest::Client,
-    job: JobSnapshot,
+    claimed: ClaimedJob,
 ) -> JobOutcome {
-    let job_id = job.id.clone();
+    let job_id = claimed.job.id.clone();
     let shutdown = gen_core::CancelFlag::new();
-    let job_future = run_utility_job(api, settings, http_client, job, shutdown.clone());
+    let job_future = run_utility_job(
+        api,
+        settings,
+        http_client,
+        claimed.job,
+        claimed.portable_model_binding,
+        shutdown.clone(),
+    );
     tokio::pin!(job_future);
 
     tokio::select! {
@@ -1810,7 +1885,10 @@ async fn register_worker_with_retry(
     let mut attempt = 0_u32;
     loop {
         match register_worker(api, settings, gpu).await {
-            Ok(_) => return Ok(()),
+            Ok(_) => {
+                portable_source_claims::start_background_inventory(settings.clone());
+                return Ok(());
+            }
             Err(error) => {
                 attempt = attempt.saturating_add(1);
                 let delay = retry_delay(settings.poll_seconds, attempt);
@@ -1843,13 +1921,17 @@ async fn poll_once(
     settings: &Settings,
     idle_heartbeat: &mut IdleHeartbeat,
     health: &GpuHealth,
-) -> WorkerResult<Option<JobSnapshot>> {
+) -> WorkerResult<Option<ClaimedJob>> {
     // sc-7824 (epic 7819): pick up a live GPU-memory-limit change here, before claiming the next
     // job, so a Settings slider move applies between jobs (not mid-flight) with no worker restart.
     // No-op unless this is the MLX worker and the desktop has written the live-handoff file.
     if settings.gpu_id == "mlx" {
         generator_cache::sync_gpu_memory_limit(&settings.config_dir);
     }
+    // A local utility selection can be outside every registered catalog. Only the API knows
+    // which exact closure a pending request needs, so prove private path-free challenges before
+    // the next claim. Hashing runs off the poller's async executor.
+    poll_portable_source_challenges(api, settings).await;
     if idle_heartbeat.should_send() {
         // sc-16260: an unusable GPU reports `unhealthy` + the host-side remedy here instead of
         // `idle`. It keeps heartbeating on the same cadence — the process IS alive, it must stay
@@ -1881,7 +1963,10 @@ async fn poll_once(
             "/api/v1/jobs/claim",
             &ClaimRequest {
                 worker_id: settings.worker_id.clone(),
-                extra: BTreeMap::new(),
+                portable_model_binding_version: Some(PORTABLE_MODEL_BINDING_VERSION),
+                portable_backend: Some(portable_runtime_backend(settings).to_owned()),
+                portable_platform: Some(std::env::consts::OS.to_owned()),
+                extra: portable_worker_proof_extra(settings),
             },
         )
         .await?;
@@ -1889,7 +1974,10 @@ async fn poll_once(
         tokio::time::sleep(Duration::from_secs(settings.poll_seconds)).await;
         return Ok(None);
     };
-    Ok(Some(job))
+    Ok(Some(ClaimedJob {
+        job,
+        portable_model_binding: claim.portable_model_binding,
+    }))
 }
 
 struct IdleHeartbeat {
@@ -1924,11 +2012,13 @@ async fn register_worker(
         &WorkerRegisterRequest {
             worker_id: settings.worker_id.clone(),
             gpu_id: gpu.id.clone(),
+            platform: Some(std::env::consts::OS.to_owned()),
+            portable_source_claims: Some(Vec::new()),
             gpu_name: Some(gpu.name.clone()),
             capabilities: worker_capabilities(gpu),
             loaded_models: Vec::new(),
             utilization: gpu.utilization.clone(),
-            extra: BTreeMap::new(),
+            extra: portable_worker_proof_extra(settings),
         },
     )
     .await
@@ -1966,23 +2056,44 @@ pub(crate) async fn heartbeat_with_reason(
     current_job_id: Option<&str>,
     status_reason: Option<String>,
 ) -> WorkerResult<()> {
+    // Busy workers keep heartbeating while a job runs; probe in the background so their local
+    // app-managed bytes can authorize a new queued request without waiting for that job to end.
+    poll_portable_source_challenges(api, settings).await;
     // Capture the label before `status` is moved into the request, for the log line.
     let status_label = status.as_str().to_owned();
-    let outcome: WorkerResult<WorkerSnapshot> = api
-        .post_json(
-            &format!("/api/v1/workers/{}/heartbeat", settings.worker_id),
-            &WorkerHeartbeatRequest {
-                status,
-                current_job_id: current_job_id.map(str::to_owned),
-                loaded_models: Vec::new(),
-                utilization: gpu_utilization(&settings.gpu_id).await,
-                status_reason,
-                extra: BTreeMap::new(),
-            },
-        )
-        .await;
+    portable_source_claims::refresh_background_inventory(settings.clone());
+    let mut portable_claims = portable_source_claims::pending_inventory_claims(&settings.worker_id);
+    let mut request = WorkerHeartbeatRequest {
+        status,
+        current_job_id: current_job_id.map(str::to_owned),
+        loaded_models: Vec::new(),
+        utilization: gpu_utilization(&settings.gpu_id).await,
+        status_reason,
+        portable_source_claims: portable_claims.as_ref().map(|(_, claims)| claims.clone()),
+        extra: portable_worker_proof_extra(settings),
+    };
+    let path = format!("/api/v1/workers/{}/heartbeat", settings.worker_id);
+    let mut outcome: WorkerResult<WorkerSnapshot> = api.post_json(&path, &request).await;
+    // A restarted API holds no claims proven under this worker's key: republish the whole
+    // inventory once, in this same heartbeat, instead of waiting for it to change.
+    if matches!(
+        &outcome,
+        Err(WorkerError::Api { code: Some(code), .. })
+            if code == sceneworks_core::model_artifacts::portable_binding::PORTABLE_SOURCE_CLAIMS_REQUIRED_CODE
+    ) {
+        let (generation, claims) =
+            portable_source_claims::inventory_claims_for_republication(&settings.worker_id);
+        request.portable_source_claims = Some(claims.clone());
+        portable_claims = Some((generation, claims));
+        outcome = api.post_json(&path, &request).await;
+    }
     match outcome {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            if let Some((generation, _)) = portable_claims {
+                portable_source_claims::mark_inventory_published(&settings.worker_id, generation);
+            }
+            Ok(())
+        }
         Err(WorkerError::Http(error)) => {
             emit_event_value(
                 Level::ERROR,

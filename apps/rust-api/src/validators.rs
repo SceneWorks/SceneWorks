@@ -1523,3 +1523,32 @@ mod advanced_audio_sampling_tests {
             .is_none());
     }
 }
+
+#[cfg(test)]
+mod canonical_generation_inputs_tests {
+    use super::*;
+
+    #[test]
+    fn first_last_video_requires_both_images() {
+        let mut request: VideoJobRequest = serde_json::from_value(serde_json::json!({
+            "projectId": "project", "model": "ltx_2_3", "mode": "first_last_frame",
+            "prompt": "a shot", "sourceAssetId": "first"
+        }))
+        .unwrap();
+        assert!(validate_video_job(&request).is_err());
+        request.last_frame_asset_id = Some("last".to_owned());
+        assert!(validate_video_job(&request).is_ok());
+    }
+
+    #[test]
+    fn audio_reference_alone_does_not_replace_the_required_prompt() {
+        let mut request: AudioJobRequest = serde_json::from_value(serde_json::json!({
+            "projectId": "project", "model": "chatterbox_tts", "prompt": "",
+            "referenceAudioAssetId": "reference"
+        }))
+        .unwrap();
+        assert!(validate_audio_job(&request).is_err());
+        request.prompt = "hello".to_owned();
+        assert!(validate_audio_job(&request).is_ok());
+    }
+}
