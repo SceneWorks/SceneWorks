@@ -639,28 +639,35 @@ pub fn allow_pattern_matches(path: &str, patterns: &[String]) -> bool {
 /// `variant`, an advanced `quantTier`, or the advanced `mlxQuantize` bit width. This is
 /// request-shape vocabulary, never a model-name mapping.
 pub fn requested_runtime_variant(payload: &Map<String, Value>) -> Option<String> {
-    if let Some(variant) = payload
-        .get("variant")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+    let variant = payload.get("variant").and_then(Value::as_str);
+    let advanced = payload.get("advanced").and_then(Value::as_object);
+    let tier = advanced
+        .and_then(|advanced| advanced.get("quantTier"))
+        .and_then(Value::as_str);
+    let bits = advanced
+        .and_then(|advanced| advanced.get("mlxQuantize"))
+        .and_then(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_str()?.trim().parse::<i64>().ok())
+        });
+    requested_runtime_variant_typed(variant, tier, bits)
+}
+
+/// Select from already-bound request fields. Numeric-string compatibility and defaults must be
+/// resolved by the portable option owner before this pure artifact choice is called.
+pub fn requested_runtime_variant_typed(
+    variant: Option<&str>,
+    quant_tier: Option<&str>,
+    mlx_quantize: Option<i64>,
+) -> Option<String> {
+    if let Some(variant) = variant.map(str::trim).filter(|value| !value.is_empty()) {
         return Some(variant.to_ascii_lowercase());
     }
-    let advanced = payload.get("advanced").and_then(Value::as_object)?;
-    if let Some(tier) = advanced
-        .get("quantTier")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(tier) = quant_tier.map(str::trim).filter(|value| !value.is_empty()) {
         return Some(tier.to_ascii_lowercase());
     }
-    let bits = advanced.get("mlxQuantize").and_then(|value| {
-        value
-            .as_i64()
-            .or_else(|| value.as_str()?.trim().parse::<i64>().ok())
-    })?;
+    let bits = mlx_quantize?;
     Some(
         match bits {
             1..=4 => "q4",
@@ -1593,6 +1600,18 @@ mod tests {
     #[test]
     fn requested_runtime_variant_reads_request_data_only() {
         let payload = |value: Value| value.as_object().unwrap().clone();
+        assert_eq!(
+            requested_runtime_variant_typed(Some(" Q8 "), Some("bf16"), Some(4)),
+            Some("q8".to_owned())
+        );
+        assert_eq!(
+            requested_runtime_variant_typed(None, Some("nvfp4"), Some(8)),
+            Some("nvfp4".to_owned())
+        );
+        assert_eq!(
+            requested_runtime_variant_typed(None, None, Some(4)),
+            Some("q4".to_owned())
+        );
         assert_eq!(
             requested_runtime_variant(&payload(json!({"variant": "Q8"}))),
             Some("q8".to_owned())
