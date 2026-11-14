@@ -23,9 +23,11 @@ only by the `tier2-ab` profile of `.github/workflows/memory-catalog-campaign.yml
 
 - Trusted refs and credentials: the selector refuses a base or head SHA that is not reachable from
   `origin/main`, `origin/release/*` or `origin/feature/*` of this repository, and the compared
-  builds and processes receive no credential (gated repositories are skipped). The recorded runs
-  predate both rules and passed the runner's `HF_TOKEN` to the API/worker; their bases and heads
-  are all ancestors of `origin/main`, and no gated route ran.
+  builds and processes receive no credential (gated repositories are skipped). Runs up to
+  43482734077 predate both rules and passed the runner's `HF_TOKEN` to the API/worker, so they do not
+  show anonymous access; their bases and heads are all ancestors of `origin/main`, and no gated route
+  ran. Run 43533122723 is the first under both rules: head's admission resolved the pinned metadata
+  of FLUX.1 dev, LTX-2.5 and Chatterbox with no credential.
 - One job per backend checks out the driver commit, the base SHA and the head SHA into separate
   directories, verifies each checkout's HEAD and clean tree, and builds each side's release
   API/worker into one shared scratch target.
@@ -97,16 +99,29 @@ Values are copied from each run's `report.json` (`peakAboveBaselineBytes`, `gpuB
 | | | | | cuda-moss-image-t2i | equal | 61.2 | 86.2 | — | 24.50 + 8.00 / 24.49 + 8.00 GiB |
 | | | | | cuda-ltx25-distilled-t2v | error on both sides (SW-7124) | — | — | — | — |
 | 43482734077 | `511d70f1d9` | `f1de2e5997` | cuda-windows | cuda-ltx23-distilled-t2v | equal | 87.4 | 128.5 | — | 55.14 + 2.93 / 55.04 + 2.97 GiB |
+| 43533122723 | `ed1ca0ca4f` | `f1de2e5997` | nax-macos-2 | mlx-flux1-dev-t2i (q4) | equal | 68.8 | 24.3 | — | 21.0 / 21.0 GiB |
+| | | | | mlx-ltx25-distilled-t2v | equal | 294.9 | 1620.9 | — | 65.0 / 65.0 GiB |
+| | | | | mlx-chatterbox-tts | equal | 29.6 | 25.2 | — | 3.88 / 4.19 GiB |
 
-The recorded video verdicts were produced by drivers up to `511d70f1d9`, whose video digest covered
+CUDA preflight-only runs 43533139405 (driver `ed1ca0ca4f`, cuda-windows-2) and 43536768371 (driver
+`4daf66f586`, cuda-windows) passed with no secret declared, the trusted-ref rule and, in the
+second, the stricter presence rule (`config/download-pattern-evidence.json`); in both, SDXL q4,
+MOSS-Image and LTX-2.3 q4 were ready at `E:\huggingface\hub` and Wan2.2 TI2V-5B was skipped as the
+LTX-2.3 alternative.
+
+The video verdicts of runs 43424868140 and 43482734077 were produced by drivers up to `511d70f1d9`, whose video digest covered
 decoded frame and audio bytes without stream geometry or timing (later drivers add both). Both video
 `equal` verdicts are nevertheless backed by identical output files: the saved MP4 had the same
 SHA-256 on base and head (LTX-2.5 MLX in 43424868140: `6174642d…`, 880,163 bytes; LTX-2.3 CUDA in
 43482734077: `47cf1ed4…`, 566,995 bytes), so frame rate, size and duration are identical too.
+In run 43533122723 the LTX-2.5 `equal` verdict includes the ffprobe stream description in the
+digest (768×512, 97 frames, 24/1 fps, time base 1/12288, 4.041667 s, on both sides), and the saved
+MP4 again had the same SHA-256 on base and head (`6174642d…`).
 
-Skips: MOSS-Image on MLX in both MLX runs (weights absent from `/Volumes/Models/huggingface/hub`
-on nax-macos-2); FLUX.3 Klein in both MLX runs (alternative of FLUX.1, which ran); Wan2.2 TI2V-5B
-in run 43482734077 (alternative of LTX-2.3, which ran).
+Skips: MOSS-Image on MLX in every MLX run (weights absent from `/Volumes/Models/huggingface/hub`
+on nax-macos-2); FLUX.3 Klein as the alternative of FLUX.1 in 43287955401 and 43424868140, and as
+a gated repository in 43533122723; Wan2.2 TI2V-5B in run 43482734077 (alternative of LTX-2.3, which
+ran).
 
 ## Regressions found and fixed
 
@@ -138,8 +153,17 @@ Run 43424868140 (head `f1de2e5997`, after both PRs) shows FLUX.1, LTX-2.5 and Ch
   for a distilled LTX-2.5 request: all of `distilled/q4`, all of `dev/q4` and the distilled LoRA.
   The catalog's q4 row lists both variant directories, so the bound closure includes `dev/q4`,
   which a distilled request does not load.
-- FLUX.1 on MLX in 43424868140: head peak 42 GiB against base 37 GiB with equal pixels. The cause
-  was not investigated.
+- First-job verification is repeated in every Tier 2 run: head's LTX-2.5 MLX load was again
+  1,404 s in 43533122723. The verified-source store is on disk under the data directory
+  (`crates/sceneworks-worker/src/external_library_runtime.rs:1124`,
+  `<data dir>/models/portable-attempts/.verified-sources`, not removed by the route retention prune
+  at line 1995), but the driver gives every run a new data directory (`scripts/tier2-ab.mjs:915-916`,
+  through `SCENEWORKS_DATA_DIR`), so each head run starts with an empty store. On a real install
+  the data directory persists, so a file is hashed once per data directory while its size, mtime
+  and (on Unix) inode/ctime are unchanged, and the verdicts survive worker and app restarts.
+- FLUX.1 on MLX: head peak 42 GiB against base 37 GiB in 43424868140, and 21 / 21 GiB in
+  43533122723, all with equal pixels, so the earlier 5 GiB difference is within the run-to-run
+  variation of this measurement. No cause is claimed.
 - Each head run follows its base run on the same host, so the operating system's file cache is
   warm for head. Head times are not speed claims.
 
@@ -147,7 +171,7 @@ Run 43424868140 (head `f1de2e5997`, after both PRs) shows FLUX.1, LTX-2.5 and Ch
 
 FLUX.2, SD3.5, Qwen, Z-Image, Krea, Wan (no run reached it), H3, Boogu, Iris, Mage-Flow,
 SDXL with InstantID, LTX-2.5 on CUDA (SW-7124), MOSS-Image on MLX (weights absent on the runner)
-and FLUX.3 Klein (alternative not exercised).
+and FLUX.3 Klein (alternative not exercised, then skipped as a gated repository).
 
 ## Residual limits
 
