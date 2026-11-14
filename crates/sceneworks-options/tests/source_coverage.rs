@@ -724,6 +724,11 @@ fn scan(sources: &[(String, syn::File)]) -> Coverage {
     coverage
 }
 
+// Source labels are compared with repository-relative literals on every host.
+fn source_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 fn source_files(root: &Path) -> Vec<(String, syn::File)> {
     fn load(
         root: &Path,
@@ -750,13 +755,7 @@ fn source_files(root: &Path) -> Vec<(String, syn::File)> {
             file.with_extension("")
         };
         modules(root, &source.items, &dir, &file, seen, sources);
-        sources.push((
-            file.strip_prefix(root)
-                .unwrap()
-                .to_string_lossy()
-                .into_owned(),
-            source,
-        ));
+        sources.push((source_path(file.strip_prefix(root).unwrap()), source));
     }
     fn modules(
         root: &Path,
@@ -1394,6 +1393,74 @@ fn javascript_mutations_require_registered_options() {
 }
 
 #[test]
+fn windows_source_paths_preserve_scoped_rules_and_reject_unknown_keys() {
+    let rust_file = source_path(Path::new(
+        r"crates\sceneworks-core\src\training\body_losses.rs",
+    ));
+    assert_eq!(
+        rust_file,
+        "crates/sceneworks-core/src/training/body_losses.rs"
+    );
+    let rust = scan(&[(
+        rust_file.clone(),
+        syn::parse_file(
+            r#"
+            const TECHNIQUE_KEYS: &[&str] = &["bodyProportionEvery"];
+            fn schedule(advanced: &JsonObject) { technique_value(advanced, every_key); }
+        "#,
+        )
+        .unwrap(),
+    )]);
+    assert!(missing(&rust).is_empty());
+    assert!(rust.domains[&rust_file].contains("bodyProportionEvery"));
+    assert!(rust.dynamic.iter().all(|(file, function, expression)| {
+        dynamic_reason(file, function, expression).is_some()
+    }));
+    assert!(!rust.dynamic.is_empty());
+    assert!(dynamic_reason(&rust_file, "schedule", "unseen_selector").is_none());
+
+    let character_file = source_path(Path::new(r"apps\web\src\screens\characterPanels.jsx"));
+    let character = js_coverage(
+        &character_file,
+        "advanced.buildAdvanced(); advanced.seedValue; advanced.supportsNegativePrompt;",
+    );
+    assert!(character.reads.is_empty());
+    let training_file = source_path(Path::new(r"apps\web\src\training\trainingConfig.js"));
+    let training = js_coverage(
+        &training_file,
+        r#"
+        const losses = [{ prefix: "bodyProportion" }];
+        const auxLossKnobs = ["Weight"];
+        function auxLossesDraft(advanced) { return advanced?.[prefix + knob]; }
+    "#,
+    );
+    assert!(missing(&training).is_empty());
+    assert!(training.domains[&training_file].contains("bodyProportionWeight"));
+    assert!(training.dynamic.contains(&(
+        "apps/web/src/training/trainingConfig.js".into(),
+        "auxLossesDraft".into(),
+        "[prefix+knob".into(),
+    )));
+    let workflow_file = source_path(Path::new(r"apps\web\src\workflowShare.js"));
+    let workflow = js_coverage(
+        &workflow_file,
+        "function workflowSettingRows(share) { const settings = share?.advanced; return settings[key]; }",
+    );
+    assert!(workflow.dynamic.contains(&(
+        "apps/web/src/workflowShare.js".into(),
+        "workflowSettingRows".into(),
+        "[key".into(),
+    )));
+    for file in [&character_file, &training_file, &workflow_file] {
+        assert_eq!(
+            missing(&js_coverage(file, "advanced.__unseen_production_option__")).len(),
+            1,
+            "{file}"
+        );
+    }
+}
+
+#[test]
 fn javascript_advanced_reads_resolve_to_option_specs() {
     fn files(dir: &Path, sources: &mut Vec<PathBuf>) {
         for entry in std::fs::read_dir(dir).unwrap() {
@@ -1428,7 +1495,7 @@ fn javascript_advanced_reads_resolve_to_option_specs() {
     let mut absent = Vec::new();
     let mut dynamic = Vec::new();
     for path in sources {
-        let file = path.strip_prefix(root).unwrap().to_string_lossy();
+        let file = source_path(path.strip_prefix(root).unwrap());
         let coverage = js_coverage(&file, &std::fs::read_to_string(&path).unwrap());
         absent.extend(missing(&coverage));
         for (file, function, expression) in coverage.dynamic {
