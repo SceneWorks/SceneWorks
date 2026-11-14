@@ -6,7 +6,9 @@
 import React, { useMemo, useState } from "react";
 
 import { VideoSourcePickerField } from "../components/AssetPicker.jsx";
+import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
 import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../modelEligibility.js";
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedbackState.js";
 
 // SeedVR2 is the only Mac engine (no torch path). 7B (sc-5197) / int8 (sc-5198) are
 // tracked engine follow-ups, so the variant is fixed to 3B here.
@@ -39,25 +41,27 @@ export function VideoUpscalePanel({
   const srcH = source?.file?.height;
   const targetLabel = srcW && srcH ? `${srcW * factor} × ${srcH * factor}` : null;
   const canSubmit = Boolean(sourceAssetId) && !block && !submitting;
+  const portableDraft = {
+    sourceAssetId,
+    factor,
+    engine: engine.id,
+    model: engine.model,
+    softness,
+    displayName: source?.displayName
+      ? `${source.displayName} (${factor}x upscaled)` : undefined,
+  };
+  const portableFeedback = usePortableFeedback("videoUpscale", portableDraft, null, canSubmit);
+  const portableRefusal = portableFeedback?.state === "invalid" ? portableFeedback.refusal : null;
 
   // A `function` declaration rather than an arrow: this is the video lane's `buildUpscaleJobBody`
   // — the one place a `video_upscale` knob would be added — and it is registered in
   // `ADVANCED_BUILDERS` as posting NO `advanced` map, so the coverage lint reads its body by name
   // (sc-15956 review). The lint's locator needs `function onUpscale`.
   async function onUpscale() {
-    if (!canSubmit) return;
+    if (!canSubmit || portableFeedbackBlocks(portableFeedback)) return;
     setSubmitting(true);
     try {
-      const job = await createVideoUpscaleJob?.({
-        sourceAssetId,
-        factor,
-        engine: engine.id,
-        model: engine.model,
-        softness,
-        displayName: source?.displayName
-          ? `${source.displayName} (${factor}x upscaled)`
-          : undefined,
-      });
+      const job = await createVideoUpscaleJob?.(portableDraft);
       if (job && onSubmitted) onSubmitted(job);
     } finally {
       setSubmitting(false);
@@ -109,7 +113,9 @@ export function VideoUpscalePanel({
         />
       </label>
       {targetLabel ? <p className="upscale-card-sub">Output ≈ {targetLabel}</p> : null}
-      <button className="prompt-cta" disabled={!canSubmit} onClick={onUpscale} type="button">
+      {portableRefusal ? <p role="alert">{portableRefusal.detail}</p> : null}
+      {portableFeedbackStatus(portableFeedback) ? <p role="status">{portableFeedbackStatus(portableFeedback)}</p> : null}
+      <button className="prompt-cta" disabled={!canSubmit || portableFeedbackBlocks(portableFeedback)} onClick={onUpscale} type="button">
         {submitting ? "Upscaling…" : "Upscale clip"}
       </button>
     </aside>

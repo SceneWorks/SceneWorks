@@ -1,3 +1,4 @@
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../../portableFeedbackState.js";
 import { Segmented } from "./LabFields.jsx";
 import React from "react";
 import { Icon } from "../../components/Icons.jsx";
@@ -12,6 +13,8 @@ export function Yue2ComposePanel({
   restorable,
   submitting,
   composeProblems,
+  portableRefusal,
+  portableFeedback,
   readyToRun,
   submit,
   kind,
@@ -106,14 +109,16 @@ export function Yue2ComposePanel({
                 <div className="prompt-cta-stack yue2-cta">
                   <button
                     className="prompt-cta"
-                    disabled={submitting || composeProblems.length > 0 || !readyToRun}
-                    onClick={() => submit(kind, kind === "fromPlan" ? { plan: planWords } : {})}
+                    disabled={submitting || composeProblems.length > 0 || portableFeedbackBlocks(portableFeedback) || !readyToRun}
+                    onClick={() => { if (!portableFeedbackBlocks(portableFeedback)) submit(kind, kind === "fromPlan" ? { plan: planWords } : {}); }}
                     title={composeProblems.join(" ") || tierProblem || undefined}
                     type="button"
                   >
                     <Icon.Sparkle size={14} /> {composeLabel}
                   </button>
                   {composeProblems.length ? <span className="yue2-muted">{composeProblems.join(" ")}</span> : null}
+                  {portableFeedbackStatus(portableFeedback) ? <span className="yue2-muted" role="status">{portableFeedbackStatus(portableFeedback)}</span> : null}
+                  {portableRefusal ? <span className="yue2-muted" role="alert">{portableRefusal.detail}</span> : null}
                 </div>
               </div>
   );

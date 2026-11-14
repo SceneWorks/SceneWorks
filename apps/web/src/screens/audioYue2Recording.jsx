@@ -1,3 +1,4 @@
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedbackState.js";
 import { downloadBlob } from "../saveExportFile.js";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
@@ -9,6 +10,7 @@ import { terminalStatuses } from "../jobTypes.js";
 import {
   TRANSCRIPTION_DEFAULT_LOOKAHEAD_SECONDS,
   TRANSCRIPTION_DEFAULT_OVERLAP_SECONDS,
+  buildYue2JobRequest,
   installJobStatusLabel,
   isCoverComponentDownload,
   midiNoteLabel,
@@ -27,6 +29,7 @@ import {
   yue2TranscriptionFileUrl,
 } from "../api/yue2.js";
 import { ErrorNotice, PolicyChips, ScorePreview } from "./audioYue2Parts.jsx";
+import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
 
 // Cover from a recording (sc-23002, epic 22988 AT2) — the Song Lab's recording → transcription →
 // cover flow. Three user-visible steps, never one click:
@@ -745,9 +748,14 @@ export function Yue2RecordingCover({
   }, [doneKey]);
 
   const target = { sourceAudioAssetId: settings.transcribeAssetId };
+  const transcribeFeedback = usePortableFeedback(
+    "yue2", buildYue2JobRequest("transcribe", settings, target, requestedGpu), null,
+    Boolean(settings.transcribeAssetId && projectId),
+  );
+  const transcribeRefusal = transcribeFeedback?.state === "invalid" ? transcribeFeedback.refusal : null;
   const problems = yue2RequestProblems("transcribe", settings, target, { hasProject: Boolean(projectId) });
   const blockedReason = !setup.installed ? "Set up covers first — the transcriber is not installed." : "";
-  const canTranscribe = !submitting && !problems.length && !blockedReason;
+  const canTranscribe = !submitting && !problems.length && !blockedReason && !portableFeedbackBlocks(transcribeFeedback);
 
   if (!setup.declared) {
     return (
@@ -846,7 +854,7 @@ export function Yue2RecordingCover({
           <button
             className="prompt-cta"
             disabled={!canTranscribe}
-            onClick={() => onTranscribe(target)}
+            onClick={() => { if (canTranscribe) onTranscribe(target); }}
             title={blockedReason || problems.join(" ") || undefined}
             type="button"
           >
@@ -857,6 +865,8 @@ export function Yue2RecordingCover({
               {[blockedReason, ...problems].filter(Boolean).join(" ")}
             </span>
           ) : null}
+          {portableFeedbackStatus(transcribeFeedback) ? <span className="yue2-muted" role="status">{portableFeedbackStatus(transcribeFeedback)}</span> : null}
+          {transcribeRefusal ? <span className="yue2-muted" role="alert">{transcribeRefusal.detail}</span> : null}
         </div>
         {latestRun ? (
           <TranscriptionJob

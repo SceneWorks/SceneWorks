@@ -908,9 +908,17 @@ pub fn parse_plan_document(text: &str) -> Result<ProductionPlan, PlanDiagnostic>
     if let Some(finding) = plan_document_version_finding(&scouted) {
         return Err(finding);
     }
-    // Decoded from the text rather than from `scouted` so a genuine structural error still carries
-    // serde's line and column.
-    serde_json::from_str(&stripped).map_err(|error| PlanDiagnostic::plan("plan", error.to_string()))
+    let upgraded =
+        crate::options::upgrade::upgrade(&scouted, crate::options::upgrade::Carrier::FilmPlan)
+            .map_err(|error| PlanDiagnostic::plan(&error.field, error.to_string()))?;
+    if upgraded == scouted {
+        // Preserve original line/column diagnostics when no alias normalization was needed.
+        serde_json::from_str(&stripped)
+            .map_err(|error| PlanDiagnostic::plan("plan", error.to_string()))
+    } else {
+        serde_json::from_value(upgraded)
+            .map_err(|error| PlanDiagnostic::plan("plan", error.to_string()))
+    }
 }
 
 /// The version pre-scan of [`parse_plan_document`], over an already-parsed JSON value.

@@ -55,10 +55,13 @@ export default defineConfig(() => ({
   // asset-search ownership split fragments the initial closure into many small
   // chunks, increasing its compressed size beyond the existing first-paint budget.
   build: { rolldownOptions: { output: { manualChunks(id) {
-    if (/\/src\/(?:context\/AppContext|components\/(?:Modal|DocumentView|Icons|WorkerProgressCard|audioTakeParts)|(?:appConfirm|audioContext|characterMembership|formatting|imageJobs|modelEligibility|mossImage|presetUtils|uiPreferences|workflowEmbedPreferences|workflowShare)|hooks\/usePreviewArrowNavigation)\.[jt]sx?$/.test(id)) return "app-shared";
+    if (/\/src\/(?:context\/AppContext|api\/client|components\/(?:Modal|DocumentView|Icons|WorkerProgressCard|audioTakeParts)|validation\/Validation|(?:appConfirm|assetActions|generationQuality|audioContext|characterMembership|formatting|imageJobs|modelEligibility|mossImage|portableValidationState|presetUtils|uiPreferences|workflowEmbedPreferences|workflowShare)|hooks\/(?:usePreviewArrowNavigation|usePortableFeedback))\.[jt]sx?$/.test(id)) return "app-shared";
   } } } },
   optimizeDeps: {
     include: ["react", "react-dom", "react-dom/client", "konva", "react-konva"],
+  },
+  test: {
+    setupFiles: ["./test/setup-options-server.js"],
   },
   server: {
     headers: {

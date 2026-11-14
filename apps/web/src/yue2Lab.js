@@ -421,35 +421,8 @@ function transcriptionBody(s) {
   });
 }
 
-// SheetSage2 transcribes 300 s windows; core `check_transcription`'s defaults and bounds.
-const TRANSCRIPTION_WINDOW_SECONDS = 300;
 export const TRANSCRIPTION_DEFAULT_OVERLAP_SECONDS = 200;
 export const TRANSCRIPTION_DEFAULT_LOOKAHEAD_SECONDS = 100;
-
-// Core `check_transcription` over the RESOLVED values (an unset field takes its default):
-// `0 <= lookahead <= overlap < 300` and a positive length limit. The server is the authority.
-export function transcriptionSettingsProblems(settings) {
-  const s = settings ?? defaultYue2Settings();
-  const read = (raw) => (raw === "" || raw === null || raw === undefined ? undefined : Number(raw));
-  const max = read(s.transcribeMaxSeconds);
-  const overlapRaw = read(s.transcribeOverlapSeconds);
-  const lookaheadRaw = read(s.transcribeLookaheadSeconds);
-  if ([max, overlapRaw, lookaheadRaw].some((value) => value !== undefined && !Number.isFinite(value))) {
-    return ["Transcription settings must be numbers."];
-  }
-  const problems = [];
-  if (max !== undefined && max <= 0) {
-    problems.push("The transcription length limit must be more than 0 seconds.");
-  }
-  const overlap = overlapRaw ?? TRANSCRIPTION_DEFAULT_OVERLAP_SECONDS;
-  const lookahead = lookaheadRaw ?? TRANSCRIPTION_DEFAULT_LOOKAHEAD_SECONDS;
-  if (overlap < 0 || overlap >= TRANSCRIPTION_WINDOW_SECONDS) {
-    problems.push(`The window overlap must be at least 0 and under ${TRANSCRIPTION_WINDOW_SECONDS} seconds.`);
-  } else if (lookahead < 0 || lookahead > overlap) {
-    problems.push(`The look-ahead must be between 0 and the window overlap (${overlap} s).`);
-  }
-  return problems;
-}
 
 function coverBody(s) {
   const cover = {};
@@ -468,61 +441,25 @@ function coverBody(s) {
   return cover;
 }
 
-/**
- * What must be fixed before `kind` can be submitted, as user-facing sentences (never the server's
- * internal field names). Empty ⇒ submittable. The server re-validates everything; this only keeps
- * the obviously incomplete request from being sent.
- */
-export function yue2RequestProblems(kind, settings, target = {}, context = {}) {
+// Only conditions absent from the portable request belong here. Static option rules,
+// including numeric bounds and kind-specific required fields, live in Rust.
+export function yue2RequestProblems(kind, settings, _target = {}, context = {}) {
   const s = settings ?? defaultYue2Settings();
   const problems = [];
   if (context.hasProject === false) {
     problems.push("Open or create a workspace first.");
   }
-  if (YUE2_FIELD_KINDS.computePolicy.includes(kind) && !["auto", "bf16", "fp32"].includes(s.computePolicy)) {
-    problems.push("Choose a compute precision (Auto, BF16, or FP32) before starting a new run. The weight tier does not set compute precision.");
-  }
   if (YUE2_FIELD_KINDS.arMode.includes(kind) && s.arMode === "experimentalFp8") {
-    if (s.tier !== "bf16") problems.push("Experimental FP8 AR needs the bf16 tier selected explicitly.");
-    if (s.computePolicy && s.computePolicy !== "auto") problems.push("Experimental FP8 AR requires Auto compute precision.");
     const capabilities = context.selectedGpuCapabilities ?? [];
     if (!context.requestedGpu || context.requestedGpu === "auto" ||
         !["nvidia", "candle", "int8_convrot"].every((capability) => capabilities.includes(capability))) {
       problems.push("Select a CUDA GPU with compute capability 8.9+ for experimental FP8 AR; Auto cannot choose this mode safely.");
     }
   }
+  // JavaScript cannot round-trip integers above 2^53 without changing the user's seed.
   if (YUE2_FIELD_KINDS.seed.includes(kind)) {
     const seedProblem = seedValueProblem(s.seed);
     if (seedProblem) problems.push(seedProblem);
-  }
-  const needsLyrics = kind === "create" || kind === "plan" || kind === "cover";
-  if (needsLyrics && !trimmed(s.lyrics)) {
-    problems.push("Write the lyrics the song sings.");
-  }
-  if ((kind === "create" || kind === "plan") && s.planSource === "supplied") {
-    if (!trimmed(s.suppliedScore)) {
-      problems.push("Paste the ABC score to plan from, or choose to sample a new plan.");
-    }
-    if (s.planning === "off") {
-      problems.push("A supplied score needs full or melody planning.");
-    }
-  }
-  if (kind === "plan" && s.planning === "off") {
-    problems.push("Plan only needs full or melody planning — planning off makes no score.");
-  }
-  if (kind === "fromPlan" && !trimmed(s.restorePlanJobId)) {
-    problems.push("Choose the saved plan to restore.");
-  }
-  if (kind === "cover") {
-    if (s.coverMode !== "melody" && s.coverMode !== "full") {
-      problems.push("Choose the cover mode (melody or full).");
-    }
-    if (s.coverSource === "version" && !trimmed(s.coverVersionId)) {
-      problems.push("Choose the reviewed score version the cover follows.");
-    }
-    if (s.coverSource === "inline" && !trimmed(s.coverScore)) {
-      problems.push("Paste the reviewed ABC score the cover follows.");
-    }
   }
   if (kind === "cover" && s.coverSource === "version" && context.coverVersion?.transcription) {
     // A transcribed score is covered in its own mode: melody-only → melody, full (chords) → full.
@@ -532,40 +469,6 @@ export function yue2RequestProblems(kind, settings, target = {}, context = {}) {
         `This transcribed score is a ${cot === "melody" ? "melody-only" : "full"} score — cover it in ${cot} mode.`,
       );
     }
-  }
-  if (kind === "transcribe") {
-    if (!trimmed(target.sourceAudioAssetId)) {
-      problems.push("Choose the recording to transcribe.");
-    }
-    problems.push(...transcriptionSettingsProblems(s));
-  }
-  if (kind === "renderVersion" && !trimmed(target.versionId)) {
-    problems.push("Choose the score version to render.");
-  }
-  if (kind === "decode" && !trimmed(target.sourceJobId)) {
-    problems.push("Choose the finished run whose latents to decode.");
-  }
-  const chunk = intOrUndefined(s.attentionChunkSize);
-  if (
-    YUE2_FIELD_KINDS["memory.acoustic"].includes(kind) &&
-    s.chunkAttention === "on" &&
-    chunk !== undefined &&
-    chunk < MIN_ATTENTION_CHUNK_ELEMENTS
-  ) {
-    problems.push(`The attention chunk size must be at least ${MIN_ATTENTION_CHUNK_ELEMENTS} score elements.`);
-  }
-  const tile = intOrUndefined(s.decodeTileEdge);
-  if (
-    YUE2_FIELD_KINDS["memory.decode"].includes(kind) &&
-    s.tileVaeDecode === "on" &&
-    tile !== undefined &&
-    (tile < 1 || tile > MAX_DECODE_TILE_FRAMES)
-  ) {
-    problems.push(`The decode tile must be between 1 and ${MAX_DECODE_TILE_FRAMES} latent frames.`);
-  }
-  const count = intOrUndefined(s.count);
-  if (YUE2_FIELD_KINDS.count.includes(kind) && count !== undefined && (count < 1 || count > MAX_TAKES)) {
-    problems.push(`Takes must be between 1 and ${MAX_TAKES}.`);
   }
   return problems;
 }

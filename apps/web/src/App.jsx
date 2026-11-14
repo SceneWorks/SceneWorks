@@ -18,6 +18,7 @@ import { AppVersion, useAppUpdate } from "./components/AppVersion.jsx";
 import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { isAbortError } from "./api.js";
 import { recordStartupMark } from "./startupTiming.js";
+import { setServerValidatorVersion } from "./portableValidationState.js";
 
 import { AccentPicker } from "./components/AccentPicker.jsx";
 import { Icon } from "./components/Icons.jsx";
@@ -61,6 +62,7 @@ import { persistNavigationPreferences, putUiPreferences } from "./uiPreferences.
 import { seedLastTiersFromServer } from "./lastTierStore.js";
 import { seedSimpleStudiosFromServer } from "./simpleStudioStore.js";
 import { seedStudioSettingsFromServer } from "./hooks/useStudioSettings.js";
+import { UpgradeError } from "./requestUpgrade.js";
 import {
   dropUpscaledVariants,
   findFoldedAssetById,
@@ -1163,7 +1165,12 @@ export function App() {
         }
       })
       .catch((error) => {
-        if (!cancelled && isSettingsRefusal(error)) setStudioSettingsRefusal(error);
+        if (!cancelled) {
+          if (isSettingsRefusal(error)) setStudioSettingsRefusal(error);
+          else if (error instanceof UpgradeError) {
+            setError(`Saved studio settings could not be restored: ${error.message}`);
+          }
+        }
       })
       .finally(() => {
         if (!cancelled) {
@@ -1179,7 +1186,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [setAccent, setTheme, settlePendingWorkflowGeneration]);
+  }, [setAccent, setTheme, setError, settlePendingWorkflowGeneration]);
 
   const refreshHealth = useCallback(() => {
     healthRequestRef.current?.abort();
@@ -1188,6 +1195,7 @@ export function App() {
     return systemApi.health("", { signal: controller.signal })
       .then((nextHealth) => {
         if (healthRequestRef.current === controller) {
+          setServerValidatorVersion(nextHealth.optionsValidatorSchemaVersion);
           setHealth(nextHealth);
         }
       })

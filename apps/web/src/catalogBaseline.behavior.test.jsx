@@ -66,7 +66,7 @@ describe("old public request behavior (SW-7028)", () => {
           expect(selection.looks).toHaveLength(2);
           expectedAppearance = selection;
           await click([...mounted.container.querySelectorAll("button")].find((node) => text(node).includes("Run batch")));
-          expect(mounted.calls.length).toBeGreaterThan(0);
+          await vi.waitFor(() => expect(mounted.calls.length).toBeGreaterThan(0));
           original = JSON.parse(JSON.stringify(mounted.calls));
         } finally { await mounted.close(); }
         // Restore the public recipe carrier used by workflow/PNG imports and regenerate through
@@ -88,6 +88,7 @@ describe("old public request behavior (SW-7028)", () => {
         try {
           expect(JSON.parse(localStorage.getItem(replay.persistenceKey)).appearance).toEqual(expectedAppearance);
           await click([...replay.container.querySelectorAll("button")].find((node) => text(node).includes("Run batch")) ?? button(replay.container, "Generate"));
+          await vi.waitFor(() => expect(replay.calls.length).toBeGreaterThan(0));
           const effective = (calls) => calls.flatMap(({ payload }) => payload.prompts ?? [payload.prompt]);
           // An unpacked recipe represents one job, so importing it restores its single authored
           // row; packed carriers restore the complete authored batch.

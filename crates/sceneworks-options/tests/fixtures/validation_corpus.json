@@ -9801,6 +9801,45 @@
           }
         }
       }
+    },
+    {
+      "name": "VQA blank question refusal",
+      "kind": "vqa",
+      "model": "sensenova_u1_8b",
+      "payload": {
+        "projectId": "p",
+        "model": "sensenova_u1_8b",
+        "sourceAssetId": "source",
+        "question": " "
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "question",
+          "detail": "question must be between 1 and 4000 characters",
+          "context": { "kind": "vqa", "model": "sensenova_u1_8b", "mode": null, "field": "question" }
+        }
+      }
+    },
+    {
+      "name": "interleave blank prompt refusal",
+      "kind": "interleave",
+      "model": "sensenova_u1_8b",
+      "payload": {
+        "projectId": "p",
+        "model": "sensenova_u1_8b",
+        "prompt": " "
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "prompt",
+          "detail": "prompt must be between 1 and 4000 characters",
+          "context": { "kind": "interleave", "model": "sensenova_u1_8b", "mode": null, "field": "prompt" }
+        }
+      }
     }
   ]
 }

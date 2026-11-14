@@ -8,6 +8,7 @@ mod requests;
 mod requests_aux;
 mod requests_yue2;
 mod training;
+pub mod upgrade;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -316,6 +317,7 @@ pub mod utility_validation;
 pub mod training_validation;
 
 mod effective_values;
+/// Syntax-only compatibility for typed route probes; these helpers insert no defaults.
 pub use effective_values::{legacy_image_flag, legacy_integer, legacy_number};
 
 pub mod supra2;

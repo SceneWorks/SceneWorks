@@ -35,26 +35,9 @@ export function videoGenerateValidation({
   activeProject,
   promptless,
   prompt,
-  supportsMode,
   implementedMode,
   hasInputs,
-  requiresLtxIcLora,
-  hasLtxIcLora,
   replaceReady,
-  scail2ReferenceOverflow = false,
-  // sc-17161: the refusal from `referenceLimitError` for a reference selection past what the model
-  // declares (`limits.max{Reference,SourceClip,ReferenceAudio,CombinedReference}Assets`), or null.
-  // An ERROR, not a silent requirement: the pickers all look satisfied — MiniMax-H3 Ref2VA's
-  // combined cap refuses selections in which every individual picker is inside its own cap — so
-  // nothing else on the form explains why Generate is dead.
-  referenceLimitMessage = null,
-  // sc-19574: `reference_to_video` with audio references selected and NO image or video reference.
-  // An ERROR rather than the silent `inputs` requirement, for `referenceLimitMessage`'s reason: the
-  // audio picker is visibly full, so an empty image zone next to it reads as optional. The rule is
-  // the reference implementation's own — diffusers `MiniMaxH3` raises on `set(kinds) == {"audio"}`,
-  // because an audio reference never reaches the visual conditioner — and both the API and the
-  // worker refuse the same shape, so saying it here is where the user finds out first.
-  audioOnlyReferenceSet = false,
   // A backend/model execution tier can be intentionally narrower than Model Manager's installable
   // package set. The studio derives the actionable reason from the exact active lane and passes it
   // here so the visible summary and Generate gate remain one authority.
@@ -99,33 +82,12 @@ export function videoGenerateValidation({
   if (!hasInputs) {
     issues.push(issue.requirement("inputs", "Add the inputs this mode needs"));
   }
-  // A mode the model can't run, or a runtime entry point not built yet. Nothing on the
-  // form explains either, so they speak.
-  if (!supportsMode) {
-    issues.push(issue.error(null, `${modelName ?? "Selected model"} does not support this mode.`));
-  }
+  // An entry point without a runtime still needs a product-level notice.
   if (!implementedMode) {
     issues.push(issue.error(null, "This entry point is reserved for the next runtime slice."));
   }
-  if (requiresLtxIcLora && !hasLtxIcLora) {
-    issues.push(issue.error(null, "LTX video-conditioned generation needs a selected IC-LoRA adapter."));
-  }
   if (!replaceReady) {
     issues.push(issue.error(null, "No live GPU worker can run person replacement yet."));
-  }
-  if (scail2ReferenceOverflow) {
-    issues.push(issue.error(null, "SCAIL-2 Animate Character supports at most 6 reference characters."));
-  }
-  if (referenceLimitMessage) {
-    issues.push(issue.error(null, referenceLimitMessage));
-  }
-  if (audioOnlyReferenceSet) {
-    issues.push(
-      issue.error(
-        null,
-        "An audio reference can't be the only reference — add a reference image or video clip. Audio conditions the soundtrack, not the picture.",
-      ),
-    );
   }
   if (vedaBlockMessage) {
     issues.push(issue.error(null, vedaBlockMessage));

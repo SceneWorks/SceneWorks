@@ -29,7 +29,6 @@ import {
   irisTaskOptionsSnapshot,
   irisTaskRequestKeys,
   irisTaskValidation,
-  microStepMultiple,
 } from "./irisTaskOptions.js";
 
 // Advanced keys a depth / restoration run refuses when present (previews are dataset items, no
@@ -1069,6 +1068,7 @@ export function configValidation(
   // basic grid (steps, saveEvery) or the Advanced disclosure (the rest, including
   // batchSize and gradientAccumulation as of sc-10689) — so every error names a field
   // the user can reach and clear, which is the epic's premise (10644 R5).
+  // Rust checks target-advertised ranges and resolution choices after this draft becomes a request.
   for (const [field, label] of [
     ["rank", "Rank"],
     ["alpha", "Alpha"],
@@ -1082,12 +1082,8 @@ export function configValidation(
     const value = numberFromDraft(configDraft[field]);
     if (!value || value <= 0) {
       issues.push(issue.error(field, `${label} must be greater than zero`));
-    } else if ((["rank", "steps", "resolution", "batchSize", "gradientAccumulation", "saveEvery"].includes(field) || (field === "alpha" && Array.isArray(selectedTarget?.limits?.alpha))) && (!Number.isSafeInteger(value) || value > 0xffffffff)) {
+    } else if (["rank", "steps", "resolution", "batchSize", "gradientAccumulation", "saveEvery"].includes(field) && (!Number.isSafeInteger(value) || value > 0xffffffff)) {
       issues.push(issue.error(field, `${label} must be a whole number no greater than 4294967295`));
-    } else if (Array.isArray(selectedTarget?.limits?.[field]) && ["rank", "alpha", "steps", "batchSize"].includes(field) && (value < selectedTarget.limits[field][0] || value > selectedTarget.limits[field][1])) {
-      issues.push(issue.error(field, `${label} must be between ${selectedTarget.limits[field][0]} and ${selectedTarget.limits[field][1]}`));
-    } else if (field === "resolution" && Array.isArray(selectedTarget?.limits?.resolutions) && !selectedTarget.limits.resolutions.includes(value)) {
-      issues.push(issue.error(field, `${label} must be one of ${selectedTarget.limits.resolutions.join(", ")}`));
     } else if (field === "alpha" && selectedTarget?.kernel === "moss_image_lora") {
       const nativeAlpha = Math.fround(value);
       if (!Number.isFinite(nativeAlpha) || nativeAlpha <= 0) {
@@ -1197,31 +1193,14 @@ export function configValidation(
       ),
     );
   }
-  // Micro-step fields (Iris, sc-25685): the trainer lands checkpoints, previews and the warmup on
-  // optimizer-step boundaries, so each must be a whole number of accumulation windows. The API
-  // refuses the same request with a typed `NotMultipleOf` 400.
-  // A restoration step is a generator window plus a critic window: multiples of 2 × accumulation.
-  const microStepFields = selectedTarget?.limits?.microStepFields;
-  const accumulation = numberFromDraft(configDraft.gradientAccumulation);
-  const multiple = Number.isInteger(accumulation) ? microStepMultiple(selectedTarget, accumulation) : 0;
-  if (Array.isArray(microStepFields) && multiple > 1) {
-    const unit = multiple === accumulation
-      ? `the gradient accumulation (${accumulation})`
-      : `2 × the gradient accumulation (${multiple}) — one step is a generator window plus a critic window`;
-    for (const field of microStepFields) {
-      const value = numberFromDraft(configDraft[field]);
-      if (value !== null && value % multiple !== 0) {
-        issues.push(issue.error(field, `${microStepFieldLabels[field] ?? optionLabel(field)} must be a multiple of ${unit}`));
-      }
+  // Rust checks micro-step alignment and the target's sample-count range after serialization.
+  for (const field of selectedTarget?.limits?.microStepFields ?? []) {
+    if (String(configDraft[field] ?? "").trim() && numberFromDraft(configDraft[field]) === null) {
+      issues.push(issue.error(field, `${optionLabel(field)} must be a number`));
     }
   }
-  const sampleCountRange = selectedTarget?.limits?.sampleCount;
-  if (Array.isArray(sampleCountRange) && sampleCountRange.length === 2) {
-    const sampleCount = numberFromDraft(configDraft.sampleCount);
-    const [min, max] = sampleCountRange.map(Number);
-    if (sampleCount !== null && (!Number.isInteger(sampleCount) || sampleCount < min || sampleCount > max)) {
-      issues.push(issue.error("sampleCount", `Sample count must be a whole number between ${min} and ${max}`));
-    }
+  if (String(configDraft.sampleCount ?? "").trim() && numberFromDraft(configDraft.sampleCount) === null) {
+    issues.push(issue.error("sampleCount", "Sample count must be a number"));
   }
   if (objective === "generation") {
     issues.push(...irisValidation(configDraft));
@@ -1280,13 +1259,6 @@ export function configValidation(
   }
   return issues;
 }
-
-const microStepFieldLabels = {
-  steps: "Steps",
-  saveEvery: "Checkpoint cadence",
-  sampleEvery: "Sample cadence",
-  lrWarmupSteps: "LR warmup steps",
-};
 
 export function samplePromptsFromTrigger(triggerWord) {
   const trigger = String(triggerWord ?? "").trim() || "the trained subject";

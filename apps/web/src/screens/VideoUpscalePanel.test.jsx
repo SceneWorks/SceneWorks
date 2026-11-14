@@ -46,6 +46,7 @@ describe("VideoUpscalePanel", () => {
         videoAssets={[VIDEO]}
       />,
     );
+    await vi.waitFor(() => expect(findButton("Upscale clip").disabled).toBe(false));
     await click(findButton("Upscale clip"));
     expect(createVideoUpscaleJob).toHaveBeenCalledTimes(1);
     expect(createVideoUpscaleJob.mock.calls[0][0]).toMatchObject({
@@ -67,6 +68,7 @@ describe("VideoUpscalePanel", () => {
       />,
     );
     await click([...container.querySelectorAll("button")].find((b) => b.textContent.trim() === "4×"));
+    await vi.waitFor(() => expect(findButton("Upscale clip").disabled).toBe(false));
     await click(findButton("Upscale clip"));
     expect(createVideoUpscaleJob.mock.calls[0][0]).toMatchObject({ factor: 4 });
   });

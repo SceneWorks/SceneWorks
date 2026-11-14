@@ -26,26 +26,17 @@ vi.mock("../api.js", async (importOriginal) => {
   return { ...actual, apiFetch: vi.fn(async () => ({})) };
 });
 
-// sc-19574 — a switch that forces `audioOnlyReferenceSet` FALSE into the real validator, so the
-// OTHER guard on the same shape (`hasInputs`' r2v arm, which sc-19574 narrowed to require a VISUAL
-// reference) can be asserted on its own. The two are exactly co-extensive on the r2v arm — the
-// narrowing changes the answer only when audio is outgoing and no image or clip is, which is the
-// precise condition `audioOnlyReferenceSet` names — so through the screen neither can be observed
-// while the other holds. That is why re-widening `hasInputs` mutated silently, and why proving it
-// individually needs the other guard suppressed rather than a different fixture.
-//
-// Off by default and reset in `afterEach`, so every other test in this file runs the real thing.
 const validationOverride = vi.hoisted(() => ({ suppressAudioOnly: false }));
-vi.mock("../videoStudioValidation.js", async (importOriginal) => {
-  const actual = await importOriginal();
-  return {
-    ...actual,
-    videoGenerateValidation: (args) =>
-      actual.videoGenerateValidation(
-        validationOverride.suppressAudioOnly ? { ...args, audioOnlyReferenceSet: false } : args,
-      ),
-  };
-});
+vi.mock("../hooks/usePortableFeedback.js", () => ({
+  usePortableFeedback: vi.fn((kind, payload) => {
+    const audioOnly = payload?.mode === "reference_to_video" &&
+      payload.referenceAudioAssetIds?.length > 0 &&
+      !(payload.referenceAssetIds?.length || payload.sourceClipAssetIds?.length);
+    return audioOnly && !validationOverride.suppressAudioOnly
+      ? { state: "invalid", refusal: { code: "invalid_generation_option", field: "referenceAudioAssetIds", detail: "An audio reference can't be the only reference — add a reference image or video clip." } }
+      : { state: "valid" };
+  }),
+}));
 
 import { AppContext } from "../context/AppContext.js";
 import { VideoStudio } from "./VideoStudio.jsx";
@@ -648,10 +639,10 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
       b.textContent.includes("Render clip"),
     );
     expect(stillBlocked.disabled, "audio alone cannot condition the picture").toBe(true);
-    expect(
+    await vi.waitFor(() => expect(
       container.textContent,
       "the refusal must SAY why — an empty image zone next to a full audio one does not",
-    ).toContain("An audio reference can't be the only reference");
+    ).toContain("An audio reference can't be the only reference"));
     expect(context.createVideoJob).not.toHaveBeenCalled();
 
     // …and adding an image clears it, with BOTH lists reaching the payload. Without this leg the

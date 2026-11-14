@@ -19,6 +19,8 @@ import {
   INTERLEAVE_RESOLUTION_OPTIONS,
 } from "../constants.js";
 import { useAppContext } from "../context/AppContext.js";
+import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableFeedbackState.js";
 import { DEFAULT_MAC_CAPABILITIES } from "../modelEligibility.js";
 import { documentModelUsable, downloadOffersFor } from "../modelEligibility.js";
 import { selectStackedJobs } from "../components/generationStudio.jsx";
@@ -132,14 +134,6 @@ function documentSegments(job) {
   return Array.isArray(segments) && segments.length ? segments : null;
 }
 
-function clampMaxImages(value) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) {
-    return MAX_IMAGES_DEFAULT;
-  }
-  return Math.min(MAX_IMAGES_LIMIT, Math.max(1, Math.floor(parsed)));
-}
-
 export function DocumentStudio() {
   const {
     activeProject,
@@ -219,6 +213,25 @@ export function DocumentStudio() {
 
   const ready = Boolean(activeProject) && interleaveModels.length > 0;
   const canSubmit = ready && prompt.trim().length > 0 && !submitting;
+  const [requestWidth, requestHeight] = resolution.split("x").map(Number);
+  const sourceAssetIds = storyboardFrames.map((frame) => frame.assetId).filter(Boolean);
+  const trimmedSystem = systemMessage.trim();
+  const advanced = {};
+  if (trimmedSystem && trimmedSystem !== DEFAULT_INTERLEAVE_SYSTEM_MESSAGE) {
+    advanced.systemMessage = trimmedSystem;
+  }
+  if (sourceAssetIds.length > 0) advanced.imageGuidanceScale = referenceGuidance;
+  const portableDraft = {
+    prompt: prompt.trim(),
+    model: model || undefined,
+    maxImages: Number(maxImages),
+    width: requestWidth,
+    height: requestHeight,
+    sourceAssetIds,
+    advanced,
+  };
+  const portableFeedback = usePortableFeedback("interleave", portableDraft, selectedModel, Boolean(selectedModel && prompt.trim()));
+  const portableRefusal = portableFeedback?.state === "invalid" ? portableFeedback.refusal : null;
 
   const referencedFrameCount = storyboardFrames.filter((frame) => frame.assetId).length;
   const pickerFrame = storyboardFrames.find((frame) => frame.id === pickerFrameId) ?? null;
@@ -322,36 +335,12 @@ export function DocumentStudio() {
 
   async function submit(event) {
     event.preventDefault();
-    if (!canSubmit) {
+    if (!canSubmit || portableFeedbackBlocks(portableFeedback)) {
       return;
     }
     setSubmitting(true);
-    const [width, height] = resolution.split("x").map((value) => Number(value));
-    const trimmedSystem = systemMessage.trim();
-    const advanced = {};
-    // Only send the system prompt when edited; blank/default lets the worker use
-    // its own _INTERLEAVE_SYSTEM_MESSAGE.
-    if (trimmedSystem && trimmedSystem !== DEFAULT_INTERLEAVE_SYSTEM_MESSAGE) {
-      advanced.systemMessage = trimmedSystem;
-    }
-    // Storyboard order IS the reference order the worker grounds on.
-    const sourceAssetIds = storyboardFrames.map((frame) => frame.assetId).filter(Boolean);
-    // Reference guidance only bites when the model is grounding on reference frames
-    // (advanced.imageGuidanceScale → engine img_cfg_scale). Omit it otherwise so an
-    // un-referenced run stays on the worker's plain-generation defaults.
-    if (sourceAssetIds.length > 0) {
-      advanced.imageGuidanceScale = referenceGuidance;
-    }
     try {
-      const job = await createInterleaveJob({
-        prompt: prompt.trim(),
-        model: model || undefined,
-        maxImages: clampMaxImages(maxImages),
-        width,
-        height,
-        sourceAssetIds,
-        advanced,
-      });
+      const job = await createInterleaveJob(portableDraft);
       if (job) {
         // Stack the run in the studio instead of routing to the Queue, so its output
         // streams in below the prompt as it composes.
@@ -660,7 +649,9 @@ export function DocumentStudio() {
           </div>
         </AdvancedSection>
 
-        <button className="primary-action" disabled={!canSubmit} type="submit">
+        {portableRefusal ? <p role="alert">{portableRefusal.detail}</p> : null}
+        {portableFeedbackStatus(portableFeedback) ? <p role="status">{portableFeedbackStatus(portableFeedback)}</p> : null}
+        <button className="primary-action" disabled={!canSubmit || portableFeedbackBlocks(portableFeedback)} type="submit">
           {submitting ? "Submitting…" : "Compose document"}
         </button>
       </form>

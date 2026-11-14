@@ -23,6 +23,7 @@ describe("Docker/direct browser CSP (F-269)", () => {
     expect(directive(policy, "img-src")).toContain("https://api.example.test:8443");
     expect(directive(policy, "media-src")).toContain("https://api.example.test:8443");
     expect(directive(policy, "script-src")).toBe("script-src 'self'");
+    expect(policy).not.toContain("'unsafe-eval'");
     expect(directive(policy, "object-src")).toBe("object-src 'none'");
     expect(policy).not.toContain("*");
     expect(() => browserPolicy("https://user:secret@api.example.test")).toThrow();

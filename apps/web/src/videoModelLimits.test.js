@@ -18,7 +18,6 @@ import {
   formatDurationSeconds,
   minStepsForModel,
   referenceCaps,
-  referenceLimitError,
 } from "./videoModelLimits.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -77,63 +76,6 @@ describe("referenceCaps", () => {
     const undeclared = referenceCaps({ limits: {} });
     expect(undeclared.clips).toBeGreaterThan(0);
     expect(undeclared.clipsDeclared).toBe(false);
-  });
-});
-
-describe("referenceLimitError", () => {
-  const caps = referenceCaps(minimaxH3Ref);
-  const modelName = minimaxH3Ref.name;
-
-  it("admits a selection inside every cap", () => {
-    expect(referenceLimitError({ modelName, caps, images: 9, clips: 2, audio: 1 })).toBeNull();
-    expect(referenceLimitError({ modelName, caps })).toBeNull();
-  });
-
-  it("names the list that is over its own cap", () => {
-    const message = referenceLimitError({ modelName, caps, images: caps.images + 1 });
-    expect(message).toContain(modelName);
-    expect(message).toContain("reference images");
-    expect(message).toContain(String(caps.images));
-    expect(message).toContain("Remove 1.");
-  });
-
-  it("refuses a kind the model takes none of, naming the kind", () => {
-    const t2v = referenceCaps(minimaxH3);
-    const message = referenceLimitError({ modelName: minimaxH3.name, caps: t2v, audio: 1 });
-    expect(message).toContain("takes no reference audio clips");
-  });
-
-  it("agrees in number: a single over-cap selection reads as singular", () => {
-    // Audio caps at 3 (and t2v at 0), so one selected file is an ordinary path — the refusal must
-    // not read "1 are selected. Remove them" (sc-17137 review B2).
-    const t2v = referenceCaps(minimaxH3);
-    const singular = referenceLimitError({ modelName: minimaxH3.name, caps: t2v, audio: 1 });
-    expect(singular).toContain("but 1 is selected. Remove it,");
-    expect(singular).not.toContain("are selected");
-    const plural = referenceLimitError({ modelName: minimaxH3.name, caps: t2v, audio: 2 });
-    expect(plural).toContain("but 2 are selected. Remove them,");
-    const overCap = referenceLimitError({ modelName, caps, images: caps.images + 2 });
-    expect(overCap).toContain(`but ${caps.images + 2} are selected. Remove 2.`);
-  });
-
-  it("refuses a combined over-selection in which every individual list fits", () => {
-    // 9 + 3 + 3 = 15 files: each picker is exactly at its own cap, and only the combined ceiling
-    // can refuse it. This is the assertion the per-list checks structurally cannot make.
-    const message = referenceLimitError({
-      modelName,
-      caps,
-      images: caps.images,
-      clips: caps.clips,
-      audio: caps.audio,
-    });
-    expect(message).not.toBeNull();
-    expect(message).toContain(`up to ${caps.combined} reference files in total`);
-    expect(message).toContain(`Remove ${caps.images + caps.clips + caps.audio - caps.combined}.`);
-  });
-
-  it("does not invent a combined ceiling for a model that declares none", () => {
-    const open = referenceCaps({ limits: {} });
-    expect(referenceLimitError({ modelName: "Bernini", caps: open, images: 8, clips: 8 })).toBeNull();
   });
 });
 
