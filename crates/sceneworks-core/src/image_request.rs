@@ -647,6 +647,7 @@ impl ImageRequest {
         Ok(request)
     }
 
+    /// Legacy authoring/persistence reader. Execution uses [`Self::resolved_quant_bits`].
     /// Explicit quantization bits (or the verified portable binding's frozen tier), before
     /// model-specific defaults or tier validation.
     pub fn quant_bits(&self) -> Option<i64> {
@@ -664,6 +665,21 @@ impl ImageRequest {
             options.mlx_quantize.as_ref(),
             self.portable_aux.bound_tier(),
         )
+    }
+
+    /// Probe one exact artifact tier without rewriting the authored request or its verified
+    /// source binding. The probe is transient and cannot be persisted as user intent.
+    pub fn with_probe_quant_bits(&self, bits: i64) -> Self {
+        let mut probe = self.clone();
+        probe
+            .resolved_advanced
+            .as_mut()
+            .expect("image options must be resolved")
+            .mlx_quantize = Some(Bound {
+            value: Some(bits),
+            origin: crate::resolved_options::Origin::Internal("artifact tier probe"),
+        });
+        probe
     }
 
     /// The prompt image `index` of this job rendered: `prompt` for an ordinary request, and
@@ -1381,6 +1397,29 @@ mod tests {
         let mut request = ImageRequest::from_resolved(&null, &null).unwrap();
         request.portable_aux = portable_aux;
         assert_eq!(request.resolved_quant_bits(), None);
+    }
+
+    #[test]
+    fn artifact_probe_changes_only_typed_quantization() {
+        let payload = payload(json!({"advanced": {"mlxQuantize": null}}));
+        let request = ImageRequest::from_resolved(&payload, &payload).unwrap();
+        let probe = request.with_probe_quant_bits(4);
+        assert_eq!(probe.resolved_quant_bits(), Some(4));
+        assert_eq!(request.resolved_quant_bits(), None);
+        assert_eq!(probe.advanced, request.advanced);
+        assert_eq!(
+            probe.effective_advanced_wire().get("mlxQuantize"),
+            Some(&json!(4))
+        );
+        assert_eq!(
+            probe
+                .resolved_advanced
+                .unwrap()
+                .mlx_quantize
+                .unwrap()
+                .origin,
+            crate::resolved_options::Origin::Internal("artifact tier probe")
+        );
     }
 
     #[test]
