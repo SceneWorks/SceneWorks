@@ -781,6 +781,8 @@ async fn run_image_generate_job_unexplained(
             )));
         }
     }
+    // Lower nested pose and phase controls once before a provider chooses its route.
+    let execution = conditioning::ResolvedImageExecution::new(&request)?;
     let project =
         ProjectStore::new(settings.data_dir.clone(), "worker").get_project(&request.project_id)?;
     let project_path = PathBuf::from(project.path);
@@ -800,10 +802,10 @@ async fn run_image_generate_job_unexplained(
     // the gallery.
     #[cfg(target_os = "macos")]
     let route = {
-        let request = request.clone();
+        let execution = execution.clone();
         let route_settings = settings.clone();
         prepare_image_route_with_progress(api, settings, &job.id, move || {
-            prepare_image_route(&request, &route_settings)
+            prepare_image_route(&execution, &route_settings)
         })
         .await?
     };
@@ -833,10 +835,10 @@ async fn run_image_generate_job_unexplained(
     // candle is disabled, so any other job (or a disabled backend) keeps `request.count`.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let route = {
-        let request = request.clone();
+        let execution = execution.clone();
         let route_settings = settings.clone();
         prepare_image_route_with_progress(api, settings, &job.id, move || {
-            prepare_candle_image_route(&request, &route_settings)
+            prepare_candle_image_route(&execution, &route_settings)
         })
         .await?
     };
@@ -958,7 +960,7 @@ async fn run_image_generate_job_unexplained(
             api,
             settings,
             job,
-            &request,
+            &execution,
             &plan,
             &project_path,
             backend,
@@ -980,7 +982,7 @@ async fn run_image_generate_job_unexplained(
             api,
             settings,
             job,
-            &request,
+            &execution,
             &plan,
             &project_path,
             backend,
