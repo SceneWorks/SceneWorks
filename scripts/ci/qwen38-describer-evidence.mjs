@@ -1,6 +1,7 @@
 // Validates and stages the bounded evidence of the dispatch-only Qwen3.8 27B describer CUDA run
 // (SW-7120). Runs no model: it reads the result the guarded worker smoke wrote and the CUDA guard's
-// resource receipt, and fails unless all six described fields are filled and the guard completed.
+// resource receipt, and fails unless the described fields are filled and the guard completed. `camera`
+// may be an empty string: the output contract allows it when the image shows no camera character.
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
@@ -22,7 +23,8 @@ export function validateResult(result, tier) {
   assert.equal(result.repo, REPO);
   assert.match(String(result.revision), /^[a-f0-9]{40}$/, 'result must name the pinned revision');
   assert.equal(result.tier, tier, 'result tier differs from the requested tier');
-  const empty = FIELDS.filter((name) => typeof result.fields?.[name] !== 'string' || !result.fields[name].trim());
+  const empty = FIELDS.filter((name) => typeof result.fields?.[name] !== 'string'
+    || (name !== 'camera' && !result.fields[name].trim()));
   assert.deepEqual(empty, [], `described fields are empty: ${empty.join(', ')}`);
   assert(Number.isFinite(result.wall_seconds) && result.wall_seconds > 0, 'wall time is missing');
   const memory = result.gpu_memory;

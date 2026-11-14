@@ -28,9 +28,14 @@ test('a complete result is accepted for its own tier', () => {
   assert.equal(accepted.gpu_memory.peak_mib, 21000);
   assert.deepEqual(Object.keys(accepted.fields), [...FIELDS]);
 });
+test('an empty camera field is accepted, as the output contract allows', () => {
+  const copy = result();
+  copy.fields.camera = '';
+  assert.equal(validateResult(copy, 'q4').fields.camera, '');
+});
 for (const name of FIELDS) {
   test(`reject an empty ${name} field`, () => {
-    for (const value of ['', '   ', null, undefined]) {
+    for (const value of name === 'camera' ? [null, undefined] : ['', '   ', null, undefined]) {
       const copy = result();
       copy.fields[name] = value;
       assert.throws(() => validateResult(copy, 'q4'), new RegExp(name));

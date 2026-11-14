@@ -178,7 +178,8 @@ async fn qwen38_describer_describes_a_synthetic_scene_on_cuda() {
     let empty: Vec<&str> = DESCRIBE_FIELDS
         .iter()
         .zip(&parsed.fields)
-        .filter(|(_, text)| text.is_empty())
+        // The output contract lets `camera` be empty when the image shows no camera character.
+        .filter(|(name, text)| **name != "camera" && text.is_empty())
         .map(|(name, _)| *name)
         .collect();
     assert!(empty.is_empty(), "described fields are empty: {empty:?}");
