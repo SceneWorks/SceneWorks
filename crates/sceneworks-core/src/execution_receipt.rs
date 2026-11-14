@@ -301,9 +301,19 @@ pub fn validate_worker_receipt(
                 .iter()
                 .filter_map(|fact| fact.get("workerExecutionStages"))
                 .collect::<Vec<_>>();
+            let fact_execution = matching
+                .first()
+                .and_then(|fact| fact.get("workerExecutionReport"));
+            // A shared provider call may be hoisted from every output to the
+            // receipt-level report. A fact that names a report must still name
+            // that exact effective report for its output.
+            let effective_execution = output
+                .execution
+                .as_ref()
+                .or_else(|| fact_execution.map(|_| &submitted.execution));
             if output.stages.is_empty()
                 && matching.len() == 1
-                && matching[0].get("workerExecutionReport") != output.execution.as_ref()
+                && fact_execution != effective_execution
             {
                 return Err(ReplayUnavailable::new(
                     "output_execution_changed",
@@ -321,7 +331,8 @@ pub fn validate_worker_receipt(
                 if matching.len() != 1
                     || inline_stages != [&expected_stages]
                     || !child_reports.is_empty()
-                    || matching[0].get("workerExecutionReport") != output.execution.as_ref()
+                    || fact_execution.is_none()
+                    || fact_execution != effective_execution
                 {
                     return Err(ReplayUnavailable::new(
                         "output_stages_changed",
@@ -655,6 +666,48 @@ mod tests {
                 .unwrap_err()
                 .reason,
             "output_artifacts_changed"
+        );
+    }
+
+    #[test]
+    fn hoisted_single_image_report_matches_its_terminal_fact() {
+        let mut receipt = worker_receipt();
+        receipt.outputs.truncate(1);
+        receipt.execution["identity"]["output_units"] = json!(1);
+        receipt.execution["identity"]["randomness"]["draws"]
+            .as_array_mut()
+            .unwrap()
+            .truncate(1);
+        let result = json!({"expectedCount":1,"assetWrites":[{
+            "assetId":"a","index":0,"workerExecutionReport":receipt.execution
+        }]});
+        assert!(validate_worker_receipt(&receipt, result.as_object().unwrap()).is_ok());
+        let mut mismatched = result.clone();
+        mismatched["assetWrites"][0]["workerExecutionReport"]["identity"]["provider_id"] =
+            json!("other_provider");
+        assert_eq!(
+            validate_worker_receipt(&receipt, mismatched.as_object().unwrap())
+                .unwrap_err()
+                .reason,
+            "output_execution_changed"
+        );
+    }
+
+    #[test]
+    fn shared_multi_output_report_refuses_one_mismatched_fact() {
+        let receipt = worker_receipt();
+        let mut result = json!({"expectedCount":2,"assetWrites":[
+            {"assetId":"a","index":0,"workerExecutionReport":receipt.execution},
+            {"assetId":"b","index":1,"workerExecutionReport":receipt.execution}
+        ]});
+        assert!(validate_worker_receipt(&receipt, result.as_object().unwrap()).is_ok());
+        result["assetWrites"][1]["workerExecutionReport"]["identity"]["provider_id"] =
+            json!("other_provider");
+        assert_eq!(
+            validate_worker_receipt(&receipt, result.as_object().unwrap())
+                .unwrap_err()
+                .reason,
+            "output_execution_changed"
         );
     }
 
