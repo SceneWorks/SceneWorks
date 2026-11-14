@@ -1,3 +1,4 @@
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableValidation.js";
 import { downloadBlob } from "../saveExportFile.js";
 import React, { useEffect, useMemo, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
@@ -96,13 +97,14 @@ function RenderScoreVersionAction({ versionId, settings, requestedGpu, renderPro
     <>
       <button
         className="prompt-cta"
-        disabled={Boolean(renderProblem || refusal)}
-        onClick={() => onRender(versionId)}
+        disabled={Boolean(renderProblem) || portableFeedbackBlocks(feedback)}
+        onClick={() => { if (!renderProblem && !portableFeedbackBlocks(feedback)) onRender(versionId); }}
         title={renderProblem || refusal?.detail || "Regenerates the whole recording from this version's score."}
         type="button"
       >
         <Icon.Sparkle size={14} /> Render this version
       </button>
+      {portableFeedbackStatus(feedback) ? <span className="yue2-muted" role="status">{portableFeedbackStatus(feedback)}</span> : null}
       {refusal ? <span className="yue2-muted" role="alert">{refusal.detail}</span> : null}
     </>
   );
@@ -438,8 +440,8 @@ export function Yue2RunCard({
               ) : null}
               <button
                 className="secondary-action"
-                disabled={Boolean(decodeBlocked || decodeRefusal)}
-                onClick={() => onDecodeAgain?.(view.id, decoder)}
+                disabled={Boolean(decodeBlocked) || portableFeedbackBlocks(decodeFeedback)}
+                onClick={() => { if (!decodeBlocked && !portableFeedbackBlocks(decodeFeedback)) onDecodeAgain?.(view.id, decoder); }}
                 title={decodeBlocked ?? undefined}
                 type="button"
               >
@@ -450,6 +452,7 @@ export function Yue2RunCard({
                   {decodeBlocked}
                 </span>
               ) : null}
+              {portableFeedbackStatus(decodeFeedback) ? <span className="yue2-muted" role="status">{portableFeedbackStatus(decodeFeedback)}</span> : null}
               {decodeRefusal ? <span className="yue2-muted" role="alert">{decodeRefusal.detail}</span> : null}
             </span>
           ) : null}

@@ -1,3 +1,4 @@
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableValidation.js";
 import React from "react";
 import { AssetBatchModal, AssetSelectionBar, useAssetBatch } from "../assetBatch.jsx";
 import { AssetPickerField, CharacterImportDialog } from "../components/AssetPicker.jsx";
@@ -379,6 +380,7 @@ export function CharacterTest({
   testPrompt,
   testResolution,
   testRefusal,
+  testFeedback,
   updateAssetStatus,
   createModelDownloadJob,
 }) {
@@ -404,7 +406,7 @@ export function CharacterTest({
         <p className="eyebrow">Test Character</p>
         <h2>Sample outputs</h2>
       </div>
-      <form className="test-character-form" onSubmit={submitTest}>
+      <form className="test-character-form" onSubmit={(event) => { if (portableFeedbackBlocks(testFeedback)) event.preventDefault(); else submitTest(event); }}>
         <label className="prompt-field">
           Prompt
           <textarea onChange={(event) => setTestPrompt(event.target.value)} value={testPrompt} />
@@ -453,8 +455,9 @@ export function CharacterTest({
           <strong>Preset-only test</strong>
           <span>Outputs use the prompt and record this character in metadata; image-reference conditioning and LoRA loading are not active yet.</span>
         </div>
+        {portableFeedbackStatus(testFeedback) ? <p role="status">{portableFeedbackStatus(testFeedback)}</p> : null}
         <ValidationSummary issues={testRefusal ? [issue.error(testRefusal.field, testRefusal.detail)] : []} label="Character test errors" />
-        <button className="primary-action" disabled={!testPrompt.trim() || Boolean(testRefusal)} type="submit">
+        <button className="primary-action" disabled={!testPrompt.trim() || portableFeedbackBlocks(testFeedback)} type="submit">
           Test Character
         </button>
       </form>
@@ -667,7 +670,7 @@ export function CharacterGenerationPanel({
   }
 
   async function generate() {
-    if (!referenceAssetId || !controller.canSubmit || submitting || !activeModel || imageRefusal) {
+    if (!referenceAssetId || !controller.canSubmit || submitting || !activeModel || portableFeedbackBlocks(imageFeedback)) {
       return;
     }
     setSubmitting(true);
@@ -734,10 +737,11 @@ export function CharacterGenerationPanel({
           Upload reference
         </button>
         <input accept="image/*" hidden onChange={onUpload} ref={fileInputRef} type="file" />
-        <button disabled={!referenceAssetId || !controller.isReady || submitting || Boolean(imageRefusal)} onClick={generate} type="button">
+        <button disabled={!referenceAssetId || !controller.isReady || submitting || portableFeedbackBlocks(imageFeedback)} onClick={generate} type="button">
           {submitting ? "Starting…" : controller.submitLabel}
         </button>
       </div>
+      {portableFeedbackStatus(imageFeedback) ? <p role="status">{portableFeedbackStatus(imageFeedback)}</p> : null}
       <ValidationSummary issues={imageRefusal ? [issue.error(imageRefusal.field, imageRefusal.detail)] : []} label="Character image errors" />
       <label>
         Prompt

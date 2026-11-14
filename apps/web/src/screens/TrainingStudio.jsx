@@ -1,3 +1,4 @@
+import { portableFeedbackBlocks } from "../portableValidation.js";
 import { formatDecimalGb } from "../formatting.js";
 import React, { useCallback, useEffect, useInsertionEffect, useMemo, useRef, useState } from "react";
 import { isImageUpload, isCaptionUpload, uploadFileBaseName, uploadFileExtension, uploadFiles } from "../uploadFiles.js";
@@ -2228,7 +2229,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   }
 
   async function submitTrainingJob() {
-    if (!configValidity.ready || trainingRefusal || submittingJob) {
+    if (!configValidity.ready || portableFeedbackBlocks(trainingFeedback) || submittingJob) {
       return;
     }
     setSubmittingJob(true);
@@ -2422,6 +2423,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   onCancelJob={jobAction ? (job) => jobAction(job, "cancel") : undefined}
                   configValidity={configValidity}
                   trainingRefusal={trainingRefusal}
+                  trainingFeedback={trainingFeedback}
                   trainingTargetsError={trainingTargetsError}
                   trainingPresetsError={trainingPresetsError}
                   configError={configError}

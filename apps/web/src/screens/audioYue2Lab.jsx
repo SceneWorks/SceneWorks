@@ -322,6 +322,7 @@ export function Yue2SongLab({ header }) {
             submitting={submitting}
             composeProblems={composeProblems}
             portableRefusal={composeRefusal}
+            portableFeedback={composeFeedback}
             readyToRun={readyToRun}
             submit={submit}
             kind={kind}
@@ -359,6 +360,7 @@ export function Yue2SongLab({ header }) {
             setReviewedTranscriptionVersionId={setReviewedTranscriptionVersionId}
             coverProblems={coverProblems}
             portableRefusal={coverRefusal}
+            portableFeedback={coverFeedback}
             readyToRun={readyToRun}
             tierProblem={tierProblem}
           />

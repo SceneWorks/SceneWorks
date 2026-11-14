@@ -1,3 +1,4 @@
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableValidation.js";
 import { useMediaTicket } from "../hooks/useMediaTicket.js";
 import { mediaResponse } from "../api/media.js";
 import { AssetVedaOutcome } from "./VedaOutcome.jsx";
@@ -588,7 +589,7 @@ export function VqaPanel({ asset, entries, pending, onAsk, project, requestedGpu
   const feedback = usePortableFeedback("vqa", draft, null, Boolean(trimmed));
   const refusal = feedback?.state === "invalid" ? feedback.refusal : null;
   const submit = () => {
-    if (!trimmed || refusal) {
+    if (!trimmed || pending || portableFeedbackBlocks(feedback)) {
       return;
     }
     onAsk(asset, trimmed, maxNewTokens);
@@ -620,10 +621,11 @@ export function VqaPanel({ asset, entries, pending, onAsk, project, requestedGpu
             ))}
           </select>
         </label>
-        <button disabled={!trimmed || pending || Boolean(refusal)} onClick={submit} type="button">
+        <button disabled={!trimmed || pending || portableFeedbackBlocks(feedback)} onClick={submit} type="button">
           {pending ? "Asking…" : "Ask"}
         </button>
       </div>
+      {portableFeedbackStatus(feedback) ? <p role="status">{portableFeedbackStatus(feedback)}</p> : null}
       <ValidationSummary issues={refusal ? [issue.error(refusal.field, refusal.detail)] : []} label="Image question errors" />
       {entries.length ? (
         <ul className="vqa-history">

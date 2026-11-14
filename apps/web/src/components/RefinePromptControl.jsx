@@ -1,3 +1,4 @@
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableValidation.js";
 import { formatDecimalGb } from "../formatting.js";
 import { fetchPromptGuide } from "../promptGuides.js";
 import { isModelMissing } from "../modelMissing.js";
@@ -38,15 +39,12 @@ export function RefinePromptControl({
   // that render this control persistently (e.g. Video Studio).
   autoStart = false,
 }) {
-  // Start in "loading" when we'll auto-run on mount, so the trigger button never flashes before
-  // the effect fires (the effect below actually kicks off the refine).
-  const [status, setStatus] = useState(() =>
-    autoStart && (prompt ?? "").trim() && typeof refinePrompt === "function" ? "loading" : "idle",
-  ); // idle | loading | review | error
+  const [status, setStatus] = useState("idle"); // idle | loading | review | error
   const [refined, setRefined] = useState("");
   const [error, setError] = useState("");
   const [downloadRequested, setDownloadRequested] = useState(false);
   const refineControllerRef = useRef(null);
+  const autoStarted = useRef(false);
 
   const trimmed = (prompt ?? "").trim();
   const portableFeedback = usePortableFeedback(
@@ -54,7 +52,7 @@ export function RefinePromptControl({
   );
   const portableRefusal = portableFeedback?.state === "invalid" ? portableFeedback.refusal : null;
   const busy = status === "loading";
-  const disabled = busy || !trimmed || Boolean(portableRefusal) || typeof refinePrompt !== "function";
+  const disabled = busy || !trimmed || portableFeedbackBlocks(portableFeedback) || typeof refinePrompt !== "function";
 
   const modelMissing = status === "error" && isModelMissing(refineModel, error);
   const installState = refineModel?.installState;
@@ -76,17 +74,16 @@ export function RefinePromptControl({
     [],
   );
 
-  // Auto-run once on mount when the control opens as a prompt-tool tile (autoStart). Guard on a
-  // non-empty prompt + a usable refine fn so an empty composer just shows the idle button instead.
+  // Start once after the current draft passes server validation.
   useEffect(() => {
-    if (autoStart && trimmed && typeof refinePrompt === "function") {
+    if (autoStart && !autoStarted.current && trimmed && typeof refinePrompt === "function" && !portableFeedbackBlocks(portableFeedback)) {
+      autoStarted.current = true;
       handleRefine();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  });
 
   async function handleRefine() {
-    if (portableRefusal) return;
+    if (!trimmed || portableFeedbackBlocks(portableFeedback) || typeof refinePrompt !== "function") return;
     refineControllerRef.current?.abort();
     const controller = new AbortController();
     refineControllerRef.current = controller;
@@ -186,6 +183,7 @@ export function RefinePromptControl({
           {error}
         </p>
       ) : null}
+      {portableFeedbackStatus(portableFeedback) ? <p role="status">{portableFeedbackStatus(portableFeedback)}</p> : null}
       <ValidationSummary issues={portableRefusal ? [issue.error(portableRefusal.field, portableRefusal.detail)] : []} label="Prompt refinement errors" />
 
       {status === "review" ? (

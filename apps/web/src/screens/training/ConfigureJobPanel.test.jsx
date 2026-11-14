@@ -2021,3 +2021,16 @@ describe("ConfigureJobPanel host-blocked targets", () => {
     expect(free.disabled).toBe(false);
   });
 });
+
+it.each(["pending", "server-required"])("blocks training and explains %s feedback", (state) => {
+  const submitTrainingJob = vi.fn();
+  mount(<ConfigureJobPanel {...baseProps({ submitTrainingJob, trainingFeedback: { state } })} />);
+  expect(submitButton().disabled).toBe(true);
+  expect(container.textContent).toContain(state === "pending" ? "Checking options with the server" : "Reconnect to continue");
+  act(() => submitButton().click());
+  expect(submitTrainingJob).not.toHaveBeenCalled();
+  mount(<ConfigureJobPanel {...baseProps({ submitTrainingJob, trainingFeedback: { state: "valid" } })} />);
+  expect(submitButton().disabled).toBe(false);
+  act(() => submitButton().click());
+  expect(submitTrainingJob).toHaveBeenCalledTimes(1);
+});

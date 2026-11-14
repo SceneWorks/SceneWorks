@@ -1,3 +1,4 @@
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../../portableValidation.js";
 import React from "react";
 
 import { AdvancedSection } from "../../components/AdvancedSection.jsx";
@@ -218,6 +219,7 @@ export function ConfigureJobPanel({
   visibleResolutionOptions,
   submittingJob,
   trainingRefusal,
+  trainingFeedback,
   resetConfigDefaults,
   submitTrainingJob,
   configSnapshot,
@@ -1539,6 +1541,7 @@ export function ConfigureJobPanel({
           {/* Only broken values, never the "you haven't picked a dataset yet" hints —
               those are obvious from the form. Sits against the actions row so it reads
               as the reason Start training is dead (sc-10501). */}
+          {portableFeedbackStatus(trainingFeedback) ? <p role="status">{portableFeedbackStatus(trainingFeedback)}</p> : null}
           <ValidationSummary issues={displayValidity.surfaced} label="Configuration errors" />
 
           <div className="training-config-actions">
@@ -1547,8 +1550,8 @@ export function ConfigureJobPanel({
             </button>
             <button
               className="primary-action"
-              disabled={!displayValidity.ready || submittingJob}
-              onClick={submitTrainingJob}
+              disabled={!displayValidity.ready || submittingJob || portableFeedbackBlocks(trainingFeedback)}
+              onClick={() => { if (!portableFeedbackBlocks(trainingFeedback)) submitTrainingJob(); }}
               type="button"
             >
               {submittingJob ? "Queuing" : "Start training"}

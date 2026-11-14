@@ -1,3 +1,4 @@
+import { portableFeedbackBlocks } from "../portableValidation.js";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CharacterAngleSet,
@@ -633,7 +634,7 @@ export function CharacterStudio() {
 
   async function submitTest(event) {
     event.preventDefault();
-    if (!selectedCharacter || testRefusal) {
+    if (!selectedCharacter || portableFeedbackBlocks(testFeedback)) {
       return;
     }
     await createCharacterTestJob(selectedCharacter.id, testRequest);
@@ -943,6 +944,7 @@ export function CharacterStudio() {
                 testPrompt={testPrompt}
                 testResolution={testResolution}
                 testRefusal={testRefusal}
+                testFeedback={testFeedback}
                 updateAssetStatus={updateAssetStatus}
               />
             </div>

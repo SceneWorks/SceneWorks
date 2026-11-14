@@ -11,6 +11,8 @@ function portablePromptBody(body) {
     Object.assign(error, feedback.refusal);
     throw error;
   }
+  // Draft feedback gates the UI. Direct callers still submit this exact body to
+  // the authoritative server when the synchronous adapter requires a server check.
   return body;
 }
 
