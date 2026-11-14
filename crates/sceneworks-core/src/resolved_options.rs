@@ -11,7 +11,7 @@ use serde_json::{Map, Value};
 use crate::contracts::JsonObject;
 use crate::image_request::ControlWeightsFields;
 use crate::video_request::ReferenceImageResizeMode;
-use sceneworks_options::{DefaultRule, OptionSpec, Shape, by_wire};
+use sceneworks_options::{by_wire, DefaultRule, OptionSpec, Shape};
 
 /// How the value reached the effective request. Omission remains distinct from an authored
 /// value that happens to equal the default.
@@ -1168,12 +1168,10 @@ mod tests {
             2.5
         );
         let canonical_only = obj(json!({"advanced":{"schedulerShift":1.25}}));
-        assert!(
-            BindingInput::new(&canonical_only, &canonical_only)
-                .number_exact_alias("advanced", "timestepShift")
-                .unwrap()
-                .is_none()
-        );
+        assert!(BindingInput::new(&canonical_only, &canonical_only)
+            .number_exact_alias("advanced", "timestepShift")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1432,11 +1430,9 @@ mod tests {
             None
         );
         let malformed = RouteOptionFacts::from_payload_syntax(&obj(json!({"yue2":{"decoder":7}})));
-        assert!(
-            malformed
-                .artifact_selection(&malformed, Some("yue2"))
-                .is_err()
-        );
+        assert!(malformed
+            .artifact_selection(&malformed, Some("yue2"))
+            .is_err());
         let omitted = RouteOptionFacts::from_payload_syntax(&obj(json!({})));
         let effective_default =
             RouteOptionFacts::from_payload_syntax(&obj(json!({"yue2":{"decoder":"standard"}})));
