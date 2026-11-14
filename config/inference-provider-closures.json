@@ -1,7 +1,7 @@
 {
   "_comment": "Per-provider inference compile-closure digests (sc-17774). Calibration currency compares a record's captured closureDigest against the entry here for the SAME provider, so a change to one model's code path can no longer demote another's. Regenerate on every inference pin bump: node scripts/inference-closure-digest.mjs --repo <inference> --write. Derivation, and what this unit deliberately does NOT see, are documented in scripts/inference-closure-digest.mjs.",
   "digestVersion": "inference-closure-digest v4",
-  "inferenceRevision": "5d9ce2bdef9a3b8af4a2bd36e8e89c3aa179748f",
+  "inferenceRevision": "164dcb3199a52a17ca397955494d207da1e8e190",
   "providers": {
     "candle:bernini": {
       "crate": "crates/media/candle-gen/candle-gen-bernini",
@@ -649,7 +649,7 @@
     },
     "candle:krea_2_raw": {
       "crate": "crates/media/candle-gen/candle-gen-krea",
-      "digest": "23df569c707ec5b2458633e0b7ca2cb8418e7eab921817c05d705ff9066ad362",
+      "digest": "6c1c97c3ab3000783e1448c8770c3104dbd6d2a882a9e87e40ff33c7dbaa5069",
       "sharedContractDigest": "f2f20ac366f5035de8d8e4fc159c86bd2407ed8f7a9d49972877dbfb4e11e35c",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -686,13 +686,13 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 648,
+      "sourceFileCount": 649,
       "sharedContractFileCount": 183,
       "lockedPackageCount": 265
     },
     "candle:krea_2_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-krea",
-      "digest": "267c2f77404a30baebbfd97dc3182fa0fdfba306cd65796c1eeaec3caf8ccec0",
+      "digest": "aa110286d6f971cc9cd59864a8a428de7e6e8a58de9c2c1d125b1064b29890b0",
       "sharedContractDigest": "f2f20ac366f5035de8d8e4fc159c86bd2407ed8f7a9d49972877dbfb4e11e35c",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -729,13 +729,13 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 648,
+      "sourceFileCount": 649,
       "sharedContractFileCount": 183,
       "lockedPackageCount": 265
     },
     "candle:krea_2_turbo_control": {
       "crate": "crates/media/candle-gen/candle-gen-krea",
-      "digest": "0079b52b3734ac6f0810772767b1a51973de3c4f5bedddee82c0ab1e914313b9",
+      "digest": "dfb8a781e171abee51ba94df446becde3215cd8950212d75ae5730a6542930fd",
       "sharedContractDigest": "f2f20ac366f5035de8d8e4fc159c86bd2407ed8f7a9d49972877dbfb4e11e35c",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -772,7 +772,7 @@
         "crates/contracts/core-llm",
         "crates/contracts/gen-core"
       ],
-      "sourceFileCount": 648,
+      "sourceFileCount": 649,
       "sharedContractFileCount": 183,
       "lockedPackageCount": 265
     },
@@ -2648,7 +2648,7 @@
     },
     "mlx:krea_2_raw": {
       "crate": "crates/media/mlx-gen/mlx-gen-krea",
-      "digest": "dbf744868dba5d5931968231563de681198768f076cc23c8d6b5776997713cea",
+      "digest": "b2cbc7e47ade5b330ab17fe80a8c7b42d5ae27fcba72d445a10ad6bc709c380f",
       "sharedContractDigest": "f2f20ac366f5035de8d8e4fc159c86bd2407ed8f7a9d49972877dbfb4e11e35c",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -2689,7 +2689,7 @@
     },
     "mlx:krea_2_turbo": {
       "crate": "crates/media/mlx-gen/mlx-gen-krea",
-      "digest": "bb396e9f4c8168b5209eb2db5303945c8ac55dca808fbc50dafab0e059ab4a8c",
+      "digest": "8e3c9a69e3a79ce8a358d7f31edf1c3333b2081ad6a24273e59f0fa657a094cc",
       "sharedContractDigest": "f2f20ac366f5035de8d8e4fc159c86bd2407ed8f7a9d49972877dbfb4e11e35c",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -2730,7 +2730,7 @@
     },
     "mlx:krea_2_turbo_control": {
       "crate": "crates/media/mlx-gen/mlx-gen-krea",
-      "digest": "f3a1abef962d36f42bc2c61c761b185c5940c57b6a436338a3b9c96916b20dca",
+      "digest": "d033dd19da85ab34f7902569a24fa3a9fb17970f26150fe50dbf3392f2832f04",
       "sharedContractDigest": "f2f20ac366f5035de8d8e4fc159c86bd2407ed8f7a9d49972877dbfb4e11e35c",
       "closureCrates": [
         "crates/contracts/core-llm",

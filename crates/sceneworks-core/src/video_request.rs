@@ -632,9 +632,10 @@ pub struct VideoRequest {
 }
 
 impl VideoRequest {
-    /// Explicit quantization bits, before model-specific defaults or tier validation.
+    /// Explicit quantization bits (or the verified portable binding's frozen tier), before
+    /// model-specific defaults or tier validation.
     pub fn quant_bits(&self) -> Option<i64> {
-        crate::payload_util::optional_i64(&self.advanced, "mlxQuantize")
+        crate::payload_util::request_quant_bits(&self.advanced)
     }
 
     /// Parse a job payload (the `payload` object of a `JobSnapshot`). Infallible:

@@ -43,6 +43,10 @@ elif [[ -n "${SCENEWORKS_ACCESS_TOKEN:-}" ]]; then
 else
   printf 'api:token:absent\n' >>"${SCENEWORKS_TEST_EVENTS}"
 fi
+if [[ -n "${SCENEWORKS_TEST_EXPECTED_MASTER:-}" ]]; then
+  [[ "${SCENEWORKS_WORKER_PROOF_MASTER:-}" == "${SCENEWORKS_TEST_EXPECTED_MASTER}" ]] || exit 94
+  printf 'api:proof-master:present\n' >>"${SCENEWORKS_TEST_EVENTS}"
+fi
 if [[ "${SCENEWORKS_TEST_RECORD_PATHS:-0}" == "1" ]]; then
   printf 'api:paths:%s|%s|%s|%s|%s|%s|%s\n' \
     "${SCENEWORKS_VOLUME}" \
@@ -81,6 +85,10 @@ elif [[ -n "${SCENEWORKS_ACCESS_TOKEN:-}" ]]; then
   exit 93
 else
   printf 'worker:token:absent\n' >>"${SCENEWORKS_TEST_EVENTS}"
+fi
+if [[ -n "${SCENEWORKS_TEST_EXPECTED_MASTER:-}" ]]; then
+  [[ "${SCENEWORKS_WORKER_PROOF_MASTER:-}" == "${SCENEWORKS_TEST_EXPECTED_MASTER}" ]] || exit 94
+  printf 'worker:proof-master:present\n' >>"${SCENEWORKS_TEST_EVENTS}"
 fi
 printf 'worker:start:%s:%s\n' "${SCENEWORKS_API_URL}" "${SCENEWORKS_GPU_ID}" >>"${SCENEWORKS_TEST_EVENTS}"
 printf 'worker:nvidia-visible:%s\n' "${NVIDIA_VISIBLE_DEVICES:-<unset>}" >>"${SCENEWORKS_TEST_EVENTS}"
@@ -363,9 +371,12 @@ run_dir="${temp_root}/signal"
 mkdir -p "${run_dir}"
 events="${run_dir}/events"
 test_access_token="runpod-self-test-$PPID-$RANDOM"
+test_proof_master="$(printf 'a%.0s' {1..64})"
 SCENEWORKS_TEST_EVENTS="${events}" \
 SCENEWORKS_TEST_CURL_COUNT="${run_dir}/curl-count" \
 SCENEWORKS_TEST_EXPECTED_TOKEN="${test_access_token}" \
+SCENEWORKS_TEST_EXPECTED_MASTER="${test_proof_master}" \
+SCENEWORKS_WORKER_PROOF_MASTER="${test_proof_master}" \
 NVIDIA_VISIBLE_DEVICES=void \
 SCENEWORKS_API_HOST=0.0.0.0 \
 SCENEWORKS_ACCESS_TOKEN="${test_access_token}" \
@@ -387,6 +398,8 @@ wait_for_event "worker:start:http://127.0.0.1:8010:auto" "${events}"
 wait_for_event "worker:nvidia-visible:all" "${events}"
 wait_for_event "api:token:present" "${events}"
 wait_for_event "worker:token:present" "${events}"
+wait_for_event "api:proof-master:present" "${events}"
+wait_for_event "worker:proof-master:present" "${events}"
 kill -TERM "${supervisor_pid}"
 wait "${supervisor_pid}"
 wait_for_event "api:term" "${events}"
@@ -394,6 +407,9 @@ wait_for_event "worker:term" "${events}"
 [[ "$(cat "${run_dir}/curl-count")" -eq 2 ]] || fail "readiness did not retry exactly once"
 if grep -Fq -- "${test_access_token}" "${run_dir}/stdout" "${run_dir}/stderr"; then
   fail "access token was written to supervisor output"
+fi
+if grep -Fq -- "${test_proof_master}" "${run_dir}/stdout" "${run_dir}/stderr"; then
+  fail "worker proof master was written to supervisor output"
 fi
 unset test_access_token
 

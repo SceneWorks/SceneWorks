@@ -3,8 +3,8 @@ import React, { useCallback, useEffect, useInsertionEffect, useMemo, useRef, use
 import { isImageUpload, isCaptionUpload, uploadFileBaseName, uploadFileExtension, uploadFiles } from "../uploadFiles.js";
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
-import { DEFAULT_MAC_CAPABILITIES, macTrainingKernelBlocked } from "../macGating.js";
-import { candleTrainingKernelBlocked } from "../candleGating.js";
+import { DEFAULT_MAC_CAPABILITIES, macTrainingKernelBlocked } from "../modelEligibility.js";
+import { candleTrainingKernelBlocked } from "../modelEligibility.js";
 import { API_BASE_URL, checkIrisDataset, irisItemSidecar, isAbortError } from "../api.js";
 import { errorMessage } from "../errorMessage.js";
 import { Icon } from "../components/Icons.jsx";

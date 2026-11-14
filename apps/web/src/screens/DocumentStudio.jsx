@@ -19,7 +19,7 @@ import {
   INTERLEAVE_RESOLUTION_OPTIONS,
 } from "../constants.js";
 import { useAppContext } from "../context/AppContext.js";
-import { DEFAULT_MAC_CAPABILITIES } from "../macGating.js";
+import { DEFAULT_MAC_CAPABILITIES } from "../modelEligibility.js";
 import { documentModelUsable, downloadOffersFor } from "../modelEligibility.js";
 import { selectStackedJobs } from "../components/generationStudio.jsx";
 

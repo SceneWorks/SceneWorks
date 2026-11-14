@@ -1367,6 +1367,25 @@ async fn media_tickets_authenticate_project_file_urls() {
         assert_eq!(bytes, b"image-bytes");
         assert_eq!(headers["referrer-policy"], "no-referrer");
     }
+    // Reference preflight checks the original media with HEAD, without a token
+    // header or loopback bypass. It must share GET's ticket scope and file checks.
+    let ticketed_file = format!("{file_uri}?ticket={ticket_value}");
+    let (status, headers, bytes) =
+        request_raw(app.clone(), "HEAD", &ticketed_file, Body::empty(), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(bytes.is_empty());
+    assert_eq!(headers["content-length"], "11");
+    for (uri, expected) in [
+        (file_uri.clone(), StatusCode::UNAUTHORIZED),
+        (format!("{file_uri}?ticket=invalid"), StatusCode::UNAUTHORIZED),
+        (format!("/api/v1/jobs?ticket={ticket_value}"), StatusCode::UNAUTHORIZED),
+        (format!("/api/v1/projects/{project_id}/files/assets/images/missing.png?ticket={ticket_value}"), StatusCode::NOT_FOUND),
+    ] {
+        let (status, _, _) = request_raw(app.clone(), "HEAD", &uri, Body::empty(), &[]).await;
+        assert_eq!(status, expected, "{uri}");
+    }
+    let (status, _, _) = request_raw(app.clone(), "POST", &ticketed_file, Body::empty(), &[]).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
     let thumbnail_uri = format!(
         "/api/v1/projects/{project_id}/files/assets/images/thumbnail-source.png?thumbnail=384&ticket={ticket_value}"
     );
@@ -2034,15 +2053,17 @@ async fn expired_media_ticket_route_returns_401_and_new_ticket_restores_read() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, b"{\"segments\":[]}");
     state.media_tickets.expire_for_test(old);
-    let (status, _, _) = request_raw(
-        app.clone(),
-        "GET",
-        &format!("{url}?ticket={old}"),
-        Body::empty(),
-        &[],
-    )
-    .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    for method in ["GET", "HEAD"] {
+        let (status, _, _) = request_raw(
+            app.clone(),
+            method,
+            &format!("{url}?ticket={old}"),
+            Body::empty(),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
     let (status, fresh) = request_with_headers(
         app.clone(),
         "POST",

@@ -228,6 +228,14 @@ async fn ensure_qwen_control_weights(
     job: &JobSnapshot,
     request: &ImageRequest,
 ) -> WorkerResult<PathBuf> {
+    if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
+        return crate::portable_aux_sources::bound_aux_path(&request.advanced, "strict_control")
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "portable strict control source is not bound".to_owned(),
+                )
+            });
+    }
     let (repo, file) = qwen_control_repo_file(request, settings)?;
     if let Ok(p) = std::env::var("SCENEWORKS_CONTROLNET_QWEN") {
         let p = PathBuf::from(p);

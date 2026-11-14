@@ -7,6 +7,10 @@ Generated admission artifacts with a persisted cross-component wire contract als
 curve bundle under `docs/generated/`. Schema v2 carries a sorted immutable source catalog and, on
 each independently fitted complete selector, the exact record-id subset contributed by each source;
 consumers validate those subsets against the compiled source bytes before admitting the bundle.
+`model-memory-guidance.schema.json` documents the `memoryGuidance` object the API serves on every
+model catalog row (SW-7032): the host-independent tier-suggestion, host-floor and high-resolution
+thresholds computed by `sceneworks-core::memory_guidance`, which the web compares with its host
+probe instead of holding memory policy; a core test validates every shipped row against it.
 
 Sidecar and job payload contracts are enforced by the Rust domain types plus the fixtures in `tests/fixtures/rust_migration_contracts/`; keep those fixtures and their tests as the source of truth instead of adding unused schemas here. The explicit exception is `checkpoint-import.schema.json`: its contracts are cross-cutting discovery/import/cache contracts, so its standalone JSON Schema is published alongside the Rust serde types in `sceneworks-core::checkpoint_import`.
 

@@ -29,6 +29,9 @@ const _: () =
 /// allocator-pool envelope (10 of 16 records report observed == predicted to the byte, none show
 /// reclaimable slack), so the residual is small and bounded by the accounting, not by variance.
 pub const CANDLE_RECAPTURE_SPREAD: f64 = 0.02;
+const _: () = assert!(
+    CANDLE_RECAPTURE_SPREAD == sceneworks_core::memory_anchor::CANDLE_ACTIVE_RECAPTURE_SPREAD
+);
 
 /// Historical maximum reclaimable-cache/activation ratio, retained for the evidence audit.
 /// This is NOT an admission allowance: `Phase::non_reclaimable_bytes` explicitly excludes

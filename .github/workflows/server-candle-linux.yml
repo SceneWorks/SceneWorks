@@ -195,7 +195,7 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
               print(f"channel={channel}", file=output)
           PY
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
           toolchain: ${{ steps.h3_admission_toolchain.outputs.channel }}
           components: clippy,rustfmt
@@ -285,7 +285,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
           toolchain: "1.98.0"
       - name: Fetch source dependencies only, never model weights

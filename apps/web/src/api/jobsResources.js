@@ -18,6 +18,13 @@ export const jobsApi = {
     apiFetch(`/api/v1/jobs/${encodeURIComponent(jobId)}/cancel`, token, options),
   item: (jobId, token, options = {}) =>
     apiFetch(`/api/v1/jobs/${encodeURIComponent(jobId)}`, token, options),
+  // A page of a job's per-item results in order: `{ items, total, nextOffset }` (SW-7082).
+  resultItems: (jobId, token, { offset = 0, limit } = {}, options = {}) =>
+    apiFetch(
+      `/api/v1/jobs/${encodeURIComponent(jobId)}/result-items?offset=${encodeURIComponent(offset)}${limit ? `&limit=${encodeURIComponent(limit)}` : ""}`,
+      token,
+      options,
+    ),
   eventsTicket: (token, options = {}) =>
     apiFetch(`/api/v1/jobs/events/ticket`, token, options),
   duplicate: (jobId, token, options = {}) =>

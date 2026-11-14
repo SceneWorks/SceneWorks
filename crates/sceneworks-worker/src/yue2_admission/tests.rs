@@ -70,20 +70,13 @@ pub(crate) fn block_on<F: std::future::Future>(future: F) -> F::Output {
 }
 
 pub(crate) fn builtin_yue2_entry() -> Value {
-    let (_, contents) = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-        .iter()
-        .find(|(name, _)| *name == "builtin.models.jsonc")
-        .expect("builtin.models.jsonc is embedded");
-    let manifest: Value =
-        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(contents))
-            .expect("builtin manifest parses");
-    manifest["models"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|model| model["id"] == "yue2")
-        .expect("yue2 is in the builtin catalog")
-        .clone()
+    // The production accessor: the shipped product row with its typed memory evidence projected
+    // in, which is what the API attaches to a YuE2 job (SW-7031).
+    Value::Object(
+        sceneworks_core::builtin_manifests::builtin_model_entry("yue2")
+            .expect("yue2 is in the builtin catalog")
+            .clone(),
+    )
 }
 
 fn round_gb(bytes: u64) -> f64 {

@@ -40,6 +40,8 @@ import { useAppContext } from "../context/AppContext.js";
 // GPU memory cap (epic 7819). The persisted value is a fraction (0.1–0.99) of total unified
 // memory, or null/absent for "no limit". The slider works in whole percent; 100% means Off.
 const GPU_LIMIT_MIN_PERCENT = 10;
+// The slider's "Use all available" end: the shell's no-target state, not a memory amount.
+const GPU_LIMIT_OFF_PERCENT = 100;
 const APP_VERSION = import.meta.env.VITE_APP_VERSION ?? "";
 
 // Settings → Updates (sc-8663): an on-demand version of the shell's startup/hourly update check.
@@ -93,9 +95,18 @@ function DesktopUpdatesGroup({ update }) {
   );
 }
 
-function fractionToPercent(fraction) {
-  if (typeof fraction !== "number" || !Number.isFinite(fraction) || fraction >= 1) return 100;
-  return Math.min(100, Math.max(GPU_LIMIT_MIN_PERCENT, Math.round(fraction * 100)));
+// The slider position for the shell's served GPU memory target (SW-7032). The shell always serves
+// `gpuMemoryLimitFraction`: `null` is its own "no target" state, drawn at the slider's "Use all
+// available" end. Before settings have loaded (or from a shell that serves no key) there is no
+// position: the slider is disabled and empty, and the web never invents a cap to save.
+function gpuLimitPercentFromSettings(settings) {
+  if (!settings || !Object.hasOwn(settings, "gpuMemoryLimitFraction")) return null;
+  const fraction = settings.gpuMemoryLimitFraction;
+  if (fraction === null) return GPU_LIMIT_OFF_PERCENT;
+  if (typeof fraction !== "number" || !Number.isFinite(fraction)) return null;
+  return fraction >= 1
+    ? GPU_LIMIT_OFF_PERCENT
+    : Math.min(GPU_LIMIT_OFF_PERCENT, Math.max(GPU_LIMIT_MIN_PERCENT, Math.round(fraction * 100)));
 }
 
 // GPU memory telemetry (epic 7819, sc-7825). The worker publishes byte counts;
@@ -221,7 +232,7 @@ export function SettingsScreen({
   const [remotePassword, setRemotePassword] = useState("");
   // GPU memory cap (epic 7819). Local slider percent for smooth dragging; committed to the shell
   // on release. 100 = Off (no limit). Synced from persisted settings once they load.
-  const [gpuLimitPercent, setGpuLimitPercent] = useState(100);
+  const [gpuLimitPercent, setGpuLimitPercent] = useState(null);
   // Live MLX memory telemetry (epic 7819, sc-7825). The worker's latest snapshot, polled while the
   // GPU card is visible; null until the first sample arrives (or on platforms without it).
   const [gpuTelemetry, setGpuTelemetry] = useState(null);
@@ -278,7 +289,7 @@ export function SettingsScreen({
 
   // Keep the slider in sync with the persisted cap (also after a commit echoes settings back).
   useEffect(() => {
-    if (settings) setGpuLimitPercent(fractionToPercent(settings.gpuMemoryLimitFraction));
+    setGpuLimitPercent(gpuLimitPercentFromSettings(settings));
   }, [settings]);
 
   // The persisted (shell-owned) policy seeds the editable fields. On a non-desktop deployment
@@ -465,9 +476,11 @@ export function SettingsScreen({
   }
 
   async function commitGpuMemoryLimit(percent) {
+    // Nothing to save until the shell's served target has loaded.
+    if (gpuLimitPercent === null || !Number.isFinite(percent)) return;
     try {
       // 100% = Off → send null so the shell clears it; otherwise a fraction (0.1–0.99).
-      const fraction = percent >= 100 ? null : percent / 100;
+      const fraction = percent >= GPU_LIMIT_OFF_PERCENT ? null : percent / 100;
       const updated = await invoke("set_gpu_memory_limit", { fraction });
       setSettings(updated);
       // Native jobs read the atomic handoff between runs; an active job retains
@@ -478,7 +491,7 @@ export function SettingsScreen({
           : `GPU memory target set to ${percent}% for new jobs — no restart needed.`,
       );
     } catch (error) {
-      setGpuLimitPercent(Math.round((settings?.gpuMemoryLimitFraction ?? 1) * 100));
+      setGpuLimitPercent(gpuLimitPercentFromSettings(settings));
       setStatus(String(error));
     }
   }
@@ -662,7 +675,9 @@ export function SettingsScreen({
   const cudaGpuMemory = ["windows", "linux"].includes(gpu?.platform) && Number(gpu?.gpuMemoryMb) > 0;
   const unifiedGb = macGpuMemory ? Math.round(gpu.unifiedMemoryMb / 1024) : 0;
   const gpuTargetLabel =
-    gpuLimitPercent >= 100
+    gpuLimitPercent === null
+      ? "Loading…"
+      : gpuLimitPercent >= GPU_LIMIT_OFF_PERCENT
       ? "Use all available"
       : macGpuMemory
         ? `~${Math.round(unifiedGb * (gpuLimitPercent / 100))} GiB of ${unifiedGb} GiB (${gpuLimitPercent}%)`

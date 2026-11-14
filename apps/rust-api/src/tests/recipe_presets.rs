@@ -2,6 +2,28 @@
 use super::support::*;
 
 #[test]
+fn recipe_presets_accept_ten_loras_and_reject_eleven() {
+    for count in [10, 11] {
+        let mut preset = json!({
+            "loras": (0..count)
+                .map(|index| json!({ "id": format!("style_{index}"), "weight": 1.0 }))
+                .collect::<Vec<_>>()
+        });
+        let result = crate::recipe_presets::normalize_recipe_preset_loras(
+            preset.as_object_mut().expect("preset object"),
+        );
+        if count == 10 {
+            result.expect("ten LoRAs are accepted");
+            assert_eq!(preset["loras"].as_array().unwrap().len(), 10);
+        } else {
+            let error = result.expect_err("eleven LoRAs exceed the cap");
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert_eq!(error.detail, "Recipe presets can include at most 10 LoRAs");
+        }
+    }
+}
+
+#[test]
 fn text_to_image_preset_defaults_exclude_retired_style_mode() {
     assert_eq!(
         crate::recipe_presets::default_recipe_preset_modes_for_workflow("text_to_image"),
@@ -498,21 +520,14 @@ async fn recipe_preset_crud_routes_persist_global_and_project_presets() {
             "name": "Too Many LoRAs",
             "model": "z_image_turbo",
             "workflow": "text_to_image",
-            "loras": [
-                { "id": "style_one" },
-                { "id": "style_two" },
-                { "id": "style_three" },
-                { "id": "style_four" },
-                { "id": "style_five" },
-                { "id": "style_six" }
-            ]
+            "loras": (0..11).map(|index| json!({ "id": format!("style_{index}") })).collect::<Vec<_>>()
         }),
     )
     .await;
     assert_eq!(bad_status, StatusCode::BAD_REQUEST);
     assert_eq!(
         bad_error["detail"],
-        "Recipe presets can include at most 5 LoRAs"
+        "Recipe presets can include at most 10 LoRAs"
     );
 
     let (bad_status, bad_error) = request(

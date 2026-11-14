@@ -1,9 +1,11 @@
 //! On-device per-tier memory-footprint measurement harness (sc-8516, epic 8506).
 //!
 //! Purpose: produce REAL steady-state resident + peak GPU-memory numbers per (model × quant tier)
-//! so the sc-8509 RAM→tier suggestion (apps/web/src/tierSuggestion.js) can be calibrated from
-//! measured data instead of the disk×multiplier estimate, and so the sc-8508 manifest footprint
-//! fields (`footprint.residentMemoryBytes` / `peakMemoryBytes`) can be populated.
+//! so the sc-8509 RAM→tier suggestion can be calibrated from measured data instead of the
+//! disk×multiplier estimate; that suggestion is now computed by `sceneworks_core::memory_guidance`
+//! and served on each catalog row as `memoryGuidance`. The measurements populate the sc-8508
+//! per-download footprint fields (`footprint.residentMemoryBytes` / `peakMemoryBytes`) that the
+//! guidance reads.
 //!
 //! Each test drives the EXACT worker runtime seam a real job uses — a registry `crate::inference_runtime::load(id)`
 //! of a packed tier subdir (the same one `image_jobs::base::standard_tier_subdir` resolves) + ONE

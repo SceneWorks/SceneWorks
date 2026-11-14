@@ -195,11 +195,23 @@ describe("recipeFromWorkflowShare", () => {
     expect(recipe.rawAdapterSettings.flux3_reference_ids).toEqual(["first-instance", "second-instance"]);
     expect(recipe.rawAdapterSettings.referenceAssetIds).toEqual(["local-duplicate", "local-duplicate"]);
   });
-  it("only assigns optional reference geometry intent to FLUX3 image workflows with picked reference slots", () => {
+  it("keeps reference geometry intent while the model is unresolved and drops it for a non-FLUX3 family", () => {
     const workflow = share({ model: "flux3_klein", width: 16, height: undefined,
       inputs: [{ kind: "reference", count: 1 }] });
     const resolved = report({ model: { state: "resolved", catalogId: "flux3_klein" } });
     const picked = { referenceAssetIds: ["reference-83x67"] };
+    expect(recipeFromWorkflowShare(workflow, resolved, { ...picked, models: [] }).uiDimensionIntent)
+      .toEqual({ width: 16, height: null });
+    expect(recipeFromWorkflowShare(workflow, resolved,
+      { ...picked, models: [{ id: "flux3_klein", family: "flux2", type: "image" }] }))
+      .not.toHaveProperty("uiDimensionIntent");
+  });
+  it("only assigns optional reference geometry intent to FLUX3 image workflows with picked reference slots", () => {
+    const workflow = share({ model: "flux3_klein", width: 16, height: undefined,
+      inputs: [{ kind: "reference", count: 1 }] });
+    const resolved = report({ model: { state: "resolved", catalogId: "flux3_klein" } });
+    const models = [{ id: "flux3_klein", family: "flux3", type: "image" }];
+    const picked = { referenceAssetIds: ["reference-83x67"], models };
     const recipe = recipeFromWorkflowShare(workflow, resolved, picked);
     expect(recipe.uiDimensionIntent).toEqual({ width: 16, height: null });
     expect(recipe.rawAdapterSettings).not.toHaveProperty("flux3ReferenceEditing");
@@ -208,10 +220,10 @@ describe("recipeFromWorkflowShare", () => {
     expect(recipeFromWorkflowShare({ ...workflow, sceneworksWorkflow: "video" }, resolved, picked)).not.toHaveProperty("uiDimensionIntent");
     expect(recipeFromWorkflowShare(share(), report(), picked)).not.toHaveProperty("uiDimensionIntent");
     const sourceWorkflow = { ...workflow, inputs: [{ kind: "source", count: 1 }] };
-    expect(recipeFromWorkflowShare(sourceWorkflow, resolved, { sourceAssetId: "source-83x67" })
+    expect(recipeFromWorkflowShare(sourceWorkflow, resolved, { sourceAssetId: "source-83x67", models })
       .uiDimensionIntent).toEqual({ width: 16, height: null });
     expect(recipeFromWorkflowShare(sourceWorkflow, resolved)).not.toHaveProperty("uiDimensionIntent");
-    expect(recipeFromWorkflowShare(sourceWorkflow, resolved, { sourceAssetId: " " }))
+    expect(recipeFromWorkflowShare(sourceWorkflow, resolved, { sourceAssetId: " ", models }))
       .not.toHaveProperty("uiDimensionIntent");
   });
   it("populates the fields the studio's injection effect reads", () => {

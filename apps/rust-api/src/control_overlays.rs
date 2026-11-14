@@ -145,7 +145,7 @@ pub(crate) async fn resolve_control_overlay_selection(
         job_payload.get("model").and_then(Value::as_str),
         overlay.get("baseModel").and_then(Value::as_str),
     ) {
-        if model != base_model {
+        if !overlay_base_matches_payload(job_payload, model, base_model) {
             return Err(ApiError::bad_request(format!(
                 "Control overlay '{overlay_id}' is registered for {base_model}, not {model}"
             )));
@@ -174,6 +174,16 @@ pub(crate) async fn resolve_control_overlay_selection(
         }
     }
     Ok(())
+}
+
+fn overlay_base_matches_payload(payload: &JsonObject, model: &str, base_model: &str) -> bool {
+    model == base_model
+        || payload
+            .get("modelManifestEntry")
+            .filter(|entry| entry.get("id").and_then(Value::as_str) == Some(model))
+            .and_then(|entry| entry.pointer("/ui/controlOverlayBaseModel"))
+            .and_then(Value::as_str)
+            == Some(base_model)
 }
 
 /// Translate one catalog entry to the only worker location the API will authorize.
@@ -348,6 +358,42 @@ fn resolve_overlay_weights_file(installed_path: &str, files: Option<&Value>) -> 
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn fine_tune_overlay_selection_accepts_only_its_catalog_projected_base() {
+        let mut payload = json!({"modelManifestEntry": {
+            "id": "kreamania", "ui": {"controlOverlayBaseModel": "krea_2_turbo"}
+        }})
+        .as_object()
+        .unwrap()
+        .clone();
+        assert!(overlay_base_matches_payload(
+            &payload,
+            "kreamania",
+            "krea_2_turbo"
+        ));
+        assert!(overlay_base_matches_payload(
+            &payload,
+            "krea_2_turbo",
+            "krea_2_turbo"
+        ));
+        assert!(!overlay_base_matches_payload(
+            &payload,
+            "kreamania",
+            "flux_dev"
+        ));
+        assert!(!overlay_base_matches_payload(
+            &payload,
+            "sick_ollie",
+            "krea_2_turbo"
+        ));
+        payload.remove("modelManifestEntry");
+        assert!(!overlay_base_matches_payload(
+            &payload,
+            "kreamania",
+            "krea_2_turbo"
+        ));
+    }
 
     #[test]
     fn hosted_overlay_repo_file_reads_huggingface_source() {

@@ -15,7 +15,7 @@
 import { useEffect } from "react";
 import { UPSCALE_ENGINES, upscaleFactorsForEngine } from "./imageJobs.js";
 import { IRIS_RESTORE_ENGINE, irisRestoreRunnable } from "./irisRestore.js";
-import { macUpscaleEngineBlocked } from "./macGating.js";
+import { macUpscaleEngineBlocked } from "./modelEligibility.js";
 
 export {
   UPSCALE_ENGINES,

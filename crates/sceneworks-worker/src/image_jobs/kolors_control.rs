@@ -179,6 +179,12 @@ async fn ensure_kolors_control_weights(
     let (repo, file) = kolors_control_repo_file(request)?;
     let revision =
         trusted_control_weight_revision(request, KOLORS_CONTROL_ENGINE_ID, &repo, &file)?;
+    if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
+        return crate::portable_aux_sources::bound_aux_path(&request.advanced, "strict_control")
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("missing bound Kolors ControlNet source".to_owned())
+            });
+    }
     if let Some(snapshot) =
         crate::model_jobs::huggingface_pinned_snapshot_dir(&settings.data_dir, &repo, &revision)
     {

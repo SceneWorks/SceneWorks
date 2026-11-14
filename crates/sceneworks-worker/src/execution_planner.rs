@@ -1848,10 +1848,9 @@ mod corpus_replay_tests {
     ];
 
     fn shipped_manifest() -> Value {
-        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(include_str!(
-            "../../../config/manifests/builtin.models.jsonc"
-        )))
-        .expect("builtin.models.jsonc parses")
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("builtin.models.jsonc parses")
+            .clone()
     }
 
     /// The premise the "unmeasured ⇒ leave unset" rule rests on: no shipped measurement describes an

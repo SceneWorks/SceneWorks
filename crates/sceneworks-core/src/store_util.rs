@@ -162,6 +162,25 @@ pub(crate) fn optional_u64(value: &Value, key: &str) -> Option<u64> {
     value.get(key).and_then(Value::as_u64)
 }
 
+/// Bind an unsigned quantity to a SQLite integer column.
+///
+/// SQLite integers are signed 64-bit, and rusqlite 0.41 removed the implicit
+/// `u64` `ToSql`/`FromSql` impls rather than keep accepting values it cannot
+/// represent exactly. Every unsigned quantity the stores bind or read through
+/// these helpers (counts, revisions, pixel dimensions, frame rates, durations,
+/// byte sizes) is non-negative by construction, so the boundary converts
+/// explicitly and the narrowing is lossless for every value our own writes
+/// produce. Centralizing the casts here keeps each call site a named
+/// conversion instead of a bare `as`, and one doc comment instead of twenty.
+pub(crate) fn sql_int(value: u64) -> i64 {
+    value as i64
+}
+
+/// Read an unsigned SQLite column. The mirror of [`sql_int`].
+pub(crate) fn unsigned_int(value: i64) -> u64 {
+    value as u64
+}
+
 pub(crate) fn optional_f64(value: &Value, key: &str) -> Option<f64> {
     value.get(key).and_then(Value::as_f64)
 }

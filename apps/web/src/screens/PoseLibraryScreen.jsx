@@ -8,7 +8,7 @@ import { AssetThumbnail } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { useAppLive, useAppStatic } from "../context/AppContext.js";
-import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
+import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../modelEligibility.js";
 import { POSE_DETECT_MODEL_ID } from "../constants.js";
 import { downloadOffersFor, modelInstallComplete, poseDetectModelUsable } from "../modelEligibility.js";
 import { deletePose, loadPoseAssets, purgePose, savePoses, setPoseStatus, setPoseTags, stagePoseSources } from "../poseLibrary.js";

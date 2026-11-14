@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use axum::Router;
 use rmcp::handler::client::ClientHandler;
-use rmcp::model::{CallToolResult, ClientInfo};
+use rmcp::model::{CallToolResult, ClientConfig};
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::StreamableHttpClientTransport;
@@ -27,8 +27,8 @@ pub async fn spawn(router: Router) -> String {
 pub struct TestClient;
 
 impl ClientHandler for TestClient {
-    fn get_info(&self) -> ClientInfo {
-        ClientInfo::default()
+    fn get_info(&self) -> ClientConfig {
+        ClientConfig::default()
     }
 }
 

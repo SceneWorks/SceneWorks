@@ -615,19 +615,86 @@ pub(super) async fn remove_whole_model_artifacts(
     allowed_roots: &[PathBuf],
     permanent: bool,
 ) -> Result<ArtifactRemoval, ApiError> {
+    let default_repo = model_download(cleanup_source).and_then(|download| {
+        download
+            .get("repo")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    });
+    let mut removal = remove_default_repo_artifacts(
+        catalog,
+        model_id,
+        cleanup_source,
+        default_repo.as_deref(),
+        data_dir,
+        allowed_roots,
+        permanent,
+    )
+    .await?;
+    // A model may own primaries in MORE than one repository on this host: the CUDA `minimax_h3`
+    // row serves q4/q8 from the rehost and its dense bf16 tier from upstream `transformer/`.
+    // [`model_artifact_paths`] names only the default primary's repository, so those other tiers
+    // were never reclaimed. Their repositories also hold co-requisites (here the shared component
+    // floor), which a model delete never removes, so they are always removed SCOPED to this
+    // entry's own primary files.
+    for repo in owned_source_repositories(cleanup_source)
+        .into_iter()
+        .filter(|repo| default_repo.as_deref() != Some(repo.as_str()))
+    {
+        let Some(own_files) = model_repo_file_scopes(cleanup_source, &repo) else {
+            continue;
+        };
+        let mut retained_files =
+            other_entries_repo_file_scopes(catalog, model_id, &repo).retained_files(&own_files);
+        for download in cleanup_source
+            .get("downloads")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|download| {
+                is_co_requisite_download(download)
+                    && download.get("repo").and_then(Value::as_str) == Some(repo.as_str())
+            })
+        {
+            for file in string_array_field(download, "files") {
+                if !retained_files.contains(&file) {
+                    retained_files.push(file);
+                }
+            }
+        }
+        let scoped = remove_tier_artifacts(
+            huggingface_repo_cache_path(data_dir, &repo),
+            Some(data_dir.join("models").join(safe_download_dir(&repo))),
+            &own_files,
+            &retained_files,
+            allowed_roots,
+            permanent,
+        )
+        .await?;
+        removal.removed_paths.extend(scoped.removed_paths);
+        removal.retained_paths.extend(scoped.retained_paths);
+        removal.trash_failed_paths.extend(scoped.trash_failed_paths);
+    }
+    Ok(removal)
+}
+
+/// The default primary repository's share of [`remove_whole_model_artifacts`], plus every other
+/// path [`model_artifact_paths`] names.
+async fn remove_default_repo_artifacts(
+    catalog: &[Value],
+    model_id: &str,
+    cleanup_source: &Value,
+    default_repo: Option<&str>,
+    data_dir: &FsPath,
+    allowed_roots: &[PathBuf],
+    permanent: bool,
+) -> Result<ArtifactRemoval, ApiError> {
     let all_paths = model_artifact_paths(cleanup_source, data_dir);
-    let shared = model_download(cleanup_source)
-        .and_then(|download| {
-            download
-                .get("repo")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .and_then(|repo| {
-            let siblings = other_entries_repo_file_scopes(catalog, model_id, &repo);
-            let own = model_repo_file_scopes(cleanup_source, &repo)?;
-            (!siblings.is_empty()).then_some((repo, own, siblings))
-        });
+    let shared = default_repo.and_then(|repo| {
+        let siblings = other_entries_repo_file_scopes(catalog, model_id, repo);
+        let own = model_repo_file_scopes(cleanup_source, repo)?;
+        (!siblings.is_empty()).then(|| (repo.to_owned(), own, siblings))
+    });
     let Some((repo, own_files, sibling_scopes)) = shared else {
         return remove_owned_artifacts(all_paths, allowed_roots, permanent).await;
     };

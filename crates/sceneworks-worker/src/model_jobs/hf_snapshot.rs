@@ -598,7 +598,28 @@ pub(crate) fn resolve_co_requisites_for_tier(
     settings: &Settings,
     tier: Option<&str>,
 ) -> WorkerResult<BTreeMap<String, gen_core::WeightsSource>> {
-    let mut components = BTreeMap::new();
+    resolve_co_requisites_for_tier_with_prebound(
+        descriptor,
+        manifest_entry,
+        settings,
+        tier,
+        &BTreeMap::new(),
+    )
+}
+
+/// Same as [`resolve_co_requisites_for_tier`], skipping any component the
+/// portable guard already verified and staged into `prebound` (SW-7030, review
+/// 4533885136): those bytes are already proven and leased on disk, so a
+/// disconnected or changed HF cache must not abort resolution before the bound
+/// path is used.
+pub(crate) fn resolve_co_requisites_for_tier_with_prebound(
+    descriptor: &gen_core::ModelDescriptor,
+    manifest_entry: &Value,
+    settings: &Settings,
+    tier: Option<&str>,
+    prebound: &BTreeMap<String, gen_core::WeightsSource>,
+) -> WorkerResult<BTreeMap<String, gen_core::WeightsSource>> {
+    let mut components = prebound.clone();
     if descriptor.required_components.is_empty() {
         return Ok(components);
     }
@@ -609,6 +630,9 @@ pub(crate) fn resolve_co_requisites_for_tier(
         .map(Vec::as_slice)
         .unwrap_or(&[]);
     for &component_id in descriptor.required_components {
+        if components.contains_key(component_id) {
+            continue;
+        }
         // The `coRequisite` download(s) that PROVISION this component id — matched on the explicit
         // `componentId` field the manifest sets (never inferred from repo names, sc-13679).
         let candidates: Vec<&Value> = downloads

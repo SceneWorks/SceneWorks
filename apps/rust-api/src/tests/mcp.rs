@@ -111,7 +111,7 @@ async fn mcp_client_round_trips_catalog_tools_via_loopback_trust() {
     let transport = StreamableHttpClientTransport::from_config(
         StreamableHttpClientTransportConfig::with_uri(format!("http://{addr}/mcp")),
     );
-    let client = rmcp::model::ClientInfo::default()
+    let client = rmcp::model::ClientConfig::default()
         .serve(transport)
         .await
         .expect("MCP client initializes against /mcp");
@@ -202,7 +202,7 @@ async fn mcp_client_round_trips_with_access_token_and_no_loopback_trust() {
         StreamableHttpClientTransportConfig::with_uri(format!("http://{addr}/mcp"))
             .custom_headers(headers),
     );
-    let client = rmcp::model::ClientInfo::default()
+    let client = rmcp::model::ClientConfig::default()
         .serve(transport)
         .await
         .expect("tokened MCP client initializes against /mcp");

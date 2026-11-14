@@ -1,5 +1,13 @@
 # PIPE-18 route reconciliation (SW-6931)
 
+> **Retired with the legacy matrix.** `main` retired the backend capability matrix and its
+> `config/backend-capabilities/matrix.json` (`82241cb04d`). The Rust reconciliation below joined
+> against that matrix, so the SW-F331 main sync (SW-6936) removed
+> `generation_route_coverage` and the `check-generation-route-coverage` command with it. The old
+> inventory stays at SceneWorks `5a28d413dd9f579cc9607d44f252a045d025bd8e`, and the profile
+> receipt check (`scripts/check-generation-route-profiles.mjs` and its fixture) remains runnable.
+> The rest of this page records what the retired reconciliation proved.
+
 The executable artifact is `sceneworks-core::jobs_store::generation_route_coverage` and
 its `check-generation-route-coverage` command. It joins the existing published product
 matrix to the current production routing predicates, canonical requests, native platform

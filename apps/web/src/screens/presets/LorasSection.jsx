@@ -1,4 +1,5 @@
 import React from "react";
+import { LoraPickerList } from "../../components/LoraPickerList.jsx";
 import { Icon } from "../../components/Icons.jsx";
 import { LORA_WEIGHT_MAX, LORA_WEIGHT_MIN, LORA_WEIGHT_STEP, MAX_PRESET_LORAS, loraMatchesModel } from "../../presetUtils.js";
 import { LoraKeywordSummary } from "../../components/LoraKeywordSummary.jsx";
@@ -95,29 +96,15 @@ export function LorasSection({
           {form.loras.length < MAX_PRESET_LORAS ? (
             showLoraPicker ? (
               <div className="lora-picker-panel">
-                <strong>Pick a LoRA</strong>
-                {addableLoras.length ? (
-                  <div className="lora-picker-list">
-                    {addableLoras.map((lora) => (
-                      <button
-                        className="lora-pick-row"
-                        key={lora.id}
-                        onClick={() => {
-                          addLoraById(lora.id);
-                          setShowLoraPicker(false);
-                        }}
-                        type="button"
-                      >
-                        <span>
-                          <strong>{lora.name ?? lora.id}</strong> {lora.family ? <span className="chip">{lora.family}</span> : null}
-                        </span>
-                        <Icon.Plus size={14} />
-                      </button>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="lora-pick-empty">{loraEmptyMessage}</p>
-                )}
+                <LoraPickerList
+                  loras={addableLoras}
+                  onAdd={(lora) => {
+                    addLoraById(lora.id);
+                    setShowLoraPicker(false);
+                  }}
+                  isDisabled={() => !editable}
+                  emptyMessage={loraEmptyMessage}
+                />
                 <div className="lora-picker-actions">
                   <button onClick={() => setShowLoraPicker(false)} type="button">
                     Cancel

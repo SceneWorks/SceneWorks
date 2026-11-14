@@ -219,6 +219,14 @@ async fn ensure_flux2_control_candle_weights(
     job: &JobSnapshot,
     request: &ImageRequest,
 ) -> WorkerResult<PathBuf> {
+    if crate::portable_aux_sources::has_bound_aux_paths(&request.advanced) {
+        return crate::portable_aux_sources::bound_aux_path(&request.advanced, "strict_control")
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "portable strict control source is not bound".to_owned(),
+                )
+            });
+    }
     let (repo, file) = flux2_control_candle_repo_file(request)?;
     if let Ok(p) = std::env::var("SCENEWORKS_CONTROLNET_FLUX2") {
         let p = PathBuf::from(p);

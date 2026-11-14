@@ -26,7 +26,6 @@ export const OUTPUTS = [
   "config/engine-capabilities/capabilities.mlx.json",
   "config/engine-capabilities/audio/capabilities.candle.json",
   "config/engine-capabilities/runtime/capabilities.mlx.json",
-  "config/backend-capabilities/matrix.json",
   "config/manifests/builtin.preview-support.jsonc",
   "apps/web/src/data/previewSupport.json",
   "docs/generated/memory-matrix.json",
@@ -478,7 +477,8 @@ async function executeRemoteWithinLease(root, output, env = process.env) {
   const runEnv = { ...remoteBuildEnv(env, request.profile), ...createUnitHfSandbox(root, env).env };
   if (request.profile === "facts-and-projections") {
     // Keep committed Windows provenance as declared; never restamp it or add a pin-currency gate.
-    // Changed Candle semantics still require genuine producer facts before the final matrix can pass.
+    // Preserve committed Candle provenance and capture current MLX producer facts for typed
+    // registry, preview and memory projections.
     validateFacts(file => readFileSync(path.join(root, file), "utf8"), undefined, ["candle"]);
     const scratch = mkdtempSync(path.join(os.tmpdir(), "remote-macos-facts-"));
     const log = path.join(output, "facts.log");
@@ -491,9 +491,6 @@ async function executeRemoteWithinLease(root, output, env = process.env) {
       }
       validateFacts(file => readFileSync(path.join(root, file), "utf8"));
       validateFacts(file => readFileSync(path.join(root, file), "utf8"), request.inference_sha, ["mlx"]);
-      const matrix = path.join(scratch, "backend-matrix.json");
-      await runLogged(root, ["cargo", "run", "--locked", "-p", "sceneworks-core", "--bin", "dump-backend-capability-matrix", "--", matrix], log, runEnv, true);
-      writeFileSync(path.join(root, OUTPUTS[3]), readFileSync(matrix));
       await runLogged(root, ["npm", "--prefix", "apps/web", "run", "gen:preview-support"], log, runEnv, true);
       await runLogged(root, ["npm", "run", "generate:memory-matrix"], log, runEnv, true);
       // GENERATION ONLY: the existing ignored writer is not a validation test or mutation proof.

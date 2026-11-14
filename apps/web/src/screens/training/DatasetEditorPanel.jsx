@@ -7,6 +7,7 @@ import { CompactSelector } from "../../components/CompactSelector.jsx";
 import { DatasetAddDialog } from "../../components/DatasetAddDialog.jsx";
 import { DatasetCaptionDialog } from "../../components/DatasetCaptionDialog.jsx";
 import { DatasetParquetImportDialog } from "../../components/DatasetParquetImportDialog.jsx";
+import { DatasetPromptBatchDialog } from "../../components/DatasetPromptBatchDialog.jsx";
 import { errorMessage } from "../../errorMessage.js";
 import { Icon } from "../../components/Icons.jsx";
 import { WorkPanel } from "../../components/WorkPanel.jsx";
@@ -133,6 +134,7 @@ export function DatasetEditorPanel({
   const focusedCaptionId = captionFocus?.datasetId === activeDataset?.id ? captionFocus?.assetId : null;
   const [captionFilter, setCaptionFilter] = React.useState("all");
   const [parquetDialogOpen, setParquetDialogOpen] = React.useState(false);
+  const [promptBatchDialogOpen, setPromptBatchDialogOpen] = React.useState(false);
   const [parquetImporting, setParquetImporting] = React.useState(false);
   const [parquetError, setParquetError] = React.useState("");
   const [preparedUploadingId, setPreparedUploadingId] = React.useState("");
@@ -436,6 +438,16 @@ export function DatasetEditorPanel({
             </button>
             <button
               className="secondary-action"
+              disabled={!activeDataset?.id || !memberAssets.length}
+              onClick={() => setPromptBatchDialogOpen(true)}
+              title={activeDataset?.id ? "Describe each image with a vision model and save the results as an Image Studio prompt batch" : "Save the dataset first"}
+              type="button"
+            >
+              <Icon.Stars size={14} />
+              Create Prompt Batch from Dataset
+            </button>
+            <button
+              className="secondary-action"
               disabled={!activeDataset?.id || renaming || !memberAssets.length}
               onClick={applyOrderedNames}
               type="button"
@@ -713,6 +725,14 @@ export function DatasetEditorPanel({
                 : { type: "all" }
           }
           settings={captionSettings}
+        />
+      ) : null}
+      {promptBatchDialogOpen && activeDataset?.id ? (
+        <DatasetPromptBatchDialog
+          dataset={activeDataset}
+          dirty={dirty}
+          onClose={() => setPromptBatchDialogOpen(false)}
+          renderThumbnail={renderClusterThumbnail}
         />
       ) : null}
       {parquetDialogOpen ? (

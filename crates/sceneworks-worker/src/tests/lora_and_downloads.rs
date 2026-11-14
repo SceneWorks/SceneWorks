@@ -1323,9 +1323,19 @@ async fn spawn_tree_stub_with_bodies(
     ) -> Response {
         use sceneworks_core::jobs_store::{CreateJob, JobsStore, RegisterWorker};
         assert_eq!(job.job_type, super::JobType::ModelImport);
-        let temp = tempfile::tempdir().unwrap();
-        let store = JobsStore::new(temp.path().join("claims.db"));
-        store.initialize().unwrap();
+        let mut claims = claims.lock().unwrap();
+        // A new retry ID needs its prior claimed row for ancestry verification. A deliberate
+        // same-ID rerun in another fixture assertion starts a fresh mock store instead.
+        if claims
+            .as_ref()
+            .is_none_or(|(_, store)| store.get_job(&job.id).is_ok())
+        {
+            let temp = tempfile::tempdir().unwrap();
+            let store = JobsStore::new(temp.path().join("claims.db"));
+            store.initialize().unwrap();
+            *claims = Some((temp, store));
+        }
+        let (_, store) = claims.as_ref().unwrap();
         store
             .create_job_with_id(
                 job.id.clone(),
@@ -1358,7 +1368,6 @@ async fn spawn_tree_stub_with_bodies(
             .unwrap()
             .expect("actual fixture row is claimable");
         assert_eq!(claimed.id, job.id);
-        *claims.lock().unwrap() = Some((temp, store));
         Json(claimed).into_response()
     }
     async fn progress_route(
@@ -1368,6 +1377,52 @@ async fn spawn_tree_stub_with_bodies(
     ) -> Response {
         posts.lock().expect("posts lock").push(body);
         Json(job_snapshot_json(&job_id, false)).into_response()
+    }
+    async fn import_claim_route(
+        State((_, claims)): State<StubState>,
+        axum::extract::Path(claimed_job_id): axum::extract::Path<String>,
+        Json(request): Json<Value>,
+    ) -> Response {
+        use sceneworks_core::jobs_store::IMPORT_CLAIM_CAPABILITY_KEY;
+        let claims = claims.lock().unwrap();
+        let Some((_, store)) = claims.as_ref() else {
+            return axum::http::StatusCode::FORBIDDEN.into_response();
+        };
+        let Ok(mut current) = store.get_job(&claimed_job_id) else {
+            return axum::http::StatusCode::FORBIDDEN.into_response();
+        };
+        let worker_id = request["workerId"].as_str();
+        let capability = request["capability"].as_str();
+        let target_id = request["targetJobId"].as_str();
+        if current.job_type != super::JobType::ModelImport
+            || current.worker_id.as_deref() != worker_id
+            || !sceneworks_core::jobs_store::ACTIVE_STATUSES.contains(&current.status.as_str())
+            || current.payload.get(IMPORT_CLAIM_CAPABILITY_KEY).and_then(Value::as_str) != capability
+            || capability.is_none_or(|value| value.len() != 64)
+        {
+            return axum::http::StatusCode::FORBIDDEN.into_response();
+        }
+        let mut target_found = false;
+        for _ in 0..64 {
+            if Some(current.id.as_str()) == target_id {
+                target_found = true;
+                break;
+            }
+            let Some(parent) = current.source_job_id.as_deref() else {
+                break;
+            };
+            let Ok(parent_row) = store.get_job(parent) else {
+                break;
+            };
+            current = parent_row;
+        }
+        if !target_found {
+            return axum::http::StatusCode::FORBIDDEN.into_response();
+        }
+        let payload_matches = request["commitment"].as_str()
+            == Some(crate::imports::model_import_commitment(&current.payload).as_str());
+        current.payload.remove(IMPORT_CLAIM_CAPABILITY_KEY);
+        Json(json!({"job": current, "payloadMatches": payload_matches})).into_response()
     }
     async fn heartbeat_route(
         axum::extract::Path(worker_id): axum::extract::Path<String>,
@@ -1384,6 +1439,7 @@ async fn spawn_tree_stub_with_bodies(
         .route("/:owner/:repo/resolve/:revision/*path", get(blob_route))
         .merge(crate::test_api_stub::job_progress_routes(job_route, progress_route))
         .route("/fixture/claimed-model-import", post(claim_fixture_job))
+        .route("/api/v1/jobs/:job_id/import-claim", post(import_claim_route))
         .route(
             "/api/v1/workers/:worker_id/heartbeat",
             post(heartbeat_route),
@@ -2201,13 +2257,17 @@ async fn run_claimed_model_import_fixture(
     client: &reqwest::Client,
     job: &JobSnapshot,
 ) -> super::WorkerResult<()> {
-    claim_model_import_fixture(api, job).await?;
-    super::model_jobs::run_model_import_job(api, settings, client, job).await
+    let claimed = claim_model_import_fixture(api, job).await?;
+    super::model_jobs::run_model_import_job(api, settings, client, &claimed).await
 }
 
-async fn claim_model_import_fixture(api: &ApiClient, job: &JobSnapshot) -> super::WorkerResult<()> {
+async fn claim_model_import_fixture(
+    api: &ApiClient,
+    job: &JobSnapshot,
+) -> super::WorkerResult<JobSnapshot> {
     let claimed: JobSnapshot = api.post_json("/fixture/claimed-model-import", job).await?;
-    super::model_jobs::validate_import_publication_claim(&api.worker_id, job, &claimed)
+    super::model_jobs::validate_import_publication_claim(&api.worker_id, job, &claimed)?;
+    Ok(claimed)
 }
 
 struct ManagedImportFixture {
@@ -3393,23 +3453,27 @@ async fn manually_rerunning_a_snapshot_is_not_authenticated_import_recovery() {
     )
     .unwrap();
     std::fs::remove_dir_all(&source).unwrap();
-    super::model_jobs::run_model_import_job(
+    let error = super::model_jobs::run_model_import_job(
         &ApiClient::new(&fixture.settings),
         &fixture.settings,
         &reqwest::Client::new(),
         &job,
     )
     .await
-    .unwrap();
+    .expect_err("an unclaimed snapshot cannot authenticate import recovery");
+    assert!(
+        matches!(&error, WorkerError::InvalidPayload(message) if message.contains("private worker proof")),
+        "{error:?}"
+    );
     assert!(
         fixture.manifest_entry().is_none(),
         "a client-side old snapshot cannot authenticate recovery"
     );
-    assert!(posts
+    assert!(!posts
         .lock()
         .unwrap()
         .iter()
-        .any(|post| post["status"] == "failed"));
+        .any(|post| post["status"] == "completed"));
     assert_eq!(
         std::fs::read(
             staged
@@ -3574,12 +3638,13 @@ fn uploaded_h3_retry_survives_real_dispatch_failure_then_releases_input_on_succe
                     std::fs::create_dir(&fixture.manifest_path).unwrap();
                     let api = ApiClient::new(&fixture.settings);
                     let client = reqwest::Client::new();
-                    claim_model_import_fixture(&api, &job).await.unwrap();
+                    let claimed = claim_model_import_fixture(&api, &job).await.unwrap();
                     super::run_utility_job(
                         &api,
                         &fixture.settings,
                         &client,
-                        job.clone(),
+                        claimed,
+                        None,
                         gen_core::CancelFlag::new(),
                     )
                     .await;
@@ -3602,13 +3667,14 @@ fn uploaded_h3_retry_survives_real_dispatch_failure_then_releases_input_on_succe
                     retry.id = "job-upload-retry".into();
                     retry.source_job_id = Some(job.id.clone());
                     retry.attempts = job.attempts.checked_add(1).unwrap();
-                    claim_model_import_fixture(&api, &retry).await.unwrap();
+                    let claimed_retry = claim_model_import_fixture(&api, &retry).await.unwrap();
                     posts.lock().unwrap().clear();
                     super::run_utility_job(
                         &api,
                         &fixture.settings,
                         &client,
-                        retry,
+                        claimed_retry,
+                        None,
                         gen_core::CancelFlag::new(),
                     )
                     .await;

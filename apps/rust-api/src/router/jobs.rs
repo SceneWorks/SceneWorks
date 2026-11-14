@@ -1,4 +1,5 @@
 use super::*;
+use crate::jobs::verify_model_import_claim;
 
 pub(super) fn routes() -> Router<AppState> {
     Router::new()
@@ -20,6 +21,10 @@ pub(super) fn routes() -> Router<AppState> {
         .route("/api/v1/jobs/events", get(job_events))
         .route("/api/v1/jobs/events/ticket", post(create_event_ticket))
         .route("/api/v1/jobs/:job_id", get(get_job))
+        .route(
+            "/api/v1/jobs/:job_id/import-claim",
+            post(verify_model_import_claim),
+        )
         .route("/api/v1/jobs/:job_id/cancel", post(cancel_job))
         // Per-job "clear" (sc-12231, issue #1556) — the per-card × dismiss. Distinct
         // from the bulk `/api/v1/jobs/clear` above (2 segments vs 3, no conflict).
@@ -33,6 +38,12 @@ pub(super) fn routes() -> Router<AppState> {
         .route(
             "/api/v1/jobs/:job_id/metrics",
             get(get_job_metrics).post(upsert_job_metrics),
+        )
+        // Per-item job results (SW-7082): the owning worker appends each finished item; the UI
+        // pages them back in order. Kept out of the progress result, which every POST replaces.
+        .route(
+            "/api/v1/jobs/:job_id/result-items",
+            get(list_job_result_items).post(append_job_result_items),
         )
         .route("/api/v1/metrics", get(list_metrics))
         .route("/api/v1/queue", get(queue_summary))

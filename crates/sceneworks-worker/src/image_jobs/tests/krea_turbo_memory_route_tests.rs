@@ -8,10 +8,11 @@ use super::super::memory::{
 use serde_json::{Map, Value};
 
 fn historical_builtin_krea_turbo_manifest() -> Map<String, Value> {
-    let jsonc = include_str!("../../../../../config/manifests/builtin.models.jsonc");
+    // The production projection: product rows with their typed memory evidence (SW-7031).
     let mut parsed: Value =
-        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(jsonc))
-            .expect("builtin model manifest parses");
+        sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("builtin model manifest parses")
+            .clone();
     let model = parsed["models"]
         .as_array_mut()
         .expect("models array")

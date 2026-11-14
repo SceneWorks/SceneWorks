@@ -18,6 +18,17 @@ fn overlay_guard() -> MutexGuard<'static, ()> {
         .unwrap_or_else(PoisonError::into_inner)
 }
 
+fn wait_for_overlay_waiters(count: usize) {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while lock_active().waiters.len() < count {
+        assert!(
+            std::time::Instant::now() < until,
+            "portable waiter did not queue"
+        );
+        std::thread::yield_now();
+    }
+}
+
 /// Install a scope over one artifact's own snapshots. Production makes this decision at the WORKER
 /// GUARD across the whole job (see `select_local_tier`); at this layer the entries are simply the
 /// artifact's own, which is what every single-artifact case below means.
@@ -254,6 +265,103 @@ fn a_superseded_revision_is_served_from_the_source_tier() {
     );
 }
 
+#[test]
+fn portable_scope_uses_frozen_revision_instead_of_source_main() {
+    let _serialized = overlay_guard();
+    let temp = tempfile::tempdir().unwrap();
+    let library_root = temp.path().join("external-hf");
+    seed_source(
+        &library_root,
+        "owner/model",
+        OTHER_REV,
+        "q4/model.safetensors",
+    );
+    write_refs_main(&library_root, "owner/model", OTHER_REV);
+    let artifact = bundle(&temp.path().join("bundle"));
+    let configured = ArtifactSourceLibrary::new_preferring_local(&library_root).unwrap();
+    let _scope =
+        prefer_portable_snapshots(overlay_entries_for_artifact(&artifact).unwrap()).unwrap();
+    let (identity, path) = configured.discover_snapshot("owner/model", None).unwrap();
+    assert_eq!(identity.revision, PRIMARY_REV);
+    assert_eq!(
+        path,
+        artifact
+            .location
+            .root()
+            .join(format!("models--owner--model/snapshots/{PRIMARY_REV}"))
+    );
+    assert_eq!(
+        ArtifactSourceLibrary::new(&library_root)
+            .unwrap()
+            .discover_snapshot("owner/model", None)
+            .unwrap()
+            .0
+            .revision,
+        OTHER_REV
+    );
+}
+
+#[test]
+fn portable_scope_refuses_ambiguous_active_revisions() {
+    let _serialized = overlay_guard();
+    let temp = tempfile::tempdir().unwrap();
+    let library_root = temp.path().join("external-hf");
+    seed_source(
+        &library_root,
+        "owner/model",
+        OTHER_REV,
+        "q4/model.safetensors",
+    );
+    write_refs_main(&library_root, "owner/model", OTHER_REV);
+    let artifact = bundle(&temp.path().join("bundle"));
+    let mut entries = overlay_entries_for_artifact(&artifact).unwrap();
+    let mut second = entries
+        .iter()
+        .find(|entry| entry.repository == "owner/model")
+        .unwrap()
+        .clone();
+    second.revision = OTHER_REV.to_owned();
+    second.snapshot_root = temp.path().join("second-snapshot");
+    std::fs::create_dir_all(&second.snapshot_root).unwrap();
+    entries.push(second);
+    let _scope = prefer_portable_snapshots(entries).unwrap();
+    let configured = ArtifactSourceLibrary::new_preferring_local(&library_root).unwrap();
+    assert!(configured
+        .discover_snapshot("owner/model", None)
+        .unwrap_err()
+        .to_string()
+        .contains("multiple frozen active revisions"));
+}
+
+#[test]
+fn portable_scope_refuses_missing_frozen_snapshot_without_source_fallback() {
+    let _serialized = overlay_guard();
+    let temp = tempfile::tempdir().unwrap();
+    let library_root = temp.path().join("external-hf");
+    seed_source(
+        &library_root,
+        "owner/model",
+        OTHER_REV,
+        "q4/model.safetensors",
+    );
+    write_refs_main(&library_root, "owner/model", OTHER_REV);
+    let artifact = bundle(&temp.path().join("bundle"));
+    let scope =
+        prefer_portable_snapshots(overlay_entries_for_artifact(&artifact).unwrap()).unwrap();
+    let frozen = scope
+        .entries()
+        .iter()
+        .find(|entry| entry.repository == "owner/model")
+        .unwrap();
+    std::fs::remove_dir_all(&frozen.snapshot_root).unwrap();
+    let configured = ArtifactSourceLibrary::new_preferring_local(&library_root).unwrap();
+    assert!(configured
+        .discover_snapshot("owner/model", None)
+        .unwrap_err()
+        .to_string()
+        .contains("frozen snapshot is missing"));
+}
+
 /// With the configured library disconnected, an unpinned resolve is served by the leased bundle —
 /// this is what keeps a complete local model usable while the drive is unplugged.
 #[test]
@@ -334,6 +442,255 @@ fn a_shared_snapshot_stays_served_until_the_last_scope_drops() {
     drop(second);
     assert!(local_snapshot("owner/encoder", COMPONENT_REV).is_none());
     assert!(local_snapshot("owner/model", PRIMARY_REV).is_none());
+}
+
+/// Two in-process utility conversions may freeze different complete closures of the same
+/// publisher revision. The second must wait for its own verified bundle to become serveable;
+/// it must neither fail terminally nor read the first job's private path. An unrelated job may
+/// still use the other worker loop while the conflict waits.
+#[test]
+fn conflicting_portable_jobs_wait_without_serializing_unrelated_sources() {
+    let _serialized = overlay_guard();
+    let temp = tempfile::tempdir().unwrap();
+    let first_artifact = bundle(&temp.path().join("first"));
+    let second_artifact = bundle(&temp.path().join("second"));
+    let first_root = first_artifact.location.root().to_path_buf();
+    let second_root = second_artifact.location.root().to_path_buf();
+    let second_entries = overlay_entries_for_artifact(&second_artifact).unwrap();
+    let first =
+        prefer_portable_snapshots(overlay_entries_for_artifact(&first_artifact).unwrap()).unwrap();
+
+    assert!(prefer_portable_snapshots(second_entries.clone()).is_err());
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (scope_tx, scope_rx) = std::sync::mpsc::channel();
+    let waiting = std::thread::spawn(move || {
+        ready_tx.send(()).unwrap();
+        scope_tx
+            .send(
+                wait_for_portable_snapshots(
+                    second_entries,
+                    &PortableOverlayWaitCancellation::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    });
+    ready_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .unwrap();
+    wait_for_overlay_waiters(1);
+    assert!(scope_rx.try_recv().is_err());
+    assert!(local_snapshot("owner/model", PRIMARY_REV)
+        .unwrap()
+        .starts_with(&first_root));
+
+    let unrelated_root = temp.path().join("unrelated");
+    std::fs::create_dir_all(&unrelated_root).unwrap();
+    let unrelated = wait_for_portable_snapshots(
+        vec![LocalArtifactOverlayEntry {
+            repository: "other/model".to_owned(),
+            revision: OTHER_REV.to_owned(),
+            snapshot_root: unrelated_root.clone(),
+            files: Vec::new(),
+        }],
+        &PortableOverlayWaitCancellation::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        local_snapshot("other/model", OTHER_REV),
+        Some(unrelated_root)
+    );
+    drop(unrelated);
+
+    drop(first);
+    let second = scope_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .unwrap();
+    assert!(local_snapshot("owner/model", PRIMARY_REV)
+        .unwrap()
+        .starts_with(&second_root));
+    drop(second);
+    waiting.join().unwrap();
+    assert!(local_snapshot("owner/model", PRIMARY_REV).is_none());
+}
+
+/// Converter paths without an explicit revision ask the source library for one frozen revision
+/// by repository. Different revisions in different jobs must therefore take turns, even though
+/// their exact `(repository, revision)` keys differ.
+#[test]
+fn different_revisions_of_one_repository_wait_for_unique_portable_lookup() {
+    let _serialized = overlay_guard();
+    let temp = tempfile::tempdir().unwrap();
+    let first_root = temp.path().join("first");
+    let second_root = temp.path().join("second");
+    let unrelated_root = temp.path().join("unrelated");
+    for root in [&first_root, &second_root, &unrelated_root] {
+        std::fs::create_dir_all(root).unwrap();
+    }
+    let entry = |revision: &str, root: &Path| LocalArtifactOverlayEntry {
+        repository: "owner/model".to_owned(),
+        revision: revision.to_owned(),
+        snapshot_root: root.to_path_buf(),
+        files: Vec::new(),
+    };
+    let first = prefer_portable_snapshots(vec![entry(PRIMARY_REV, &first_root)]).unwrap();
+    let second_entry = entry(OTHER_REV, &second_root);
+    assert!(prefer_portable_snapshots(vec![second_entry.clone()]).is_err());
+    let (scope_tx, scope_rx) = std::sync::mpsc::channel();
+    let waiting = std::thread::spawn(move || {
+        scope_tx
+            .send(
+                wait_for_portable_snapshots(
+                    vec![second_entry],
+                    &PortableOverlayWaitCancellation::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    });
+    wait_for_overlay_waiters(1);
+    let configured =
+        ArtifactSourceLibrary::new_preferring_local(temp.path().join("absent-source")).unwrap();
+    assert_eq!(
+        configured.discover_snapshot("owner/model", None).unwrap().1,
+        first_root
+    );
+    assert!(scope_rx.try_recv().is_err());
+
+    let unrelated = wait_for_portable_snapshots(
+        vec![LocalArtifactOverlayEntry {
+            repository: "other/model".to_owned(),
+            revision: OTHER_REV.to_owned(),
+            snapshot_root: unrelated_root,
+            files: Vec::new(),
+        }],
+        &PortableOverlayWaitCancellation::default(),
+    )
+    .unwrap();
+    drop(unrelated);
+
+    drop(first);
+    let second = scope_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(
+        configured.discover_snapshot("owner/model", None).unwrap().1,
+        second_root
+    );
+    drop(second);
+    waiting.join().unwrap();
+}
+
+#[test]
+fn conflicting_portable_waiters_follow_order_after_owner_fault() {
+    let _serialized = overlay_guard();
+    let temp = tempfile::tempdir().unwrap();
+    let first = prefer_portable_snapshots(
+        overlay_entries_for_artifact(&bundle(&temp.path().join("first"))).unwrap(),
+    )
+    .unwrap();
+    let second_entries =
+        overlay_entries_for_artifact(&bundle(&temp.path().join("second"))).unwrap();
+    let third_entries = overlay_entries_for_artifact(&bundle(&temp.path().join("third"))).unwrap();
+    let (second_tx, second_rx) = std::sync::mpsc::channel();
+    let second = std::thread::spawn(move || {
+        second_tx
+            .send(
+                wait_for_portable_snapshots(
+                    second_entries,
+                    &PortableOverlayWaitCancellation::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    });
+    wait_for_overlay_waiters(1);
+    let (third_tx, third_rx) = std::sync::mpsc::channel();
+    let third = std::thread::spawn(move || {
+        third_tx
+            .send(
+                wait_for_portable_snapshots(
+                    third_entries,
+                    &PortableOverlayWaitCancellation::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    });
+    wait_for_overlay_waiters(2);
+
+    // A job fault unwinds its guard. That drop must wake the first waiter, while the later
+    // conflicting job remains queued until the first waiter releases its own scope.
+    let owner = std::thread::spawn(move || {
+        let _scope = first;
+        panic!("synthetic utility owner fault");
+    });
+    assert!(owner.join().is_err());
+    let second_scope = second_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    assert!(third_rx.try_recv().is_err());
+    drop(second_scope);
+    let third_scope = third_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    drop(third_scope);
+    second.join().unwrap();
+    third.join().unwrap();
+}
+
+/// A owns the pair; B and C queue in that order. If B's async heartbeat owner goes away,
+/// cancellation must remove B's ticket while A still runs so C can take the pair next.
+#[test]
+fn canceled_portable_waiter_releases_fifo_place_for_live_job() {
+    let _serialized = overlay_guard();
+    let temp = tempfile::tempdir().unwrap();
+    let first = prefer_portable_snapshots(
+        overlay_entries_for_artifact(&bundle(&temp.path().join("first"))).unwrap(),
+    )
+    .unwrap();
+    let second_entries =
+        overlay_entries_for_artifact(&bundle(&temp.path().join("second"))).unwrap();
+    let third_entries = overlay_entries_for_artifact(&bundle(&temp.path().join("third"))).unwrap();
+    let canceled = PortableOverlayWaitCancellation::default();
+    let second_token = canceled.clone();
+    let (second_tx, second_rx) = std::sync::mpsc::channel();
+    let second = std::thread::spawn(move || {
+        second_tx
+            .send(wait_for_portable_snapshots(second_entries, &second_token))
+            .unwrap();
+    });
+    wait_for_overlay_waiters(1);
+    let (third_tx, third_rx) = std::sync::mpsc::channel();
+    let third = std::thread::spawn(move || {
+        third_tx
+            .send(
+                wait_for_portable_snapshots(
+                    third_entries,
+                    &PortableOverlayWaitCancellation::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    });
+    wait_for_overlay_waiters(2);
+
+    // Simulates the heartbeat future exiting on 409/transport while B's blocking guard waits.
+    canceled.cancel();
+    assert!(second_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap()
+        .is_err());
+    second.join().unwrap();
+    assert_eq!(lock_active().waiters.len(), 1);
+    assert!(third_rx.try_recv().is_err());
+    drop(first);
+    let third_scope = third_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(lock_active().waiters.len(), 0);
+    drop(third_scope);
+    third.join().unwrap();
 }
 
 /// The subset primitive the guard's coverage rule is built on. A pair may only be served by a

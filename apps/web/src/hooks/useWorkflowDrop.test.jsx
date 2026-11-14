@@ -312,7 +312,7 @@ describe("useWorkflowDrop", () => {
     body.resolution.inputs = [{ kind: "source", count: 1 }];
     inspectWorkflowFile.mockResolvedValue(body);
     const launchRecipe = vi.fn(async () => true);
-    await render({ launchRecipe });
+    await render({ launchRecipe, models: [{ id: "flux3_klein", family: "flux3", type: "image" }] });
     await act(async () => { await hook.handleDroppedFile(pngFile()); });
     await act(async () => { hook.missing.onPickInput("source-0-0", "picked-source"); });
     await act(async () => { await hook.useWorkflow(); });

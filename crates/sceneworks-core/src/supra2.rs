@@ -36,6 +36,8 @@ const UNSUPPORTED_ADVANCED: &[&str] = &[
     "usePid",
     "pidTarget",
     "strength",
+    // Diagnostic context belongs to the img2img input, which Supra2 does not support.
+    "imageReference",
     "ipAdapterScale",
     // The InstantID identity-structure slider's WIRE key (`imageJobAdvanced.js` /
     // `CharacterAdvancedOptions.jsx`); `identityStructure` / `controlnetScale` /

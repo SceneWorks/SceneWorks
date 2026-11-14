@@ -282,14 +282,9 @@ pub(super) async fn estimate_current_model_catalog_sizes(
 
 pub(crate) fn manifest_download_size_bytes(model: &Value, download: &Value) -> Option<u64> {
     // Prefer the selected download entry, then fall back to legacy model-level metadata.
-    ["estimatedSizeBytes", "downloadSizeBytes", "sizeBytes"]
-        .iter()
-        .find_map(|field| download.get(*field).and_then(json_size_to_u64))
-        .or_else(|| {
-            ["estimatedSizeBytes", "downloadSizeBytes", "sizeBytes"]
-                .iter()
-                .find_map(|field| model.get(*field).and_then(json_size_to_u64))
-        })
+    sceneworks_core::model_artifacts::artifact_selection::manifest_download_size_bytes(
+        model, download,
+    )
 }
 
 pub(super) fn model_size_estimation_disabled(_state: &AppState) -> bool {

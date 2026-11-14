@@ -69,6 +69,9 @@ const qwenEditCandlePath = fileURLToPath(
     import.meta.url,
   ),
 );
+const registrySpecsPath = fileURLToPath(
+  new URL("../../../config/manifests/registry/specs.json", import.meta.url),
+);
 const pulidMlxPath = fileURLToPath(
   new URL("../../../crates/sceneworks-worker/src/image_jobs/pulid.rs", import.meta.url),
 );
@@ -135,7 +138,10 @@ assertBackendCoverage(
 );
 
 const bespokePreviewRoutes = [
-  ...parseBespokePreviewRoutes(readFileSync(qwenEditCandlePath, "utf8")),
+  ...parseBespokePreviewRoutes(
+    readFileSync(qwenEditCandlePath, "utf8"),
+    JSON.parse(readFileSync(registrySpecsPath, "utf8")),
+  ),
   ...parsePulidPreviewRoutes(
     readFileSync(pulidMlxPath, "utf8"),
     readFileSync(pulidCandlePath, "utf8"),

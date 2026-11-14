@@ -1,7 +1,7 @@
 {
   "_comment": "Per-model loader-closure digests: the memory anchor currency key (sc-22511). An anchor is CURRENT while the digest it recorded still equals the digest here for its (model, backend lane). The unit is the source files the model's loader reaches, and nothing else — not the pin, not sibling models, not shared crates the loader never reaches. Regenerate when the pinned inference revision changes: node scripts/anchor-loader-closure.mjs --repo <inference> --write. A regeneration that leaves the digests unchanged is the expected case. A catalog alias (a model id the inference tree never names, such as z_image_edit) declares the engine id it resolves to as engineId; the alias is part of its hashed closure text.",
   "digestVersion": "anchor-loader-closure v2",
-  "inferenceRevision": "5d9ce2bdef9a3b8af4a2bd36e8e89c3aa179748f",
+  "inferenceRevision": "164dcb3199a52a17ca397955494d207da1e8e190",
   "models": {
     "bernini:candle": {
       "entryPoints": [
@@ -17966,8 +17966,8 @@
       "entryPoints": [
         "crates/media/candle-gen/candle-gen-krea/src/lib.rs"
       ],
-      "digest": "ee3eb02d07f03b368a0717fdd43d6924ddcbcf53348d05744cc498907b23b05c",
-      "closureFileCount": 418,
+      "digest": "5f9ec46b837ac69f74b6e2531de8329675c08426f9ebf68cb45889c4a48da4f6",
+      "closureFileCount": 420,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -18101,6 +18101,7 @@
         "crates/contracts/gen-core/src/sampling/unified.rs",
         "crates/contracts/gen-core/src/source_inventory.rs",
         "crates/contracts/gen-core/src/text_embed.rs",
+        "crates/contracts/gen-core/src/tier_integrity.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
         "crates/contracts/gen-core/src/train/aspect_ratio.rs",
@@ -18168,6 +18169,7 @@
         "crates/media/candle-gen/candle-gen-krea/src/config.rs",
         "crates/media/candle-gen/candle-gen-krea/src/control.rs",
         "crates/media/candle-gen/candle-gen-krea/src/control_provider.rs",
+        "crates/media/candle-gen/candle-gen-krea/src/control_registry.rs",
         "crates/media/candle-gen/candle-gen-krea/src/control_train.rs",
         "crates/media/candle-gen/candle-gen-krea/src/control_trainer.rs",
         "crates/media/candle-gen/candle-gen-krea/src/convert.rs",
@@ -18394,7 +18396,7 @@
         "crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-krea/src/model.rs"
       ],
-      "digest": "a43a977e2c6278b3547a7eeac4d7cc023ff3d246bdfe87651ecd3cdf877b307d",
+      "digest": "02303a674492511ab251740c26fe2eac8744552a8c586ea40bda2b29a43d8f8a",
       "closureFileCount": 531,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -18934,8 +18936,8 @@
       "entryPoints": [
         "crates/media/candle-gen/candle-gen-krea/src/lib.rs"
       ],
-      "digest": "1a9e15d4fdc6419a4c30779057ece3e572407da47d8acd28405795320abdc28b",
-      "closureFileCount": 418,
+      "digest": "0f464bc95f96f6d0a80f8bb4027978238ddc7b7eb67eb2a3ed5ab816a8733883",
+      "closureFileCount": 420,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -19069,6 +19071,7 @@
         "crates/contracts/gen-core/src/sampling/unified.rs",
         "crates/contracts/gen-core/src/source_inventory.rs",
         "crates/contracts/gen-core/src/text_embed.rs",
+        "crates/contracts/gen-core/src/tier_integrity.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
         "crates/contracts/gen-core/src/train/aspect_ratio.rs",
@@ -19136,6 +19139,7 @@
         "crates/media/candle-gen/candle-gen-krea/src/config.rs",
         "crates/media/candle-gen/candle-gen-krea/src/control.rs",
         "crates/media/candle-gen/candle-gen-krea/src/control_provider.rs",
+        "crates/media/candle-gen/candle-gen-krea/src/control_registry.rs",
         "crates/media/candle-gen/candle-gen-krea/src/control_train.rs",
         "crates/media/candle-gen/candle-gen-krea/src/control_trainer.rs",
         "crates/media/candle-gen/candle-gen-krea/src/convert.rs",
@@ -19362,7 +19366,7 @@
         "crates/media/mlx-gen/mlx-gen-krea/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-krea/src/model.rs"
       ],
-      "digest": "d43049d4caf45c19de9080f67c7dd7408f7c13ae4006e5400b855e5528a9e730",
+      "digest": "fa1167e62ae77003d024fc58a5e2c5e929ee90db3ae6d09308acb89ce08355fd",
       "closureFileCount": 531,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",

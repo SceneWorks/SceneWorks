@@ -570,17 +570,11 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
 // second load→strip→parse copy (sc-20529: its klein guards must be driven off the real builtin
 // entries, not a synthetic stand-in that can pass vacuously).
 pub(crate) fn builtin_models_manifest() -> Vec<Value> {
-    use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
-    use sceneworks_core::jsonc::strip_jsonc_comments;
-
-    let raw = BUILTIN_MANIFESTS
-        .iter()
-        .find(|(name, _)| *name == "builtin.models.jsonc")
-        .map(|(_, contents)| *contents)
-        .expect("builtin.models.jsonc present");
-    let manifest: Value =
-        serde_json::from_str(&strip_jsonc_comments(raw)).expect("builtin models parses as JSON");
-    manifest
+    // The production accessor: the shipped product rows with their typed memory evidence
+    // (`config/manifests/registry/evidence.json`) projected in, exactly what the API serves and the
+    // worker receives. The raw jsonc bytes no longer carry measured memory facts (SW-7031).
+    sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+        .expect("builtin.models.jsonc projects")
         .get("models")
         .and_then(Value::as_array)
         .expect("models array")

@@ -1,0 +1,612 @@
+{
+  "schemaVersion": 1,
+  "image": [
+    {
+      "id": "mage_flow_base",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "mage_flow",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "mage_flow_turbo",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "mage_flow_edit_base",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "mage_flow_edit",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "mage_flow_edit_turbo",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "z_image_turbo",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "z_image",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "z_image_edit",
+      "mlxRouted": true,
+      "candleRouted": false,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": false
+    },
+    {
+      "id": "flux_schnell",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": true,
+      "candleLora": true,
+      "candleQuantLora": false
+    },
+    {
+      "id": "flux_dev",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": true,
+      "candleLora": true,
+      "candleQuantLora": false
+    },
+    {
+      "id": "qwen_image",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "qwen_image_2_1",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "qwen_image_2_1_turbo",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "qwen_image_edit",
+      "mlxRouted": true,
+      "candleRouted": false,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": false,
+      "legacyAlias": true
+    },
+    {
+      "id": "qwen_image_edit_2509",
+      "mlxRouted": true,
+      "candleRouted": false,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": false,
+      "legacyAlias": true
+    },
+    {
+      "id": "qwen_image_edit_2511",
+      "mlxRouted": true,
+      "candleRouted": false,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": false
+    },
+    {
+      "id": "qwen_image_edit_2511_lightning",
+      "mlxRouted": true,
+      "candleRouted": false,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": false
+    },
+    {
+      "id": "flux2_klein_9b",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "flux2_klein_9b_kv",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "flux2_klein_9b_true_v2",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": true,
+      "candleQuantLora": false
+    },
+    {
+      "id": "flux2_dev",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "sdxl",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "realvisxl",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "illustrious_xl_v1",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "illustrious_xl_v2",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "realvisxl_lightning",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "instantid_realvisxl",
+      "mlxRouted": true,
+      "candleRouted": false,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": false
+    },
+    {
+      "id": "pulid_flux_dev",
+      "mlxRouted": true,
+      "candleRouted": false,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": false
+    },
+    {
+      "id": "chroma1_hd",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": true,
+      "candleLora": true,
+      "candleQuantLora": false
+    },
+    {
+      "id": "chroma1_base",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": true,
+      "candleLora": true,
+      "candleQuantLora": false
+    },
+    {
+      "id": "chroma1_flash",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": true,
+      "candleLora": true,
+      "candleQuantLora": false
+    },
+    {
+      "id": "sensenova_u1_8b",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": true,
+      "candleLora": false,
+      "candleQuantLora": false
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v2",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": true,
+      "candleLora": false,
+      "candleQuantLora": false
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v3",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": true,
+      "candleLora": false,
+      "candleQuantLora": false
+    },
+    {
+      "id": "sensenova_u1_8b_fast",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": true,
+      "candleLora": false,
+      "candleQuantLora": false
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v2_fast",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": true,
+      "candleLora": false,
+      "candleQuantLora": false
+    },
+    {
+      "id": "sensenova_u1_8b_infographic_v3_fast",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": true,
+      "candleLora": false,
+      "candleQuantLora": false
+    },
+    {
+      "id": "kolors",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "lens",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "lens_turbo",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "bernini_image",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "ideogram_4",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "ideogram_4_turbo",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "boogu_image",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": true,
+      "candleLora": false,
+      "candleQuantLora": false
+    },
+    {
+      "id": "boogu_image_turbo",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": true,
+      "candleLora": false,
+      "candleQuantLora": false
+    },
+    {
+      "id": "boogu_image_edit",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": true,
+      "candleLora": false,
+      "candleQuantLora": false
+    },
+    {
+      "id": "krea_2_turbo",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "krea_2_raw",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "sd3_5_large",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "sd3_5_large_turbo",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "sd3_5_medium",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "sana_1600m",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": false
+    },
+    {
+      "id": "sana_sprint_1600m",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": false
+    },
+    {
+      "id": "anima_base",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": true,
+      "candleQuantLora": false
+    },
+    {
+      "id": "anima_aesthetic",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": true,
+      "candleQuantLora": false
+    },
+    {
+      "id": "anima_turbo",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": true,
+      "candleQuantLora": false
+    },
+    {
+      "id": "moss_image_base",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": true,
+      "candleQuantLora": false
+    },
+    {
+      "id": "moss_image_sft",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": true,
+      "candleQuantLora": false
+    },
+    {
+      "id": "iris_3b",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "flux3_klein",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "flux3_klein_base",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": true
+    },
+    {
+      "id": "supra2_img",
+      "mlxRouted": true,
+      "candleRouted": true,
+      "candleQuant": false,
+      "candleLora": false,
+      "candleQuantLora": false
+    }
+  ],
+  "video": [
+    {
+      "id": "ltx_2_5",
+      "videoMlxRouted": true,
+      "candleVideoRouted": true,
+      "candleVideoI2v": false,
+      "candleVideoVace": false
+    },
+    {
+      "id": "ltx_2_3",
+      "videoMlxRouted": true,
+      "candleVideoRouted": true,
+      "candleVideoI2v": false,
+      "candleVideoVace": false
+    },
+    {
+      "id": "ltx_2_3_eros",
+      "videoMlxRouted": true,
+      "candleVideoRouted": false,
+      "candleVideoI2v": false,
+      "candleVideoVace": false
+    },
+    {
+      "id": "wan_2_2",
+      "videoMlxRouted": true,
+      "candleVideoRouted": true,
+      "candleVideoI2v": false,
+      "candleVideoVace": true
+    },
+    {
+      "id": "wan_2_2_t2v_14b",
+      "videoMlxRouted": true,
+      "candleVideoRouted": true,
+      "candleVideoI2v": false,
+      "candleVideoVace": true
+    },
+    {
+      "id": "wan_2_2_i2v_14b",
+      "videoMlxRouted": true,
+      "candleVideoRouted": true,
+      "candleVideoI2v": true,
+      "candleVideoVace": true
+    },
+    {
+      "id": "svd",
+      "videoMlxRouted": true,
+      "candleVideoRouted": true,
+      "candleVideoI2v": true,
+      "candleVideoVace": false
+    },
+    {
+      "id": "bernini",
+      "videoMlxRouted": true,
+      "candleVideoRouted": true,
+      "candleVideoI2v": false,
+      "candleVideoVace": false
+    },
+    {
+      "id": "scail2_14b",
+      "videoMlxRouted": true,
+      "candleVideoRouted": false,
+      "candleVideoI2v": false,
+      "candleVideoVace": false
+    },
+    {
+      "id": "mochi_1",
+      "videoMlxRouted": true,
+      "candleVideoRouted": true,
+      "candleVideoI2v": false,
+      "candleVideoVace": false,
+      "legacyAlias": true
+    },
+    {
+      "id": "krea_realtime_14b",
+      "videoMlxRouted": true,
+      "candleVideoRouted": false,
+      "candleVideoI2v": false,
+      "candleVideoVace": false
+    },
+    {
+      "id": "wan_2_2_vace_fun_14b",
+      "videoMlxRouted": true,
+      "candleVideoRouted": false,
+      "candleVideoI2v": false,
+      "candleVideoVace": false
+    },
+    {
+      "id": "minimax_h3",
+      "videoMlxRouted": true,
+      "candleVideoRouted": true,
+      "candleVideoI2v": false,
+      "candleVideoVace": false
+    },
+    {
+      "id": "minimax_h3_ref",
+      "videoMlxRouted": true,
+      "candleVideoRouted": true,
+      "candleVideoI2v": false,
+      "candleVideoVace": false
+    }
+  ]
+}

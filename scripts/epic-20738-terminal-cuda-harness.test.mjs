@@ -56,6 +56,7 @@ import {
   verifyArtifactUnchanged,
 } from "./epic-20738-terminal-cuda-harness.mjs";
 import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
+import { projectBuiltinMemoryEvidence } from "./lib/builtin-memory-evidence.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 
 const profile = () => structuredClone(loadProfile());
@@ -164,9 +165,10 @@ test("checked-in terminal profile is the exact serialized 19-cell campaign", asy
     ],
   );
 
-  const manifest = JSON.parse(stripJsoncComments(await readFile(
-    "config/manifests/builtin.models.jsonc", "utf8",
-  )));
+  const manifest = projectBuiltinMemoryEvidence(
+    JSON.parse(stripJsoncComments(await readFile("config/manifests/builtin.models.jsonc", "utf8"))),
+    JSON.parse(await readFile("config/manifests/registry/evidence.json", "utf8")),
+  );
   assert.doesNotThrow(() => validateManifestAuthorities(checked, manifest));
   for (const [modelId, currentRevision, legacyRevision, exactSizes] of [
     [
@@ -490,9 +492,10 @@ test("sparse execution lifetimes cover only 14, 18, and 19 while retaining share
 });
 
 test("profile validator rejects count, order, every semantic tuple mutation, blocked, and authority drift", async () => {
-  const manifest = JSON.parse(stripJsoncComments(await readFile(
-    "config/manifests/builtin.models.jsonc", "utf8",
-  )));
+  const manifest = projectBuiltinMemoryEvidence(
+    JSON.parse(stripJsoncComments(await readFile("config/manifests/builtin.models.jsonc", "utf8"))),
+    JSON.parse(await readFile("config/manifests/registry/evidence.json", "utf8")),
+  );
   const missing = profile();
   missing.cells.pop();
   assert.throws(() => validateProfile(missing), /exactly 19/);

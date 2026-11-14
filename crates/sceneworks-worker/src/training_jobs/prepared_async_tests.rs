@@ -477,6 +477,10 @@ async fn production_dry_run_preserves_summary_and_closes_prepared_inputs_without
     let api = ApiClient::new(&settings);
     let job: JobSnapshot =
         serde_json::from_value(crate::tests::job_snapshot_json("prepared-job", false)).unwrap();
+    assert!(
+        !settings.data_dir.join("loras").exists(),
+        "the fixture must start without training output"
+    );
     run_training_dry_run(&api, &settings, &job, &plan)
         .await
         .unwrap();

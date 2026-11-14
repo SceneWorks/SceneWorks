@@ -1616,30 +1616,31 @@ async fn a_real_timeline_export_mixes_the_harness_four_track_sequence() {
         .expect("the API serves");
     });
     let data_dir = harness.temp_dir.path().join("data");
-    let worker_settings = sceneworks_worker::Settings {
-        api_url: format!("http://127.0.0.1:{port}"),
-        access_token: None,
-        data_dir: data_dir.clone(),
-        resolved_cache: Default::default(),
-        config_dir: harness.temp_dir.path().join("config"),
-        worker_id: "real-utility-worker".to_owned(),
-        gpu_id: "cpu".to_owned(),
-        is_child_worker: true,
-        poll_seconds: 1,
-        heartbeat_seconds: 5,
-        shutdown_timeout_seconds: 1,
-        huggingface_base_url: "http://127.0.0.1:9".to_owned(),
-        huggingface_token: None,
-        credentials: Vec::new(),
-        max_lora_url_bytes: 1 << 30,
-        max_model_url_bytes: 1 << 30,
-        allow_private_lora_urls: false,
-        utility_workers: 1,
-        backend_mlx_enabled: false,
-        backend_candle_enabled: false,
-        external_model_roots: Vec::new(),
-        gpu_memory_limit_bytes: 0,
-    };
+    let mut worker_settings = crate::tests::support::test_worker_settings(
+        format!("http://127.0.0.1:{port}"),
+        &harness.state.settings,
+    );
+    worker_settings.access_token = None;
+    worker_settings.data_dir = data_dir.clone();
+    worker_settings.resolved_cache = Default::default();
+    worker_settings.config_dir = harness.temp_dir.path().join("config");
+    worker_settings.worker_id = "real-utility-worker".to_owned();
+    worker_settings.gpu_id = "cpu".to_owned();
+    worker_settings.is_child_worker = true;
+    worker_settings.poll_seconds = 1;
+    worker_settings.heartbeat_seconds = 5;
+    worker_settings.shutdown_timeout_seconds = 1;
+    worker_settings.huggingface_base_url = "http://127.0.0.1:9".to_owned();
+    worker_settings.huggingface_token = None;
+    worker_settings.credentials = Vec::new();
+    worker_settings.max_lora_url_bytes = 1 << 30;
+    worker_settings.max_model_url_bytes = 1 << 30;
+    worker_settings.allow_private_lora_urls = false;
+    worker_settings.utility_workers = 1;
+    worker_settings.backend_mlx_enabled = false;
+    worker_settings.backend_candle_enabled = false;
+    worker_settings.external_model_roots = Vec::new();
+    worker_settings.gpu_memory_limit_bytes = 0;
     // Poll the real worker on its own thread with the shipped worker entry's stack
     // (`run_on_worker_entry_thread`). Its future holds every platform-compiled job handler, and on
     // macOS (MLX handlers included) an unoptimized build overflows libtest's 2 MiB test thread.

@@ -449,7 +449,7 @@ pub(crate) async fn materialize_catalog_results(
         _ => {
             return Err(ApiError::bad_request(
                 "deduplicationPolicy must be content_and_perceptual or none",
-            ))
+            ));
         }
     };
     request.query.cursor = None;
@@ -1633,18 +1633,33 @@ pub(crate) async fn run_catalog_analysis(
         &mut payload,
     )
     .await?;
+    let portable_binding = crate::portable_admission::capture_portable_model_binding(
+        &state,
+        &JobType::CatalogAnalysis,
+        &payload,
+        &requested_gpu,
+    )
+    .await?
+    .map(serde_json::to_value)
+    .transpose()
+    .map_err(|error| ApiError::internal(format!("portable model binding serialize: {error}")))?;
     let job = crate::store_call(state.clone(), move |store, _timeout| {
-        store.create_job(CreateJob {
-            job_type: JobType::CatalogAnalysis,
-            project_id: None,
-            project_name: None,
-            payload,
-            requested_gpu,
-            source_job_id: None,
-            duplicate_of_job_id: None,
-            attempts: 1,
-            initial_status: None,
-        })
+        store.create_job_with_portable_binding(
+            CreateJob {
+                job_type: JobType::CatalogAnalysis,
+                project_id: None,
+                project_name: None,
+                payload,
+                requested_gpu,
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+                initial_status: None,
+            },
+            None,
+            None,
+            portable_binding.as_ref(),
+        )
     })
     .await?;
     crate::publish(&state, "job.updated", &job);

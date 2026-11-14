@@ -43,6 +43,7 @@ import jsonschema
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = ROOT / "config" / "manifests" / "builtin.models.jsonc"
 SCHEMA_PATH = ROOT / "packages" / "schemas" / "model-manifest.schema.json"
+EVIDENCE_PATH = ROOT / "config" / "manifests" / "registry" / "evidence.json"
 ENGINE_TABLE_PATH = ROOT / "crates" / "sceneworks-worker" / "src" / "engines.rs"
 WORKER_SOURCE_PATH = ROOT / "crates" / "sceneworks-worker" / "src"
 CONTROL_WEIGHTS_PATH = ROOT / "crates" / "sceneworks-core" / "src" / "control_weights.rs"
@@ -175,7 +176,50 @@ def _cached_json(path: Path) -> dict:
 
 
 def _load_builtin_models_manifest() -> dict:
-    return copy.deepcopy(_cached_jsonc(MANIFEST_PATH))
+    # Legacy structural audits exercise the effective catalog shape. The authored v2 file
+    # keeps only product fields; the core catalog projects these measured rows at load time.
+    manifest = copy.deepcopy(_cached_jsonc(MANIFEST_PATH))
+    evidence = _cached_json(EVIDENCE_PATH)
+    for model in manifest["models"]:
+        row = evidence.get(model["id"], {})
+        model.update(copy.deepcopy(row.get("model", {})))
+        for backend in ("mlx", "candle"):
+            if backend in row:
+                model[backend].update(copy.deepcopy(row[backend]))
+        for measured in row.get("downloads", []):
+            keys = ("provider", "repo", "revision", "variant", "files")
+            matches = [
+                download for download in model.get("downloads", [])
+                if all(download.get(key) == measured.get(key) for key in keys)
+                and ("platforms" not in measured or download.get("platforms") == measured["platforms"])
+            ]
+            assert len(matches) == 1, f"{model['id']}: ambiguous measured download"
+            matches[0]["footprint"].update(copy.deepcopy(measured["footprint"]))
+    manifest["schemaVersion"] = 1
+    return manifest
+
+
+def test_v2_product_manifest_keeps_memory_evidence_out_of_authored_rows() -> None:
+    product = _cached_jsonc(MANIFEST_PATH)
+    assert product["schemaVersion"] == 2
+    schema = _load_schema(SCHEMA_PATH)
+    assert not list(jsonschema.Draft202012Validator(schema).iter_errors(product))
+    projected = _load_builtin_models_manifest()["models"]
+    assert product["models"], "the v2 product manifest ships models"
+    assert len(product["models"]) == len(projected)
+    assert [model["id"] for model in product["models"]] == [model["id"] for model in projected]
+    measured = {"minMemoryGb", "minMemoryGbByTier", "memoryStrategyContract",
+                "memoryStrategyCapabilities", "memoryStrategyStructuralExemptions", "calibrations",
+                "vramGbByTier", "vramMeasuredPixels", "supportsSequentialOffload",
+                "sequentialPeakGb", "measured", "imageActivationGbPerMegapixel", "turboFit",
+                "control", "memoryDeclarationWithhold", "measuredSiblingActiveDiskFraction"}
+    for model in product["models"]:
+        assert "minMemoryGb" not in model
+        for backend in ("mlx", "candle"):
+            assert not (measured & model.get(backend, {}).keys()), model["id"]
+        for download in model.get("downloads", []):
+            assert not ({"residentMemoryBytes", "peakMemoryBytes", "measuredPixels"}
+                        & download.get("footprint", {}).keys()), model["id"]
 
 
 def _load_schema(path: Path) -> dict:

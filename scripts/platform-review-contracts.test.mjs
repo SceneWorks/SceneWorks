@@ -2639,7 +2639,7 @@ test("Docker relevance step consumes the exhaustive shared diff and fails safe o
 test("every release job is confined to refs/tags/v", async () => {
   const workflow = await source(".github/workflows/release.yml");
   const jobConditions = [...workflow.matchAll(/^\s{4}if:\s*(.+)$/gm)].map((match) => match[1]);
-  assert.equal(jobConditions.length, 3);
+  assert.equal(jobConditions.length, 4);
   for (const condition of jobConditions) {
     assert.match(condition, /startsWith\(github\.ref, 'refs\/tags\/v'\)/);
   }
@@ -2647,6 +2647,42 @@ test("every release job is confined to refs/tags/v", async () => {
     workflow.includes('if [[ "${TAG#v}" == *-* ]]; then'),
     "prerelease classification must use the validated v-tag",
   );
+});
+
+test("desktop builds run independently and publish signed assets after all succeed", async () => {
+  const workflow = await source(".github/workflows/release.yml");
+  for (const platform of ["macos", "windows", "linux"]) {
+    const job = workflowJob(workflow, platform);
+    assert.doesNotMatch(job, /^    needs:/m, `${platform} must start without waiting for another build`);
+    if (platform !== "macos") {
+      assert.doesNotMatch(job, /gh release (upload|download)/, `${platform} must defer shared manifest writes`);
+      const guard = job.indexOf("- name: Guard against NC model weights");
+      const pack = job.indexOf(`tar -cf release-${platform}.tar`);
+      assert.ok(guard >= 0 && pack > guard, `${platform} packages pass the weight guard before transfer`);
+      assert.match(job, /if-no-files-found: error/);
+    }
+  }
+  const publisher = workflowJob(workflow, "publish-desktop");
+  assert.match(publisher, /^    needs: \[macos, windows, linux\]$/m);
+  assert.doesNotMatch(publisher, /always\(\)|secrets\.(TAURI_SIGNING|APPLE_|AZURE_)/);
+  assert.match(publisher, /tar -xf release-artifacts\/windows\/release-windows.tar -C target\/release\/bundle/);
+  assert.match(publisher, /tar -xf release-artifacts\/linux\/release-linux.tar -C target\/release\/bundle/);
+  assert.ok(publisher.indexOf("--target windows-x86_64") < publisher.indexOf("--target linux-x86_64"));
+  assert.equal((publisher.match(/gh release download "\$TAG" -p latest.json --clobber/g) ?? []).length, 2);
+  assert.equal((publisher.match(/gh release upload "\$TAG" --clobber latest.json/g) ?? []).length, 2);
+});
+
+test("Linux release scan bounds the measured CUDA sidecar without changing other archive guards", async () => {
+  const guard = "Guard against NC model weights in the desktop bundle (sc-10526, sc-10551)";
+  const release = await source(".github/workflows/release.yml");
+  const job = workflowJob(release, "linux");
+  const step = workflowStep(job, guard);
+  assert.match(step, /check-no-nc-weights\.mjs --dir target\/release\/bundle --scan-archives --skip-uninspectable --max-entry-bytes 1610612736/);
+  assert.doesNotMatch(step, /--max-(?:archive-bytes|uncompressed|entries|depth)|continue-on-error/);
+  assert.ok(job.indexOf(`- name: ${guard}`) > job.indexOf("- name: Reject host NVIDIA drivers"));
+  for (const platform of ["macos", "windows"]) {
+    assert.doesNotMatch(workflowStep(workflowJob(release, platform), guard), /--max-entry-bytes/);
+  }
 });
 
 test("Lens smoke only terminates processes it started", async () => {
@@ -2781,17 +2817,8 @@ test("Rust Docker builders copy every production generated embed from sceneworks
   }
 });
 
-test("both Rust Docker builders carry the mechanically digested web capability sources", async () => {
+test("both Rust Docker builders carry typed registry inputs", async () => {
   const dockerfile = await source("docker/rust.Dockerfile");
-  const matrix = await source(
-    "crates/sceneworks-core/src/jobs_store/routing/matrix.rs",
-  );
-  const webEmbeds = [
-    ...matrix.matchAll(
-      /include_str!\(\s*"\.\.\/\.\.\/\.\.\/\.\.\/\.\.\/apps\/web\/src\/([^"\n]+)"\s*\)/g,
-    ),
-  ].map((match) => match[1]);
-  assert.ok(webEmbeds.length > 0, "matrix must retain its production web source inputs");
   const stage = (name) => {
     const heading = new RegExp(`^FROM [^\\r\\n]+ AS ${name}\\r?$`, "m").exec(
       dockerfile,
@@ -2804,12 +2831,9 @@ test("both Rust Docker builders carry the mechanically digested web capability s
   for (const name of ["builder", "candle-builder"]) {
     assert.match(
       stage(name),
-      /^COPY apps\/web\/src \.\/apps\/web\/src$/m,
-      `${name} must copy the whole owning source root`,
+      /^COPY config \.\/config$/m,
+      `${name} must copy the product manifest, evidence, and typed runtime exports`,
     );
-  }
-  for (const relative of webEmbeds) {
-    assert.doesNotMatch(relative, /(?:^|\/)\.\.(?:\/|$)/, relative);
   }
 });
 
@@ -3587,9 +3611,9 @@ test("Windows preserves fresh capability facts when content verification fails",
   // The whole scratch DIRECTORY, not an enumerated file list, and that distinction has already
   // been load-bearing once. The dumper writes three files — `capabilities.candle.json`,
   // `audio/capabilities.candle.json`, and the rich `runtime/capabilities.candle.json` — and the
-  // runtime descriptor is the one the backend capability matrix cannot be rebuilt without. The
-  // enumerated two-file spelling this used to assert predates that third file, so an artifact
-  // produced under it looks complete and silently cannot repair the matrix. Pin the directory and
+  // runtime descriptor is an input to the typed model registry. The enumerated two-file spelling
+  // this used to assert predates that third file, so an artifact produced under it looks complete
+  // and silently cannot repair the registry input. Pin the directory and
   // the artifact name the repair instructions actually tell you to download.
   assert.match(tail, /name: backend-capability-facts-candle/);
   assert.match(tail, /path: \$\{\{ runner\.temp \}\}\/engine-capability-facts-verify\s/);

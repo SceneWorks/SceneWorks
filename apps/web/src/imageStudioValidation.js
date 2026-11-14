@@ -94,6 +94,8 @@ export function imageGenerateValidation({
   // sc-25908). A pre-computed, user-facing ERROR string (or null): the enqueue gate 400s the
   // request, so the dead Generate button must say why before the click.
   referenceOverflowError = null,
+  imageReferenceError = null,
+  imageReferencePending = false,
   // A restored alternate decoder cannot be reconciled or safely omitted until the platform
   // capability response identifies the active engine. Native selections never set this gate.
   decoderCapabilitiesPending = false,
@@ -103,6 +105,7 @@ export function imageGenerateValidation({
   restorePlan = null,
 } = {}) {
   const issues = [];
+  issues.push(...imageReferenceIssues(imageReferenceError, imageReferencePending));
   if (!activeProject) {
     issues.push(issue.requirement("project", "Open a project to generate"));
   }
@@ -188,6 +191,8 @@ export function batchResolutionMessage({ width, height } = {}, { min, max, step 
 // prompt" hint is an empty-state affordance the panel renders on its own.
 export function imageBatchValidation({
   activeProject,
+  imageReferenceError = null,
+  imageReferencePending = false,
   batchStructuredExpandBlocked,
   batchTotal,
   missingKeys = [],
@@ -206,6 +211,7 @@ export function imageBatchValidation({
   restorePlan = null,
 } = {}) {
   const issues = [];
+  issues.push(...imageReferenceIssues(imageReferenceError, imageReferencePending));
   if (!activeProject) {
     issues.push(issue.requirement("project", "Open a project to run a batch"));
   }
@@ -247,4 +253,10 @@ export function imageBatchValidation({
     issues.push(issue.requirement("prompts", "Add at least one prompt to run a batch."));
   }
   return issues;
+}
+
+function imageReferenceIssues(error, pending) {
+  if (error) return [issue.error("imageReference", error)];
+  if (pending) return [issue.requirement("imageReference", "Checking the reference image…")];
+  return [];
 }

@@ -299,6 +299,128 @@ class FunctionalAdmissionTests(unittest.TestCase):
         self.assertTrue(result["timeout"]); self.assertTrue(result["owned_tree_empty"])
 
 
+def fake_smi_xml(gpu1_used, processes1, gpu0_used=50220, gpu0_processes=(("40052", "C", "N/A"),)):
+    """Shape of `nvidia-smi -q -x` on the Windows host: GPU0 at bus 21, display GPU1 at bus C1."""
+    def gpu(bus, uuid, used, attached, processes):
+        rows = "".join(f"<process_info><pid>{pid}</pid><type>{kind}</type><process_name>C:\\x\\p{pid}.exe</process_name>"
+                       f"<used_memory>{memory}</used_memory></process_info>" for pid, kind, memory in processes)
+        return (f'<gpu id="{bus}"><product_name>NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition</product_name>'
+                f"<display_attached>{attached}</display_attached><display_active>Disabled</display_active>"
+                f"<driver_model><current_dm>WDDM</current_dm></driver_model><uuid>{uuid}</uuid>"
+                f"<fb_memory_usage><total>97887 MiB</total><used>{used} MiB</used><free>{97887 - used} MiB</free></fb_memory_usage>"
+                f"<utilization><gpu_util>12 %</gpu_util></utilization><processes>{rows}</processes></gpu>")
+    return ("<nvidia_smi_log>" + gpu("00000000:21:00.0", "GPU-one", gpu0_used, "No", gpu0_processes)
+            + gpu("00000000:C1:00.0", "GPU-two", gpu1_used, "Yes", processes1) + "</nvidia_smi_log>")
+
+
+DISPLAY = [(str(pid), "C+G", "N/A") for pid in (768, 13284, 28124, 39752)]
+
+
+class SharedDisplayAdmissionTests(unittest.TestCase):
+    """Fake nvidia-smi output only: the shared-display policy for the Tier 2 A/B actor."""
+    environment = dict(FunctionalAdmissionTests.environment)
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="shared-display-", dir=HERE)
+        self.addCleanup(self.temp.cleanup)
+        self.out = Path(self.temp.name)
+
+    def guard_for(self, used_series, processes1, utilization=12):
+        """A guard whose inventory replays one fake nvidia-smi snapshot per call (CSV rows + XML file)."""
+        calls = {"n": 0}
+        guard = Mock()
+        def inventory(out, label, deadline):
+            used = used_series(calls["n"]) if callable(used_series) else used_series[min(calls["n"], len(used_series) - 1)]
+            calls["n"] += 1
+            (out / f"{label}-nvidia-smi.xml").write_text(fake_smi_xml(used, processes1), encoding="utf-8")
+            devices = [dict(index=0, uuid="GPU-one", total_mib=97887, used_mib=50220, utilization_percent=99),
+                       dict(index=1, uuid="GPU-two", total_mib=97887, used_mib=used, utilization_percent=utilization)]
+            processes = [["GPU-one", "40052", "p40052.exe", "C"]] + [["GPU-two", pid, f"p{pid}.exe", kind] for pid, kind, _ in processes1]
+            return devices, processes
+        guard.inventory.side_effect = inventory
+        guard.idle.side_effect = shared.component("veda_cuda_guard.py", shared.GUARD_SHA).idle
+        guard.sample_baseline.side_effect = AssertionError("shared-display never uses the strict benchmark baseline")
+        return guard
+
+    def claim(self, guard, deadline=60, policy=None, min_free_mib=75776):
+        class Locker:
+            LK_NBLCK, LK_UNLCK = 2, 0
+            def locking(self, *_): pass
+        now = [0]
+        result = shared.claim_uuids(["GPU-two"], guard, self.out, deadline, self.out, Locker(),
+            required_indices={"GPU-two": 1}, admission_policy=policy or shared.SHARED_DISPLAY_POLICY,
+            clock=lambda: now[0], sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+            min_free_mib=min_free_mib)
+        shared.release_all(result[1], Locker())
+        return result
+
+    def window(self):
+        return json.loads((self.out / "claimed-device-1-shared-window.json").read_text())
+
+    def test_display_only_baseline_with_a_context_holder_is_admitted(self):
+        # Run 43287950598 at lease start: 5847 MiB used, 12% util, 25 display processes and one
+        # compute context (WDDM per-process memory N/A).
+        guard = self.guard_for([5847] * 10, DISPLAY + [("40068", "C", "N/A")])
+        selected, _, baselines, _ = self.claim(guard)
+        self.assertEqual(selected[0]["uuid"], "GPU-two")
+        summary = baselines["GPU-two"]
+        self.assertEqual(summary["baseline_used_mib"], 5847); self.assertEqual(summary["free_mib"], 97887 - 5847)
+        self.assertFalse(summary["per_process_memory_reported"])
+        self.assertTrue(self.window()["admitted"])
+        guard.sample_baseline.assert_not_called()
+
+    def test_large_foreign_compute_footprint_is_refused(self):
+        # Run 43287950598 at cancel: 21131 MiB used with a foreign compute process present.
+        guard = self.guard_for([21131] * 10, DISPLAY + [("40068", "C", "N/A")])
+        with self.assertRaisesRegex(TimeoutError, "shared display GPU never became quiet"):
+            self.claim(guard, deadline=30)
+        self.assertFalse(self.window()["admitted"])
+        self.assertTrue(any("foreign compute process present" in reason for reason in self.window()["reasons"]))
+        # Where the driver does report per-process memory, a 4 GiB foreign job refuses even when small overall.
+        guard = self.guard_for([6000] * 10, DISPLAY + [("777", "C", "4096 MiB")])
+        with self.assertRaises(TimeoutError): self.claim(guard, deadline=30)
+        self.assertTrue(any("pid 777 uses 4096 MiB" in reason for reason in self.window()["reasons"]))
+
+    def test_growing_or_unstable_usage_and_too_little_free_memory_are_refused(self):
+        # A foreign job that keeps growing or oscillating never settles, so every window refuses.
+        for series, needle in [(lambda n: 6000 + 20 * n, "growing"),
+                               (lambda n: 6000 + 600 * (n % 2), "unstable"),
+                               ([30000] * 10, "free")]:
+            guard = self.guard_for(series, DISPLAY)
+            with self.assertRaises(TimeoutError): self.claim(guard, deadline=30)
+            self.assertTrue(any(needle in reason for reason in self.window()["reasons"]), (needle, self.window()))
+        guard = self.guard_for([5847] * 10, DISPLAY, utilization=45)
+        with self.assertRaises(TimeoutError): self.claim(guard, deadline=30)
+
+    def test_strict_idle_is_unchanged_for_every_other_caller(self):
+        guard = self.guard_for([5847] * 10, DISPLAY)
+        with self.assertRaisesRegex(TimeoutError, "lock/idle wait"):
+            self.claim(guard, deadline=5, policy=shared.STRICT_POLICY, min_free_mib=None)
+        guard.sample_baseline.assert_not_called()  # never reached: strict refuses the display GPU first
+        shared.require_admission_policy(shared.SHARED_DISPLAY_POLICY, "tier2-ab-cuda", self.environment, None, "0", None)
+        for actor, environment in [("load-progress-acceptance", self.environment), ("legacy-actor", self.environment),
+                                   ("tier2-ab-cuda", dict(self.environment, GITHUB_EVENT_NAME="push")),
+                                   ("tier2-ab-cuda", dict(self.environment, GITHUB_WORKFLOW_REF="SceneWorks/SceneWorks/.github/workflows/windows-candle.yml@x")),
+                                   ("tier2-ab-cuda", dict(self.environment, CUDA_VISIBLE_DEVICES="0"))]:
+            with self.assertRaises(RuntimeError): shared.require_admission_policy(shared.SHARED_DISPLAY_POLICY, actor, environment, None, "0", None)
+        with self.assertRaises(RuntimeError):
+            shared.require_admission_policy(shared.SHARED_DISPLAY_POLICY, "tier2-ab-cuda", self.environment, "1", "0", None)
+        with self.assertRaisesRegex(RuntimeError, "needs --min-free-mib"):
+            self.claim(self.guard_for([5847] * 10, DISPLAY), min_free_mib=None)
+
+    def test_receipt_identities_name_both_gpus_with_display_and_process_types(self):
+        rows = shared.gpu_identities(fake_smi_xml(5847, DISPLAY + [("40068", "C", "N/A")]))
+        self.assertEqual([(row["pci_bus_id"], row["uuid"], row["display_attached"]) for row in rows],
+                         [("00000000:21:00.0", "GPU-one", "No"), ("00000000:C1:00.0", "GPU-two", "Yes")])
+        self.assertEqual([p["type"] for p in rows[1]["processes"]].count("C+G"), 4)
+        self.assertEqual(shared.process_memory_mib(fake_smi_xml(1, [("9", "C", "300 MiB"), ("8", "C", "N/A")])),
+                         {("GPU-one", "40052"): None, ("GPU-two", "9"): 300, ("GPU-two", "8"): None})
+        receipt = shared.resource_receipt("tier2-ab-cuda", ["node"], shared.SHARED_DISPLAY_POLICY)
+        self.assertTrue(receipt["shared_device"]); self.assertIn("baseline", receipt["observation_note"])
+        shared.complete_resource(receipt, {"returncode": 0, "timeout": False, "owned_tree_empty": True}, [], Mock(), self.out, {}, shared.SHARED_DISPLAY_POLICY)
+        self.assertTrue(receipt["resource_completed"]); self.assertIs(receipt["post_child_idle_verified"], False)
+
+
 class HostServiceTransactionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="service-unit-", dir=HERE)

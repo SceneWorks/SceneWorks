@@ -383,7 +383,7 @@ async fn adapter_import_cpu_contract() {
         assert!(registered.capabilities.contains(&WorkerCapability::Cpu));
         assert!(registered.capabilities.contains(&WorkerCapability::LoraImport));
         assert!(!registered.capabilities.contains(&WorkerCapability::Gpu));
-        let (status, claimed) = request(app.clone(), "POST", "/api/v1/jobs/claim", json!({"workerId":utility.worker_id})).await;
+        let (status, claimed) = request(app.clone(), "POST", "/api/v1/jobs/claim", with_test_worker_proof(json!({"workerId":utility.worker_id}), &settings, &utility.worker_id)).await;
         assert_eq!(status, StatusCode::OK, "{claimed}");
         assert_eq!(claimed["job"]["id"], job["id"]);
         assert_eq!(claimed["job"]["workerId"], utility.worker_id);
@@ -532,27 +532,38 @@ fn pre_model_library_and_dispatch_contracts() {
         .name(sceneworks_worker::WORKER_ENTRY_THREAD_NAME.to_owned())
         .stack_size(sceneworks_worker::WORKER_ENTRY_STACK_BYTES)
         .spawn(|| {
+            let temp = tempfile::tempdir().unwrap();
+            let settings = super::support::test_settings(&temp);
+            let _hf =
+                super::support::pin_hf_hub_cache(&settings.data_dir.join("cache/huggingface/hub"));
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("CPU dispatch runtime builds")
-                .block_on(pre_model_library_and_dispatch_cpu_contract());
+                .block_on(pre_model_library_and_dispatch_cpu_contract(temp, settings));
         })
         .expect("CPU dispatch test thread spawns")
         .join()
         .expect("CPU dispatch test thread joins");
 }
 
-async fn pre_model_library_and_dispatch_cpu_contract() {
+async fn pre_model_library_and_dispatch_cpu_contract(
+    _temp: tempfile::TempDir,
+    settings: crate::Settings,
+) {
     use super::moss_training_acceptance::{seed_acceptance_manifests, worker_settings};
     use super::support::*;
+    use sceneworks_core::model_artifacts::portable_binding::{
+        portable_file_ledger_sha256, PortableArtifactFile, PortableSourceClaim,
+        PortableSourceProvenance,
+    };
     use sceneworks_worker::test_support as native;
     training_library_resolves_declared_final_file_by_filesystem_identity();
     custom_adapter_witness_requires_exact_provider_identity_and_complete_apply_report();
     let (dispatcher_bytes, wrapper_bytes) = native::acceptance_utility_future_sizes();
-    let temp = tempfile::tempdir().unwrap();
-    let settings = test_settings(&temp);
     seed_acceptance_manifests(&settings).unwrap();
+    seed_pinned_training_base_fixture(&settings.data_dir, "moss_image_base");
+    seed_pinned_training_base_fixture(&settings.data_dir, "moss_image_sft");
     // Literal installed local adapters exercise the shipped catalog and API gate only.
     let mut adapters = Vec::new();
     for parent in ["base", "sft"] {
@@ -582,7 +593,7 @@ async fn pre_model_library_and_dispatch_cpu_contract() {
         serde_json::to_vec(&json!({"schemaVersion":1,"loras":adapters})).unwrap(),
     )
     .unwrap();
-    let app = create_app(settings.clone()).unwrap();
+    let (app, _state) = create_training_fixture_app_with_state(settings.clone()).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
@@ -597,6 +608,48 @@ async fn pre_model_library_and_dispatch_cpu_contract() {
     let mut worker = worker_settings(url, &settings, "cpu".into());
     worker.backend_mlx_enabled = false;
     worker.backend_candle_enabled = false;
+    let claims = adapters
+        .iter()
+        .map(|adapter| {
+            let id = adapter["id"].as_str().unwrap();
+            let path = settings
+                .data_dir
+                .join(adapter["source"]["path"].as_str().unwrap());
+            let file = PortableArtifactFile {
+                relative_path: path.file_name().unwrap().into(),
+                size_bytes: std::fs::metadata(&path).unwrap().len(),
+                sha256: format!(
+                    "sha256:{}",
+                    sceneworks_core::hashing::sha256_file(&path).unwrap()
+                ),
+            };
+            let ledger = portable_file_ledger_sha256(std::slice::from_ref(&file)).unwrap();
+            let source_id = sceneworks_core::portable_sources::registered_digest_claim_id(
+                "lora", id, None, &ledger,
+            )
+            .unwrap();
+            PortableSourceClaim::new(
+                source_id,
+                PortableSourceProvenance::OperatorOverride,
+                vec![file],
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let mut registration = portable_test_worker_registration(
+        &worker.worker_id,
+        &["gpu", "mlx", "image_generate"],
+        TestPortableRoute::MlxMacos,
+    );
+    registration["portableSourceClaims"] = json!(claims);
+    let (status, registered) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        registration,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{registered}");
     let (status, project) =
         crate::tests::support::create_project(app.clone(), &"CPU dispatcher refusal").await;
     assert_eq!(status, StatusCode::CREATED, "{project}");
@@ -656,7 +709,19 @@ async fn pre_model_library_and_dispatch_cpu_contract() {
             json!({"projectId":project["id"],"model":"moss_image_base","prompt":"metadata-only refusal","width":256,"height":256})).await;
         assert_eq!(status, StatusCode::CREATED, "{submitted}");
         let id = submitted["id"].as_str().unwrap();
-        claim_job_as_worker(&app, id, &worker.worker_id, &["gpu", "image_generate"]).await;
+        let (status, claimed) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/jobs/claim",
+            with_test_worker_proof(
+                portable_test_worker_claim(&worker.worker_id, TestPortableRoute::MlxMacos),
+                &settings,
+                &worker.worker_id,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{claimed}");
+        assert_eq!(claimed["job"]["id"], id, "{claimed}");
         let (status, claimed) = request(
             app.clone(),
             "GET",

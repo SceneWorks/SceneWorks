@@ -28,6 +28,8 @@ impl ControlLadderContext<'_> {
                 // the request geometry is off the measured cell (every measured candidate was
                 // structurally excluded there), or the selected rung has no measured row at all.
                 estimate_scoped: request_geometry != measured_geometry
+                    || self.adapter_gb > 0.0
+                    || !self.runtime_verified
                     || !measured
                         .iter()
                         .any(|(strategy, _)| *strategy == selection.strategy),
@@ -35,12 +37,17 @@ impl ControlLadderContext<'_> {
             Selection::Reject {
                 needed_gb,
                 available_gb,
-            } => KreaControlFit::TooBig {
-                // Preserve the legacy outward-facing admission numbers while shared Budget arithmetic
-                // models the same headroom explicitly.
-                needed_gb: needed_gb + HEADROOM_GB,
-                available_gb: available_gb + HEADROOM_GB,
-            },
+            } if u64::from(request_geometry.width) * u64::from(request_geometry.height)
+                <= u64::from(measured_geometry.width) * u64::from(measured_geometry.height)
+                && self.adapter_gb == 0.0 =>
+            {
+                KreaControlFit::TooBig {
+                    // Preserve the legacy outward-facing admission numbers while shared Budget arithmetic
+                    // models the same headroom explicitly.
+                    needed_gb: needed_gb + HEADROOM_GB,
+                    available_gb: available_gb + HEADROOM_GB,
+                }
+            }
             // sc-18097 retired the `sequential_peak_gb.is_none()` ⇒ `Fits` arm that used to sit here —
             // the fail-open that silently ADMITTED sequential staging for a cell with no staged
             // measurement. With current evidence inside the measured envelope, every implemented rung
@@ -50,8 +57,12 @@ impl ControlLadderContext<'_> {
             // for the cases the floors deliberately do not cover (superseded evidence, unverified
             // runtime, adapters, geometry above the measured envelope), where the pre-18097
             // best-effort never-reject contract still stands — now uniformly as `BestEffort`, never a
-            // silent `Fits`.
-            Selection::Unverified { .. } => {
+            // silent `Fits`. Adapter and larger-resolution estimates can now select a faster path,
+            // while their no-fit result still preserves the recoverable fallback.
+            // An extrapolated scalar floor can admit a roomy device, but it cannot prove that a
+            // bounded high-resolution render is impossible. Keep the recoverable fallback if none
+            // of those conservative estimates fit instead of refusing a previously runnable job.
+            Selection::Unverified { .. } | Selection::Reject { .. } => {
                 let (strategy, measured_peak_gb) = measured
                     .iter()
                     .min_by(|left, right| left.1.total_cmp(&right.1))

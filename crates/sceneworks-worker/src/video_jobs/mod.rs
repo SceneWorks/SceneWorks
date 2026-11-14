@@ -1516,10 +1516,10 @@ pub(crate) fn runtime_descriptor_engine_ids(model: &str, mode: &str) -> Vec<&'st
 // injected by the callers, never re-branched at runtime.
 // ---------------------------------------------------------------------------
 
-/// At most 5 user LoRAs per job (mirrors the image path's `MAX_JOB_LORAS`). Shared by every
+/// The shared per-job LoRA limit, including builtins. Shared by every
 /// dense (single-transformer) video family on both backends.
 #[cfg(native_lane)]
-const MAX_JOB_LORAS: usize = 5;
+const MAX_JOB_LORAS: usize = sceneworks_core::lora_family::MAX_JOB_LORAS;
 
 /// The trimmed `negative_prompt`, or `None` when empty/whitespace — the single source for the
 /// idiom the video dispatchers all repeated (sc-8830). Empty negatives must be `None`, not

@@ -149,7 +149,12 @@ pub(crate) fn requested_tier_key(
     if nvfp4 {
         return NVFP4_TIER;
     }
-    let raw = advanced.get("mlxQuantize").and_then(quant_int).or_else(|| {
+    let raw = match sceneworks_core::payload_util::quant_selection(advanced) {
+        sceneworks_core::payload_util::QuantSelection::Explicit(bits)
+        | sceneworks_core::payload_util::QuantSelection::Bound(bits) => Some(bits),
+        _ => None,
+    }
+    .or_else(|| {
         manifest_entry
             .get("mlx")
             .and_then(|mlx| mlx.get("quantize"))

@@ -244,6 +244,27 @@ pub fn retain_downloads_for_os(model: &mut Value, os: &str) {
     );
 }
 
+/// The declared size of one download row: the row's own `estimatedSizeBytes` /
+/// `downloadSizeBytes` / `sizeBytes` (in that order), then the same keys on the model as legacy
+/// fallback. The catalog's per-variant `downloadSizeBytes` and memory guidance both read this.
+pub fn manifest_download_size_bytes(model: &Value, download: &Value) -> Option<u64> {
+    const SIZE_FIELDS: [&str; 3] = ["estimatedSizeBytes", "downloadSizeBytes", "sizeBytes"];
+    SIZE_FIELDS
+        .iter()
+        .find_map(|field| {
+            download
+                .get(*field)
+                .and_then(crate::payload_util::json_size_to_u64)
+        })
+        .or_else(|| {
+            SIZE_FIELDS.iter().find_map(|field| {
+                model
+                    .get(*field)
+                    .and_then(crate::payload_util::json_size_to_u64)
+            })
+        })
+}
+
 /// The model's canonical (default-or-first) primary download entry.
 pub fn model_download(model: &Value) -> Option<Value> {
     let downloads = model.get("downloads")?.as_array()?;
@@ -672,6 +693,214 @@ pub fn selected_model_artifact_closure_with_choices(
     choices: &BTreeMap<String, String>,
 ) -> Value {
     select_model_artifact_closure(model, platform, requested_variant, Some(choices))
+}
+
+/// Select the exact sources a queued job will open, including request-selected companion sources.
+pub fn selected_portable_model_artifact_closure(
+    model: &Value,
+    backend: &str,
+    platform: &str,
+    requested_variant: Option<&str>,
+    payload: &Map<String, Value>,
+) -> Result<Value, String> {
+    let model_id = model.get("id").and_then(Value::as_str);
+    if model_id == payload.get("model").and_then(Value::as_str)
+        && crate::portable_sources::krea_convrot_requested(
+            model_id.unwrap_or_default(),
+            backend,
+            platform,
+            payload
+                .get("advanced")
+                .and_then(Value::as_object)
+                .and_then(|advanced| advanced.get("convRot")),
+        )
+    {
+        let mut available = model.clone();
+        retain_downloads_for_os(&mut available, platform);
+        let base = available
+            .get("downloads")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|row| {
+                row.get("repo").and_then(Value::as_str) == Some("SceneWorks/krea-2-turbo-mlx")
+                    && row.get("variant").and_then(Value::as_str) == Some("bf16")
+                    && row.get("revision").and_then(Value::as_str).is_some()
+                    && row.get("files").and_then(Value::as_array).is_some()
+            })
+            .ok_or("Krea ConvRot has no pinned bf16 base declaration")?;
+        let mut base = base.clone();
+        let fields = base
+            .as_object_mut()
+            .ok_or("Krea ConvRot base declaration is invalid")?;
+        fields.insert("coRequisite".to_owned(), Value::Bool(true));
+        fields.insert(
+            "componentId".to_owned(),
+            Value::String("krea_convrot_base".to_owned()),
+        );
+        let mut selected = selected_model_artifact_closure(model, platform, Some("int8-convrot"));
+        let downloads = selected
+            .get_mut("downloads")
+            .and_then(Value::as_array_mut)
+            .ok_or("Krea ConvRot has no selected downloads")?;
+        if !downloads.iter().any(|row| {
+            row.get("repo").and_then(Value::as_str) == Some("SceneWorks/krea-2-turbo-int8-convrot")
+                && row.get("variant").and_then(Value::as_str) == Some("int8-convrot")
+                && !is_co_requisite_download(row)
+        }) {
+            return Err("Krea ConvRot checkpoint is unavailable on this route".to_owned());
+        }
+        downloads.push(base);
+        return Ok(selected);
+    }
+    if model.get("id").and_then(Value::as_str) != Some("yue2") {
+        return Ok(selected_model_artifact_closure(
+            model,
+            platform,
+            requested_variant,
+        ));
+    }
+    let mut requested = BTreeMap::new();
+    if let Some(block) = payload.get("yue2").filter(|block| !block.is_null()) {
+        let decoder = block
+            .as_object()
+            .ok_or("YuE2 request block is not an object")?
+            .get("decoder")
+            .filter(|decoder| !decoder.is_null());
+        if let Some(decoder) = decoder {
+            let option = decoder
+                .as_str()
+                .ok_or("YuE2 decoder choice is not a string")?;
+            requested.insert("decoder".to_owned(), option.to_owned());
+        }
+    }
+    let choices = resolve_co_requisite_choices(model, requested_variant, &requested)
+        .map_err(|error| error.to_string())?;
+    Ok(selected_model_artifact_closure_with_choices(
+        model,
+        platform,
+        requested_variant,
+        &choices,
+    ))
+}
+
+pub fn selected_portable_requirements_for_model(
+    model: &Value,
+    backend: &str,
+    platform: &str,
+    requested_variant: Option<&str>,
+    payload: &Map<String, Value>,
+    data_dir: &Path,
+) -> Result<SelectedRequirements, String> {
+    let selected = selected_portable_model_artifact_closure(
+        model,
+        backend,
+        platform,
+        requested_variant,
+        payload,
+    )?;
+    Ok(selected_requirements_for_closure(&selected, data_dir))
+}
+
+/// Installed base components opened alongside an imported checkpoint. The imported checkpoint
+/// remains the job's primary source; this closure supplies the separate resident-base plan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResidentBaseShape {
+    FullTier,
+    ComponentsOnly,
+}
+
+pub struct PlanBackedResidentBase {
+    pub family: &'static str,
+    pub base_model_id: &'static str,
+    pub tier: &'static str,
+    pub shape: ResidentBaseShape,
+}
+
+pub const PLAN_BACKED_RESIDENT_BASE_MODELS: &[PlanBackedResidentBase] = &[
+    PlanBackedResidentBase {
+        family: "krea_2",
+        base_model_id: "krea_2_turbo",
+        tier: "bf16",
+        shape: ResidentBaseShape::FullTier,
+    },
+    PlanBackedResidentBase {
+        family: "mage-flow",
+        base_model_id: "mage_flow_base",
+        tier: "bf16",
+        shape: ResidentBaseShape::ComponentsOnly,
+    },
+];
+
+pub fn selected_resident_base_closure_for_row(
+    base_entry: &Value,
+    tier: &str,
+    shape: ResidentBaseShape,
+    platform: &str,
+) -> Option<Value> {
+    match shape {
+        ResidentBaseShape::FullTier => Some(selected_model_artifact_closure(
+            base_entry,
+            platform,
+            Some(tier),
+        )),
+        ResidentBaseShape::ComponentsOnly => {
+            let mut platform_entry = base_entry.clone();
+            retain_downloads_for_os(&mut platform_entry, platform);
+            let mut rows: Vec<Value> = Vec::new();
+            for download in model_co_requisite_downloads_for_variant(&platform_entry, Some(tier))
+                .into_iter()
+                .filter(|download| download.get("required").and_then(Value::as_str) != Some("soft"))
+            {
+                let repository = download.get("repo").and_then(Value::as_str)?;
+                let files = download.get("files").and_then(Value::as_array)?;
+                match rows
+                    .iter_mut()
+                    .find(|held| held.get("repo").and_then(Value::as_str) == Some(repository))
+                {
+                    Some(held) => held
+                        .get_mut("files")?
+                        .as_array_mut()?
+                        .extend(files.iter().cloned()),
+                    None => rows.push(download),
+                }
+            }
+            // Requirements need one primary, but this is a component of the imported job. Do
+            // not put the base model id on the synthetic entry: component receipts can be written
+            // by any sibling Mage card.
+            rows.first_mut()?.as_object_mut()?.remove("coRequisite");
+            Some(serde_json::json!({ "downloads": rows }))
+        }
+    }
+}
+
+pub fn selected_resident_base_closure(entry: &Value, platform: &str) -> Option<Value> {
+    let family = entry.get("family")?.as_str()?.trim();
+    let row = PLAN_BACKED_RESIDENT_BASE_MODELS
+        .iter()
+        .find(|row| row.family == family)?;
+    let base =
+        Value::Object(crate::builtin_manifests::builtin_model_entry(row.base_model_id)?.clone());
+    selected_resident_base_closure_for_row(&base, row.tier, row.shape, platform)
+}
+
+/// The same selected rows, represented as supplemental members of the imported model binding.
+pub fn resident_base_component_downloads(closure: &Value) -> Vec<Value> {
+    closure
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|row| is_supported_model_download(row))
+        .filter(|row| row.get("required").and_then(Value::as_str) != Some("soft"))
+        .cloned()
+        .map(|mut row| {
+            row.as_object_mut()
+                .expect("selected download is an object")
+                .insert("coRequisite".to_owned(), Value::Bool(true));
+            row
+        })
+        .collect()
 }
 
 fn select_model_artifact_closure(
@@ -1593,6 +1822,119 @@ mod tests {
             repos(closure["downloads"].as_array().unwrap()),
             ["m-a-p/YuE2-3B", "m-a-p/YuE2-Vae-legacy"]
         );
+    }
+
+    #[test]
+    fn portable_yue2_choice_matches_the_queued_decoder() {
+        let yue2 = builtin_yue2();
+        let selected = |decoder: Value| {
+            let payload = json!({"model":"yue2","yue2":{"decoder":decoder}});
+            selected_portable_model_artifact_closure(
+                &yue2,
+                "cpu",
+                "macos",
+                Some("bf16"),
+                payload.as_object().unwrap(),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            repos(selected(json!("legacy"))["downloads"].as_array().unwrap()),
+            ["m-a-p/YuE2-3B", "m-a-p/YuE2-Vae-legacy"]
+        );
+        assert_eq!(
+            repos(selected(json!("standard"))["downloads"].as_array().unwrap()),
+            ["m-a-p/YuE2-3B", "m-a-p/YuE2-Vae"]
+        );
+        let invalid = json!({"model":"yue2","yue2":{"decoder":"unknown"}});
+        assert!(selected_portable_model_artifact_closure(
+            &yue2,
+            "cpu",
+            "macos",
+            Some("bf16"),
+            invalid.as_object().unwrap(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn portable_candle_krea_convrot_freezes_checkpoint_and_dense_base() {
+        let manifest = crate::builtin_manifests::builtin_manifest("builtin.models.jsonc").unwrap();
+        let model = manifest["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["id"] == "krea_2_turbo")
+            .unwrap();
+        let request = json!({"model":"krea_2_turbo","advanced":{"convRot":true}});
+        assert_eq!(
+            requested_runtime_variant(request.as_object().unwrap()),
+            None
+        );
+        let selected = selected_portable_model_artifact_closure(
+            model,
+            "candle",
+            "linux",
+            None,
+            request.as_object().unwrap(),
+        )
+        .unwrap();
+        let rows = selected["downloads"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["repo"], "SceneWorks/krea-2-turbo-int8-convrot");
+        assert_eq!(rows[0]["variant"], "int8-convrot");
+        assert!(!is_co_requisite_download(&rows[0]));
+        assert_eq!(rows[1]["repo"], "SceneWorks/krea-2-turbo-mlx");
+        assert_eq!(rows[1]["variant"], "bf16");
+        assert!(is_co_requisite_download(&rows[1]));
+        assert!(rows[1]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|file| file.as_str().unwrap().starts_with("bf16/")));
+
+        let mut explicit_q4 = request.as_object().unwrap().clone();
+        explicit_q4.insert("variant".to_owned(), json!("q4"));
+        let selected = selected_portable_model_artifact_closure(
+            model,
+            "candle",
+            "windows",
+            Some("q4"),
+            &explicit_q4,
+        )
+        .unwrap();
+        assert_eq!(selected["downloads"][0]["variant"], "int8-convrot");
+
+        let ordinary = json!({"model":"krea_2_turbo","advanced":{"convRot":false}});
+        let selected = selected_portable_model_artifact_closure(
+            model,
+            "candle",
+            "linux",
+            None,
+            ordinary.as_object().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(selected["downloads"][0]["variant"], "q8");
+        assert!(!selected["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["componentId"] == "krea_convrot_base"));
+
+        let selected = selected_portable_model_artifact_closure(
+            model,
+            "mlx",
+            "macos",
+            None,
+            request.as_object().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(selected["downloads"][0]["variant"], "q8");
+        assert!(!selected["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["componentId"] == "krea_convrot_base"));
     }
 
     #[test]
