@@ -282,12 +282,32 @@ pub fn default_control_weight_for_request(
     backend: &str,
     payload: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<&'static ShippedControlWeight> {
-    let poses = payload
-        .get("advanced")?
-        .get("poses")?
-        .as_array()
-        .is_some_and(|poses| !poses.is_empty());
-    if !poses || payload.get("mode").and_then(serde_json::Value::as_str) == Some("edit_image") {
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    default_control_weight_for_request_resolved(
+        model_id,
+        entry,
+        backend,
+        matches!(facts.poses, crate::resolved_options::RouteField::Valid(count) if count > 0),
+        payload
+            .get("mode")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default(),
+        match facts.mlx_quantize {
+            crate::resolved_options::RouteField::Valid(bits) => Some(bits),
+            _ => None,
+        },
+    )
+}
+
+pub fn default_control_weight_for_request_resolved(
+    model_id: &str,
+    entry: &serde_json::Value,
+    backend: &str,
+    has_poses: bool,
+    mode: &str,
+    quant_bits: Option<i64>,
+) -> Option<&'static ShippedControlWeight> {
+    if !has_poses || mode == "edit_image" {
         return None;
     }
     // An imported fine-tune names its base explicitly, or carries the server-projected control
@@ -321,7 +341,7 @@ pub fn default_control_weight_for_request(
     let file = match engine {
         "z_image_control" if backend == "candle" => "diffusion_pytorch_model.safetensors",
         "z_image_control" => "Z-Image-Fun-Controlnet-Union-2.1.safetensors",
-        "qwen_image_control" => match selected_qwen_control_tier(payload) {
+        "qwen_image_control" => match selected_qwen_control_tier_resolved(quant_bits) {
             "q4" => "q4/model.safetensors",
             "bf16" => "bf16/model.safetensors",
             _ => "q8/model.safetensors",
@@ -344,10 +364,15 @@ pub fn default_control_weight_for_request(
 pub fn selected_qwen_control_tier(
     payload: &serde_json::Map<String, serde_json::Value>,
 ) -> &'static str {
-    let bits = payload
-        .get("advanced")
-        .and_then(serde_json::Value::as_object)
-        .and_then(|advanced| crate::payload_util::optional_i64(advanced, "mlxQuantize"));
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    let bits = match facts.mlx_quantize {
+        crate::resolved_options::RouteField::Valid(bits) => Some(bits),
+        _ => None,
+    };
+    selected_qwen_control_tier_resolved(bits)
+}
+
+pub fn selected_qwen_control_tier_resolved(bits: Option<i64>) -> &'static str {
     match bits {
         Some(bits) if bits <= 0 => "bf16",
         Some(bits) if bits <= 4 => "q4",
@@ -367,6 +392,47 @@ mod tests {
             .as_array()
             .expect("models array")
             .to_vec()
+    }
+
+    #[test]
+    fn bound_control_route_selects_exact_qwen_tier_and_refuses_non_pose_modes() {
+        let entry = json!({"id":"qwen_image"});
+        for (bits, tier) in [
+            (None, "q8"),
+            (Some(0), "bf16"),
+            (Some(4), "q4"),
+            (Some(8), "q8"),
+        ] {
+            assert_eq!(selected_qwen_control_tier_resolved(bits), tier);
+            let weight = default_control_weight_for_request_resolved(
+                "qwen_image",
+                &entry,
+                "candle",
+                true,
+                "text_to_image",
+                bits,
+            )
+            .expect("shipped Qwen pose control weight");
+            assert_eq!(weight.file, format!("{tier}/model.safetensors"));
+        }
+        assert!(default_control_weight_for_request_resolved(
+            "qwen_image",
+            &entry,
+            "candle",
+            false,
+            "text_to_image",
+            Some(4),
+        )
+        .is_none());
+        assert!(default_control_weight_for_request_resolved(
+            "qwen_image",
+            &entry,
+            "candle",
+            true,
+            "edit_image",
+            Some(4),
+        )
+        .is_none());
     }
 
     #[test]
