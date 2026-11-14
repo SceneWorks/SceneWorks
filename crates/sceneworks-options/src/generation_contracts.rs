@@ -445,8 +445,10 @@ pub struct VqaJobRequest {
     pub question: String,
     #[serde(default = "default_vqa_model")]
     pub model: String,
-    #[serde(default = "default_vqa_max_new_tokens")]
-    pub max_new_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_new_tokens: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_image_pixels: Option<Value>,
     #[serde(default = "default_requested_gpu")]
     pub requested_gpu: String,
     #[serde(default)]
@@ -465,12 +467,12 @@ pub struct InterleaveJobRequest {
     pub source_asset_ids: Vec<String>,
     #[serde(default = "default_interleave_model")]
     pub model: String,
-    #[serde(default = "default_interleave_max_images")]
-    pub max_images: u32,
-    #[serde(default = "default_image_size")]
-    pub width: u32,
-    #[serde(default = "default_image_size")]
-    pub height: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_images: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<Value>,
     #[serde(default)]
     pub seed: Option<i64>,
     #[serde(default = "default_requested_gpu")]
@@ -505,10 +507,6 @@ fn default_image_size() -> u32 {
     1024
 }
 
-fn default_interleave_max_images() -> u32 {
-    6
-}
-
 fn default_interleave_model() -> String {
     "sensenova_u1_8b".to_owned()
 }
@@ -535,10 +533,6 @@ fn default_video_model() -> String {
 
 fn default_video_quality() -> String {
     "balanced".to_owned()
-}
-
-fn default_vqa_max_new_tokens() -> u32 {
-    256
 }
 
 fn default_vqa_model() -> String {

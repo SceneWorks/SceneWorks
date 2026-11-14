@@ -27,6 +27,11 @@ async fn shared_refusals_survive_http_raw_deserialization() {
             json!({"projectId":"p","model":"ltx_2_5","mode":"text_to_video","prompt":"tree","sourceClipAssetIds":["clip",5]}),
         ),
         (
+            "/api/v1/image/vqa/jobs",
+            "vqa",
+            json!({"projectId":"p","model":"sensenova_u1_8b","sourceAssetId":"source","question":"What?","maxNewTokens":"NaN"}),
+        ),
+        (
             "/api/v1/audio/jobs",
             "audio",
             json!({"projectId":"p","model":"kokoro_82m","prompt":"hello","steps":"bad"}),
@@ -223,4 +228,75 @@ async fn shared_promptless_svd_matches_create_retry_duplicate_and_preserves_raw_
     let (status, refusal) = request(app, "POST", "/api/v1/video/jobs", ordinary).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
     assert_eq!(refusal["field"], "prompt");
+}
+
+#[tokio::test]
+async fn sensenova_http_extractor_preserves_authored_numbers_and_shared_effective_values() {
+    use axum::extract::FromRequest;
+    use sceneworks_core::request_validation::resolve;
+    let facts = sceneworks_core::registry::builtin_model_spec("sensenova_u1_8b")
+        .unwrap()
+        .project(None);
+    for (kind, payload) in [
+        (
+            "vqa",
+            json!({"projectId":"p","model":"sensenova_u1_8b","sourceAssetId":"source","question":"What?","maxNewTokens":"4096","maxImagePixels":2.5}),
+        ),
+        (
+            "interleave",
+            json!({"projectId":"p","model":"sensenova_u1_8b","prompt":"tree","width":"9999","height":12.9,"advanced":{"timestepShift":1.5,"schedulerShift":9}}),
+        ),
+        (
+            "interleave",
+            json!({"projectId":"p","model":"sensenova_u1_8b","prompt":"tree"}),
+        ),
+        (
+            "interleave",
+            json!({"projectId":"p","model":"sensenova_u1_8b","prompt":"tree","maxImages":2}),
+        ),
+        (
+            "interleave",
+            json!({"projectId":"p","model":"sensenova_u1_8b","prompt":"tree","maxImages":99}),
+        ),
+        (
+            "interleave",
+            json!({"projectId":"p","model":"sensenova_u1_8b","prompt":"tree","maxImages":2,"advanced":{"maxImages":4}}),
+        ),
+    ] {
+        let request = axum::http::Request::builder()
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(payload.to_string()))
+            .unwrap();
+        let typed = if kind == "vqa" {
+            let crate::ApiJson(value) =
+                crate::ApiJson::<crate::VqaJobRequest>::from_request(request, &())
+                    .await
+                    .unwrap();
+            serde_json::to_value(value).unwrap()
+        } else {
+            let crate::ApiJson(value) =
+                crate::ApiJson::<crate::InterleaveJobRequest>::from_request(request, &())
+                    .await
+                    .unwrap();
+            serde_json::to_value(value).unwrap()
+        };
+        for key in [
+            "width",
+            "height",
+            "maxNewTokens",
+            "maxImagePixels",
+            "maxImages",
+        ] {
+            assert_eq!(typed.get(key), payload.get(key));
+        }
+        assert_eq!(
+            resolve(kind, typed.as_object().unwrap(), facts.as_object().unwrap()).unwrap(),
+            resolve(
+                kind,
+                payload.as_object().unwrap(),
+                facts.as_object().unwrap()
+            )
+            .unwrap()
+        );
+    }
 }

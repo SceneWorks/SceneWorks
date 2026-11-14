@@ -788,3 +788,70 @@ fn shared_promptless_svd_passes_worker_admission_without_inventing_text() {
     validate_static_job_options(&JobType::VideoGenerate, payload.as_object().unwrap()).unwrap();
     assert_eq!(payload["prompt"], "");
 }
+
+#[cfg(test)]
+#[test]
+fn shared_sensenova_legacy_numbers_survive_worker_gate() {
+    let model = sceneworks_core::registry::builtin_model_spec("sensenova_u1_8b")
+        .unwrap()
+        .project(None);
+    for (kind, job_type, mut payload) in [
+        (
+            "vqa",
+            JobType::ImageVqa,
+            serde_json::json!({"projectId":"p","model":"sensenova_u1_8b","sourceAssetId":"source","question":"What?","maxNewTokens":"4096","maxImagePixels":2.5}),
+        ),
+        (
+            "interleave",
+            JobType::ImageInterleave,
+            serde_json::json!({"projectId":"p","model":"sensenova_u1_8b","prompt":"tree","width":"9999","height":12.9,"advanced":{"timestepShift":1.5,"schedulerShift":9}}),
+        ),
+        (
+            "interleave",
+            JobType::ImageInterleave,
+            serde_json::json!({"projectId":"p","model":"sensenova_u1_8b","prompt":"tree","width":4096,"advanced":{"timestepShift":1.5},"maxImages":99}),
+        ),
+        (
+            "interleave",
+            JobType::ImageInterleave,
+            serde_json::json!({"projectId":"p","model":"sensenova_u1_8b","prompt":"tree","width":4096,"maxImages":2,"advanced":{"timestepShift":1.5,"maxImages":4}}),
+        ),
+    ] {
+        payload["modelManifestEntry"] = serde_json::json!(model);
+        validate_static_job_options(&job_type, payload.as_object().unwrap()).unwrap();
+        let resolved = sceneworks_core::request_validation::resolve(
+            kind,
+            payload.as_object().unwrap(),
+            model.as_object().unwrap(),
+        )
+        .unwrap();
+        if kind == "vqa" {
+            assert_eq!(resolved["maxNewTokens"], 2048);
+        } else {
+            assert_eq!(resolved["width"], 4096);
+            assert_eq!(resolved["advanced"]["timestepShift"], 1.5);
+        }
+        if payload.get("maxImages").is_some() {
+            assert_eq!(
+                resolved["advanced"]["maxImages"],
+                if payload["maxImages"] == 99 { 10 } else { 4 }
+            );
+        }
+        let key = if kind == "vqa" {
+            "maxNewTokens"
+        } else {
+            "width"
+        };
+        for value in [
+            serde_json::json!("bad"),
+            serde_json::json!("NaN"),
+            serde_json::json!(null),
+        ] {
+            payload[key] = value;
+            assert!(matches!(
+                validate_static_job_options(&job_type, payload.as_object().unwrap()),
+                Err(WorkerError::Validation(_))
+            ));
+        }
+    }
+}

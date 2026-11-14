@@ -6884,7 +6884,6 @@
           "sourceAssetId": "source",
           "question": "What is shown?",
           "projectName": null,
-          "maxNewTokens": 256,
           "requestedGpu": "auto",
           "advanced": {
             "resolution": "2048x2048",
@@ -6900,12 +6899,14 @@
             "thinkMode": false,
             "mlxQuantizeExplicit": false,
             "convRot": false
-          }
+          },
+          "maxNewTokens": 256,
+          "maxImagePixels": 589824
         }
       }
     },
     {
-      "name": "VQA invalid tokens",
+      "name": "VQA clamped tokens",
       "kind": "vqa",
       "model": "sensenova_u1_8b",
       "payload": {
@@ -6916,17 +6917,31 @@
         "maxNewTokens": 9999
       },
       "expected": {
-        "ok": false,
-        "refusal": {
-          "code": "invalid_generation_option",
-          "field": "maxNewTokens",
-          "detail": "maxNewTokens must be between 16 and 2048",
-          "context": {
-            "kind": "vqa",
-            "model": "sensenova_u1_8b",
-            "mode": null,
-            "field": "maxNewTokens"
-          }
+        "ok": true,
+        "resolved": {
+          "projectId": "p",
+          "model": "sensenova_u1_8b",
+          "sourceAssetId": "source",
+          "question": "What is shown?",
+          "maxNewTokens": 2048,
+          "projectName": null,
+          "requestedGpu": "auto",
+          "advanced": {
+            "resolution": "2048x2048",
+            "sampler": "default",
+            "scheduler": "shift",
+            "schedulerShift": 3.0,
+            "steps": 50,
+            "guidanceScale": 4.0,
+            "numInferenceSteps": 50,
+            "trueCfgScale": 1.5,
+            "maxImages": 6,
+            "maxNewTokens": 2048,
+            "thinkMode": false,
+            "mlxQuantizeExplicit": false,
+            "convRot": false
+          },
+          "maxImagePixels": 589824
         }
       }
     },
@@ -6947,10 +6962,96 @@
           "prompt": "a tree",
           "projectName": null,
           "sourceAssetIds": [],
-          "maxImages": 6,
-          "width": 1024,
-          "height": 1024,
           "seed": null,
+          "requestedGpu": "auto",
+          "advanced": {
+            "resolution": "2048x2048",
+            "sampler": "default",
+            "scheduler": "shift",
+            "schedulerShift": 3.0,
+            "steps": 50,
+            "guidanceScale": 4.0,
+            "numInferenceSteps": 50,
+            "trueCfgScale": 1.5,
+            "maxImages": 6,
+            "maxNewTokens": 2048,
+            "thinkMode": false,
+            "mlxQuantizeExplicit": false,
+            "convRot": false,
+            "imageGuidanceScale": 1.0,
+            "timestepShift": 3.0
+          },
+          "width": 2048,
+          "height": 1152,
+          "maxImages": 6
+        }
+      }
+    },
+    {
+      "name": "interleave clamped top-level budget",
+      "kind": "interleave",
+      "model": "sensenova_u1_8b",
+      "payload": {
+        "projectId": "p",
+        "model": "sensenova_u1_8b",
+        "prompt": "a tree",
+        "maxImages": 99
+      },
+      "expected": {
+        "ok": true,
+        "resolved": {
+          "projectId": "p",
+          "model": "sensenova_u1_8b",
+          "prompt": "a tree",
+          "maxImages": 10,
+          "projectName": null,
+          "sourceAssetIds": [],
+          "seed": null,
+          "requestedGpu": "auto",
+          "advanced": {
+            "resolution": "2048x2048",
+            "sampler": "default",
+            "scheduler": "shift",
+            "schedulerShift": 3.0,
+            "steps": 50,
+            "guidanceScale": 4.0,
+            "numInferenceSteps": 50,
+            "trueCfgScale": 1.5,
+            "maxImages": 10,
+            "maxNewTokens": 2048,
+            "thinkMode": false,
+            "mlxQuantizeExplicit": false,
+            "convRot": false,
+            "imageGuidanceScale": 1.0,
+            "timestepShift": 3.0
+          },
+          "width": 2048,
+          "height": 1152
+        }
+      }
+    },
+    {
+      "name": "VQA legacy numeric controls",
+      "kind": "vqa",
+      "model": "sensenova_u1_8b",
+      "payload": {
+        "projectId": "p",
+        "model": "sensenova_u1_8b",
+        "sourceAssetId": "source",
+        "question": "What?",
+        "maxNewTokens": "4096",
+        "maxImagePixels": 2.5
+      },
+      "expected": {
+        "ok": true,
+        "resolved": {
+          "projectId": "p",
+          "model": "sensenova_u1_8b",
+          "sourceAssetId": "source",
+          "question": "What?",
+          "maxNewTokens": 2048,
+          "maxImagePixels": 65536,
+          "projectName": null,
           "requestedGpu": "auto",
           "advanced": {
             "resolution": "2048x2048",
@@ -6971,26 +7072,102 @@
       }
     },
     {
-      "name": "interleave invalid budget",
-      "kind": "interleave",
+      "name": "VQA malformed numeric controls",
+      "kind": "vqa",
       "model": "sensenova_u1_8b",
       "payload": {
         "projectId": "p",
         "model": "sensenova_u1_8b",
-        "prompt": "a tree",
-        "maxImages": 99
+        "sourceAssetId": "source",
+        "question": "What?",
+        "maxNewTokens": "bad"
       },
       "expected": {
         "ok": false,
         "refusal": {
           "code": "invalid_generation_option",
-          "field": "maxImages",
-          "detail": "maxImages must be between 1 and 10",
+          "field": "maxNewTokens",
+          "detail": "must be a finite number or numeric string",
+          "context": {
+            "kind": "vqa",
+            "model": "sensenova_u1_8b",
+            "mode": null,
+            "field": "maxNewTokens"
+          }
+        }
+      }
+    },
+    {
+      "name": "interleave legacy numeric controls",
+      "kind": "interleave",
+      "model": "sensenova_u1_8b",
+      "payload": {
+        "projectId": "p",
+        "model": "sensenova_u1_8b",
+        "prompt": "tree",
+        "width": "9999",
+        "height": 12.9,
+        "advanced": {
+          "timestepShift": 1.5,
+          "schedulerShift": 9,
+          "maxNewTokens": "9000",
+          "numInferenceSteps": 0
+        }
+      },
+      "expected": {
+        "ok": true,
+        "resolved": {
+          "projectId": "p",
+          "model": "sensenova_u1_8b",
+          "prompt": "tree",
+          "width": 4096,
+          "height": 256,
+          "advanced": {
+            "scheduler": "shift",
+            "schedulerShift": 9,
+            "maxNewTokens": 8192,
+            "numInferenceSteps": 1,
+            "resolution": "2048x2048",
+            "sampler": "default",
+            "steps": 50,
+            "guidanceScale": 4.0,
+            "trueCfgScale": 1.5,
+            "maxImages": 6,
+            "thinkMode": false,
+            "mlxQuantizeExplicit": false,
+            "convRot": false,
+            "imageGuidanceScale": 1.0,
+            "timestepShift": 1.5
+          },
+          "projectName": null,
+          "sourceAssetIds": [],
+          "seed": null,
+          "requestedGpu": "auto",
+          "maxImages": 6
+        }
+      }
+    },
+    {
+      "name": "interleave malformed geometry",
+      "kind": "interleave",
+      "model": "sensenova_u1_8b",
+      "payload": {
+        "projectId": "p",
+        "model": "sensenova_u1_8b",
+        "prompt": "tree",
+        "width": "bad"
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "width",
+          "detail": "must be a finite number or numeric string",
           "context": {
             "kind": "interleave",
             "model": "sensenova_u1_8b",
             "mode": null,
-            "field": "maxImages"
+            "field": "width"
           }
         }
       }

@@ -1027,11 +1027,13 @@ pub fn validate_vqa_job(payload: &VqaJobRequest) -> Result<(), ApiError> {
         )));
     }
     validate_prompt_extras("", &payload.advanced)?;
-    if !(16..=2048).contains(&payload.max_new_tokens) {
-        return Err(ApiError::bad_request(
-            "maxNewTokens must be between 16 and 2048",
-        ));
-    }
+    crate::sensenova_validation::canonical_numbers(
+        "vqa",
+        serde_json::to_value(payload)
+            .expect("VQA DTO")
+            .as_object()
+            .unwrap(),
+    )?;
     Ok(())
 }
 pub fn validate_interleave_job(payload: &InterleaveJobRequest) -> Result<(), ApiError> {
@@ -1044,10 +1046,6 @@ pub fn validate_interleave_job(payload: &InterleaveJobRequest) -> Result<(), Api
         )));
     }
     validate_prompt_extras("", &payload.advanced)?;
-    // Upstream interleave_gen caps the run at 10 generated images.
-    if !(1..=10).contains(&payload.max_images) {
-        return Err(ApiError::bad_request("maxImages must be between 1 and 10"));
-    }
     if payload
         .source_asset_ids
         .iter()
@@ -1057,8 +1055,13 @@ pub fn validate_interleave_job(payload: &InterleaveJobRequest) -> Result<(), Api
             "sourceAssetIds must not contain blank ids",
         ));
     }
-    validate_dimension(payload.width, "width", MAX_IMAGE_DIMENSION)?;
-    validate_dimension(payload.height, "height", MAX_IMAGE_DIMENSION)?;
+    crate::sensenova_validation::canonical_numbers(
+        "interleave",
+        serde_json::to_value(payload)
+            .expect("interleave DTO")
+            .as_object()
+            .unwrap(),
+    )?;
     Ok(())
 }
 const MIN_VECTOR_SVG_BYTES: u32 = 1024;

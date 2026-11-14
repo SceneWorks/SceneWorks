@@ -29,6 +29,58 @@ pub struct InterleaveControls {
     pub system_message: Option<String>,
 }
 
+/// Validate historical numeric syntax before any tolerant reader can erase an authored value.
+/// The copy is for shape checking only; persisted DTO fields keep the original JSON spelling.
+pub fn canonical_numbers(
+    kind: &str,
+    authored: &JsonObject,
+) -> Result<JsonObject, crate::request_validation::ValidationRefusal> {
+    let mut result = authored.clone();
+    let fields: &[(&str, bool)] = match kind {
+        "vqa" => &[("maxNewTokens", true), ("maxImagePixels", true)],
+        "interleave" => &[("width", true), ("height", true), ("maxImages", true)],
+        _ => return Ok(result),
+    };
+    fn lower(
+        object: &mut JsonObject,
+        key: &str,
+        integer: bool,
+        prefix: &str,
+    ) -> Result<(), crate::request_validation::ValidationRefusal> {
+        if let Some(value) = object.get(key) {
+            let number = crate::effective_values::legacy_number(value).ok_or_else(|| {
+                crate::request_validation::ValidationRefusal::new(
+                    format!("{prefix}{key}"),
+                    "must be a finite number or numeric string",
+                )
+            })?;
+            object.insert(
+                key.into(),
+                if integer {
+                    json!(number as i64)
+                } else {
+                    json!(number)
+                },
+            );
+        }
+        Ok(())
+    }
+    for (key, integer) in fields {
+        lower(&mut result, key, *integer, "")?;
+    }
+    if kind == "interleave" {
+        if let Some(advanced) = result.get_mut("advanced").and_then(Value::as_object_mut) {
+            for key in ["numInferenceSteps", "maxNewTokens", "maxImages"] {
+                lower(advanced, key, true, "advanced.")?;
+            }
+            for key in ["guidanceScale", "imageGuidanceScale", "timestepShift"] {
+                lower(advanced, key, false, "advanced.")?;
+            }
+        }
+    }
+    Ok(result)
+}
+
 /// Match the worker's numeric input order: integer, float cast to integer, then trimmed integer
 /// string. Invalid input uses the caller's default before clamping.
 fn safe_int(object: &JsonObject, key: &str, default: i64, low: i64, high: i64) -> i64 {
@@ -38,7 +90,9 @@ fn safe_int(object: &JsonObject, key: &str, default: i64, low: i64, high: i64) -
             value
                 .as_i64()
                 .or_else(|| value.as_f64().map(|float| float as i64))
-                .or_else(|| value.as_str()?.trim().parse().ok())
+                .or_else(|| {
+                    crate::effective_values::legacy_number(value).map(|number| number as i64)
+                })
         })
         .unwrap_or(default)
         .clamp(low, high)
@@ -84,7 +138,11 @@ pub fn resolve_interleave(authored: &JsonObject) -> InterleaveControls {
         // option and must not override it when both are present.
         timestep_shift: advanced_float(advanced, "timestepShift", 3.0),
         max_new_tokens: safe_int(advanced, "maxNewTokens", 2048, 64, 8192),
-        max_images: safe_int(advanced, "maxImages", 6, 1, 10),
+        max_images: if advanced.contains_key("maxImages") {
+            safe_int(advanced, "maxImages", 6, 1, 10)
+        } else {
+            safe_int(authored, "maxImages", 6, 1, 10)
+        },
         think_mode: advanced
             .get("thinkMode")
             .and_then(Value::as_bool)
@@ -110,6 +168,7 @@ pub fn materialize_interleave(authored: &JsonObject, effective: &mut JsonObject)
     let controls = resolve_interleave(authored);
     effective.insert("width".into(), json!(controls.width));
     effective.insert("height".into(), json!(controls.height));
+    effective.insert("maxImages".into(), json!(controls.max_images));
     let advanced = effective
         .entry("advanced")
         .or_insert_with(|| json!({}))

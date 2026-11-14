@@ -193,7 +193,7 @@ fn main() {
         json!({"projectId":"p","model":"sensenova_u1_8b","sourceAssetId":"source","question":"What is shown?"}),
     );
     add(
-        "VQA invalid tokens",
+        "VQA clamped tokens",
         "vqa",
         json!({"projectId":"p","model":"sensenova_u1_8b","sourceAssetId":"source","question":"What is shown?","maxNewTokens":9999}),
     );
@@ -203,10 +203,34 @@ fn main() {
         json!({"projectId":"p","model":"sensenova_u1_8b","prompt":"a tree"}),
     );
     add(
-        "interleave invalid budget",
+        "interleave clamped top-level budget",
         "interleave",
         json!({"projectId":"p","model":"sensenova_u1_8b","prompt":"a tree","maxImages":99}),
     );
+    for (name, kind, payload) in [
+        (
+            "VQA legacy numeric controls",
+            "vqa",
+            json!({"projectId":"p","model":"sensenova_u1_8b","sourceAssetId":"source","question":"What?","maxNewTokens":"4096","maxImagePixels":2.5}),
+        ),
+        (
+            "VQA malformed numeric controls",
+            "vqa",
+            json!({"projectId":"p","model":"sensenova_u1_8b","sourceAssetId":"source","question":"What?","maxNewTokens":"bad"}),
+        ),
+        (
+            "interleave legacy numeric controls",
+            "interleave",
+            json!({"projectId":"p","model":"sensenova_u1_8b","prompt":"tree","width":"9999","height":12.9,"advanced":{"timestepShift":1.5,"schedulerShift":9,"maxNewTokens":"9000","numInferenceSteps":0}}),
+        ),
+        (
+            "interleave malformed geometry",
+            "interleave",
+            json!({"projectId":"p","model":"sensenova_u1_8b","prompt":"tree","width":"bad"}),
+        ),
+    ] {
+        add(name, kind, payload);
+    }
     add(
         "video upscale",
         "videoUpscale",

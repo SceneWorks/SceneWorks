@@ -971,10 +971,17 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "VqaRequest.max_new_tokens",
     )
     .limits(&[
-        "apps/rust-api/src/generation.rs: integer 16..2048",
+        "apps/rust-api/src/generation.rs: finite numeric input, clamp 16..2048",
     ])
+    .compat("finite numeric string or number; integer truncation and shared clamp")
     .applies(Predicate::Capability("vqa"))
     .ui("Max new tokens", "number"),
+    OptionSpec::new(
+        "vqa.maxImagePixels", "vqa", "maxImagePixels", Shape::Integer,
+        DefaultRule::Literal("589824"), IntentClass::WhatToMake, "VqaControls.max_image_pixels",
+    ).limits(&["finite numeric input; clamp 65536..4194304"])
+     .compat("finite numeric string or number; integer truncation and shared clamp")
+     .applies(Predicate::Capability("vqa")).ui("Max image pixels", "number"),
     // apps/rust-api/src/dto.rs:1092
     OptionSpec::new(
         "vqa.requestedGpu",
@@ -1091,8 +1098,9 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "InterleaveRequest.max_images",
     )
     .limits(&[
-        "apps/rust-api/src/generation.rs: integer 1..10",
+        "apps/rust-api/src/generation.rs: finite numeric input, clamp 1..10",
     ])
+    .compat("finite numeric string or number; advanced.maxImages takes precedence; shared clamp")
     .applies(Predicate::Capability("interleave"))
     .ui("Max images", "number"),
     // apps/rust-api/src/dto.rs:1120
@@ -1101,13 +1109,14 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "interleave",
         "width",
         Shape::Integer,
-        DefaultRule::Literal("1024"),
+        DefaultRule::Literal("2048"),
         IntentClass::WhatToMake,
         "InterleaveRequest.width",
     )
     .limits(&[
-        "apps/rust-api/src/generation.rs: dimension 256..4096",
+        "apps/rust-api/src/generation.rs: finite numeric input, clamp 256..4096",
     ])
+    .compat("finite numeric string or number; integer truncation and shared clamp")
     .applies(Predicate::Capability("interleave"))
     .ui("Width", "number"),
     // apps/rust-api/src/dto.rs:1122
@@ -1116,13 +1125,14 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "interleave",
         "height",
         Shape::Integer,
-        DefaultRule::Literal("1024"),
+        DefaultRule::Literal("1152"),
         IntentClass::WhatToMake,
         "InterleaveRequest.height",
     )
     .limits(&[
-        "apps/rust-api/src/generation.rs: dimension 256..4096",
+        "apps/rust-api/src/generation.rs: finite numeric input, clamp 256..4096",
     ])
+    .compat("finite numeric string or number; integer truncation and shared clamp")
     .applies(Predicate::Capability("interleave"))
     .ui("Height", "number"),
     // apps/rust-api/src/dto.rs:1124

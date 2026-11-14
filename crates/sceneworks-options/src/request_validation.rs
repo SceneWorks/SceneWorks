@@ -123,7 +123,8 @@ pub fn validate_shape(kind: &str, payload: &JsonObject) -> Result<(), Validation
         return validate_yue2(kind, payload).map_err(|error| error.with_request(kind, payload));
     }
     (|| {
-        crate::validate::shape(kind, &Value::Object(payload.clone()))
+        let numeric_payload = crate::sensenova_validation::canonical_numbers(kind, payload)?;
+        crate::validate::shape(kind, &Value::Object(numeric_payload))
             .map_err(|error| ValidationRefusal::new(error.field, error.detail))?;
         match kind {
             "image" => shape::validate_image_job(&decode::<ImageJobRequest>(payload)?),
@@ -219,6 +220,11 @@ pub fn resolve(
     }
     if matches!(kind, "image" | "video" | "vqa" | "interleave") {
         crate::effective_values::resolve_advanced(&mut resolved, entry);
+    }
+    match kind {
+        "vqa" => crate::sensenova_validation::materialize_vqa(payload, &mut resolved),
+        "interleave" => crate::sensenova_validation::materialize_interleave(payload, &mut resolved),
+        _ => {}
     }
     if kind == "promptRefine" {
         resolved = crate::utility_validation::resolve_prompt_refine(&resolved);
