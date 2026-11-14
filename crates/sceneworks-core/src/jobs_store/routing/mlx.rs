@@ -1490,7 +1490,7 @@ pub(crate) fn training_job_is_mlx_eligible_with_facts(
     }
     // LoKr-on-Wan is refused (no Kronecker merge in the mlx Wan path).
     if matches!(kernel, "wan_lora" | "wan_moe_lora")
-        && route.is_some_and(|route| training_plan_is_lokr_with_facts(route))
+        && route.is_some_and(training_plan_is_lokr_with_facts)
     {
         return false;
     }
