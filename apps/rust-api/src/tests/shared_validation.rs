@@ -17,6 +17,11 @@ async fn shared_refusals_survive_http_raw_deserialization() {
             json!({"projectId":"p","model":"flux_dev","prompt":"tree","advanced":{"steps":"bad"}}),
         ),
         (
+            "/api/v1/image/jobs",
+            "image",
+            json!({"projectId":"p","model":"flux_dev","prompt":"tree","advanced":{"enhanceTemperature":1.0}}),
+        ),
+        (
             "/api/v1/video/jobs",
             "video",
             json!({"projectId":"p","model":"ltx_2_5","mode":"text_to_video","prompt":"tree","sourceClipAssetIds":["clip",5]}),
@@ -48,7 +53,7 @@ async fn shared_video_upscale_refusals_match_raw_create_retry_duplicate() {
         app.clone(),
         "POST",
         "/api/v1/jobs",
-        json!({"type":"video_upscale","projectId":project["id"],"payload":payload}),
+        json!({"type":"video_upscale","requestedGpu":"auto","projectId":project["id"],"payload":payload}),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{job}");
@@ -63,7 +68,7 @@ async fn shared_video_upscale_refusals_match_raw_create_retry_duplicate() {
         app.clone(),
         "POST",
         "/api/v1/jobs",
-        json!({"type":"video_upscale","projectId":project["id"],"payload":invalid}),
+        json!({"type":"video_upscale","requestedGpu":"auto","projectId":project["id"],"payload":invalid}),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");

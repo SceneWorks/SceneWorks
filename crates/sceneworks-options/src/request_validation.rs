@@ -138,6 +138,27 @@ pub fn validate_shape(kind: &str, payload: &JsonObject) -> Result<(), Validation
     .map_err(|error: ValidationRefusal| error.with_request(kind, payload))
 }
 
+/// Owner-issued effective options. Its private payload prevents execution bindings from claiming
+/// an arbitrary authored map already passed static validation and lowering.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct ResolvedRequest(JsonObject);
+impl ResolvedRequest {
+    pub fn as_payload(&self) -> &JsonObject {
+        &self.0
+    }
+    pub fn into_payload(self) -> JsonObject {
+        self.0
+    }
+}
+pub fn resolve_request(
+    kind: &str,
+    payload: &JsonObject,
+    entry: &JsonObject,
+) -> Result<ResolvedRequest, ValidationRefusal> {
+    resolve(kind, payload, entry).map(ResolvedRequest)
+}
+
 /// Resolve omitted scalar values using the same model defaults the native readers use. The
 /// returned object is a preview/execution view; the authored payload and omission intent survive.
 pub fn resolve(
@@ -178,6 +199,9 @@ pub fn resolve(
     };
     if let Some(Value::Object(defaults)) = defaults {
         resolved.extend(defaults);
+    }
+    if matches!(kind, "image" | "video" | "vqa" | "interleave") {
+        crate::effective_values::resolve_advanced(&mut resolved, entry);
     }
     Ok(resolved)
 }
@@ -241,9 +265,11 @@ pub fn validate(
             .get("advanced")
             .and_then(Value::as_object)
             .unwrap_or(&empty);
+        let default_model = default_model_for(kind);
         let model = payload
             .get("model")
             .and_then(Value::as_str)
+            .or(default_model.as_deref())
             .unwrap_or_default();
         if advanced.get("lowResStart").is_some_and(|v| !v.is_null())
             && entry.get("features").and_then(|f| f.get("low_res_start"))
@@ -400,6 +426,18 @@ pub fn validate(
                         entry,
                     ),
                 )?;
+                let mut canonical = payload.clone();
+                canonical.insert("model".into(), json!(request.model));
+                canonical.insert("mode".into(), json!(request.mode));
+                if !crate::video_eligibility::any_eligible(
+                    crate::video_eligibility::VideoJobKind::for_mode(&request.mode).as_str(),
+                    &canonical,
+                    entry,
+                ) {
+                    return Err(ValidationRefusal::new("mode", format!(
+                        "{model} cannot render the \"{}\" mode — no backend implements it, so this job would wait for a worker that will never claim it. Choose a mode this model lists in its capabilities, or a model that supports this one.", request.mode
+                    )));
+                }
             }
             "vectorPrompt" => {
                 let request: VectorPromptWorkflowRequest = decode(payload)?;

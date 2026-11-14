@@ -1,7 +1,7 @@
 //! Native job-kind adapter for the portable static option policy.
 pub mod shape;
 pub use sceneworks_options::request_validation::{
-    resolve, validate, validate_shape, ValidationRefusal,
+    resolve, resolve_request, validate, validate_shape, ResolvedRequest, ValidationRefusal,
 };
 pub fn kind_for_job(job_type: &crate::contracts::JobType) -> Option<&'static str> {
     use crate::contracts::JobType::*;
@@ -42,10 +42,11 @@ pub fn facts_for_job(
         .unwrap()
         .clone()
     } else {
-        payload
+        let mut entry = payload
             .get("modelManifestEntry")
-            .and_then(serde_json::Value::as_object)
             .cloned()
-            .unwrap_or_default()
+            .unwrap_or_else(|| serde_json::json!({}));
+        crate::registry::project_option_route_facts(&mut entry);
+        entry.as_object().cloned().unwrap_or_default()
     }
 }

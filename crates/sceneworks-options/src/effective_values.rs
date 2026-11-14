@@ -1,0 +1,184 @@
+//! Lower accepted authored values into the effective binding view. The caller keeps the original
+//! request for provenance. Provider defaults are deliberately resolved by their portable owners,
+//! not inferred from prose in the declaration catalog.
+use crate::{contracts::JsonObject, DefaultRule, OptionContext, OptionSpec, Shape};
+use serde_json::{Map, Value};
+
+pub fn resolve_advanced(payload: &mut JsonObject, entry: &JsonObject) {
+    let model = Value::Object(entry.clone());
+    let operation = payload
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let context = OptionContext {
+        operation: &operation,
+        model: &model,
+        features: model.get("features").unwrap_or(&Value::Null),
+        target: &Value::Null,
+    };
+    let advanced = payload
+        .entry("advanced")
+        .or_insert_with(|| Value::Object(Map::new()));
+    if advanced.is_null() {
+        *advanced = Value::Object(Map::new());
+    }
+    for spec in crate::registry()
+        .filter(|spec| spec.location == "advanced" || spec.location.starts_with("advanced."))
+    {
+        if !spec.user_settable {
+            continue;
+        }
+        let path = spec.location.strip_prefix("advanced.").unwrap_or("");
+        let segments: Vec<_> = path.split('.').filter(|part| !part.is_empty()).collect();
+        visit(advanced, &segments, spec, &context);
+    }
+}
+fn visit(value: &mut Value, path: &[&str], spec: &OptionSpec, context: &OptionContext<'_>) {
+    if let Some((segment, rest)) = path.split_first() {
+        let key = segment.trim_end_matches("[]");
+        if let Some(child) = value.get_mut(key) {
+            if segment.ends_with("[]") {
+                if let Some(values) = child.as_array_mut() {
+                    for child in values {
+                        visit(child, rest, spec, context);
+                    }
+                }
+            } else {
+                visit(child, rest, spec, context);
+            }
+        }
+        return;
+    }
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    // A present null blocks the verified bound-tier fallback. Absence must remain absent until
+    // source binding selects its tier; inserting a model default here would override that fact.
+    if spec.id == "advanced.mlxQuantize" && object.get(spec.key).is_none_or(Value::is_null) {
+        return;
+    }
+    let mut effective = object.get(spec.key).cloned().or_else(|| {
+        spec.aliases
+            .iter()
+            .find_map(|key| object.get(*key).cloned())
+    });
+    if effective.as_ref().is_none_or(Value::is_null) {
+        effective = if spec.applies_when.matches(context) {
+            match spec.default {
+                DefaultRule::Literal(json) => serde_json::from_str(json).ok(),
+                DefaultRule::Model(path) => path
+                    .split('.')
+                    .try_fold(context.model, |value, key| value.get(key))
+                    .cloned(),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        // Some declaration paths identify a compound selection rather than its resolved object.
+        // Leave those to the owning structured resolver instead of inserting the wrong wire type.
+        effective = effective.filter(|value| matches_shape(value, spec.shape));
+    }
+    if let Some(mut effective) = effective {
+        if spec.compatibility.contains("numeric string") {
+            if let Some(text) = effective.as_str() {
+                let parsed = match spec.shape {
+                    Shape::Integer => text
+                        .trim()
+                        .parse::<i64>()
+                        .ok()
+                        .map(Value::from)
+                        .or_else(|| text.trim().parse::<u64>().ok().map(Value::from)),
+                    Shape::Number => text
+                        .trim()
+                        .parse::<f64>()
+                        .ok()
+                        .filter(|v| v.is_finite())
+                        .map(Value::from),
+                    _ => None,
+                };
+                if let Some(parsed) = parsed {
+                    effective = parsed;
+                }
+            }
+        }
+        if spec.shape == Shape::Bool && spec.compatibility.contains("Legacy image flag") {
+            effective = Value::Bool(match &effective {
+                Value::Bool(value) => *value,
+                Value::Number(value) => value.as_f64().is_some_and(|v| v != 0.0),
+                Value::String(value) => !value.is_empty(),
+                Value::Array(value) => !value.is_empty(),
+                _ => false,
+            });
+        }
+        object.insert(spec.key.into(), effective);
+    } else {
+        object.remove(spec.key);
+    }
+    for alias in spec.aliases {
+        object.remove(*alias);
+    }
+}
+fn matches_shape(value: &Value, shape: Shape) -> bool {
+    match shape {
+        Shape::Bool => value.is_boolean(),
+        Shape::Integer => value.as_i64().is_some() || value.as_u64().is_some(),
+        Shape::Number => value.is_number(),
+        Shape::Text | Shape::OneOf(_) => value.is_string(),
+        Shape::Object(_) => value.is_object(),
+        Shape::List(_) | Shape::Numbers | Shape::Strings => value.is_array(),
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn effective_values_lower_accepted_values_without_changing_authored_values() {
+        let authored = json!({"advanced":{"steps":"20","guidanceScale":"3.5","usePid":0,"timestepShift":"2","strength":null}});
+        let mut effective = authored.as_object().unwrap().clone();
+        resolve_advanced(
+            &mut effective,
+            json!({"type":"image","defaults":{"steps":10},"ui":{"pid":true}})
+                .as_object()
+                .unwrap(),
+        );
+        assert_eq!(effective["advanced"]["steps"], 20);
+        assert_eq!(effective["advanced"]["guidanceScale"], 3.5);
+        assert_eq!(effective["advanced"]["usePid"], false);
+        assert_eq!(effective["advanced"]["schedulerShift"], 2.0);
+        assert!(effective["advanced"].get("timestepShift").is_none());
+        assert!(effective["advanced"].get("strength").is_none());
+        assert_eq!(authored["advanced"]["steps"], "20");
+    }
+    #[test]
+    fn quant_null_and_absence_preserve_bound_tier_selection() {
+        let entry = json!({"type":"image","mlx":{"quantize":8}});
+        for advanced in [
+            json!({"mlxQuantize":null,"__portableBoundTier":"q4"}),
+            json!({"__portableBoundTier":"q4"}),
+        ] {
+            let mut payload = json!({"advanced":advanced}).as_object().unwrap().clone();
+            resolve_advanced(&mut payload, entry.as_object().unwrap());
+            assert_eq!(
+                payload["advanced"].get("mlxQuantize"),
+                advanced.get("mlxQuantize")
+            );
+        }
+    }
+    #[test]
+    fn defaults_require_applicable_facts_and_do_not_invent_provider_choices() {
+        let mut payload = JsonObject::new();
+        resolve_advanced(
+            &mut payload,
+            json!({"type":"image","defaults":{"steps":28}})
+                .as_object()
+                .unwrap(),
+        );
+        assert_eq!(payload["advanced"]["steps"], 28);
+        assert!(payload["advanced"].get("vaeDecoder").is_none());
+        assert!(payload["advanced"].get("sampler").is_none());
+        assert!(payload["advanced"].get("mossImage").is_none());
+    }
+}

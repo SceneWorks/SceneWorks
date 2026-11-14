@@ -67,6 +67,23 @@ pub enum VideoJobKind {
 }
 
 impl VideoJobKind {
+    pub fn for_mode(mode: &str) -> Self {
+        match mode {
+            "extend_clip" => Self::Extend,
+            "video_bridge" => Self::Bridge,
+            "replace_person" => Self::Replace,
+            _ => Self::Generate,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Generate => "video_generate",
+            Self::Extend => "video_extend",
+            Self::Bridge => "video_bridge",
+            Self::Replace => "person_replace",
+        }
+    }
+
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "video_generate" | "videoGenerate" | "video" => Some(Self::Generate),

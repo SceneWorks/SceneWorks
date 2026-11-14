@@ -2007,6 +2007,9 @@ pub fn validate(
     validate_shape(kind, payload)?;
     let (carrier, _) = config_carrier(kind, payload)?;
     let target = resolve_target(kind, carrier, entry)?;
+    let config: TrainingConfig = serde_json::from_value(carrier["config"].clone())
+        .map_err(|error| refusal("config", error.to_string()))?;
+    validate_training_config_for_target(&target, &config).map_err(policy_refusal)?;
     if kind == "control_training" && target.kernel != "krea_control" {
         return Err(refusal(
             "target.kernel",
@@ -2016,9 +2019,24 @@ pub fn validate(
             ),
         ));
     }
-    let config: TrainingConfig = serde_json::from_value(carrier["config"].clone())
-        .map_err(|error| refusal("config", error.to_string()))?;
-    validate_training_config_for_target(&target, &config).map_err(policy_refusal)?;
+    if kind != "training" {
+        if let Some(submitted) = carrier.get("target").and_then(Value::as_object) {
+            for (key, expected) in [
+                ("targetId", target.id.as_str()),
+                ("kernel", target.kernel.as_str()),
+                ("baseModel", target.base_model.as_str()),
+            ] {
+                if submitted
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value != expected)
+                {
+                    return Err(refusal(format!("target.{key}"), format!("Training plan target.{key} does not match the authoritative target '{0}'.", target.id)));
+                }
+            }
+        }
+    }
+
     if kind == "training"
         && flux3::KERNELS.contains(&target.kernel.as_str())
         && config.advanced.get("resume").and_then(Value::as_bool) == Some(true)

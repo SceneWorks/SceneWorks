@@ -161,3 +161,64 @@ fn portable_corpus_model_facts_are_actual_exports() {
         );
     }
 }
+
+#[test]
+fn route_facts_are_compiled_and_ignore_live_availability() {
+    let mut forged = json!({"id":"custom-video","optionRouteFacts":{"videoMlxRouted":true}});
+    sceneworks_core::registry::project_option_route_facts(&mut forged);
+    assert!(forged.get("optionRouteFacts").is_none());
+    let mut entry = facts("ltx_2_5", "text_to_video");
+    let trusted = entry["optionRouteFacts"].clone();
+    entry["optionRouteFacts"] = json!({"videoMlxRouted":false});
+    sceneworks_core::registry::project_option_route_facts(&mut entry);
+    assert_eq!(entry["optionRouteFacts"], trusted);
+    let payload = json!({"projectId":"p","model":"ltx_2_5","mode":"text_to_video","prompt":"tree"});
+    let before = options::request_validation::resolve(
+        "video",
+        payload.as_object().unwrap(),
+        entry.as_object().unwrap(),
+    )
+    .unwrap();
+    entry["installed"] = json!(false);
+    entry["usable"] = json!(false);
+    entry["installState"] = json!("missing");
+    entry["availability"] = json!({"device":"unavailable"});
+    assert_eq!(
+        before,
+        options::request_validation::resolve(
+            "video",
+            payload.as_object().unwrap(),
+            entry.as_object().unwrap()
+        )
+        .unwrap()
+    );
+}
+
+#[test]
+fn portable_video_refusal_agrees_with_native_lane_owner() {
+    use sceneworks_core::{contracts::JobType, jobs_store::video_request_is_claimable_by_any_lane};
+    for (model, mode, expected) in [
+        ("ltx_2_5", "text_to_video", true),
+        ("wan_2_2_i2v_14b", "first_last_frame", false),
+    ] {
+        let entry = facts(model, mode);
+        let mut payload = json!({"projectId":"p","model":model,"mode":mode,"prompt":"tree"});
+        if mode == "first_last_frame" {
+            payload["sourceAssetId"] = json!("first");
+            payload["lastFrameAssetId"] = json!("last");
+        }
+        payload["modelManifestEntry"] = entry.clone();
+        assert_eq!(
+            video_request_is_claimable_by_any_lane(
+                &JobType::VideoGenerate,
+                payload.as_object().unwrap()
+            ),
+            expected
+        );
+        let decision = compare("video", payload, entry);
+        assert_eq!(decision.is_ok(), expected);
+        if let Err(error) = decision {
+            assert_eq!(error.field, "mode");
+        }
+    }
+}

@@ -2139,6 +2139,283 @@
         "candleVideoLora": true
       }
     },
+    "wan_2_2_i2v_14b": {
+      "id": "wan_2_2_i2v_14b",
+      "name": "Wan2.2 14B (I2V)",
+      "family": "wan-video",
+      "type": "video",
+      "adapter": "wan_video",
+      "candle": {
+        "minMemoryGb": 24,
+        "vramGbByTier": {
+          "bf16": 38.62,
+          "q4": 22.2,
+          "q8": 28.02
+        },
+        "vramMeasuredPixels": 1048576,
+        "measured": true
+      },
+      "capabilities": [
+        "image_to_video",
+        "extend_clip",
+        "video_bridge"
+      ],
+      "defaults": {
+        "duration": 5,
+        "fps": 16,
+        "quality": "balanced",
+        "resolution": "1280x720",
+        "sampler": "default",
+        "scheduler": "default"
+      },
+      "downloads": [
+        {
+          "coRequisite": true,
+          "estimatedSizeBytes": 2453954848,
+          "files": [
+            "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1/high_noise_model.safetensors",
+            "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1/low_noise_model.safetensors"
+          ],
+          "platforms": [
+            "macos"
+          ],
+          "provider": "huggingface",
+          "repo": "lightx2v/Wan2.2-Lightning",
+          "revision": "18bccf8884ec0a078eed79785eb4ef13ea16ce1e"
+        },
+        {
+          "default": true,
+          "estimatedSizeBytes": 28645879665,
+          "files": [
+            "q4/*"
+          ],
+          "footprint": {
+            "diskSizeBytes": 28645879665,
+            "measuredPixels": 1048576,
+            "peakMemoryBytes": 21930721975,
+            "residentMemoryBytes": null
+          },
+          "platforms": [
+            "macos"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-i2v-a14b-mlx",
+          "revision": "c6c786170031eccc3a1fac0f98f1ad4ff988271e",
+          "variant": "q4"
+        },
+        {
+          "estimatedSizeBytes": 42696802013,
+          "files": [
+            "q8/*"
+          ],
+          "footprint": {
+            "diskSizeBytes": 42696802013,
+            "peakMemoryBytes": null,
+            "residentMemoryBytes": null
+          },
+          "platforms": [
+            "macos"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-i2v-a14b-mlx",
+          "revision": "c6c786170031eccc3a1fac0f98f1ad4ff988271e",
+          "variant": "q8"
+        },
+        {
+          "estimatedSizeBytes": 69042107982,
+          "files": [
+            "bf16/*"
+          ],
+          "footprint": {
+            "diskSizeBytes": 69042107982,
+            "peakMemoryBytes": null,
+            "residentMemoryBytes": null
+          },
+          "platforms": [
+            "macos"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-i2v-a14b-mlx",
+          "revision": "c6c786170031eccc3a1fac0f98f1ad4ff988271e",
+          "variant": "bf16"
+        },
+        {
+          "default": true,
+          "estimatedSizeBytes": 29792232225,
+          "files": [
+            "q4/*"
+          ],
+          "footprint": {
+            "diskSizeBytes": 29792232225,
+            "peakMemoryBytes": null,
+            "residentMemoryBytes": null
+          },
+          "platforms": [
+            "windows",
+            "linux"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-i2v-a14b-candle",
+          "revision": "d01bf1ea995c01a5bc545cefb977a320c9cb9fd0",
+          "variant": "q4"
+        },
+        {
+          "estimatedSizeBytes": 44075477169,
+          "files": [
+            "q8/*"
+          ],
+          "footprint": {
+            "diskSizeBytes": 44075477169,
+            "peakMemoryBytes": null,
+            "residentMemoryBytes": null
+          },
+          "platforms": [
+            "windows",
+            "linux"
+          ],
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-i2v-a14b-candle",
+          "revision": "d01bf1ea995c01a5bc545cefb977a320c9cb9fd0",
+          "variant": "q8"
+        },
+        {
+          "estimatedSizeBytes": 72000000000,
+          "files": [],
+          "platforms": [
+            "windows",
+            "linux"
+          ],
+          "provider": "huggingface",
+          "repo": "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+          "revision": "596658fd9ca6b7b71d5057529bbf319ecbc61d74",
+          "variant": "bf16"
+        }
+      ],
+      "limits": {
+        "durations": [
+          3,
+          4,
+          5
+        ],
+        "fps": [
+          16
+        ],
+        "hardMaxDuration": 5,
+        "maxPixels": 921600,
+        "recommendedMaxDuration": 5,
+        "requiresDimensionsMultipleOf": 16,
+        "resolutions": [
+          "832x480",
+          "480x832",
+          "1280x720",
+          "720x1280"
+        ],
+        "samplers": [
+          "default",
+          "uni_pc",
+          "euler"
+        ],
+        "schedulers": [
+          "default"
+        ]
+      },
+      "loraCompatibility": {
+        "families": [
+          "wan-video"
+        ],
+        "imageConditionedBackbone": true,
+        "sizeClass": "14b",
+        "types": [
+          "style",
+          "motion",
+          "character",
+          "enhance"
+        ]
+      },
+      "mlx": {
+        "limits": {
+          "samplers": [
+            "default",
+            "uni_pc",
+            "euler",
+            "dpmpp_2m",
+            "euler_ancestral",
+            "heun",
+            "dpmpp_sde",
+            "ddim"
+          ],
+          "schedulers": [
+            "default"
+          ]
+        },
+        "repo": "SceneWorks/wan2.2-i2v-a14b-mlx",
+        "minMemoryGb": 133,
+        "measuredSiblingActiveDiskFraction": 0.5
+      },
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/wan2.2-i2v-a14b-mlx"
+      },
+      "quantization": {
+        "defaults": {
+          "cuda": "gguf-q4_k_m",
+          "mps": "gguf-q8_0"
+        },
+        "variants": {
+          "gguf-q4_k_m": {
+            "format": "gguf",
+            "label": "GGUF Q4_K_M (smallest)",
+            "repo": "QuantStack/Wan2.2-I2V-A14B-GGUF",
+            "transformer2File": "LowNoise/Wan2.2-I2V-A14B-LowNoise-Q4_K_M.gguf",
+            "transformerFile": "HighNoise/Wan2.2-I2V-A14B-HighNoise-Q4_K_M.gguf"
+          },
+          "gguf-q8_0": {
+            "format": "gguf",
+            "label": "GGUF Q8_0 (near-lossless)",
+            "repo": "QuantStack/Wan2.2-I2V-A14B-GGUF",
+            "transformer2File": "LowNoise/Wan2.2-I2V-A14B-LowNoise-Q8_0.gguf",
+            "transformerFile": "HighNoise/Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf"
+          }
+        }
+      },
+      "ui": {
+        "description": "Wan2.2 A14B image-to-video (high/low-noise mixture-of-experts). Higher fidelity than the 5B model; needs ample VRAM for both experts.",
+        "durationHint": "Heavier than 5B — keep clips at 5s or less. Generates at 16fps.",
+        "label": "Wan2.2 14B (I2V)",
+        "promptGuide": {
+          "path": "/prompt-guides/wan-2-2-i2v-14b.md",
+          "sources": [
+            {
+              "label": "Qwen Cloud video prompt guide",
+              "url": "https://docs.qwencloud.com/developer-guides/accuracy-tuning/video-generation"
+            },
+            {
+              "label": "Wan2.2 GitHub repo",
+              "url": "https://github.com/Wan-Video/Wan2.2"
+            },
+            {
+              "label": "Wan2.2 TI2V model card",
+              "url": "https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers"
+            }
+          ],
+          "title": "Wan2.2 14B Image-to-Video Prompt Guide"
+        },
+        "recommendedFor": [
+          "image_to_video",
+          "extend_clip",
+          "video_bridge"
+        ]
+      },
+      "video": {
+        "supportsLightning": true
+      },
+      "optionRouteFacts": {
+        "videoMlxRouted": true,
+        "candleVideoRouted": true,
+        "candleVideoI2v": true,
+        "candleVideoVace": true,
+        "candleVideoLora": true
+      }
+    },
     "kokoro_82m": {
       "id": "kokoro_82m",
       "name": "Kokoro 82M (Speech)",
@@ -4570,7 +4847,24 @@
           "prompt": "a tree",
           "width": 1024,
           "height": 1024,
-          "count": 1
+          "count": 1,
+          "advanced": {
+            "resolution": "1024x1024",
+            "steps": 28,
+            "guidanceScale": 3.5,
+            "usePid": false,
+            "pidTarget": "4k",
+            "trueCfgScale": 4.0,
+            "faceRestore": false,
+            "controlScale": 0.7,
+            "openPoseScale": 0.7,
+            "flashAttn": true,
+            "mlxQuantize": 4,
+            "mlxQuantizeExplicit": false,
+            "convRot": false,
+            "segment": true,
+            "confidence": 0.25
+          }
         }
       }
     },
@@ -4593,7 +4887,7 @@
           "context": {
             "kind": "image",
             "model": "flux_dev",
-            "mode": null,
+            "mode": "text_to_image",
             "field": "width"
           }
         }
@@ -4618,7 +4912,7 @@
           "context": {
             "kind": "image",
             "model": "flux_dev",
-            "mode": null,
+            "mode": "text_to_image",
             "field": "count"
           }
         }
@@ -4645,7 +4939,7 @@
           "context": {
             "kind": "image",
             "model": "flux_dev",
-            "mode": null,
+            "mode": "text_to_image",
             "field": "advanced.steps"
           }
         }
@@ -4670,7 +4964,21 @@
           "model": "flux_dev",
           "prompt": "a tree",
           "advanced": {
-            "steps": "20"
+            "steps": 20,
+            "resolution": "1024x1024",
+            "guidanceScale": 3.5,
+            "usePid": false,
+            "pidTarget": "4k",
+            "trueCfgScale": 4.0,
+            "faceRestore": false,
+            "controlScale": 0.7,
+            "openPoseScale": 0.7,
+            "flashAttn": true,
+            "mlxQuantize": 4,
+            "mlxQuantizeExplicit": false,
+            "convRot": false,
+            "segment": true,
+            "confidence": 0.25
           },
           "width": 1024,
           "height": 1024,
@@ -4703,7 +5011,7 @@
           "context": {
             "kind": "image",
             "model": "flux_dev",
-            "mode": null,
+            "mode": "text_to_image",
             "field": "advanced.lowResStart"
           }
         }
@@ -4730,7 +5038,7 @@
           "context": {
             "kind": "image",
             "model": "flux_dev",
-            "mode": null,
+            "mode": "text_to_image",
             "field": "advanced.enhancePrompt"
           }
         }
@@ -4758,7 +5066,7 @@
           "context": {
             "kind": "image",
             "model": "flux_dev",
-            "mode": null,
+            "mode": "text_to_image",
             "field": "referenceAssetIds"
           }
         }
@@ -4784,7 +5092,55 @@
           "width": 768,
           "height": 512,
           "duration": 6.0,
-          "fps": 25
+          "fps": 25,
+          "advanced": {
+            "resolution": "768x512",
+            "steps": 8,
+            "mlxQuantizeExplicit": false,
+            "motion": "slow push-in",
+            "quantization": "auto",
+            "useDistillLora": true,
+            "distillStage1Strength": 0.0,
+            "distillStage2Strength": 1.0,
+            "useUncensoredEnhancer": false,
+            "noAudio": false,
+            "videoConditioningStrength": 1,
+            "bridgeRightVideoConditioningStrength": 1,
+            "imageConditioningStrength": 1,
+            "lastFrameConditioningStrength": 1,
+            "imageFrameIndex": 0,
+            "maskingStrength": 1,
+            "conditioningScale": 1,
+            "segment": true,
+            "confidence": 0.25
+          }
+        }
+      }
+    },
+    {
+      "name": "video unsupported backend mode",
+      "kind": "video",
+      "model": "wan_2_2_i2v_14b",
+      "payload": {
+        "projectId": "p",
+        "model": "wan_2_2_i2v_14b",
+        "mode": "first_last_frame",
+        "prompt": "a tree",
+        "sourceAssetId": "first",
+        "lastFrameAssetId": "last"
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "mode",
+          "detail": "wan_2_2_i2v_14b cannot render the \"first_last_frame\" mode — no backend implements it, so this job would wait for a worker that will never claim it. Choose a mode this model lists in its capabilities, or a model that supports this one.",
+          "context": {
+            "kind": "video",
+            "model": "wan_2_2_i2v_14b",
+            "mode": "first_last_frame",
+            "field": "mode"
+          }
         }
       }
     },
@@ -5112,7 +5468,25 @@
           "projectName": null,
           "maxNewTokens": 256,
           "requestedGpu": "auto",
-          "advanced": {}
+          "advanced": {
+            "resolution": "2048x2048",
+            "sampler": "default",
+            "scheduler": "shift",
+            "schedulerShift": 3.0,
+            "steps": 50,
+            "guidanceScale": 4.0,
+            "numInferenceSteps": 50,
+            "trueCfgScale": 1.5,
+            "maxImages": 6,
+            "maxNewTokens": 2048,
+            "thinkMode": false,
+            "flashAttn": true,
+            "mlxQuantize": 4,
+            "mlxQuantizeExplicit": false,
+            "convRot": false,
+            "segment": true,
+            "confidence": 0.25
+          }
         }
       }
     },
@@ -5164,7 +5538,25 @@
           "height": 1024,
           "seed": null,
           "requestedGpu": "auto",
-          "advanced": {}
+          "advanced": {
+            "resolution": "2048x2048",
+            "sampler": "default",
+            "scheduler": "shift",
+            "schedulerShift": 3.0,
+            "steps": 50,
+            "guidanceScale": 4.0,
+            "numInferenceSteps": 50,
+            "trueCfgScale": 1.5,
+            "maxImages": 6,
+            "maxNewTokens": 2048,
+            "thinkMode": false,
+            "flashAttn": true,
+            "mlxQuantize": 4,
+            "mlxQuantizeExplicit": false,
+            "convRot": false,
+            "segment": true,
+            "confidence": 0.25
+          }
         }
       }
     },

@@ -241,7 +241,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         .effects(&[effect("enabled", "override with phase step sum", "advanced.steps"), effect("enabled", "override with per-phase guidance", "advanced.guidanceScale"), effect("enabled", "exclude", "advanced.usePid"), effect("enabled", "exclude", "image.hiresFix"), effect("enabled", "exclude", "image.sourceAssetId"), effect("enabled", "exclude", "image.referenceAssetIds"), effect("enabled", "exclude", "advanced.poses")])
         .ui("Multi-phase denoise", "phaseEditor"),
     opt!("flashAttn", Bool, Literal("true"), IMAGE, MachineBudget, "Candle SDXL flash attention kernel"),
-    opt!("mlxQuantize", Integer, Model("mlx.quantize"), VISUAL, MachineBudget, "model load quantization bits").limits(&["download variants","declared memory routes"]),
+    opt!("mlxQuantize", Integer, Model("mlx.quantize"), VISUAL, MachineBudget, "model load quantization bits").limits(&["download variants","declared memory routes"]).compat("JSON integer or numeric string. Explicit null blocks portable bound-tier fallback; absent selection is resolved after verified source binding."),
     opt!("mlxQuantizeExplicit", Bool, Literal("false"), VISUAL, MachineBudget, "user tier selection provenance"),
     opt!("convRot", Bool, Literal("false"), IMAGE, MachineBudget, "ConvRot load recipe").limits(&["declared memory routes"]),
     opt!("quantTier", Text, Provider("available checkpoint tiers"), VISUAL, MachineBudget, "artifact tier identity").limits(&["download variants","declared memory routes"]),

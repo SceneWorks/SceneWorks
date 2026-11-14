@@ -7,6 +7,7 @@ fn main() {
         ("flux_dev", "text_to_image"),
         ("flux3_klein", "text_to_image"),
         ("ltx_2_5", "text_to_video"),
+        ("wan_2_2_i2v_14b", "first_last_frame"),
         ("kokoro_82m", "text_to_speech"),
         ("starvector_1b", "image_to_svg"),
         ("sensenova_u1_8b", "text_to_image"),
@@ -88,6 +89,11 @@ fn main() {
         add(&format!("image {key} {value}"), "image", payload);
     }
     add("video model defaults", "video", video.clone());
+    add(
+        "video unsupported backend mode",
+        "video",
+        json!({"projectId":"p","model":"wan_2_2_i2v_14b","mode":"first_last_frame","prompt":"a tree","sourceAssetId":"first","lastFrameAssetId":"last"}),
+    );
     for (key, value) in [
         ("duration", json!(30)),
         ("fps", json!(60)),

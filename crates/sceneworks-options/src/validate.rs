@@ -144,7 +144,14 @@ pub fn shape(kind: &str, payload: &Value) -> Result<(), ShapeError> {
                         .as_array()
                         .is_some_and(|a| a.iter().all(|v| v.as_f64().is_some_and(f64::is_finite))),
                     Shape::Object(_) => value.is_object(),
-                    Shape::List(_) => value.is_array(),
+                    Shape::List(
+                        "x,y,confidence coordinates"
+                        | "hand coordinate arrays"
+                        | "face coordinate arrays",
+                    ) => value.is_array(),
+                    Shape::List(_) => value
+                        .as_array()
+                        .is_some_and(|values| values.iter().all(Value::is_object)),
                 };
                 if !valid {
                     let field = if path.is_empty() {

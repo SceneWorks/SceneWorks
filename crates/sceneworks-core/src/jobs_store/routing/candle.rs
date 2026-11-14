@@ -836,41 +836,6 @@ pub(crate) fn video_request_is_candle_eligible(
     )
 }
 
-/// The one video shape a PLAN-BACKED manifest entry (`importPlan.checkpointId`, epic 20398) is
-/// claimable on: candle's in-place ComfyUI Wan **T2V** lane.
-///
-/// Keyed entirely on the forwarded `modelManifestEntry`, never on the model id — an imported
-/// checkpoint's id is in no static routed list and never will be, which is exactly why every other
-/// video predicate answered `false` for it and `create_video_job` returned `400` for a job the
-/// worker's `wan_comfyui_claims` would have taken (sc-20651).
-///
-/// Deliberately narrow on all three axes, because a claim is a promise a worker arm exists:
-/// * **family** — only `wan-video`. `resolve_wan_comfyui_paths` refuses any other family outright,
-///   and no other candle video lane consults a plan at all.
-/// * **mode** — only `text_to_video`. `resolve_candle_video_route` routes `extend_clip` /
-///   `video_bridge` / `replace_person` to the Wan-VACE / SCAIL-2 arms *before* the ComfyUI Wan arm
-///   is consulted, so a plan-backed entry on those modes never reaches a lane that can load its
-///   bytes. Claiming them would trade a `400` for a queued job that later refuses.
-/// * **shape** — no source/last-frame/clip conditioning. The T2V lane consumes none of it, and the
-///   claim must not admit a request whose conditioning would be silently dropped.
-///
-/// This is a claim, not a load: the worker still verifies the plan fail-closed (drift, missing
-/// tier, missing expert role) and raises a typed refusal when it cannot.
-pub(crate) fn plan_backed_wan_video_candle_eligible(payload: &Map<String, Value>) -> bool {
-    sceneworks_options::video_eligibility::plan_backed_wan_eligible(payload)
-}
-
-/// The exact request shape MiniMax-H3's BASE partition (`transformer/`: t2va + fl2va) serves:
-/// `text_to_video` with no keyframe, `image_to_video` with exactly ONE keyframe — the first frame
-/// or, last-frame-only, the last (FL2VA conditions on 0, 1 or 2 keyframes; the API admits the
-/// last-only shape through `h3_keyframes`, and the worker's `resolve_minimax_h3_conditioning`
-/// places it) — `first_last_frame` with both, and never a reference, clip, mask or bridge. One predicate for the builtin `minimax_h3`
-/// candle arm and the imported-DiT claim (sc-26680) on both lanes, so the partition an imported
-/// checkpoint is bound to cannot serve a shape the builtin partition refuses.
-pub(crate) fn minimax_h3_base_partition_shape(payload: &Map<String, Value>) -> bool {
-    sceneworks_options::video_eligibility::h3_base_shape(payload)
-}
-
 /// Which `video_generate` modes the candle (Windows/Linux/CUDA) lane claims for `model` — the
 /// off-Mac twin of [`super::mlx::video_mode_is_mlx_eligible`] and the predicate
 /// [`super::catalog::video_model_candle_support`] maps over [`super::catalog::VIDEO_UI_MODES`]
@@ -896,6 +861,7 @@ pub(crate) fn video_mode_is_candle_eligible(model: &str, mode: &str) -> bool {
 
 /// Per-model candle txt2video-eligibility, factored out so the routing tests can probe it with
 /// synthetic payloads (parity with `image_request_candle_eligible`).
+#[cfg(test)]
 pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
     sceneworks_options::video_eligibility::candle_base_eligible(
         model,
@@ -907,6 +873,7 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
 /// Native LTX replace-person eligibility. Unlike the historical generic Wan-VACE substitution, this
 /// route keeps the selected LTX/Eros model and forwards the tracked clip, masks, references, and
 /// selected IC-LoRA to that model's `ControlClip`/keyframe-append provider path.
+#[cfg(test)]
 pub(crate) fn ltx_replace_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
     sceneworks_options::video_eligibility::ltx_replace_eligible(model, payload)
 }
@@ -917,6 +884,7 @@ pub(crate) fn ltx_replace_candle_eligible(model: &str, payload: &Map<String, Val
 /// dedicated VACE-Fun provider is admitted here only for PersonReplace and accepts user adapters;
 /// generic VACE still rejects them. Factored out so the routing tests can probe it with synthetic
 /// payloads (parity with [`video_request_candle_eligible`]).
+#[cfg(test)]
 pub(crate) fn video_request_candle_vace_eligible(
     model: &str,
     payload: &Map<String, Value>,
@@ -935,6 +903,7 @@ pub(crate) fn video_request_candle_vace_eligible(
 }
 
 /// The request selects one exact tier and never asks a packed provider to merge an adapter.
+#[cfg(test)]
 pub(crate) fn scail2_candle_source_tier_eligible(payload: &Map<String, Value>) -> bool {
     sceneworks_options::video_eligibility::scail2_source_tier_eligible(payload)
 }
@@ -948,6 +917,7 @@ pub(crate) fn scail2_candle_source_tier_eligible(payload: &Map<String, Value>) -
 /// preserved and resolved to bf16 by the worker. Mirrors the MLX
 /// `video_mode_is_mlx_eligible(scail2_14b, animate_character)` shape, expressed as a candle-claim
 /// gate. Factored out so the routing tests can probe it (parity with [`video_request_candle_eligible`]).
+#[cfg(test)]
 pub(crate) fn scail2_animate_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
     sceneworks_options::video_eligibility::scail2_animate_eligible(model, payload)
 }
@@ -958,6 +928,7 @@ pub(crate) fn scail2_animate_candle_eligible(model: &str, payload: &Map<String, 
 /// seam as standalone animation (LoRA / LoKr / LoHa / diff-patch) on dense bf16 only; the exact
 /// q4/q8 package tiers reject adapter merging. A distinct candle engine, so it is gated here rather than
 /// added to [`CANDLE_VIDEO_VACE_MODELS`]. Factored out so the routing tests can probe it.
+#[cfg(test)]
 pub(crate) fn scail2_replace_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
     sceneworks_options::video_eligibility::scail2_replace_eligible(model, payload)
 }
@@ -976,6 +947,7 @@ pub(crate) fn scail2_replace_candle_eligible(model: &str, payload: &Map<String, 
 /// on Candle because the worker resolves the published bf16/q8/q4 tier subdirectories (sc-11003) —
 /// there is no torch Bernini to fall back to. Factored out so
 /// the routing tests can probe it with synthetic payloads (parity with [`video_request_candle_eligible`]).
+#[cfg(test)]
 pub(crate) fn bernini_video_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
     sceneworks_options::video_eligibility::bernini_eligible(model, payload)
 }

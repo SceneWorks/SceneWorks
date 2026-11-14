@@ -19,5 +19,19 @@ fn native_portable_validation_corpus() {
             Err(error) => json!({"ok":false,"refusal":error}),
         };
         assert_eq!(actual, case["expected"], "{}", case["name"]);
+        if let Some(resolved) = actual.get("resolved").and_then(Value::as_object) {
+            let second =
+                resolve(case["kind"].as_str().unwrap(), resolved, entry).unwrap_or_else(|error| {
+                    panic!(
+                        "effective copy must remain valid for {}: {error:?}",
+                        case["name"]
+                    )
+                });
+            assert_eq!(
+                &second, resolved,
+                "resolution must be idempotent for {}",
+                case["name"]
+            );
+        }
     }
 }

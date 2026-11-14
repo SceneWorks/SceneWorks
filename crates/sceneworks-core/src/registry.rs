@@ -234,3 +234,23 @@ mod assemble;
 mod parity_contract_tests;
 #[cfg(test)]
 mod tests;
+
+/// Replace reserved routing facts with compiled policy; imported/user rows cannot grant lanes.
+pub fn project_option_route_facts(entry: &mut Value) {
+    let id = entry.get("id").and_then(Value::as_str).unwrap_or_default();
+    let facts = crate::jobs_store::video_route_facts(id);
+    if let Some(object) = entry.as_object_mut() {
+        if facts.mlx || facts.candle {
+            object.insert(
+                "optionRouteFacts".into(),
+                serde_json::json!({
+                    "videoMlxRouted":facts.mlx, "candleVideoRouted":facts.candle,
+                    "candleVideoI2v":facts.candle_i2v, "candleVideoVace":facts.candle_vace,
+                    "candleVideoLora":facts.candle_lora
+                }),
+            );
+        } else {
+            object.remove("optionRouteFacts");
+        }
+    }
+}
