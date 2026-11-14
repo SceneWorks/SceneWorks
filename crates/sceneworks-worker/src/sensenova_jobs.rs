@@ -580,7 +580,12 @@ pub(crate) async fn run_vqa_job(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
-    let request = ImageRequest::from_payload(&job.payload);
+    let facts = sceneworks_core::request_validation::facts_for_job(&job.job_type, &job.payload);
+    let resolved =
+        sceneworks_core::request_validation::resolve_request("vqa", &job.payload, &facts)
+            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let request = ImageRequest::from_resolved(&job.payload, resolved.as_payload())
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
     if request.project_id.trim().is_empty() {
         return Err(WorkerError::InvalidPayload(
             "Missing payload.projectId".to_owned(),
@@ -936,7 +941,6 @@ struct InterleaveParams {
 /// values and it can be unit-tested without weights or a device (sc-8839).
 #[cfg(native_lane)]
 fn resolve_interleave_params(request: &ImageRequest, payload: &JsonObject) -> InterleaveParams {
-    let advanced = &request.advanced;
     // Snap the requested W×H to the nearest interleave bucket by aspect ratio (log-space), mirroring
     // the Python `interleave_resolution_for`. Defaults 2048×1152 (16:9), clamped 256..4096.
     let req_width = payload_int(payload, "width", 2048, 256, 4096);
@@ -946,18 +950,18 @@ fn resolve_interleave_params(request: &ImageRequest, payload: &JsonObject) -> In
         width,
         height,
         // Upstream interleave defaults (examples/interleave/inference.py @238d6cf).
-        steps: advanced_int(advanced, "numInferenceSteps", 50, 1, 100) as usize,
-        cfg_scale: advanced_float(advanced, "guidanceScale", 4.0),
-        img_cfg_scale: advanced_float(advanced, "imageGuidanceScale", 1.0),
-        timestep_shift: advanced_float(advanced, "timestepShift", 3.0),
-        max_new_tokens: advanced_int(advanced, "maxNewTokens", 2048, 64, 8192) as usize,
-        max_images: advanced_int(advanced, "maxImages", 6, 1, 10) as usize,
+        steps: advanced_int(request, "numInferenceSteps", 50, 1, 100) as usize,
+        cfg_scale: advanced_float(request, "guidanceScale", 4.0),
+        img_cfg_scale: advanced_float(request, "imageGuidanceScale", 1.0),
+        timestep_shift: advanced_float(request, "timestepShift", 3.0),
+        max_new_tokens: advanced_int(request, "maxNewTokens", 2048, 64, 8192) as usize,
+        max_images: advanced_int(request, "maxImages", 6, 1, 10) as usize,
         // Non-Think by default: the document is the deliverable, so skip the chain-of-thought.
-        think_mode: advanced
-            .get("thinkMode")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        system_message: crate::payload::trimmed_string(advanced.get("systemMessage"))
+        think_mode: request.advanced_bool("thinkMode").unwrap_or(false),
+        system_message: request
+            .advanced_text("systemMessage")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
             .map(str::to_owned)
             .unwrap_or_else(|| INTERLEAVE_SYSTEM_MESSAGE.to_owned()),
         seed: resolve_seed(request, 0),
@@ -980,7 +984,12 @@ pub(crate) async fn run_interleave_job(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
-    let request = ImageRequest::from_payload(&job.payload);
+    let facts = sceneworks_core::request_validation::facts_for_job(&job.job_type, &job.payload);
+    let resolved =
+        sceneworks_core::request_validation::resolve_request("interleave", &job.payload, &facts)
+            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let request = ImageRequest::from_resolved(&job.payload, resolved.as_payload())
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
     if request.project_id.trim().is_empty() {
         return Err(WorkerError::InvalidPayload(
             "Missing payload.projectId".to_owned(),
@@ -1768,20 +1777,15 @@ fn payload_int(payload: &JsonObject, key: &str, default: i64, lo: i64, hi: i64) 
 
 /// `safe_int` over an `advanced` field (same parse/clamp as [`payload_int`]).
 #[cfg(native_lane)]
-fn advanced_int(advanced: &JsonObject, key: &str, default: i64, lo: i64, hi: i64) -> i64 {
-    payload_int(advanced, key, default, lo, hi)
+fn advanced_int(request: &ImageRequest, key: &'static str, default: i64, lo: i64, hi: i64) -> i64 {
+    request.advanced_i64(key).unwrap_or(default).clamp(lo, hi)
 }
 
 /// `_advanced_float`: parse an `advanced` field as f32 else `default`.
 #[cfg(native_lane)]
-fn advanced_float(advanced: &JsonObject, key: &str, default: f32) -> f32 {
-    advanced
-        .get(key)
-        .and_then(|value| {
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
+fn advanced_float(request: &ImageRequest, key: &'static str, default: f32) -> f32 {
+    request
+        .advanced_f64(key)
         .map(|value| value as f32)
         .unwrap_or(default)
 }
@@ -1961,7 +1965,7 @@ mod tests {
         .as_object()
         .cloned()
         .unwrap();
-        let request = ImageRequest::from_payload(&payload);
+        let request = ImageRequest::from_resolved(&payload, &payload).unwrap();
         let params = resolve_interleave_params(&request, &payload);
         assert_eq!(
             params,
@@ -1992,7 +1996,7 @@ mod tests {
             .as_object()
             .cloned()
             .unwrap();
-        let request = ImageRequest::from_payload(&payload);
+        let request = ImageRequest::from_resolved(&payload, &payload).unwrap();
         let params = resolve_interleave_params(&request, &payload);
         assert_eq!(
             params,
