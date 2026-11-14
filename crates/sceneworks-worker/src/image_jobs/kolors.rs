@@ -476,6 +476,7 @@ pub(super) async fn generate_kolors_control_stream(
         api,
         settings,
         job,
+        &request.portable_aux,
         true,
         "pose-set face-stack staging failed; likeness scores omitted",
     )

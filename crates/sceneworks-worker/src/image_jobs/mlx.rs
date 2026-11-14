@@ -973,6 +973,7 @@ pub(super) async fn generate_stream_using(
         api,
         settings,
         job,
+        &request.portable_aux,
         likeness_source.is_some(),
         "character_image face-stack staging failed; likeness scores omitted",
     )

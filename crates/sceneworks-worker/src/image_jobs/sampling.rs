@@ -567,3 +567,40 @@ pub(super) fn explicit_sampling_request(request: &ImageRequest) -> gen_core::Gen
         ..Default::default()
     }
 }
+
+#[cfg(test)]
+mod resolved_sampling_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn sampling_reads_canonical_values_without_reinterpreting_authored_strings() {
+        let authored = json!({"advanced": {
+            "sampler": " euler ", "scheduler": "default", "schedulerShift": "0.5",
+            "guidanceScale": "4.25"
+        }});
+        let effective = json!({"advanced": {
+            "sampler": " euler ", "scheduler": "default", "schedulerShift": 0.5,
+            "guidanceScale": 4.25
+        }});
+        let request = ImageRequest::from_resolved(
+            authored.as_object().unwrap(),
+            effective.as_object().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            read_resolved_image_sampling_knobs(&request),
+            (Some("euler".to_owned()), None, Some(0.5))
+        );
+        assert_eq!(explicit_sampling_request(&request).guidance, Some(4.25));
+
+        let malformed = ImageRequest::from_resolved(
+            authored.as_object().unwrap(),
+            authored.as_object().unwrap(),
+        );
+        assert!(matches!(
+            malformed,
+            Err(sceneworks_core::resolved_options::BindingError::InvalidEffectiveValue { .. })
+        ));
+    }
+}

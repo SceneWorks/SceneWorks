@@ -487,6 +487,7 @@ pub(super) async fn generate_pulid_flux_stream(
         api,
         settings,
         job,
+        &request.portable_aux,
         true,
         "PuLID-FLUX face-stack staging failed; likeness scores omitted",
     )

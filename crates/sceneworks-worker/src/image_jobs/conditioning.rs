@@ -1454,13 +1454,14 @@ pub(super) async fn stage_likeness(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
     should_stage: bool,
     warn_message: &'static str,
 ) -> Option<PathBuf> {
     if !should_stage {
         return None;
     }
-    match ensure_face_stack_dir(api, settings, job).await {
+    match ensure_face_stack_dir(api, settings, job, portable_aux).await {
         Ok(dir) => Some(dir),
         Err(error) => {
             tracing::warn!(error = %error, "{warn_message}");

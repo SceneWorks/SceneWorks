@@ -376,6 +376,7 @@ pub(super) async fn generate_candle_pulid_stream(
         api,
         settings,
         job,
+        &request.portable_aux,
         score_likeness,
         "PuLID-FLUX face-stack staging failed; likeness scores omitted",
     )

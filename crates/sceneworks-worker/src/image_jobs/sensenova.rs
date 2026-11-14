@@ -270,6 +270,7 @@ pub(super) async fn generate_sensenova_edit_stream(
         api,
         settings,
         job,
+        &request.portable_aux,
         score_likeness,
         "character_image face-stack staging failed; likeness scores omitted",
     )

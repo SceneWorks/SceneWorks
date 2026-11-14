@@ -840,16 +840,15 @@ pub(super) async fn ensure_instantid_file(
 /// face detection but neither ArcFace nor the SDXL/IdentityNet stack. Shares the env override
 /// (`SCENEWORKS_INSTANTID_WEIGHTS`) + app cache + download-on-first-use with
 /// [`ensure_instantid_weights`], so a prior InstantID run leaves it already cached.
-fn bound_utility_face_stack(payload: &JsonObject) -> WorkerResult<PathBuf> {
-    let advanced = payload
-        .get("advanced")
-        .and_then(Value::as_object)
+fn bound_utility_face_stack(
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
+) -> WorkerResult<PathBuf> {
+    portable_aux
+        .path("utility_face_stack")
+        .map(Path::to_path_buf)
         .ok_or_else(|| {
-            WorkerError::InvalidPayload("face utility lacks portable source map".to_owned())
-        })?;
-    crate::portable_aux_sources::bound_aux_path(advanced, "utility_face_stack").ok_or_else(|| {
-        WorkerError::InvalidPayload("face utility lacks bound face stack".to_owned())
-    })
+            WorkerError::InvalidPayload("face utility lacks bound face stack".to_owned())
+        })
 }
 
 #[cfg(test)]
@@ -858,7 +857,7 @@ mod utility_face_source_tests {
 
     #[test]
     fn utility_face_loader_requires_verified_dispatch_map() {
-        let absent = JsonObject::new();
+        let absent = sceneworks_core::portable_aux_bindings::PortableAuxBindings::default();
         assert!(bound_utility_face_stack(&absent).is_err());
         let mut bound = JsonObject::new();
         bound.insert(
@@ -868,7 +867,9 @@ mod utility_face_source_tests {
             }),
         );
         assert_eq!(
-            bound_utility_face_stack(&bound).unwrap(),
+            bound_utility_face_stack(
+                &sceneworks_core::portable_aux_bindings::PortableAuxBindings::from_trusted_dispatch(&bound).unwrap()
+            ).unwrap(),
             PathBuf::from("/private/snapshot/face")
         );
     }
@@ -881,12 +882,13 @@ pub(crate) async fn ensure_scrfd_weights(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<PathBuf> {
     if matches!(
         job.job_type,
         sceneworks_core::contracts::JobType::KpsExtract
     ) {
-        return Ok(bound_utility_face_stack(&job.payload)?.join(INSTANTID_SCRFD_FILE));
+        return Ok(bound_utility_face_stack(portable_aux)?.join(INSTANTID_SCRFD_FILE));
     }
     let client = crate::downloads::streaming_download_client();
     let context = DownloadContext {
@@ -923,11 +925,10 @@ pub(crate) async fn ensure_face_stack_dir(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<PathBuf> {
-    if let Some(advanced) = job.payload.get("advanced").and_then(Value::as_object) {
-        if let Some(dir) = crate::portable_aux_sources::bound_aux_path(advanced, "instantid_mlx") {
-            return Ok(dir);
-        }
+    if let Some(dir) = portable_aux.path("instantid_mlx") {
+        return Ok(dir.to_path_buf());
     }
     if matches!(
         job.job_type,
@@ -936,7 +937,7 @@ pub(crate) async fn ensure_face_stack_dir(
             | sceneworks_core::contracts::JobType::FaceLikenessCompare
             | sceneworks_core::contracts::JobType::CatalogAnalysis
     ) {
-        return bound_utility_face_stack(&job.payload);
+        return bound_utility_face_stack(portable_aux);
     }
     let client = crate::downloads::streaming_download_client();
     let context = DownloadContext {

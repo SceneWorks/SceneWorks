@@ -413,23 +413,17 @@ pub(super) async fn ensure_depth_estimator_dir(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<PathBuf> {
-    if let Some(advanced) = job
-        .payload
-        .get("advanced")
-        .and_then(serde_json::Value::as_object)
-    {
-        if crate::portable_aux_sources::has_bound_aux_paths(advanced) {
-            return crate::portable_aux_sources::bound_aux_path(
-                advanced,
-                "depth_anything_v2_small",
-            )
+    if portable_aux.has_paths() {
+        return portable_aux
+            .path("depth_anything_v2_small")
+            .map(Path::to_path_buf)
             .ok_or_else(|| {
                 WorkerError::InvalidPayload(
                     "portable depth estimator source is not bound".to_owned(),
                 )
             });
-        }
     }
     use crate::depth::{
         DEPTH_ANYTHING_V2_FILE, DEPTH_ANYTHING_V2_REVISION, DEPTH_ANYTHING_V2_SMALL_REPO,

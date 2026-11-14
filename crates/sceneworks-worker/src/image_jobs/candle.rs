@@ -2296,6 +2296,7 @@ async fn generate_candle_registry_stream_using(
         api,
         settings,
         job,
+        &request.portable_aux,
         likeness_source.is_some(),
         "registered Candle character_image face-stack staging failed; likeness scores omitted",
     )

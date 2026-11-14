@@ -203,7 +203,7 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
     // depth map (the passthrough short-circuits estimation). Fetched once on the first depth job (the
     // off-Mac candle estimator, sc-8413).
     let depth_weights_dir = if control_kind == ControlKind::Depth && user_control.is_none() {
-        Some(ensure_depth_estimator_dir(api, settings, job).await?)
+        Some(ensure_depth_estimator_dir(api, settings, job, &request.portable_aux).await?)
     } else {
         None
     };

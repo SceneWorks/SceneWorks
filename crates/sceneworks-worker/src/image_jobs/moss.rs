@@ -584,7 +584,7 @@ fn emit_moss_advanced_outputs(
                 let companion =
                     write_moss_tensor_companion(plan, project, index, &settings, sample.seed)?;
                 let fact = json!({"assetId":fresh_asset_id(),"type":"tensor","mediaPath":relative,"mimeType":sceneworks_core::tensor_artifact::MIME,
-                    "tensor":metadata,"batchIndex":index,"parents":moss_input_parents(&raw)?,"displayName":format!("MOSS sampled latents {}",index+1),"createdAt":now_rfc3339(),
+                    "tensor":metadata,"batchIndex":index,"parents":moss_input_parents(&plan.request)?,"displayName":format!("MOSS sampled latents {}",index+1),"createdAt":now_rfc3339(),
                     "mode":"edit_image","model":plan.request.model,"adapter":plan.adapter,"prompt":plan.request.image_prompt(index),"negativePrompt":plan.request.negative_prompt,
                     "seed":sample.seed,"count":plan.request.count,"normalizedWidth":request.width,"normalizedHeight":request.height,
                     "sourceAssetId":reference_ids.first(),

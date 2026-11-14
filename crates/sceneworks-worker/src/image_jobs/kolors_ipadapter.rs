@@ -146,14 +146,15 @@ async fn ensure_kolors_ipadapter_weights(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<PathBuf> {
-    if let Some(advanced) = job.payload.get("advanced").and_then(Value::as_object) {
-        if crate::portable_aux_sources::has_bound_aux_paths(advanced) {
-            return crate::portable_aux_sources::bound_aux_path(advanced, "kolors_ip_adapter")
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload("missing bound Kolors IP-Adapter source".to_owned())
-                });
-        }
+    if portable_aux.has_paths() {
+        return portable_aux
+            .path("kolors_ip_adapter")
+            .map(Path::to_path_buf)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("missing bound Kolors IP-Adapter source".to_owned())
+            });
     }
     let has_layout = |dir: &Path| {
         dir.join(KOLORS_IPADAPTER_BUNDLE).is_file()
@@ -265,7 +266,8 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
         reference_id,
         project_path,
     )?;
-    let ip_adapter = ensure_kolors_ipadapter_weights(api, settings, job).await?;
+    let ip_adapter =
+        ensure_kolors_ipadapter_weights(api, settings, job, &request.portable_aux).await?;
 
     // Identity-likeness scoring (epic 4406, sc-4411 plain With-Character): the candle Kolors IP-Adapter
     // lane is the With-Character route for a Kolors model — score every output against the reference face
@@ -283,6 +285,7 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
         api,
         settings,
         job,
+        &request.portable_aux,
         score_likeness,
         "character_image face-stack staging failed; likeness scores omitted",
     )

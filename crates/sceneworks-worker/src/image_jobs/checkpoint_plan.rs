@@ -1842,7 +1842,7 @@ fn checkpoint_plan_bespoke_primary(
 
 /// Optional per-request override of a u32 knob: `advanced[key]`, else the manifest entry's
 /// `[key]`. `None` means "the provider's own default", which the registry descriptor owns.
-fn checkpoint_plan_u32_override(request: &ImageRequest, key: &'static str) -> Option<u32> {
+fn resolved_checkpoint_plan_u32(request: &ImageRequest, key: &'static str) -> Option<u32> {
     let parse = |value: &Value| {
         value
             .as_u64()
@@ -1855,7 +1855,7 @@ fn checkpoint_plan_u32_override(request: &ImageRequest, key: &'static str) -> Op
         .or_else(|| request.model_manifest_entry.get(key).and_then(parse))
 }
 
-fn checkpoint_plan_f32_override(request: &ImageRequest, key: &'static str) -> Option<f32> {
+fn resolved_checkpoint_plan_f32(request: &ImageRequest, key: &'static str) -> Option<f32> {
     let parse = |value: &Value| {
         value
             .as_f64()
@@ -2007,8 +2007,8 @@ pub(super) fn checkpoint_plan_generation_request(request: &ImageRequest) -> Gene
     GenerationRequest {
         width: request.width,
         height: request.height,
-        steps: checkpoint_plan_u32_override(request, "steps").map(|steps| steps.clamp(1, 100)),
-        guidance: checkpoint_plan_f32_override(request, "guidanceScale"),
+        steps: resolved_checkpoint_plan_u32(request, "steps").map(|steps| steps.clamp(1, 100)),
+        guidance: resolved_checkpoint_plan_f32(request, "guidanceScale"),
         ..super::sampling::explicit_sampling_request(request)
     }
 }
