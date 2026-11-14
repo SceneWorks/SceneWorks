@@ -24,8 +24,9 @@ if (!Number.isInteger(samples) || samples < 5 || samples > 50) {
 const corpus = JSON.parse(readFileSync(fileURLToPath(new URL(
   "../crates/sceneworks-options/tests/fixtures/validation_corpus.json", import.meta.url,
 )), "utf8"));
-const sample = corpus.cases.find((entry) => entry.name === "image model defaults");
-if (!sample) throw new Error("Shared image corpus sample is missing");
+const sample = corpus.cases.find((entry) =>
+  entry.kind === "image" && entry.expected.ok && corpus.modelFacts[entry.model]);
+if (!sample) throw new Error("Shared image corpus has no model-backed success case");
 const fixture = {
   kind: sample.kind,
   payload: sample.payload,
