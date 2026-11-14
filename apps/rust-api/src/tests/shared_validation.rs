@@ -127,6 +127,10 @@ async fn shared_person_and_prompt_refusals_match_typed_raw_retry_and_duplicate()
             vec![
                 json!({"prompt":"tree","sourceAssetIds":null}),
                 json!({"task":"image_caption","sourceAssetId":"source","prompt":null}),
+                json!({"task":"image_caption","imagePaths":["",42]}),
+                json!({"task":"image_caption","imagePaths":["image.png",42]}),
+                json!({"task":"image_caption","imagePaths":null}),
+                json!({"task":"image_caption","imagePaths":vec!["image.png";7]}),
             ],
         ),
     ] {

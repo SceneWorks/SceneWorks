@@ -742,6 +742,26 @@ fn shared_person_and_prompt_refusals_precede_worker_parsing() {
             "promptRefine",
             serde_json::json!({"task":"image_caption","sourceAssetId":"source","prompt":null}),
         ),
+        (
+            JobType::PromptRefine,
+            "promptRefine",
+            serde_json::json!({"task":"image_caption","imagePaths":["",42]}),
+        ),
+        (
+            JobType::PromptRefine,
+            "promptRefine",
+            serde_json::json!({"task":"image_caption","imagePaths":["image.png",42]}),
+        ),
+        (
+            JobType::PromptRefine,
+            "promptRefine",
+            serde_json::json!({"task":"image_caption","imagePaths":null}),
+        ),
+        (
+            JobType::PromptRefine,
+            "promptRefine",
+            serde_json::json!({"task":"image_caption","imagePaths":vec!["image.png";7]}),
+        ),
     ] {
         let payload = payload.as_object().unwrap();
         let expected =

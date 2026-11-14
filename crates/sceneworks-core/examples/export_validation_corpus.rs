@@ -126,7 +126,7 @@ fn main() {
         json!({"projectId":"p","model":"flux3_klein","prompt":"tree","referenceAssetIds":(0..11).map(|i| format!("source-{i}")).collect::<Vec<_>>()}),
     );
     add(
-        "video LTX IC-LoRA required",
+        "video LTX extend mode refusal",
         "video",
         json!({"projectId":"p","model":"ltx_2_5","mode":"extend_clip","prompt":"tree","sourceClipAssetId":"clip"}),
     );
@@ -230,6 +230,22 @@ fn main() {
         }
     }
     for (name, payload) in [
+        (
+            "vision blank paths",
+            json!({"task":"image_caption","imagePaths":["",42]}),
+        ),
+        (
+            "vision nonstring path",
+            json!({"task":"image_caption","imagePaths":["image.png",42]}),
+        ),
+        (
+            "vision null paths",
+            json!({"task":"image_caption","imagePaths":null}),
+        ),
+        (
+            "vision path cap",
+            json!({"task":"image_caption","imagePaths":vec!["image.png";7]}),
+        ),
         (
             "vision null prompt",
             json!({"task":"image_caption","sourceAssetId":"source","prompt":null}),

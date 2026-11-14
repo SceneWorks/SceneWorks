@@ -6359,7 +6359,7 @@
       }
     },
     {
-      "name": "video LTX IC-LoRA required",
+      "name": "video LTX extend mode refusal",
       "kind": "video",
       "model": "ltx_2_5",
       "payload": {
@@ -7189,6 +7189,112 @@
             "model": null,
             "mode": null,
             "field": "trackName"
+          }
+        }
+      }
+    },
+    {
+      "name": "vision blank paths",
+      "kind": "promptRefine",
+      "model": "",
+      "payload": {
+        "task": "image_caption",
+        "imagePaths": [
+          "",
+          42
+        ]
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "imagePaths[0]",
+          "detail": "imagePaths must contain only nonblank string paths",
+          "context": {
+            "kind": "promptRefine",
+            "model": null,
+            "mode": null,
+            "field": "imagePaths[0]"
+          }
+        }
+      }
+    },
+    {
+      "name": "vision nonstring path",
+      "kind": "promptRefine",
+      "model": "",
+      "payload": {
+        "task": "image_caption",
+        "imagePaths": [
+          "image.png",
+          42
+        ]
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "imagePaths[1]",
+          "detail": "imagePaths must contain only nonblank string paths",
+          "context": {
+            "kind": "promptRefine",
+            "model": null,
+            "mode": null,
+            "field": "imagePaths[1]"
+          }
+        }
+      }
+    },
+    {
+      "name": "vision null paths",
+      "kind": "promptRefine",
+      "model": "",
+      "payload": {
+        "task": "image_caption",
+        "imagePaths": null
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "imagePaths",
+          "detail": "imagePaths must be an array of nonblank string paths",
+          "context": {
+            "kind": "promptRefine",
+            "model": null,
+            "mode": null,
+            "field": "imagePaths"
+          }
+        }
+      }
+    },
+    {
+      "name": "vision path cap",
+      "kind": "promptRefine",
+      "model": "",
+      "payload": {
+        "task": "image_caption",
+        "imagePaths": [
+          "image.png",
+          "image.png",
+          "image.png",
+          "image.png",
+          "image.png",
+          "image.png",
+          "image.png"
+        ]
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "imagePaths",
+          "detail": "A mood board accepts at most 6 reference images",
+          "context": {
+            "kind": "promptRefine",
+            "model": null,
+            "mode": null,
+            "field": "imagePaths"
           }
         }
       }

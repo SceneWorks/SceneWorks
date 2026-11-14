@@ -178,6 +178,26 @@ pub fn resolve_prompt_refine(payload: &JsonObject) -> JsonObject {
 
 /// Accept authored asset ids or the API-resolved path carrier; path confinement remains native.
 pub fn validate_prompt_refine(payload: &JsonObject) -> Result<(), ValidationRefusal> {
+    let image_paths = payload
+        .get("imagePaths")
+        .map(|value| {
+            let paths = value.as_array().ok_or_else(|| {
+                ValidationRefusal::new(
+                    "imagePaths",
+                    "imagePaths must be an array of nonblank string paths",
+                )
+            })?;
+            for (index, path) in paths.iter().enumerate() {
+                if path.as_str().is_none_or(|path| path.trim().is_empty()) {
+                    return Err(ValidationRefusal::new(
+                        format!("imagePaths[{index}]"),
+                        "imagePaths must contain only nonblank string paths",
+                    ));
+                }
+            }
+            Ok(paths)
+        })
+        .transpose()?;
     let text = |key: &str| {
         payload
             .get(key)
@@ -196,7 +216,7 @@ pub fn validate_prompt_refine(payload: &JsonObject) -> Result<(), ValidationRefu
             .get("sourceAssetIds")
             .and_then(Value::as_array)
             .filter(|a| !a.is_empty())
-            .or_else(|| payload.get("imagePaths").and_then(Value::as_array))
+            .or(image_paths)
             .map(Vec::len)
             .unwrap_or_else(|| {
                 usize::from(
@@ -216,9 +236,15 @@ pub fn validate_prompt_refine(payload: &JsonObject) -> Result<(), ValidationRefu
         } else {
             MAX_MOOD_BOARD_IMAGES
         };
-        if count > cap {
+        // A submitted resolved-path list cannot hide an over-cap execution list behind asset ids.
+        if count.max(image_paths.map_or(0, Vec::len)) > cap {
+            let field = if image_paths.is_some_and(|paths| paths.len() > cap) {
+                "imagePaths"
+            } else {
+                "sourceAssetIds"
+            };
             return Err(ValidationRefusal::new(
-                "sourceAssetIds",
+                field,
                 if rewrite {
                     format!("Qwen Image 2.1 prompt rewriting accepts at most {cap} reference images — the same ordered list the render takes")
                 } else {
@@ -502,5 +528,40 @@ mod request_tests {
         assert_eq!(describe["captionStyle"], "prose");
         assert_eq!(describe["sourceAssetIds"], json!([]));
         assert!(!describe.contains_key("aspectRatio"));
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn prompt_reference_paths_refuse_malformed_members_and_enforce_task_caps() {
+    use crate::request_validation::validate_shape;
+    for (paths, field) in [
+        (json!(null), "imagePaths"),
+        (json!("image.png"), "imagePaths"),
+        (json!(["", 42]), "imagePaths[0]"),
+        (json!(["image.png", 42]), "imagePaths[1]"),
+        (json!(["  "]), "imagePaths[0]"),
+    ] {
+        let payload = json!({"task":"image_describe","imagePaths":paths});
+        assert_eq!(
+            validate_shape("promptRefine", payload.as_object().unwrap())
+                .unwrap_err()
+                .field,
+            field
+        );
+    }
+    for (task, cap) in [
+        ("image_describe", MAX_MOOD_BOARD_IMAGES),
+        ("qwen_image_rewrite", MAX_QWEN_REWRITE_IMAGES),
+    ] {
+        let mut payload = json!({"task":task,"prompt":"tree","sourceAssetIds":["asset"],"imagePaths":vec!["image.png";cap]});
+        validate_shape("promptRefine", payload.as_object().unwrap()).unwrap();
+        payload["imagePaths"] = json!(vec!["image.png"; cap + 1]);
+        assert_eq!(
+            validate_shape("promptRefine", payload.as_object().unwrap())
+                .unwrap_err()
+                .field,
+            "imagePaths"
+        );
     }
 }

@@ -35,3 +35,25 @@ fn native_portable_validation_corpus() {
         }
     }
 }
+
+#[test]
+fn ltx_extend_fixture_asserts_the_public_mode_refusal() {
+    let corpus: Value =
+        serde_json::from_str(include_str!("fixtures/validation_corpus.json")).unwrap();
+    let case = corpus["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|case| case["name"] == "video LTX extend mode refusal")
+        .expect("the named mode-refusal fixture must remain in the shared corpus");
+    let facts = corpus["modelFacts"]["ltx_2_5"].as_object().unwrap();
+    let refusal = resolve("video", case["payload"].as_object().unwrap(), facts).unwrap_err();
+    assert_eq!(refusal.field, "mode");
+    assert!(
+        refusal.detail.starts_with(
+            "ltx_2_5 cannot render the \"extend_clip\" mode — no backend implements it"
+        ),
+        "{refusal:?}"
+    );
+    assert_eq!(refusal.context["mode"], "extend_clip");
+}
