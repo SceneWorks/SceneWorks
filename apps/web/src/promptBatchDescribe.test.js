@@ -63,6 +63,46 @@ describe("formatPromptBatch", () => {
     expect(extractKeys(prompts)).toEqual(["man_1", "woman_1", "girl_1", "cat_1"]);
   });
 
+  it("emits one Pose line per person after Description, with labels as batch variables", () => {
+    const pose =
+      "woman_1 — Body line: upright; Stance: standing on their right leg; Facing: front; Torso: straight; " +
+      "Head: tilted toward their left shoulder; Left arm: hidden; Right arm: hand on man_1's shoulder; " +
+      "Left leg: knee bent; Right leg: straight; Depth: their left side is nearer the camera; Placement: frame-left of man_1\n" +
+      "man_1 — Body line: upright; Stance: seated; Facing: profile toward frame-left; Torso: leaning back; " +
+      "Head: turned toward woman_1; Left arm: on the table; Right arm: hidden; Left leg: hidden; Right leg: hidden; " +
+      "Depth: not stated; Placement: frame-right";
+    const { text } = formatPromptBatch([{ itemId: "p", width: 1000, height: 1000, fields: fields({ pose }) }]);
+    const lines = text.split("\n");
+    expect(lines.slice(0, 4)).toEqual([
+      "[1:1]",
+      "Description: {{man_1}} walks past {{woman_1}}",
+      "Pose: {{woman_1}} — Body line: upright; Stance: standing on their right leg; Facing: front; Torso: straight; " +
+        "Head: tilted toward their left shoulder; Left arm: hidden; Right arm: hand on {{man_1}}'s shoulder; " +
+        "Left leg: knee bent; Right leg: straight; Depth: their left side is nearer the camera; Placement: frame-left of {{man_1}}",
+      "Pose: {{man_1}} — Body line: upright; Stance: seated; Facing: profile toward frame-left; Torso: leaning back; " +
+        "Head: turned toward {{woman_1}}; Left arm: on the table; Right arm: hidden; Left leg: hidden; Right leg: hidden; " +
+        "Depth: not stated; Placement: frame-right",
+    ]);
+    expect(lines[4]).toBe("Style: Photo");
+    expect(extractKeys(splitPromptLines(text))).toEqual(["man_1", "woman_1"]);
+  });
+
+  it("keeps a plain-text pose, skips blank pose lines, and formats a six-field result without a Pose line", () => {
+    const plain = formatPromptBatch([
+      { itemId: "j", width: 1000, height: 1000, fields: fields({ pose: "  man_1 stands upright, arms folded.\n\n  woman_1 sits,   facing frame-left.  " }) },
+    ]).text;
+    expect(plain).toBe(
+      "[1:1]\nDescription: {{man_1}} walks past {{woman_1}}\nPose: {{man_1}} stands upright, arms folded.\n" +
+        "Pose: {{woman_1}} sits, facing frame-left.\n" +
+        "Style: Photo\nLighting: Soft\nEnvironment: Street",
+    );
+    const empty = formatPromptBatch([{ itemId: "e", width: 1000, height: 1000, fields: fields({ pose: "" }) }]).text;
+    const legacy = formatPromptBatch([{ itemId: "l", width: 1000, height: 1000, fields: fields() }]).text;
+    expect("pose" in fields()).toBe(false);
+    expect(legacy).toBe("[1:1]\nDescription: {{man_1}} walks past {{woman_1}}\nStyle: Photo\nLighting: Soft\nEnvironment: Street");
+    expect(empty).toBe(legacy);
+  });
+
   it("skips a row whose fields are all empty instead of emitting a ratio-only prompt", () => {
     const empty = { itemId: "d", width: 1000, height: 1000, fields: fields({ description: "", style: " ", lighting: "", environment: "" }) };
     const { text, skipped } = formatPromptBatch([empty, results[0]]);

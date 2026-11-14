@@ -10,9 +10,12 @@ pub const VISION_CAPTIONER_REPO: &str = "huihui-ai/Huihui-Qwen3-VL-8B-Instruct-a
 /// JoyCaption's repository (catalog id `joycaption_beta_one`, the `training_caption` captioner).
 pub const JOYCAPTION_REPO: &str = "fancyfeast/llama-joycaption-beta-one-hf-llava";
 
-/// The six description fields every described image carries, in output-contract order.
-pub const DESCRIBE_FIELDS: [&str; 6] = [
+/// The seven description fields every described image carries, in output-contract order. Each is
+/// stored as text: the worker flattens the Vision Captioner's structured `pose` (named slots per
+/// person) into one line per person. A result stored before `pose` existed has only the other six.
+pub const DESCRIBE_FIELDS: [&str; 7] = [
     "description",
+    "pose",
     "style",
     "camera",
     "composition",
@@ -122,5 +125,21 @@ mod tests {
         );
         assert_eq!(max_describe_prompt_chars(Some(JOYCAPTION_REPO)), 3_000);
         assert_eq!(max_describe_prompt_chars(None), 32_000);
+    }
+
+    #[test]
+    fn pose_follows_description_and_the_other_six_keep_their_order() {
+        assert_eq!(
+            DESCRIBE_FIELDS,
+            [
+                "description",
+                "pose",
+                "style",
+                "camera",
+                "composition",
+                "lighting",
+                "environment"
+            ]
+        );
     }
 }

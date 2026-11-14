@@ -20,7 +20,7 @@ import { issue, summarize } from "../validation/issues.js";
 import { ValidationSummary, invalidProps } from "../validation/Validation.jsx";
 
 // "Create Prompt Batch from Dataset" (SW-7085, feature SW-F362). A vision model describes each
-// dataset image as six fields; the review table lets the user edit them, re-run one image, and save
+// dataset image as seven fields; the review table lets the user edit them, re-run one image, and save
 // the result as an Image Studio prompt batch (one `[W:H]` block per image, see promptBatchDescribe.js).
 //
 // The describe job (`dataset_batch_describe`) stores each image's result as it finishes (the job's
@@ -41,8 +41,10 @@ export const DESCRIBE_MODELS = [
   { id: JOY_CAPTION_MODEL_ID, repo: joyCaptionModel, label: "JoyCaption beta-one" },
 ];
 
+// `pose` is one line per person; a result stored before it existed reads as an empty pose.
 export const DESCRIBE_FIELDS = [
   ["description", "Description"],
+  ["pose", "Pose"],
   ["style", "Style"],
   ["camera", "Camera"],
   ["composition", "Composition"],
@@ -746,7 +748,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
             value={prompt}
           />
           <span className="dataset-caption-field-hint" id="dataset-prompt-batch-prompt-hint">
-            The tool adds the JSON output format after this text, so edits never change the six fields.
+            The tool adds the JSON output format after this text, so edits never change the seven fields.
           </span>
         </label>
         <div className="dataset-prompt-batch-prompt-actions">
@@ -822,7 +824,7 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
                         <textarea
                           disabled={busy}
                           onChange={(event) => updateField(row.itemId, key, event.target.value)}
-                          rows={key === "description" ? 3 : 2}
+                          rows={key === "description" || key === "pose" ? 3 : 2}
                           value={row.fields[key]}
                         />
                       </label>
