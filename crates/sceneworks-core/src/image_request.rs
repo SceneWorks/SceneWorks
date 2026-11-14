@@ -179,7 +179,9 @@ pub struct ImageAdvanced {
     pub think_mode: Option<Bound<bool>>,
     pub phases: Option<Bound<Vec<Value>>>,
     pub flash_attn: Option<Bound<bool>>,
-    pub mlx_quantize: Option<Bound<i64>>,
+    /// Outer `None` means absent; inner `None` means an authored null that suppresses
+    /// fallback to the verified portable bound tier.
+    pub mlx_quantize: Option<Bound<Option<i64>>>,
     pub mlx_quantize_explicit: Option<Bound<bool>>,
     pub conv_rot: Option<Bound<bool>>,
     pub quant_tier: Option<Bound<String>>,
@@ -328,7 +330,7 @@ impl ImageAdvanced {
             think_mode: input.boolean("advanced", "thinkMode")?,
             phases: input.structured("advanced", "phases")?,
             flash_attn: input.boolean("advanced", "flashAttn")?,
-            mlx_quantize: input.integer("advanced", "mlxQuantize")?,
+            mlx_quantize: input.nullable_integer("advanced", "mlxQuantize")?,
             mlx_quantize_explicit: input.boolean("advanced", "mlxQuantizeExplicit")?,
             conv_rot: input.boolean("advanced", "convRot")?,
             quant_tier: input.text("advanced", "quantTier")?,
@@ -397,6 +399,8 @@ pub struct ImageRequest {
     /// Canonical effective options for execution. `None` denotes a legacy authoring/parser
     /// request that has not crossed the shared resolver boundary.
     pub resolved_advanced: Option<ImageAdvanced>,
+    /// Worker-verified local sources. The API never binds client-authored path claims.
+    pub portable_aux: crate::portable_aux_bindings::PortableAuxBindings,
     /// Image Studio "Upscale" toggle (sc-8091): when `enabled`, the worker upscales each
     /// generated image with `engine` (`seedvr2` / `real-esrgan`) at `factor` and writes a
     /// second "(Nx upscaled)" asset — mirroring the Python worker. Disabled when omitted.
@@ -440,6 +444,9 @@ impl ImageRequest {
             .resolved_advanced
             .as_ref()
             .expect("image options must be resolved");
+        if key == "mlxQuantize" {
+            return options.mlx_quantize.as_ref().and_then(|bound| bound.value);
+        }
         let value = match key {
             "steps" => &options.steps,
             "enhanceMaxTokens" => &options.enhance_max_tokens,
@@ -449,7 +456,6 @@ impl ImageRequest {
             "timestepToStartCfg" => &options.timestep_to_start_cfg,
             "maxImages" => &options.max_images,
             "maxNewTokens" => &options.max_new_tokens,
-            "mlxQuantize" => &options.mlx_quantize,
             _ => panic!("undeclared image integer accessor: {key}"),
         };
         value.as_ref().map(|bound| bound.value)
@@ -625,6 +631,7 @@ impl ImageRequest {
             model_manifest_entry,
             advanced: object_or_empty(payload, "advanced"),
             resolved_advanced: None,
+            portable_aux: Default::default(),
             upscale: parse_upscale(payload),
             hires_fix: parse_hires_fix(payload),
         }
@@ -1198,6 +1205,35 @@ mod tests {
             ImageRequest::from_resolved(&payload, &payload),
             Err(BindingError::InvalidEffectiveValue { .. })
         ));
+    }
+
+    #[test]
+    fn resolved_image_options_preserve_explicit_null_quantization() {
+        let authored = payload(json!({"advanced": {"mlxQuantize": null}}));
+        let request = ImageRequest::from_resolved(&authored, &authored).unwrap();
+        assert_eq!(request.advanced_i64("mlxQuantize"), None);
+        assert_eq!(
+            request.effective_advanced_wire().get("mlxQuantize"),
+            Some(&Value::Null)
+        );
+        assert!(matches!(
+            request
+                .resolved_advanced
+                .unwrap()
+                .mlx_quantize
+                .unwrap()
+                .origin,
+            crate::resolved_options::Origin::Authored {
+                spelling: "mlxQuantize"
+            }
+        ));
+        let absent = payload(json!({"advanced": {}}));
+        assert!(ImageRequest::from_resolved(&absent, &absent)
+            .unwrap()
+            .resolved_advanced
+            .unwrap()
+            .mlx_quantize
+            .is_none());
     }
 
     #[test]
