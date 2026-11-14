@@ -135,6 +135,110 @@ pub struct PidCheckpoint {
     pub filename: Option<String>,
 }
 
+/// A nested control-weight field retains the shape distinction needed by tolerant legacy
+/// routes and by SDXL's strict refusal. Malformed content is never used as a path or revision.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ControlWeightField<T> {
+    #[default]
+    Absent,
+    Null,
+    Valid(T),
+    Invalid,
+}
+
+impl<T> ControlWeightField<T> {
+    pub fn valid(&self) -> Option<&T> {
+        match self {
+            Self::Valid(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn is_invalid(&self) -> bool {
+        matches!(self, Self::Invalid)
+    }
+}
+
+impl ControlWeightField<String> {
+    pub fn valid_trimmed(&self) -> Option<&str> {
+        self.valid()
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+    }
+}
+
+/// Typed view of the resolved control-weight carrier. Parsing never grants trust to `path`,
+/// `revision`, or `_catalogAuthorized`; native route checks still confine and authorize them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ControlWeightsFields {
+    pub repo: ControlWeightField<String>,
+    pub filename: ControlWeightField<String>,
+    pub path: ControlWeightField<String>,
+    pub revision: ControlWeightField<String>,
+    pub overlay_id: ControlWeightField<String>,
+    pub catalog_authorized: ControlWeightField<bool>,
+}
+
+impl<'de> serde::Deserialize<'de> for ControlWeightsFields {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let map = JsonObject::deserialize(deserializer)?;
+        fn text(map: &JsonObject, key: &str) -> ControlWeightField<String> {
+            match map.get(key) {
+                None => ControlWeightField::Absent,
+                Some(Value::Null) => ControlWeightField::Null,
+                Some(Value::String(value)) => ControlWeightField::Valid(value.clone()),
+                Some(_) => ControlWeightField::Invalid,
+            }
+        }
+        let catalog_authorized = match map.get("_catalogAuthorized") {
+            None => ControlWeightField::Absent,
+            Some(Value::Null) => ControlWeightField::Null,
+            Some(Value::Bool(value)) => ControlWeightField::Valid(*value),
+            Some(_) => ControlWeightField::Invalid,
+        };
+        Ok(Self {
+            repo: text(&map, "repo"),
+            filename: text(&map, "filename"),
+            path: text(&map, "path"),
+            revision: text(&map, "revision"),
+            overlay_id: text(&map, "overlayId"),
+            catalog_authorized,
+        })
+    }
+}
+
+impl serde::Serialize for ControlWeightsFields {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = JsonObject::new();
+        fn put<T: serde::Serialize>(
+            map: &mut JsonObject,
+            key: &str,
+            field: &ControlWeightField<T>,
+        ) {
+            match field {
+                ControlWeightField::Valid(value) => {
+                    map.insert(
+                        key.to_owned(),
+                        serde_json::to_value(value).expect("typed field serializes"),
+                    );
+                }
+                ControlWeightField::Null => {
+                    map.insert(key.to_owned(), Value::Null);
+                }
+                ControlWeightField::Absent | ControlWeightField::Invalid => {}
+            }
+        }
+        put(&mut map, "repo", &self.repo);
+        put(&mut map, "filename", &self.filename);
+        put(&mut map, "path", &self.path);
+        put(&mut map, "revision", &self.revision);
+        put(&mut map, "overlayId", &self.overlay_id);
+        put(&mut map, "_catalogAuthorized", &self.catalog_authorized);
+        serde::Serialize::serialize(&map, serializer)
+    }
+}
+
 /// Image options lowered once from the shared resolver's canonical effective request.
 /// Each value retains whether the caller supplied it or the resolver applied a default.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -169,7 +273,7 @@ pub struct ImageAdvanced {
     pub face_restore: Option<Bound<bool>>,
     pub control_mode: Option<Bound<String>>,
     pub control_image: Option<Bound<String>>,
-    pub control_weights: Option<Bound<JsonObject>>,
+    pub control_weights: Option<Bound<ControlWeightsFields>>,
     pub control_scale: Option<Bound<f64>>,
     pub open_pose_scale: Option<Bound<f64>>,
     pub cn_scale: Option<Bound<f64>>,
@@ -1298,6 +1402,35 @@ mod tests {
             .value;
         assert_eq!(checkpoint.repo.as_deref(), Some("SceneWorks/pid-flux"));
         assert_eq!(checkpoint.filename.as_deref(), Some("student.safetensors"));
+    }
+
+    #[test]
+    fn control_weights_preserve_nested_shape_for_route_specific_checks() {
+        let payload = payload(json!({"advanced": {"controlWeights": {
+            "repo": 7, "filename": " ../escape ", "overlayId": " depth ",
+            "_catalogAuthorized": "yes", "revision": null
+        }}}));
+        let request = ImageRequest::from_resolved(&payload, &payload).unwrap();
+        let weights = &request
+            .resolved_advanced
+            .as_ref()
+            .unwrap()
+            .control_weights
+            .as_ref()
+            .unwrap()
+            .value;
+        assert!(weights.repo.is_invalid());
+        assert_eq!(weights.filename.valid_trimmed(), Some("../escape"));
+        assert_eq!(weights.overlay_id.valid_trimmed(), Some("depth"));
+        assert!(weights.catalog_authorized.is_invalid());
+        assert_eq!(weights.revision, ControlWeightField::Null);
+        assert_eq!(
+            request
+                .effective_advanced_wire()
+                .get("controlWeights")
+                .unwrap(),
+            &json!({"filename":" ../escape ","overlayId":" depth ","revision":null})
+        );
     }
 
     #[test]
