@@ -20,6 +20,7 @@ use super::sampling::resolve_advanced_or_manifest_u32;
 use super::standard_tier_subdir;
 use super::stream::drive_gen_items_scored;
 use super::stream::start_gen_stream;
+use super::GenerationOutput;
 use super::Image;
 use super::ImagePlan;
 use super::ImageRequest;
@@ -591,9 +592,9 @@ pub(super) async fn generate_candle_pulid_stream(
         },
         move |(model, reference, scorer), tx, cancel| {
             drive_gen_items_scored(
-                tx,
+                tx.clone(),
                 work,
-                move |_index, (seed, prompt), preview, on_progress| {
+                move |index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
@@ -614,16 +615,20 @@ pub(super) async fn generate_candle_pulid_stream(
                         cancel: cancel.clone(),
                     };
                     let generated = match memory_context.as_ref() {
-                        Some(context) => model.generate_with_memory_context(
+                        Some(context) => model.generate_with_memory_context_with_execution_report(
                             context,
                             &req,
                             &reference,
                             &mut *on_progress,
                         ),
-                        None => model.generate(&req, &reference, &mut *on_progress),
+                        None => model.generate_with_execution_report(
+                            &req,
+                            &reference,
+                            &mut *on_progress,
+                        ),
                     };
-                    let out = match generated {
-                        Ok(out) => out,
+                    let completed = match generated {
+                        Ok(completed) => completed,
                         Err(_) if cancel.is_cancelled() => return Ok(None),
                         Err(error) => {
                             return Err(WorkerError::Engine(format!(
@@ -631,6 +636,22 @@ pub(super) async fn generate_candle_pulid_stream(
                             )));
                         }
                     };
+                    let out = match completed.generation.output {
+                        Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
+                            images.remove(0)
+                        }
+                        _ => {
+                            return Err(WorkerError::Engine(
+                                "PuLID-FLUX returned an incomplete image".into(),
+                            ))
+                        }
+                    };
+                    let mut facts = crate::JsonObject::new();
+                    facts.insert(
+                        "workerExecutionReport".into(),
+                        serde_json::to_value(completed.execution).map_err(WorkerError::Json)?,
+                    );
+                    let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
                     // Score this finished image against the cached source embedding (sc-4411). The Image
                     // build + pixel clone is paid ONLY when a scorer exists; a non-frontal / no-face result
                     // records an honest detected:false N/A, `None` scorer ⇒ field omitted.

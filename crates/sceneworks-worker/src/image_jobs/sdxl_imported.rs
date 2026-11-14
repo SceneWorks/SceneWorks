@@ -852,9 +852,9 @@ pub(super) async fn generate_sdxl_imported_stream(
         "SDXL imported checkpoint load failed".to_owned(),
         move |model, tx, cancel| {
             drive_gen_items(
-                tx,
+                tx.clone(),
                 work,
-                move |_index, (seed, prompt), preview, on_progress| {
+                move |index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
@@ -910,20 +910,30 @@ pub(super) async fn generate_sdxl_imported_stream(
                         cancel: cancel.clone(),
                         ..Default::default()
                     };
-                    let output = model
-                        .generate(&request, &mut *on_progress)
+                    let completed = model
+                        .generate_with_execution_report(&request, &mut *on_progress)
                         .map_err(|error| {
                             WorkerError::Engine(format!(
                                 "SDXL imported checkpoint generation failed: {error}"
                             ))
                         })?;
-                    match output {
-                        GenerationOutput::Images(mut images) => {
+                    match completed.generation.output {
+                        Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
                             let image = images.pop().ok_or_else(|| {
                                 WorkerError::Engine(
                                     "SDXL imported checkpoint produced no image".to_owned(),
                                 )
                             })?;
+                            let mut facts = crate::JsonObject::new();
+                            facts.insert(
+                                "workerExecutionReport".into(),
+                                serde_json::to_value(completed.execution)
+                                    .map_err(WorkerError::Json)?,
+                            );
+                            let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts {
+                                index,
+                                facts,
+                            });
                             Ok(Some((seed, image.width, image.height, image.pixels)))
                         }
                         _ => Err(WorkerError::Engine(

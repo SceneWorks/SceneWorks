@@ -17,6 +17,7 @@ use super::sampling::resolve_advanced_or_manifest_u32;
 use super::standard_tier_subdir;
 use super::stream::drive_gen_items_scored;
 use super::stream::start_gen_stream;
+use super::GenerationOutput;
 use super::Image;
 use super::ImagePlan;
 use super::ImageRequest;
@@ -509,9 +510,9 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
             // before the denoise), so the per-item closure mutates `model`.
             let mut model = model;
             drive_gen_items_scored(
-                tx,
+                tx.clone(),
                 work,
-                move |_index, (seed, prompt), preview, on_progress| {
+                move |index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
@@ -529,13 +530,13 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
                         preview,
                         cancel: cancel.clone(),
                     };
-                    let out = match model.generate_with_memory_context(
+                    let completed = match model.generate_with_memory_context_with_execution_report(
                         &memory_context,
                         &req,
                         &reference,
                         &mut *on_progress,
                     ) {
-                        Ok(out) => out,
+                        Ok(completed) => completed,
                         Err(_) if cancel.is_cancelled() => return Ok(None),
                         Err(error) => {
                             return Err(WorkerError::Engine(format!(
@@ -543,6 +544,22 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
                             )));
                         }
                     };
+                    let out = match completed.generation.output {
+                        Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
+                            images.remove(0)
+                        }
+                        _ => {
+                            return Err(WorkerError::Engine(
+                                "Kolors IP-Adapter returned an incomplete image".into(),
+                            ))
+                        }
+                    };
+                    let mut facts = crate::JsonObject::new();
+                    facts.insert(
+                        "workerExecutionReport".into(),
+                        serde_json::to_value(completed.execution).map_err(WorkerError::Json)?,
+                    );
+                    let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
                     // Score this finished image against the cached source embedding (sc-4411). Clone paid
                     // ONLY when a scorer exists; non-frontal → honest detected:false N/A; `None` ⇒ omitted.
                     let face_likeness = scorer.as_ref().and_then(|scorer| {

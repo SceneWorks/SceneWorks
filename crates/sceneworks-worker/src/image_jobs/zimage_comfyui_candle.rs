@@ -384,9 +384,9 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
         ),
         move |model, tx, cancel| {
             drive_gen_items(
-                tx,
+                tx.clone(),
                 work,
-                move |_index, (seed, prompt, conditioning), preview, on_progress| {
+                move |index, (seed, prompt, conditioning), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
@@ -402,20 +402,31 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
                         cancel: cancel.clone(),
                         ..sampling_controls.clone()
                     };
-                    let output = match model.generate(&request, &mut *on_progress) {
-                        Ok(output) => output,
-                        Err(_) if cancel.is_cancelled() => return Ok(None),
-                        Err(error) => {
-                            return Err(WorkerError::Engine(format!(
-                                "ComfyUI Z-Image generation failed: {error}"
-                            )));
-                        }
-                    };
-                    match output {
-                        GenerationOutput::Images(mut images) => {
+                    let completed =
+                        match model.generate_with_execution_report(&request, &mut *on_progress) {
+                            Ok(completed) => completed,
+                            Err(_) if cancel.is_cancelled() => return Ok(None),
+                            Err(error) => {
+                                return Err(WorkerError::Engine(format!(
+                                    "ComfyUI Z-Image generation failed: {error}"
+                                )));
+                            }
+                        };
+                    match completed.generation.output {
+                        Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
                             let image = images.pop().ok_or_else(|| {
                                 WorkerError::Engine("ComfyUI Z-Image produced no image".to_owned())
                             })?;
+                            let mut facts = crate::JsonObject::new();
+                            facts.insert(
+                                "workerExecutionReport".into(),
+                                serde_json::to_value(completed.execution)
+                                    .map_err(WorkerError::Json)?,
+                            );
+                            let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts {
+                                index,
+                                facts,
+                            });
                             Ok(Some((seed, image.width, image.height, image.pixels)))
                         }
                         _ => Err(WorkerError::Engine(

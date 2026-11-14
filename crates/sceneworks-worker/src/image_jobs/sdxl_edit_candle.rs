@@ -16,6 +16,7 @@ use super::standard_tier_subdir;
 use super::stream::drive_gen_items;
 use super::stream::start_gen_stream;
 use super::uses_standard_tier_layout;
+use super::GenerationOutput;
 use super::Image;
 use super::ImagePlan;
 use super::ImageRequest;
@@ -426,9 +427,9 @@ pub(super) async fn generate_candle_sdxl_edit_stream(
         },
         move |(model, source, mask), tx, cancel| {
             drive_gen_items(
-                tx,
+                tx.clone(),
                 work,
-                move |_index, (seed, prompt), preview, on_progress| {
+                move |index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
@@ -448,11 +449,18 @@ pub(super) async fn generate_candle_sdxl_edit_stream(
                         cancel: cancel.clone(),
                     };
                     let result = match &mask {
-                        Some(mask) => model.generate_masked(&req, &source, mask, &mut *on_progress),
-                        None => model.generate(&req, &source, &mut *on_progress),
+                        Some(mask) => model.generate_masked_with_execution_report(
+                            &req,
+                            &source,
+                            mask,
+                            &mut *on_progress,
+                        ),
+                        None => {
+                            model.generate_with_execution_report(&req, &source, &mut *on_progress)
+                        }
                     };
-                    let out = match result {
-                        Ok(out) => out,
+                    let completed = match result {
+                        Ok(completed) => completed,
                         Err(_) if cancel.is_cancelled() => return Ok(None),
                         Err(error) => {
                             return Err(WorkerError::Engine(format!(
@@ -460,6 +468,22 @@ pub(super) async fn generate_candle_sdxl_edit_stream(
                             )));
                         }
                     };
+                    let out = match completed.generation.output {
+                        Some(GenerationOutput::Images(mut images)) if images.len() == 1 => {
+                            images.remove(0)
+                        }
+                        _ => {
+                            return Err(WorkerError::Engine(
+                                "SDXL edit returned an incomplete image".into(),
+                            ))
+                        }
+                    };
+                    let mut facts = crate::JsonObject::new();
+                    facts.insert(
+                        "workerExecutionReport".into(),
+                        serde_json::to_value(completed.execution).map_err(WorkerError::Json)?,
+                    );
+                    let _ = tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
                     Ok(Some((seed, out.width, out.height, out.pixels)))
                 },
             )
