@@ -256,25 +256,24 @@ pub(crate) async fn resolve_selected_image_text_encoder(
     model_id: &str,
     manifest_entry: &mut Value,
 ) -> Result<(), ApiError> {
-    let selected = match job_payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("textEncoderModel"))
-    {
-        None => {
+    let route_options =
+        sceneworks_core::resolved_options::RouteOptionFacts::from_payload_syntax(job_payload);
+    let selected = match &route_options.text_encoder_model {
+        sceneworks_core::resolved_options::RouteField::Absent
+        | sceneworks_core::resolved_options::RouteField::Null => {
             if let Some(object) = manifest_entry.as_object_mut() {
                 object.remove("resolvedTextEncoder");
             }
             return Ok(());
         }
-        Some(Value::String(id)) if id == "default" => {
+        sceneworks_core::resolved_options::RouteField::Valid(id) if id == "default" => {
             if let Some(object) = manifest_entry.as_object_mut() {
                 object.remove("resolvedTextEncoder");
             }
             return Ok(());
         }
-        Some(Value::String(id)) => id.as_str(),
-        Some(_) => return Err(ApiError::bad_request(
+        sceneworks_core::resolved_options::RouteField::Valid(id) => id.as_str(),
+        sceneworks_core::resolved_options::RouteField::Invalid => return Err(ApiError::bad_request(
             "advanced.textEncoderModel must be a string option id returned by GET /api/v1/models",
         )),
     };
