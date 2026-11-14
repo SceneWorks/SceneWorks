@@ -1371,6 +1371,7 @@ fn imported_requested_quant_with_facts(
 ///
 /// This helper deliberately does not infer Pose from either field. A caller must independently select
 /// Pose from a non-empty `advanced.poses` set and prove that exact source/backend operation exists.
+#[cfg(test)]
 pub fn imported_control_intent_is_material(advanced: &Map<String, Value>) -> bool {
     let payload = Map::from_iter([("advanced".to_owned(), Value::Object(advanced.clone()))]);
     let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(&payload);
@@ -1398,6 +1399,7 @@ pub fn imported_control_intent_is_material_resolved(
 /// keeps that proven default; any explicit non-pose or malformed mode must fail before claim rather
 /// than reach a worker predicate that cannot consume it. When provider facts gain per-control-kind
 /// metadata this check can be derived from that registration instead.
+#[cfg(test)]
 pub fn imported_pose_control_mode_is_supported(advanced: &Map<String, Value>) -> bool {
     let payload = Map::from_iter([("advanced".to_owned(), Value::Object(advanced.clone()))]);
     let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(&payload);
