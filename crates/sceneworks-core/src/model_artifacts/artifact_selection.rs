@@ -711,15 +711,70 @@ pub fn selected_portable_model_artifact_closure(
     payload: &Map<String, Value>,
 ) -> Result<Value, String> {
     let model_id = model.get("id").and_then(Value::as_str);
+    let options = PortableArtifactOptions {
+        conv_rot: payload
+            .get("advanced")
+            .and_then(Value::as_object)
+            .and_then(|advanced| advanced.get("convRot"))
+            .and_then(Value::as_bool)
+            == Some(true),
+        yue2_decoder: if model_id == Some("yue2") {
+            payload
+                .get("yue2")
+                .filter(|block| !block.is_null())
+                .map(|block| {
+                    block
+                        .as_object()
+                        .ok_or("YuE2 request block is not an object")?
+                        .get("decoder")
+                        .filter(|decoder| !decoder.is_null())
+                        .map(|decoder| {
+                            decoder
+                                .as_str()
+                                .map(str::to_owned)
+                                .ok_or("YuE2 decoder choice is not a string")
+                        })
+                        .transpose()
+                })
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        },
+    };
+    selected_portable_model_artifact_closure_resolved(
+        model,
+        backend,
+        platform,
+        requested_variant,
+        payload,
+        &options,
+    )
+}
+
+/// Companion artifact choices derived once from the shared resolved request. The route/device
+/// check remains with the source selector; YuE2's decoder choice is a typed option.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PortableArtifactOptions {
+    pub conv_rot: bool,
+    pub yue2_decoder: Option<String>,
+}
+
+pub fn selected_portable_model_artifact_closure_resolved(
+    model: &Value,
+    backend: &str,
+    platform: &str,
+    requested_variant: Option<&str>,
+    payload: &Map<String, Value>,
+    options: &PortableArtifactOptions,
+) -> Result<Value, String> {
+    let model_id = model.get("id").and_then(Value::as_str);
     if model_id == payload.get("model").and_then(Value::as_str)
-        && crate::portable_sources::krea_convrot_requested(
+        && crate::portable_sources::krea_convrot_requested_resolved(
             model_id.unwrap_or_default(),
             backend,
             platform,
-            payload
-                .get("advanced")
-                .and_then(Value::as_object)
-                .and_then(|advanced| advanced.get("convRot")),
+            options.conv_rot,
         )
     {
         let mut available = model.clone();
@@ -768,18 +823,8 @@ pub fn selected_portable_model_artifact_closure(
         ));
     }
     let mut requested = BTreeMap::new();
-    if let Some(block) = payload.get("yue2").filter(|block| !block.is_null()) {
-        let decoder = block
-            .as_object()
-            .ok_or("YuE2 request block is not an object")?
-            .get("decoder")
-            .filter(|decoder| !decoder.is_null());
-        if let Some(decoder) = decoder {
-            let option = decoder
-                .as_str()
-                .ok_or("YuE2 decoder choice is not a string")?;
-            requested.insert("decoder".to_owned(), option.to_owned());
-        }
+    if let Some(decoder) = options.yue2_decoder.as_deref() {
+        requested.insert("decoder".to_owned(), decoder.to_owned());
     }
     let choices = resolve_co_requisite_choices(model, requested_variant, &requested)
         .map_err(|error| error.to_string())?;
@@ -805,6 +850,26 @@ pub fn selected_portable_requirements_for_model(
         platform,
         requested_variant,
         payload,
+    )?;
+    Ok(selected_requirements_for_closure(&selected, data_dir))
+}
+
+pub fn selected_portable_requirements_for_model_resolved(
+    model: &Value,
+    backend: &str,
+    platform: &str,
+    requested_variant: Option<&str>,
+    payload: &Map<String, Value>,
+    options: &PortableArtifactOptions,
+    data_dir: &Path,
+) -> Result<SelectedRequirements, String> {
+    let selected = selected_portable_model_artifact_closure_resolved(
+        model,
+        backend,
+        platform,
+        requested_variant,
+        payload,
+        options,
     )?;
     Ok(selected_requirements_for_closure(&selected, data_dir))
 }
@@ -1874,6 +1939,50 @@ mod tests {
             invalid.as_object().unwrap(),
         )
         .is_err());
+    }
+
+    #[test]
+    fn resolved_artifact_choices_do_not_reparse_authored_request_options() {
+        let yue2 = builtin_yue2();
+        let authored = json!({"model":"yue2","yue2":{"decoder":"standard"}});
+        let selected = selected_portable_model_artifact_closure_resolved(
+            &yue2,
+            "cpu",
+            "macos",
+            Some("bf16"),
+            authored.as_object().unwrap(),
+            &PortableArtifactOptions {
+                yue2_decoder: Some("legacy".to_owned()),
+                ..PortableArtifactOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            repos(selected["downloads"].as_array().unwrap()),
+            ["m-a-p/YuE2-3B", "m-a-p/YuE2-Vae-legacy"]
+        );
+
+        let manifest = crate::builtin_manifests::builtin_manifest("builtin.models.jsonc").unwrap();
+        let krea = manifest["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["id"] == "krea_2_turbo")
+            .unwrap();
+        let authored = json!({"model":"krea_2_turbo","advanced":{"convRot":false}});
+        let selected = selected_portable_model_artifact_closure_resolved(
+            krea,
+            "candle",
+            "linux",
+            None,
+            authored.as_object().unwrap(),
+            &PortableArtifactOptions {
+                conv_rot: true,
+                ..PortableArtifactOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(selected["downloads"][0]["variant"], "int8-convrot");
     }
 
     #[test]

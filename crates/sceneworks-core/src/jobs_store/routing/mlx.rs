@@ -219,27 +219,18 @@ pub(crate) fn sdxl_mlx_lane(payload: &Map<String, Value>) -> Option<MlxSdxlLane>
 /// routing; exact shape, count, supported mode, and conflict validation belongs to the shared worker
 /// handler and fails closed there.
 pub(crate) fn sdxl_control_mlx_candidate(payload: &Map<String, Value>) -> bool {
-    let Some(advanced) = payload.get("advanced").and_then(Value::as_object) else {
-        return false;
-    };
-    let poses_are_material = match advanced.get("poses") {
-        None | Some(Value::Null) => false,
-        Some(Value::Array(poses)) if poses.is_empty() => false,
-        Some(_) => true,
-    };
-    let named_control_is_material = match advanced.get("controlMode") {
-        None | Some(Value::Null) => false,
-        Some(Value::String(mode)) => !mode.trim().is_empty(),
-        Some(_) => true,
+    use crate::resolved_options::RouteField;
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    let poses_are_material = matches!(facts.poses, RouteField::Valid(1..) | RouteField::Invalid);
+    let named_control_is_material = match facts.control_mode {
+        RouteField::Valid(mode) => !mode.trim().is_empty(),
+        RouteField::Invalid => true,
+        RouteField::Absent | RouteField::Null => false,
     };
     poses_are_material
         || named_control_is_material
-        || advanced
-            .get("controlImage")
-            .is_some_and(|value| !value.is_null())
-        || advanced
-            .get("controlWeights")
-            .is_some_and(|value| !value.is_null())
+        || facts.control_image.is_present_nonnull()
+        || facts.control_weights.is_present_nonnull()
 }
 
 /// RealVisXL Lightning MLX-routing (sc-6075). The standalone distilled checkpoint runs through the
@@ -343,12 +334,7 @@ pub(crate) fn qwen_mlx_eligible(payload: &Map<String, Value>) -> bool {
     if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
         return false;
     }
-    let has_poses = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty());
+    let has_poses = has_nonempty_nested_array(payload, "advanced", "poses");
     if has_poses {
         return true;
     }
@@ -518,22 +504,11 @@ pub(crate) fn iris_mlx_eligible(payload: &Map<String, Value>) -> bool {
 
 /// Whether `advanced.mlxQuantize` is absent/null or names an Iris MLX tier (`0` / `4` / `8`).
 fn iris_quantize_is_a_tier(payload: &Map<String, Value>) -> bool {
-    let Some(advanced) = payload.get("advanced") else {
-        return true;
-    };
-    let Some(advanced) = advanced.as_object() else {
-        // A malformed `advanced` is refused by the carrier checks it would otherwise hide.
-        return !has_nonnull_or_malformed_nested_carrier(payload, "advanced", "mlxQuantize");
-    };
-    match advanced.get("mlxQuantize") {
-        None | Some(Value::Null) => true,
-        Some(value) => matches!(
-            value
-                .as_i64()
-                .or_else(|| value.as_str()?.trim().parse().ok()),
-            Some(0 | 4 | 8)
-        ),
-    }
+    use crate::resolved_options::RouteField;
+    matches!(
+        crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload).mlx_quantize,
+        RouteField::Absent | RouteField::Null | RouteField::Valid(0 | 4 | 8)
+    )
 }
 
 /// FLUX 3 Image Klein base and distilled: text-to-image on the native MLX provider in one of the
@@ -693,12 +668,7 @@ pub(crate) fn chroma_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// (`supports_lora=false`) and the manifest surfaces no LoRA slot, so no LoRA gate is needed.
 pub(crate) fn sensenova_mlx_eligible(payload: &Map<String, Value>) -> bool {
     let mode = payload.get("mode").and_then(Value::as_str);
-    let has_poses = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty());
+    let has_poses = has_nonempty_nested_array(payload, "advanced", "poses");
     if has_poses
         || mlx_conditioned_edit_has_unsupported_carrier(payload, false, true, false)
         || conditioned_true_cfg_is_malformed(payload)
@@ -928,20 +898,10 @@ pub(crate) fn sana_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// absence. Missing/null means "use the manifest default"; an integer or trimmed integer string is a
 /// valid explicit tier selection. Every other shape must fail closed instead of silently selecting Q4.
 fn sana_has_malformed_quant_carrier(payload: &Map<String, Value>) -> bool {
-    let Some(value) = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("mlxQuantize"))
-    else {
-        return false;
-    };
-    if value.is_null() {
-        return false;
-    }
-    value
-        .as_i64()
-        .or_else(|| value.as_str().and_then(|bits| bits.trim().parse().ok()))
-        .is_none()
+    matches!(
+        crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload).mlx_quantize,
+        crate::resolved_options::RouteField::Invalid
+    )
 }
 
 /// Anima base / aesthetic / turbo (epic 10512 / sc-10523) MLX-eligibility. The native `mlx-gen-anima`

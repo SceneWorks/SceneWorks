@@ -9,6 +9,34 @@ pub enum PortableAuxSourceShape {
     Directory,
 }
 
+/// Already-resolved request controls that select companion downloads. The API and worker must
+/// construct this once at their typed binding boundary; source selection never reparses the
+/// author's `advanced` map. `poses_contain_object` retains the legacy distinction between an
+/// empty pose list and a pose object while the pose execution DTO is lowered separately.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AuxOptionSelection {
+    pub poses_present: bool,
+    pub poses_contain_object: bool,
+    pub use_pid: bool,
+    pub decoder: Option<String>,
+    pub enhance_prompt: bool,
+    pub control_mode: Option<String>,
+    pub control_image: Option<String>,
+    pub veda_enabled: bool,
+    pub use_uncensored_enhancer: bool,
+    pub text_encoder_model: Option<String>,
+    pub training: Option<TrainingAuxSelection>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrainingAuxSelection {
+    pub base_model: String,
+    pub depth_init_parent: bool,
+    pub restore_init_parent: bool,
+    pub iris_repa_enabled: bool,
+    pub iris_kernel: bool,
+}
+
 /// The image loader accepts both a JSON boolean and the legacy string spelling.
 pub fn pid_requested(value: Option<&Value>) -> bool {
     value.is_some_and(|value| {
@@ -27,10 +55,21 @@ pub fn krea_convrot_requested(
     platform: &str,
     flag: Option<&Value>,
 ) -> bool {
-    model_id == "krea_2_turbo"
-        && backend == "candle"
-        && platform != "macos"
-        && flag.and_then(Value::as_bool) == Some(true)
+    krea_convrot_requested_resolved(
+        model_id,
+        backend,
+        platform,
+        flag.and_then(Value::as_bool) == Some(true),
+    )
+}
+
+pub fn krea_convrot_requested_resolved(
+    model_id: &str,
+    backend: &str,
+    platform: &str,
+    flag: bool,
+) -> bool {
+    model_id == "krea_2_turbo" && backend == "candle" && platform != "macos" && flag
 }
 
 /// Path-free key for a worker's registered local digest source. The API computes the same key
@@ -362,11 +401,124 @@ pub fn strict_control_requires_depth_estimator(advanced: Option<&Value>) -> bool
             .is_none_or(|id| id.trim().is_empty())
 }
 
+pub fn strict_control_requires_depth_estimator_resolved(options: &AuxOptionSelection) -> bool {
+    options.control_mode.as_deref() == Some("depth")
+        && options
+            .control_image
+            .as_deref()
+            .is_none_or(|id| id.trim().is_empty())
+}
+
+// Compatibility path for archived requests and focused source-selection tests. Production
+// admission and worker callers migrate to the owner-issued typed selection below.
+fn authored_aux_selection(
+    job_type: &JobType,
+    payload: &JsonObject,
+    entry_id: &str,
+) -> Result<AuxOptionSelection, String> {
+    let advanced = payload.get("advanced").and_then(Value::as_object);
+    let poses = advanced
+        .and_then(|advanced| advanced.get("poses"))
+        .and_then(Value::as_array);
+    let mut result = AuxOptionSelection {
+        poses_present: poses.is_some_and(|poses| !poses.is_empty()),
+        poses_contain_object: poses.is_some_and(|poses| poses.iter().any(Value::is_object)),
+        use_pid: pid_requested(advanced.and_then(|advanced| advanced.get("usePid"))),
+        decoder: advanced
+            .and_then(|advanced| advanced.get("decoder"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        enhance_prompt: advanced
+            .and_then(|advanced| advanced.get("enhancePrompt"))
+            .and_then(Value::as_bool)
+            == Some(true),
+        control_mode: advanced
+            .and_then(|advanced| advanced.get("controlMode"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        control_image: advanced
+            .and_then(|advanced| advanced.get("controlImage"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        veda_enabled: advanced
+            .and_then(|advanced| advanced.get("veda"))
+            .and_then(|veda| veda.get("enabled"))
+            .and_then(Value::as_bool)
+            == Some(true),
+        use_uncensored_enhancer: advanced
+            .and_then(|advanced| advanced.get("useUncensoredEnhancer"))
+            .and_then(Value::as_bool)
+            == Some(true),
+        text_encoder_model: advanced
+            .and_then(|advanced| advanced.get("textEncoderModel"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        training: None,
+    };
+    if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
+        let plan: crate::training::TrainingPlan = serde_json::from_value(
+            payload
+                .get("plan")
+                .cloned()
+                .ok_or("training job lacks resolved plan")?,
+        )
+        .map_err(|error| format!("invalid resolved training plan: {error}"))?;
+        let matches_entry = plan.target.base_model == entry_id;
+        let depth_init_parent = matches_entry
+            && entry_id == "iris_3b_depth"
+            && crate::training::iris::depth::depth_init(&plan.config)
+                .map_err(|error| error.to_string())?
+                == crate::training::iris::depth::DEPTH_INIT_PARENT;
+        let restore_init_parent = if matches_entry && entry_id == "iris_3b_restore" {
+            crate::training::iris::restore::restore_options(&plan.config)
+                .map_err(|error| error.to_string())?
+                .get("init")
+                .and_then(Value::as_str)
+                == Some("parent")
+        } else {
+            false
+        };
+        let iris_kernel =
+            matches_entry && crate::training::iris::is_iris_training_kernel(&plan.target.kernel);
+        let iris_repa_enabled = if iris_kernel {
+            let options = crate::training::iris::iris_options(&plan.config)
+                .map_err(|error| error.to_string())?;
+            crate::training::iris::curricula::iris_repa_enabled(&options)
+        } else {
+            false
+        };
+        result.training = Some(TrainingAuxSelection {
+            base_model: plan.target.base_model,
+            depth_init_parent,
+            restore_init_parent,
+            iris_repa_enabled,
+            iris_kernel,
+        });
+    }
+    Ok(result)
+}
+
 pub fn required_portable_aux_source_ids(
     job_type: &JobType,
     payload: &JsonObject,
     entry: &Value,
     backend: &str,
+) -> Result<Vec<String>, String> {
+    let entry_id = entry
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or("model entry lacks id")?;
+    let options = authored_aux_selection(job_type, payload, entry_id)?;
+    required_portable_aux_source_ids_resolved(job_type, payload, entry, backend, &options)
+}
+
+/// Select only the companion sources named by a validated, typed execution request.
+pub fn required_portable_aux_source_ids_resolved(
+    job_type: &JobType,
+    payload: &JsonObject,
+    entry: &Value,
+    backend: &str,
+    options: &AuxOptionSelection,
 ) -> Result<Vec<String>, String> {
     let id = entry
         .get("id")
@@ -384,7 +536,6 @@ pub fn required_portable_aux_source_ids(
         return Ok(vec!["utility_face_stack".to_owned()]);
     }
     let primary_model = payload.get("model").and_then(Value::as_str) == Some(id);
-    let advanced = payload.get("advanced").and_then(Value::as_object);
     let mut ids = Vec::new();
     if *job_type == JobType::ModelConvert {
         match payload.get("converter").and_then(Value::as_str) {
@@ -402,11 +553,7 @@ pub fn required_portable_aux_source_ids(
     if primary_model && matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
         if id == "instantid_realvisxl" {
             ids.extend(["instantid_mlx", "instantid_controlnet"].map(str::to_owned));
-            if advanced
-                .and_then(|value| value.get("poses"))
-                .and_then(Value::as_array)
-                .is_some_and(|poses| poses.iter().any(Value::is_object))
-            {
+            if options.poses_contain_object {
                 ids.push("instantid_openpose".to_owned());
             }
         }
@@ -422,25 +569,13 @@ pub fn required_portable_aux_source_ids(
                 .map(str::to_owned),
             );
         }
-        if id == "kolors"
-            && has_ref
-            && (backend == "mlx"
-                || !advanced
-                    .and_then(|value| value.get("poses"))
-                    .and_then(Value::as_array)
-                    .is_some_and(|poses| poses.iter().any(Value::is_object)))
-        {
+        if id == "kolors" && has_ref && (backend == "mlx" || !options.poses_contain_object) {
             ids.push("kolors_ip_adapter".to_owned());
         }
         if pid_backbone_for(id).is_some()
-            && (id != "kolors"
-                || (backend == "candle"
-                    && advanced
-                        .and_then(|value| value.get("poses"))
-                        .and_then(Value::as_array)
-                        .is_some_and(|poses| poses.iter().any(Value::is_object))))
+            && (id != "kolors" || (backend == "candle" && options.poses_contain_object))
             && (id != "pulid_flux_dev" || backend == "candle")
-            && pid_requested(advanced.and_then(|value| value.get("usePid")))
+            && options.use_pid
         {
             ids.extend(["pid_checkpoint", "pid_gemma"].map(str::to_owned));
         }
@@ -469,9 +604,9 @@ pub fn required_portable_aux_source_ids(
         {
             ids.extend(["sdxl_ip_adapter", "sdxl_ip_encoder"].map(str::to_owned));
         }
-        if let Some(decoder) = advanced
-            .and_then(|value| value.get("decoder"))
-            .and_then(Value::as_str)
+        if let Some(decoder) = options
+            .decoder
+            .as_deref()
             .filter(|value| !value.is_empty() && *value != "native")
         {
             let component = entry
@@ -487,22 +622,12 @@ pub fn required_portable_aux_source_ids(
                 .ok_or_else(|| format!("{id} cannot use decoder {decoder} on {backend}"))?;
             ids.push(component.to_owned());
         }
-        if matches!(id, "flux3_klein" | "flux3_klein_base")
-            && advanced
-                .and_then(|value| value.get("enhancePrompt"))
-                .and_then(Value::as_bool)
-                == Some(true)
-        {
+        if matches!(id, "flux3_klein" | "flux3_klein_base") && options.enhance_prompt {
             ids.push("prompt_upsampler".to_owned());
         }
-        if id != "instantid_realvisxl"
-            && advanced
-                .and_then(|value| value.get("poses"))
-                .and_then(Value::as_array)
-                .is_some_and(|poses| !poses.is_empty())
-        {
+        if id != "instantid_realvisxl" && options.poses_present {
             ids.push("strict_control".to_owned());
-            if strict_control_requires_depth_estimator(payload.get("advanced")) {
+            if strict_control_requires_depth_estimator_resolved(options) {
                 ids.push("depth_anything_v2_small".to_owned());
             }
         }
@@ -514,44 +639,28 @@ pub fn required_portable_aux_source_ids(
     {
         ids.push("sft_cover".to_owned());
     }
-    if matches!(id, "minimax_h3" | "minimax_h3_ref")
-        && advanced
-            .and_then(|value| value.get("veda"))
-            .and_then(|value| value.get("enabled"))
-            .and_then(Value::as_bool)
-            == Some(true)
-    {
+    if matches!(id, "minimax_h3" | "minimax_h3_ref") && options.veda_enabled {
         ids.push("veda_predictor".to_owned());
     }
     if id.starts_with("ltx")
         && backend == "mlx"
-        && advanced.is_some_and(|value| {
-            value.get("useUncensoredEnhancer").and_then(Value::as_bool) == Some(true)
-                || value.get("textEncoderModel").and_then(Value::as_str)
-                    == Some("ltx_amoral_gemma_3_12b")
-        })
+        && (options.use_uncensored_enhancer
+            || options.text_encoder_model.as_deref() == Some("ltx_amoral_gemma_3_12b"))
     {
         ids.push("ltx_amoral_gemma_3_12b".to_owned());
     }
     if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
-        let plan: crate::training::TrainingPlan = serde_json::from_value(
-            payload
-                .get("plan")
-                .cloned()
-                .ok_or("training job lacks resolved plan")?,
-        )
-        .map_err(|error| format!("invalid resolved training plan: {error}"))?;
-        if plan.target.base_model == id {
+        let training = options
+            .training
+            .as_ref()
+            .ok_or("training job lacks resolved plan")?;
+        if training.base_model == id {
             ids.extend(
                 trainer_required_component_ids(id, backend)
                     .iter()
                     .map(|id| (*id).to_owned()),
             );
-            if id == "iris_3b_depth"
-                && crate::training::iris::depth::depth_init(&plan.config)
-                    .map_err(|error| error.to_string())?
-                    == crate::training::iris::depth::DEPTH_INIT_PARENT
-            {
+            if id == "iris_3b_depth" && training.depth_init_parent {
                 ids.extend(["iris_parent_backbone", "iris_depth_parent"].map(str::to_owned));
             }
             if id == "iris_3b_restore" {
@@ -560,24 +669,15 @@ pub fn required_portable_aux_source_ids(
                         .iter()
                         .map(|(catalog_id, _)| (*catalog_id).to_owned()),
                 );
-                if crate::training::iris::restore::restore_options(&plan.config)
-                    .map_err(|error| error.to_string())?
-                    .get("init")
-                    .and_then(Value::as_str)
-                    == Some("parent")
-                {
+                if training.restore_init_parent {
                     ids.push("iris_parent_backbone".to_owned());
                 }
             }
             if id == "ltx_2_3" {
                 ids.push("ltx_training_text_encoder".to_owned());
             }
-            if crate::training::iris::is_iris_training_kernel(&plan.target.kernel) {
-                let options = crate::training::iris::iris_options(&plan.config)
-                    .map_err(|error| error.to_string())?;
-                if crate::training::iris::curricula::iris_repa_enabled(&options) {
-                    ids.push("repa_teacher".to_owned());
-                }
+            if training.iris_kernel && training.iris_repa_enabled {
+                ids.push("repa_teacher".to_owned());
             }
         }
     }
@@ -589,6 +689,34 @@ pub fn required_portable_aux_source_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolved_aux_source_selection_ignores_conflicting_authored_options() {
+        let entry = serde_json::json!({"id":"instantid_realvisxl"});
+        let authored = serde_json::json!({
+            "model":"instantid_realvisxl",
+            "advanced":{"poses":[],"usePid":false,"controlMode":"canny"}
+        });
+        let selection = AuxOptionSelection {
+            poses_present: true,
+            poses_contain_object: true,
+            use_pid: true,
+            control_mode: Some("depth".to_owned()),
+            ..AuxOptionSelection::default()
+        };
+        let ids = required_portable_aux_source_ids_resolved(
+            &JobType::ImageGenerate,
+            authored.as_object().unwrap(),
+            &entry,
+            "candle",
+            &selection,
+        )
+        .unwrap();
+        assert!(ids.contains(&"instantid_openpose".to_owned()));
+        assert!(ids.contains(&"pid_checkpoint".to_owned()));
+        assert!(!ids.contains(&"strict_control".to_owned()));
+        assert!(strict_control_requires_depth_estimator_resolved(&selection));
+    }
 
     #[test]
     fn conversion_requires_exact_selected_auxiliary_and_directory_shape() {

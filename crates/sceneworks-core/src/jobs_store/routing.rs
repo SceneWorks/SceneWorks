@@ -426,12 +426,16 @@ pub(super) fn has_nonempty_nested_array(
     object_key: &str,
     array_key: &str,
 ) -> bool {
-    payload
-        .get(object_key)
-        .and_then(Value::as_object)
-        .and_then(|object| object.get(array_key))
-        .and_then(Value::as_array)
-        .is_some_and(|values| !values.is_empty())
+    debug_assert_eq!(object_key, "advanced");
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    matches!(
+        match array_key {
+            "poses" => facts.poses,
+            "phases" => facts.phases,
+            _ => return false,
+        },
+        crate::resolved_options::RouteField::Valid(1..)
+    )
 }
 
 /// Nested equivalent of [`has_nonempty_or_malformed_array`]. A malformed parent object or child
@@ -441,11 +445,17 @@ pub(super) fn has_nonempty_or_malformed_nested_array(
     object_key: &str,
     array_key: &str,
 ) -> bool {
-    match payload.get(object_key) {
-        None | Some(Value::Null) => false,
-        Some(Value::Object(object)) => has_nonempty_or_malformed_array(object, array_key),
-        Some(_) => true,
-    }
+    debug_assert_eq!(object_key, "advanced");
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    matches!(
+        match array_key {
+            "poses" => facts.poses,
+            "phases" => facts.phases,
+            _ => return false,
+        },
+        crate::resolved_options::RouteField::Valid(1..)
+            | crate::resolved_options::RouteField::Invalid
+    )
 }
 
 /// True when an optional nested carrier is present with any non-null value. A malformed parent
@@ -457,12 +467,23 @@ pub(super) fn has_nonnull_or_malformed_nested_carrier(
     object_key: &str,
     carrier_key: &str,
 ) -> bool {
-    match payload.get(object_key) {
-        None | Some(Value::Null) => false,
-        Some(Value::Object(object)) => object
-            .get(carrier_key)
-            .is_some_and(|value| !value.is_null()),
-        Some(_) => true,
+    use crate::resolved_options::RouteField;
+    debug_assert_eq!(object_key, "advanced");
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    match carrier_key {
+        "controlMode" => facts.control_mode.is_present_nonnull(),
+        "controlImage" => facts.control_image.is_present_nonnull(),
+        "controlScale" => facts.control_scale.is_present_nonnull(),
+        "controlWeights" => facts.control_weights.is_present_nonnull(),
+        "mlxQuantize" => facts.mlx_quantize.is_present_nonnull(),
+        "quantTier" => facts.quant_tier.is_present_nonnull(),
+        "trueCfgScale" => facts.true_cfg_scale.is_present_nonnull(),
+        "imageGuidanceScale" => facts.image_guidance_scale.is_present_nonnull(),
+        "ipAdapterScale" => facts.ip_adapter_scale.is_present_nonnull(),
+        "referenceStrength" => facts.reference_strength.is_present_nonnull(),
+        "strength" => facts.strength.is_present_nonnull(),
+        "convRot" => facts.conv_rot.is_present_nonnull(),
+        _ => matches!(facts.poses, RouteField::Invalid),
     }
 }
 
@@ -474,19 +495,21 @@ pub(super) fn has_malformed_optional_nested_number(
     object_key: &str,
     number_key: &str,
 ) -> bool {
-    match payload.get(object_key) {
-        None | Some(Value::Null) => false,
-        Some(Value::Object(object)) => match object.get(number_key) {
-            None | Some(Value::Null) => false,
-            Some(Value::Number(value)) => value.as_f64().is_none_or(|value| !value.is_finite()),
-            Some(Value::String(value)) => value
-                .trim()
-                .parse::<f64>()
-                .map_or(true, |value| !value.is_finite()),
-            Some(_) => true,
+    use crate::resolved_options::RouteField;
+    debug_assert_eq!(object_key, "advanced");
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    matches!(
+        match number_key {
+            "controlScale" => facts.control_scale,
+            "trueCfgScale" => facts.true_cfg_scale,
+            "imageGuidanceScale" => facts.image_guidance_scale,
+            "ipAdapterScale" => facts.ip_adapter_scale,
+            "referenceStrength" => facts.reference_strength,
+            "strength" => facts.strength,
+            _ => return true,
         },
-        Some(_) => true,
-    }
+        RouteField::Invalid
+    )
 }
 
 /// Unsupported structural carriers for Krea's reference edit lane. LoRAs, quant selection,

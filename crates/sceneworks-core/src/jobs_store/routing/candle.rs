@@ -733,21 +733,11 @@ fn candle_refuses_flux1_unsupported_packed_tier(model: &str, payload: &Map<Strin
     if !matches!(model, "flux_schnell" | "flux_dev") {
         return false;
     }
-    let Some(advanced) = payload.get("advanced") else {
-        return false;
-    };
-    let Some(advanced) = advanced.as_object() else {
-        return true;
-    };
-    match advanced.get("mlxQuantize") {
-        None | Some(Value::Null) => false,
-        Some(value) => !matches!(
-            value
-                .as_i64()
-                .or_else(|| value.as_str()?.trim().parse().ok()),
-            Some(4 | 8)
-        ),
-    }
+    use crate::resolved_options::RouteField;
+    !matches!(
+        crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload).mlx_quantize,
+        RouteField::Absent | RouteField::Null | RouteField::Valid(4 | 8)
+    )
 }
 
 /// The first [`CANDLE_IMAGE_CHECKS`] entry that refuses this request, short-circuiting exactly like
@@ -814,16 +804,10 @@ pub(crate) fn candle_request_wants_quant(payload: &Map<String, Value>) -> bool {
 /// for sc-20530: the gap classifier has to name the REQUESTED tier in the refusal message, and
 /// re-deriving it there is how the wording drifts from the gate that produced the refusal.
 pub(crate) fn candle_requested_quant_bits(payload: &Map<String, Value>) -> Option<i64> {
-    payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("mlxQuantize"))
-        .and_then(|value| {
-            value
-                .as_i64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-        })
-        .filter(|bits| *bits > 0)
+    match crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload).mlx_quantize {
+        crate::resolved_options::RouteField::Valid(bits) if bits > 0 => Some(bits),
+        _ => None,
+    }
 }
 
 fn candle_request_wants_torch_quantization(payload: &Map<String, Value>) -> bool {
@@ -1191,21 +1175,13 @@ enum CandleLtxTier {
 
 /// Parse only the exact packed tiers published by the shared LTX bundle.
 fn candle_ltx_requested_tier(payload: &Map<String, Value>) -> Option<CandleLtxTier> {
-    let value = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("mlxQuantize"));
-    let Some(value) = value else {
-        return Some(CandleLtxTier::Q4);
-    };
-    match value
-        .as_i64()
-        .or_else(|| value.as_str()?.trim().parse::<i64>().ok())?
-    {
-        i64::MIN..=0 => Some(CandleLtxTier::Bf16),
-        4 => Some(CandleLtxTier::Q4),
-        8 => Some(CandleLtxTier::Q8),
-        _ => None,
+    use crate::resolved_options::RouteField;
+    match crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload).mlx_quantize {
+        RouteField::Absent | RouteField::Null => Some(CandleLtxTier::Q4),
+        RouteField::Valid(..=0) => Some(CandleLtxTier::Bf16),
+        RouteField::Valid(4) => Some(CandleLtxTier::Q4),
+        RouteField::Valid(8) => Some(CandleLtxTier::Q8),
+        RouteField::Valid(_) | RouteField::Invalid => None,
     }
 }
 
@@ -1321,21 +1297,12 @@ pub(crate) fn video_request_candle_vace_eligible(
 /// package selections. This is deliberately stricter than the historical MLX range mapping: q6
 /// must not silently select q4/q8.
 fn scail2_candle_effective_tier(payload: &Map<String, Value>) -> Option<&'static str> {
-    let value = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("mlxQuantize"));
-    match value {
-        None | Some(Value::Null) => Some("bf16"),
-        Some(value) => match value
-            .as_i64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-        {
-            Some(..=0) => Some("bf16"),
-            Some(4) => Some("q4"),
-            Some(8) => Some("q8"),
-            _ => None,
-        },
+    use crate::resolved_options::RouteField;
+    match crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload).mlx_quantize {
+        RouteField::Absent | RouteField::Null | RouteField::Valid(..=0) => Some("bf16"),
+        RouteField::Valid(4) => Some("q4"),
+        RouteField::Valid(8) => Some("q8"),
+        RouteField::Valid(_) | RouteField::Invalid => None,
     }
 }
 
@@ -1503,27 +1470,18 @@ pub(crate) fn is_sdxl_control_model(model: &str) -> bool {
 }
 
 fn has_material_sdxl_control_intent(payload: &Map<String, Value>) -> bool {
-    let Some(advanced) = payload.get("advanced").and_then(Value::as_object) else {
-        return false;
-    };
-    let poses_are_material = match advanced.get("poses") {
-        None | Some(Value::Null) => false,
-        Some(Value::Array(poses)) if poses.is_empty() => false,
-        Some(_) => true,
-    };
-    let named_control_is_material = match advanced.get("controlMode") {
-        None | Some(Value::Null) => false,
-        Some(Value::String(mode)) => !mode.trim().is_empty(),
-        Some(_) => true,
+    use crate::resolved_options::RouteField;
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    let poses_are_material = matches!(facts.poses, RouteField::Valid(1..) | RouteField::Invalid);
+    let named_control_is_material = match facts.control_mode {
+        RouteField::Valid(mode) => !mode.trim().is_empty(),
+        RouteField::Invalid => true,
+        RouteField::Absent | RouteField::Null => false,
     };
     poses_are_material
         || named_control_is_material
-        || advanced
-            .get("controlImage")
-            .is_some_and(|value| !value.is_null())
-        || advanced
-            .get("controlWeights")
-            .is_some_and(|value| !value.is_null())
+        || facts.control_image.is_present_nonnull()
+        || facts.control_weights.is_present_nonnull()
 }
 
 /// A material SDXL control carrier. The worker owns the full conflict/count/type validation; this
@@ -1603,18 +1561,12 @@ pub(crate) fn qwen_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
 /// Missing/null/empty means no pose set; a supplied set must contain only objects and stay within the
 /// API-wide pose bound. Workers parse those same objects with the production whole-body renderer.
 fn strict_candle_pose_count(payload: &Map<String, Value>) -> Option<usize> {
-    match payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
+    use crate::resolved_options::RouteField;
+    match crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload).poses_all_objects
     {
-        None | Some(Value::Null) => Some(0),
-        Some(Value::Array(poses))
-            if poses.len() <= MAX_JOB_POSES && poses.iter().all(Value::is_object) =>
-        {
-            Some(poses.len())
-        }
-        Some(_) => None,
+        RouteField::Absent | RouteField::Null => Some(0),
+        RouteField::Valid(count) if count <= MAX_JOB_POSES => Some(count),
+        RouteField::Valid(_) | RouteField::Invalid => None,
     }
 }
 

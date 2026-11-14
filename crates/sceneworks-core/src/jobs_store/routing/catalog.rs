@@ -1368,6 +1368,17 @@ pub fn imported_control_intent_is_material(advanced: &Map<String, Value>) -> boo
     }
 }
 
+/// Control intent after the request has passed shared validation and image option binding.
+pub fn imported_control_intent_is_material_resolved(
+    advanced: &crate::image_request::ImageAdvanced,
+) -> bool {
+    advanced.control_image.is_some()
+        || advanced
+            .control_mode
+            .as_ref()
+            .is_some_and(|mode| !mode.value.trim().is_empty())
+}
+
 /// The imported Pose surface currently assembles a pose-only Krea control branch. Omission/empty
 /// keeps that proven default; any explicit non-pose or malformed mode must fail before claim rather
 /// than reach a worker predicate that cannot consume it. When provider facts gain per-control-kind
@@ -1379,6 +1390,15 @@ pub fn imported_pose_control_mode_is_supported(advanced: &Map<String, Value>) ->
         Some(Value::String(mode)) => mode.trim().eq_ignore_ascii_case("pose"),
         Some(_) => false,
     }
+}
+
+/// Pose-mode check for a previously bound image request.
+pub fn imported_pose_control_mode_is_supported_resolved(
+    advanced: &crate::image_request::ImageAdvanced,
+) -> bool {
+    advanced.control_mode.as_ref().is_none_or(|mode| {
+        mode.value.trim().is_empty() || mode.value.trim().eq_ignore_ascii_case("pose")
+    })
 }
 
 /// Fail-closed request gate for a non-builtin imported image model. The exact source shape and
