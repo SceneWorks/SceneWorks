@@ -312,6 +312,7 @@ describe("ImageStudio — Iris-3B (sc-25679)", () => {
     await render(baseContext({ createImageJob }));
     await act(async () => setInput(field(container, "Variations"), "4"));
     await runBatch("a red fox\na blue whale\na green frog\n[512x512] a gold bird");
+    await act(async () => { await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(3)); });
     const requests = createImageJob.mock.calls.map(([request]) => request);
     expect(requests.map((request) => [request.prompt, request.prompts, request.count])).toEqual([
       ["a red fox", ["a red fox", "a blue whale"], 4],
@@ -325,6 +326,7 @@ describe("ImageStudio — Iris-3B (sc-25679)", () => {
     const createImageJob = vi.fn(async () => ({ id: `job-${createImageJob.mock.calls.length}` }));
     await render(baseContext({ createImageJob }));
     await runBatch("[4:3] a red fox\n[8:6] a blue whale\n[3:4] a green frog\n[1:1] a gold bird");
+    await act(async () => { await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(3)); });
     const requests = createImageJob.mock.calls.map(([request]) => request);
     expect(requests.map(({ prompt, prompts, width, height }) => [prompt, prompts, width, height])).toEqual([
       ["a red fox", ["a red fox", "a blue whale"], 1152, 896],
