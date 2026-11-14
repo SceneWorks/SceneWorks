@@ -301,6 +301,7 @@ async fn run_utility_job_inner(
             http_client,
             &dispatch_job,
             &shutdown,
+            source_guard.portable_aux(),
         )
         .await;
         // Success releases the operation-owned source sessions; failure re-probes the exact bound
@@ -342,6 +343,7 @@ async fn dispatch_utility_job(
     http_client: &reqwest::Client,
     job: &JobSnapshot,
     shutdown: &gen_core::CancelFlag,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> Result<(), (&'static str, WorkerError)> {
     match job.job_type {
         JobType::Placeholder => run_placeholder_job(api, settings, job, shutdown)
@@ -393,7 +395,7 @@ async fn dispatch_utility_job(
         // VideoExtend/VideoBridge capabilities are never advertised, so these arms are
         // unreachable there (the procedural stub would otherwise ignore the conditioning).
         JobType::VideoGenerate | JobType::VideoExtend | JobType::VideoBridge => {
-            run_video_generate_job(api, settings, job)
+            run_video_generate_job(api, settings, job, portable_aux)
                 .await
                 .map_err(|error| ("Video generation failed.", error))
         }
@@ -404,7 +406,7 @@ async fn dispatch_utility_job(
         // MLX-eligible replace_person jobs here (`jobs_store::video_job_is_mlx_eligible`). The
         // off-Mac candle lane serves eligible Wan-VACE/SCAIL-2 replacement; unsupported models
         // are refused and remain queued.
-        JobType::PersonReplace => run_video_generate_job(api, settings, job)
+        JobType::PersonReplace => run_video_generate_job(api, settings, job, portable_aux)
             .await
             .map_err(|error| ("Person replacement failed.", error)),
         // Pure audio synthesis (SceneWorks Audio Studio, epic 13400 / sc-13404): Kokoro TTS (and
@@ -413,7 +415,7 @@ async fn dispatch_utility_job(
         // that links the audio registry (the macOS mlx worker, whose `runtime-macos` bundle ships
         // it default-on); a worker without the lane never advertises `audio_generate`, so this arm
         // is unreachable there and the job stays queued for a capable worker.
-        JobType::AudioGenerate => run_audio_generate_job(api, settings, job)
+        JobType::AudioGenerate => run_audio_generate_job(api, settings, job, portable_aux)
             .await
             .map_err(|error| ("Audio generation failed.", error)),
         // Native MLX LoRA/LoKr training (epic 3039, sc-3043/3049), served in-process
@@ -497,7 +499,7 @@ async fn dispatch_utility_job(
         JobType::ModelImport => run_model_import_job(api, settings, http_client, job)
             .await
             .map_err(|error| ("Model import failed.", error)),
-        JobType::ModelConvert => run_model_convert_job(api, settings, job)
+        JobType::ModelConvert => run_model_convert_job(api, settings, job, portable_aux)
             .await
             .map_err(|error| ("Model conversion failed.", error)),
         JobType::FrameExtract => run_frame_extract_job(api, settings, job)

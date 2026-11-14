@@ -48,6 +48,7 @@ fn classify_audio_synthesis_error(context: &str, error: gen_core::Error) -> Work
 /// has far fewer knobs than video, so it needs no shared-core struct). Infallible parse: missing
 /// fields fall back to sane defaults and `project_id` may be empty — the preflight rejects that.
 struct AudioRequest {
+    portable_aux: sceneworks_core::portable_aux_bindings::PortableAuxBindings,
     project_id: String,
     model: String,
     model_provided: bool,
@@ -200,6 +201,7 @@ impl AudioRequest {
         let model = string("model");
         let base_model = string("baseModel");
         Self {
+            portable_aux: Default::default(),
             project_id: string("projectId").unwrap_or_default(),
             model_provided: model.is_some(),
             model: model.unwrap_or_else(|| "kokoro_82m".to_owned()),
@@ -962,12 +964,20 @@ pub(crate) async fn run_audio_generate_job(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<()> {
     // YuE2 (sc-22999): its own contract, eligibility, run directory and provenance.
     if crate::yue2_jobs::is_yue2_job(&job.payload) {
         return crate::yue2_jobs::run_yue2_job(api, settings, job).await;
     }
-    run_audio_generate_job_using(api, settings, job, crate::inference_runtime::load_audio).await
+    run_audio_generate_job_using(
+        api,
+        settings,
+        job,
+        portable_aux,
+        crate::inference_runtime::load_audio,
+    )
+    .await
 }
 
 /// [`run_audio_generate_job`] with the single-generator lane's loader injected (sc-19384) — the same
@@ -979,11 +989,13 @@ async fn run_audio_generate_job_using(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
         + 'static,
 ) -> WorkerResult<()> {
-    let request = AudioRequest::from_payload(&job.payload);
+    let mut request = AudioRequest::from_payload(&job.payload);
+    request.portable_aux = portable_aux.clone();
     refuse_symbolic_song_without_block(&request)?;
     audio_preflight(&request)?;
     // YuE whole-render memory admission (sc-19386): refuse a render that cannot fit before the
@@ -1611,13 +1623,11 @@ async fn run_audio_synthesis_with(
     // removed), so this attach is the sole offline Cover source. An absent snapshot stages nothing; the
     // engine then surfaces the actionable Cover-needs-`sft_cover` error on the request that needs it.
     if request.edit_mode.as_deref() == Some("cover") {
-        let bound = job
-            .payload
-            .get("advanced")
-            .and_then(Value::as_object)
-            .filter(|advanced| crate::portable_aux_sources::has_bound_aux_paths(advanced));
-        if let Some(advanced) = bound {
-            let path = crate::portable_aux_sources::bound_aux_path(advanced, "sft_cover")
+        if request.portable_aux.has_paths() {
+            let path = request
+                .portable_aux
+                .path("sft_cover")
+                .map(PathBuf::from)
                 .ok_or_else(|| {
                     WorkerError::InvalidPayload("portable ACE Cover source is not bound".to_owned())
                 })?;
@@ -5891,10 +5901,16 @@ mod yue_job_surface_tests {
         let job = job_snapshot("yue-long-clip", payload);
         let loaded = Arc::new(AtomicBool::new(false));
         let flag = loaded.clone();
-        let error = run_audio_generate_job_using(&api, &staged.settings, &job, move |_, _| {
-            flag.store(true, Ordering::SeqCst);
-            Err(gen_core::Error::Msg("the loader must not run".into()))
-        })
+        let error = run_audio_generate_job_using(
+            &api,
+            &staged.settings,
+            &job,
+            &Default::default(),
+            move |_, _| {
+                flag.store(true, Ordering::SeqCst);
+                Err(gen_core::Error::Msg("the loader must not run".into()))
+            },
+        )
         .await
         .expect_err("the decoded clip is too long for the capped budget");
         assert!(matches!(error, WorkerError::InvalidPayload(_)), "{error}");
@@ -6079,6 +6095,7 @@ mod yue_job_surface_tests {
             &api,
             &staged.settings,
             &job,
+            &Default::default(),
             stub_loader(
                 Behavior::Song,
                 seen.clone(),
@@ -6208,6 +6225,7 @@ mod yue_job_surface_tests {
             &api,
             &staged.settings,
             &job,
+            &Default::default(),
             stub_loader(
                 Behavior::WaitForCancel,
                 Arc::new(Mutex::new(Seen::default())),
