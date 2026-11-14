@@ -9,6 +9,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
 use crate::contracts::JsonObject;
+use crate::image_request::ControlWeightsFields;
 use sceneworks_options::{by_wire, DefaultRule, OptionSpec, Shape};
 
 /// How the value reached the effective request. Omission remains distinct from an authored
@@ -100,7 +101,7 @@ pub struct RouteOptionFacts {
     pub phases: RouteField<usize>,
     pub control_mode: RouteField<String>,
     pub control_image: RouteField<String>,
-    pub control_weights: RouteField<()>,
+    pub control_weights: RouteField<ControlWeightsFields>,
     pub control_scale: RouteField<f64>,
     pub true_cfg_scale: RouteField<f64>,
     pub image_guidance_scale: RouteField<f64>,
@@ -116,9 +117,11 @@ pub struct RouteOptionFacts {
     pub veda_enabled: RouteField<bool>,
     pub use_uncensored_enhancer: RouteField<bool>,
     pub text_encoder_model: RouteField<String>,
+    pub tile_control_net_repo: RouteField<String>,
     pub strength: RouteField<f64>,
     pub hires_fix_enabled: RouteField<bool>,
     pub conv_rot: RouteField<bool>,
+    pub angle_set: RouteField<bool>,
 }
 
 impl RouteOptionFacts {
@@ -175,7 +178,9 @@ impl RouteOptionFacts {
             phases: field(advanced, "phases", count),
             control_mode: field(advanced, "controlMode", text),
             control_image: field(advanced, "controlImage", text),
-            control_weights: field(advanced, "controlWeights", |v| v.as_object().map(|_| ())),
+            control_weights: field(advanced, "controlWeights", |v| {
+                serde_json::from_value(v.clone()).ok()
+            }),
             control_scale: field(advanced, "controlScale", |v| {
                 v.as_f64().filter(|n| n.is_finite())
             }),
@@ -201,11 +206,13 @@ impl RouteOptionFacts {
             veda_enabled: field(veda, "enabled", boolean),
             use_uncensored_enhancer: field(advanced, "useUncensoredEnhancer", boolean),
             text_encoder_model: field(advanced, "textEncoderModel", text),
+            tile_control_net_repo: field(advanced, "tileControlNetRepo", text),
             strength: field(advanced, "strength", |v| {
                 v.as_f64().filter(|n| n.is_finite())
             }),
             hires_fix_enabled: field(hires_fix, "enabled", boolean),
             conv_rot: field(advanced, "convRot", boolean),
+            angle_set: field(advanced, "angleSet", boolean),
         }
     }
 }
@@ -215,6 +222,7 @@ impl RouteOptionFacts {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrainingRouteFacts {
     pub network_type: RouteField<String>,
+    pub base_model_path: RouteField<String>,
 }
 
 impl TrainingRouteFacts {
@@ -244,7 +252,21 @@ impl TrainingRouteFacts {
             }
             Err(()) => RouteField::Invalid,
         };
-        Self { network_type }
+        let base_model_path = match plan.get("target") {
+            None => RouteField::Absent,
+            Some(Value::Null) => RouteField::Null,
+            Some(Value::Object(target)) => match target.get("baseModelPath") {
+                None => RouteField::Absent,
+                Some(Value::Null) => RouteField::Null,
+                Some(Value::String(path)) => RouteField::Valid(path.clone()),
+                Some(_) => RouteField::Invalid,
+            },
+            Some(_) => RouteField::Invalid,
+        };
+        Self {
+            network_type,
+            base_model_path,
+        }
     }
 }
 
@@ -572,6 +594,7 @@ mod tests {
         let facts = RouteOptionFacts::from_payload_syntax(&obj(json!({
             "advanced": {
                 "poses": [], "controlMode": null, "controlImage": 17,
+                "controlWeights":{"overlayId":"pose-1","_catalogAuthorized":true},
                 "mlxQuantize": 4, "veda": {"enabled": true}
             },
             "hiresFix": {"enabled": false}
@@ -581,6 +604,11 @@ mod tests {
         assert_eq!(facts.phases, RouteField::Absent);
         assert_eq!(facts.control_mode, RouteField::Null);
         assert_eq!(facts.control_image, RouteField::Invalid);
+        assert!(
+            matches!(facts.control_weights, RouteField::Valid(ref weights)
+            if weights.overlay_id.valid().map(String::as_str) == Some("pose-1")
+                && weights.catalog_authorized.valid() == Some(&true))
+        );
         assert_eq!(facts.mlx_quantize, RouteField::Valid(4));
         assert_eq!(facts.veda_enabled, RouteField::Valid(true));
         assert_eq!(facts.hires_fix_enabled, RouteField::Valid(false));

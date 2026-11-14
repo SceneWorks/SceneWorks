@@ -3,12 +3,15 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
 use sceneworks_core::contracts::JsonObject;
 use sceneworks_core::portable_aux_bindings::PortableAuxBindings;
+#[cfg(test)]
 use serde_json::Value;
 
 /// Only the verified dispatch clone carries this private map. The worker guard removes every
 /// client-supplied copy before adding immutable leased paths for the selected route.
+#[cfg(test)]
 pub(crate) fn bound_aux_path(advanced: &JsonObject, source_id: &str) -> Option<PathBuf> {
     advanced
         .get("__portableAuxPaths")?
@@ -17,13 +20,14 @@ pub(crate) fn bound_aux_path(advanced: &JsonObject, source_id: &str) -> Option<P
         .map(PathBuf::from)
 }
 
+#[cfg(test)]
 pub(crate) fn has_bound_aux_paths(advanced: &JsonObject) -> bool {
     advanced.get("__portableAuxPaths").is_some()
 }
 
 /// A verified portable attempt must use its leased strict-control copy even when an operator
 /// env override is present. Legacy, unbound jobs retain the operator override behavior.
-#[cfg(any(test, native_lane))]
+#[cfg(test)]
 pub(crate) fn selected_krea_control_override(
     advanced: &JsonObject,
     env_override: Option<&str>,
@@ -65,7 +69,7 @@ pub(crate) fn selected_krea_control_override_typed(
 /// The native PuLID providers take a single face directory although the three selected
 /// face files belong to two independently authenticated repositories. Compose only from
 /// worker-leased immutable paths and keep this temporary directory alive through generation.
-#[cfg(native_lane)]
+#[cfg(test)]
 pub(crate) fn bound_pulid_weights(
     advanced: &JsonObject,
 ) -> crate::WorkerResult<(PathBuf, PathBuf, PathBuf, tempfile::TempDir)> {
@@ -114,26 +118,6 @@ pub(crate) fn bound_pulid_weights_typed(
         std::fs::copy(source, staged.path().join(file))?;
     }
     Ok((adapter, eva, staged.path().to_path_buf(), staged))
-}
-
-/// Effective path plus whether the loader selected an authorized operator override.
-/// The caller hashes the exact file/dir closure and records pinned-repo provenance otherwise.
-pub(crate) fn resolve_selected_aux_source(
-    source_id: &str,
-    data_dir: &Path,
-    payload: &JsonObject,
-) -> Option<(PathBuf, bool)> {
-    let tile_repo = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("tileControlNetRepo"))
-        .and_then(Value::as_str);
-    let plan_base_model_path = payload
-        .get("plan")
-        .and_then(|plan| plan.get("target"))
-        .and_then(|target| target.get("baseModelPath"))
-        .and_then(Value::as_str);
-    resolve_selected_aux_source_typed(source_id, data_dir, tile_repo, plan_base_model_path)
 }
 
 /// Resolve an auxiliary source from the bound tile repository selection.

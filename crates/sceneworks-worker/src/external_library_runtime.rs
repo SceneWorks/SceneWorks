@@ -3488,12 +3488,16 @@ fn selected_local_artifact_path(
             .transpose()?
     } else if member.role == ArtifactMemberRole::Control {
         if member.component_id.as_deref() == Some("strict_control") {
-            let overlay_id = payload
-                .get("advanced")
-                .and_then(|advanced| advanced.get("controlWeights"))
-                .and_then(|weights| weights.get("overlayId"))
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| invalid_binding("registered control overlay has no ID"))?;
+            let control_weights =
+                sceneworks_core::resolved_options::RouteOptionFacts::from_payload_syntax(payload)
+                    .control_weights;
+            let overlay_id = match &control_weights {
+                sceneworks_core::resolved_options::RouteField::Valid(weights) => {
+                    weights.overlay_id.valid().map(String::as_str)
+                }
+                _ => None,
+            }
+            .ok_or_else(|| invalid_binding("registered control overlay has no ID"))?;
             return crate::portable_source_claims::registered_control_overlay_path(
                 settings,
                 payload,
