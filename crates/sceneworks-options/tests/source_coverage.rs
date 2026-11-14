@@ -431,6 +431,12 @@ fn describe(expr: &Expr) -> String {
 }
 
 impl<'ast> Visit<'ast> for Scanner<'_> {
+    fn visit_expr_block(&mut self, expr: &'ast syn::ExprBlock) {
+        if production(&expr.attrs) {
+            visit::visit_expr_block(self, expr);
+        }
+    }
+
     fn visit_expr_assign(&mut self, expr: &'ast syn::ExprAssign) {
         if !production(&expr.attrs) {
             return;
@@ -1069,6 +1075,7 @@ fn valid_fixture_and_test_only_exclusion() {
             request
                 .advanced
                 .get("steps");
+            #[cfg(test)] { request.advanced.get("__unseen_test_block_key__"); }
             let knobs = &request.advanced;
             knobs.get_mut("guidanceScale");
             let other = knobs.clone();
@@ -1364,6 +1371,7 @@ fn print_production_binding_inventory() {
     for read in &coverage.reads {
         if read.file.ends_with("/film_compile.rs")
             || read.file.starts_with("apps/rust-api/src/")
+            || read.file.ends_with("/image_jobs.rs")
             || read.file.ends_with("/workflow_parameters.rs")
             || read.file.ends_with("/workflow_resolution.rs")
             || read.file.ends_with("/workflow_share.rs")
@@ -1479,6 +1487,18 @@ fn production_execution_has_no_raw_advanced_reads() {
             && read.location == "advanced"
             && read.key == "filmHarness"
     };
+    // The image worker reads these authored fields only while formatting a missing-reference
+    // error or a sanitized share/PNG metadata envelope after execution has chosen its options.
+    let authored_image_metadata_read = |read: &Read| {
+        read.file == "crates/sceneworks-worker/src/image_jobs.rs"
+            && read.location == "advanced"
+            && matches!(
+                (read.function.as_str(), read.key.as_str()),
+                ("explain_image_reference_error", "imageReference")
+                    | ("resolved_steps_for_share", "numInferenceSteps")
+                    | ("write_image_asset", "phases")
+            )
+    };
     let direct = coverage
         .reads
         .iter()
@@ -1486,6 +1506,7 @@ fn production_execution_has_no_raw_advanced_reads() {
             !binding_boundary(&read.file, &read.function)
                 && !authored_workflow_read(read)
                 && !persisted_film_attempt_read(read)
+                && !authored_image_metadata_read(read)
         })
         .map(|read| {
             format!(
