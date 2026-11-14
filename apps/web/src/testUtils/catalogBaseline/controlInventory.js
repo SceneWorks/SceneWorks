@@ -1,39 +1,34 @@
-// Derive the historical side solely from pinned rendered observations, including the menu
-// choices. The old option vocabulary lives here so future registry/UI edits cannot rename it.
-const optionLabels = {
-  "schedule shift": "schedulerShift", sampler: "sampler", scheduler: "scheduler", steps: "steps",
-  guidance: "guidanceScale", "guidance (cfg)": "guidance", "width override": "width",
-  "height override": "height", "custom width": "width", "custom height": "height",
-  aspect: "resolution", variations: "count", "pid decoder non-commercial": "usePid",
-  "hires.fix": "hiresFix", upscale: "upscale", "flash attention": "flashAttn",
-  "quant tier": "mlxQuantize", "negative prompt": "negativePrompt", "caption overflow": "captionOverflow",
-  "guidance method": "guidanceMethod", "transparent background (rgba)": "transparentBackground",
-  "text style": "textStyleGain", "control strength": "controlScale", "enable multi-phase denoise": "phases",
-};
+import identities from "./controlIdentities.json";
+import old from "./old-catalog.json";
 
-const effects = {
+// These names are a frozen vocabulary, not inferred candidate wire fields. Unknown
+// controls fail closed until their identity is explicitly added to the vocabulary.
+const fieldPrefixes = Object.keys(identities.fields).sort((a, b) => b.length - a.length);
+const modelNames = new Set(old.catalog.models.map((model) => model.name ?? model.id));
+export const declaredEffects = {
   hiresFix: [{ when: "enabled", clear: "usePid" }, { when: "enabled", clear: "upscale" }],
   upscale: [{ when: "enabled", clear: "usePid" }, { when: "enabled", clear: "hiresFix" }],
   decoder: [{ when: "nonNative", clear: "usePid" }],
 };
 
-function optionId(control) {
-  // The legacy DOM value attribute contains the current number/text. It cannot identify
-  // a field. Remove values and select choices embedded by the wrapping HTML label.
-  let label = control.label;
-  if (control.options?.length) {
-    const start = label.indexOf(control.options.map((option) => option.label).join(""));
-    if (start >= 0) label = label.slice(0, start);
+function optionId(control, simple, menu) {
+  if (!menu && simple && identities.simpleVoiceLabels.includes(control.label)) return "voice";
+  if (!menu && simple) {
+    const prefix = Object.keys(identities.actionPrefixes).find((name) => control.label.startsWith(name));
+    if (prefix) return identities.actionPrefixes[prefix];
   }
-  if (typeof control.value === "string" && control.value && label.endsWith(control.value)) {
-    label = label.slice(0, -control.value.length);
+  if (!menu && simple && modelNames.has(control.label)) return "model";
+  if (!menu && simple && /^\d+:\d+.*[×x]/.test(control.label)) return "resolution";
+  if (["button", "tab", "radio"].includes(control.role)) {
+    const id = identities.actions[control.label];
+    if (id) return `${menu ? "choice/" : ""}${id}`;
+  } else {
+    // Match only an explicit historical field name; wrapping label text can also
+    // contain its value, choices and help text. None of those belongs in an ID.
+    const name = fieldPrefixes.find((prefix) => control.label.startsWith(prefix));
+    if (name) return identities.fields[name];
   }
-  const name = label.trim().toLowerCase();
-  if (optionLabels[name]) return optionLabels[name];
-  const prefix = ["negative prompt", "quant tier", "decoder experimental", "control strength", "text style", "system prompt", "prompta ", "aspect256"].find((key) => name.startsWith(key));
-  if (prefix) return optionLabels[prefix] ?? { "decoder experimental": "decoder", "system prompt": "systemMessage", "prompta ": "prompt", aspect256: "resolution" }[prefix];
-  // A navigation or picker action has a stable control identity but no wire option of its own.
-  return (name || control.role).replace(/[^a-z0-9]+(.)?/g, (_, next) => next?.toUpperCase() ?? "");
+  throw new Error(`No declared control identity: ${control.role}: ${control.label}`);
 }
 
 export function backendFor(platform) {
@@ -42,18 +37,34 @@ export function backendFor(platform) {
   return "ungated";
 }
 
-function inventoryControls(controls) {
+function inventoryControls(controls, scope, simple, menu = false) {
+  const occurrences = new Map();
   return controls.map((control) => {
-    const id = optionId(control);
-    return { id, availability: control.disabled ? "disabled" : "enabled",
-      reason: control.disabledReason, effects: effects[id] ?? [] };
+    const id = optionId(control, simple, menu);
+    const instance = occurrences.get(id) ?? 0;
+    occurrences.set(id, instance + 1);
+    return { id, controlId: `${scope}/${control.role}/${id}/${instance}`,
+      availability: control.disabled ? "disabled" : "enabled",
+      reason: control.disabledReason, effects: declaredEffects[id] ?? [] };
   });
 }
 
-export function controlInventory(observation, platform) {
+export function controlInventory(observation, platform, row = {}) {
+  const scope = row.studio ?? "studio";
   return {
     backend: backendFor(platform),
-    controls: inventoryControls(observation.controls),
-    menus: observation.menus.map((menu) => ({ label: menu.label, controls: inventoryControls(menu.controls) })),
+    controls: inventoryControls(observation.controls, scope, scope.startsWith("simple")),
+    menus: observation.menus.map((menu, index) => ({ label: menu.label,
+      controls: inventoryControls(menu.controls, `${scope}/picker/${index}`, false, true) })),
   };
+}
+
+// Effect witnesses provide the precondition and final persisted state after a real
+// interaction. Checking a declaration against itself cannot establish this contract.
+export function assertDeclaredEffects(id, when, before, after) {
+  for (const effect of declaredEffects[id] ?? []) {
+    if (effect.when === when && before[effect.clear] && after[effect.clear] !== false) {
+      throw new Error(`${id} must clear ${effect.clear}`);
+    }
+  }
 }
