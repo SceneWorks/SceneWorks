@@ -1428,14 +1428,31 @@ pub(super) struct PoseInput {
 /// Image options lowered once at the worker boundary, before selecting a provider.
 /// The authored map remains on the request for persistence, but route decisions use these
 /// parsed values and the request's resolved scalar fields.
-pub(super) struct ResolvedImageExecution<'a> {
-    pub(super) request: &'a ImageRequest,
-    poses: Vec<PoseInput>,
-    phases: Option<Vec<super::krea_multiphase::MultiPhaseSpec>>,
+#[derive(Clone)]
+pub(super) struct ResolvedImageExecution {
+    request: std::sync::Arc<ImageRequest>,
+    poses: std::sync::Arc<Vec<PoseInput>>,
+    invalid_pose_entries: std::sync::Arc<Vec<usize>>,
+    phases: Option<std::sync::Arc<Vec<super::krea_multiphase::MultiPhaseSpec>>>,
 }
 
-impl<'a> ResolvedImageExecution<'a> {
-    pub(super) fn new(request: &'a ImageRequest) -> WorkerResult<Self> {
+impl ResolvedImageExecution {
+    pub(super) fn new(request: &ImageRequest) -> WorkerResult<Self> {
+        let invalid_pose_entries = request
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved")
+            .poses
+            .as_ref()
+            .map(|bound| {
+                bound
+                    .value
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, entry)| (!entry.is_object()).then_some(index))
+                    .collect()
+            })
+            .unwrap_or_default();
         let poses = parse_poses(request);
         let phases = if request.model == "krea_2_raw"
             && super::krea_multiphase::request_has_multiphase(request)
@@ -1445,9 +1462,10 @@ impl<'a> ResolvedImageExecution<'a> {
             None
         };
         Ok(Self {
-            request,
-            poses,
-            phases,
+            request: std::sync::Arc::new(request.clone()),
+            poses: std::sync::Arc::new(poses),
+            invalid_pose_entries: std::sync::Arc::new(invalid_pose_entries),
+            phases: phases.map(std::sync::Arc::new),
         })
     }
 
@@ -1455,16 +1473,33 @@ impl<'a> ResolvedImageExecution<'a> {
         &self.poses
     }
 
+    pub(super) fn has_pose_source(&self) -> bool {
+        self.request
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved")
+            .poses
+            .is_some()
+    }
+
+    pub(super) fn pose_source_count(&self) -> usize {
+        self.poses.len() + self.invalid_pose_entries.len()
+    }
+
+    pub(super) fn invalid_pose_entries(&self) -> &[usize] {
+        &self.invalid_pose_entries
+    }
+
     pub(super) fn phases(&self) -> Option<&[super::krea_multiphase::MultiPhaseSpec]> {
-        self.phases.as_deref()
+        self.phases.as_ref().map(|phases| phases.as_slice())
     }
 }
 
-impl std::ops::Deref for ResolvedImageExecution<'_> {
+impl std::ops::Deref for ResolvedImageExecution {
     type Target = ImageRequest;
 
     fn deref(&self) -> &Self::Target {
-        self.request
+        self.request.as_ref()
     }
 }
 
@@ -1483,6 +1518,9 @@ mod resolved_execution_tests {
         .unwrap();
         let execution = ResolvedImageExecution::new(&request).unwrap();
         assert_eq!(execution.poses().len(), 1);
+        assert!(execution.has_pose_source());
+        assert_eq!(execution.pose_source_count(), 2);
+        assert_eq!(execution.invalid_pose_entries(), &[0]);
         assert_eq!(execution.poses()[0].keypoints.len(), 18);
         assert!(execution.phases().is_none());
     }

@@ -30,6 +30,7 @@ use super::conditioning::pose_entries;
 use super::conditioning::sensenova_edit_candle_available;
 #[cfg(target_os = "macos")]
 use super::conditioning::EditGrouping;
+use super::conditioning::ResolvedImageExecution;
 #[cfg(target_os = "macos")]
 use super::flux1_control::flux1_dev_control_available;
 #[cfg(target_os = "macos")]
@@ -671,7 +672,7 @@ impl PreparedImageRoute {
 /// the matching handler.
 #[cfg(target_os = "macos")]
 pub(super) fn prepare_image_route(
-    request: &ImageRequest,
+    request: &ResolvedImageExecution,
     settings: &Settings,
 ) -> WorkerResult<Option<PreparedImageRoute>> {
     // The plan-driven route is offered the request first. It claims the shapes it serves; a shape
@@ -1403,7 +1404,7 @@ pub(super) fn resolve_candle_image_route(
 /// later await. Only the route that wins the existing predicate order consumes its prepared bundle.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn prepare_candle_image_route(
-    request: &ImageRequest,
+    request: &ResolvedImageExecution,
     settings: &Settings,
 ) -> WorkerResult<Option<PreparedCandleImageRoute>> {
     if !settings.backend_candle_enabled {

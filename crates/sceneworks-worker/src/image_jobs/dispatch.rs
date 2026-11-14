@@ -1,5 +1,6 @@
 //! Execution of the one prepared image route; heartbeat and job lifecycle stay in the parent.
-use super::{ImagePlan, ImageRequest};
+use super::conditioning::ResolvedImageExecution;
+use super::ImagePlan;
 use crate::{ApiClient, JobSnapshot, Settings, WorkerError, WorkerResult};
 use serde_json::Value;
 use std::path::Path;
@@ -106,7 +107,7 @@ pub(super) async fn execute_mlx_image_route(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
-    request: &ImageRequest,
+    request: &ResolvedImageExecution,
     plan: &ImagePlan,
     project_path: &Path,
     backend: &str,
@@ -523,7 +524,7 @@ pub(super) async fn execute_candle_image_route(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
-    request: &ImageRequest,
+    request: &ResolvedImageExecution,
     plan: &ImagePlan,
     project_path: &Path,
     backend: &str,
