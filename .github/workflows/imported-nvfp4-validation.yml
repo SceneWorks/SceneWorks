@@ -33,7 +33,7 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
           Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
       - name: Set up Node for Cargo cache selection
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - name: Isolate Cargo dependency checkout for the imported NVFP4 smoke
@@ -58,7 +58,7 @@ jobs:
           python -I scripts/ci/imported-nvfp4-cuda-guard.py
       - name: Upload only bounded owned model-validation evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: imported-nvfp4-worker-proof-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}\imported-nvfp4-proof-${{ github.run_id }}-${{ github.run_attempt }}/artifact
