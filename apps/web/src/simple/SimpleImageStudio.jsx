@@ -11,6 +11,7 @@ import { assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { EditPromptTemplates } from "../components/EditPromptTemplates.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableValidation.js";
 import { imageModelServesMode } from "../modelEligibility.js";
 import { findModelEditLora, loraIsInstalled } from "../presetUtils.js";
 import { fitsResolutionOptions } from "../resolutionMemory.js";
@@ -922,7 +923,7 @@ export function SimpleImageStudio() {
 
       <button
         className={busy ? "su-generate busy" : "su-generate"}
-        disabled={!canGenerate || Boolean(portableRefusal)}
+        disabled={!canGenerate || portableFeedbackBlocks(portableFeedback)}
         onClick={generate}
         type="button"
       >
@@ -930,6 +931,7 @@ export function SimpleImageStudio() {
         {busy ? "Generating…" : `Generate ${variations} image${variations > 1 ? "s" : ""}`}
       </button>
       {portableRefusal ? <p className="su-error" role="alert">{portableRefusal.detail}</p> : null}
+      {portableFeedbackStatus(portableFeedback) ? <p role="status">{portableFeedbackStatus(portableFeedback)}</p> : null}
       {needsSource ? (
         <p className="su-empty">Pick the image you want to edit to start a run.</p>
       ) : null}

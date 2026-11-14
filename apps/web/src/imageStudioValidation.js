@@ -65,6 +65,7 @@ export function imageGenerateValidation({
   captionHasContent,
   tensorConditioning = false,
   prompt,
+  dimensionAdvice = null,
   mode,
   characterId,
   editSourceMissing = false,
@@ -99,6 +100,7 @@ export function imageGenerateValidation({
   if (!activeProject) {
     issues.push(issue.requirement("project", "Open a project to generate"));
   }
+  if (dimensionAdvice) issues.push(issue.error("width", dimensionAdvice));
   issues.push(...restorePlanIssues(restorePlan));
   // A structured model needs caption content; everyone else a plain prompt. Both are
   // "you haven't written it yet" — silent, the empty field speaks for itself.
@@ -166,6 +168,7 @@ export function imageBatchValidation({
   batchTotal,
   missingKeys = [],
   groupIssues = [],
+  dimensionAdvice = null,
   promptBudgetOverages = [],
   decoderCapabilitiesPending = false,
   // The Iris restoration post-processing plan status for EVERY distinct render size of the batch
@@ -179,6 +182,7 @@ export function imageBatchValidation({
     issues.push(issue.requirement("project", "Open a project to run a batch"));
   }
   issues.push(...restorePlanIssues(restorePlan));
+  if (dimensionAdvice) issues.push(issue.error("width", dimensionAdvice));
   if (batchStructuredExpandBlocked) {
     issues.push(
       issue.error(

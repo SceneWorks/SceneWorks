@@ -5,7 +5,7 @@ import { CREATE_JOB_DEFINITIONS, makeCreateJob } from "../createJob.js";
 
 // F-189: extracted from App along its existing concern boundary.
 export function useJobCreators({
-  token, activeProject, requestedGpu, setJobs, setError, setActiveView, activeViewRef, confirmWorkflowEmbeddingBeforeGeneration, modelEntryForRequest
+  token, activeProject, requestedGpu, setJobs, setError, setActiveView, activeViewRef, confirmWorkflowEmbeddingBeforeGeneration
 }) {
   // sc-4194: defined here (above the data hooks) because useTimelines takes it as a
   // dependency; a stable identity keeps the timeline hook's queue action stable too.
@@ -18,14 +18,13 @@ export function useJobCreators({
         requestedGpu,
         setJobs,
         setError,
-        modelEntryForRequest,
         afterCreate: (_job, _payload, { navigateToQueue = false } = {}) => {
           if (navigateToQueue) {
             setActiveView("Queue");
           }
         },
       }),
-    [token, activeProject, requestedGpu, setJobs, setError, setActiveView, modelEntryForRequest],
+    [token, activeProject, requestedGpu, setJobs, setError, setActiveView],
   );
 
   // SceneWorks Audio Studio (epic 13400 / sc-13404): the audio analogue of createVideoJob. POSTs to
@@ -41,9 +40,8 @@ export function useJobCreators({
         requestedGpu,
         setJobs,
         setError,
-        modelEntryForRequest,
       }),
-    [token, activeProject, requestedGpu, setJobs, setError, modelEntryForRequest],
+    [token, activeProject, requestedGpu, setJobs, setError],
   );
 
   const createPlaceholderJob = useCallback(
@@ -81,22 +79,21 @@ export function useJobCreators({
         requestedGpu,
         setJobs,
         setError,
-        modelEntryForRequest,
         // Every image-producing studio shares this preflight. The first undecided request waits
         // here, before the POST, until the recipe-sharing choice is durably saved.
         beforeCreate: confirmWorkflowEmbeddingBeforeGeneration,
       }),
-    [token, activeProject, requestedGpu, setJobs, setError, confirmWorkflowEmbeddingBeforeGeneration, modelEntryForRequest],
+    [token, activeProject, requestedGpu, setJobs, setError, confirmWorkflowEmbeddingBeforeGeneration],
   );
 
   const createVectorJob = useMemo(
-    () => makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.vector, token, project: activeProject, requestedGpu, setJobs, setError, modelEntryForRequest }),
-    [token, activeProject, requestedGpu, setJobs, setError, modelEntryForRequest],
+    () => makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.vector, token, project: activeProject, requestedGpu, setJobs, setError }),
+    [token, activeProject, requestedGpu, setJobs, setError],
   );
 
   const createVectorPromptWorkflow = useMemo(
-    () => makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.vectorPrompt, token, project: activeProject, requestedGpu, setJobs, setError, modelEntryForRequest }),
-    [token, activeProject, requestedGpu, setJobs, setError, modelEntryForRequest],
+    () => makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.vectorPrompt, token, project: activeProject, requestedGpu, setJobs, setError }),
+    [token, activeProject, requestedGpu, setJobs, setError],
   );
 
   // Standalone video upscale (epic 4811 / sc-4816): the net-new `video_upscale` job runs
@@ -111,9 +108,8 @@ export function useJobCreators({
         requestedGpu,
         setJobs,
         setError,
-        modelEntryForRequest,
       }),
-    [token, activeProject, requestedGpu, setJobs, setError, modelEntryForRequest],
+    [token, activeProject, requestedGpu, setJobs, setError],
   );
 
   const createVqaJob = useMemo(
@@ -125,9 +121,8 @@ export function useJobCreators({
         requestedGpu,
         setJobs,
         setError,
-        modelEntryForRequest,
       }),
-    [token, activeProject, requestedGpu, setJobs, setError, modelEntryForRequest],
+    [token, activeProject, requestedGpu, setJobs, setError],
   );
 
   const createInterleaveJob = useMemo(
@@ -139,9 +134,8 @@ export function useJobCreators({
         requestedGpu,
         setJobs,
         setError,
-        modelEntryForRequest,
       }),
-    [token, activeProject, requestedGpu, setJobs, setError, modelEntryForRequest],
+    [token, activeProject, requestedGpu, setJobs, setError],
   );
   const context = useAppDomainValue({
     createVideoJob,

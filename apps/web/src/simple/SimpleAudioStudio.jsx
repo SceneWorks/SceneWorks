@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useAppContext } from "../context/AppContext.js";
 import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableValidation.js";
 import { audioModelServesMode } from "../modelEligibility.js";
 import { audioAssetRunGroups, audioRunGroups } from "../audioTakes.js";
 import { useAudioTakePlayer } from "../components/audioTakeParts.jsx";
@@ -222,7 +223,7 @@ export function SimpleAudioStudio() {
 
       <button
         className={busy ? "su-generate busy" : "su-generate"}
-        disabled={!canGenerate || Boolean(portableRefusal)}
+        disabled={!canGenerate || portableFeedbackBlocks(portableFeedback)}
         onClick={generate}
         type="button"
       >
@@ -230,6 +231,7 @@ export function SimpleAudioStudio() {
         {busy ? "Generating…" : "Generate audio"}
       </button>
       {portableRefusal ? <p className="su-error" role="alert">{portableRefusal.detail}</p> : null}
+      {portableFeedbackStatus(portableFeedback) ? <p role="status">{portableFeedbackStatus(portableFeedback)}</p> : null}
 
       {/* Live run strip: progress + Cancel + the outcome, right under Generate. */}
       <StudioRunStatus job={latestJob} />

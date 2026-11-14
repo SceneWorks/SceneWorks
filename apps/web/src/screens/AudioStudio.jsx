@@ -6,6 +6,7 @@ import { AudioAdvancedPanel } from "./audioStudio/AudioAdvancedPanel.jsx";
 import { useAudioSettingsWriter } from "./audioStudio/useAudioSettingsWriter.js";
 import { useAudioSubmission } from "./audioStudio/useAudioSubmission.js";
 import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableValidation.js";
 import { useAudioModelDefaults } from "./audioStudio/useAudioModelDefaults.js";
 import { useAudioScript } from "./audioStudio/useAudioScript.js";
 import { useAudioVoiceLibrary } from "./audioStudio/useAudioVoiceLibrary.js";
@@ -623,11 +624,12 @@ export function AudioStudio() {
             addSegment={addSegment}
             setPrompt={setPrompt}
             prompt={prompt}
-            canGenerate={canGenerate && !portableRefusal}
+            canGenerate={canGenerate && !portableFeedbackBlocks(portableFeedback)}
             setGenreTags={setGenreTags}
             songPrompt={songPrompt}
           />
             {portableRefusal ? <p className="inline-warning" role="alert">{portableRefusal.detail}</p> : null}
+            {portableFeedbackStatus(portableFeedback) ? <p role="status">{portableFeedbackStatus(portableFeedback)}</p> : null}
 
             {/* Settings bar (epic 14361 / sc-14363). The row is a FIXED 4-column grid — Model ·
                 Voice · Language · Length — with `align-items: end`, and the model's capability

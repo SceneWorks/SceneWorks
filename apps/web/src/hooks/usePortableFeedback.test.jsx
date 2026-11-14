@@ -4,13 +4,17 @@ import { createRoot } from "react-dom/client";
 import { afterEach, expect, it, vi } from "vitest";
 
 import { usePortableBatchFeedback, usePortableFeedback } from "./usePortableFeedback.js";
-import { validatePortableRequest } from "../portableValidation.js";
+import { validatePortableBatch, validatePortableRequest } from "../portableValidation.js";
 import { AppContext } from "../context/AppContext.js";
 
 vi.mock("../portableValidation.js", () => ({
+  MAX_VALIDATION_BATCH: 32,
   validatePortableRequest: vi.fn(async ({ payload }) => payload.value === 3
     ? { state: "invalid", refusal: { field: "value", detail: "Third item refused" } }
     : { state: "valid" }),
+  validatePortableBatch: vi.fn(async ({ requests }) => requests.map((payload) => payload.value === 3
+    ? { state: "invalid", refusal: { field: "value", detail: "Third item refused" } }
+    : { state: "valid" })),
 }));
 
 let root;
@@ -23,6 +27,10 @@ afterEach(async () => {
   vi.mocked(validatePortableRequest).mockImplementation(async ({ payload }) => payload.value === 3
     ? { state: "invalid", refusal: { field: "value", detail: "Third item refused" } }
     : { state: "valid" });
+  vi.mocked(validatePortableBatch).mockReset();
+  vi.mocked(validatePortableBatch).mockImplementation(async ({ requests }) => requests.map((payload) => payload.value === 3
+    ? { state: "invalid", refusal: { field: "value", detail: "Third item refused" } }
+    : { state: "valid" }));
 });
 
 function SingleHarness({ value }) {
@@ -75,16 +83,16 @@ it("validates the submitted project scope and drops feedback after a project swi
   </AppContext.Provider>;
   await act(async () => root.render(render("first")));
   await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
-  expect(validatePortableRequest).toHaveBeenLastCalledWith({
-    kind: "image", payload: { value: 1, projectId: "first" }, modelEntry: null,
-  });
+  expect(validatePortableRequest).toHaveBeenLastCalledWith(expect.objectContaining({
+    kind: "image", payload: { value: 1, projectId: "first" },
+  }));
   await act(async () => root.render(render("second")));
   await act(async () => finish({ state: "invalid", refusal: { detail: "Old project refused" } }));
   await vi.waitFor(() => expect(container.textContent).toBe("valid"));
   expect(container.textContent).not.toContain("Old project refused");
-  expect(validatePortableRequest).toHaveBeenLastCalledWith({
-    kind: "image", payload: { value: 1, projectId: "second" }, modelEntry: null,
-  });
+  expect(validatePortableRequest).toHaveBeenLastCalledWith(expect.objectContaining({
+    kind: "image", payload: { value: 1, projectId: "second" },
+  }));
 });
 
 function Harness({ revision, values, modelEntry = null }) {
@@ -105,10 +113,10 @@ it("keeps a completed batch when equivalent catalog facts are reallocated", asyn
   root = createRoot(container);
   await act(async () => root.render(<Harness revision="a" values={[1, 2]} modelEntry={{ id: "m" }} />));
   await vi.waitFor(() => expect(container.textContent).toBe("valid"));
-  const calls = vi.mocked(validatePortableRequest).mock.calls.length;
+  const calls = vi.mocked(validatePortableBatch).mock.calls.length;
   await act(async () => root.render(<Harness revision="a" values={[1, 2]} modelEntry={{ id: "m" }} />));
   expect(container.textContent).toBe("valid");
-  expect(vi.mocked(validatePortableRequest).mock.calls).toHaveLength(calls);
+  expect(vi.mocked(validatePortableBatch).mock.calls).toHaveLength(calls);
 });
 
 it("checks every batch item and hides a refusal when the authored draft changes", async () => {
@@ -133,10 +141,10 @@ it("checks each batch request in the active project and restarts on a project sw
   </AppContext.Provider>;
   await act(async () => root.render(render("first")));
   await vi.waitFor(() => expect(container.textContent).toBe("valid"));
-  expect(vi.mocked(validatePortableRequest).mock.calls.map(([request]) => request.payload.projectId))
+  expect(vi.mocked(validatePortableBatch).mock.calls.flatMap(([request]) => request.requests.map((payload) => payload.projectId)))
     .toEqual(["first", "first"]);
   await act(async () => root.render(render("second")));
   await vi.waitFor(() => expect(container.textContent).toBe("valid"));
-  expect(vi.mocked(validatePortableRequest).mock.calls.map(([request]) => request.payload.projectId))
+  expect(vi.mocked(validatePortableBatch).mock.calls.flatMap(([request]) => request.requests.map((payload) => payload.projectId)))
     .toEqual(["first", "first", "second", "second"]);
 });

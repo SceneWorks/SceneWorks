@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableValidation.js";
 import { videoModelServesMode, wanPairedLoraAvailable } from "../modelEligibility.js";
 import { buildSimpleVideoRequest } from "./simpleJobs.js";
 import { describeResolution, resolutionSummary } from "./aspect.js";
@@ -177,7 +178,7 @@ export function SimpleVideoStudio() {
   const portableRefusal = portableFeedback?.state === "invalid" ? portableFeedback.refusal : null;
 
   async function generate() {
-    if (!canGenerate || portableRefusal) {
+    if (!canGenerate || portableFeedbackBlocks(portableFeedback)) {
       return;
     }
     if (!activeProject) {
@@ -376,7 +377,7 @@ export function SimpleVideoStudio() {
 
       <button
         className={busy ? "su-generate busy" : "su-generate"}
-        disabled={!canGenerate || Boolean(portableRefusal)}
+        disabled={!canGenerate || portableFeedbackBlocks(portableFeedback)}
         onClick={generate}
         type="button"
       >
@@ -384,6 +385,7 @@ export function SimpleVideoStudio() {
         {busy ? "Rendering…" : "Generate video"}
       </button>
       {portableRefusal ? <p className="su-error" role="alert">{portableRefusal.detail}</p> : null}
+      {portableFeedbackStatus(portableFeedback) ? <p role="status">{portableFeedbackStatus(portableFeedback)}</p> : null}
       {needsSource ? <p className="su-empty">Attach a start frame to render an Image → Video clip.</p> : null}
 
       {/* Live run strip: progress + Cancel + the outcome, right under Generate. */}

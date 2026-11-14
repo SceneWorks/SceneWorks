@@ -1,78 +1,88 @@
 import { useEffect, useRef, useState } from "react";
 import { useAppStaticOptional } from "../context/AppContext.js";
+import { MAX_VALIDATION_BATCH } from "../portableValidationState.js";
 
 function submittedDraft(payload, projectId) {
   return projectId ? { ...payload, projectId } : payload;
 }
 
-// Forms pass the exact payload they would submit. A stale async result never blocks a newer
-// draft, and a cold import remains a server-owned check until the Rust module is ready.
-export function usePortableFeedback(kind, payload, modelEntry, enabled = true) {
-  const projectId = useAppStaticOptional()?.activeProject?.id;
+// Forms pass the exact payload they would submit. A stale response cannot unlock a newer draft.
+export function usePortableFeedback(kind, payload, _modelEntry, enabled = true) {
+  const app = useAppStaticOptional();
+  const projectId = app?.activeProject?.id;
+  const token = app?.token ?? "";
   let draft = null;
-  let modelSnapshot = null;
   if (enabled && payload) {
     try {
       draft = JSON.stringify(submittedDraft(payload, projectId));
-      modelSnapshot = JSON.stringify(modelEntry ?? null);
     } catch { /* Server validates the request. */ }
   }
   const [feedback, setFeedback] = useState(null);
   useEffect(() => {
     if (!draft) return;
     let current = true;
+    const controller = new AbortController();
     import("../portableValidation.js")
       .then(({ validatePortableRequest }) => validatePortableRequest({
-        kind, payload: JSON.parse(draft), modelEntry: JSON.parse(modelSnapshot),
+        kind, payload: JSON.parse(draft), token, signal: controller.signal,
       }))
       .then((result) => {
-        if (current) setFeedback({ draft, kind, modelSnapshot, result });
+        if (current) setFeedback({ draft, kind, result });
       })
-      .catch(() => { if (current) setFeedback(null); });
-    return () => { current = false; };
-  }, [draft, kind, modelSnapshot]);
-  return feedback?.draft === draft && feedback.kind === kind && feedback.modelSnapshot === modelSnapshot
-    ? feedback.result : null;
+      .catch(() => { if (current) setFeedback({ draft, kind, result: { state: "server-required" } }); });
+    return () => { current = false; controller.abort(); };
+  }, [draft, kind, token]);
+  if (!draft) return null;
+  return feedback?.draft === draft && feedback.kind === kind
+    ? feedback.result : { state: "pending" };
 }
 
-// A prompt batch can expand to many distinct requests. Inspect every authored item without
-// holding the input event: the iterator is consumed in small slices and abandoned on a new draft.
-export function usePortableBatchFeedback(kind, revision, requests, modelEntry, enabled = true) {
-  const projectId = useAppStaticOptional()?.activeProject?.id;
+// Inspect every authored item in bounded server batches; a new edit cancels the old response.
+export function usePortableBatchFeedback(kind, revision, requests, _modelEntry, enabled = true) {
+  const app = useAppStaticOptional();
+  const projectId = app?.activeProject?.id;
+  const token = app?.token ?? "";
   const requestsRef = useRef(requests);
   requestsRef.current = requests;
-  let modelSnapshot = null;
-  try { modelSnapshot = JSON.stringify(modelEntry ?? null); } catch { /* Server validates the batch. */ }
   const [feedback, setFeedback] = useState(null);
   useEffect(() => {
     if (!enabled || !revision) return;
     let current = true;
+    const controller = new AbortController();
     const inspect = async () => {
-      const { validatePortableRequest } = await import("../portableValidation.js");
-      const modelFacts = modelSnapshot === null ? null : JSON.parse(modelSnapshot);
+      const { validatePortableBatch } = await import("../portableValidation.js");
       let index = 0;
       let fallback = null;
-      for (const payload of requestsRef.current()) {
+      const iterator = requestsRef.current();
+      while (true) {
         if (!current) return;
-        index += 1;
-        const result = await validatePortableRequest({
-          kind, payload: submittedDraft(payload, projectId), modelEntry: modelFacts,
-        });
-        if (!current) return;
-        if (result.state === "invalid") {
-          setFeedback({ revision, modelSnapshot, projectId, result, index });
-          return;
+        const chunk = [];
+        for (let slot = 0; slot < MAX_VALIDATION_BATCH; slot += 1) {
+          const next = iterator.next();
+          if (next.done) break;
+          chunk.push(submittedDraft(next.value, projectId));
         }
-        if (result.state === "server-required") fallback = result;
-        if (index % 8 === 0) await new Promise((resolve) => window.setTimeout(resolve, 0));
+        if (!chunk.length) break;
+        const results = await validatePortableBatch({ kind, requests: chunk, token, signal: controller.signal });
+        if (!current) return;
+        for (const result of results) {
+          index += 1;
+          if (result.state === "invalid") {
+            setFeedback({ kind, revision, projectId, result, index });
+            return;
+          }
+          if (result.state === "server-required") fallback = result;
+        }
+        if (fallback) break;
       }
-      if (current) setFeedback({ revision, modelSnapshot, projectId, result: fallback ?? { state: "valid" }, index });
+      if (current) setFeedback({ kind, revision, projectId, result: fallback ?? { state: "valid" }, index });
     };
     void inspect().catch(() => {
-      if (current) setFeedback({ revision, modelSnapshot, projectId, result: { state: "server-required" }, index: 0 });
+      if (current) setFeedback({ kind, revision, projectId, result: { state: "server-required" }, index: 0 });
     });
-    return () => { current = false; };
-  }, [enabled, kind, modelSnapshot, projectId, revision]);
-  return enabled && feedback?.revision === revision && feedback.modelSnapshot === modelSnapshot
-    && feedback.projectId === projectId ? feedback : null;
+    return () => { current = false; controller.abort(); };
+  }, [enabled, kind, projectId, revision, token]);
+  if (!enabled || !revision) return null;
+  return feedback?.kind === kind && feedback.revision === revision
+    && feedback.projectId === projectId ? feedback : { result: { state: "pending" }, index: 0 };
 }

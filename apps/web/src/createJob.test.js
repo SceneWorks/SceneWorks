@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { apiFetch } from "./api.js";
 import { CREATE_JOB_DEFINITIONS, makeCreateJob } from "./createJob.js";
-import { validatePortableRequestNow } from "./portableValidation.js";
 import {
   createModelLibraryGate,
   setModelLibraryHandler,
@@ -11,9 +10,6 @@ import {
 
 vi.mock("./api.js", () => ({
   apiFetch: vi.fn(),
-}));
-vi.mock("./portableValidation.js", () => ({
-  validatePortableRequestNow: vi.fn(),
 }));
 
 const project = { id: "project-7", name: "Project Seven" };
@@ -89,19 +85,26 @@ const cases = [
       requestedGpu: "gpu-2",
     },
   },
+  {
+    key: "vectorPrompt",
+    args: [{ rasterModel: "raster-a", vectorModel: "vector-b", prompt: "a logo" }],
+    path: "/api/v1/image/vectorize/prompt/jobs",
+    body: {
+      rasterModel: "raster-a", vectorModel: "vector-b", prompt: "a logo",
+      projectId: "project-7", projectName: "Project Seven", requestedGpu: "gpu-2",
+    },
+  },
 ];
 
 describe("makeCreateJob", () => {
   beforeEach(() => {
     apiFetch.mockReset();
-    validatePortableRequestNow.mockReset();
   });
 
-  it("shows a portable typed refusal before submitting a generation job", async () => {
+  it("surfaces the authoritative server refusal without trusting client catalog facts", async () => {
     const refusal = { code: "invalid_generation_option", field: "width", detail: "width exceeds the model limit" };
-    validatePortableRequestNow.mockReturnValue({ state: "invalid", refusal });
+    apiFetch.mockRejectedValue(Object.assign(new Error(refusal.detail), refusal));
     const setError = vi.fn();
-    const entry = { id: "model-a", limits: { width: 1024 } };
     const creator = makeCreateJob({
       definition: CREATE_JOB_DEFINITIONS.image,
       token: "token-1",
@@ -109,53 +112,13 @@ describe("makeCreateJob", () => {
       requestedGpu: "auto",
       setJobs: vi.fn(),
       setError,
-      modelEntryForRequest: () => entry,
     });
 
     await expect(creator.withResult([{ model: "model-a", width: 2048 }])).resolves.toMatchObject({
       error: refusal.detail,
-      validationRefusal: refusal,
     });
-    expect(validatePortableRequestNow).toHaveBeenCalledWith(expect.objectContaining({
-      kind: "image", modelEntry: entry,
-    }));
-    expect(apiFetch).not.toHaveBeenCalled();
+    expect(apiFetch).toHaveBeenCalledOnce();
     expect(setError).toHaveBeenCalledWith(refusal.detail);
-  });
-
-  it("passes the authored video-upscale payload to its own Rust rule kind", async () => {
-    validatePortableRequestNow.mockReturnValue({ state: "server-required", reason: "model-facts-unavailable" });
-    apiFetch.mockResolvedValue({ id: "upscale-job", status: "queued" });
-    const creator = makeCreateJob({
-      definition: CREATE_JOB_DEFINITIONS.videoUpscale,
-      token: "token-1", project, requestedGpu: "auto",
-      setJobs: vi.fn(), setError: vi.fn(), modelEntryForRequest: () => null,
-    });
-    await creator({ sourceAssetId: "clip", factor: 2 });
-    expect(validatePortableRequestNow).toHaveBeenCalledWith(expect.objectContaining({
-      kind: "videoUpscale",
-      payload: expect.objectContaining({ sourceAssetId: "clip", factor: 2 }),
-    }));
-    expect(apiFetch).toHaveBeenCalledOnce();
-  });
-
-  it("passes both catalog rows for vector prompt validation", async () => {
-    validatePortableRequestNow.mockReturnValue({ state: "valid" });
-    apiFetch.mockResolvedValue({ id: "vector-job", status: "queued" });
-    const raster = { id: "raster-a" };
-    const vector = { id: "vector-b" };
-    const lookup = vi.fn((id) => ({ "raster-a": raster, "vector-b": vector })[id]);
-    const creator = makeCreateJob({
-      definition: CREATE_JOB_DEFINITIONS.vectorPrompt,
-      token: "token-1", project, requestedGpu: "auto",
-      setJobs: vi.fn(), setError: vi.fn(), modelEntryForRequest: lookup,
-    });
-    await creator({ rasterModel: "raster-a", vectorModel: "vector-b", prompt: "a logo" });
-    expect(lookup.mock.calls).toEqual([["raster-a"], ["vector-b"]]);
-    expect(validatePortableRequestNow).toHaveBeenCalledWith(expect.objectContaining({
-      kind: "vectorPrompt", modelEntry: { raster, vector },
-    }));
-    expect(apiFetch).toHaveBeenCalledOnce();
   });
 
   it.each(cases)("preserves the $key route and request body", async ({ key, args, path, body }) => {

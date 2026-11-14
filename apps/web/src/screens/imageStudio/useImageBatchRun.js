@@ -29,6 +29,7 @@ export function useImageBatchRun({
   batchJobCount,
   BATCH_PREFLIGHT_YIELD_INTERVAL,
   selectedModel,
+  token = "",
   buildBatchJobRequest,
   onMagicExpand,
   createImageJob
@@ -228,10 +229,11 @@ export function useImageBatchRun({
         // Structured captions exist only after refinement. Validate the exact resolved
         // request here, including a cold browser module, before admitting this batch item.
         const portable = await validatePortableRequest({
-          kind: "image", payload: { ...request, projectId: owner.projectId }, modelEntry: selectedModel,
+          kind: "image", payload: { ...request, projectId: owner.projectId }, token, signal: owner.controller.signal,
         });
         if (stopped()) break;
         if (portable.state === "invalid") throw new Error(portable.refusal.detail);
+        if (portable.state !== "valid") throw new Error("The server must check these options. Reconnect to continue.");
         const result = createImageJob.withResult
           ? await createImageJob.withResult([request], { shouldContinue: () => !stopped(), signal: owner.controller.signal })
           : { job: await createImageJob(request) };

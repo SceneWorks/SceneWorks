@@ -158,6 +158,7 @@ export function controls(container, persistenceKey) {
 }
 export async function click(node) {
   if (!node) throw new Error("Missing baseline interaction target");
+  await settleServerFeedback(node.ownerDocument);
   await act(async () => node.click());
 }
 export async function change(node, value) {
@@ -165,6 +166,15 @@ export async function change(node, value) {
     const proto = node.tagName === "SELECT" ? HTMLSelectElement.prototype : node.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
     Object.getOwnPropertyDescriptor(proto, "value").set.call(node, value);
     node.dispatchEvent(new Event(node.tagName === "SELECT" ? "change" : "input", { bubbles: true }));
+  });
+  await settleServerFeedback(node.ownerDocument);
+}
+async function settleServerFeedback(document) {
+  await vi.waitFor(() => {
+    if ([...document.querySelectorAll('[role="status"]')].some((node) =>
+      node.textContent.includes("Checking options with the server"))) {
+      throw new Error("Waiting for server option feedback");
+    }
   });
 }
 export function submissionButton(container, studio) {
@@ -204,6 +214,7 @@ export async function mount(catalog, row, saved = {}, overrides = {}) {
     return <SimpleUiContext.Provider value={simple}><Screen />{sheet ? <SimpleSheet onClose={() => setSheet(null)} phone={false} title={sheet.title}>{sheet.body ?? <SimpleSheetOptions kind={sheet.kind} options={sheet.options} onSelect={(value) => { sheet.onSelect(value); setSheet(null); }} />}</SimpleSheet> : null}</SimpleUiContext.Provider>;
   }
   await act(async () => root.render(<AppContext.Provider value={context}><Shell /></AppContext.Provider>));
+  await settleServerFeedback(container.ownerDocument);
   const close = async () => { await act(async () => root.unmount()); container.remove(); };
   return { container, root, context, calls, persistenceKey, close, getPersisted };
 }

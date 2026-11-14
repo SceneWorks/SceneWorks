@@ -10,7 +10,7 @@ import { brotliCompressSync, constants, gzipSync } from "node:zlib";
 //     `await import()` target) together with its static closure minus the initial chunks,
 //     i.e. what one lazy load actually fetches. Checked per chunk, not summed.
 //   - `largestRoute`: the heaviest route family in `routeFamilies`, same closure rule.
-//   - `largestRoute` also gates each form route plus validator JS/WASM fetched on draft input.
+//   - `largestRoute` also gates each form route plus validator bridge JS fetched on draft input.
 //   - `initialExclusions`: named heavy domains must never appear in the initial graph.
 // Telemetry (reported in dist/bundle-report.json, never a gate):
 //   - `total`: every emitted JS chunk/asset and WASM asset. Growing the app with more lazy screens is
@@ -39,16 +39,15 @@ export const routeFamilies = Object.freeze({
   "Simple UI": ["/src/simple/SimpleShell.jsx"],
 });
 
-// These screens start the validator after a draft edit. Charge the validator's
-// dynamic JS and WASM to the interactive fetch as well as to its own lazy chunk.
+// These screens contact the server after a draft edit. Charge the bridge's
+// dynamic JS to the interactive fetch as well as to its own lazy chunk.
 const validatorFormRoutes = new Set([
   "Image Studio", "Video Studio", "Audio Studio", "Characters",
   "Document Studio", "Training", "Vector Studio", "Simple UI",
 ]);
 const validatorModuleSuffixes = [
   "/src/portableValidation.js",
-  "/src/portableValidationEngine.js",
-  "/src/wasm/options-validator/options_validator.js",
+  "/src/portableValidationServer.js",
 ];
 
 export const initialExclusions = Object.freeze({

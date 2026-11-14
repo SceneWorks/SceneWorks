@@ -18,7 +18,7 @@ import { AppVersion, useAppUpdate } from "./components/AppVersion.jsx";
 import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { isAbortError } from "./api.js";
 import { recordStartupMark } from "./startupTiming.js";
-import { setServerValidatorVersion } from "./portableValidation.js";
+import { setServerValidatorVersion } from "./portableValidationState.js";
 
 import { AccentPicker } from "./components/AccentPicker.jsx";
 import { Icon } from "./components/Icons.jsx";
@@ -783,15 +783,8 @@ export function App() {
     [requestProjectSwitch],
   );
 
-  // Job creators run before the catalog hook below. A stable reader sees its latest
-  // served rows without moving those hooks or treating a stale row as availability.
-  const portableModelFactsRef = useRef([]);
-  const modelEntryForRequest = useCallback(
-    (id) => portableModelFactsRef.current.find((row) => row.id === id) ?? null,
-    [],
-  );
   const { createVideoJob, context: jobCreatorsContext } = useJobCreators({
-    token, activeProject, requestedGpu, setJobs, setError, setActiveView, activeViewRef, confirmWorkflowEmbeddingBeforeGeneration, modelEntryForRequest
+    token, activeProject, requestedGpu, setJobs, setError, setActiveView, activeViewRef, confirmWorkflowEmbeddingBeforeGeneration
   });
 
   const { setCharacters, refreshCharacters, context: charactersContext } = useCharacters({
@@ -836,7 +829,6 @@ export function App() {
     setJobs,
     setActiveView,
   });
-  portableModelFactsRef.current = models;
 
   const { setPersonTracks, refreshPersonTracks, context: personTracksContext } = usePersonTracks({
     token,

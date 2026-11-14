@@ -39,6 +39,7 @@ import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { videoGenerateValidation } from "../videoStudioValidation.js";
 import { useValidation } from "../validation/useValidation.js";
 import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
 import { issue } from "../validation/issues.js";
 
@@ -1147,7 +1148,7 @@ export function VideoStudio() {
   // The request has already been built; form readiness must not hide an option refusal.
   const portableFeedback = usePortableFeedback("video", portableDraft, selectedModel);
   const portableRefusal = portableFeedback?.state === "invalid" ? portableFeedback.refusal : null;
-  const generateDisabled = submitting || !videoValidity.ready || Boolean(portableRefusal);
+  const generateDisabled = submitting || !videoValidity.ready || portableFeedbackBlocks(portableFeedback);
   const renderLabel = mode === "replace_person" ? "Replace person" : "Render clip";
 
   return (
@@ -1445,6 +1446,7 @@ export function VideoStudio() {
           <ValidationSummary issues={portableRefusal
             ? [...videoValidity.surfaced, issue.error(portableRefusal.field, portableRefusal.detail)]
             : videoValidity.surfaced} label="Generate errors" />
+          {portableFeedbackStatus(portableFeedback) ? <p role="status">{portableFeedbackStatus(portableFeedback)}</p> : null}
           <VedaOutcome
             label="Recorded recipe attention"
             raw={launchRequest?.recipe?.rawAdapterSettings}

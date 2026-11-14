@@ -1,60 +1,34 @@
-export const VALIDATOR_SCHEMA_VERSION = 1;
-let enginePromise;
-let loadedEngine;
-let serverValidatorVersion = null;
+import {
+  MAX_VALIDATION_BATCH, VALIDATOR_SCHEMA_VERSION,
+  serverRequired, versionReason,
+} from "./portableValidationState.js";
 
-export function setServerValidatorVersion(version) {
-  serverValidatorVersion = Number.isInteger(version) && version > 0 ? version : null;
-}
+export { MAX_VALIDATION_BATCH, VALIDATOR_SCHEMA_VERSION, setServerValidatorVersion, validatePortableRequestNow } from "./portableValidationState.js";
 
-function engine() {
-  enginePromise ??= import("./portableValidationEngine.js")
-    .then(({ load }) => load())
-    .then((validate) => {
-      loadedEngine = validate;
-      return loadedEngine;
-    })
-    .catch((error) => {
-      enginePromise = undefined;
-      throw error;
-    });
-  return enginePromise;
-}
-
-function serverRequired(reason, metadataSource = null) {
-  return { state: "server-required", reason, metadataSource, liveChecks: "server" };
-}
-
-function versionReason(request) {
-  if ((request.validatorSchemaVersion ?? VALIDATOR_SCHEMA_VERSION) !== VALIDATOR_SCHEMA_VERSION) {
-    return "validator-version-mismatch";
+export async function validatePortableBatch({ kind, requests, token = "", signal, validatorSchemaVersion }) {
+  const mismatch = versionReason({ validatorSchemaVersion });
+  if (mismatch) return requests.map(() => serverRequired(mismatch));
+  if (!Array.isArray(requests) || requests.length < 1 || requests.length > MAX_VALIDATION_BATCH) {
+    return requests.map(() => serverRequired("invalid-batch-size"));
   }
-  if (serverValidatorVersion !== null && serverValidatorVersion !== VALIDATOR_SCHEMA_VERSION) {
-    return "server-validator-version-mismatch";
-  }
-  return null;
+  const { requestServerValidation } = await import("./portableValidationServer.js");
+  return requestServerValidation({ kind, requests, token, signal, version: VALIDATOR_SCHEMA_VERSION });
 }
 
-// Submission must not wait for a cold module import: navigation or cancellation may occur
-// while it loads. A cold check falls through to the server, which always revalidates.
-export function validatePortableRequestNow(request) {
-  const mismatch = versionReason(request);
-  if (mismatch) return serverRequired(mismatch);
-  if (!loadedEngine) {
-    void engine().catch(() => {});
-    return serverRequired("validator-loading");
-  }
-  return loadedEngine(request, VALIDATOR_SCHEMA_VERSION, serverRequired);
-}
-
-// Forms call this as their draft changes, warming the module before submission and
-// showing a typed refusal without waiting for a round trip.
 export async function validatePortableRequest(request) {
-  const mismatch = versionReason(request);
-  if (mismatch) return serverRequired(mismatch);
-  try {
-    return (await engine())(request, VALIDATOR_SCHEMA_VERSION, serverRequired);
-  } catch {
-    return serverRequired("validator-unavailable");
-  }
+  const [result] = await validatePortableBatch({
+    kind: request.kind, requests: [request.payload], token: request.token,
+    signal: request.signal, validatorSchemaVersion: request.validatorSchemaVersion,
+  });
+  return result;
+}
+
+export function portableFeedbackBlocks(feedback) {
+  return feedback != null && feedback.state !== "valid";
+}
+
+export function portableFeedbackStatus(feedback) {
+  if (feedback?.state === "pending") return "Checking options with the server…";
+  if (feedback?.state === "server-required") return "The server must check these options. Reconnect to continue.";
+  return null;
 }

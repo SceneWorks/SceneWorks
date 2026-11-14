@@ -36,6 +36,7 @@ import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
 import { iterateBatch, linkedGroupIssues, missingKeys, parsePromptResolution } from "../promptBatch.js";
 import {
   evaluateModelDimensions,
+  dimensionConstraintMessage,
   isFlux3ReferenceRequest,
 } from "../resolutionOverride.js";
 // sc-24113. `minStepsForModel` lives in videoModelLimits.js only because video declared
@@ -125,6 +126,7 @@ import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { imageBatchValidation, imageGenerateValidation } from "../imageStudioValidation.js";
 import { useImageReferenceStatus } from "../hooks/useImageReferenceStatus.js";
 import { usePortableBatchFeedback, usePortableFeedback } from "../hooks/usePortableFeedback.js";
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableValidation.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
 import { issue } from "../validation/issues.js";
@@ -2072,6 +2074,15 @@ export function ImageStudio() {
     dimensionIntent: activeDimensionIntent,
   });
   const { width, height, constraints: dimensionConstraints } = dimensionEval;
+  // A bare native stride is advice for the editable controls, not an API request
+  // limit. The portable owner enforces the grid only with a full declared envelope.
+  const declaredMinimum = Number(selectedModel?.limits?.minDimension);
+  const declaredMaximum = Number(selectedModel?.limits?.maxDimension);
+  const uiOnlyDimensionAdvice = dimensionConstraints.step > 1 && !(
+    Number.isInteger(declaredMinimum) && declaredMinimum > 0 &&
+    Number.isInteger(declaredMaximum) && declaredMaximum > 0
+  );
+  const dimensionAdvice = uiOnlyDimensionAdvice ? dimensionConstraintMessage(dimensionEval) : null;
   // sc-25681: a model that shows its patch grid below a declared side (Iris-3B, 1024) says so
   // whenever the effective width or height is under it.
   const patchGridNotice = patchGridHint(selectedModel, width, height);
@@ -2660,6 +2671,22 @@ export function ImageStudio() {
   );
   const batchMissingKeys = missingKeys(batchPrompts, batchVariables);
   const batchGroupIssues = linkedGroupIssues(batchPrompts);
+  let batchDimensionAdvice = null;
+  if (uiOnlyDimensionAdvice && batchMode && batchTotal > 0) {
+    for (const { prompt: resolvedPrompt } of iterateBatch(batchPrompts, batchVariables)) {
+      const { resolution: itemResolution } = parsePromptResolution(resolvedPrompt, resolutionOptions);
+      const evaluation = evaluateModelDimensions({
+        model: selectedModel,
+        resolution: `${itemResolution?.width ?? width}x${itemResolution?.height ?? height}`,
+        widthOverride: "",
+        heightOverride: "",
+      });
+      if (evaluation.invalid) {
+        batchDimensionAdvice = `Width and height must be between ${dimensionConstraints.min} and ${dimensionConstraints.max} and a multiple of ${dimensionConstraints.step}.`;
+        break;
+      }
+    }
+  }
   // A structured-caption model can batch, but only if the prompt-refiner is available to
   // auto-write a caption per resolved prompt (sc-9980).
   const batchStructuredExpandBlocked =
@@ -2690,6 +2717,7 @@ export function ImageStudio() {
       batchTotal,
       missingKeys: batchMissingKeys,
       groupIssues: batchGroupIssues,
+      dimensionAdvice: batchDimensionAdvice,
       decoderCapabilitiesPending,
       restorePlan: irisUpscale ? restorePlanStatus : null,
     }),
@@ -2701,6 +2729,7 @@ export function ImageStudio() {
       batchTotal,
       batchMissingKeys,
       batchGroupIssues,
+      batchDimensionAdvice,
       decoderCapabilitiesPending,
       irisUpscale,
       restorePlanStatus,
@@ -2733,6 +2762,7 @@ export function ImageStudio() {
       captionHasContent,
       tensorConditioning: mossEdit && Boolean(mossImageAdvanced.positive),
       prompt,
+      dimensionAdvice,
       // sc-13133 / sc-13224: measure the COMPOSED outgoing prompt against the cap, but only when a
       // style is active (styleless behavior unchanged). For prose that is the Subject:/Style:
       // composition; for a structured model it is the style-injected, re-serialized caption. Either
@@ -2764,6 +2794,7 @@ export function ImageStudio() {
       captionHasContent,
       mossEdit, mossImageAdvanced,
       prompt,
+      dimensionAdvice,
       stylePreviewActive,
       structuredStyleActive,
       styledPreviewPrompt,
@@ -2829,7 +2860,7 @@ export function ImageStudio() {
   // `submitting` is a busy gate, not a rule. `batchTotal === 0` is a requirement (silent),
   // already folded into batchValidity — no need to repeat it here.
   const batchRunDisabled =
-    !batchValidity.ready || Boolean(portableBatchRefusal) || !selectedModelServesMode || replayTierUnavailable || Boolean(characterReferenceError) || !mossComponents.ready || Boolean(mossEditError) || Boolean(batchRun?.submitting);
+    !batchValidity.ready || portableFeedbackBlocks(portableBatchFeedback?.result) || !selectedModelServesMode || replayTierUnavailable || Boolean(characterReferenceError) || !mossComponents.ready || Boolean(mossEditError) || Boolean(batchRun?.submitting);
   // The two conditions whose message has its own home stay explicit gates: a structured
   // caption's field errors live in the builder, and a Mac block prints its own note.
   const {
@@ -2858,13 +2889,14 @@ export function ImageStudio() {
   batchJobCount,
   BATCH_PREFLIGHT_YIELD_INTERVAL,
   selectedModel,
+  token,
   buildBatchJobRequest,
   onMagicExpand,
   createImageJob
   });
   const generateDisabled =
     submitting ||
-    Boolean(portableRefusal) ||
+    portableFeedbackBlocks(portableFeedback) ||
     replayTierUnavailable ||
     Boolean(characterReferenceError) ||
     !mossComponents.ready ||
@@ -3599,6 +3631,8 @@ export function ImageStudio() {
           <ValidationSummary issues={portableRefusal
             ? [...generateValidity.surfaced, issue.error(portableRefusal.field, portableRefusal.detail)]
             : generateValidity.surfaced} label="Generate errors" />
+          {portableFeedbackStatus(portableFeedback) ? <p role="status">{portableFeedbackStatus(portableFeedback)}</p> : null}
+          {portableFeedbackStatus(portableBatchFeedback?.result) ? <p role="status">{portableFeedbackStatus(portableBatchFeedback.result)}</p> : null}
 
         </WorkPanel>
 

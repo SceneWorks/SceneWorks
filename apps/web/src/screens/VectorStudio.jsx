@@ -1,5 +1,6 @@
 import { useMediaTicket } from "../hooks/useMediaTicket.js";
 import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableValidation.js";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
@@ -613,7 +614,8 @@ export function VectorStudio() {
               Selected vector budget: {selectedBudgetLabel(detailBudget)}
             </p>
             {portableRefusal ? <p role="alert">{portableRefusal.detail}</p> : null}
-            <button disabled={!canCreateFromPrompt || Boolean(portableRefusal)} type="submit">
+            {portableFeedbackStatus(portableFeedback) ? <p role="status">{portableFeedbackStatus(portableFeedback)}</p> : null}
+            <button disabled={!canCreateFromPrompt || portableFeedbackBlocks(portableFeedback)} type="submit">
               Create SVG
             </button>
           </form>
@@ -678,7 +680,8 @@ export function VectorStudio() {
                 Selected vector budget: {selectedBudgetLabel(detailBudget)}
               </p>
               {portableRefusal ? <p role="alert">{portableRefusal.detail}</p> : null}
-              <button disabled={!canConvert || Boolean(portableRefusal)} type="submit">
+              {portableFeedbackStatus(portableFeedback) ? <p role="status">{portableFeedbackStatus(portableFeedback)}</p> : null}
+              <button disabled={!canConvert || portableFeedbackBlocks(portableFeedback)} type="submit">
                 Convert to SVG
               </button>
             </form>

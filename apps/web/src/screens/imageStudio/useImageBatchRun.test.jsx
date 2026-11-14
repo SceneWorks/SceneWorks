@@ -39,9 +39,9 @@ it("continues the committed project's batch while a different project render sus
   await act(async () => root.render(<Harness />));
   await act(async () => container.querySelector("button").click());
   await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(1));
-  expect(validatePortableRequest).toHaveBeenCalledWith({
-    kind: "image", payload: { prompt: "one", count: 1, projectId: "A" }, modelEntry: null,
-  });
+  expect(validatePortableRequest).toHaveBeenCalledWith(expect.objectContaining({
+    kind: "image", payload: { prompt: "one", count: 1, projectId: "A" }, token: "", signal: expect.any(AbortSignal),
+  }));
   await act(async () => React.startTransition(() => changeProject("B")));
   await act(async () => { resolveFirst({ id: "first", status: "queued" }); await running; });
   expect(createImageJob).toHaveBeenCalledTimes(2);

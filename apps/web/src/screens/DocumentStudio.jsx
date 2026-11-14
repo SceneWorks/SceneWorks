@@ -20,6 +20,7 @@ import {
 } from "../constants.js";
 import { useAppContext } from "../context/AppContext.js";
 import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
+import { portableFeedbackBlocks, portableFeedbackStatus } from "../portableValidation.js";
 import { DEFAULT_MAC_CAPABILITIES } from "../modelEligibility.js";
 import { documentModelUsable, downloadOffersFor } from "../modelEligibility.js";
 import { selectStackedJobs } from "../components/generationStudio.jsx";
@@ -334,7 +335,7 @@ export function DocumentStudio() {
 
   async function submit(event) {
     event.preventDefault();
-    if (!canSubmit || portableRefusal) {
+    if (!canSubmit || portableFeedbackBlocks(portableFeedback)) {
       return;
     }
     setSubmitting(true);
@@ -649,7 +650,8 @@ export function DocumentStudio() {
         </AdvancedSection>
 
         {portableRefusal ? <p role="alert">{portableRefusal.detail}</p> : null}
-        <button className="primary-action" disabled={!canSubmit || Boolean(portableRefusal)} type="submit">
+        {portableFeedbackStatus(portableFeedback) ? <p role="status">{portableFeedbackStatus(portableFeedback)}</p> : null}
+        <button className="primary-action" disabled={!canSubmit || portableFeedbackBlocks(portableFeedback)} type="submit">
           {submitting ? "Submitting…" : "Compose document"}
         </button>
       </form>
