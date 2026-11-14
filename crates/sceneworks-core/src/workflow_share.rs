@@ -118,7 +118,9 @@ pub const WORKFLOW_KINDS: &[&str] = &[WORKFLOW_KIND_IMAGE, WORKFLOW_KIND_VIDEO];
 /// The contract version. Bump ONLY on a breaking field change — an additive field does not
 /// need it (an older reader drops what it does not know). [`parse_workflow_share`] branches
 /// on this and on nothing else.
-pub const WORKFLOW_SHARE_SCHEMA_VERSION: u32 = 1;
+pub const WORKFLOW_SHARE_SCHEMA_VERSION: u32 = 2;
+/// Ordinary shares remain readable by released v1 readers.
+pub const WORKFLOW_SHARE_LEGACY_VERSION: u32 = 1;
 
 /// Producer name. Names the software, never the installation.
 pub const PRODUCER_NAME: &str = "SceneWorks";
@@ -371,6 +373,7 @@ pub const OMITTED_PHASE_LORAS: &str = "advanced.phases[].loras";
 /// declared nothing else — where an entry count over [`MAX_SHARE_LORAS`] is, because the recipe
 /// named LoRAs and the envelope records none of them.
 pub const OMITTED_FIELDS: &[&str] = &[
+    "advanced.lowResStart",
     OMITTED_LORAS,
     OMITTED_INPUTS,
     OMITTED_POSES,
@@ -582,6 +585,8 @@ impl AdvancedKeySource {
 /// smuggled under an allow-listed scalar key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdvancedShape {
+    /// Frozen low-res recipe v1 params, never a runtime receipt.
+    LowResStart,
     /// Public catalog recipe IDs, without arbitrary nested metadata.
     Appearance,
     /// String, number or bool. Path-shaped strings are dropped (see [`is_path_shaped`]).
@@ -698,6 +703,7 @@ const fn deny_server(key: &'static str, reason: &'static str) -> AdvancedKeyRule
 /// The rule of thumb when classifying a new key: does it describe **what to make** (travels)
 /// or **what this machine can afford to make it with** (does not)?
 pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
+    allow_from("lowResStart", AdvancedShape::LowResStart, AdvancedKeySource::Server, "Versioned low-res recipe params; requires outer share v2. Execution availability is checked separately."),
     allow("flux3_layout", AdvancedShape::Flux3Layout, "Authored FLUX.3 soft-guidance boxes; public row fields only, never worker provenance."),
     allow("flux3_reference_ids", AdvancedShape::StringList, "Ordered attachment-instance identities for FLUX.3 layout replay; not asset paths."),
     allow("mossImageEdit", AdvancedShape::MossImageEditOptions, "Authored native edit reference edge and cache policy, emitted and restored by Studio."),
@@ -1673,7 +1679,11 @@ fn build_share_of_kind(
     let inputs = describe_inputs(job_payload, moss_edit);
     reduce_workflow_share(WorkflowShare {
         kind: kind.to_owned(),
-        schema_version: WORKFLOW_SHARE_SCHEMA_VERSION,
+        schema_version: if low_res_active(advanced.get("lowResStart")) {
+            WORKFLOW_SHARE_SCHEMA_VERSION
+        } else {
+            WORKFLOW_SHARE_LEGACY_VERSION
+        },
         producer: WorkflowProducer::default(),
         mode,
         model,
@@ -2172,6 +2182,11 @@ fn reduce_workflow_share(share: WorkflowShare) -> WorkflowShare {
         lost.push(OMITTED_INPUTS.to_owned());
     }
     lost.extend(advanced_omissions(&advanced, &sanitized_advanced));
+    if low_res_active(advanced.get("lowResStart"))
+        && !sanitized_advanced.contains_key("lowResStart")
+    {
+        lost.push("advanced.lowResStart".to_owned());
+    }
 
     WorkflowShare {
         kind,
@@ -2367,6 +2382,46 @@ fn is_strict_semver(value: &str) -> bool {
 /// Unclassified keys are dropped, not passed through — that is the whole design (see
 /// [`ADVANCED_KEY_RULES`]).
 #[must_use]
+fn low_res_active(value: Option<&Value>) -> bool {
+    value.is_some_and(|value| !value.is_null() && value != &Value::Bool(false))
+}
+
+/// Frozen SGA §6.1 params. No arbitrary extension bag: additional recipe identity belongs
+/// to its versioned contract. ENG-16 owns the future chained-pass schema after APP-2.
+fn validate_low_res_start(value: &Value) -> Result<(), String> {
+    if value.is_null() || value == &Value::Bool(false) {
+        return Ok(());
+    }
+    let object = value.as_object().ok_or("expected low-res recipe object")?;
+    if object.get("version").and_then(Value::as_u64) != Some(1) {
+        return Err("unsupported low-res recipe version; supported version is 1".into());
+    }
+    if object
+        .keys()
+        .any(|key| !["version", "k", "scale"].contains(&key.as_str()))
+    {
+        return Err("unknown low-res recipe identity field".into());
+    }
+    if !object
+        .get("k")
+        .and_then(Value::as_u64)
+        .is_some_and(|k| k > 0)
+    {
+        return Err(
+            "k must be a positive integer; route validation also requires k below executed steps"
+                .into(),
+        );
+    }
+    if !object
+        .get("scale")
+        .and_then(Value::as_f64)
+        .is_some_and(|s| (0.25..=0.9).contains(&s))
+    {
+        return Err("scale must be between 0.25 and 0.9".into());
+    }
+    Ok(())
+}
+
 pub fn sanitize_advanced(advanced: &JsonObject) -> JsonObject {
     let mut out = JsonObject::new();
     for (key, value) in advanced {
@@ -2377,6 +2432,9 @@ pub fn sanitize_advanced(advanced: &JsonObject) -> JsonObject {
             continue;
         }
         let sanitized = match rule.shape {
+            AdvancedShape::LowResStart => {
+                validate_low_res_start(value).ok().map(|()| value.clone())
+            }
             AdvancedShape::Scalar => sanitize_scalar(key, value),
             AdvancedShape::StructuredPrompt => sanitize_structured_prompt(value),
             AdvancedShape::Appearance => sanitize_appearance(value),
@@ -2818,8 +2876,39 @@ pub fn parse_workflow_share(value: &Value) -> Result<WorkflowShare, WorkflowShar
         });
     }
 
+    if schema_version == 2 {
+        // A future active recipe may also require v2. Unlike ordinary v1 additive metadata,
+        // an unknown v2 option cannot be discarded while pretending the recipe was understood.
+        if let Some(advanced) = object.get("advanced").and_then(Value::as_object) {
+            if let Some(key) = advanced.keys().find(|key| advanced_key_rule(key).is_none()) {
+                return Err(WorkflowShareError::Malformed {
+                    field: format!("advanced.{key}"),
+                    detail: "unknown v2 recipe setting; update SceneWorks to read this recipe"
+                        .to_owned(),
+                });
+            }
+        }
+    }
+    if let Some(recipe) = object.get("advanced").and_then(|a| a.get("lowResStart")) {
+        validate_low_res_start(recipe).map_err(|detail| WorkflowShareError::Malformed {
+            field: "advanced.lowResStart".to_owned(),
+            detail,
+        })?;
+        if low_res_active(Some(recipe)) && schema_version < 2 {
+            return Err(WorkflowShareError::Malformed {
+                field: "schemaVersion".to_owned(),
+                detail: "active lowResStart requires schemaVersion 2".to_owned(),
+            });
+        }
+    }
+    let value =
+        crate::options::upgrade::upgrade(value, crate::options::upgrade::Carrier::ShareEnvelope)
+            .map_err(|error| WorkflowShareError::Malformed {
+                field: error.field.clone(),
+                detail: error.to_string(),
+            })?;
     let share: WorkflowShare =
-        serde_json::from_value(value.clone()).map_err(|error| WorkflowShareError::Malformed {
+        serde_json::from_value(value).map_err(|error| WorkflowShareError::Malformed {
             field: field_from_serde_error(&error),
             detail: error.to_string(),
         })?;

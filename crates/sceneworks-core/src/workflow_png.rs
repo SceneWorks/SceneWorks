@@ -2406,7 +2406,7 @@ mod tests {
                 "{\"sceneworksWorkflow\": \"image\", \"schemaVersion\": 99}",
                 WorkflowShareError::UnsupportedSchemaVersion {
                     file: 99,
-                    supported: 1,
+                    supported: 2,
                 },
             ),
         ];

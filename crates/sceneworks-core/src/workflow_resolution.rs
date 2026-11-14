@@ -1105,6 +1105,7 @@ fn omission_detail(field: &str) -> String {
              phases that remain are NOT the whole schedule."
                 .to_owned()
         }
+        "advanced.lowResStart" => "The active low-resolution start recipe was not recorded because its version or parameters were unsupported. This recipe cannot preserve that generation's intent.".to_owned(),
         // The parse side keeps only members of the closed vocabulary, so this is unreachable from
         // a file. Answered anyway rather than showing the user a bare field name.
         other => format!("The `{other}` collection was declared but not recorded."),

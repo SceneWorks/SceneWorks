@@ -1419,14 +1419,43 @@ async fn validate_and_canonicalize_merged_generation_payload(
     let project_id = job.project_id.clone();
     // sc-26691: only a job that actually rendered can be a legacy (pre-resize-mode) render.
     let persisted_rendered = matches!(job.status, JobStatus::Completed);
-    let mut merged = job.payload;
-    // Resolved from the PERSISTED payload, BEFORE the merge below, because inline-LoRA permission is
-    // a property of how the job was originally created and `payload_changes` must not be able to
-    // mint it. Carries the specific adapters permitted, not a blanket flag — see
-    // [`persisted_character_inline_loras`] and [`validate_merged_job_loras`].
+    let upgrade = |payload: &JsonObject| {
+        sceneworks_core::options::upgrade::upgrade_object(
+            payload,
+            sceneworks_core::options::upgrade::Carrier::Request,
+        )
+        .map_err(|error| {
+            ApiError::typed(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                error.to_string(),
+                error.code,
+                json!({ "field": error.field }),
+            )
+        })
+    };
+    // Each source must be internally consistent. A patch is allowed to override a stored
+    // value using either spelling, so normalize before merging rather than treating the two
+    // sources as conflicting authorship in one document.
+    let mut merged = upgrade(&job.payload)?;
+    let changes = upgrade(payload_changes)?;
+    // Inline-LoRA permission comes only from the persisted job, never from the patch.
     let permitted_inline_loras = persisted_character_inline_loras(&merged);
     let persisted = merged.clone();
-    merged.extend(payload_changes.clone());
+    for spec in sceneworks_core::options::registry()
+        .filter(|spec| spec.location == "image" && !spec.aliases.is_empty())
+    {
+        if let Some(value) = changes.get(spec.key) {
+            for alias in spec.aliases {
+                if let Some(existing) = merged.get_mut(*alias) {
+                    *existing = value.clone();
+                }
+            }
+        }
+    }
+    merged.extend(changes);
+    if !retry {
+        sceneworks_core::options::upgrade::strip_machine_decisions(&mut merged);
+    }
     if merged.get("model") == persisted.get("model") {
         // A retry of the same selection retains the admitted identity even when a patch replaces
         // other settings. Same-id catalog rebinding cannot opt out of the original checkpoint.

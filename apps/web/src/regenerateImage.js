@@ -1,3 +1,4 @@
+import { upgradeCarrier } from "./requestUpgrade.js";
 import { jobsApi } from "./api/jobsResources.js";
 import { imageApi } from "./api/imageResources.js";
 
@@ -7,8 +8,8 @@ import { isMossImage, isMossEdit, mossComponentState, mossEditReferenceIds, moss
 // Older assets can outlive their job row. Replay their recorded inputs without opening a form.
 // The prompt is already composed; reapplying its preset/style would wrap it a second time.
 export function imageRecipeRequest(asset) {
-  const shared = asset.generationSet?.recipe ?? {};
-  const own = asset.recipe ?? {};
+  const shared = upgradeCarrier(asset.generationSet?.recipe ?? {}, "recipe");
+  const own = upgradeCarrier(asset.recipe ?? {}, "recipe");
   const recipe = { ...shared, ...own,
     normalizedSettings: { ...shared.normalizedSettings, ...own.normalizedSettings },
     rawAdapterSettings: { ...shared.rawAdapterSettings, ...own.rawAdapterSettings } };
@@ -28,6 +29,7 @@ export function imageRecipeRequest(asset) {
   delete advanced.upscale;
   delete advanced.hiresFix;
   delete advanced.mossImageExecutionReport;
+  delete advanced.moss_image_execution_report;
   delete advanced.mossImageEditExecutionReport;
   delete advanced.moss_image_edit_execution_report;
   delete advanced.mossImageSampleIndex;

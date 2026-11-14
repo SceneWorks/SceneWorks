@@ -82,9 +82,9 @@ the workspace version at compile time. It is deliberately not derived from git, 
 build host or the build path — `0.8.1-dirty-alice` would walk straight into every shared image — and
 a test asserts it is strict semver.
 
-### Two versions, and only one of them is parsed
+### Contract versions and producer version
 
-`schemaVersion` is the contract version and is **the only version the parser branches on**.
+`schemaVersion` is the outer contract version. Active v2 recipes also validate their nested recipe version.
 `producer.version` is recorded so a bug report is actionable and is never interpreted. (It is not
 the only *field* the parser branches on: the `sceneworksWorkflow` marker is checked too, and a blob
 whose marker names a kind this build has no reader for at all — `hologram`, say — is refused as an
@@ -136,7 +136,7 @@ rule exists for.
 | The file says | This build does |
 | --- | --- |
 | `schemaVersion` newer than this build's | Refuses the whole envelope and names both versions, so the user is told to update rather than shown a parse error. |
-| `schemaVersion` equal to or older than this build's | Reads it with today's field set. Fields this build does not know are dropped; fields it knows and the file lacks take their defaults. |
+| `schemaVersion` equal to or older than this build's | Reads supported v1/v2 content, checking active recipe identity before reduction. Unknown ordinary metadata is dropped; unknown active recipe versions refuse. |
 | `schemaVersion` absent or `null` | Refuses the envelope. A version-less blob is not readable safely. |
 | `schemaVersion` present but not a whole number | Refuses the envelope as malformed, naming the field. |
 
@@ -389,6 +389,7 @@ smuggled under a scalar key.
 
 | Key | Shape | What it is |
 | --- | --- | --- |
+| `lowResStart` | Versioned `{version:1,k,scale}` recipe parameters. Active content requires outer schema v2; unavailable controls are disclosed on portable import. |
 | `flux3_layout` | `Flux3Layout` | FLUX.3 caption-only soft spatial guidance: version, ordered labeled placement/source/target boxes, null removals, coordinate spaces and attachment-instance selection. Public row fields retain their original precision; unknown provenance fields are withheld. |
 | `flux3_reference_ids` | `StringList` | Up to ten unique attachment-instance identities in submitted reference order, including distinct slots for duplicate assets. Asset paths and identifiers remain separately withheld. |
 | `mossImage` | `MossImageOptions` | Requested MOSS mode, precision, context and author controls, validated through the native contract. |
@@ -1143,3 +1144,34 @@ Advanced MOSS edit inputs use project-owned `tensor` assets imported through the
 `positive.values` and optional `positive.mask` carry [B,S,4096] FP32 and binary [B,S]. Negative embeddings follow the same shapes and match B; `negativePrompts` is mutually exclusive and has one string per row. Positive tensors replace both prompt carriers. Nonempty broadcast negative text cannot accompany supplied negative inputs; the native negative-batch request carries no broadcast value. `noise` is exact FP32 [B×count,128,H/16,W/16]; it yields nullable seed `null`, never a generated replacement seed. No separate input-latents or strength/dtype/quantization control is exposed. Context and positive training shift remain native scalar controls, distinct from schedule shift.
 
 Latent outputs are real FP32 NPY artifacts, one [1,128,H/16,W/16] file per ordered sample, without a preview. The full authored input batch/count remains in every recipe; the original sample ordinal and native batch shape are provenance. A bounded `.sceneworks-workflow.json` companion uses this same WorkflowShare envelope and inspect/resolution reducer. Asset metadata/API/MCP links bind the NPY and companion; it never appends a trailer to NPY. Same-library replay uses authorized original tensors. Portable replay retains identities and shape requirements, requires exact reacquisition, and never treats stale execution receipts as inputs.
+
+
+## Options carrier compatibility (SW-7037)
+
+The writer keeps outer `schemaVersion: 1` for content the released v1 reader can
+express. Active `advanced.lowResStart` uses outer version 2 and the frozen SGA
+params `{version:1,k,scale}` (positive integer k, scale 0.25–0.9). The reader
+accepts both outer versions, rejects unknown nested versions/fields and unrecognized
+v2 advanced settings, and refuses
+an active low-res recipe mislabeled v1. Route support and `k < executed steps`
+remain submission checks; portable import explicitly reports this build's
+missing low-res control. The pinned actual v1 reader test demonstrates its
+version refusal rather than assuming an old reader understands new content.
+
+ENG-16 introduces chained passes after APP-2/3 and ENG-7. Its producer must add
+an approved nested schema/validator and v2 share classification before emitting
+an active recipe; no speculative chain schema is recognized here.
+
+Local carriers use optional `optionsSchemaVersion` (current version 1), separate
+from existing film/training/share schema numbers. Absent means the historical
+unversioned shape. Upgrading copies values, retains original alias spellings, adds canonical aliases
+only when authored, never resolves defaults, and refuses
+conflicting aliases or future versions. Original files/rows remain intact.
+Telemetry, memoryStrategy and legacy source bindings retain their names and
+values. A new regeneration strips prior machine decisions and chooses fresh
+seeds; portable import still revalidates current availability and discloses
+omissions. Neither operation claims exact replay.
+
+SceneWorks-Art has no executable reader in its current repository; compatibility
+is demonstrated at the published envelope/recipe contract and pinned SceneWorks
+v1 reader, not by claiming an Art runtime test.

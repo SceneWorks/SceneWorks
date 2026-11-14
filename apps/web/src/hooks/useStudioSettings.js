@@ -1,3 +1,5 @@
+import { upgradeCarrier, UpgradeError } from "../requestUpgrade.js";
+import upgradeMetadata from "../optionUpgradeMetadata.json";
 import { useEffect, useRef } from "react";
 import { persistNavigationPreferences } from "../uiPreferences.js";
 
@@ -115,6 +117,9 @@ export function sessionOnlyFields(studio, settings) {
 const DEFAULT_WORKSPACE = "default";
 // Keep in sync with MAX_STUDIO_WORKSPACES in apps/rust-api/src/preferences.rs.
 const MAX_WORKSPACES = 24;
+// A newer server snapshot must survive this older client's full-map PUTs. A refused
+// hydration blocks advanced-studio writes until a later compatible snapshot arrives.
+let serverSnapshotRefusal = null;
 
 function workspaceKey(workspaceId) {
   return workspaceId ?? DEFAULT_WORKSPACE;
@@ -130,8 +135,9 @@ export function loadStudioSettings(studio, workspaceId) {
   try {
     const raw = window.localStorage.getItem(storageKey(studio, workspaceId));
     const parsed = raw ? JSON.parse(raw) : null;
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
+    return parsed && typeof parsed === "object" ? upgradeCarrier(parsed, "studioSettings") : {};
+  } catch (error) {
+    if (error instanceof UpgradeError) throw error;
     return {};
   }
 }
@@ -170,7 +176,7 @@ export function seedStudioSettingsFromServer(map) {
   if (!map || typeof map !== "object") {
     return 0;
   }
-  let written = 0;
+  const candidates = [];
   for (const [workspace, perStudio] of Object.entries(map)) {
     if (!perStudio || typeof perStudio !== "object") {
       continue;
@@ -180,19 +186,47 @@ export function seedStudioSettingsFromServer(map) {
       if (!restored || typeof restored !== "object") {
         continue;
       }
-      const cached = loadStudioSettings(studio, workspace);
-      writeCache(studio, workspace, { ...cached, ...restored });
-      written += 1;
+      // Normalize each source before merging: the authoritative server alias must replace a
+      // cached canonical value, not manufacture a conflict between two valid snapshots.
+      let upgraded;
+      let cached;
+      try {
+        upgraded = upgradeCarrier(restored, "studioSettings");
+        cached = loadStudioSettings(studio, workspace);
+      } catch (error) {
+        if (error instanceof UpgradeError) serverSnapshotRefusal = error;
+        throw error;
+      }
+      // A server canonical value also supersedes cached legacy spellings. Validate each
+      // source first, then remove only aliases whose option the server actually authored.
+      for (const rule of upgradeMetadata.aliases) {
+        if (rule.location === "advanced" && Object.hasOwn(upgraded, rule.key)) {
+          for (const alias of rule.aliases) delete cached[alias];
+        }
+      }
+      candidates.push({ studio, workspace, settings: { ...cached, ...upgraded } });
     }
+  }
+  serverSnapshotRefusal = null;
+  let written = 0;
+  for (const { studio, workspace, settings } of candidates) {
+    if (writeCache(studio, workspace, settings)) written += 1;
   }
   return written;
 }
 
 function writeCache(studio, workspaceId, settings) {
+  if (serverSnapshotRefusal) return false;
+  // Never overwrite a stored future/conflicting document with the form's fallback defaults.
+  loadStudioSettings(studio, workspaceId);
+  settings = upgradeCarrier(settings, "studioSettings");
   try {
     window.localStorage.setItem(storageKey(studio, workspaceId), JSON.stringify(settings));
+    return true;
   } catch {
-    // localStorage unavailable — settings just won't persist this session.
+    // The durable PUT rebuilds the whole map from this cache. A failed write must
+    // not send an empty or stale replacement map to the server.
+    return false;
   }
 }
 
@@ -200,6 +234,7 @@ function writeCache(studio, workspaceId, settings) {
 // non-durable fields, and send it. The server replaces the field wholesale (it does not
 // deep-merge), so the payload has to be the full map — same contract as `perModelTier`.
 function persistToServer(touchedWorkspace) {
+  if (serverSnapshotRefusal) return;
   const map = {};
   let keys;
   try {
@@ -288,7 +323,7 @@ export function useStudioSettingsWriter(studio, workspaceId, settings, ready = t
     if (unchangedInitialSnapshot) {
       return undefined;
     }
-    writeCache(studio, workspaceId, JSON.parse(serialized));
+    if (!writeCache(studio, workspaceId, JSON.parse(serialized))) return undefined;
     // Debounced: the advanced studios re-serialize on every keystroke, and one durable write
     // per character would hammer a disk-writing PUT. The queue keeps requests ordered; this
     // keeps them rare.

@@ -5200,4 +5200,55 @@ mod tests {
             finding.message
         );
     }
+    #[test]
+    fn historical_film_builder_output_upgrades_without_changing_dispatch_intent() {
+        use crate::options::upgrade::{upgrade, Carrier};
+        // Production compile/dispatch source is byte-identical to d3f7b05b; only this test is new.
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/sw7037/film-builder-output.json");
+        if std::env::var_os("UPDATE_SW7037_FILM_FIXTURE").is_some() {
+            let compiled = compiled(BTreeMap::new());
+            let assets = role_assets();
+            let context = DispatchContext {
+                project_id: "proj_1",
+                run_id: "run_abc",
+                plan_id: "courier-workshop",
+                plan_version: 2,
+                attempt: 1,
+                tier: Some("q4"),
+                idempotency_key: Some("run_abc:SH010:a1"),
+                pack: pack_ref(),
+                role_assets: &assets,
+            };
+            let body = compiled
+                .request("SH010")
+                .unwrap()
+                .to_job_body(&context)
+                .unwrap();
+            std::fs::write(
+                &fixture_path,
+                serde_json::to_string_pretty(&json!({
+                    "sourceRevision":"d3f7b05bf22826e44fd43da19cff0985fb17d68b",
+                    "compiled":compiled,"request":body,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let fixture: Value =
+            serde_json::from_str(&std::fs::read_to_string(fixture_path).unwrap()).unwrap();
+        assert_eq!(
+            upgrade(&fixture["compiled"], Carrier::CompiledFilmPlan).unwrap(),
+            fixture["compiled"]
+        );
+        assert_eq!(
+            upgrade(&fixture["request"], Carrier::Request).unwrap(),
+            fixture["request"]
+        );
+        assert_eq!(
+            fixture["request"]["advanced"]["filmHarness"]["planVersion"],
+            2
+        );
+        assert_eq!(fixture["request"]["seed"], 7);
+    }
 }
