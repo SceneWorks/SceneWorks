@@ -4783,7 +4783,7 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
     assert!(
         qwen_stream.contains("QwenEdit::load_with_memory_context(")
             && qwen_stream.contains("&provider_load_spec,")
-            && qwen_stream.contains("model.generate_with_memory_context("),
+            && qwen_stream.contains("model.generate_with_memory_context_with_execution_report("),
         "Qwen admission context and its exact tier/load receipt must remain provider-owned across load and generation"
     );
     let qwen_adapter_setup = between(
