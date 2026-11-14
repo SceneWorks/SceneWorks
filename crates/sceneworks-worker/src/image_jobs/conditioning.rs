@@ -1419,6 +1419,7 @@ pub(super) fn pose_entries(request: &ImageRequest) -> Vec<&Value> {
 /// A pose's parsed keypoints, ready for [`crate::openpose_skeleton::draw_wholebody`].
 // Shared strict-control preprocessing reads the whole body on both native backends.
 #[cfg(native_lane)]
+#[derive(Clone)]
 pub(super) struct PoseInput {
     pub(super) keypoints: Vec<crate::openpose_skeleton::Keypoint>,
     pub(super) hands: Option<Vec<crate::openpose_skeleton::Hand>>,

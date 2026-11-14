@@ -424,6 +424,7 @@ pub(super) async fn generate_candle_kolors_control_stream(
     settings: &Settings,
     job: &JobSnapshot,
     plan: &ImagePlan,
+    execution: &super::conditioning::ResolvedImageExecution,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
@@ -650,6 +651,7 @@ pub(super) async fn generate_candle_kolors_control_stream(
         backend,
         provider,
         raw_settings,
+        execution,
         asset_writes,
     )
     .await

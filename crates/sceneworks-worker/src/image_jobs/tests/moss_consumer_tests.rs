@@ -2069,7 +2069,13 @@ async fn moss_real_native_product_worker_campaign() {
             crate::load_progress::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let api = ApiClient::new(&settings);
         let job: JobSnapshot = serde_json::from_value(job_value).unwrap();
-        let result = run_image_generate_job(&api, &settings, &job).await;
+        let result = run_image_generate_job(
+            &api,
+            &settings,
+            &job,
+            &sceneworks_core::portable_aux_bindings::PortableAuxBindings::default(),
+        )
+        .await;
         let events = posts.lock().unwrap().clone();
         server.abort();
         std::fs::write(

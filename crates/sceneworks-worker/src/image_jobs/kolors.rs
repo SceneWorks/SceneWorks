@@ -4,7 +4,6 @@ use super::artifact_resolution::resolve_weights_dir;
 use super::artifact_resolution::resolved_mlx_artifact_provenance;
 use super::artifact_resolution::resolved_mlx_artifact_tier;
 use super::conditioning::load_reference_image;
-use super::conditioning::parse_poses;
 use super::conditioning::pose_entries;
 use super::conditioning::should_fit_edit_source;
 use super::conditioning::stage_likeness;
@@ -364,6 +363,7 @@ pub(super) async fn generate_kolors_control_stream(
     settings: &Settings,
     job: &JobSnapshot,
     plan: &ImagePlan,
+    execution: &super::conditioning::ResolvedImageExecution,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
@@ -447,7 +447,7 @@ pub(super) async fn generate_kolors_control_stream(
     );
     let adapters = resolve_adapters(request, settings)?;
     let repo = model_repo(request, &kolors);
-    let poses = parse_poses(request);
+    let poses = execution.poses().to_vec();
     let count = poses.len();
     let raw_settings = kolors_control_raw_settings(
         request,

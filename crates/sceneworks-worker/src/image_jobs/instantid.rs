@@ -4,7 +4,6 @@ use super::admit_conditioning_paths;
 use super::conditioning::augment_prompt_for_angle;
 use super::conditioning::load_reference_image;
 use super::conditioning::non_empty;
-use super::conditioning::parse_poses;
 use super::conditioning::pose_entries;
 use super::events::consume_gen_events;
 #[cfg(not(target_os = "macos"))]
@@ -1105,6 +1104,7 @@ pub(super) async fn generate_instantid_stream(
     settings: &Settings,
     job: &JobSnapshot,
     plan: &ImagePlan,
+    execution: &super::conditioning::ResolvedImageExecution,
     project_path: &Path,
     backend: &str,
     asset_writes: &mut Vec<Value>,
@@ -1297,8 +1297,9 @@ pub(super) async fn generate_instantid_stream(
     let work: Vec<(i64, String, InstantIdAction)> = match &mode {
         InstantIdMode::PoseSet(_) => {
             let set_seed = resolve_seed(request, 0);
-            parse_poses(request)
-                .into_iter()
+            execution
+                .poses()
+                .iter()
                 .map(|pose| {
                     (
                         set_seed,

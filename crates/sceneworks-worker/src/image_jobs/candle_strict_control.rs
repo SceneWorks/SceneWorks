@@ -1,5 +1,4 @@
 use super::admit_conditioning_overlay;
-use super::conditioning::parse_poses;
 use super::conditioning::resolve_control_identity_source;
 use super::conditioning::stage_likeness;
 use super::events::consume_gen_events;
@@ -155,6 +154,7 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
     backend: &str,
     provider: P,
     raw_settings: JsonObject,
+    execution: &super::conditioning::ResolvedImageExecution,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
@@ -208,7 +208,7 @@ pub(super) async fn run_candle_strict_control<P: CandleStrictControl>(
         None
     };
 
-    let poses = parse_poses(request);
+    let poses = execution.poses().to_vec();
     let pose_count = poses.len();
 
     // Render the control map + generate at the provider's output dims (normally the request's W×H; a PiD
