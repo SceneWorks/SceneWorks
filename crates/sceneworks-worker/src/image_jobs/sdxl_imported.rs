@@ -902,10 +902,7 @@ pub(super) async fn generate_sdxl_imported_stream(
                             )
                         })?;
                         let mut facts = crate::JsonObject::new();
-                        facts.insert(
-                            "workerExecutionReport".into(),
-                            serde_json::to_value(report).map_err(WorkerError::Json)?,
-                        );
+                        report.insert_image_facts(&mut facts)?;
                         let _ =
                             tx.blocking_send(super::stream::GenEvent::ImageFacts { index, facts });
                         return Ok(Some((seed, out_width, out_height, pixels)));

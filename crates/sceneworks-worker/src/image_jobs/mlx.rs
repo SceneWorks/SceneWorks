@@ -1114,10 +1114,7 @@ pub(super) async fn generate_stream_using(
                         )
                         .unwrap_or_default();
                         if let Some(report) = execution_report.take() {
-                            facts.insert(
-                                "workerExecutionReport".into(),
-                                serde_json::to_value(report).map_err(WorkerError::Json)?,
-                            );
+                            report.insert_image_facts(&mut facts)?;
                         }
                         Ok((images, (!facts.is_empty()).then_some(facts)))
                     },
@@ -1245,10 +1242,7 @@ pub(super) async fn generate_stream_using(
                     )
                     .unwrap_or_default();
                     if let Some(report) = execution_report.take() {
-                        facts.insert(
-                            "workerExecutionReport".into(),
-                            serde_json::to_value(report).map_err(WorkerError::Json)?,
-                        );
+                        report.insert_image_facts(&mut facts)?;
                     }
                     if let Some(references) = flux3_references.as_ref() {
                         facts.insert(

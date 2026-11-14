@@ -25,6 +25,22 @@ pub(crate) enum WorkerExecutionReport {
     HiresFix(HiresExecutionReport),
 }
 
+impl WorkerExecutionReport {
+    pub(crate) fn insert_image_facts(self, facts: &mut crate::JsonObject) -> WorkerResult<()> {
+        if let Self::HiresFix(report) = &self {
+            facts.insert(
+                "workerExecutionStages".into(),
+                serde_json::to_value(&report.stages).map_err(WorkerError::Json)?,
+            );
+        }
+        facts.insert(
+            "workerExecutionReport".into(),
+            serde_json::to_value(self).map_err(WorkerError::Json)?,
+        );
+        Ok(())
+    }
+}
+
 #[derive(serde::Serialize)]
 pub(crate) struct HiresExecutionReport {
     state: &'static str,
@@ -228,7 +244,7 @@ fn generate_one_on_surface(
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
-    render_on_surface(
+    let images = render_on_surface(
         generator,
         prompt,
         width,
@@ -255,9 +271,13 @@ fn generate_one_on_surface(
         surface,
         cancel,
         on_progress,
-    )?
-    .pop()
-    .ok_or_else(|| WorkerError::Engine("generator produced no image".to_owned()))
+    )?;
+    match images.len() {
+        1 => Ok(images.into_iter().next().expect("one image checked")),
+        count => Err(WorkerError::Engine(format!(
+            "single-image render returned {count} images"
+        ))),
+    }
 }
 
 /// The one generic-lane engine call: builds the request (one `prompt`, or the surface's native
@@ -878,6 +898,8 @@ mod hires_report_tests {
         calls: AtomicUsize,
         fail_on: usize,
         cancel_on: usize,
+        bad_output_on: usize,
+        bad_output_count: usize,
     }
 
     impl Probe {
@@ -897,7 +919,16 @@ mod hires_report_tests {
                 calls: AtomicUsize::new(0),
                 fail_on,
                 cancel_on,
+                bad_output_on: 0,
+                bad_output_count: 1,
             }
+        }
+
+        fn with_output_count(call: usize, count: usize) -> Self {
+            let mut probe = Self::new(0, 0);
+            probe.bad_output_on = call;
+            probe.bad_output_count = count;
+            probe
         }
 
         fn render(
@@ -917,12 +948,21 @@ mod hires_report_tests {
                 current: 1,
                 total: req.steps.unwrap_or(1),
             });
+            let output_count = if call == self.bad_output_on {
+                self.bad_output_count
+            } else {
+                1
+            };
             Ok((
-                GenerationOutput::Images(vec![Image {
-                    width: req.width,
-                    height: req.height,
-                    pixels: vec![call as u8; (req.width * req.height * 3) as usize],
-                }]),
+                GenerationOutput::Images(
+                    (0..output_count)
+                        .map(|_| Image {
+                            width: req.width,
+                            height: req.height,
+                            pixels: vec![call as u8; (req.width * req.height * 3) as usize],
+                        })
+                        .collect(),
+                ),
                 ExecutionIdentity::Unavailable {
                     reason: ExecutionUnavailable {
                         code: format!("pass-{call}"),
@@ -1016,7 +1056,9 @@ mod hires_report_tests {
         let sink = std::cell::RefCell::new(None);
         let first = run(&probe, &sink, &CancelFlag::default()).unwrap();
         assert_eq!((first.0, first.1), (8, 8));
-        let report = serde_json::to_value(sink.take().unwrap()).unwrap();
+        let mut facts = crate::JsonObject::new();
+        sink.take().unwrap().insert_image_facts(&mut facts).unwrap();
+        let report = &facts["workerExecutionReport"];
         assert_eq!(report["state"], "unavailable");
         assert_eq!(
             report["reason"]["code"],
@@ -1027,6 +1069,14 @@ mod hires_report_tests {
         assert_eq!(report["stages"][0]["execution"]["reason"]["code"], "pass-1");
         assert_eq!(report["stages"][1]["stage"], "refine");
         assert_eq!(report["stages"][1]["execution"]["reason"]["code"], "pass-2");
+        assert_eq!(facts["workerExecutionStages"], report["stages"]);
+
+        let mut ordinary_facts = crate::JsonObject::new();
+        WorkerExecutionReport::Provider(ExecutionIdentity::provider_default())
+            .insert_image_facts(&mut ordinary_facts)
+            .unwrap();
+        assert!(ordinary_facts.contains_key("workerExecutionReport"));
+        assert!(!ordinary_facts.contains_key("workerExecutionStages"));
 
         run(&probe, &sink, &CancelFlag::default()).unwrap();
         let retry = serde_json::to_value(sink.take().unwrap()).unwrap();
@@ -1049,5 +1099,33 @@ mod hires_report_tests {
         assert!(
             completed_hires_report(vec![("refine", identity()), ("base", identity())]).is_err()
         );
+    }
+
+    #[test]
+    fn hires_report_refuses_zero_or_two_images_from_either_stage_and_clears_retry_sink() {
+        for stage in [1, 2] {
+            for count in [0, 2] {
+                let probe = Probe::with_output_count(stage, count);
+                let sink = std::cell::RefCell::new(Some(WorkerExecutionReport::Provider(
+                    ExecutionIdentity::provider_default(),
+                )));
+                assert!(
+                    run(&probe, &sink, &CancelFlag::default()).is_err(),
+                    "stage {stage} with {count} images must fail"
+                );
+                assert!(sink.borrow().is_none());
+                run(&probe, &sink, &CancelFlag::default()).unwrap();
+                let retry = serde_json::to_value(sink.take().unwrap()).unwrap();
+                let first_retry_call = if stage == 1 { 2 } else { 3 };
+                assert_eq!(
+                    retry["stages"][0]["execution"]["reason"]["code"],
+                    format!("pass-{first_retry_call}")
+                );
+                assert_eq!(
+                    retry["stages"][1]["execution"]["reason"]["code"],
+                    format!("pass-{}", first_retry_call + 1)
+                );
+            }
+        }
     }
 }
