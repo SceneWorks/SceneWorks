@@ -39,11 +39,11 @@ use sceneworks_core::training::latent_perceptual::{
     LATENT_LPIPS, VAE_ANCHOR,
 };
 use sceneworks_core::training::{
-    parse_resolution_bucket_config, subject_mask_loss_weights, technique_value,
-    ResolutionBucketConfig, TrainingPlan, GRADIENT_NOISE_ETA_KEY, GRADIENT_NOISE_ETA_MAX,
-    GRADIENT_NOISE_GAMMA_DEFAULT, GRADIENT_NOISE_GAMMA_KEY, GRADIENT_NOISE_GAMMA_MAX,
-    RESOLUTION_BUCKETS_KEY, SUBJECT_MASK_LOSS_KEY, TRAINING_PLAN_VERSION, WEIGHT_NOISE_SIGMA_KEY,
-    WEIGHT_NOISE_SIGMA_MAX,
+    parse_resolution_bucket_config, parse_training_bucket_config, subject_mask_loss_weights,
+    technique_value, ResolutionBucketConfig, TrainingPlan, GRADIENT_NOISE_ETA_KEY,
+    GRADIENT_NOISE_ETA_MAX, GRADIENT_NOISE_GAMMA_DEFAULT, GRADIENT_NOISE_GAMMA_KEY,
+    GRADIENT_NOISE_GAMMA_MAX, RESOLUTION_BUCKETS_KEY, SUBJECT_MASK_LOSS_KEY, TRAINING_PLAN_VERSION,
+    WEIGHT_NOISE_SIGMA_KEY, WEIGHT_NOISE_SIGMA_MAX,
 };
 use sceneworks_core::training_subject_masks::{
     lookup_subject_mask_for_image, read_subject_mask_index_at, subject_mask_relative_path,
@@ -232,6 +232,19 @@ pub(crate) async fn run_lora_train_job(
 /// (apps/rust-api training.rs). The plan round-trips through `TrainingPlan`, so a
 /// payload missing/garbling it is a hard error (never a silent no-op).
 pub(crate) fn parse_plan(payload: &JsonObject) -> WorkerResult<TrainingPlan> {
+    let facts = serde_json::to_value(
+        sceneworks_core::training::effective_training_targets_for_candle(!cfg!(
+            target_os = "macos"
+        )),
+    )
+    .expect("training catalog serializes");
+    sceneworks_core::training::validate(
+        "lora_train",
+        payload,
+        facts.as_object().expect("catalog object"),
+    )
+    .map_err(WorkerError::Validation)?;
+
     let plan = payload.get("plan").ok_or_else(|| {
         WorkerError::InvalidPayload("Training job payload is missing a resolved plan.".to_owned())
     })?;
@@ -1769,81 +1782,28 @@ fn validate_new_family_request(
 }
 
 fn preflight_string(advanced: &JsonObject, key: &str, default: &str) -> WorkerResult<String> {
-    match advanced.get(key) {
-        None => Ok(default.to_owned()),
-        Some(Value::String(value)) if !value.trim().is_empty() => Ok(value.trim().to_owned()),
-        Some(Value::String(_)) => Ok(default.to_owned()),
-        Some(_) => Err(WorkerError::InvalidPayload(format!(
-            "Training config field '{key}' must be a string."
-        ))),
-    }
+    sceneworks_core::training::preflight_string(advanced, key, default)
+        .map_err(|error| WorkerError::InvalidPayload(error.detail))
 }
 
 fn preflight_bool(advanced: &JsonObject, key: &str, default: bool) -> WorkerResult<bool> {
-    match advanced.get(key) {
-        None => Ok(default),
-        Some(Value::Bool(value)) => Ok(*value),
-        Some(Value::String(value)) if value.trim().eq_ignore_ascii_case("true") => Ok(true),
-        Some(Value::String(value)) if value.trim().eq_ignore_ascii_case("false") => Ok(false),
-        Some(_) => Err(WorkerError::InvalidPayload(format!(
-            "Training config field '{key}' must be a boolean."
-        ))),
-    }
+    sceneworks_core::training::preflight_bool(advanced, key, default)
+        .map_err(|error| WorkerError::InvalidPayload(error.detail))
 }
 
 fn preflight_u32(advanced: &JsonObject, key: &str, default: u32) -> WorkerResult<u32> {
-    match advanced.get(key) {
-        None => Ok(default),
-        Some(Value::Number(value)) => value
-            .as_u64()
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| {
-                WorkerError::InvalidPayload(format!(
-                    "Training config field '{key}' must be a non-negative integer."
-                ))
-            }),
-        Some(Value::String(value)) => value.trim().parse::<u32>().map_err(|_| {
-            WorkerError::InvalidPayload(format!(
-                "Training config field '{key}' must be a non-negative integer."
-            ))
-        }),
-        Some(_) => Err(WorkerError::InvalidPayload(format!(
-            "Training config field '{key}' must be a non-negative integer."
-        ))),
-    }
+    sceneworks_core::training::preflight_u32(advanced, key, default)
+        .map_err(|error| WorkerError::InvalidPayload(error.detail))
 }
 
 fn preflight_f32(advanced: &JsonObject, key: &str, default: f32) -> WorkerResult<f32> {
-    let Some(value) = advanced.get(key) else {
-        return Ok(default);
-    };
-    let value = value
-        .as_f64()
-        .or_else(|| value.as_str()?.trim().parse::<f64>().ok());
-    value
-        .filter(|value| value.is_finite())
-        .and_then(|value| {
-            let converted = value as f32;
-            (converted.is_finite() && (value == 0.0 || converted != 0.0)).then_some(converted)
-        })
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "Training config field '{key}' must be a finite f32 number."
-            ))
-        })
+    sceneworks_core::training::preflight_f32(advanced, key, default)
+        .map_err(|error| WorkerError::InvalidPayload(error.detail))
 }
 
 fn preflight_i32(advanced: &JsonObject, key: &str, default: i32) -> WorkerResult<i32> {
-    let Some(value) = advanced.get(key) else {
-        return Ok(default);
-    };
-    sceneworks_core::payload_util::json_integer(value)
-        .and_then(|value| i32::try_from(value).ok())
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "Training config field '{key}' must be a signed 32-bit integer."
-            ))
-        })
+    sceneworks_core::training::preflight_i32(advanced, key, default)
+        .map_err(|error| WorkerError::InvalidPayload(error.detail))
 }
 
 /// Epic 2123 depth anchoring (sc-2125): map the strictly parsed `advanced.depthAnchoring*` keys onto
@@ -2401,21 +2361,8 @@ fn preflight_bounded_f64(
     max: f64,
     default: f64,
 ) -> WorkerResult<f64> {
-    let Some(value) = technique_value(advanced, key) else {
-        return Ok(default);
-    };
-    value
-        .as_f64()
-        .filter(|number| {
-            number.is_finite()
-                && (0.0..=max).contains(number)
-                && (*number == 0.0 || (*number as f32).is_finite() && *number as f32 != 0.0)
-        })
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "Training config field '{key}' must be a number between 0 and {max}."
-            ))
-        })
+    sceneworks_core::training::preflight_bounded_f64(advanced, key, max, default)
+        .map_err(|error| WorkerError::InvalidPayload(error.detail))
 }
 
 /// Dry-run: validate the plan and active trainer descriptor, then report what a real run would
@@ -2697,12 +2644,9 @@ fn training_load_precision(engine_id: &str, train_dtype: &str) -> Precision {
 /// anything unrecognized — falls back to full-precision `"f32"`, matching the
 /// engine's own "unrecognized ⇒ f32" rule. The *absent*-key default is applied by
 /// the caller (`"bf16"`), so a plan that omits the key keeps the OOM fix on.
-#[cfg(native_lane)]
+#[cfg(all(native_lane, test))]
 fn normalize_train_dtype(value: &str) -> String {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "bf16" => "bf16".to_owned(),
-        _ => "f32".to_owned(),
-    }
+    sceneworks_core::training::normalize_train_dtype(value)
 }
 
 /// Map the SceneWorks `TrainingConfig` (plan `config` + its free-form `advanced`
@@ -2715,31 +2659,16 @@ fn map_training_config(
     config: &sceneworks_core::training::TrainingConfig,
 ) -> WorkerResult<TrainingConfig> {
     let advanced = &config.advanced;
-    // sc-14056 — the FULL base fine-tune selector. `networkType` carries three values on the product
-    // surface (`lora` / `lokr` / `full`), but the engine models the third one as a separate boolean
-    // rather than a `NetworkType` variant (gen-core deliberately kept the enum closed). So `full` maps
-    // to `full_finetune: true` here, and `NetworkType::parse` — which maps every unknown string,
-    // including "full", to `Lora` — is left to describe the *adapter* parameterization it always did.
-    // Without this the flag never reaches the engine and a user asking for a full tune silently gets a
-    // LoRA (the F-055 class; gen-core's `validate_full_finetune_request` floor is the engine-side twin
-    // of this mapping).
-    let full_finetune =
-        preflight_string(advanced, "networkType", "lora")?.eq_ignore_ascii_case("full");
-    let lora_target_modules = advanced
-        .get("loraTargetModules")
-        .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(|value| value.as_str().map(str::to_owned))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let resolved =
+        sceneworks_core::training::resolve_advanced(advanced).map_err(WorkerError::Validation)?;
     Ok(TrainingConfig {
         rank: config.rank,
         alpha: sceneworks_core::training::training_alpha_f32(&config.alpha)
             .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?,
-        learning_rate: config.learning_rate.as_f64().unwrap_or(1e-4) as f32,
+        learning_rate: config
+            .learning_rate
+            .as_f64()
+            .expect("validated learning rate") as f32,
         steps: config.steps,
         batch_size: config.batch_size,
         gradient_accumulation: config.gradient_accumulation,
@@ -2747,147 +2676,47 @@ fn map_training_config(
         save_every: config.save_every,
         seed: config.seed.max(0) as u64,
         optimizer: config.optimizer.clone(),
-        weight_decay: preflight_f32(advanced, "weightDecay", 0.0)?,
-        lr_scheduler: LrSchedule::parse(&preflight_string(advanced, "lrScheduler", "constant")?),
-        lr_warmup_steps: preflight_u32(advanced, "lrWarmupSteps", 0)?,
-        network_type: NetworkType::parse(&preflight_string(advanced, "networkType", "lora")?),
-        decompose_factor: preflight_i32(advanced, "decomposeFactor", -1)?,
-        lora_target_modules,
-        timestep_type: preflight_string(advanced, "timestepType", "sigmoid")?,
-        timestep_bias: preflight_string(advanced, "timestepBias", "balanced")?,
-        loss_type: preflight_string(advanced, "lossType", "mse")?,
-        // Training compute dtype — the primary OOM fix (sc-4887). bf16 halves the
-        // activation working set and drops the 1024² z-image first-step peak 135 → ~44 GB,
-        // so the run survives. This mapping builds the engine config field-by-field (no
-        // `..Default::default()`), so the engine's "bf16" default never reaches here — it
-        // MUST be set explicitly. Sourced from the advanced `mixedPrecision` key (presets
-        // already carry "bf16"); the engine only supports bf16/f32, so anything else
-        // (incl. "fp16", "no", empty) normalizes to "f32". Absent → "bf16" (keep the fix on).
-        train_dtype: normalize_train_dtype(&preflight_string(advanced, "mixedPrecision", "bf16")?),
-        // Honor the "Gradient Checkpointing" UI checkbox on the Rust path (sc-4881) — an
-        // extra lever for smaller machines / higher resolution on top of the bf16 fix.
-        // Previously dropped here, so the engine always ran at its `false` default. Absent
-        // (legacy payloads) preserves that default.
-        //
-        // Full fine-tunes do not silently clear this value. Platform-effective metadata seeds
-        // `false`, and the shared dry/real preflight rejects a forged `true` plan before load.
-        gradient_checkpointing: preflight_bool(advanced, "gradientCheckpointing", false)?,
-        full_finetune,
+        lr_scheduler: LrSchedule::parse(&resolved.lr_scheduler),
+        network_type: NetworkType::parse(&resolved.network_type),
         trigger_word: config.trigger_word.clone(),
-        // sc-5637 — preview-sample cadence. The SceneWorks config + UI always supply these (presets
-        // set `sampleEvery`/`sampleSteps`/`sampleGuidanceScale`; the submit derives `samplePrompts`
-        // from the trigger word), but the engine config is built field-by-field (no `..Default`), so
-        // they must be mapped explicitly or the family trainer never samples. Absent `sampleEvery`
-        // (legacy payloads) → 0 → sampling stays off, exactly as before this fix.
-        sample_every: preflight_u32(advanced, "sampleEvery", 0)?,
-        sample_steps: preflight_u32(advanced, "sampleSteps", 20)?,
-        sample_guidance_scale: preflight_f32(advanced, "sampleGuidanceScale", 1.0)?,
-        // Preserve family-specific options instead of collapsing them into the common scalar
-        // fields above. Native trainers parse only the keys they own and reject unsupported modes.
+        // The untouched authored options remain the family/provider's input snapshot.
         model_options: advanced.clone(),
-        // Preserve submitted resume intent. Each backend either implements it or the shared
-        // dry/real preflight rejects it before any model load.
-        resume: preflight_bool(advanced, "resume", false)?,
-        // Epic 2123 weight noising (sc-24826). Absent ⇒ 0 ⇒ off, so legacy plans train exactly as
-        // before. A malformed / out-of-range value never reaches here: the shared dry/real
-        // preflight (`preflight_weight_noise_sigma`) refuses it first.
-        weight_noise_sigma: preflight_bounded_f64(
-            advanced,
-            WEIGHT_NOISE_SIGMA_KEY,
-            WEIGHT_NOISE_SIGMA_MAX,
-            0.0,
-        )? as f32,
-        // Epic 2123 gradient noise (sc-24827). Absent eta ⇒ 0 ⇒ off; absent gamma ⇒ the upstream
-        // 0.55. Malformed / out-of-range values are refused by the shared preflight first.
-        gradient_noise_eta: preflight_bounded_f64(
-            advanced,
-            GRADIENT_NOISE_ETA_KEY,
-            GRADIENT_NOISE_ETA_MAX,
-            0.0,
-        )? as f32,
-        gradient_noise_gamma: preflight_bounded_f64(
-            advanced,
-            GRADIENT_NOISE_GAMMA_KEY,
-            GRADIENT_NOISE_GAMMA_MAX,
-            GRADIENT_NOISE_GAMMA_DEFAULT,
-        )? as f32,
-        // Epic 2123 multi-resolution buckets (sc-2127). Absent ⇒ empty ⇒ off (one bucket at
-        // `resolution`, exactly as before).
         resolution_buckets: map_resolution_buckets(advanced),
         aspect_ratio_buckets: map_aspect_ratio_buckets(advanced),
-        cache_latents: preflight_bool(advanced, "cacheLatents", true)?,
-        cache_text_embeddings: preflight_bool(advanced, "cacheTextEmbeddings", true)?,
-        // Preserve explicit caps, including invalid present values for the engine's validation:
-        // zero bytes and a non-finite fraction refuse rather than silently disabling a caller cap.
-        memory_limit_bytes: technique_value(advanced, "memoryLimitBytes").map(|value| {
-            value
-                .as_u64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-                .unwrap_or(0)
-        }),
-        memory_limit_fraction: technique_value(advanced, "memoryLimitFraction").map(|value| {
-            // Check the source value before f32 conversion: a fraction just above 1 can round
-            // down to 1.0f32 and otherwise bypass the engine's range validation.
-            value
-                .as_f64()
-                .or_else(|| value.as_str()?.trim().parse::<f64>().ok())
-                .filter(|fraction| fraction.is_finite() && *fraction > 0.0 && *fraction <= 1.0)
-                .map(|fraction| fraction as f32)
-                .filter(|fraction| *fraction > 0.0)
-                .unwrap_or(f32::NAN)
-        }),
-        // Epic 2123 depth anchoring (sc-2125) starts off here; `apply_depth_anchoring` (which owns
-        // the strict parse and the auxiliary-model resolution, and so can fail) fills it in when
-        // the plan enables it.
+        // Installed auxiliary models and provider-native structures remain local.
         depth_anchoring: Default::default(),
         perceptual_decoder_dir: None,
-        // Epic 2123 body losses (sc-24832) start off here; `apply_body_losses` fills them in.
         body_losses: Default::default(),
-        // Epic 2123 face losses (sc-24831) likewise start off; `apply_face_losses` fills them in.
         identity_loss: Default::default(),
         face_landmark_loss: Default::default(),
         face_analysis_dir: None,
-        // Epic 2123 subject-masked loss (sc-24828) is resolved by `training_request_from_plan`,
-        // whose fallible reader refuses malformed weights instead of defaulting them to off.
         subject_mask_loss: None,
-        // Epic 2123 latent-space perceptual losses (sc-24833) start off here;
-        // `apply_latent_perceptual` fills them in when the plan enables them.
         vae_anchor: Default::default(),
         latent_lpips: Default::default(),
-        // The de-distill training adapter (sc-25213) starts off here; `apply_training_adapter`
-        // (which owns the strict parse and the installed-file resolution, and so can fail) fills
-        // it in when the plan names one.
         training_adapter: None,
-        // ControlNet control type (sc-10163) — set by a control-branch target's `advanced.controlType`
-        // (e.g. "pose"); absent for LoRA/LoKr targets ⇒ None. Drives the control trainer's overlay
-        // `kind` metadata and is required by its validate; ignored by LoRA trainers.
-        control_type: advanced
-            .get("controlType")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        // sc-8671 — the engine renders one preview per prompt, capped at `sampleCount` (default 4 =
-        // the historical fixed `[:4]` cap). The UI always supplies `samplePrompts` (prefilled from the
-        // trigger phrase); an absent/empty pool ⇒ no previews, exactly as before (sampling is gated by
-        // `sampleEvery` anyway). The pool is truncated, never padded — to get more previews, add prompts.
-        sample_prompts: {
-            let pool = advanced
-                .get("samplePrompts")
-                .and_then(Value::as_array)
-                .map(|values| {
-                    values
-                        .iter()
-                        .filter_map(|value| value.as_str())
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .map(str::to_owned)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            resolve_sample_prompts(
-                pool,
-                preflight_u32(advanced, "sampleCount", DEFAULT_SAMPLE_COUNT)?,
-            )
-        },
+        weight_decay: resolved.weight_decay,
+        lr_warmup_steps: resolved.lr_warmup_steps,
+        decompose_factor: resolved.decompose_factor,
+        lora_target_modules: resolved.lora_target_modules,
+        timestep_type: resolved.timestep_type,
+        timestep_bias: resolved.timestep_bias,
+        loss_type: resolved.loss_type,
+        train_dtype: resolved.train_dtype,
+        gradient_checkpointing: resolved.gradient_checkpointing,
+        full_finetune: resolved.full_finetune,
+        sample_every: resolved.sample_every,
+        sample_steps: resolved.sample_steps,
+        sample_guidance_scale: resolved.sample_guidance_scale,
+        resume: resolved.resume,
+        weight_noise_sigma: resolved.weight_noise_sigma,
+        gradient_noise_eta: resolved.gradient_noise_eta,
+        gradient_noise_gamma: resolved.gradient_noise_gamma,
+        cache_latents: resolved.cache_latents,
+        cache_text_embeddings: resolved.cache_text_embeddings,
+        memory_limit_bytes: resolved.memory_limit_bytes,
+        memory_limit_fraction: resolved.memory_limit_fraction,
+        control_type: resolved.control_type,
+        sample_prompts: resolved.sample_prompts,
     })
 }
 
@@ -2898,7 +2727,7 @@ fn map_training_config(
 /// training at one resolution.
 #[cfg(native_lane)]
 fn map_resolution_buckets(advanced: &JsonObject) -> Vec<gen_core::ResolutionBucket> {
-    match parse_resolution_bucket_config(advanced) {
+    match parse_training_bucket_config(advanced) {
         Ok(None | Some(ResolutionBucketConfig::AspectRatio(_))) => Vec::new(),
         Ok(Some(ResolutionBucketConfig::Legacy(buckets))) => buckets
             .into_iter()
@@ -2918,25 +2747,7 @@ fn map_resolution_buckets(advanced: &JsonObject) -> Vec<gen_core::ResolutionBuck
 /// data fails closed even if a caller bypasses the shared plan preflight.
 #[cfg(native_lane)]
 fn map_aspect_ratio_buckets(advanced: &JsonObject) -> Vec<gen_core::AspectRatioBucket> {
-    // Preserve main's explicit rectangular key alongside the canonical product key. Two present
-    // forms are ambiguous, so refuse rather than silently discarding either caller's geometry.
-    if let Some(value) = technique_value(advanced, "aspectRatioBuckets") {
-        if technique_value(advanced, "resolutionBuckets").is_some() {
-            return vec![gen_core::AspectRatioBucket {
-                width: 0,
-                height: 0,
-                repeats: 0,
-            }];
-        }
-        return serde_json::from_value(value.clone()).unwrap_or_else(|_| {
-            vec![gen_core::AspectRatioBucket {
-                width: 0,
-                height: 0,
-                repeats: 0,
-            }]
-        });
-    }
-    match parse_resolution_bucket_config(advanced) {
+    match parse_training_bucket_config(advanced) {
         Ok(None | Some(ResolutionBucketConfig::Legacy(_))) => Vec::new(),
         Ok(Some(ResolutionBucketConfig::AspectRatio(buckets))) => buckets
             .into_iter()
@@ -2952,19 +2763,6 @@ fn map_aspect_ratio_buckets(advanced: &JsonObject) -> Vec<gen_core::AspectRatioB
             repeats: 0,
         }],
     }
-}
-
-/// Default number of preview images rendered per sample step when the plan doesn't set
-/// `advanced.sampleCount`. Matches the four default prompts the UI prefills, so legacy payloads
-/// preview exactly as before this knob existed (sc-8671).
-#[cfg(native_lane)]
-const DEFAULT_SAMPLE_COUNT: u32 = 4;
-
-/// Cap a prompt pool at `count` (one preview per prompt, truncated — never padded). An empty pool or
-/// `count == 0` yields no samples (sampling stays off). The UI owns the default prompts (sc-8671).
-#[cfg(native_lane)]
-fn resolve_sample_prompts(pool: Vec<String>, count: u32) -> Vec<String> {
-    pool.into_iter().take(count as usize).collect()
 }
 
 /// Whether the candle (Windows/CUDA + Linux/NVIDIA) backend MUST run this family with gradient
@@ -3033,26 +2831,11 @@ fn finalize_training_config(mut config: TrainingConfig, plan: &TrainingPlan) -> 
         }
     }
     if plan.target.kernel == "moss_image_lora" {
-        if plan
-            .config
-            .advanced
-            .get("timestepType")
-            .and_then(Value::as_str)
-            .is_none_or(|value| value.trim().is_empty())
-        {
-            config.timestep_type = "moss_stage3_v1".to_owned();
-        }
-        config.model_options = plan
-            .config
-            .advanced
-            .get("modelOptions")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
-        config
-            .model_options
-            .entry("vae_posterior".to_owned())
-            .or_insert_with(|| json!("posterior_mean_v1"));
+        config.timestep_type = sceneworks_core::training::moss_timestep_type(
+            &plan.config.advanced,
+            config.timestep_type,
+        );
+        config.model_options = sceneworks_core::training::moss_model_options(&plan.config.advanced);
     }
     config
 }
@@ -7009,12 +6792,14 @@ mod tests {
         for value in [json!(1.00000001), json!("1.00000001")] {
             config.advanced.insert("memoryLimitFraction".into(), value);
             assert!(map_training_config(&config)
-                .expect("valid mapped training config")
-                .memory_limit_fraction
-                .unwrap()
-                .is_nan());
+                .unwrap_err()
+                .to_string()
+                .contains("memoryLimitFraction"));
         }
 
+        config
+            .advanced
+            .insert("memoryLimitFraction".into(), json!(0.75));
         config
             .advanced
             .insert("memoryLimitBytes".into(), json!("9876543210"));
@@ -7031,10 +6816,10 @@ mod tests {
         config
             .advanced
             .insert("memoryLimitFraction".into(), json!("invalid"));
-        let invalid = map_training_config(&config).expect("valid mapped training config");
-        assert_eq!(invalid.aspect_ratio_buckets[0].width, 0);
-        assert_eq!(invalid.memory_limit_bytes, Some(0));
-        assert!(invalid.memory_limit_fraction.unwrap().is_nan());
+        assert!(map_training_config(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("memoryLimitBytes"));
     }
 
     /// sc-2127 (epic 2123 E3): the shared dry/real preflight refuses a malformed bucket list, and
