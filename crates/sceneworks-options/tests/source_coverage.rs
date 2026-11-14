@@ -167,6 +167,19 @@ fn helper_key(name: &str) -> Option<usize> {
     }
 }
 
+// Routing helpers accept a JSON object name and a child key. Their call sites are option
+// reads whenever the object name is `advanced`, even though the helper definition uses a
+// generic `object_key` parameter and never spells `advanced` itself.
+fn nested_helper_key(name: &str) -> Option<usize> {
+    match name {
+        "has_nonempty_nested_array"
+        | "has_nonempty_or_malformed_nested_array"
+        | "has_nonnull_or_malformed_nested_carrier"
+        | "has_malformed_optional_nested_number" => Some(2),
+        _ => None,
+    }
+}
+
 struct Scanner<'a> {
     file: &'a str,
     function: String,
@@ -302,6 +315,7 @@ impl Scanner<'_> {
                 "training_job_is_candle_eligible"
                     | "moss_training_plan_is_supported"
                     | "training_plan_is_lokr"
+                    | "apply_training_retry_resume"
             )
         {
             self.location = "training.config.advanced";
@@ -527,6 +541,31 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         if !production(&expr.attrs) {
             return;
         }
+        if matches!(expr.method.to_string().as_str(), "pointer" | "pointer_mut") {
+            if let Some(path) = expr.args.first().and_then(|arg| self.strings(arg)) {
+                for path in path {
+                    let parts: Vec<_> = path.split('/').collect();
+                    if let Some(index) = parts.iter().position(|part| *part == "advanced") {
+                        let Some(key) = parts.get(index + 1).filter(|key| !key.is_empty()) else {
+                            continue;
+                        };
+                        let location = if self.location == "training.config.advanced"
+                            || (index > 1 && parts[index - 1] == "config")
+                        {
+                            "training.config.advanced"
+                        } else {
+                            "advanced"
+                        };
+                        self.coverage.reads.insert(Read {
+                            file: self.file.into(),
+                            function: self.function.clone(),
+                            location,
+                            key: key.replace("~1", "/").replace("~0", "~"),
+                        });
+                    }
+                }
+            }
+        }
         if self.map(&expr.receiver) {
             match expr.method.to_string().as_str() {
                 "get" | "get_mut" | "get_key_value" | "contains_key" => {
@@ -599,12 +638,25 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
             return;
         }
         if let Some(called) = name(&expr.func) {
-            let called = self.imports.get(&called).unwrap_or(&called);
+            let called = self.imports.get(&called).cloned().unwrap_or(called);
+            if let Some(key_index) = nested_helper_key(&called) {
+                if expr
+                    .args
+                    .iter()
+                    .nth(1)
+                    .and_then(|arg| self.strings(arg))
+                    .is_some_and(|keys| keys == BTreeSet::from(["advanced".into()]))
+                {
+                    if let Some(key) = expr.args.iter().nth(key_index) {
+                        self.read(key);
+                    }
+                }
+            }
             if let Some(index) = self
                 .closures
-                .get(called)
+                .get(&called)
                 .copied()
-                .or_else(|| helper_key(called))
+                .or_else(|| helper_key(&called))
             {
                 let qualified_advanced = matches!(unwrapped(&expr.func), Expr::Path(it)
                     if it.path.segments.iter().any(|part| part.ident == "advanced"));
@@ -621,7 +673,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
                     );
                 if qualified_advanced
                     || request_helper
-                    || self.closures.contains_key(called)
+                    || self.closures.contains_key(&called)
                     || expr.args.first().is_some_and(|arg| self.map(arg))
                 {
                     if let Some(key) = expr.args.iter().nth(index) {
@@ -902,6 +954,9 @@ fn injecting_an_unseen_production_key_fails_coverage() {
         r#"advanced::f32(&request.advanced, "__unseen_production_option__", 0.0);"#,
         r#"let alias = &request.advanced; let alias = alias.clone(); alias.get("__unseen_production_option__");"#,
         r#"payload.get("advanced").and_then(Value::as_object).and_then(|knobs| knobs.get("__unseen_production_option__"));"#,
+        r#"has_nonempty_nested_array(payload, "advanced", "__unseen_production_option__");"#,
+        r#"has_nonnull_or_malformed_nested_carrier(payload, "advanced", "__unseen_production_option__");"#,
+        r#"payload.pointer("/advanced/__unseen_production_option__");"#,
     ] {
         let coverage = fixture(&format!(
             "fn production() {{ {body} }} #[cfg(test)] mod tests {{}}"
@@ -911,6 +966,12 @@ fn injecting_an_unseen_production_key_fails_coverage() {
     assert_eq!(
         fixture("fn production(key: &str) { advanced.get(key); }")
             .dynamic
+            .len(),
+        1
+    );
+    assert_eq!(
+        fixture("fn production() { let knobs = &request.advanced; for value in knobs.values() { consume(value); } }")
+            .whole_map_reads
             .len(),
         1
     );
