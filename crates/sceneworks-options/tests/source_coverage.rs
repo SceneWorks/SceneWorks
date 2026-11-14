@@ -119,6 +119,7 @@ struct Coverage {
     whole_map_reads: BTreeSet<(String, String, String)>,
     nested_reads: BTreeSet<(String, String, String)>,
     mutations: BTreeSet<(String, String, String)>,
+    trusted_aux_constructor_calls: BTreeSet<(String, String)>,
     domains: BTreeMap<String, BTreeSet<String>>,
 }
 
@@ -799,6 +800,11 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         }
         if let Some(called) = name(&expr.func) {
             let called = self.imports.get(&called).cloned().unwrap_or(called);
+            if called == "from_trusted_dispatch" {
+                self.coverage
+                    .trusted_aux_constructor_calls
+                    .insert((self.file.into(), self.function.clone()));
+            }
             if let Some(index) = training_technique_map_arg(&called) {
                 if expr.args.iter().nth(index).is_some_and(|arg| self.map(arg)) {
                     self.coverage.whole_map_reads.insert((
@@ -1226,6 +1232,19 @@ fn native_training_technique_calls_remain_visible_as_raw_map_reads() {
 }
 
 #[test]
+fn portable_owner_gate_requires_each_module_to_be_reviewed() {
+    assert!(portable_owner_module(
+        "crates/sceneworks-options/src/h3_veda.rs"
+    ));
+    assert!(!portable_owner_module(
+        "crates/sceneworks-options/src/new_execution_reader.rs"
+    ));
+    assert!(!portable_owner_module(
+        "crates/sceneworks-core/src/h3_veda.rs"
+    ));
+}
+
+#[test]
 fn advanced_index_writes_are_not_execution_reads() {
     let coverage = fixture(
         r#"fn production() {
@@ -1366,10 +1385,46 @@ fn dynamic_reason(file: &str, function: &str, expression: &str) -> Option<&'stat
             Some("schedule destructures the caller's four-key array; the owning TECHNIQUE_KEYS table is checked"),
         ("crates/sceneworks-options/src/training_validation/iris.rs", "validate_micro_steps", "field") =>
             Some("IRIS_MICRO_STEP_FIELDS selects sampleEvery/lrWarmupSteps from advanced; steps/saveEvery are top-level config fields"),
-        ("crates/sceneworks-core/src/image_request/flux3.rs", "parse", "key") =>
-            Some("legacy FLUX.3 parser delegates only the six literal noise-strength keys in parse_with_advanced"),
         _ => None,
     }
+}
+
+// These are the reviewed portable owner modules that parse, validate, or lower authored options.
+// Declaration coverage above still checks every read in them. A new module must be reviewed and
+// added here explicitly before its reads can be excluded from the native execution-consumer gate.
+fn portable_owner_module(file: &str) -> bool {
+    matches!(
+        file,
+        "crates/sceneworks-options/src/h3_veda.rs"
+            | "crates/sceneworks-options/src/image_limits.rs"
+            | "crates/sceneworks-options/src/image_request.rs"
+            | "crates/sceneworks-options/src/image_request/flux3.rs"
+            | "crates/sceneworks-options/src/image_sampling_controls.rs"
+            | "crates/sceneworks-options/src/limits.rs"
+            | "crates/sceneworks-options/src/moss_advanced.rs"
+            | "crates/sceneworks-options/src/moss_validation.rs"
+            | "crates/sceneworks-options/src/payload_util.rs"
+            | "crates/sceneworks-options/src/prompt_enhancement.rs"
+            | "crates/sceneworks-options/src/request_validation.rs"
+            | "crates/sceneworks-options/src/request_validation/shape.rs"
+            | "crates/sceneworks-options/src/sensenova_validation.rs"
+            | "crates/sceneworks-options/src/supra2.rs"
+            | "crates/sceneworks-options/src/training_validation.rs"
+            | "crates/sceneworks-options/src/training_validation/body_losses.rs"
+            | "crates/sceneworks-options/src/training_validation/depth_anchoring.rs"
+            | "crates/sceneworks-options/src/training_validation/face_losses.rs"
+            | "crates/sceneworks-options/src/training_validation/flux3.rs"
+            | "crates/sceneworks-options/src/training_validation/iris.rs"
+            | "crates/sceneworks-options/src/training_validation/iris/curricula.rs"
+            | "crates/sceneworks-options/src/training_validation/iris/depth.rs"
+            | "crates/sceneworks-options/src/training_validation/iris/restore.rs"
+            | "crates/sceneworks-options/src/training_validation/latent_perceptual.rs"
+            | "crates/sceneworks-options/src/training_validation/training_adapter.rs"
+            | "crates/sceneworks-options/src/utility_validation.rs"
+            | "crates/sceneworks-options/src/validate.rs"
+            | "crates/sceneworks-options/src/video_eligibility.rs"
+            | "crates/sceneworks-options/src/video_request.rs"
+    )
 }
 
 #[test]
@@ -1477,6 +1532,18 @@ fn production_execution_has_no_raw_advanced_reads() {
     let binding_boundary = |file: &str, function: &str| {
         file == "crates/sceneworks-core/src/resolved_options.rs"
             && matches!(function, "from_payload_syntax" | "from_plan_syntax")
+    };
+    let trusted_aux_parser = |read: &Read| {
+        read.file == "crates/sceneworks-core/src/portable_aux_bindings.rs"
+            && read.function == "from_trusted_dispatch"
+            && read.location == "advanced"
+            && matches!(
+                read.key.as_str(),
+                "__portableAuxPaths"
+                    | "__portableBoundTier"
+                    | "__portableFrozenSources"
+                    | "__portableGemmaFiles"
+            )
     };
     // These exact clones write authored options into asset receipts. The functions only add
     // resolved telemetry and return the resulting settings object; no route or engine input reads
@@ -1602,12 +1669,14 @@ fn production_execution_has_no_raw_advanced_reads() {
         .reads
         .iter()
         .filter(|read| {
-            !binding_boundary(&read.file, &read.function)
+            !portable_owner_module(&read.file)
+                && !binding_boundary(&read.file, &read.function)
                 && !authored_workflow_read(read)
                 && !persisted_film_attempt_read(read)
                 && !authored_image_metadata_read(read)
                 && !trusted_control_weights_write(read)
                 && !authored_control_weights_scrub(read)
+                && !trusted_aux_parser(read)
         })
         .map(|read| {
             format!(
@@ -1618,26 +1687,34 @@ fn production_execution_has_no_raw_advanced_reads() {
     let dynamic = coverage
         .dynamic
         .iter()
+        .filter(|(file, _, _)| !portable_owner_module(file))
         .map(|(file, function, expr)| format!("{file}::{function} dynamic {expr}"));
     let delegated = coverage
         .delegated
         .iter()
+        .filter(|(file, _, _)| !portable_owner_module(file))
         .map(|(file, function, expr)| format!("{file}::{function} delegated {expr}"));
     let whole_map = coverage
         .whole_map_reads
         .iter()
         .filter(|(file, function, expression)| {
-            !authored_receipt_clone(file, function, expression)
+            !portable_owner_module(file)
+                && !authored_receipt_clone(file, function, expression)
                 && !resize_mode_authoring_stamp(file, function, expression)
+                && !(file == "crates/sceneworks-core/src/resolved_options.rs"
+                    && matches!(function.as_str(), "bind" | "for_config" | "from_effective")
+                    && (expression == "whole advanced map: clone"
+                        || expression.starts_with("delegated training technique: ")))
         })
         .map(|(file, function, expr)| format!("{file}::{function} {expr}"));
     let nested = coverage
         .nested_reads
         .iter()
         .filter(|(file, function, expression)| {
-            !(file == "crates/sceneworks-core/src/workflow_parameters.rs"
-                && function == "settings_line"
-                && expression == "nested advanced JSON: iter")
+            !portable_owner_module(file)
+                && !(file == "crates/sceneworks-core/src/workflow_parameters.rs"
+                    && function == "settings_line"
+                    && expression == "nested advanced JSON: iter")
         })
         .map(|(file, function, expr)| format!("{file}::{function} {expr}"));
     let remaining: Vec<_> = direct
@@ -1791,6 +1868,24 @@ fn raw_option_map_mutations_have_reviewed_sites() {
     .map(|(file, function, expression)| (file.into(), function.into(), expression.into()))
     .collect();
     assert_eq!(coverage.mutations, expected);
+}
+
+#[test]
+fn only_verified_worker_guard_constructs_portable_aux_bindings() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let coverage = scan(&source_files(root));
+    assert_eq!(
+        coverage.trusted_aux_constructor_calls,
+        BTreeSet::from([(
+            "crates/sceneworks-worker/src/external_library_runtime.rs".to_owned(),
+            "begin_with_binding_cancelable".to_owned(),
+        )]),
+        "Only the verified RuntimeSourceGuard may lower private auxiliary route stamps"
+    );
 }
 
 // A small lexical guard keeps Rust-only CI independent of Node/npm. It recognizes

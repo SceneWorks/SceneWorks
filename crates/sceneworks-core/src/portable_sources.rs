@@ -159,23 +159,30 @@ pub fn selected_training_aux_models(
     plan: &crate::training::TrainingPlan,
     engine_id: &str,
 ) -> Result<Vec<&'static crate::training::depth_anchoring::AuxTrainingModel>, String> {
-    use crate::training::{
-        body_losses, depth_anchoring, face_losses, latent_perceptual, training_adapter,
-    };
+    let options = crate::resolved_options::TrainingExecutionOptions::for_config(
+        &plan.config,
+        &plan.target.kernel,
+        &plan.target.base_model,
+    )?;
+    selected_training_aux_models_resolved(&options, engine_id)
+}
+
+pub fn selected_training_aux_models_resolved(
+    options: &crate::resolved_options::TrainingExecutionOptions,
+    engine_id: &str,
+) -> Result<Vec<&'static crate::training::depth_anchoring::AuxTrainingModel>, String> {
+    use crate::training::{body_losses, depth_anchoring, face_losses, latent_perceptual};
     use depth_anchoring::{AuxTrainingModel, X0DecoderSource};
-    let advanced = &plan.config.advanced;
     let mut models: Vec<&'static AuxTrainingModel> = Vec::new();
     let mut need_decoder = false;
-    if let Some(depth) =
-        depth_anchoring::depth_anchoring_settings(advanced).map_err(|error| error.to_string())?
-    {
+    if let Some(depth) = &options.depth_anchoring {
         need_decoder = true;
         models.push(
             depth_anchoring::depth_anything_v2_model(depth.model)
                 .ok_or_else(|| format!("unknown Depth Anything V2 size {}", depth.model))?,
         );
     }
-    let body = body_losses::body_loss_settings(advanced).map_err(|error| error.to_string())?;
+    let body = &options.body_losses;
     if body.any_enabled() {
         need_decoder = true;
         models.push(&body_losses::VITPOSE_PLUS_BASE_MODEL);
@@ -187,33 +194,23 @@ pub fn selected_training_aux_models(
             }
         }
     }
-    if latent_perceptual::latent_loss_settings(&latent_perceptual::VAE_ANCHOR, advanced)
-        .map_err(|error| error.to_string())?
-        .is_some()
-    {
+    if options.vae_anchor.is_some() {
         need_decoder = true;
         models.push(&latent_perceptual::FLUX2_VAE_MODEL);
     }
-    if latent_perceptual::latent_loss_settings(&latent_perceptual::LATENT_LPIPS, advanced)
-        .map_err(|error| error.to_string())?
-        .is_some()
-    {
+    if options.latent_lpips.is_some() {
         models.push(
             latent_perceptual::latent_lpips_model_for_trainer(engine_id)
                 .ok_or_else(|| format!("{engine_id} has no E-LatentLPIPS model"))?,
         );
     }
-    let identity =
-        face_losses::identity_loss_settings(advanced).map_err(|error| error.to_string())?;
-    let landmark =
-        face_losses::face_landmark_loss_settings(advanced).map_err(|error| error.to_string())?;
-    if identity.is_some() || landmark.is_some() {
+    if options.identity_loss.is_some() || options.face_landmark_loss.is_some() {
         need_decoder = true;
         models.push(&face_losses::FACE_STACK_SCRFD);
-        if identity.is_some() {
+        if options.identity_loss.is_some() {
             models.push(&face_losses::FACE_STACK_ARCFACE);
         }
-        if landmark.is_some() {
+        if options.face_landmark_loss.is_some() {
             models.push(&face_losses::FACEMESH_V2_MODEL);
         }
     }
@@ -225,9 +222,7 @@ pub fn selected_training_aux_models(
             X0DecoderSource::BaseModelVae => {}
         }
     }
-    if let Some(model) =
-        training_adapter::training_adapter_model(advanced).map_err(|error| error.to_string())?
-    {
+    if let Some(model) = options.training_adapter {
         models.push(model);
     }
     models.sort_by_key(|model| (model.id, model.file));

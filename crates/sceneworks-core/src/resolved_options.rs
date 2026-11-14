@@ -638,6 +638,7 @@ impl ValidatedModelOptionsWire {
 pub struct TrainingExecutionOptions {
     pub common: crate::training::ResolvedTrainingAdvanced,
     pub iris: IrisTrainingOptions,
+    pub ltx_workflow: Option<Bound<String>>,
     pub subject_mask_loss_weights: Option<(f64, f64)>,
     pub depth_anchoring: Option<crate::training::depth_anchoring::DepthAnchoringSettings>,
     pub body_losses: crate::training::body_losses::BodyLossSettings,
@@ -677,7 +678,7 @@ impl TrainingExecutionOptions {
             .unwrap_or("");
         let common = crate::training::resolve_advanced_for_model(advanced, kernel, base_model)
             .map_err(|error| error.to_string())?;
-        Self::from_effective(authored, effective, advanced, common)
+        Self::from_effective(authored, effective, advanced, kernel, common)
     }
 
     /// Preview and Iris helpers sometimes have a validated bare config rather than a plan.
@@ -711,13 +712,14 @@ impl TrainingExecutionOptions {
         let advanced = effective["config"]["advanced"]
             .as_object()
             .expect("constructed training advanced object");
-        Self::from_effective(&authored, &effective, advanced, common)
+        Self::from_effective(&authored, &effective, advanced, kernel, common)
     }
 
     fn from_effective(
         authored: &JsonObject,
         effective: &JsonObject,
         advanced: &JsonObject,
+        kernel: &str,
         common: crate::training::ResolvedTrainingAdvanced,
     ) -> Result<Self, String> {
         let iris = IrisTrainingOptions::bind(&BindingInput::new(authored, effective))
@@ -726,6 +728,9 @@ impl TrainingExecutionOptions {
         Ok(Self {
             common,
             iris,
+            ltx_workflow: BindingInput::new(authored, effective)
+                .text("training.config.advanced", "ltxWorkflow")
+                .map_err(|error| error.to_string())?,
             subject_mask_loss_weights: crate::training::subject_mask_loss_weights(advanced)
                 .map_err(technique_error)?,
             depth_anchoring: crate::training::depth_anchoring::depth_anchoring_settings(advanced)
@@ -749,7 +754,14 @@ impl TrainingExecutionOptions {
             training_adapter: crate::training::training_adapter::training_adapter_model(advanced)
                 .map_err(technique_error)?,
             buckets: crate::training::parse_training_bucket_config(advanced)?,
-            model_options_wire: ValidatedModelOptionsWire(advanced.clone()),
+            model_options_wire: ValidatedModelOptionsWire(
+                crate::training::training_model_options_wire(
+                    BindingInput::parent(authored, "training.config.advanced").ok_or_else(
+                        || "authored training request has no config.advanced object".to_owned(),
+                    )?,
+                    kernel,
+                ),
+            ),
         })
     }
 }
@@ -1427,5 +1439,39 @@ mod tests {
             let bound = IrisTrainingOptions::bind(&BindingInput::new(&payload, &payload)).unwrap();
             assert_eq!(bound.full_activation_checkpointing, full, "{mode}");
         }
+    }
+
+    #[test]
+    fn training_family_wire_and_flux3_defaults_match_source_profiles() {
+        let empty = JsonObject::new();
+        let flux3 = crate::training::resolve_advanced_for_model(
+            &empty,
+            "flux3_klein_lora",
+            "flux3_klein_base",
+        )
+        .unwrap();
+        assert_eq!(flux3.timestep_type, "uniform");
+        assert_eq!(flux3.weight_decay, 0.0001);
+        assert_eq!(
+            crate::training::training_model_options_wire(&empty, "flux3_klein_lora"),
+            obj(json!({"flux3":{"mode":"captioned"}}))
+        );
+        let authored = obj(json!({
+            "resume": true,
+            "flux3": {"mode":"edit", "caption_dropout":0.2},
+            "unrelated": "ignored"
+        }));
+        assert_eq!(
+            crate::training::training_model_options_wire(&authored, "flux3_klein_edit_lora"),
+            obj(json!({"flux3":{"mode":"edit","caption_dropout":0.2}}))
+        );
+        assert_eq!(
+            crate::training::training_model_options_wire(&empty, "moss_image_lora"),
+            obj(json!({"vae_posterior":"posterior_mean_v1"}))
+        );
+        assert_eq!(
+            crate::training::training_model_options_wire(&authored, "iris_train"),
+            authored
+        );
     }
 }

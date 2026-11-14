@@ -79,9 +79,16 @@ pub fn parse(payload: &JsonObject) -> Result<ReferenceRequest, String> {
     parse_with_carriers(
         payload,
         |key| {
-            advanced
-                .and_then(|advanced| advanced.get(key))
-                .is_some_and(|value| !value.is_null())
+            let value = advanced.and_then(|advanced| match key {
+                "strength" => advanced.get("strength"),
+                "referenceStrength" => advanced.get("referenceStrength"),
+                "denoisingStrength" => advanced.get("denoisingStrength"),
+                "imageStrength" => advanced.get("imageStrength"),
+                "ip_adapter_scale" => advanced.get("ip_adapter_scale"),
+                "ipAdapterScale" => advanced.get("ipAdapterScale"),
+                _ => None,
+            });
+            value.is_some_and(|value| !value.is_null())
         },
         || {
             parse_reference_ids_wire(

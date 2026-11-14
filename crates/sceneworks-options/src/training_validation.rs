@@ -2292,6 +2292,20 @@ pub fn resolve_advanced_for_model(
     kernel: &str,
     base_model: &str,
 ) -> Result<ResolvedTrainingAdvanced, ValidationRefusal> {
+    // FLUX.3's native trainer has a source profile whose omitted advanced controls must be
+    // resolved before the generic engine fields are mapped. Keep the same default owner for API,
+    // worker, and preview callers rather than seeding a second copy at worker dispatch.
+    let seeded;
+    let advanced = if flux3::KERNELS.contains(&kernel) {
+        seeded = {
+            let mut defaults = flux3::target(kernel == flux3::KERNELS[1]).defaults.advanced;
+            defaults.extend(advanced.clone());
+            defaults
+        };
+        &seeded
+    } else {
+        advanced
+    };
     let mut result = resolve_advanced_for_kernel(advanced, kernel)?;
     result.network_type = network_type_for_model(advanced, kernel, base_model)?;
     result.full_finetune = result.network_type == "full";
@@ -2474,6 +2488,24 @@ pub fn moss_model_options(advanced: &JsonObject) -> JsonObject {
         .entry("vae_posterior".to_owned())
         .or_insert_with(|| json!("posterior_mean_v1"));
     options
+}
+
+/// The native trainer ABI keeps authored provider options, except for two family contracts:
+/// MOSS takes its validated posterior bag, and FLUX.3 keeps only its source-profile namespace so
+/// generic retry controls cannot change a checkpoint identity hash.
+pub fn training_model_options_wire(advanced: &JsonObject, kernel: &str) -> JsonObject {
+    if kernel == "moss_image_lora" {
+        return moss_model_options(advanced);
+    }
+    if flux3::KERNELS.contains(&kernel) {
+        let mut seeded = flux3::target(kernel == flux3::KERNELS[1]).defaults.advanced;
+        seeded.extend(advanced.clone());
+        return seeded
+            .into_iter()
+            .filter(|(key, _)| key == "flux3")
+            .collect();
+    }
+    advanced.clone()
 }
 pub fn moss_timestep_type(advanced: &JsonObject, mapped: String) -> String {
     if advanced

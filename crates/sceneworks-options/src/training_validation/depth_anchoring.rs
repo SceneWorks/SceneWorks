@@ -85,18 +85,25 @@ pub fn depth_anchoring_combination_refusal(
     base_model: &str,
     config: &TrainingConfig,
 ) -> Option<String> {
-    if super::config_is_full_finetune(config) {
+    depth_anchoring_combination_refusal_resolved(
+        base_model,
+        super::config_is_full_finetune(config),
+        config.advanced.get("ltxWorkflow").and_then(Value::as_str),
+    )
+}
+
+pub fn depth_anchoring_combination_refusal_resolved(
+    base_model: &str,
+    full_finetune: bool,
+    ltx_workflow: Option<&str>,
+) -> Option<String> {
+    if full_finetune {
         return Some(
             "Depth anchoring trains a LoRA/LoKr adapter only, not a full fine-tune.".to_owned(),
         );
     }
     if base_model == "ltx_2_5" {
-        let workflow = config
-            .advanced
-            .get("ltxWorkflow")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .unwrap_or_default();
+        let workflow = ltx_workflow.map(str::trim).unwrap_or_default();
         if DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS.contains(&workflow) {
             return Some(format!(
                 "Depth anchoring needs a generated video stream; the LTX-2.5 workflow '{workflow}' \
