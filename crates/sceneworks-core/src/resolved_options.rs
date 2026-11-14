@@ -11,7 +11,7 @@ use serde_json::{Map, Value};
 use crate::contracts::JsonObject;
 use crate::image_request::ControlWeightsFields;
 use crate::video_request::ReferenceImageResizeMode;
-use sceneworks_options::{by_wire, DefaultRule, OptionSpec, Shape};
+use sceneworks_options::{DefaultRule, OptionSpec, Shape, by_wire};
 
 /// How the value reached the effective request. Omission remains distinct from an authored
 /// value that happens to equal the default.
@@ -640,6 +640,7 @@ pub struct TrainingExecutionOptions {
     pub iris: IrisTrainingOptions,
     pub ltx_workflow: Option<Bound<String>>,
     pub subject_mask_loss_weights: Option<(f64, f64)>,
+    pub subject_mask_consumer: Option<&'static str>,
     pub depth_anchoring: Option<crate::training::depth_anchoring::DepthAnchoringSettings>,
     pub body_losses: crate::training::body_losses::BodyLossSettings,
     pub vae_anchor: Option<crate::training::latent_perceptual::LatentLossSettings>,
@@ -725,18 +726,25 @@ impl TrainingExecutionOptions {
         let iris = IrisTrainingOptions::bind(&BindingInput::new(authored, effective))
             .map_err(|error| error.to_string())?;
         let technique_error = |error: crate::training::TrainingPlanError| error.to_string();
+        let subject_mask_loss_weights =
+            crate::training::subject_mask_loss_weights(advanced).map_err(technique_error)?;
+        let body_losses =
+            crate::training::body_losses::body_loss_settings(advanced).map_err(technique_error)?;
+        let subject_mask_consumer = crate::training::subject_mask_consumer_resolved(
+            subject_mask_loss_weights,
+            &body_losses,
+        );
         Ok(Self {
             common,
             iris,
             ltx_workflow: BindingInput::new(authored, effective)
                 .text("training.config.advanced", "ltxWorkflow")
                 .map_err(|error| error.to_string())?,
-            subject_mask_loss_weights: crate::training::subject_mask_loss_weights(advanced)
-                .map_err(technique_error)?,
+            subject_mask_loss_weights,
+            subject_mask_consumer,
             depth_anchoring: crate::training::depth_anchoring::depth_anchoring_settings(advanced)
                 .map_err(technique_error)?,
-            body_losses: crate::training::body_losses::body_loss_settings(advanced)
-                .map_err(technique_error)?,
+            body_losses,
             vae_anchor: crate::training::latent_perceptual::latent_loss_settings(
                 &crate::training::latent_perceptual::VAE_ANCHOR,
                 advanced,
@@ -1090,10 +1098,12 @@ mod tests {
             2.5
         );
         let canonical_only = obj(json!({"advanced":{"schedulerShift":1.25}}));
-        assert!(BindingInput::new(&canonical_only, &canonical_only)
-            .number_exact_alias("advanced", "timestepShift")
-            .unwrap()
-            .is_none());
+        assert!(
+            BindingInput::new(&canonical_only, &canonical_only)
+                .number_exact_alias("advanced", "timestepShift")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1334,9 +1344,11 @@ mod tests {
             None
         );
         let malformed = RouteOptionFacts::from_payload_syntax(&obj(json!({"yue2":{"decoder":7}})));
-        assert!(malformed
-            .artifact_selection(&malformed, Some("yue2"))
-            .is_err());
+        assert!(
+            malformed
+                .artifact_selection(&malformed, Some("yue2"))
+                .is_err()
+        );
         let omitted = RouteOptionFacts::from_payload_syntax(&obj(json!({})));
         let effective_default =
             RouteOptionFacts::from_payload_syntax(&obj(json!({"yue2":{"decoder":"standard"}})));
