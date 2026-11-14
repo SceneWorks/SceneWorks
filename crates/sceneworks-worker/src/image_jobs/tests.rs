@@ -4731,7 +4731,8 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
         candle_stream.contains("memory_strategy_context.as_ref()")
             && candle_stream.contains("generate_one_with_hires_on_surface(")
             && render_source.contains("render_on_surface(")
-            && render_surface.contains("crate::memory_strategy::generate_with_scope_report(")
+            && render_surface
+                .contains("crate::memory_strategy::generate_with_scope_execution_report(")
             && render_surface
                 .contains("            memory_strategy_context,\n            on_progress,"),
         "the selected Krea contract must reach provider safety and lifecycle hooks"
