@@ -1377,7 +1377,7 @@ fn print_production_binding_inventory() {
             || read.file.ends_with("/workflow_share.rs")
         {
             eprintln!(
-                "authored workflow read: {}::{} {}.{}",
+                "scoped read: {}::{} {}.{}",
                 read.file, read.function, read.location, read.key
             );
         }
