@@ -356,6 +356,7 @@ impl Scanner<'_> {
                 "training_job_is_candle_eligible"
                     | "moss_training_plan_is_supported"
                     | "training_plan_is_lokr"
+                    | "from_plan_syntax"
                     | "apply_training_retry_resume"
             )
         {
@@ -582,6 +583,26 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
     }
 
     fn visit_expr_for_loop(&mut self, expr: &'ast syn::ExprForLoop) {
+        // The legacy FLUX.3 authoring parser passes this finite inline key table into a
+        // delegated closure. Keep the dynamic closure read tied to its actual source keys.
+        if self.file.ends_with("/image_request/flux3.rs") && self.function == "parse_with_advanced"
+        {
+            if let Some(keys) = self.strings(&expr.expr) {
+                self.coverage
+                    .domains
+                    .entry(self.file.into())
+                    .or_default()
+                    .extend(keys.clone());
+                for key in keys {
+                    self.coverage.reads.insert(Read {
+                        file: self.file.into(),
+                        function: self.function.clone(),
+                        location: "advanced",
+                        key,
+                    });
+                }
+            }
+        }
         self.visit_expr(&expr.expr);
         let old = self.bindings.clone();
         if self.descendant(&expr.expr) {
@@ -722,6 +743,14 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         }
         if let Some(called) = name(&expr.func) {
             let called = self.imports.get(&called).cloned().unwrap_or(called);
+            // The typed route binder uses a small generic `field(advanced, key, decode)`
+            // parser. Track its literal key just like `advanced.get(key)`; otherwise moving a
+            // raw read into that parser would make the inventory silently shrink.
+            if called == "field" && expr.args.first().is_some_and(|arg| self.map(arg)) {
+                if let Some(key) = expr.args.iter().nth(1) {
+                    self.read(key);
+                }
+            }
             if called == "has_bound_aux_paths" && expr.args.first().is_some_and(|arg| self.map(arg))
             {
                 self.coverage.whole_map_reads.insert((
@@ -1127,6 +1156,21 @@ fn nested_advanced_json_remains_visible_after_aliasing() {
 }
 
 #[test]
+fn generic_typed_boundary_field_calls_remain_in_the_source_inventory() {
+    let coverage = fixture(
+        r#"fn from_payload_syntax(advanced: &JsonObject) {
+            field(advanced, "poses", count);
+            field(advanced, dynamic_key, count);
+        }"#,
+    );
+    assert!(coverage.reads.iter().any(|read| read.key == "poses"));
+    assert!(coverage
+        .dynamic
+        .iter()
+        .any(|(_, _, key)| key == "dynamic_key"));
+}
+
+#[test]
 fn adding_an_unregistered_key_to_a_dynamic_domain_fails_coverage() {
     let path = "crates/sceneworks-core/src/training/body_losses.rs";
     let valid = scan(&[(
@@ -1220,6 +1264,8 @@ fn dynamic_reason(file: &str, function: &str, expression: &str) -> Option<&'stat
             Some("schedule destructures the caller's four-key array; the owning TECHNIQUE_KEYS table is checked"),
         ("crates/sceneworks-core/src/training/iris.rs", "validate_micro_steps", "field") =>
             Some("IRIS_MICRO_STEP_FIELDS selects sampleEvery/lrWarmupSteps from advanced; steps/saveEvery are top-level config fields"),
+        ("crates/sceneworks-core/src/image_request/flux3.rs", "parse", "key") =>
+            Some("legacy FLUX.3 parser delegates only the six literal noise-strength keys in parse_with_advanced"),
         _ => None,
     }
 }
@@ -1303,8 +1349,8 @@ fn print_production_binding_inventory() {
 }
 
 // SW-7038 migration gate. Keep this explicit zero assertion next to the live inventory
-// while family execution paths are converted. Only authored persistence and the historical
-// upgrader may be excluded when those exact source sites are identified and reviewed.
+// while family execution paths are converted. Only the exact one-time typed binder functions,
+// authored persistence, and the historical upgrader may be excluded after site review.
 // No path, directory, option family, or dynamic-accessor blanket exemption is permitted.
 #[test]
 #[ignore = "SW-7038 production binding migration in progress"]
@@ -1315,12 +1361,22 @@ fn production_execution_has_no_raw_advanced_reads() {
         .parent()
         .unwrap();
     let coverage = scan(&source_files(root));
-    let direct = coverage.reads.iter().map(|read| {
-        format!(
-            "{}::{} {}.{}",
-            read.file, read.function, read.location, read.key
-        )
-    });
+    // These exact functions are the one-time typed parser boundary. Their registered keys stay
+    // in the inventory and declaration coverage above, but execution consumers must be empty.
+    let binding_boundary = |file: &str, function: &str| {
+        file == "crates/sceneworks-core/src/resolved_options.rs"
+            && matches!(function, "from_payload_syntax" | "from_plan_syntax")
+    };
+    let direct = coverage
+        .reads
+        .iter()
+        .filter(|read| !binding_boundary(&read.file, &read.function))
+        .map(|read| {
+            format!(
+                "{}::{} {}.{}",
+                read.file, read.function, read.location, read.key
+            )
+        });
     let dynamic = coverage
         .dynamic
         .iter()
