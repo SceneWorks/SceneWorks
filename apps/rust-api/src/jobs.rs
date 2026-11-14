@@ -1680,7 +1680,15 @@ async fn validate_and_canonicalize_merged_generation_payload(
             // model that refuses it, or switch the model out from under a stored block, and only
             // fail at the worker instead of being refused at this creation boundary.
             {
-                let request = sceneworks_core::image_request::ImageRequest::from_payload(&merged);
+                let facts = sceneworks_core::request_validation::facts_for_job(&job_type, &merged);
+                let resolved =
+                    sceneworks_core::request_validation::resolve_request("image", &merged, &facts)
+                        .map_err(ApiError::from)?;
+                let request = sceneworks_core::image_request::ImageRequest::from_resolved(
+                    &merged,
+                    resolved.as_payload(),
+                )
+                .map_err(|error| ApiError::bad_request(error.to_string()))?;
                 let family = merged
                     .get("modelManifestEntry")
                     .and_then(|entry| entry.get("family"))

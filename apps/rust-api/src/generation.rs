@@ -391,11 +391,19 @@ pub(crate) async fn create_image_job(
         // top-level `hiresFix`, so the second pass never ran AND the worker's refusals never fired —
         // a POST for a model that should refuse it returned 201 and failed later (or rendered
         // without the pass). Judged against the FINAL payload (post-preset, with the resolved
-        // dimensions above) and the server-owned manifest entry, and off `from_payload` so the API
-        // and the worker parse the request exactly the same way. Read after the width/height/count
-        // defaults because the 4096-target check needs the resolved geometry.
+        // dimensions above) and the server-owned manifest entry. Bind the same effective typed
+        // options the worker consumes after shared validation; the authored payload stays intact
+        // for persistence. Read after the width/height/count defaults because the 4096-target
+        // check needs the resolved geometry.
         {
-            let request = sceneworks_core::image_request::ImageRequest::from_payload(&job_payload);
+            let resolved =
+                sceneworks_core::request_validation::resolve_request("image", &job_payload, entry)
+                    .map_err(ApiError::from)?;
+            let request = sceneworks_core::image_request::ImageRequest::from_resolved(
+                &job_payload,
+                resolved.as_payload(),
+            )
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
             let family = entry
                 .get("family")
                 .and_then(Value::as_str)

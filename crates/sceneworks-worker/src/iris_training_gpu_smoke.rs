@@ -168,7 +168,7 @@ async fn render_model(
     }
     let job: JobSnapshot = serde_json::from_value(snapshot).expect("render job deserializes");
     let api = ApiClient::new(settings);
-    crate::image_jobs::run_image_generate_job(&api, settings, &job)
+    crate::image_jobs::run_image_generate_job(&api, settings, &job, &Default::default())
         .await
         .unwrap_or_else(|error| panic!("the Iris render {job_id} completes: {error}"));
     let result = posts
