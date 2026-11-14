@@ -226,36 +226,89 @@ export function snapshotDir(hub, repo, revision, paths = path) {
   fact(/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(repo) && SHA.test(revision), "pinned repo/revision required");
   return paths.join(hub, `models--${repo.replace("/", "--")}`, "snapshots", revision);
 }
-const globRegex = (pattern) => new RegExp(`^${pattern.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join("[^/]*")}$`);
-export async function selectorPresent(snapshot, selector, fs = { stat, readdir }) {
-  const nonEmptyDir = async (dir) => { try { return (await fs.readdir(dir)).length > 0; } catch { return false; } };
-  if (selector === "*" ) return nonEmptyDir(snapshot);
-  if (!selector.includes("*")) { try { const info = await fs.stat(path.join(snapshot, ...selector.split("/"))); return info.isFile() && info.size > 0; } catch { return false; } }
+// Presence is a PLANNING check, not verification: it decides which hub (and tier) a route will use
+// and skips a route whose weights are visibly absent. Head's admission and the worker verify the
+// exact files; a set that passes planning but is still incomplete fails that run with the reason
+// the product serves.
+//
+// A wildcard selector is expanded against config/download-pattern-evidence.json, the checked-in,
+// CI-guarded file listing of every pinned catalog revision (identical at base and head), using the
+// product's glob semantics (artifact_selection.rs pattern_matches: `*` also crosses `/`). Every
+// listed file must resolve: a weight file must be non-empty, any other file must exist. Only a
+// revision absent from that listing falls back to a heuristic: the directory exists, holds at least
+// one non-empty weight file, and every entry resolves (no dangling link) to a non-empty file.
+// HF `blobs/*.incomplete` leftovers are not inspected: a snapshot entry links only to a finished
+// blob, and every entry's target is checked to exist and be non-empty.
+export const WEIGHT_EXTENSIONS = Object.freeze([".safetensors", ".gguf", ".bin", ".npz", ".onnx"]);
+const isWeight = (name) => WEIGHT_EXTENSIONS.some((extension) => name.toLowerCase().endsWith(extension));
+const productGlob = (pattern) => new RegExp(`^${pattern.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`);
+export function expandSelector(selector, files) { const re = productGlob(selector); return files.filter((file) => re.test(file)); }
+export async function readPatternEvidence(checkout) {
+  try {
+    const evidence = JSON.parse(await readFile(path.join(checkout, "config", "download-pattern-evidence.json"), "utf8"));
+    return new Map((evidence.repos ?? []).filter((repo) => repo.key && Array.isArray(repo.files)).map((repo) => [repo.key, repo.files]));
+  } catch { return new Map(); }
+}
+async function usableFile(file, fs, needsBytes) { try { const info = await fs.stat(file); return info.isFile() && (!needsBytes || info.size > 0); } catch { return false; } }
+// Returns the problems found for one selector (empty = present).
+export async function selectorProblems(snapshot, selector, { fs = { stat, readdir }, evidenceFiles = null } = {}) {
+  const at = (relative) => path.join(snapshot, ...relative.split("/"));
+  if (!selector.includes("*")) return (await usableFile(at(selector), fs, true)) ? [] : [selector];
+  const expected = evidenceFiles ? expandSelector(selector, evidenceFiles) : [];
+  if (expected.length) {
+    const problems = [];
+    for (const file of expected) if (!(await usableFile(at(file), fs, isWeight(file)))) problems.push(file);
+    return problems;
+  }
+  // Heuristic for a revision with no checked-in listing.
   const parts = selector.split("/"), last = parts.pop();
   fact(!parts.some((part) => part.includes("*")), `unsupported selector ${selector}`);
-  const dir = path.join(snapshot, ...parts);
-  if (last === "*") return nonEmptyDir(dir);
-  try { const re = globRegex(last); return (await fs.readdir(dir)).some((entry) => re.test(entry)); } catch { return false; }
+  const root = path.join(snapshot, ...parts), filter = last === "*" ? null : productGlob(last);
+  const problems = [];
+  let weights = 0, seen = 0;
+  const walk = async (dir, relative, depth) => {
+    let names; try { names = await fs.readdir(dir); } catch { if (!depth) problems.push(`${selector} (directory absent)`); return; }
+    for (const name of names) {
+      const child = path.join(dir, name), rel = relative ? `${relative}/${name}` : name;
+      let info; try { info = await fs.stat(child); } catch { problems.push(`${rel} (dangling or unreadable entry)`); continue; }
+      if (info.isDirectory()) { if (depth < 4) await walk(child, rel, depth + 1); continue; }
+      if (filter && !filter.test(name)) continue;
+      seen++;
+      if (info.size <= 0) problems.push(`${rel} (empty file)`);
+      else if (isWeight(name)) weights++;
+    }
+  };
+  await walk(root, "", 0);
+  if (!problems.length && !weights) problems.push(`${selector} (${seen ? "no non-empty weight file" : "empty"})`);
+  return problems;
 }
-export async function routePresence(hub, rows, fs) {
+export async function selectorPresent(snapshot, selector, fs = { stat, readdir }, evidenceFiles = null) {
+  return (await selectorProblems(snapshot, selector, { fs, evidenceFiles })).length === 0;
+}
+export async function routePresence(hub, rows, fs, evidence = new Map()) {
   const check = async (list) => {
     const missing = [];
     for (const row of list) {
       const snapshot = snapshotDir(hub, row.repo, row.revision);
       const selectors = row.files.length ? row.files : ["*"];
-      for (const selector of selectors) if (!(await selectorPresent(snapshot, selector, fs))) missing.push(`${row.repo}@${row.revision.slice(0, 12)}/${selector}`);
+      const evidenceFiles = evidence.get(`${row.repo}@${row.revision}`) ?? null;
+      for (const selector of selectors) {
+        const problems = await selectorProblems(snapshot, selector, { fs, evidenceFiles });
+        if (problems.length) missing.push(`${row.repo}@${row.revision.slice(0, 12)}/${selector}${problems.length === 1 && problems[0] === selector ? "" : `: ${problems.slice(0, 3).join(", ")}${problems.length > 3 ? ` +${problems.length - 3} more` : ""}`}`);
+      }
     }
     return missing;
   };
   const missing = await check(rows.required), optionalMissing = await check(rows.optional);
-  return { hub, complete: missing.length === 0, missing, optionalMissing };
+  const selectorCount = rows.required.reduce((sum, row) => sum + Math.max(1, row.files.length), 0);
+  return { hub, complete: missing.length === 0, partial: missing.length > 0 && missing.length < selectorCount, missing, optionalMissing };
 }
 export async function readCatalog(checkout) {
   return JSON.parse(stripJsoncComments(await readFile(path.join(checkout, "config", "manifests", "builtin.models.jsonc"), "utf8"))).models;
 }
 // Pick, per route, the first hub holding every required file; route groups are alternatives
 // (the first present member runs, the rest are skipped naming it).
-export async function planRoutes({ routes, hubs, baseCatalog, headCatalog, platform, fs }) {
+export async function planRoutes({ routes, hubs, baseCatalog, headCatalog, platform, fs, evidence = new Map() }) {
   const planned = [], ranGroups = new Map();
   for (const route of routes) {
     const entry = { id: route.id, model: route.model, kind: route.kind, mode: route.mode, group: route.group, request: requestTemplate(route) };
@@ -284,7 +337,7 @@ export async function planRoutes({ routes, hubs, baseCatalog, headCatalog, platf
     let selected = null, selectedRows = null;
     for (const hub of hubs) {
       for (const rows of rowsByTier) {
-        const result = { ...(await routePresence(hub, rows, fs)), tier: rows.tier };
+        const result = { ...(await routePresence(hub, rows, fs, evidence)), tier: rows.tier };
         checks.push(result);
         if (result.complete) { selected = result; selectedRows = rows; break; }
       }
@@ -292,7 +345,9 @@ export async function planRoutes({ routes, hubs, baseCatalog, headCatalog, platf
     }
     if (!selected) { planned.push({ ...entry, tier: route.tier, tierCandidates: route.tierCandidates, rows: rowsByTier[0], presence: checks, status: "skipped", skipReason: `weights absent from every hub root for tier ${candidates.join(" or ")} (${checks.map((c) => `${c.hub} [${c.tier ?? "untiered"}]: ${c.missing.slice(0, 3).join(", ")}${c.missing.length > 3 ? ` +${c.missing.length - 3} more` : ""}`).join("; ")})` }); continue; }
     if (route.group) ranGroups.set(route.group, route.id);
-    planned.push({ ...entry, tier: selectedRows.tier, tierCandidates: route.tierCandidates, tierSource: route.tierCandidates ? "first complete tier in the product's untiered preference order" : "named by the request", rows: selectedRows, presence: checks, hub: selected.hub, status: "ready" });
+    // A hub (or tier) that holds part of the set is recorded, and the search moved on past it.
+    const partial = checks.filter((check) => check.partial).map((check) => `partial at ${check.hub} [${check.tier ?? "untiered"}]: ${check.missing.slice(0, 3).join("; ")}`);
+    planned.push({ ...entry, ...(partial.length ? { presenceNotes: partial } : {}), tier: selectedRows.tier, tierCandidates: route.tierCandidates, tierSource: route.tierCandidates ? "first complete tier in the product's untiered preference order" : "named by the request", rows: selectedRows, presence: checks, hub: selected.hub, status: "ready" });
   }
   return planned;
 }
@@ -667,7 +722,7 @@ export function renderMarkdown(report) {
   for (const route of report.routes) {
     const run = (label) => route.runs?.find((item) => item.label === label);
     const time = (label) => secs(run(label)?.timing?.enqueueToCompleteSeconds), mem = (label) => memoryCell(run(label)?.memory);
-    lines.push(`| ${route.id} | ${route.model}${route.tier ? ` (${route.tier}${route.tierCandidates ? ", untiered request" : ""})` : ""} | ${route.status} | ${route.verdict ?? (route.status === "not_run" ? "not_run" : "–")} | ${time("base#1")} | ${time("head")} | ${time("base#2")} | ${mem("base#1")} | ${mem("head")} | ${(route.skipReason ?? route.verdictReason ?? "").replace(/\|/g, "/").slice(0, 300)} |`);
+    lines.push(`| ${route.id} | ${route.model}${route.tier ? ` (${route.tier}${route.tierCandidates ? ", untiered request" : ""})` : ""} | ${route.status} | ${route.verdict ?? (route.status === "not_run" ? "not_run" : "–")} | ${time("base#1")} | ${time("head")} | ${time("base#2")} | ${mem("base#1")} | ${mem("head")} | ${[route.skipReason ?? route.verdictReason ?? "", ...(route.presenceNotes ?? [])].filter(Boolean).join("; ").replace(/\|/g, "/").slice(0, 400)} |`);
   }
   for (const route of report.routes.filter((item) => item.comparison || item.runs?.length)) {
     lines.push("", `## ${route.id}`, "", `- hub: ${route.hub}`, `- request sha256: ${route.request.sha256}`);
@@ -733,7 +788,11 @@ async function preflight(env, cfg, report) {
   report.disk = { workFreeBytes: await freeBytes(cfg.work), note: "statfs available bytes; macOS purgeable space is not included" };
   fact(report.disk.workFreeBytes === null || report.disk.workFreeBytes >= 20 * GIB, `only ${gib(report.disk.workFreeBytes)} free for the shared build target and evidence; at least 20 GiB required`);
   const [baseCatalog, headCatalog] = await Promise.all([readCatalog(cfg.baseDir), readCatalog(cfg.headDir)]);
-  report.routes = await planRoutes({ routes: cfg.routes, hubs: cfg.hubs, baseCatalog, headCatalog, platform });
+  // The same checked-in listing exists at base and head; head's copy is used, base's if head lacks it.
+  const headEvidence = await readPatternEvidence(cfg.headDir);
+  const evidence = headEvidence.size ? headEvidence : await readPatternEvidence(cfg.baseDir);
+  report.presenceBasis = evidence.size ? `config/download-pattern-evidence.json (${evidence.size} pinned revisions) for wildcard selectors; heuristic otherwise` : "heuristic only (no download-pattern evidence in either checkout)";
+  report.routes = await planRoutes({ routes: cfg.routes, hubs: cfg.hubs, baseCatalog, headCatalog, platform, evidence });
   for (const route of report.routes.filter((item) => item.kind === "video" && item.status === "ready")) {
     if (!report.tools.ffmpeg.available) route.note = "ffmpeg unavailable: fidelity falls back to file bytes and the worker cannot mux video";
     else if (!report.tools.ffprobe.available) route.note = "ffprobe unavailable: video fidelity falls back to file bytes (no stream geometry/timing)";

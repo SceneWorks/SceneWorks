@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { sha256 } from "./lib/file-sha256.mjs";
 import {
   DEFAULT_ROUTE_IDS, ROUTES, contentDigest, decodePng, decodedContent, descendants, diffObjects, dispatchOptions,
-  childEnvironments, childStdio, exitCodeFor, assertTrustedShas, scrubSecrets, TRUSTED_REF_PATTERNS, trustedRefFor, ffprobePath, gpuInventory, hubFingerprint, memoryCell, streamShape, HUB_MUTATION_LISTING_LIMIT, hubMutationAttribution, processState, identitySubset, jobClaimed, jobDiagnostics, jobProgressDecision, lastLines, numericDifference, progressLine, removeScratch, parseTopMem, parseWav, planRoutes, readCatalog, redactPaths, referenceWav,
+  childEnvironments, childStdio, exitCodeFor, expandSelector, readPatternEvidence, selectorProblems, assertTrustedShas, scrubSecrets, TRUSTED_REF_PATTERNS, trustedRefFor, ffprobePath, gpuInventory, hubFingerprint, memoryCell, streamShape, HUB_MUTATION_LISTING_LIMIT, hubMutationAttribution, processState, identitySubset, jobClaimed, jobDiagnostics, jobProgressDecision, lastLines, numericDifference, progressLine, removeScratch, parseTopMem, parseWav, planRoutes, readCatalog, redactPaths, referenceWav,
   renderMarkdown, reportName, requestBody, requestTemplate, resolveConfig, routeDownloadRows, routePresence, selectRoutes,
   summarize, verdictFor,
 } from "./tier2-ab.mjs";
@@ -307,6 +307,65 @@ test("video fidelity digest covers stream geometry and timing, not only decoded 
   assert.equal(noProbe.method, "file_bytes_no_probe"); assert.equal(noProbe.sha256, sha256(Buffer.from("container")));
   assert.equal(streamShape({ streams: [] }).video, null);
   assert.equal(ffprobePath("ffmpeg"), "ffprobe"); assert.equal(ffprobePath("/opt/bin/ffmpeg"), "/opt/bin/ffprobe"); assert.equal(ffprobePath("/opt/bin/avconv"), "ffprobe");
+});
+
+test("wildcard presence: config-only, dangling or empty sets are not complete; the next hub is chosen", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "tier2-ab-partial-")); t.after(() => rm(dir, { recursive: true, force: true }));
+  const rev = "d".repeat(40), repo = "O/w";
+  const snap = (hub) => path.join(hub, "models--O--w", "snapshots", rev);
+  const model = { id: "w_model", downloads: [{ provider: "huggingface", repo, revision: rev, variant: "q8", default: true, files: ["q8/*"] }] };
+  const rows = routeDownloadRows(model, { platform: "darwin", tier: "q8" });
+  const configOnly = path.join(dir, "config-only"), dangling = path.join(dir, "dangling"), empty = path.join(dir, "empty-weight"), full = path.join(dir, "full");
+  await mkdir(path.join(snap(configOnly), "q8"), { recursive: true }); await writeFile(path.join(snap(configOnly), "q8", "config.json"), "{}");
+  await mkdir(path.join(snap(dangling), "q8"), { recursive: true }); await writeFile(path.join(snap(dangling), "q8", "model.safetensors"), "w");
+  const { symlink } = await import("node:fs/promises"); await symlink("../../../blobs/missing", path.join(snap(dangling), "q8", "shard-2.safetensors"));
+  await mkdir(path.join(snap(empty), "q8"), { recursive: true }); await writeFile(path.join(snap(empty), "q8", "config.json"), "{}"); await writeFile(path.join(snap(empty), "q8", "model.safetensors"), "");
+  await mkdir(path.join(snap(full), "q8", "transformer"), { recursive: true }); await writeFile(path.join(snap(full), "q8", "config.json"), "{}"); await writeFile(path.join(snap(full), "q8", "transformer", "model.safetensors"), "w");
+  // Heuristic (no checked-in listing for this revision).
+  const heuristic = async (hub) => routePresence(hub, rows);
+  const a = await heuristic(configOnly); assert.equal(a.complete, false); assert.match(a.missing[0], /no non-empty weight file/);
+  const b = await heuristic(dangling); assert.equal(b.complete, false); assert.match(b.missing[0], /shard-2\.safetensors \(dangling/);
+  const c = await heuristic(empty); assert.equal(c.complete, false); assert.match(c.missing[0], /model\.safetensors \(empty file\)/);
+  assert.equal((await heuristic(full)).complete, true);
+  const route = { id: "r", backend: "mlx", model: "w_model", kind: "image", mode: "text_to_image", tier: "q8", group: null, endpoint: "/api/v1/image/jobs", body: { model: "w_model", seed: 1 } };
+  const planned = (await planRoutes({ routes: [route], hubs: [configOnly, dangling, empty, full], baseCatalog: [model], headCatalog: [model], platform: "darwin" }))[0];
+  assert.equal(planned.status, "ready"); assert.equal(planned.hub, full, "a partial hub never stops the search");
+  assert.equal(planned.presence.length, 4);
+  // With a checked-in listing the exact expected files decide, so a missing listed shard is caught
+  // even when another weight file is present.
+  const evidence = new Map([[`${repo}@${rev}`, ["README.md", "q8/config.json", "q8/transformer/model.safetensors", "q8/transformer/model-2.safetensors"]]]);
+  const listed = await routePresence(full, rows, undefined, evidence);
+  assert.equal(listed.complete, false); assert.equal(listed.partial, false, "a single wildcard selector is either present or not"); assert.match(listed.missing[0], /q8\/transformer\/model-2\.safetensors/);
+  await writeFile(path.join(snap(full), "q8", "transformer", "model-2.safetensors"), "w");
+  assert.equal((await routePresence(full, rows, undefined, evidence)).complete, true);
+  assert.deepEqual(await selectorProblems(snap(full), "q8/*", { evidenceFiles: evidence.get(`${repo}@${rev}`) }), []);
+  // Partial across selectors is recorded on the ready route.
+  const twoRows = { id: "m2", downloads: [{ provider: "huggingface", repo, revision: rev, files: ["q8/config.json", "q8/extra.json"] }] };
+  const partialRoute = { ...route, id: "r2", model: "m2", tier: null };
+  const plannedPartial = (await planRoutes({ routes: [partialRoute], hubs: [configOnly, full], baseCatalog: [twoRows], headCatalog: [twoRows], platform: "darwin" }))[0];
+  assert.equal(plannedPartial.status, "skipped"); assert.match(plannedPartial.skipReason, /q8\/extra\.json/);
+  await writeFile(path.join(snap(full), "q8", "extra.json"), "{}");
+  const readyPartial = (await planRoutes({ routes: [partialRoute], hubs: [configOnly, full], baseCatalog: [twoRows], headCatalog: [twoRows], platform: "darwin" }))[0];
+  assert.equal(readyPartial.status, "ready"); assert.equal(readyPartial.hub, full);
+  assert.deepEqual(readyPartial.presenceNotes, [`partial at ${configOnly} [untiered]: O/w@${rev.slice(0, 12)}/q8/extra.json`]);
+});
+
+test("the checked-in download listing expands every wildcard of the default routes to weight files", async () => {
+  const evidence = await readPatternEvidence(root), models = await readCatalog(root);
+  assert.ok(evidence.size > 0);
+  for (const id of [...DEFAULT_ROUTE_IDS.mlx, ...DEFAULT_ROUTE_IDS.cuda]) {
+    const route = ROUTES[id], model = models.find((entry) => entry.id === route.model);
+    if (model.gated) continue;
+    for (const tier of route.tierCandidates ?? [route.tier]) {
+      const rows = routeDownloadRows(model, { platform: route.backend === "mlx" ? "darwin" : "win32", tier });
+      for (const row of rows.required) for (const selector of row.files.filter((item) => item.includes("*"))) {
+        const files = evidence.get(`${row.repo}@${row.revision}`);
+        assert.ok(files, `${id}: ${row.repo}@${row.revision} has a checked-in listing`);
+        assert.ok(expandSelector(selector, files).some((file) => file.endsWith(".safetensors")), `${id} ${tier}: ${selector} expands to weight files`);
+      }
+    }
+  }
+  assert.deepEqual(expandSelector("q4/*", ["q4/a/b.safetensors", "q8/c.safetensors", "q4x"]), ["q4/a/b.safetensors"], "`*` crosses `/`, as the product's glob does");
 });
 
 test("untiered presence follows the product's preference order and reports the tier found", async (t) => {

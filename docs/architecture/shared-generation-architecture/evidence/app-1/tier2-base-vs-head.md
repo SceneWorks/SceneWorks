@@ -29,6 +29,10 @@ only by the `tier2-ab` profile of `.github/workflows/memory-catalog-campaign.yml
 - One job per backend checks out the driver commit, the base SHA and the head SHA into separate
   directories, verifies each checkout's HEAD and clean tree, and builds each side's release
   API/worker into one shared scratch target.
+- Weight presence (which hub and tier a route uses, or why it is skipped) is a planning check, not
+  verification: wildcard selectors are expanded against the checked-in
+  `config/download-pattern-evidence.json` listing, and head's admission and the worker verify the
+  exact files, so a set that passes planning but is incomplete fails that run with the served reason.
 - Each run starts a fresh API and a separate worker from one side's binary with fresh state,
   creates a project, POSTs the route's fixed request with a fixed seed, waits for the claim and
   completion, and reads the saved asset back through the product file route. Both sides receive
