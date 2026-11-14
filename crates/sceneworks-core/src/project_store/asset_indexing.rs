@@ -212,7 +212,7 @@ pub(super) fn backfill_upscale_variant_lineage(project_path: &Path) -> ProjectSt
     let mut parsed: Vec<(PathBuf, Value)> = Vec::with_capacity(sidecars.len());
     for sidecar_path in sidecars {
         record_asset_list_filesystem_operation(AssetListFilesystemOperation::SidecarRead);
-        let Ok(asset) = read_json(&sidecar_path) else {
+        let Ok(asset) = crate::store_util::read_json_history(&sidecar_path) else {
             continue;
         };
         if let (Some(id), Some(genset), Some(path)) = (
@@ -222,7 +222,11 @@ pub(super) fn backfill_upscale_variant_lineage(project_path: &Path) -> ProjectSt
         ) {
             base_ids.insert((genset.to_owned(), path.to_owned()), id.to_owned());
         }
-        parsed.push((sidecar_path, asset));
+        // An unsupported recipe may identify a parent, but automatic healing must never
+        // rewrite its original bytes or persist the read-only refusal annotation.
+        if asset.get("optionsUpgradeError").is_none() {
+            parsed.push((sidecar_path, asset));
+        }
     }
 
     let mut healed = 0usize;

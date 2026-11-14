@@ -8,6 +8,7 @@ mod requests;
 mod requests_aux;
 mod requests_yue2;
 mod training;
+pub mod upgrade;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]

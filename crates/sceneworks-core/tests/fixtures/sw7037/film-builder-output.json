@@ -1,0 +1,102 @@
+{
+  "sourceRevision": "d3f7b05bf22826e44fd43da19cff0985fb17d68b",
+  "compiled": {
+    "schemaVersion": 7,
+    "planId": "courier-workshop",
+    "planVersion": 2,
+    "planSha256": "abc123def456",
+    "referencePackId": "courier-refs",
+    "referencePackVersion": 3,
+    "referencePackSha256": "2ef3b698cc9a06b2c186cf65503571b11b3be94947009ef7dc472b4a3b1ebb53",
+    "compiledAt": "2026-09-13T00:00:00Z",
+    "model": {
+      "id": "minimax_h3",
+      "tier": "q4",
+      "fps": 24,
+      "lane": "mlx"
+    },
+    "requests": [
+      {
+        "shotId": "SH010",
+        "beat": "enter",
+        "mode": "text_to_video",
+        "model": "minimax_h3",
+        "effectiveSteps": 50,
+        "partitionReason": "no reference roles; renders on the plan's model minimax_h3",
+        "prompt": "a courier enters. Audio: Room tone, no music.",
+        "promptSource": "authored",
+        "insertedText": [
+          {
+            "kind": "audio",
+            "text": "Audio: Room tone, no music."
+          }
+        ],
+        "durationSeconds": 5.1667,
+        "fps": 24,
+        "width": 576,
+        "height": 320,
+        "seed": 7,
+        "referenceRoles": [],
+        "continuityRoles": [
+          "courier"
+        ]
+      },
+      {
+        "shotId": "SH020",
+        "beat": "place",
+        "mode": "image_to_video",
+        "model": "minimax_h3",
+        "effectiveSteps": 50,
+        "partitionReason": "no reference roles; renders on the plan's model minimax_h3",
+        "prompt": "places the parcel. Audio: Room tone, no music.",
+        "promptSource": "authored",
+        "insertedText": [
+          {
+            "kind": "audio",
+            "text": "Audio: Room tone, no music."
+          }
+        ],
+        "durationSeconds": 5.875,
+        "fps": 24,
+        "width": 576,
+        "height": 320,
+        "firstFrameRole": "workshop_plate",
+        "referenceRoles": [],
+        "chainFromShotId": "SH010",
+        "continuityRoles": [
+          "courier",
+          "red_parcel"
+        ]
+      }
+    ]
+  },
+  "request": {
+    "projectId": "proj_1",
+    "mode": "text_to_video",
+    "model": "minimax_h3",
+    "prompt": "a courier enters. Audio: Room tone, no music.",
+    "duration": 5.1667,
+    "fps": 24,
+    "width": 576,
+    "height": 320,
+    "fitMode": "crop",
+    "requestedGpu": "auto",
+    "advanced": {
+      "mlxQuantize": 4,
+      "filmHarness": {
+        "runId": "run_abc",
+        "planId": "courier-workshop",
+        "planVersion": 2,
+        "shotId": "SH010",
+        "attempt": 1,
+        "idempotencyKey": "run_abc:SH010:a1",
+        "partitionReason": "no reference roles; renders on the plan's model minimax_h3",
+        "continuityRoles": [
+          "courier"
+        ],
+        "seed": 7
+      }
+    },
+    "seed": 7
+  }
+}
