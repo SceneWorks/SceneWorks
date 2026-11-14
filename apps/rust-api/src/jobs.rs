@@ -1727,10 +1727,12 @@ async fn validate_and_canonicalize_merged_generation_payload(
         // when it stops being a no-op, so the overwhelmingly common decoder-less replay costs no
         // extra catalog resolution. The LoRA gate needs no such guard: it returns before touching a
         // catalog when `loras` is absent or empty.
-        let selects_decoder = merged
-            .get("advanced")
-            .and_then(Value::as_object)
-            .is_some_and(|advanced| advanced.contains_key("decoder"));
+        let route_options =
+            sceneworks_core::resolved_options::RouteOptionFacts::from_payload_syntax(&merged);
+        let selects_decoder = !matches!(
+            route_options.decoder,
+            sceneworks_core::resolved_options::RouteField::Absent
+        );
         if let Some(model_id) = merged
             .get("model")
             .and_then(Value::as_str)
