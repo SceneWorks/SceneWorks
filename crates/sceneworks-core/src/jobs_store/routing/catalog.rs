@@ -16,9 +16,11 @@ use crate::jobs_store::routing::candle::video_mode_is_candle_eligible;
 use crate::jobs_store::routing::gaps::{
     classify_candle_video_gap, classify_image_gap, classify_video_gap, UnsupportedReason,
 };
+#[cfg(test)]
+use crate::jobs_store::routing::has_nonempty_nested_array;
 use crate::jobs_store::routing::mlx::{image_request_mlx_eligible, video_mode_is_mlx_eligible};
 use crate::jobs_store::routing::{
-    has_nonempty_array, has_nonempty_nested_array, has_nonempty_string, has_nonempty_string_array,
+    has_nonempty_array, has_nonempty_string, has_nonempty_string_array,
 };
 
 /// The user-facing affordance prefix the Mac UI shows in place of a control with no native Mac lane
@@ -988,6 +990,7 @@ fn imported_provider_route(
 /// identity alone.
 /// The single imported provider operation a payload selects. Exactly one wins, and the order is the
 /// contract: a phase list is a MultiPhase job even when it also carries poses, and so on down.
+#[cfg(test)]
 fn imported_payload_operation(payload: &Map<String, Value>) -> &'static str {
     let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
     imported_payload_operation_with_facts(payload, &facts)
@@ -1315,6 +1318,7 @@ fn imported_source_shape(entry: &Map<String, Value>) -> Option<&str> {
 
 /// Explicit load-time quant requested by the shared image payload. A named tier takes precedence
 /// over the legacy MLX bit count. Unknown names are terminal rather than silently coerced.
+#[cfg(test)]
 fn imported_requested_quant(
     payload: &Map<String, Value>,
     ignore_quant_tier: bool,

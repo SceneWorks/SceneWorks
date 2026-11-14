@@ -1201,7 +1201,10 @@ pub(crate) fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedRea
             None,
         ),
         model if SENSENOVA_MODEL_IDS.contains(&model) => {
-            let has_poses = super::has_nonempty_nested_array(payload, "advanced", "poses");
+            let has_poses = matches!(
+                crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload).poses,
+                crate::resolved_options::RouteField::Valid(count) if count > 0
+            );
             if has_poses {
                 UnsupportedReason::new(
                     Some(model),

@@ -5,16 +5,22 @@ use serde_json::{Map, Value};
 
 use crate::contracts::{JobSnapshot, JobType};
 use crate::image_request::Flux3Tier;
+#[cfg(test)]
+use crate::jobs_store::routing::catalog::imported_image_request_provider_eligible;
 use crate::jobs_store::routing::catalog::{
-    imported_image_request_provider_eligible, MLX_ONLY_TRAINING_KERNELS, MLX_ROUTED_MODELS,
-    MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS,
+    MLX_ONLY_TRAINING_KERNELS, MLX_ROUTED_MODELS, MLX_ROUTED_TRAINING_KERNELS,
+    VIDEO_MLX_ROUTED_MODELS,
 };
 use crate::jobs_store::routing::{
-    conditioned_reference_count, has_malformed_optional_nested_number,
-    has_malformed_optional_string, has_nonempty_array, has_nonempty_nested_array,
-    has_nonempty_or_malformed_array, has_nonempty_or_malformed_nested_array,
-    has_nonempty_or_malformed_string, has_nonempty_string, has_nonnull_or_malformed_nested_carrier,
-    krea_edit_has_unsupported_carrier, qwen_image_2_1_reference_ids, SENSENOVA_MODEL_IDS,
+    conditioned_reference_count, has_malformed_optional_string, has_nonempty_array,
+    has_nonempty_or_malformed_array, has_nonempty_or_malformed_string, has_nonempty_string,
+    qwen_image_2_1_reference_ids, SENSENOVA_MODEL_IDS,
+};
+#[cfg(test)]
+use crate::jobs_store::routing::{
+    has_malformed_optional_nested_number, has_nonempty_nested_array,
+    has_nonempty_or_malformed_nested_array, has_nonnull_or_malformed_nested_carrier,
+    krea_edit_has_unsupported_carrier,
 };
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
@@ -236,6 +242,7 @@ pub(crate) fn understanding_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
 /// Third-party LyCORIS (LoHa / non-peft LoKr) now applies on the SDXL merge path (epic 3641,
 /// sc-3671), so every SDXL shape — including a LyCORIS-tagged job — is MLX-eligible.
 /// `image_detail` is a separate job type with its own routing (see `image_detail_native_eligible`).
+#[cfg(test)]
 pub(crate) fn sdxl_mlx_eligible(payload: &Map<String, Value>) -> bool {
     sdxl_mlx_lane(payload).is_some()
 }
@@ -250,6 +257,7 @@ pub(crate) enum MlxSdxlLane {
     Generic,
 }
 
+#[cfg(test)]
 pub(crate) fn sdxl_mlx_lane(payload: &Map<String, Value>) -> Option<MlxSdxlLane> {
     Some(if sdxl_control_mlx_candidate(payload) {
         MlxSdxlLane::Control
@@ -262,6 +270,7 @@ pub(crate) fn sdxl_mlx_lane(payload: &Map<String, Value>) -> Option<MlxSdxlLane>
 /// `advanced.poses` carrier or explicit material control intent is claimed before edit/IP/generic
 /// routing; exact shape, count, supported mode, and conflict validation belongs to the shared worker
 /// handler and fails closed there.
+#[cfg(test)]
 pub(crate) fn sdxl_control_mlx_candidate(payload: &Map<String, Value>) -> bool {
     let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
     sdxl_control_mlx_candidate_with_facts(&facts)
@@ -290,10 +299,12 @@ pub(crate) fn sdxl_control_mlx_candidate_with_facts(
 /// the named control lane, where the worker executes the supported ControlNet + Lightning composition.
 /// Any non-pose `edit_image`, source, reference, or mask shape is
 /// refused and remains queued. LoRAs + quant are fine on the SDXL path, so they don't gate.
+#[cfg(test)]
 pub(crate) fn realvisxl_lightning_mlx_eligible(payload: &Map<String, Value>) -> bool {
     realvisxl_lightning_mlx_lane(payload).is_some()
 }
 
+#[cfg(test)]
 pub(crate) fn realvisxl_lightning_mlx_lane(payload: &Map<String, Value>) -> Option<MlxSdxlLane> {
     let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
     realvisxl_lightning_mlx_lane_with_facts(payload, &facts)
@@ -360,6 +371,7 @@ pub(crate) fn pulid_flux_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// multi-reference (sc-3029), third-party LyCORIS via the core loader (epic 3641), and FLUX.2-dev
 /// txt2img plus edit/reference/character/style workflows. Reference-bearing modes require one strict,
 /// non-conflicting reference carrier so malformed requests cannot fall through to unconditioned T2I.
+#[cfg(test)]
 pub(crate) fn flux2_mlx_eligible(payload: &Map<String, Value>) -> bool {
     let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
     flux2_mlx_eligible_with_facts(payload, &facts)
@@ -398,6 +410,7 @@ fn flux2_mlx_eligible_with_facts(
 /// engine variant. A reference without poses (character/edit flow) and `edit_image` are refused and
 /// remain queued. Third-party LyCORIS (LoHa / non-peft LoKr) now applies on the core MLX
 /// loader (epic 3641, sc-3642/3643), so it no longer changes eligibility.
+#[cfg(test)]
 pub(crate) fn qwen_mlx_eligible(payload: &Map<String, Value>) -> bool {
     let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
     qwen_mlx_eligible_with_facts(payload, &facts)
@@ -451,6 +464,7 @@ fn qwen_mlx_eligible_with_facts(
 /// key, LoHa on a packed tier) is the engine's typed `Unsupported`, which surfaces as an actionable
 /// job failure; refusing here instead would leave the job unclaimable by anything on a Mac-only
 /// install and it would sit queued forever — the Anima defect of sc-10523.
+#[cfg(test)]
 pub(crate) fn qwen_image_2_1_mlx_eligible(payload: &Map<String, Value>) -> bool {
     let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
     qwen_image_2_1_mlx_eligible_with_facts(payload, &facts)
@@ -511,6 +525,7 @@ pub(crate) fn qwen_image_2_1_mlx_eligible_with_facts(
 /// / best-effort-pose / angle-set flows — all reference-conditioned). The lightning distill
 /// (sc-3398) shares the same gate (its sampler + distill-LoRA are worker-local). Third-party
 /// LyCORIS now applies on the core MLX loader (epic 3641), so it no longer forces torch.
+#[cfg(test)]
 pub(crate) fn qwen_edit_mlx_eligible(payload: &Map<String, Value>) -> bool {
     let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
     qwen_edit_mlx_eligible_with_facts(payload, &facts)
@@ -554,6 +569,7 @@ pub(crate) fn flux_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// `resolve_adapters` → `LoadSpec::with_adapters` plumbing reaches `mlx_gen_mage`'s `assemble`,
 /// which installs stacked/mixed LoRA + LoKr through `apply_mage_adapters` (strict — an unmatched
 /// target errors rather than being silently dropped).
+#[cfg(test)]
 pub(crate) fn mage_flow_mlx_eligible(payload: &Map<String, Value>) -> bool {
     let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
     mage_flow_mlx_eligible_with_facts(payload, &facts)
@@ -591,6 +607,7 @@ fn mage_flow_mlx_eligible_with_facts(
 /// `quantTier.js` emits and the worker's `resolve_quant` parses. Any other value (which the worker
 /// would silently round to q4 / q8) and every `advanced.quantTier` (the candle-only NVFP4 /
 /// non-bits tiers) stay refused.
+#[cfg(test)]
 pub(crate) fn iris_mlx_eligible(payload: &Map<String, Value>) -> bool {
     let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
     iris_mlx_eligible_with_facts(payload, &facts)
@@ -612,6 +629,7 @@ pub(crate) fn iris_mlx_eligible_with_facts(
 }
 
 /// Whether `advanced.mlxQuantize` is absent/null or names an Iris MLX tier (`0` / `4` / `8`).
+#[cfg(test)]
 fn iris_quantize_is_a_tier(payload: &Map<String, Value>) -> bool {
     let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
     iris_quantize_is_a_tier_with_facts(&facts)
@@ -629,6 +647,7 @@ fn iris_quantize_is_a_tier_with_facts(facts: &crate::resolved_options::RouteOpti
 /// packages it serves — bf16, or the locally converted MLX affine q4/q8 (sc-26241). The publisher
 /// FP8R/NVFP4 packages are CUDA formats the MLX descriptor does not advertise, so they keep the
 /// job off MLX. Every other carrier is judged by [`flux3_surface_eligible`].
+#[cfg(test)]
 pub(crate) fn flux3_mlx_eligible(payload: &Map<String, Value>) -> bool {
     let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
     flux3_mlx_eligible_with_facts(payload, &facts)
@@ -661,6 +680,7 @@ pub(crate) fn flux3_payload_tier_with_facts(
 /// are sc-26236/7), admits identity-checked LoRA (sc-26239), and refuses hires fix like
 /// Iris (its second pass is an img2img refinement the engine refuses). Judged with the precision
 /// carriers removed, since [`flux3_payload_tier`] owns them.
+#[cfg(test)]
 pub(crate) fn flux3_surface_eligible(payload: &Map<String, Value>) -> bool {
     let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
     flux3_surface_eligible_with_facts(payload, &facts)
@@ -707,6 +727,7 @@ pub(crate) fn flux3_surface_eligible_with_facts(
 /// So `loras`, an `mlxQuantize`/`quantTier` carrier or an enabled hires fix (an img2img second pass)
 /// keeps the job off MLX — an `mlx_unsupported` affordance — instead of reaching an engine that
 /// would refuse it after load.
+#[cfg(test)]
 pub(crate) fn supra2_mlx_eligible(payload: &Map<String, Value>) -> bool {
     let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
     supra2_mlx_eligible_with_facts(payload, &facts)
@@ -740,6 +761,7 @@ pub(crate) fn supra2_mlx_eligible_with_facts(
 /// sc-15320). Nothing advertised, nothing claimable, no gap — which is exactly what
 /// `every_lora_advertising_image_model_is_claimable_with_a_lora` checks, exception-free. Adding
 /// `loraCompatibility` to an edit row without relaxing this line turns that guard red.
+#[cfg(test)]
 pub(crate) fn mage_flow_edit_mlx_eligible(payload: &Map<String, Value>) -> bool {
     let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
     mage_flow_edit_mlx_eligible_with_facts(payload, &facts)
@@ -817,6 +839,7 @@ pub(crate) fn chroma_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// Edit/character require the
 /// reference the it2i path needs; plain T2I is always eligible. User LoRAs are not supported
 /// (`supports_lora=false`) and the manifest surfaces no LoRA slot, so no LoRA gate is needed.
+#[cfg(test)]
 pub(crate) fn sensenova_mlx_eligible(payload: &Map<String, Value>) -> bool {
     let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
     sensenova_mlx_eligible_with_facts(payload, &facts)
@@ -852,6 +875,7 @@ fn sensenova_mlx_eligible_with_facts(
     }
 }
 
+#[cfg(test)]
 fn conditioned_true_cfg_is_malformed(payload: &Map<String, Value>) -> bool {
     let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
     conditioned_true_cfg_is_malformed_with_facts(&facts)
@@ -865,6 +889,7 @@ fn conditioned_true_cfg_is_malformed_with_facts(
         .any(|key| crate::jobs_store::routing::route_number_malformed(facts, key))
 }
 
+#[cfg(test)]
 fn mlx_conditioned_edit_has_unsupported_carrier(
     payload: &Map<String, Value>,
     allow_loras: bool,
@@ -1003,6 +1028,7 @@ pub(crate) fn boogu_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// `features.edit` (the `model_mac_support` probe) flips true too. The worker picks the engine id by model. An
 /// `edit_image` shape with no conditioning image at all is rejected (the defensive shape t2i-only engines
 /// reject).
+#[cfg(test)]
 pub(crate) fn krea_mlx_eligible(payload: &Map<String, Value>) -> bool {
     let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
     krea_mlx_eligible_with_facts(payload, &facts)
@@ -1065,6 +1091,7 @@ pub(crate) fn sd3_5_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// observed live). sc-20525 finished the job: the replacement still rejected a BLANK string, which
 /// contradicted both its own doc and the worker's convention that a blank asset id is absent, and
 /// left the Mac lane disagreeing with the Candle twin on the same payload.
+#[cfg(test)]
 pub(crate) fn sana_mlx_eligible(payload: &Map<String, Value>) -> bool {
     let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
     sana_mlx_eligible_with_facts(payload, &facts)
@@ -1103,6 +1130,7 @@ fn sana_mlx_eligible_with_facts(
 /// Mirror the worker's `quant_int` request contract without treating an invalid explicit override as
 /// absence. Missing/null means "use the manifest default"; an integer or trimmed integer string is a
 /// valid explicit tier selection. Every other shape must fail closed instead of silently selecting Q4.
+#[cfg(test)]
 fn sana_has_malformed_quant_carrier(payload: &Map<String, Value>) -> bool {
     matches!(
         crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload).mlx_quantize,
