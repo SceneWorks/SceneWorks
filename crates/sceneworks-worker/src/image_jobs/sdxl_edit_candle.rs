@@ -22,7 +22,6 @@ use super::ImageRequest;
 use super::SdxlEdit;
 use super::SdxlEditPaths;
 use super::SdxlEditRequest;
-use crate::advanced;
 use crate::huggingface_snapshot_dir;
 use crate::resolve_app_managed_model_dir;
 use crate::ApiClient;

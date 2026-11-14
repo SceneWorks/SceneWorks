@@ -23,7 +23,6 @@ use super::Progress;
 use super::ZImageControl;
 use super::ZImageControlPaths;
 use super::ZImageControlRequest;
-use crate::advanced;
 use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
 use crate::ensure_hf_cached_file;
 use crate::huggingface_snapshot_dir;

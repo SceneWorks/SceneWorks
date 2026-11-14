@@ -1,7 +1,6 @@
 use super::conditioning::pose_entries;
 use super::zimage_edit_candle::resolve_zimage_edit_candle_base;
 use super::ImageRequest;
-use crate::advanced;
 use crate::Settings;
 
 // Candle (Windows/CUDA) Z-Image identity-init route for Image Studio "With Character" (sc-8409, epic

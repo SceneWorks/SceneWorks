@@ -257,6 +257,7 @@ pub(crate) use sceneworks_core::admission_geometry;
 // Windows/Linux build it stays excluded, so its accessors are never uncalled-dead there.
 #[cfg(native_lane)]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg(test)]
 mod advanced;
 mod api_client;
 #[cfg(native_lane)]

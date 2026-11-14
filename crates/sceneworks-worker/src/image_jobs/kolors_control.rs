@@ -25,7 +25,6 @@ use super::KolorsControl;
 use super::KolorsControlPaths;
 use super::KolorsControlRequest;
 use super::Progress;
-use crate::advanced;
 use crate::conditioning_fit::{ConditioningAdmission, ConditioningFootprint};
 use crate::ensure_hf_cached_file;
 use crate::resolve_app_managed_model_dir;

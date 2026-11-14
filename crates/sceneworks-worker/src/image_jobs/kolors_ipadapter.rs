@@ -23,7 +23,6 @@ use super::ImageRequest;
 use super::IpAdapterKolors;
 use super::IpAdapterKolorsPaths;
 use super::IpAdapterKolorsRequest;
-use crate::advanced;
 use crate::ensure_hf_cached_file;
 use crate::resolve_app_managed_model_dir;
 use crate::ApiClient;

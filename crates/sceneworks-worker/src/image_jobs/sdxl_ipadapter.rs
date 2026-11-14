@@ -27,7 +27,6 @@ use super::ImageRequest;
 use super::IpAdapterSdxl;
 use super::IpAdapterSdxlPaths;
 use super::IpAdapterSdxlRequest;
-use crate::advanced;
 use crate::ensure_hf_cached_file;
 use crate::huggingface_snapshot_dir;
 use crate::resolve_app_managed_model_dir;

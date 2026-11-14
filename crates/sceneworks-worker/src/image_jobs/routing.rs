@@ -189,7 +189,6 @@ use super::ImageRequest;
 use super::CANDLE_ADAPTER;
 use super::STUB_ADAPTER;
 #[cfg(not(target_os = "macos"))]
-use crate::advanced;
 #[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
 use crate::Path;
 #[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]

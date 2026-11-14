@@ -51,7 +51,6 @@ use super::Image;
 use super::ImagePlan;
 use super::ImageRequest;
 use super::Progress;
-use crate::advanced;
 use crate::conditioning_fit::ConditioningAdmission;
 use crate::ensure_hf_cached_file;
 use crate::huggingface_snapshot_dir;

@@ -26,7 +26,6 @@ use super::ImageRequest;
 use super::PulidFlux;
 use super::PulidFluxPaths;
 use super::PulidFluxRequest;
-use crate::advanced;
 use crate::ensure_hf_cached_file;
 use crate::huggingface_snapshot_dir;
 use crate::resolve_app_managed_model_dir;
