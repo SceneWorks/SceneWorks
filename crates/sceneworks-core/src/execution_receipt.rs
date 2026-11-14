@@ -25,6 +25,9 @@ pub struct OutputExecutionBinding {
     /// unavailable provider report may leave this empty; exact replay cannot.
     #[serde(default)]
     pub artifact_sha256: Vec<String>,
+    /// Ordered provider calls that produced an inline child asset for this output.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stages: Vec<ExecutionStageBinding>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -161,6 +164,19 @@ pub fn validate_worker_receipt(
         if let Some(execution) = &output.execution {
             validate_execution_identity(execution, 1)?;
         }
+        if !output.stages.is_empty()
+            && (output.stages.len() != 2
+                || output.stages[0].stage != "base_render"
+                || output.stages[1].stage != "child_transform")
+        {
+            return Err(ReplayUnavailable::new(
+                "invalid_output_stages",
+                "outputs.stages",
+            ));
+        }
+        for stage in &output.stages {
+            validate_execution_identity(&stage.execution, 1)?;
+        }
     }
     let voice_stages = submitted.stages.len() == 2
         && submitted.stages[0].stage == "base_tts"
@@ -218,6 +234,57 @@ pub fn validate_worker_receipt(
                 }))
         {
             return Err(ReplayUnavailable::new("invalid_output_hashes", "outputs"));
+        }
+        let writes = terminal_result.get("assetWrites").and_then(Value::as_array);
+        if let Some(writes) = writes {
+            let matching = writes
+                .iter()
+                .enumerate()
+                .filter(|(position, fact)| {
+                    fact.get("index")
+                        .and_then(Value::as_u64)
+                        .and_then(|value| usize::try_from(value).ok())
+                        .unwrap_or(*position)
+                        == index
+                })
+                .map(|(_, fact)| fact)
+                .collect::<Vec<_>>();
+            let child_reports = matching
+                .iter()
+                .filter_map(|fact| fact.get("workerChildExecutionReport"))
+                .collect::<Vec<_>>();
+            if child_reports.is_empty() != output.stages.is_empty() {
+                return Err(ReplayUnavailable::new(
+                    "output_stages_changed",
+                    "outputs.stages",
+                ));
+            }
+            if !child_reports.is_empty() {
+                let base = matching
+                    .first()
+                    .and_then(|fact| fact.get("workerExecutionReport"));
+                let base_matches = base.map_or_else(
+                    || {
+                        output.stages[0]
+                            .execution
+                            .get("state")
+                            .and_then(Value::as_str)
+                            == Some("unavailable")
+                    },
+                    |report| report == &output.stages[0].execution,
+                );
+                if matching.len() != 2
+                    || matching[1].get("sourceAssetId") != matching[0].get("assetId")
+                    || child_reports.len() != 1
+                    || !base_matches
+                    || child_reports[0] != &output.stages[1].execution
+                {
+                    return Err(ReplayUnavailable::new(
+                        "output_stages_changed",
+                        "outputs.stages",
+                    ));
+                }
+            }
         }
     }
     if terminal_result
@@ -279,7 +346,12 @@ pub fn require_deterministic_scope(
     receipt: &TrustedExecutionReceipt,
     actual_scope: &str,
 ) -> Result<(), ReplayUnavailable> {
-    if !receipt.stages.is_empty() {
+    if !receipt.stages.is_empty()
+        || receipt
+            .outputs
+            .iter()
+            .any(|output| !output.stages.is_empty())
+    {
         return Err(ReplayUnavailable::new(
             "composite_replay_unavailable",
             "stages",
@@ -361,10 +433,11 @@ pub fn require_provider_route_binding(
             .resolved()
             .ok_or_else(|| ReplayUnavailable::new("execution_unavailable", "execution"))?;
         if identity.backend != route.backend
-            || !route
-                .models
-                .iter()
-                .any(|model| model.model_id == identity.provider_id)
+            || !route.models.iter().any(|model| {
+                model.model_id == identity.provider_id
+                    || (identity.provider_id == "instantid"
+                        && model.model_id == "instantid_realvisxl")
+            })
         {
             return Err(ReplayUnavailable::new("provider_route_changed", "source"));
         }
@@ -651,6 +724,62 @@ mod tests {
                 .unwrap_err()
                 .reason,
             "deterministic_replay_unavailable"
+        );
+    }
+
+    #[test]
+    fn instantid_provider_alias_is_narrow_and_backend_bound() {
+        use crate::model_artifacts::portable_binding::{
+            PortableModelBinding, PortableRouteBinding,
+        };
+        let mut worker = worker_receipt();
+        worker.execution["identity"]["provider_id"] = json!("instantid");
+        let receipt = TrustedExecutionReceipt {
+            version: 1,
+            job_id: "job".into(),
+            job_type: "image_generate".into(),
+            worker_id: "worker".into(),
+            attempt_id: "a".repeat(64),
+            accepted_backend: "candle".into(),
+            accepted_device: "cuda:0".into(),
+            accepted_source_route: None,
+            inference_revision: "b".repeat(40),
+            accepted_binding_sha256: "c".repeat(64),
+            accepted_result_sha256: "d".repeat(64),
+            execution: worker.execution,
+            outputs: worker.outputs,
+            stages: Vec::new(),
+        };
+        let mut route = PortableRouteBinding {
+            backend: "candle".into(),
+            platform: "windows".into(),
+            models: vec![PortableModelBinding {
+                schema_version: 1,
+                slot: "modelManifestEntry".into(),
+                model_id: "instantid_realvisxl".into(),
+                backend: "candle".into(),
+                variant: "default".into(),
+                tier: None,
+                authored_options_sha256: "e".repeat(64),
+                members: Vec::new(),
+                checkpoint_plan: None,
+            }],
+        };
+        assert!(require_provider_route_binding(&receipt, &route).is_ok());
+        route.models[0].model_id = "another_instantid".into();
+        assert_eq!(
+            require_provider_route_binding(&receipt, &route)
+                .unwrap_err()
+                .reason,
+            "provider_route_changed"
+        );
+        route.models[0].model_id = "instantid_realvisxl".into();
+        route.backend = "mlx".into();
+        assert_eq!(
+            require_provider_route_binding(&receipt, &route)
+                .unwrap_err()
+                .reason,
+            "provider_route_changed"
         );
     }
 

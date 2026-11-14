@@ -1047,8 +1047,10 @@ fn image_execution_receipt(
             execution: None,
             artifact_ids: Vec::new(),
             artifact_sha256: Vec::new(),
+            stages: Vec::new(),
         })
         .collect::<Vec<_>>();
+    let mut child_reports = vec![None; image_count];
     for fact in asset_writes {
         let output_index = fact
             .get("index")
@@ -1097,11 +1099,39 @@ fn image_execution_receipt(
             }
             *slot = Some(report.clone());
         }
+        if let Some(report) = fact.get("workerChildExecutionReport") {
+            if child_reports[output_index]
+                .replace(report.clone())
+                .is_some()
+            {
+                return Err(WorkerError::InvalidPayload(
+                    "completed image output has more than one child provider report".into(),
+                ));
+            }
+        }
     }
     if outputs.iter().any(|output| output.artifact_ids.is_empty()) {
         return Err(WorkerError::InvalidPayload(
             "completed image output has no artifact".into(),
         ));
+    }
+    for (output, child) in outputs.iter_mut().zip(child_reports) {
+        if let Some(child) = child {
+            let base = output.execution.take().unwrap_or_else(|| {
+                serde_json::to_value(gen_core::generator::ExecutionIdentity::provider_default())
+                    .expect("provider default serializes")
+            });
+            output.stages = vec![
+                sceneworks_core::execution_receipt::ExecutionStageBinding {
+                    stage: "base_render".into(),
+                    execution: base,
+                },
+                sceneworks_core::execution_receipt::ExecutionStageBinding {
+                    stage: "child_transform".into(),
+                    execution: child,
+                },
+            ];
+        }
     }
     let shared = outputs
         .first()
@@ -1164,6 +1194,63 @@ fn completed_image_receipt_hashes_written_bytes_and_rejects_escape() {
         "assetId":"asset-one", "index":0, "mediaPath":outside.path().join("outside.png")
     })];
     assert!(image_execution_receipt(project.path(), &escaped, 1).is_err());
+}
+
+#[cfg(test)]
+#[test]
+fn inline_upscale_receipt_orders_base_and_child_reports_with_both_png_hashes() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("base.png"), b"base bytes").unwrap();
+    std::fs::write(project.path().join("child.png"), b"final child bytes").unwrap();
+    let base =
+        serde_json::to_value(gen_core::generator::ExecutionIdentity::provider_default()).unwrap();
+    let child =
+        serde_json::to_value(crate::upscale_jobs::real_esrgan_execution_unavailable()).unwrap();
+    let facts = vec![
+        serde_json::json!({"assetId":"base","index":0,"mediaPath":"base.png","workerExecutionReport":base.clone()}),
+        serde_json::json!({"assetId":"child","index":0,"mediaPath":"child.png","sourceAssetId":"base",
+            "workerExecutionReport":base,"workerChildExecutionReport":child}),
+    ];
+    let receipt = image_execution_receipt(project.path(), &facts, 1).unwrap();
+    assert_eq!(receipt.outputs[0].artifact_ids, ["base", "child"]);
+    assert_eq!(receipt.outputs[0].stages[0].stage, "base_render");
+    assert_eq!(receipt.outputs[0].stages[1].stage, "child_transform");
+    assert_eq!(receipt.outputs[0].stages[1].execution, child);
+    assert_eq!(
+        receipt.outputs[0].artifact_sha256[1],
+        sceneworks_core::hashing::hex(&Sha256::digest(b"final child bytes"))
+    );
+    let result = serde_json::json!({"expectedCount":1,"assetWrites":facts});
+    sceneworks_core::execution_receipt::validate_worker_receipt(
+        &receipt,
+        result.as_object().unwrap(),
+    )
+    .unwrap();
+    let mut reversed = receipt.clone();
+    reversed.outputs[0].stages.swap(0, 1);
+    assert_eq!(
+        sceneworks_core::execution_receipt::validate_worker_receipt(
+            &reversed,
+            result.as_object().unwrap(),
+        )
+        .unwrap_err()
+        .reason,
+        "invalid_output_stages"
+    );
+    let mut omitted = result;
+    omitted["assetWrites"][1]
+        .as_object_mut()
+        .unwrap()
+        .remove("workerChildExecutionReport");
+    assert_eq!(
+        sceneworks_core::execution_receipt::validate_worker_receipt(
+            &receipt,
+            omitted.as_object().unwrap(),
+        )
+        .unwrap_err()
+        .reason,
+        "output_stages_changed"
+    );
 }
 
 #[cfg(test)]
@@ -2495,7 +2582,7 @@ async fn apply_inline_upscale(
         )
         .await?;
 
-        let upscaled = crate::upscale_jobs::upscale_image_in_memory(
+        let (upscaled, upscale_execution) = crate::upscale_jobs::upscale_image_in_memory(
             api,
             settings,
             job,
@@ -2515,7 +2602,7 @@ async fn apply_inline_upscale(
         let base_fact_for_task = base_fact.clone();
         let engine_for_task = engine_id.to_owned();
         let project_path_for_task = project_path.to_owned();
-        let fact = crate::load_progress::spawn_blocking(move || {
+        let mut fact = crate::load_progress::spawn_blocking(move || {
             write_upscaled_asset(
                 &plan_for_task,
                 &base_fact_for_task,
@@ -2530,6 +2617,10 @@ async fn apply_inline_upscale(
         })
         .await
         .map_err(|error| crate::task_join_error("upscaled asset write task", error))??;
+        fact.insert(
+            "workerChildExecutionReport".into(),
+            serde_json::to_value(upscale_execution).map_err(WorkerError::Json)?,
+        );
         asset_writes.push(Value::Object(fact));
         heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     }
@@ -2636,7 +2727,7 @@ pub(crate) async fn apply_inline_iris_restore(
         let base_fact_for_task = base_fact.clone();
         let project_path_for_task = project_path.to_owned();
         let trained_model_for_task = trained_model.clone();
-        let fact = crate::load_progress::spawn_blocking(move || {
+        let mut fact = crate::load_progress::spawn_blocking(move || {
             write_upscaled_asset(
                 &plan_for_task,
                 &base_fact_for_task,
@@ -2651,6 +2742,11 @@ pub(crate) async fn apply_inline_iris_restore(
         })
         .await
         .map_err(|error| crate::task_join_error("restored asset write task", error))??;
+        fact.insert(
+            "workerChildExecutionReport".into(),
+            serde_json::to_value(crate::upscale_jobs::iris_restore_execution_unavailable())
+                .map_err(WorkerError::Json)?,
+        );
         asset_writes.push(Value::Object(fact));
         heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     }

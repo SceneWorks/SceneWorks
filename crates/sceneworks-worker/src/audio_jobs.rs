@@ -4372,49 +4372,61 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn voice_clone_reports_both_completed_stages_in_order() {
-        let (base_url, _) = spawn_audio_cancel_stub(false).await;
-        let settings = cancel_test_settings(base_url);
-        let api = ApiClient::new(&settings);
-        let job = audio_test_job("audio-voice-stages");
-        let request = AudioRequest::from_payload(&payload(json!({})));
-        let base_load = stub_load(StubBehavior::CompleteOk, Arc::new(AtomicBool::new(false)));
-        let converter_load = |_id: &str, _spec: &LoadSpec| {
-            Ok(Box::new(CompleteTransform(stub_transform_descriptor())) as Box<dyn AudioTransform>)
-        };
-        let plan = VoiceClonePlan {
-            base_model_dir: PathBuf::from("unused-base"),
-            converter_dir: PathBuf::from("unused-converter"),
-            reference: gen_core::AudioTrack {
-                samples: vec![0.05],
-                sample_rate: 24_000,
-                channels: 1,
-                stems: Vec::new(),
-            },
-        };
-        let (track, stages) = run_voice_clone_synthesis_using_completed(
-            &api,
-            &settings,
-            &job,
-            &request,
-            plan,
-            base_load,
-            converter_load,
-        )
-        .await
-        .unwrap();
-        assert!(!track.samples.is_empty());
-        assert_eq!(
-            stages
+    #[test]
+    fn voice_clone_reports_both_completed_stages_in_order() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (base_url, _) = spawn_audio_cancel_stub(false).await;
+            let data = tempfile::tempdir().unwrap();
+            let mut settings = cancel_test_settings(base_url);
+            settings.data_dir = data.path().to_path_buf();
+            let api = ApiClient::new(&settings);
+            let job = audio_test_job("audio-voice-stages");
+            let request = AudioRequest::from_payload(&payload(json!({})));
+            let base_load = stub_load(StubBehavior::CompleteOk, Arc::new(AtomicBool::new(false)));
+            let converter_load = |_id: &str, _spec: &LoadSpec| {
+                Ok(Box::new(CompleteTransform(stub_transform_descriptor()))
+                    as Box<dyn AudioTransform>)
+            };
+            let plan = VoiceClonePlan {
+                base_model_dir: PathBuf::from("unused-base"),
+                converter_dir: PathBuf::from("unused-converter"),
+                reference: gen_core::AudioTrack {
+                    samples: vec![0.05],
+                    sample_rate: 24_000,
+                    channels: 1,
+                    stems: Vec::new(),
+                },
+            };
+            let (track, stages) = run_voice_clone_synthesis_using_completed(
+                &api,
+                &settings,
+                &job,
+                &request,
+                plan,
+                base_load,
+                converter_load,
+            )
+            .await
+            .unwrap();
+            assert!(!track.samples.is_empty());
+            assert_eq!(
+                stages
+                    .iter()
+                    .map(|stage| stage.stage.as_str())
+                    .collect::<Vec<_>>(),
+                ["base_tts", "voice_conversion"]
+            );
+            assert!(stages
                 .iter()
-                .map(|stage| stage.stage.as_str())
-                .collect::<Vec<_>>(),
-            ["base_tts", "voice_conversion"]
-        );
-        assert!(stages
-            .iter()
-            .all(|stage| stage.execution["state"] == "unavailable"));
+                .all(|stage| stage.execution["state"] == "unavailable"));
+        });
+        // The worker starts a background inventory while posting progress. The test
+        // proves the two completed stages without waiting for that unrelated scan.
+        runtime.shutdown_timeout(Duration::from_millis(50));
     }
 
     /// Native single-call clone-TTS path (`chatterbox_tts`): the shared flag reaches the one

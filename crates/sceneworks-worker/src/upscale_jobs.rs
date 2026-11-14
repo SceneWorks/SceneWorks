@@ -426,7 +426,7 @@ async fn run_seedvr2_upscale(
     softness: f32,
     seed: u64,
     cancel: CancelFlag,
-) -> WorkerResult<RgbImage> {
+) -> WorkerResult<(RgbImage, gen_core::generator::ExecutionIdentity)> {
     let (src_w, src_h) = (source.width(), source.height());
     let target_w = round_to_16(src_w.saturating_mul(u32::from(factor)));
     let target_h = round_to_16(src_h.saturating_mul(u32::from(factor)));
@@ -464,15 +464,15 @@ async fn run_seedvr2_upscale(
                 cancel: cancel.clone(),
                 ..Default::default()
             };
-            let output = generator
-                .generate(&request, &mut |_progress| {})
+            let completed = generator
+                .generate_with_execution_report(&request, &mut |_progress| {})
                 .map_err(|error| match error {
                     gen_core::Error::Canceled => WorkerError::Canceled(error.to_string()),
                     other => WorkerError::Engine(format!("SeedVR2 upscale failed: {other}")),
                 })?;
-            let image = match output {
-                GenerationOutput::Images(mut images) if !images.is_empty() => images.remove(0),
-                GenerationOutput::Images(_) => {
+            let image = match completed.generation.output {
+                Some(GenerationOutput::Images(mut images)) if images.len() == 1 => images.remove(0),
+                Some(GenerationOutput::Images(_)) => {
                     return Err(WorkerError::Engine("SeedVR2 produced no image".to_owned()))
                 }
                 other => {
@@ -481,11 +481,34 @@ async fn run_seedvr2_upscale(
                     )))
                 }
             };
-            RgbImage::from_raw(image.width, image.height, image.pixels)
-                .ok_or_else(|| WorkerError::Engine("SeedVR2 image buffer size mismatch".to_owned()))
+            let rgb =
+                RgbImage::from_raw(image.width, image.height, image.pixels).ok_or_else(|| {
+                    WorkerError::Engine("SeedVR2 image buffer size mismatch".to_owned())
+                })?;
+            Ok((rgb, completed.execution))
         },
     )
     .await
+}
+
+pub(crate) fn real_esrgan_execution_unavailable() -> gen_core::generator::ExecutionIdentity {
+    gen_core::generator::ExecutionIdentity::unavailable(
+        gen_core::generator::ExecutionUnavailable {
+            code: "real_esrgan_onnx_execution_unavailable".into(),
+            detail: "Real-ESRGAN runs through the ONNX Runtime session without a completed provider execution identity".into(),
+            missing_facts: vec!["onnx_execution_recipe".into(), "deterministic_runtime_scope".into()],
+        },
+    )
+}
+
+pub(crate) fn iris_restore_execution_unavailable() -> gen_core::generator::ExecutionIdentity {
+    gen_core::generator::ExecutionIdentity::unavailable(
+        gen_core::generator::ExecutionUnavailable {
+            code: "iris_transform_execution_unavailable".into(),
+            detail: "Iris restoration uses the Transform apply path without a completed transform execution report".into(),
+            missing_facts: vec!["transform_execution_recipe".into(), "deterministic_runtime_scope".into()],
+        },
+    )
 }
 
 /// Upscale one in-memory RGB image with the selected engine, returning the upscaled image.
@@ -510,7 +533,7 @@ pub(crate) async fn upscale_image_in_memory(
     seed: u64,
     source: RgbImage,
     cancel: &CancelFlag,
-) -> WorkerResult<RgbImage> {
+) -> WorkerResult<(RgbImage, gen_core::generator::ExecutionIdentity)> {
     // Both branches run their long compute under `run_upscale_with_heartbeat` so the worker keeps
     // emitting `Busy` heartbeats (every 5-15s) during model load + diffusion. Without it, an inline
     // SeedVR2 upscale (model load + one-step diffusion, easily > the API's 90s worker-timeout) goes
@@ -548,7 +571,7 @@ pub(crate) async fn upscale_image_in_memory(
                 }),
             )
             .await?;
-            Ok(out)
+            Ok((out, real_esrgan_execution_unavailable()))
         }
     }
 }
@@ -737,7 +760,11 @@ pub(crate) async fn run_image_upscale_job(
 
     // Real-ESRGAN reports its actual `ort` execution device (coreml/cuda/cpu) for observability;
     // SeedVR2 is a generative pass with no such session, so it reports `None` (sc-8923).
-    let (upscaled, esrgan_device): (RgbImage, Option<&'static str>) = if engine_id == "seedvr2" {
+    let (upscaled, esrgan_device, execution_report): (
+        RgbImage,
+        Option<&'static str>,
+        gen_core::generator::ExecutionIdentity,
+    ) = if engine_id == "seedvr2" {
         update_job(
             api,
             &job.id,
@@ -771,7 +798,7 @@ pub(crate) async fn run_image_upscale_job(
         let cancel = CancelFlag::new();
         // Move `source_image` into the future — the `else` branch already consumes it and it's
         // unused after this `if`, so the clone (a full RGB buffer copy) was needless (sc-8927).
-        let out = run_upscale_with_heartbeat(
+        let (out, execution) = run_upscale_with_heartbeat(
             api,
             settings,
             &job.id,
@@ -781,7 +808,7 @@ pub(crate) async fn run_image_upscale_job(
             }),
         )
         .await?;
-        (out, None)
+        (out, None, execution)
     } else {
         // Real-ESRGAN via `ort` — the CoreML EP on macOS (sc-3489), the CUDA EP off-Mac on the
         // candle GPU-worker lane (sc-5499), both with a CPU fallback. The routing oracle
@@ -829,7 +856,7 @@ pub(crate) async fn run_image_upscale_job(
             }),
         )
         .await?;
-        (out, Some(device))
+        (out, Some(device), real_esrgan_execution_unavailable())
     };
     let (out_w, out_h) = (upscaled.width(), upscaled.height());
 
@@ -914,6 +941,7 @@ pub(crate) async fn run_image_upscale_job(
                 "loras": [],
                 "stylePreset": "",
                 "sourceAssetId": source_asset_id,
+                "workerExecutionReport": execution_report,
                 "rawAdapterSettings": { "upscale": upscale_settings },
                 "parents": [source_asset_id],
                 "extra": {
@@ -1268,6 +1296,7 @@ pub(crate) async fn run_iris_restore_job_using(
                 "loras": [],
                 "stylePreset": "",
                 "sourceAssetId": source_asset_id,
+                "workerExecutionReport": iris_restore_execution_unavailable(),
                 "rawAdapterSettings": { "upscale": record },
                 "parents": [source_asset_id],
                 "extra": {

@@ -69,6 +69,7 @@ fn report(job_id: &str) -> WorkerExecutionReceipt {
             execution: None,
             artifact_ids: vec![job_id.into()],
             artifact_sha256: Vec::new(),
+            stages: Vec::new(),
         }],
         stages: Vec::new(),
     }
@@ -291,6 +292,7 @@ fn deterministic_image_receipt_creates_separate_pinned_replay_job() {
             execution: None,
             artifact_ids: vec!["asset-one".into()],
             artifact_sha256: vec!["c".repeat(64)],
+            stages: Vec::new(),
         }],
         stages: Vec::new(),
     };
@@ -373,6 +375,7 @@ fn deterministic_image_receipt_creates_separate_pinned_replay_job() {
             execution: None,
             artifact_ids: vec![replay.id.clone()],
             artifact_sha256: vec!["c".repeat(64)],
+            stages: Vec::new(),
         }],
         stages: Vec::new(),
     };

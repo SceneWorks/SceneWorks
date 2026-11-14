@@ -771,6 +771,7 @@ fn unavailable_completed_receipt(
             execution: None,
             artifact_ids: Vec::new(),
             artifact_sha256: Vec::new(),
+            stages: Vec::new(),
         })
         .collect::<Vec<_>>();
     if let Some(writes) = writes {
