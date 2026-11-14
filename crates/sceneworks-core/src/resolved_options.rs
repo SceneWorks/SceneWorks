@@ -98,6 +98,7 @@ pub struct RouteOptionFacts {
     pub poses: RouteField<usize>,
     /// Pose routing also checks each entry's container shape without parsing its keypoints.
     pub poses_all_objects: RouteField<usize>,
+    pub poses_any_object: RouteField<bool>,
     pub phases: RouteField<usize>,
     pub control_mode: RouteField<String>,
     pub control_image: RouteField<String>,
@@ -174,6 +175,11 @@ impl RouteOptionFacts {
                 value
                     .as_array()
                     .and_then(|items| items.iter().all(Value::is_object).then_some(items.len()))
+            }),
+            poses_any_object: field(advanced, "poses", |value| {
+                value
+                    .as_array()
+                    .map(|items| items.iter().any(Value::is_object))
             }),
             phases: field(advanced, "phases", count),
             control_mode: field(advanced, "controlMode", text),
@@ -601,6 +607,7 @@ mod tests {
         })));
         assert_eq!(facts.poses, RouteField::Valid(0));
         assert_eq!(facts.poses_all_objects, RouteField::Valid(0));
+        assert_eq!(facts.poses_any_object, RouteField::Valid(false));
         assert_eq!(facts.phases, RouteField::Absent);
         assert_eq!(facts.control_mode, RouteField::Null);
         assert_eq!(facts.control_image, RouteField::Invalid);
@@ -616,6 +623,7 @@ mod tests {
         let malformed = RouteOptionFacts::from_payload_syntax(&obj(json!({"advanced": []})));
         assert_eq!(malformed.poses, RouteField::Invalid);
         assert_eq!(malformed.poses_all_objects, RouteField::Invalid);
+        assert_eq!(malformed.poses_any_object, RouteField::Invalid);
         assert_eq!(malformed.control_mode, RouteField::Invalid);
         assert_eq!(malformed.veda_enabled, RouteField::Invalid);
     }
