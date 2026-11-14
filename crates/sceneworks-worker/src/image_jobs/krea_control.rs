@@ -274,9 +274,24 @@ pub(super) fn resolve_krea_control_base(
 /// `advanced.poses`, not edit mode, whose dense base resolves locally. The MLX mirror of
 /// `krea_control_candle_available`; the overlay weights are NOT part of the gate (resolved on first use).
 pub(super) fn krea_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+    krea_control_available_with_pose_count(request, settings, pose_entries(request).len())
+}
+
+pub(super) fn krea_control_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> bool {
+    krea_control_available_with_pose_count(execution, settings, execution.pose_source_count())
+}
+
+fn krea_control_available_with_pose_count(
+    request: &ImageRequest,
+    settings: &Settings,
+    pose_count: usize,
+) -> bool {
     is_krea_control_model(&request.model)
         && request.mode != "edit_image"
-        && !pose_entries(request).is_empty()
+        && pose_count > 0
         && matches!(resolve_krea_control_base(request, settings), Ok(Some(_)))
 }
 

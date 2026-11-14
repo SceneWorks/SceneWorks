@@ -1162,9 +1162,24 @@ const FLUX2_CONTROL_ADAPTER_LABEL: &str = "mlx_flux2";
 /// presence is NOT part of the gate: they are fetched on first use in the stream (a missing checkpoint
 /// downloads, then errors loudly only on a real failure — never silently drops the poses).
 pub(super) fn flux2_dev_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+    flux2_dev_control_available_with_pose_count(request, settings, pose_entries(request).len())
+}
+
+pub(super) fn flux2_dev_control_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> bool {
+    flux2_dev_control_available_with_pose_count(execution, settings, execution.pose_source_count())
+}
+
+fn flux2_dev_control_available_with_pose_count(
+    request: &ImageRequest,
+    settings: &Settings,
+    pose_count: usize,
+) -> bool {
     mlx_flux_strict_control_engine_id(&request.model) == Some(FLUX2_DEV_CONTROL_ENGINE_ID)
         && request.mode != "edit_image"
-        && !pose_entries(request).is_empty()
+        && pose_count > 0
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
 }
 

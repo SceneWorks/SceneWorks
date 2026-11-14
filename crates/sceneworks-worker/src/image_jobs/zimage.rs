@@ -77,8 +77,23 @@ pub(super) const ZIMAGE_BASE_CONTROL_FILE: &str = "Z-Image-Fun-Controlnet-Union-
 /// Control-weights presence is checked in the stream so a missing checkpoint errors
 /// loudly instead of silently dropping the poses to the txt2img path.
 pub(super) fn zimage_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+    zimage_control_available_with_pose_count(request, settings, pose_entries(request).len())
+}
+
+pub(super) fn zimage_control_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> bool {
+    zimage_control_available_with_pose_count(execution, settings, execution.pose_source_count())
+}
+
+fn zimage_control_available_with_pose_count(
+    request: &ImageRequest,
+    settings: &Settings,
+    pose_count: usize,
+) -> bool {
     request.model == "z_image_turbo"
-        && !pose_entries(request).is_empty()
+        && pose_count > 0
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
 }
 
@@ -87,8 +102,27 @@ pub(super) fn zimage_control_available(request: &ImageRequest, settings: &Settin
 /// txt2img (sc-8251). The base mirror of [`zimage_control_available`]; keyed on the base model id so
 /// the Turbo control path is untouched.
 pub(super) fn zimage_base_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+    zimage_base_control_available_with_pose_count(request, settings, pose_entries(request).len())
+}
+
+pub(super) fn zimage_base_control_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> bool {
+    zimage_base_control_available_with_pose_count(
+        execution,
+        settings,
+        execution.pose_source_count(),
+    )
+}
+
+fn zimage_base_control_available_with_pose_count(
+    request: &ImageRequest,
+    settings: &Settings,
+    pose_count: usize,
+) -> bool {
     request.model == "z_image"
-        && !pose_entries(request).is_empty()
+        && pose_count > 0
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
 }
 

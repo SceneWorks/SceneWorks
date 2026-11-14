@@ -155,6 +155,19 @@ pub(super) fn resolve_imported_sdxl_pin(
 }
 
 pub(super) fn sdxl_imported_request_shape_available(request: &ImageRequest) -> bool {
+    sdxl_imported_request_shape_available_with_pose_count(request, pose_entries(request).len())
+}
+
+pub(super) fn sdxl_imported_request_shape_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+) -> bool {
+    sdxl_imported_request_shape_available_with_pose_count(execution, execution.pose_source_count())
+}
+
+fn sdxl_imported_request_shape_available_with_pose_count(
+    request: &ImageRequest,
+    pose_count: usize,
+) -> bool {
     if sceneworks_core::jobs_store::imported_control_intent_is_material_resolved(
         request
             .resolved_advanced
@@ -186,7 +199,7 @@ pub(super) fn sdxl_imported_request_shape_available(request: &ImageRequest) -> b
         .phases
         .as_ref()
         .is_some_and(|phases| !phases.value.is_empty());
-    if !pose_entries(request).is_empty()
+    if pose_count > 0
         || !request.reference_asset_ids.is_empty()
         || request.character_id.is_some()
         || request.character_look_id.is_some()

@@ -142,9 +142,28 @@ fn resolve_flux1_control_base(
 /// `jobs_store::flux1_control_candle_eligible` so the worker and router agree. Control-weights presence is
 /// NOT part of the gate: they are fetched on first use in the stream.
 pub(super) fn flux1_control_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
+    flux1_control_candle_available_with_pose_count(request, settings, pose_entries(request).len())
+}
+
+pub(super) fn flux1_control_candle_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> bool {
+    flux1_control_candle_available_with_pose_count(
+        execution,
+        settings,
+        execution.pose_source_count(),
+    )
+}
+
+fn flux1_control_candle_available_with_pose_count(
+    request: &ImageRequest,
+    settings: &Settings,
+    pose_count: usize,
+) -> bool {
     is_flux1_control_model(&request.model)
         && request.mode != "edit_image"
-        && !pose_entries(request).is_empty()
+        && pose_count > 0
         && matches!(resolve_flux1_control_base(request, settings), Ok(Some(_)))
 }
 

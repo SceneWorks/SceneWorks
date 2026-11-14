@@ -69,13 +69,32 @@ pub(super) fn zimage_identity_candle_available(
     request: &ImageRequest,
     settings: &Settings,
 ) -> bool {
+    zimage_identity_candle_available_with_pose_count(request, settings, pose_entries(request).len())
+}
+
+pub(super) fn zimage_identity_candle_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> bool {
+    zimage_identity_candle_available_with_pose_count(
+        execution,
+        settings,
+        execution.pose_source_count(),
+    )
+}
+
+fn zimage_identity_candle_available_with_pose_count(
+    request: &ImageRequest,
+    settings: &Settings,
+    pose_count: usize,
+) -> bool {
     is_zimage_identity_candle_model(&request.model)
         && request.mode == "character_image"
         && zimage_identity_candle_strength(request).is_some()
         // Angle / pose sets are `character_image` too, but route to (and score on) their own lanes —
         // exclude both so this plain With-Character lane never steals them (it sits BEFORE the Z-Image
         // strict-control lane in the dispatch). Mirrors `resolve_character_image_likeness_source`.
-        && pose_entries(request).is_empty()
+        && pose_count == 0
         && !request.advanced_bool("angleSet").unwrap_or(false)
         && matches!(
             resolve_zimage_edit_candle_base(request, settings),

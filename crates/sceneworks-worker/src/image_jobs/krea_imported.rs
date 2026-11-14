@@ -447,6 +447,19 @@ fn dir_has_safetensors(dir: &Path) -> bool {
 /// [`resolve_krea_imported_base_tier`] error in the handler rather than a silent fall-through to the stub.
 /// Mirrors the shape of the other `…_available` predicates.
 pub(super) fn krea_imported_request_shape_available(request: &ImageRequest) -> bool {
+    krea_imported_request_shape_available_with_pose_count(request, pose_entries(request).len())
+}
+
+pub(super) fn krea_imported_request_shape_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+) -> bool {
+    krea_imported_request_shape_available_with_pose_count(execution, execution.pose_source_count())
+}
+
+fn krea_imported_request_shape_available_with_pose_count(
+    request: &ImageRequest,
+    pose_count: usize,
+) -> bool {
     let operation = krea_imported_operation(request);
     if krea_imported_native_nvfp4(request) {
         #[cfg(target_os = "macos")]
@@ -497,7 +510,7 @@ pub(super) fn krea_imported_request_shape_available(request: &ImageRequest) -> b
     }
     if request_has_multiphase(request) {
         return request.mode != "edit_image"
-            && pose_entries(request).is_empty()
+            && pose_count == 0
             && request.reference_asset_ids.is_empty()
             && request.reference_asset_id.is_none()
             && request.source_asset_id.is_none();
@@ -508,12 +521,12 @@ pub(super) fn krea_imported_request_shape_available(request: &ImageRequest) -> b
     // generate_one` threads the request conditioning into the first pass before refining it, so the
     // source is honored rather than dropped (this is why the guard is narrower than the shape gate
     // that preceded the two-pass rework).
-    if request.hires_fix.enabled && !pose_entries(request).is_empty() {
+    if request.hires_fix.enabled && pose_count > 0 {
         return false;
     }
     // A pose set inside edit mode is no lane anywhere (the builtin edit lane rejects it too), and
     // outside edit mode it requires a registered provider accepting Control conditioning.
-    if !pose_entries(request).is_empty() {
+    if pose_count > 0 {
         if request.mode == "edit_image"
             || !caps
                 .conditioning
@@ -599,9 +612,33 @@ pub(super) fn krea_imported_img2img_requested(request: &ImageRequest) -> bool {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(super) fn krea_imported_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+    krea_imported_control_available_with_pose_count(request, settings, pose_entries(request).len())
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn krea_imported_control_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> bool {
+    krea_imported_control_available_with_pose_count(
+        execution,
+        settings,
+        execution.pose_source_count(),
+    )
+}
+
+#[cfg(any(
+    all(target_os = "macos", test),
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn krea_imported_control_available_with_pose_count(
+    request: &ImageRequest,
+    settings: &Settings,
+    pose_count: usize,
+) -> bool {
     request.mode != "edit_image"
-        && !pose_entries(request).is_empty()
-        && krea_imported_request_shape_available(request)
+        && pose_count > 0
+        && krea_imported_request_shape_available_with_pose_count(request, pose_count)
         && matches!(
             resolve_imported_krea_dit_pin(request, settings),
             Ok(Some(_))
@@ -752,7 +789,27 @@ pub(super) fn prepare_krea_imported_sources(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PreparedKreaImportedSources>> {
-    if !krea_imported_request_shape_available(request) || !pose_entries(request).is_empty() {
+    prepare_krea_imported_sources_with_pose_count(request, settings, pose_entries(request).len())
+}
+
+pub(super) fn prepare_krea_imported_sources_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> WorkerResult<Option<PreparedKreaImportedSources>> {
+    prepare_krea_imported_sources_with_pose_count(
+        execution,
+        settings,
+        execution.pose_source_count(),
+    )
+}
+
+fn prepare_krea_imported_sources_with_pose_count(
+    request: &ImageRequest,
+    settings: &Settings,
+    pose_count: usize,
+) -> WorkerResult<Option<PreparedKreaImportedSources>> {
+    if !krea_imported_request_shape_available_with_pose_count(request, pose_count) || pose_count > 0
+    {
         return Ok(None);
     }
     let Some(dit_pin) = resolve_imported_krea_dit_pin(request, settings)? else {
@@ -772,9 +829,34 @@ pub(super) fn prepare_krea_imported_control_sources(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PreparedKreaImportedControlSources>> {
+    prepare_krea_imported_control_sources_with_pose_count(
+        request,
+        settings,
+        pose_entries(request).len(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn prepare_krea_imported_control_sources_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> WorkerResult<Option<PreparedKreaImportedControlSources>> {
+    prepare_krea_imported_control_sources_with_pose_count(
+        execution,
+        settings,
+        execution.pose_source_count(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn prepare_krea_imported_control_sources_with_pose_count(
+    request: &ImageRequest,
+    settings: &Settings,
+    pose_count: usize,
+) -> WorkerResult<Option<PreparedKreaImportedControlSources>> {
     if request.mode == "edit_image"
-        || pose_entries(request).is_empty()
-        || !krea_imported_request_shape_available(request)
+        || pose_count == 0
+        || !krea_imported_request_shape_available_with_pose_count(request, pose_count)
     {
         return Ok(None);
     }

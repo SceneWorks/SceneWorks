@@ -90,9 +90,24 @@ pub(super) const QWEN_CONTROL_FILE: &str = "model.safetensors";
 /// is ignored for parity with the Python torch `QwenImageControlNetPipeline` path; identity comes
 /// from character LoRA adapters on the base transformer.
 pub(super) fn qwen_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+    qwen_control_available_with_pose_count(request, settings, pose_entries(request).len())
+}
+
+pub(super) fn qwen_control_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> bool {
+    qwen_control_available_with_pose_count(execution, settings, execution.pose_source_count())
+}
+
+fn qwen_control_available_with_pose_count(
+    request: &ImageRequest,
+    settings: &Settings,
+    pose_count: usize,
+) -> bool {
     request.model == "qwen_image"
         && request.mode != "edit_image"
-        && !pose_entries(request).is_empty()
+        && pose_count > 0
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
 }
 

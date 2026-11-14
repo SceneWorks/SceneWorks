@@ -151,6 +151,17 @@ pub(super) fn flux2_control_candle_available(request: &ImageRequest, settings: &
         && matches!(resolve_flux2_control_base(request, settings), Ok(Some(_)))
 }
 
+pub(super) fn flux2_control_candle_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> bool {
+    let request: &ImageRequest = execution;
+    is_flux2_control_model(&request.model)
+        && request.mode != "edit_image"
+        && flux2_control_candle_pose_count_resolved(execution).is_some_and(|count| count > 0)
+        && matches!(resolve_flux2_control_base(request, settings), Ok(Some(_)))
+}
+
 /// Strict scheduler/worker pose contract: no filtered-away malformed entries and no unbounded set.
 fn flux2_control_candle_pose_count(request: &ImageRequest) -> Option<usize> {
     match request

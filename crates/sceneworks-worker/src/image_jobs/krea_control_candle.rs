@@ -341,9 +341,28 @@ pub(super) fn resolve_krea_control_base(
 /// `jobs_store::krea_control_candle_eligible` so the worker and router agree. The overlay weights are NOT
 /// part of the gate: they are resolved on first use in the stream.
 pub(super) fn krea_control_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
+    krea_control_candle_available_with_pose_count(request, settings, pose_entries(request).len())
+}
+
+pub(super) fn krea_control_candle_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> bool {
+    krea_control_candle_available_with_pose_count(
+        execution,
+        settings,
+        execution.pose_source_count(),
+    )
+}
+
+fn krea_control_candle_available_with_pose_count(
+    request: &ImageRequest,
+    settings: &Settings,
+    pose_count: usize,
+) -> bool {
     is_krea_control_model(&request.model)
         && request.mode != "edit_image"
-        && !pose_entries(request).is_empty()
+        && pose_count > 0
         && if super::artifact_resolution::wants_krea_convrot(request) {
             super::artifact_resolution::resolve_krea_convrot_dit(settings).is_some()
         } else {

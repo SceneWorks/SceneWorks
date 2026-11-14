@@ -16,6 +16,7 @@ use crate::{WorkerError, WorkerResult};
 pub(crate) const FACT_KEY: &str = "flux3ReferenceEditing";
 
 /// The native lanes share this ingress: reserved provenance is never caller-authored.
+#[cfg(test)]
 pub(crate) fn caller_raw_settings(
     advanced: &serde_json::Map<String, serde_json::Value>,
 ) -> serde_json::Map<String, serde_json::Value> {

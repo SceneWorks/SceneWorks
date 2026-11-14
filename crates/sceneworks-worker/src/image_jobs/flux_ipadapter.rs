@@ -186,23 +186,24 @@ async fn ensure_flux_ipadapter_weights(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
+    portable_aux: &sceneworks_core::portable_aux_bindings::PortableAuxBindings,
 ) -> WorkerResult<(PathBuf, PathBuf)> {
-    if let Some(advanced) = job.payload.get("advanced").and_then(Value::as_object) {
-        if crate::portable_aux_sources::has_bound_aux_paths(advanced) {
-            let adapter = crate::portable_aux_sources::bound_aux_path(advanced, "flux_ip_adapter")
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload(
-                        "portable FLUX IP-Adapter source is not bound".to_owned(),
-                    )
-                })?;
-            let encoder = crate::portable_aux_sources::bound_aux_path(advanced, "flux_ip_encoder")
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload(
-                        "portable FLUX image encoder is not bound".to_owned(),
-                    )
-                })?;
-            return Ok((adapter, encoder));
-        }
+    if portable_aux.has_paths() {
+        let adapter = portable_aux
+            .path("flux_ip_adapter")
+            .map(Path::to_path_buf)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "portable FLUX IP-Adapter source is not bound".to_owned(),
+                )
+            })?;
+        let encoder = portable_aux
+            .path("flux_ip_encoder")
+            .map(Path::to_path_buf)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("portable FLUX image encoder is not bound".to_owned())
+            })?;
+        return Ok((adapter, encoder));
     }
     // Env override: a staged dir laid out like the validation harness.
     if let Ok(root) = std::env::var("SCENEWORKS_IPADAPTER_FLUX") {
@@ -321,7 +322,8 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
         reference_id,
         project_path,
     )?;
-    let (adapter_file, encoder_dir) = ensure_flux_ipadapter_weights(api, settings, job).await?;
+    let (adapter_file, encoder_dir) =
+        ensure_flux_ipadapter_weights(api, settings, job, &request.portable_aux).await?;
 
     // Identity-likeness scoring (epic 4406, sc-4411 plain With-Character): the candle FLUX XLabs
     // IP-Adapter lane is the With-Character route for a FLUX.1 model — score every output against the

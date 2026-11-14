@@ -168,9 +168,24 @@ pub(super) fn resolve_zimage_control_base(
 /// (sc-8379) with a non-empty `advanced.poses`, not edit mode, whose base resolves locally. Mirrors
 /// `jobs_store::zimage_control_candle_eligible` so the worker and router agree.
 pub(super) fn zimage_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+    zimage_control_available_with_pose_count(request, settings, pose_entries(request).len())
+}
+
+pub(super) fn zimage_control_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> bool {
+    zimage_control_available_with_pose_count(execution, settings, execution.pose_source_count())
+}
+
+fn zimage_control_available_with_pose_count(
+    request: &ImageRequest,
+    settings: &Settings,
+    pose_count: usize,
+) -> bool {
     is_zimage_control_model(&request.model)
         && request.mode != "edit_image"
-        && !pose_entries(request).is_empty()
+        && pose_count > 0
         && matches!(resolve_zimage_control_base(request, settings), Ok(Some(_)))
 }
 

@@ -123,9 +123,24 @@ pub(super) fn request_carries_img2img_reference(request: &ImageRequest) -> bool 
 /// `mlx_available` arm so it wins over plain Raw t2i (which would run the 52-step true-CFG regime and
 /// never accelerate).
 pub(super) fn krea_turbo_on_raw_available(request: &ImageRequest, settings: &Settings) -> bool {
+    krea_turbo_on_raw_available_with_pose_count(request, settings, pose_entries(request).len())
+}
+
+pub(super) fn krea_turbo_on_raw_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> bool {
+    krea_turbo_on_raw_available_with_pose_count(execution, settings, execution.pose_source_count())
+}
+
+fn krea_turbo_on_raw_available_with_pose_count(
+    request: &ImageRequest,
+    settings: &Settings,
+    pose_count: usize,
+) -> bool {
     request.model == KREA_RAW_MODEL_ID
         && request.mode != "edit_image"
-        && pose_entries(request).is_empty()
+        && pose_count == 0
         && !request_carries_img2img_reference(request)
         && request_has_accelerator_lora(request)
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))

@@ -89,9 +89,24 @@ const FLUX1_CONTROL_ADAPTER_LABEL: &str = "mlx_flux";
 /// entry is the structural hint carrier for every kind (pose renders a skeleton; canny/depth pair the
 /// pose with `advanced.controlMode` + an input image — the pose set still drives the per-image loop).
 pub(super) fn flux1_dev_control_available(request: &ImageRequest, settings: &Settings) -> bool {
+    flux1_dev_control_available_with_pose_count(request, settings, pose_entries(request).len())
+}
+
+pub(super) fn flux1_dev_control_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> bool {
+    flux1_dev_control_available_with_pose_count(execution, settings, execution.pose_source_count())
+}
+
+fn flux1_dev_control_available_with_pose_count(
+    request: &ImageRequest,
+    settings: &Settings,
+    pose_count: usize,
+) -> bool {
     mlx_flux_strict_control_engine_id(&request.model) == Some(FLUX1_DEV_CONTROL_ENGINE_ID)
         && request.mode != "edit_image"
-        && !pose_entries(request).is_empty()
+        && pose_count > 0
         && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
 }
 
