@@ -38,7 +38,7 @@ jobs:
           call node apps/desktop/scripts/build-sidecar.mjs || exit /b 1
           call node scripts/release-sidecar-artifact.mjs seal windows apps/desktop/binaries/sceneworks-api-x86_64-pc-windows-msvc.exe "%RUNNER_TEMP%\release-sidecar-windows-%GITHUB_RUN_ID%" || exit /b 1
           call node scripts/release-sidecar-artifact.mjs verify windows "%RUNNER_TEMP%\release-sidecar-windows-%GITHUB_RUN_ID%" || exit /b 1
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-sidecar-windows
           path: ${{ runner.temp }}/release-sidecar-windows-${{ github.run_id }}
@@ -55,7 +55,7 @@ jobs:
       CARGO_NET_OFFLINE: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "20"
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
@@ -75,7 +75,7 @@ jobs:
       # Tag-scoped caches in release.yml cannot supply that reuse.
       - name: Select persistent FlashAttention build directory
         run: node scripts/select-linux-flash-cache.mjs
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2 (v2.9.1+1)
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2 (v2.9.1+1)
         with:
           cache-directories: ${{ env.CANDLE_FLASH_ATTN_BUILD_DIR }}
           env-vars: CANDLE_FLASH_ATTN_BUILD_DIR NVCC NVCC_CCBIN
@@ -94,7 +94,7 @@ jobs:
           node apps/desktop/scripts/build-sidecar.mjs
           node scripts/release-sidecar-artifact.mjs seal linux apps/desktop/binaries/sceneworks-api-x86_64-unknown-linux-gnu "$RUNNER_TEMP/release-sidecar-linux-$GITHUB_RUN_ID"
           node scripts/release-sidecar-artifact.mjs verify linux "$RUNNER_TEMP/release-sidecar-linux-$GITHUB_RUN_ID"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-sidecar-linux
           path: ${{ runner.temp }}/release-sidecar-linux-${{ github.run_id }}

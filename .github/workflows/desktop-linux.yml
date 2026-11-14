@@ -24,7 +24,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "20"
           cache: "npm"
@@ -41,7 +41,7 @@ jobs:
       # main-only save would leave it with nothing to restore and cold on every dispatch. The
       # 2026-08-15 cache inventory carried no entry from this lane at all, so it is not what was
       # starving the PR lanes. Do not re-symmetrise this with the lanes above.
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2 (v2.9.1+1)
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2 (v2.9.1+1)
 
       # Tauri v2's Ubuntu/WebKitGTK build prerequisites. gstreamer1.0-libav
       # supplies the H.264 decoder that WebKitGTK lacks on stock Ubuntu and is
@@ -110,7 +110,7 @@ jobs:
           done
 
       - name: Upload Linux desktop packages
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sceneworks-desktop-linux
           path: |
