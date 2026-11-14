@@ -168,6 +168,22 @@ describe("bundle report", () => {
     expect(report.violations.some((message) => message.includes("Largest route") && message.includes("rawBytes"))).toBe(true);
   });
 
+  it("charges WASM fetched by a nested dynamic validator chunk", () => {
+    const wasmFile = "assets/options-nested.wasm";
+    const report = buildBundleReport(entryWith({
+      "assets/validator.js": chunk("assets/validator.js", {
+        isDynamicEntry: true,
+        code: `const url = "/${wasmFile}";`,
+      }),
+      [wasmFile]: asset(wasmFile, Buffer.alloc(600, 0x42)),
+    }), {
+      ...roomyBudgets,
+      lazyChunk: { rawBytes: 500, gzipBytes: 10000, brotliBytes: 10000 },
+    });
+    expect(report.lazyChunks["assets/validator.js"].chunks).toEqual(["assets/options-nested.wasm", "assets/validator.js"]);
+    expect(report.violations.some((message) => message.startsWith("Lazy chunk (assets/validator.js) rawBytes is "))).toBe(true);
+  });
+
   it("fails closed when emitted WASM is not attributed to a JavaScript chunk", () => {
     const report = buildBundleReport(entryWith({
       "assets/orphan-12345678.wasm": asset("assets/orphan-12345678.wasm", Buffer.alloc(10)),
