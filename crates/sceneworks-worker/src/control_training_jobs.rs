@@ -37,11 +37,6 @@ mod imp {
         parse_plan, run_training_execution, training_progress, validate_training_plan,
     };
 
-    /// The only kernel the studio job trains today — the Krea 2 pose-ControlNet branch. The API stamps
-    /// it into the plan (`krea_control` target); a plan with any other kernel is rejected here rather
-    /// than mis-dispatched (the executor maps `krea_control` → the `krea_2_control` engine trainer).
-    const CONTROL_KERNEL: &str = "krea_control";
-
     /// YOLO person-gate confidence floor when `advanced.personGate` is on — drop a target with no
     /// detected person so a pose branch isn't trained on empty skeletons. Deliberately permissive
     /// (Dataset Doctor runs the richer quality pass).
@@ -100,12 +95,9 @@ mod imp {
         // detector setup, or GPU rendering. The rewritten rendered-dataset plan is validated again by
         // `run_training_execution` after preparation.
         validate_training_plan(settings, &plan)?;
-        if plan.target.kernel != CONTROL_KERNEL {
-            return Err(WorkerError::InvalidPayload(format!(
-                "control_training expects a '{CONTROL_KERNEL}' plan, got kernel '{}'.",
-                plan.target.kernel
-            )));
-        }
+        let facts = sceneworks_core::request_validation::facts_for_job(&job.job_type, &job.payload);
+        sceneworks_core::request_validation::validate("control_training", &job.payload, &facts)
+            .map_err(WorkerError::Validation)?;
         if plan.dataset.items.is_empty() {
             return Err(WorkerError::InvalidPayload(
                 "control_training plan has no dataset items to render conditions from.".to_owned(),

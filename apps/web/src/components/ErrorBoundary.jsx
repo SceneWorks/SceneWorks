@@ -1,3 +1,4 @@
+import { isSettingsRefusal, SettingsRefusal } from "./SettingsRefusal.jsx";
 import React from "react";
 
 export class ErrorBoundary extends React.Component {
@@ -17,6 +18,10 @@ export class ErrorBoundary extends React.Component {
   render() {
     if (!this.state.error) {
       return this.props.children;
+    }
+
+    if (isSettingsRefusal(this.state.error)) {
+      return <SettingsRefusal error={this.state.error} />;
     }
 
     const message = this.state.error?.message ?? "Unknown render error";

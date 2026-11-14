@@ -1,3 +1,4 @@
+import { jobFailureMessage } from "../generationRefusal.js";
 import { formatMiB } from "../formatting.js";
 import React, { useEffect, useMemo, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
@@ -97,7 +98,7 @@ function activeDependencyFor(job, jobs) {
 
 function jobWaitingMessage(job, workers, jobs) {
   if (job.status !== "queued") {
-    return job.error ?? job.message;
+    return jobFailureMessage(job);
   }
   const dependency = activeDependencyFor(job, jobs);
   if (dependency) {

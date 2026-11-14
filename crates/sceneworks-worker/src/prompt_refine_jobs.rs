@@ -168,14 +168,12 @@ impl RefineTask {
     /// Classify the payload's `task` discriminator (case-insensitive). Any unknown/absent value is the
     /// default free-text [`Rewrite`](RefineTask::Rewrite) — the pre-refactor behavior.
     pub(crate) fn from_payload(task: Option<&str>) -> Self {
-        match task.map(str::trim).unwrap_or_default() {
-            t if t.eq_ignore_ascii_case("magic_prompt") => RefineTask::MagicPrompt,
-            t if t.eq_ignore_ascii_case("image_caption") => RefineTask::ImageCaption,
-            t if t.eq_ignore_ascii_case("image_describe") => RefineTask::ImageDescribe,
-            t if t.eq_ignore_ascii_case("film_plan") => RefineTask::FilmPlan,
-            t if t.eq_ignore_ascii_case(crate::qwen_prompt_rewrite::REWRITE_TASK) => {
-                RefineTask::QwenImageRewrite
-            }
+        match sceneworks_core::request_validation::utility_validation::prompt_refine_task(task) {
+            "magic_prompt" => RefineTask::MagicPrompt,
+            "image_caption" => RefineTask::ImageCaption,
+            "image_describe" => RefineTask::ImageDescribe,
+            "film_plan" => RefineTask::FilmPlan,
+            "qwen_image_rewrite" => RefineTask::QwenImageRewrite,
             _ => RefineTask::Rewrite,
         }
     }
@@ -363,11 +361,8 @@ fn base_rules(medium: &str) -> String {
 /// plus the model's prompt guide when one is supplied. Port of the Python `build_system_prompt`.
 #[cfg(any(test, native_lane))]
 fn build_refine_system_prompt(guide: Option<&str>, workflow: Option<&str>) -> String {
-    let medium = match workflow.map(str::trim) {
-        Some(value) if value.eq_ignore_ascii_case("video") => "video",
-        Some(value) if value.eq_ignore_ascii_case("audio") => "audio",
-        _ => "image",
-    };
+    let medium =
+        sceneworks_core::request_validation::utility_validation::prompt_refine_workflow(workflow);
     let rules = base_rules(medium);
     let guide = guide.unwrap_or("").trim();
     if guide.is_empty() {
@@ -722,8 +717,10 @@ impl DescribeStyle {
     /// Parse the `captionStyle` payload value; only `"tags"` (case-insensitive) selects tags, everything
     /// else — including absent/empty/unknown — is prose.
     pub(crate) fn from_payload(value: Option<&str>) -> Self {
-        match value.map(str::trim) {
-            Some(v) if v.eq_ignore_ascii_case("tags") => DescribeStyle::Tags,
+        match sceneworks_core::request_validation::utility_validation::prompt_refine_caption_style(
+            value,
+        ) {
+            "tags" => DescribeStyle::Tags,
             _ => DescribeStyle::Prose,
         }
     }

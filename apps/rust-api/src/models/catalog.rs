@@ -2081,6 +2081,7 @@ pub(crate) fn merge_model_entries_with_registry(
         .collect();
     let mut merged = merge_entries_by_id(builtin, user.clone());
     for entry in &mut merged {
+        sceneworks_core::registry::project_option_route_facts(entry);
         let Some(id) = entry.get("id").and_then(Value::as_str).map(str::to_owned) else {
             continue;
         };
@@ -2369,6 +2370,7 @@ pub(crate) async fn resolve_model_manifest_entry(
             catalog_scope = Some("builtin");
         }
     }
+    sceneworks_core::registry::project_option_route_facts(&mut entry);
     inherit_provider_decoder_downloads(&mut entry, &builtin);
     if let (Some(scope), Some(object)) = (catalog_scope, entry.as_object_mut()) {
         // The merged worker-facing entry must carry the same routing authority as `/models`.

@@ -197,6 +197,8 @@ async fn run_utility_job_inner(
     // timings are posted separately by the handlers and coalesce-merge server-side.
     let metrics_probe = job_metrics::JobMetricsProbe::start(&settings.gpu_id);
     let result = with_shutdown_flag(shutdown.clone(), async {
+        validate_static_job_options(&job.job_type, &job.payload)
+            .map_err(|error| ("Invalid generation options.", error))?;
         // Validate the claimed route before any source work. The guard below selects a local
         // bundle first, then a genuinely cold revision may be fetched and re-guarded.
         if let Some(binding) = portable_model_binding.as_ref() {
@@ -602,6 +604,23 @@ async fn handle_job_failure(
 ) {
     match error {
         WorkerError::Canceled(_) => {}
+        WorkerError::Validation(error) => {
+            let mut result = job.result.clone();
+            result.insert(
+                "validationRefusal".to_owned(),
+                serde_json::to_value(&error).expect("serializable refusal"),
+            );
+            let payload = progress_payload(
+                JobStatus::Failed,
+                ProgressStage::Failed,
+                1.0,
+                message,
+                Some(error.detail),
+                Some(result),
+                None,
+            );
+            let _ = update_job(api, &job.id, payload).await;
+        }
         error => {
             // sc-16247: this detail is what `QueueScreen` renders as `job.error`, so it is the
             // last point before a raw `DriverError(...)` reaches the user. `classify_engine_error`
@@ -691,5 +710,206 @@ async fn handle_job_failure(
                 "{message}"
             );
         }
+    }
+}
+
+/// The raw admission gate runs before source/device checks and every tolerant job parser.
+fn validate_static_job_options(job_type: &JobType, payload: &JsonObject) -> WorkerResult<()> {
+    if let Some(kind) = sceneworks_core::request_validation::kind_for_job(job_type) {
+        let entry = sceneworks_core::request_validation::facts_for_job(job_type, payload);
+        sceneworks_core::request_validation::validate(kind, payload, &entry)
+            .map_err(WorkerError::Validation)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn shared_person_and_prompt_refusals_precede_worker_parsing() {
+    for (job_type, kind, payload) in [
+        (JobType::PersonDetect, "personDetect", serde_json::json!({})),
+        (
+            JobType::PersonDetect,
+            "personDetect",
+            serde_json::json!({"sourceAssetId":"clip","sourceTimestamp":-1}),
+        ),
+        (
+            JobType::PersonTrack,
+            "personTrack",
+            serde_json::json!({"sourceAssetId":"clip","representativeFrameAssetId":"frame","detection":{}}),
+        ),
+        (
+            JobType::PromptRefine,
+            "promptRefine",
+            serde_json::json!({"prompt":"tree","sourceAssetIds":null}),
+        ),
+        (
+            JobType::PromptRefine,
+            "promptRefine",
+            serde_json::json!({"task":"image_caption","sourceAssetId":"source","prompt":null}),
+        ),
+        (
+            JobType::PromptRefine,
+            "promptRefine",
+            serde_json::json!({"task":"image_caption","imagePaths":["",42]}),
+        ),
+        (
+            JobType::PromptRefine,
+            "promptRefine",
+            serde_json::json!({"task":"image_caption","imagePaths":["image.png",42]}),
+        ),
+        (
+            JobType::PromptRefine,
+            "promptRefine",
+            serde_json::json!({"task":"image_caption","imagePaths":null}),
+        ),
+        (
+            JobType::PromptRefine,
+            "promptRefine",
+            serde_json::json!({"task":"image_caption","imagePaths":vec!["image.png";7]}),
+        ),
+        (
+            JobType::PromptRefine,
+            "promptRefine",
+            serde_json::json!({"task":"image_caption","sourceAssetIds":["asset"],"imagePaths":[]}),
+        ),
+    ] {
+        let payload = payload.as_object().unwrap();
+        let expected =
+            sceneworks_core::request_validation::validate_shape(kind, payload).unwrap_err();
+        match validate_static_job_options(&job_type, payload).unwrap_err() {
+            WorkerError::Validation(actual) => assert_eq!(actual, expected),
+            other => panic!("lost typed refusal: {other}"),
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn shared_promptless_svd_passes_worker_admission_without_inventing_text() {
+    let model = sceneworks_core::registry::builtin_model_spec("svd")
+        .unwrap()
+        .project(None);
+    let payload = serde_json::json!({"projectId":"p","model":"svd","mode":"image_to_video","prompt":"","sourceAssetId":"image","modelManifestEntry":model});
+    validate_static_job_options(&JobType::VideoGenerate, payload.as_object().unwrap()).unwrap();
+    assert_eq!(payload["prompt"], "");
+}
+
+#[cfg(test)]
+#[test]
+fn shared_sensenova_legacy_numbers_survive_worker_gate() {
+    let model = sceneworks_core::registry::builtin_model_spec("sensenova_u1_8b")
+        .unwrap()
+        .project(None);
+    for (kind, job_type, mut payload) in [
+        (
+            "vqa",
+            JobType::ImageVqa,
+            serde_json::json!({"projectId":"p","model":"sensenova_u1_8b","sourceAssetId":"source","question":"What?","maxNewTokens":"4096","maxImagePixels":2.5}),
+        ),
+        (
+            "interleave",
+            JobType::ImageInterleave,
+            serde_json::json!({"projectId":"p","model":"sensenova_u1_8b","prompt":"tree","width":"9999","height":12.9,"advanced":{"timestepShift":1.5,"schedulerShift":9}}),
+        ),
+        (
+            "interleave",
+            JobType::ImageInterleave,
+            serde_json::json!({"projectId":"p","model":"sensenova_u1_8b","prompt":"tree","width":4096,"advanced":{"timestepShift":1.5},"maxImages":99}),
+        ),
+        (
+            "interleave",
+            JobType::ImageInterleave,
+            serde_json::json!({"projectId":"p","model":"sensenova_u1_8b","prompt":"tree","width":4096,"maxImages":2,"advanced":{"timestepShift":1.5,"maxImages":4}}),
+        ),
+    ] {
+        payload["modelManifestEntry"] = serde_json::json!(model);
+        validate_static_job_options(&job_type, payload.as_object().unwrap()).unwrap();
+        let resolved = sceneworks_core::request_validation::resolve(
+            kind,
+            payload.as_object().unwrap(),
+            model.as_object().unwrap(),
+        )
+        .unwrap();
+        if kind == "vqa" {
+            assert_eq!(resolved["maxNewTokens"], 2048);
+        } else {
+            assert_eq!(resolved["width"], 4096);
+            assert_eq!(resolved["advanced"]["timestepShift"], 1.5);
+        }
+        if payload.get("maxImages").is_some() {
+            assert_eq!(
+                resolved["advanced"]["maxImages"],
+                if payload["maxImages"] == 99 { 10 } else { 4 }
+            );
+        }
+        let key = if kind == "vqa" {
+            "maxNewTokens"
+        } else {
+            "width"
+        };
+        for value in [
+            serde_json::json!("bad"),
+            serde_json::json!("NaN"),
+            serde_json::json!("2.5"),
+            serde_json::json!("1e100"),
+            serde_json::json!(null),
+        ] {
+            payload[key] = value;
+            validate_static_job_options(&job_type, payload.as_object().unwrap()).unwrap();
+            let resolved = sceneworks_core::request_validation::resolve(
+                kind,
+                payload.as_object().unwrap(),
+                model.as_object().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(resolved[key], if kind == "vqa" { 256 } else { 2048 });
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn shared_image_detail_checks_registered_controls_without_prompt_requirement() {
+    let valid = serde_json::json!({"model":"flux_dev","sourceAssetId":"source","advanced":{"tileControlNetRepo":"example/control"}});
+    validate_static_job_options(&JobType::ImageDetail, valid.as_object().unwrap()).unwrap();
+    let effective = sceneworks_core::request_validation::resolve_request(
+        "imageDetail",
+        valid.as_object().unwrap(),
+        &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(effective.as_payload()["advanced"], valid["advanced"]);
+    let mut invalid = valid;
+    invalid["advanced"]["tileControlNetRepo"] = serde_json::json!(42);
+    assert!(matches!(
+        validate_static_job_options(&JobType::ImageDetail, invalid.as_object().unwrap()),
+        Err(WorkerError::Validation(_))
+    ));
+}
+
+#[cfg(test)]
+#[test]
+fn shared_source_utility_fields_resolve_without_generation_requirements() {
+    for kind in [
+        JobType::ModelConvert,
+        JobType::DatasetAnalysis,
+        JobType::TrainingCaption,
+    ] {
+        let payload = serde_json::json!({"advanced":{"mlxQuantize":"4"}});
+        validate_static_job_options(&kind, payload.as_object().unwrap()).unwrap();
+        let owner_kind = sceneworks_core::request_validation::kind_for_job(&kind).unwrap();
+        let effective = sceneworks_core::request_validation::resolve_request(
+            owner_kind,
+            payload.as_object().unwrap(),
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(effective.as_payload()["advanced"]["mlxQuantize"], 4);
+        let malformed = serde_json::json!({"advanced":{"mlxQuantize":"bad"}});
+        assert!(matches!(
+            validate_static_job_options(&kind, malformed.as_object().unwrap()),
+            Err(WorkerError::Validation(_))
+        ));
     }
 }

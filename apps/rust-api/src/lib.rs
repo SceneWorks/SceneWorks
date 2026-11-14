@@ -24,11 +24,11 @@ use futures_util::{future::join_all, stream};
 use parking_lot::Mutex;
 use sceneworks_core::contracts::{
     CancelPendingJobsRequest, CancelPendingJobsResponse, ClaimRequest, ClaimResponse,
-    ClearJobsRequest, ClearJobsResponse, ContractNumber, DuplicateJobRequest, GenerationMetrics,
-    GenerationMetricsRow, HiresFixRequest, ImageUpscaleRequest, JobCreateRequest, JobSnapshot,
-    JobStatus, JobType, JsonObject, PrioritizeJobsRequest, PrioritizeJobsResponse, ProgressRequest,
-    QueueSummary, RetryJobRequest, WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest,
-    WorkerSnapshot, WorkerStatus, WorkerTerminationRequest,
+    ClearJobsRequest, ClearJobsResponse, DuplicateJobRequest, GenerationMetrics,
+    GenerationMetricsRow, JobCreateRequest, JobSnapshot, JobStatus, JobType, JsonObject,
+    PrioritizeJobsRequest, PrioritizeJobsResponse, ProgressRequest, QueueSummary, RetryJobRequest,
+    WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest, WorkerSnapshot, WorkerStatus,
+    WorkerTerminationRequest,
 };
 #[cfg(test)]
 use sceneworks_core::hf_home::huggingface_hub_cache_dir;
@@ -71,9 +71,8 @@ use sceneworks_core::training_store::{
     TrainingDatasetSummary, TrainingDatasetUpdateInput,
 };
 use sceneworks_core::video_request::{
-    classify_reference_set, default_resolution, duration_limit_error, fps_limit_error,
-    reference_limit_error, requested_auto_duration, requested_ltx25_vae_decoder,
-    requested_temporal_upsample_rounds, resolve_duration, resolve_fps, ReferenceSetVerdict,
+    default_resolution, duration_limit_error, fps_limit_error, reference_limit_error,
+    resolve_duration, resolve_fps,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -416,6 +415,40 @@ const MEDIA_TICKET_TTL_SECONDS: u64 = 300;
 const HEARTBEAT_SSE_DATA: &str = "{}";
 #[cfg(test)]
 const HEARTBEAT_SSE_WIRE: &str = "event: heartbeat\ndata: {}\n\n";
+fn generation_wire_kind<T: 'static>() -> Option<&'static str> {
+    use std::any::TypeId;
+    let id = TypeId::of::<T>();
+    if id == TypeId::of::<PersonDetectionJobRequest>() {
+        Some("personDetect")
+    } else if id == TypeId::of::<PersonTrackJobRequest>() {
+        Some("personTrack")
+    } else if id == TypeId::of::<LoraTrainingRequest>() {
+        Some("training")
+    } else if id == TypeId::of::<sceneworks_core::yue2_score::jobs::Yue2JobSpec>() {
+        Some("yue2")
+    } else if id == TypeId::of::<ImageJobRequest>() {
+        Some("image")
+    } else if id == TypeId::of::<VideoJobRequest>() {
+        Some("video")
+    } else if id == TypeId::of::<CharacterTestRequest>() {
+        Some("characterTest")
+    } else if id == TypeId::of::<PromptRefineRequest>() {
+        Some("promptRefine")
+    } else if id == TypeId::of::<VectorPromptWorkflowRequest>() {
+        Some("vectorPrompt")
+    } else if id == TypeId::of::<VectorRequest>() {
+        Some("vector")
+    } else if id == TypeId::of::<AudioJobRequest>() {
+        Some("audio")
+    } else if id == TypeId::of::<VqaJobRequest>() {
+        Some("vqa")
+    } else if id == TypeId::of::<InterleaveJobRequest>() {
+        Some("interleave")
+    } else {
+        None
+    }
+}
+
 // sc-4201 (F-API-1): default to loopback so a bare/server run that doesn't set
 // SCENEWORKS_API_HOST isn't exposed to the whole LAN with auth off. Docker and the
 // desktop wrapper set the host explicitly (0.0.0.0 / 127.0.0.1 respectively), so this
@@ -484,28 +517,44 @@ const STALE_UPLOAD_SECONDS: u64 = 24 * 60 * 60;
 // Declared in sceneworks-core (sc-22710) so the pre-dispatch plan validator in
 // `sceneworks_core::film_plan` refuses exactly what this route refuses instead of hand-copying
 // the number and drifting.
-pub(crate) use sceneworks_core::MAX_PROMPT_CHARS;
+
 // sc-8884 (F-082): serialized-size ceiling for the free-form `advanced` object. It is a
 // pass-through bag threaded to the worker, so it has no per-key schema — bound its total
 // serialized size instead. Image pose coordinates have a separate bounded data budget in
 // `validate_image_prompt_extras`; the remaining settings still obey this ceiling.
-const MAX_ADVANCED_JSON_BYTES: usize = 64 * 1024;
+#[cfg(test)]
+const MAX_ADVANCED_JSON_BYTES: usize =
+    sceneworks_core::request_validation::shape::MAX_ADVANCED_JSON_BYTES;
 
 struct ApiJson<T>(T);
 
 #[axum::async_trait]
 impl<S, T> FromRequest<S> for ApiJson<T>
 where
-    T: DeserializeOwned,
+    T: DeserializeOwned + 'static,
     S: Send + Sync,
 {
     type Rejection = Response;
 
     async fn from_request(request: AxumRequest, state: &S) -> Result<Self, Self::Rejection> {
-        match Json::<T>::from_request(request, state).await {
-            Ok(Json(value)) => Ok(Self(value)),
-            Err(rejection) => Err(json_rejection_response(rejection)),
+        let Json(mut value) = Json::<Value>::from_request(request, state)
+            .await
+            .map_err(json_rejection_response)?;
+        if let Some(kind) = generation_wire_kind::<T>() {
+            let payload = value.as_object().ok_or_else(|| {
+                ApiError::bad_request("Generation request must be an object").into_response()
+            })?;
+            sceneworks_core::request_validation::validate_shape(kind, payload)
+                .map_err(|error| ApiError::from(error).into_response())?;
+            // The canonical upgrader has checked this envelope field. Strict DTOs only own options.
+            value
+                .as_object_mut()
+                .expect("request object")
+                .remove("optionsSchemaVersion");
         }
+        serde_json::from_value(value)
+            .map(Self)
+            .map_err(|error| ApiError::bad_request(error.to_string()).into_response())
     }
 }
 

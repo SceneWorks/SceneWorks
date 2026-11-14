@@ -1428,7 +1428,24 @@ fn json_result(value: Value) -> Result<CallToolResult, ErrorData> {
 /// Surface an API failure as a JSON-RPC internal error; the Display impl already
 /// includes the upstream status + detail, and never the token.
 fn api_error(error: ApiClientError) -> ErrorData {
-    ErrorData::internal_error(error.to_string(), None)
+    let data = match &error {
+        ApiClientError::Api { detail, .. } => serde_json::from_str::<Value>(detail)
+            .ok()
+            .filter(Value::is_object),
+        _ => None,
+    };
+    let message = data
+        .as_ref()
+        .and_then(|body| body.get("detail"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| error.to_string());
+    match &error {
+        ApiClientError::Api { status, .. } if *status == reqwest::StatusCode::BAD_REQUEST => {
+            ErrorData::invalid_params(message, data)
+        }
+        _ => ErrorData::internal_error(message, data),
+    }
 }
 
 /// A domain failure (failed/canceled job, timeout) as a tool-level error result
@@ -2307,6 +2324,40 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn shared_validation_refusal_preserves_machine_fields() {
+        let body = json!({"code":"invalid_generation_option", "field":"advanced.steps",
+            "detail":"steps exceeds the model limit", "context":{"field":"advanced.steps", "model":"flux_dev", "kind":"image"}});
+        let error = api_error(ApiClientError::Api {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            detail: body.to_string(),
+        });
+        assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert_eq!(error.message, "steps exceeds the model limit");
+        assert_eq!(error.data, Some(body));
+    }
+
+    #[test]
+    fn other_api_client_failures_are_not_invalid_params() {
+        for status in [
+            reqwest::StatusCode::UNAUTHORIZED,
+            reqwest::StatusCode::FORBIDDEN,
+            reqwest::StatusCode::NOT_FOUND,
+            reqwest::StatusCode::CONFLICT,
+        ] {
+            let error = api_error(ApiClientError::Api {
+                status,
+                detail: r#"{"detail":"upstream failure"}"#.to_owned(),
+            });
+            assert_eq!(
+                error.code,
+                ErrorData::internal_error("upstream failure".to_owned(), None).code,
+                "status {status} must not be a parameter error"
+            );
+            assert_eq!(error.message, "upstream failure");
+        }
+    }
 
     #[test]
     fn compact_projects_keeps_only_id_name_created_at() {

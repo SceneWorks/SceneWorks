@@ -833,6 +833,32 @@ impl VideoModelCaps {
 // Generated from the schema-validated router product policy in the static ModelSpec build.
 include!(concat!(env!("OUT_DIR"), "/model-route-policy.rs"));
 
+pub(crate) fn video_route_facts(
+    model: &str,
+) -> sceneworks_options::video_eligibility::VideoRouteFacts {
+    crate::registry::builtin_model_specs()
+        .find(|spec| spec.product.id == model)
+        .map(|spec| {
+            let facts = spec.option_route_facts();
+            sceneworks_options::video_eligibility::VideoRouteFacts::from_value(Some(&facts))
+        })
+        .or_else(|| {
+            VIDEO_MODEL_CAPS
+                .iter()
+                .find(|caps| caps.id == model)
+                .map(|caps| {
+                    sceneworks_options::video_eligibility::VideoRouteFacts::new(
+                        caps.video_mlx_routed,
+                        caps.candle_video_routed,
+                        caps.candle_video_i2v,
+                        caps.candle_video_vace,
+                        false,
+                    )
+                })
+        })
+        .unwrap_or_default()
+}
+
 /// Derive a `&'static [&'static str]` list constant from a boolean column of one of the capability
 /// tables above (sc-9495). Expands to a compile-time-built array of exactly the ids whose column is
 /// `true`, in table-row order, so the generated constant is a drop-in for the hand-written list it

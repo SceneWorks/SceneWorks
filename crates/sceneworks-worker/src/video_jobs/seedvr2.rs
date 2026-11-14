@@ -85,14 +85,6 @@ impl Drop for Seedvr2OutputGuard {
     }
 }
 
-/// Snap a dimension to the SeedVR2 VAE/patch stride (a multiple of 16, the engine's hard
-/// requirement), rounding to nearest and clamping to the engine's `[16, 4096]` size range.
-#[cfg(native_lane)]
-fn snap_seedvr2_dim(value: u32) -> u32 {
-    let rounded = value.saturating_add(8) / 16 * 16;
-    rounded.clamp(16, 4096)
-}
-
 // ---------------------------------------------------------------------------
 // Disk-space guard for the streaming SeedVR2 output (sc-9646, sc-9595 follow-up)
 // ---------------------------------------------------------------------------
@@ -1303,7 +1295,6 @@ async fn run_seedvr2_stream(
     source_path: &Path,
     src_frames_dir: &Path,
     out_frames_dir: &Path,
-    factor: u32,
     weights_dir: PathBuf,
 ) -> WorkerResult<Seedvr2Stream> {
     let seed = req.seed.unwrap_or(0);
@@ -1312,15 +1303,12 @@ async fn run_seedvr2_stream(
     // pass measures the frame timing the output keeps (sc-24391).
     let (probe, timing) = probe_seedvr2_source(api, settings, &job.id, source_path).await?;
     let engine_fps = timing.frames.nominal_fps(probe.frame_count as usize);
-    let (target_w, target_h) = match (req.target_width, req.target_height) {
-        (Some(w), Some(h)) if w > 0 && h > 0 => (w, h),
-        _ => (
-            probe.width.saturating_mul(factor),
-            probe.height.saturating_mul(factor),
-        ),
-    };
-    let target_w = snap_seedvr2_dim(target_w);
-    let target_h = snap_seedvr2_dim(target_h);
+    let (target_w, target_h) =
+        sceneworks_core::request_validation::utility_validation::video_upscale_dimensions(
+            req,
+            probe.width,
+            probe.height,
+        );
     {
         let guard_dir = out_frames_dir
             .parent()
@@ -1480,12 +1468,8 @@ async fn run_seedvr2_stream(
 /// factor widened to `u32` for the downstream dimension math.
 #[cfg(native_lane)]
 pub(super) fn resolve_video_upscale_factor(factor: u8) -> WorkerResult<u32> {
-    match factor {
-        2 | 4 => Ok(u32::from(factor)),
-        other => Err(WorkerError::InvalidPayload(format!(
-            "Video upscale supports only factor 2 or 4 (got {other})."
-        ))),
-    }
+    sceneworks_core::request_validation::utility_validation::video_upscale_factor(factor)
+        .map_err(|error| WorkerError::InvalidPayload(error.detail))
 }
 
 /// The source-audio passthrough mux: copy the upscaled picture untouched, re-encode the source
@@ -1589,17 +1573,8 @@ pub(crate) async fn run_video_upscale_job(
         serde_json::from_value(Value::Object(job.payload.clone())).map_err(|error| {
             WorkerError::InvalidPayload(format!("Invalid video_upscale payload: {error}"))
         })?;
-    if req.source_asset_id.trim().is_empty() {
-        return Err(WorkerError::InvalidPayload(
-            "Video upscale jobs require a source video asset.".to_owned(),
-        ));
-    }
-    let engine = req.engine.trim().to_ascii_lowercase();
-    if !matches!(engine.as_str(), "" | "seedvr2" | "seedvr2_3b") {
-        return Err(WorkerError::InvalidPayload(format!(
-            "This video upscaler supports only engine=seedvr2 (got {engine})."
-        )));
-    }
+    sceneworks_core::request_validation::utility_validation::validate_video_upscale(&req)
+        .map_err(WorkerError::Validation)?;
     let project_id = req
         .project_id
         .clone()
@@ -1709,7 +1684,6 @@ pub(crate) async fn run_video_upscale_job(
         &source_path,
         &src_frames_dir,
         &out_frames_dir,
-        factor,
         weights_dir,
     )
     .await;

@@ -41,49 +41,7 @@ pub const MINIMAX_H3_RESIDENT_COMPONENTS: &[(&str, &str)] = &[
     ("transformer_ref", MINIMAX_H3_REFERENCE_PARTITION_MODEL),
 ];
 
-/// Task compatibility declared independently of architecture and tensor shape.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MiniMaxH3Partition {
-    Fl2va,
-    Ref2va,
-    Hybrid,
-}
-
-impl MiniMaxH3Partition {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Fl2va => "fl2va",
-            Self::Ref2va => "ref2va",
-            Self::Hybrid => "hybrid",
-        }
-    }
-
-    pub fn supports_base(self) -> bool {
-        matches!(self, Self::Fl2va | Self::Hybrid)
-    }
-
-    pub fn supports_references(self) -> bool {
-        matches!(self, Self::Ref2va | Self::Hybrid)
-    }
-
-    pub fn from_entry(entry: &Map<String, Value>) -> Result<Self, String> {
-        let partition = match entry_str(entry, "minimaxH3Partition") {
-            Some("fl2va") => Self::Fl2va,
-            Some("ref2va") => Self::Ref2va,
-            Some("hybrid") => Self::Hybrid,
-            _ => return Err("MiniMax-H3 task compatibility is ambiguous: explicitly declare minimaxH3Partition fl2va, ref2va, or hybrid; shapes and directory names do not prove compatibility".to_owned()),
-        };
-        let expected = if partition == Self::Ref2va {
-            MINIMAX_H3_REFERENCE_PARTITION_MODEL
-        } else {
-            MINIMAX_H3_BASE_PARTITION_MODEL
-        };
-        if entry_str(entry, "baseModel") != Some(expected) {
-            return Err(format!("MiniMax-H3 {} requires exact compatible baseModel {expected}; incompatible or missing base declaration", partition.as_str()));
-        }
-        Ok(partition)
-    }
-}
+pub use sceneworks_options::h3_import_facts::MiniMaxH3Partition;
 
 /// H3 compatibility is also an architecture constraint, even when `family` was omitted.
 pub fn entry_requires_minimax_h3_family(entry: &Map<String, Value>) -> bool {
@@ -375,18 +333,7 @@ pub fn entry_assembly(entry: &Map<String, Value>) -> Option<&Map<String, Value>>
 /// Keyed entirely on the entry, never on the model id: an imported checkpoint's id is the user's,
 /// and admitting a BUILTIN id here is refused separately by every caller (a builtin id names the
 /// shipped weights, so a plan riding under it would render one checkpoint under another's name).
-pub fn entry_is_imported_minimax_h3(entry: &Map<String, Value>) -> bool {
-    entry_str(entry, "family") == Some(MINIMAX_H3_IMPORT_FAMILY)
-        && entry_str(entry, "importSourceShape") == Some(MINIMAX_H3_IMPORT_SOURCE_SHAPE)
-        && crate::jobs_store::checkpoint_plan_checkpoint_id(entry).is_some()
-        && entry_assembly(entry).is_some_and(|assembly| {
-            assembly.get("schemaVersion").and_then(Value::as_u64)
-                == Some(MINIMAX_H3_ASSEMBLY_SCHEMA_VERSION)
-                && MiniMaxH3Partition::from_entry(entry).is_ok_and(|partition| {
-                    assembly.get("partition").and_then(Value::as_str) == Some(partition.as_str())
-                })
-        })
-}
+pub use sceneworks_options::h3_import_facts::entry_is_imported_minimax_h3;
 
 /// Re-derive the assembly from the plan the store resolved and require it to equal the binding the
 /// entry carries. The render-time half of the import's validation: a stamped binding that names a
