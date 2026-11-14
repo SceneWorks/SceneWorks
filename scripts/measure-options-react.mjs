@@ -52,7 +52,8 @@ try {
         }
         const response = await fetch(`${fixtureOrigin}${url.pathname}${url.search}`, {
           method: request.method(),
-          headers: request.headers(),
+          headers: request.headers()["content-type"]
+            ? { "content-type": request.headers()["content-type"] } : {},
           ...(request.method() === "GET" || request.method() === "HEAD"
             ? {} : { body: request.postDataBuffer() }),
         });
