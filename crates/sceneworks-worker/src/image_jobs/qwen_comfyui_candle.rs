@@ -174,6 +174,21 @@ pub(super) fn prepare_qwen_comfyui_sources(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<ComfyuiQwenPaths>> {
+    prepare_qwen_comfyui_sources_with_preflight(request, settings, None)
+}
+
+pub(super) fn prepare_qwen_comfyui_sources_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> WorkerResult<Option<ComfyuiQwenPaths>> {
+    prepare_qwen_comfyui_sources_with_preflight(execution, settings, Some(execution))
+}
+
+fn prepare_qwen_comfyui_sources_with_preflight(
+    request: &ImageRequest,
+    settings: &Settings,
+    execution: Option<&super::conditioning::ResolvedImageExecution>,
+) -> WorkerResult<Option<ComfyuiQwenPaths>> {
     // A plan-backed entry (`importPlan.checkpointId`, epic 20398) whose REQUEST the plan-driven
     // route claims belongs to that route; this lane never also claims it, so one request has exactly
     // one owner. Explicit rather than left to the `external_base_` id prefix below: that prefix is
@@ -182,11 +197,19 @@ pub(super) fn prepare_qwen_comfyui_sources(
     if super::request_is_checkpoint_plan_backed(request) {
         return Ok(None);
     }
-    let descriptor = super::routing::imported_generate_request_supported(
-        request,
-        "qwen-image",
-        gen_core::ImportedModelSource::ComfyUiTree,
-    );
+    let descriptor = if let Some(execution) = execution {
+        super::routing::imported_generate_request_supported_resolved(
+            execution,
+            "qwen-image",
+            gen_core::ImportedModelSource::ComfyUiTree,
+        )
+    } else {
+        super::routing::imported_generate_request_supported(
+            request,
+            "qwen-image",
+            gen_core::ImportedModelSource::ComfyUiTree,
+        )
+    };
     if descriptor.as_ref().is_none_or(|descriptor| {
         super::krea_imported::imported_model_quant(request, descriptor, "ComfyUI Qwen-Image")
             .is_err()

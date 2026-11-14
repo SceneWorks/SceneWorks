@@ -155,17 +155,40 @@ pub(super) fn prepare_zimage_comfyui_sources(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<ComfyuiZImagePaths>> {
+    prepare_zimage_comfyui_sources_with_preflight(request, settings, None)
+}
+
+pub(super) fn prepare_zimage_comfyui_sources_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> WorkerResult<Option<ComfyuiZImagePaths>> {
+    prepare_zimage_comfyui_sources_with_preflight(execution, settings, Some(execution))
+}
+
+fn prepare_zimage_comfyui_sources_with_preflight(
+    request: &ImageRequest,
+    settings: &Settings,
+    execution: Option<&super::conditioning::ResolvedImageExecution>,
+) -> WorkerResult<Option<ComfyuiZImagePaths>> {
     // A plan-backed entry (`importPlan.checkpointId`, epic 20398) belongs to the plan-driven
     // route; this bespoke lane never also claims it, so one entry has exactly one owner. Explicit
     // rather than left to arm ordering in the resolver (sc-20634 review): ordering is not a claim.
     if super::request_is_checkpoint_plan_backed(request) {
         return Ok(None);
     }
-    let descriptor = super::routing::imported_generate_request_supported(
-        request,
-        "z-image",
-        gen_core::ImportedModelSource::ComfyUiTree,
-    );
+    let descriptor = if let Some(execution) = execution {
+        super::routing::imported_generate_request_supported_resolved(
+            execution,
+            "z-image",
+            gen_core::ImportedModelSource::ComfyUiTree,
+        )
+    } else {
+        super::routing::imported_generate_request_supported(
+            request,
+            "z-image",
+            gen_core::ImportedModelSource::ComfyUiTree,
+        )
+    };
     if descriptor.as_ref().is_none_or(|descriptor| {
         super::krea_imported::imported_model_quant(request, descriptor, "ComfyUI Z-Image").is_err()
     }) {

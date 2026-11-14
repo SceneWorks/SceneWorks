@@ -203,6 +203,21 @@ pub(super) fn prepare_flux2_comfyui_sources(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<ComfyuiFlux2Paths>> {
+    prepare_flux2_comfyui_sources_with_preflight(request, settings, None)
+}
+
+pub(super) fn prepare_flux2_comfyui_sources_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> WorkerResult<Option<ComfyuiFlux2Paths>> {
+    prepare_flux2_comfyui_sources_with_preflight(execution, settings, Some(execution))
+}
+
+fn prepare_flux2_comfyui_sources_with_preflight(
+    request: &ImageRequest,
+    settings: &Settings,
+    execution: Option<&super::conditioning::ResolvedImageExecution>,
+) -> WorkerResult<Option<ComfyuiFlux2Paths>> {
     // A plan-backed entry whose REQUEST the plan-driven route claims belongs to that route; this
     // lane never also claims it. Explicit rather than left to the `external_base_` id prefix below:
     // that prefix is an incidental property of how the catalog names a scanned row, and an
@@ -210,11 +225,20 @@ pub(super) fn prepare_flux2_comfyui_sources(
     if super::request_is_checkpoint_plan_backed(request) {
         return Ok(None);
     }
-    let Some(_descriptor) = super::routing::imported_generate_request_supported(
-        request,
-        "flux2",
-        gen_core::ImportedModelSource::ComfyUiTree,
-    ) else {
+    let descriptor = if let Some(execution) = execution {
+        super::routing::imported_generate_request_supported_resolved(
+            execution,
+            "flux2",
+            gen_core::ImportedModelSource::ComfyUiTree,
+        )
+    } else {
+        super::routing::imported_generate_request_supported(
+            request,
+            "flux2",
+            gen_core::ImportedModelSource::ComfyUiTree,
+        )
+    };
+    let Some(_descriptor) = descriptor else {
         return Ok(None);
     };
     let quant = match flux2_comfyui_quant(request) {
