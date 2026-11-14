@@ -865,6 +865,7 @@ pub(super) struct CachedGeneratorFactory<L> {
     pub(super) load: L,
 }
 
+#[cfg(not(target_os = "macos"))]
 pub(super) type PreparedRenderPlans = Box<
     dyn FnOnce(&gen_core::CancelFlag) -> WorkerResult<Vec<Option<gen_core::RenderPlan>>> + Send,
 >;

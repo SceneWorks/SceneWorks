@@ -127,7 +127,6 @@ use super::stream::drive_native_prompt_batch;
 #[cfg(target_os = "macos")]
 use super::stream::start_cached_gen_stream_with_request_state_using_prepared;
 #[cfg(target_os = "macos")]
-use super::stream::PreparedRenderPlans;
 #[cfg(target_os = "macos")]
 use super::Generator;
 #[cfg(target_os = "macos")]
@@ -179,6 +178,12 @@ pub(super) fn mlx_tier_fit(engine_id: &str, spec: &LoadSpec) -> TierFit {
         },
     }
 }
+
+/// The FLUX.1 pre-load planner the generic MLX lane hands its owner command.
+#[cfg(target_os = "macos")]
+type PreparedFluxRenders = Box<
+    dyn FnOnce(&gen_core::CancelFlag) -> WorkerResult<Vec<super::render::PreparedRender>> + Send,
+>;
 
 /// Complete immutable input to both pre-load tier selection and the eventual cached generation.
 #[cfg(target_os = "macos")]
@@ -990,14 +995,16 @@ pub(super) async fn generate_stream_using(
     // Every FLUX.1 request on this lane — base text-to-image (SW-6933) and the XLabs IP-Adapter
     // reference (SW-6936) — renders only from that pre-load plan, built from exactly the inputs the
     // render passes, so the provider refuses an unsupported request (a reference without its
-    // IP-Adapter, several references, a mask) before any weights load.
+    // IP-Adapter, several references, a mask) before any weights load. A Hires.fix request compiles
+    // both passes as one multi-pass plan: the refinement pass binds the first pass's stretched
+    // output by size and strength.
     let flux1_planned = matches!(engine_id, "flux1_schnell" | "flux1_dev");
-    let prepare_render_plans: PreparedRenderPlans = if flux1_planned {
-        if hires_fix.is_some() {
-            // The refinement pass is conditioned on the first pass's output, which no pre-load
-            // plan can bind.
+    let prepare_render_plans: PreparedFluxRenders = if flux1_planned {
+        if hires_fix.is_some() && spec.ip_adapter.is_none() {
+            // The refinement pass conditions on the first pass's image, and base FLUX.1 accepts a
+            // reference only through the XLabs IP-Adapter.
             return Err(WorkerError::InvalidPayload(
-                "FLUX.1 rendering does not support Hires.fix refinement".to_owned(),
+                "FLUX.1 text-to-image does not support Hires.fix refinement".to_owned(),
             ));
         }
         let planning_spec = spec.clone();
@@ -1016,10 +1023,21 @@ pub(super) async fn generate_stream_using(
         Box::new(move |planning_cancel| {
             let planning_surface = LaneRgbaSurface {
                 multi_reference_alpha: &planning_edit_ref_alpha,
-                output_channels: rgba_output_channels,
+                // The Hires.fix first pass always decodes RGB (`generate_one_with_hires_on_surface`).
+                output_channels: if hires_fix.is_some() {
+                    gen_core::OutputChannels::Rgb
+                } else {
+                    rgba_output_channels
+                },
                 controls: lane_controls,
                 prompt_batch: planning_batch.as_ref(),
                 ..Default::default()
+            };
+            // Enhancement belongs to the persisted pass: the Hires.fix first pass runs without it.
+            let first_pass_enhance = if hires_fix.is_some() {
+                PromptEnhance::default()
+            } else {
+                planning_enhance.clone()
             };
             let planning_work = if planning_batch.is_some() {
                 vec![(planning_seeds[0], "")]
@@ -1051,18 +1069,66 @@ pub(super) async fn generate_stream_using(
                         use_pid,
                         text_style_gain,
                         None,
-                        &planning_enhance,
+                        &first_pass_enhance,
                         gen_core::PromptEnhancementSink::default(),
                         gen_core::PreviewSink::default(),
                         &planning_surface,
                         planning_cancel,
                     )?;
-                    super::render::compile_render_plan(
+                    let Some(hires) = hires_fix else {
+                        return Ok(super::render::PreparedRender {
+                            pass: super::render::compile_render_plan(
+                                crate::inference_runtime::media(),
+                                engine_id,
+                                &planning_spec,
+                                &candidate,
+                            )?,
+                            hires: None,
+                        });
+                    };
+                    // The refinement pass exactly as `generate_one_with_hires_on_surface` builds
+                    // it, minus the reference the plan binds from the first pass.
+                    let refine = super::render::build_render_request(
+                        item_prompt,
+                        hires.width,
+                        hires.height,
+                        seed,
+                        hires.steps,
+                        hires.guidance,
+                        planning_negative.clone(),
+                        None,
+                        &[],
+                        None,
+                        hires.true_cfg,
+                        planning_sampler.as_deref(),
+                        planning_scheduler.as_deref(),
+                        scheduler_shift,
+                        planning_guidance_method.as_deref(),
+                        use_pid,
+                        text_style_gain,
+                        None,
+                        &planning_enhance,
+                        gen_core::PromptEnhancementSink::default(),
+                        gen_core::PreviewSink::default(),
+                        &LaneRgbaSurface {
+                            output_channels: rgba_output_channels,
+                            controls: lane_controls,
+                            ..Default::default()
+                        },
+                        planning_cancel,
+                    )?;
+                    let (pass, hires) = super::render::compile_hires_render_plans(
                         crate::inference_runtime::media(),
                         engine_id,
                         &planning_spec,
                         &candidate,
-                    )
+                        &refine,
+                        &hires,
+                    )?;
+                    Ok(super::render::PreparedRender {
+                        pass: Some(pass),
+                        hires: Some(hires),
+                    })
                 })
                 .collect::<WorkerResult<Vec<_>>>()
         })
@@ -1190,7 +1256,10 @@ pub(super) async fn generate_stream_using(
                                 warnings: Some(&warnings),
                                 prefix_kv_cache: Some(&prefix_kv_cache_report),
                                 prompt_batch: Some(batch),
-                                render_plan: render_plans.first().and_then(Option::as_ref),
+                                render_plan: render_plans
+                                    .first()
+                                    .and_then(|plans| plans.pass.as_ref()),
+                                hires_render_plan: None,
                             },
                             &cancel,
                             on_progress,
@@ -1282,7 +1351,12 @@ pub(super) async fn generate_stream_using(
                                 warnings: Some(&warnings),
                                 prefix_kv_cache: Some(&prefix_kv_cache_report),
                                 prompt_batch: None,
-                                render_plan: render_plans.get(index).and_then(Option::as_ref),
+                                render_plan: render_plans
+                                    .get(index)
+                                    .and_then(|plans| plans.pass.as_ref()),
+                                hires_render_plan: render_plans
+                                    .get(index)
+                                    .and_then(|plans| plans.hires.as_ref()),
                             },
                             &cancel,
                             on_progress,

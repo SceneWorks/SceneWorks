@@ -135,6 +135,9 @@ pub(crate) struct LaneRgbaSurface<'a> {
     /// The exact owner-local plan compiled before the generator was loaded. Only base FLUX.1
     /// reaches this seam during ENG-1a; other routes retain their existing generator call.
     pub(crate) render_plan: Option<&'a gen_core::RenderPlan>,
+    /// The pre-load plan of the Hires.fix refinement pass, compiled together with `render_plan` as
+    /// one multi-pass plan whose second pass consumes the first pass's stretched output.
+    pub(crate) hires_render_plan: Option<&'a gen_core::RenderPlan>,
 }
 
 /// [`generate_one`] with an explicit [`LaneRgbaSurface`].
@@ -463,6 +466,81 @@ pub(super) fn compile_required_render_plan(
             "{engine_id}: route has no registered pre-load render planner"
         ))
     })
+}
+
+/// The pre-load plans one generic-lane image renders from: its pass, and for a Hires.fix request the
+/// refinement pass compiled together with it.
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+pub(super) struct PreparedRender {
+    pub(super) pass: Option<gen_core::RenderPlan>,
+    pub(super) hires: Option<gen_core::RenderPlan>,
+}
+
+/// Compile a Hires.fix render — the first pass, then a refinement pass whose reference is the first
+/// pass's output stretched to the target size at the refinement strength — as one multi-pass plan
+/// before load. `refine` carries no reference of its own; the plan binds the produced one by size
+/// and strength, because its pixels exist only after the first pass.
+#[cfg(target_os = "macos")]
+pub(super) fn compile_hires_render_plans(
+    registry: &gen_core::ProviderRegistry,
+    engine_id: &str,
+    spec: &gen_core::LoadSpec,
+    first: &GenerationRequest,
+    refine: &GenerationRequest,
+    hires: &HiresFixPlan,
+) -> WorkerResult<(gen_core::RenderPlan, gen_core::RenderPlan)> {
+    let passes = [
+        gen_core::PlannedPassRequest {
+            request: first,
+            produced_reference: None,
+        },
+        gen_core::PlannedPassRequest {
+            request: refine,
+            produced_reference: Some(gen_core::ProducedReference {
+                from_pass: 0,
+                width: hires.width,
+                height: hires.height,
+                strength: Some(hires.provider_reference_strength),
+            }),
+        },
+    ];
+    let plan = registry
+        .compile_multi_pass_render_plan(engine_id, spec, &passes)
+        .map_err(|error| preload_plan_error(engine_id, error))?
+        .ok_or_else(|| {
+            WorkerError::Engine(format!(
+                "{engine_id}: Hires.fix route has no registered pre-load render planner"
+            ))
+        })?;
+    match plan.passes() {
+        [first, refine] => Ok((first.clone(), refine.clone())),
+        passes => Err(WorkerError::Engine(format!(
+            "{engine_id}: Hires.fix plan compiled {} passes, expected 2",
+            passes.len()
+        ))),
+    }
+}
+
+/// The refinement pass's reference must be exactly the image its plan declared it consumes.
+pub(super) fn check_produced_reference(
+    plan: &gen_core::RenderPlan,
+    reference: &Image,
+) -> WorkerResult<()> {
+    match plan.produced_reference() {
+        Some(produced)
+            if (produced.width, produced.height) == (reference.width, reference.height) =>
+        {
+            Ok(())
+        }
+        Some(produced) => Err(WorkerError::InvalidPayload(format!(
+            "Hires.fix refinement plan expects a {}x{} first-pass image, got {}x{}",
+            produced.width, produced.height, reference.width, reference.height
+        ))),
+        None => Err(WorkerError::InvalidPayload(
+            "Hires.fix refinement plan does not consume the first pass's output".to_owned(),
+        )),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -805,6 +883,7 @@ pub(super) fn generate_one_with_hires_on_surface(
         // A hires-fix render is per image; the arms refuse a prompt batch with it.
         prompt_batch: None,
         render_plan: surface.render_plan,
+        hires_render_plan: None,
     };
     let (base_width, base_height, base_pixels) = generate_one_on_surface(
         generator,
@@ -847,6 +926,9 @@ pub(super) fn generate_one_with_hires_on_surface(
         hires.height,
         "stretch",
     )?;
+    if let Some(plan) = surface.hires_render_plan {
+        check_produced_reference(plan, &high_res_reference)?;
+    }
     let reference = (high_res_reference, hires.provider_reference_strength);
     let mut second_progress = |progress| match progress {
         Progress::Step { current, .. } => on_progress(Progress::Step {
@@ -873,7 +955,8 @@ pub(super) fn generate_one_with_hires_on_surface(
         prefix_kv_cache: surface.prefix_kv_cache,
         // A hires-fix render is per image; the arms refuse a prompt batch with it.
         prompt_batch: None,
-        render_plan: None,
+        render_plan: surface.hires_render_plan,
+        hires_render_plan: None,
     };
     generate_one_on_surface(
         generator,

@@ -289,3 +289,106 @@ fn mlx_conditional_preload_refusals_are_payload_errors() {
         }
     }
 }
+
+/// SW-6936: an MLX XLabs IP-Adapter Hires.fix request compiles both passes before load — the first
+/// pass and a refinement pass that consumes the first pass's output stretched to the target size —
+/// and the refinement refuses a first-pass image of any other size as a payload error. Base FLUX.1
+/// has no reference input without the IP-Adapter, so its refinement pass is refused before load.
+#[cfg(target_os = "macos")]
+#[test]
+fn mlx_ip_hires_fix_compiles_both_passes_before_load() {
+    use gen_core::{Conditioning, GenerationRequest, LoadSpec, WeightsSource};
+
+    let root = tempfile::tempdir().expect("fixture root");
+    let base = root.path().join("base");
+    let ip_adapter = root.path().join("ip_adapter");
+    std::fs::create_dir_all(&base).expect("base dir");
+    std::fs::create_dir_all(&ip_adapter).expect("ip dir");
+    let base_spec = LoadSpec::new(WeightsSource::Dir(base));
+    let ip_spec = base_spec
+        .clone()
+        .with_ip_adapter(WeightsSource::Dir(ip_adapter));
+    let request = |side: u32, steps: u32, conditioning: Vec<Conditioning>| GenerationRequest {
+        prompt: "a portrait".to_owned(),
+        width: side,
+        height: side,
+        count: 1,
+        seed: Some(7),
+        steps: Some(steps),
+        guidance: Some(3.5),
+        conditioning,
+        ..Default::default()
+    };
+    let reference = Conditioning::Reference {
+        image: gen_core::Image {
+            width: 512,
+            height: 512,
+            pixels: vec![96; 512 * 512 * 3],
+        },
+        strength: Some(0.7),
+    };
+    let hires = super::HiresFixPlan {
+        width: 1024,
+        height: 1024,
+        steps: 6,
+        guidance: Some(3.5),
+        true_cfg: None,
+        provider_reference_strength: 0.45,
+    };
+    let first = request(512, 4, vec![reference]);
+    let refine = request(1024, 6, Vec::new());
+    let registry = crate::inference_runtime::media();
+
+    let (first_plan, refine_plan) =
+        super::compile_hires_render_plans(registry, "flux1_dev", &ip_spec, &first, &refine, &hires)
+            .expect("an IP-Adapter Hires.fix request compiles both passes before load");
+    assert_eq!(first_plan.pass_index(), 0);
+    assert_eq!(first_plan.output_size(), (512, 512));
+    assert_eq!(refine_plan.pass_index(), 1);
+    assert_eq!(refine_plan.output_size(), (1024, 1024));
+    assert_eq!(
+        refine_plan.produced_reference(),
+        Some(gen_core::ProducedReference {
+            from_pass: 0,
+            width: 1024,
+            height: 1024,
+            strength: Some(0.45),
+        })
+    );
+
+    let stretched = |side: u32| gen_core::Image {
+        width: side,
+        height: side,
+        pixels: vec![0; (side * side * 3) as usize],
+    };
+    super::check_produced_reference(&refine_plan, &stretched(1024))
+        .expect("the declared first-pass size is accepted");
+    match super::check_produced_reference(&refine_plan, &stretched(768)) {
+        Err(crate::WorkerError::InvalidPayload(message)) => {
+            assert!(message.contains("expects a 1024x1024"), "{message}")
+        }
+        other => panic!("a mismatched first-pass size must be a payload error, got {other:?}"),
+    }
+    assert!(
+        matches!(
+            super::check_produced_reference(&first_plan, &stretched(1024)),
+            Err(crate::WorkerError::InvalidPayload(_))
+        ),
+        "a plan that consumes no produced reference cannot take one"
+    );
+
+    match super::compile_hires_render_plans(
+        registry,
+        "flux1_dev",
+        &base_spec,
+        &request(512, 4, Vec::new()),
+        &refine,
+        &hires,
+    ) {
+        Err(crate::WorkerError::InvalidPayload(message)) => assert!(
+            message.contains("cannot compile render plan before load"),
+            "{message}"
+        ),
+        other => panic!("base FLUX.1 Hires.fix must be refused before load, got {other:?}"),
+    }
+}
