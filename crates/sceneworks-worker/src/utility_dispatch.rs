@@ -450,15 +450,17 @@ async fn dispatch_utility_job(
         JobType::DatasetAnalysis => run_dataset_analysis_job(api, settings, job)
             .await
             .map_err(|error| ("Dataset analysis failed.", error)),
-        JobType::CatalogAnalysis => run_catalog_analysis_job(api, settings, job)
+        JobType::CatalogAnalysis => run_catalog_analysis_job(api, settings, job, portable_aux)
             .await
             .map_err(|error| ("Catalog analysis failed.", error)),
         // Dataset Doctor face pass (sc-6538): the native SCRFD+ArcFace stack embeds the largest face of
         // each Person-dataset image and POSTs the face sidecar. MLX on Mac (`mlx-gen-face`), candle on
         // the candle lane; off both the handler returns a precise unsupported error.
-        JobType::DatasetFaceAnalysis => run_dataset_face_analysis_job(api, settings, job)
-            .await
-            .map_err(|error| ("Dataset face analysis failed.", error)),
+        JobType::DatasetFaceAnalysis => {
+            run_dataset_face_analysis_job(api, settings, job, portable_aux)
+                .await
+                .map_err(|error| ("Dataset face analysis failed.", error))
+        }
         // Training subject masks (sc-2126): SAM3 "person" segmentation of every dataset image,
         // POSTed to the mask sidecar. Routed by the `image_segment` capability; MLX on Mac, candle
         // off-Mac; off both the handler returns a precise unsupported error.
@@ -470,9 +472,11 @@ async fn dispatch_utility_job(
         // candle off-Mac; off both the handler returns a precise unsupported error. Like the
         // dataset-face pass, the job-type capability is gpu.rs-hardcoded (the face stack has no gen-core
         // registry), so a job stays queued rather than mis-claimed where the stack isn't linked.
-        JobType::FaceLikenessCompare => run_face_likeness_compare_job(api, settings, job)
-            .await
-            .map_err(|error| ("Face likeness compare failed.", error)),
+        JobType::FaceLikenessCompare => {
+            run_face_likeness_compare_job(api, settings, job, portable_aux)
+                .await
+                .map_err(|error| ("Face likeness compare failed.", error))
+        }
         // Native candle prompt refinement (epic 5095, sc-5525; consolidated onto candle-llm in sc-7404):
         // routes `prompt_refine` to the candle `core_llm::TextLlm` provider (candle-llama, resolved
         // model-first). The candle worker advertises `prompt_refine` only when `backend_candle_enabled`
@@ -526,7 +530,7 @@ async fn dispatch_utility_job(
         // `KpsExtract` is never advertised, so the job remains queued and this falls to the `_` arm
         // only if called defensively.
         #[cfg(native_lane)]
-        JobType::KpsExtract => run_kps_extract_job(api, settings, job)
+        JobType::KpsExtract => run_kps_extract_job(api, settings, job, portable_aux)
             .await
             .map_err(|error| ("Keypoint extraction failed.", error)),
         // Image upscaling, served in-process by `upscale_jobs::run_image_upscale_job`: Real-ESRGAN
