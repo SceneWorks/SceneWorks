@@ -821,13 +821,15 @@ impl VideoRequest {
     /// Explicit quantization bits (or the verified portable binding's frozen tier), before
     /// model-specific defaults or tier validation.
     pub fn quant_bits(&self) -> Option<i64> {
-        if let Some(options) = &self.options {
-            return crate::payload_util::request_quant_bits_typed(
-                options.mlx_quantize.as_ref(),
-                self.portable_aux.bound_tier(),
-            );
-        }
         crate::payload_util::request_quant_bits(&self.advanced)
+    }
+
+    /// Execution tier selection from effective controls and the worker's verified source guard.
+    pub fn resolved_quant_bits(&self) -> Option<i64> {
+        crate::payload_util::request_quant_bits_typed(
+            self.options().mlx_quantize.as_ref(),
+            self.portable_aux.bound_tier(),
+        )
     }
 
     /// Parse a job payload (the `payload` object of a `JobSnapshot`). Infallible:
@@ -2433,12 +2435,12 @@ mod tests {
         let absent = payload(json!({"advanced": {}}));
         let mut request = VideoRequest::from_resolved(&absent, &absent).unwrap();
         request.portable_aux = portable_aux.clone();
-        assert_eq!(request.quant_bits(), Some(4));
+        assert_eq!(request.resolved_quant_bits(), Some(4));
 
         let explicit_null = payload(json!({"advanced": {"mlxQuantize": null}}));
         let mut request = VideoRequest::from_resolved(&explicit_null, &explicit_null).unwrap();
         request.portable_aux = portable_aux;
-        assert_eq!(request.quant_bits(), None);
+        assert_eq!(request.resolved_quant_bits(), None);
     }
 
     // ----------------------------------------------------------------------------------------
