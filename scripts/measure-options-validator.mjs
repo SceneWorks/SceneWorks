@@ -47,6 +47,8 @@ if (!moduleUrl) {
 let browserVersion;
 const cold = [];
 let pure = [];
+let singleInputVisible = [];
+let batchInputVisible = [];
 for (let index = 0; index < samples; index += 1) {
   const browser = await chromium.launch({
     headless: true,
@@ -78,14 +80,49 @@ for (let index = 0; index < samples; index += 1) {
             pureMs.push(performance.now() - t);
           }
         }
-        return { coldMs, first, pureMs };
+        const inputVisible = async (batchSize) => {
+          const field = document.createElement("input");
+          const feedback = document.createElement("span");
+          document.body.append(field, feedback);
+          const timings = [];
+          field.addEventListener("input", async () => {
+            for (let item = 0; item < batchSize; item += 1) {
+              validator.validate_request(input.kind, input.payload, input.modelEntry);
+              if ((item + 1) % 8 === 0 && item + 1 < batchSize) {
+                await new Promise((resolve) => setTimeout(resolve, 0));
+              }
+            }
+            feedback.textContent = field.value;
+          });
+          for (let edit = 0; edit < 100; edit += 1) {
+            const value = `edit-${edit}`;
+            const start = performance.now();
+            field.value = value;
+            field.dispatchEvent(new Event("input"));
+            while (feedback.textContent !== value) {
+              await new Promise((resolve) => setTimeout(resolve, 0));
+            }
+            await new Promise((resolve) => requestAnimationFrame(resolve));
+            timings.push(performance.now() - start);
+          }
+          field.remove();
+          feedback.remove();
+          return timings;
+        };
+        return { coldMs, first, pureMs,
+          singleInputVisibleMs: measurePure ? await inputVisible(1) : [],
+          batchInputVisibleMs: measurePure ? await inputVisible(32) : [] };
       }, { moduleUrl, fixture, measurePure: index === 0 });
       if (result.first.validatorSchemaVersion !== corpus.schemaVersion) {
         throw new Error(`Browser validator version disagreed with corpus on sample ${index + 1}`);
       }
       deepStrictEqual(result.first.result, fixture.expected);
       cold.push(result.coldMs);
-      if (index === 0) pure = result.pureMs;
+      if (index === 0) {
+        pure = result.pureMs;
+        singleInputVisible = result.singleInputVisibleMs;
+        batchInputVisible = result.batchInputVisibleMs;
+      }
     } finally {
       await context.close();
     }
@@ -100,11 +137,17 @@ function p95(values) {
 }
 const coldP95 = p95(cold);
 const pureP95 = p95(pure);
+const singleInputVisibleP95 = p95(singleInputVisible);
+const batchInputVisibleP95 = p95(batchInputVisible);
 const coldBudgetMs = args.profile === "desktop" ? 250 : 1000;
 const result = { origin, moduleUrl, profile: args.profile, browser: `Chromium ${browserVersion}`,
   platform: process.platform, cache: "fresh browser process per cold sample", coldSamples: samples,
   coldFetchCompileFirstP95Ms: coldP95, coldMinMs: Math.min(...cold), coldMaxMs: Math.max(...cold), coldBudgetMs,
   pureSamples: pure.length, pureValidationP95Ms: pureP95, pureBudgetMs: 16,
-  coldWithinBudget: coldP95 <= coldBudgetMs, pureWithinBudget: pureP95 <= 16 };
+  inputVisibleHarness: "DOM input event to next animation frame after validation; 32 resolved requests for batch",
+  inputVisibleSamples: singleInputVisible.length, singleInputVisibleP95Ms: singleInputVisibleP95,
+  batchInputVisibleP95Ms: batchInputVisibleP95, inputVisibleBudgetMs: 100,
+  coldWithinBudget: coldP95 <= coldBudgetMs, pureWithinBudget: pureP95 <= 16,
+  inputVisibleWithinBudget: singleInputVisibleP95 <= 100 && batchInputVisibleP95 <= 100 };
 console.log(JSON.stringify(result, null, 2));
-if (!result.coldWithinBudget || !result.pureWithinBudget) process.exitCode = 1;
+if (!result.coldWithinBudget || !result.pureWithinBudget || !result.inputVisibleWithinBudget) process.exitCode = 1;
