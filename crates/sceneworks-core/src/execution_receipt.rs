@@ -35,6 +35,16 @@ pub struct WorkerExecutionReceipt {
     /// inference contract. Neither a request nor a preflight report is valid here.
     pub execution: Value,
     pub outputs: Vec<OutputExecutionBinding>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stages: Vec<ExecutionStageBinding>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExecutionStageBinding {
+    /// Stable call order within one completed worker attempt.
+    pub stage: String,
+    pub execution: Value,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -60,6 +70,8 @@ pub struct TrustedExecutionReceipt {
     pub accepted_result_sha256: String,
     pub execution: Value,
     pub outputs: Vec<OutputExecutionBinding>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stages: Vec<ExecutionStageBinding>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,6 +162,34 @@ pub fn validate_worker_receipt(
             validate_execution_identity(execution, 1)?;
         }
     }
+    if !submitted.stages.is_empty()
+        && (submitted.stages.len() != 2
+            || submitted.outputs.len() != 1
+            || submitted.stages[0].stage != "base_tts"
+            || submitted.stages[1].stage != "voice_conversion")
+    {
+        return Err(ReplayUnavailable::new("invalid_execution_stages", "stages"));
+    }
+    let stage_value = (!submitted.stages.is_empty())
+        .then(|| serde_json::to_value(&submitted.stages).ok())
+        .flatten();
+    if terminal_result.get("workerExecutionStages") != stage_value.as_ref() {
+        return Err(ReplayUnavailable::new("execution_stages_changed", "stages"));
+    }
+    let mut seen_stages = BTreeSet::new();
+    for stage in &submitted.stages {
+        if stage.stage.trim().is_empty() || !seen_stages.insert(stage.stage.as_str()) {
+            return Err(ReplayUnavailable::new("invalid_execution_stages", "stages"));
+        }
+        let units = stage
+            .execution
+            .pointer("/identity/output_units")
+            .and_then(Value::as_u64)
+            .and_then(|units| usize::try_from(units).ok())
+            .filter(|units| *units > 0 && *units <= 10_000)
+            .unwrap_or(1);
+        validate_execution_identity(&stage.execution, units)?;
+    }
     let expected_ids = output_asset_ids(terminal_result, submitted.outputs.len())?;
     let mut unique = BTreeSet::new();
     for (index, output) in submitted.outputs.iter().enumerate() {
@@ -229,6 +269,12 @@ pub fn require_deterministic_scope(
     receipt: &TrustedExecutionReceipt,
     actual_scope: &str,
 ) -> Result<(), ReplayUnavailable> {
+    if !receipt.stages.is_empty() {
+        return Err(ReplayUnavailable::new(
+            "composite_replay_unavailable",
+            "stages",
+        ));
+    }
     for output in &receipt.outputs {
         let execution = output.execution.as_ref().unwrap_or(&receipt.execution);
         let report = parse_execution_identity(
@@ -467,6 +513,54 @@ mod tests {
     }
 
     #[test]
+    fn two_stage_voice_receipt_requires_order_and_complete_terminal_binding() {
+        let stage_report = json!({"state":"unavailable","reason":{
+            "code":"provider_report_unavailable","detail":"fixture","missing_facts":["provider_resolved_execution"]
+        }});
+        let stages = vec![
+            ExecutionStageBinding {
+                stage: "base_tts".into(),
+                execution: stage_report.clone(),
+            },
+            ExecutionStageBinding {
+                stage: "voice_conversion".into(),
+                execution: stage_report,
+            },
+        ];
+        let mut receipt = worker_receipt();
+        receipt.execution = json!({"state":"unavailable","reason":{
+            "code":"composite_execution_unavailable","detail":"fixture","missing_facts":["composite_determinism"]
+        }});
+        receipt.outputs.truncate(1);
+        receipt.stages = stages.clone();
+        let result = json!({"expectedCount":1,"assetWrites":[{"assetId":"a"}],"workerExecutionStages":stages});
+        assert!(validate_worker_receipt(&receipt, result.as_object().unwrap()).is_ok());
+        receipt.stages.swap(0, 1);
+        assert_eq!(
+            validate_worker_receipt(&receipt, result.as_object().unwrap())
+                .unwrap_err()
+                .reason,
+            "invalid_execution_stages"
+        );
+        receipt.stages.pop();
+        assert_eq!(
+            validate_worker_receipt(&receipt, result.as_object().unwrap())
+                .unwrap_err()
+                .reason,
+            "invalid_execution_stages"
+        );
+        let mut omitted = receipt.clone();
+        omitted.stages = serde_json::from_value(result["workerExecutionStages"].clone()).unwrap();
+        let missing = json!({"expectedCount":1,"assetWrites":[{"assetId":"a"}]});
+        assert_eq!(
+            validate_worker_receipt(&omitted, missing.as_object().unwrap())
+                .unwrap_err()
+                .reason,
+            "execution_stages_changed"
+        );
+    }
+
+    #[test]
     fn deterministic_scope_is_explicit_and_exact() {
         let input = worker_receipt();
         let receipt = TrustedExecutionReceipt {
@@ -483,6 +577,7 @@ mod tests {
             accepted_result_sha256: "c".repeat(64),
             execution: input.execution,
             outputs: input.outputs,
+            stages: Vec::new(),
         };
         assert!(require_deterministic_scope(&receipt, "same-device").is_ok());
         assert_eq!(
@@ -519,6 +614,7 @@ mod tests {
             accepted_result_sha256: "c".repeat(64),
             execution: input.execution,
             outputs: input.outputs,
+            stages: Vec::new(),
         };
         receipt.execution["identity"]["randomness"] = json!({
             "kind":"draws", "scheme":"cpu_std_rng", "draws":[

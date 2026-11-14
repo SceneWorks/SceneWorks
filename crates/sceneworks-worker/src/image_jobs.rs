@@ -1134,6 +1134,7 @@ fn image_execution_receipt(
             })
         }),
         outputs,
+        stages: Vec::new(),
     })
 }
 

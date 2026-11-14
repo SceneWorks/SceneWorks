@@ -70,6 +70,7 @@ fn report(job_id: &str) -> WorkerExecutionReceipt {
             artifact_ids: vec![job_id.into()],
             artifact_sha256: Vec::new(),
         }],
+        stages: Vec::new(),
     }
 }
 
@@ -291,6 +292,7 @@ fn deterministic_image_receipt_creates_separate_pinned_replay_job() {
             artifact_ids: vec!["asset-one".into()],
             artifact_sha256: vec!["c".repeat(64)],
         }],
+        stages: Vec::new(),
     };
     store
         .open_connection()
@@ -372,6 +374,7 @@ fn deterministic_image_receipt_creates_separate_pinned_replay_job() {
             artifact_ids: vec![replay.id.clone()],
             artifact_sha256: vec!["c".repeat(64)],
         }],
+        stages: Vec::new(),
     };
     let mut changed_bytes = completed.clone();
     changed_bytes.outputs[0].artifact_sha256 = vec!["d".repeat(64)];

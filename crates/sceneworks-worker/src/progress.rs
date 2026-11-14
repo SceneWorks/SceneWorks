@@ -847,6 +847,13 @@ fn unavailable_completed_receipt(
                 })
             }),
         outputs,
+        stages: result
+            .get("workerExecutionStages")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(WorkerError::Json)?
+            .unwrap_or_default(),
     };
     if sceneworks_core::execution_receipt::validate_worker_receipt(&receipt, result).is_err() {
         return Ok(None);

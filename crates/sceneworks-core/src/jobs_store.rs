@@ -4514,6 +4514,7 @@ impl JobsStore {
                         .iter()
                         .filter_map(|output| output.execution.as_ref()),
                 )
+                .chain(receipt.stages.iter().map(|stage| &stage.execution))
                 .any(|execution| {
                     execution.get("state").and_then(Value::as_str) == Some("resolved")
                         && execution
@@ -4542,6 +4543,7 @@ impl JobsStore {
                 ))?,
                 execution: receipt.execution.clone(),
                 outputs: receipt.outputs.clone(),
+                stages: receipt.stages.clone(),
             };
             if let Some(encoded) = replay_expected.as_deref() {
                 let expected: crate::execution_receipt::TrustedExecutionReceipt =
@@ -4551,6 +4553,7 @@ impl JobsStore {
                     || expected.accepted_source_route != trusted.accepted_source_route
                     || expected.inference_revision != trusted.inference_revision
                     || expected.execution != trusted.execution
+                    || expected.stages != trusted.stages
                     || expected.outputs.len() != trusted.outputs.len()
                     || expected
                         .outputs
