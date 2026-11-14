@@ -19,6 +19,7 @@
 use serde_json::Value;
 
 use crate::contracts::JsonObject;
+use crate::resolved_options::Bound;
 
 /// Read a string key, returning the RAW value (no trimming); a present-but-empty string
 /// is preserved. Falls back to `default` only when the key is absent or non-string.
@@ -69,6 +70,44 @@ pub enum QuantSelection<'a> {
     Null,
     /// The request named a value that is not an integer bit count: refuse it.
     Malformed(&'a Value),
+}
+
+/// Quant selection after the portable resolver has lowered the authored control. The trusted
+/// bound tier comes from the worker's verified source guard, never from a client payload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResolvedQuantSelection {
+    Explicit(i64),
+    Bound(i64),
+    Unselected,
+    Null,
+}
+
+pub fn resolved_quant_selection(
+    explicit: Option<&Bound<Option<i64>>>,
+    trusted_bound_tier: Option<&str>,
+) -> ResolvedQuantSelection {
+    match explicit {
+        Some(Bound {
+            value: Some(bits), ..
+        }) => ResolvedQuantSelection::Explicit(*bits),
+        Some(Bound { value: None, .. }) => ResolvedQuantSelection::Null,
+        None => match trusted_bound_tier {
+            Some("q4") => ResolvedQuantSelection::Bound(4),
+            Some("q8") => ResolvedQuantSelection::Bound(8),
+            Some("bf16") => ResolvedQuantSelection::Bound(0),
+            _ => ResolvedQuantSelection::Unselected,
+        },
+    }
+}
+
+pub fn request_quant_bits_typed(
+    explicit: Option<&Bound<Option<i64>>>,
+    trusted_bound_tier: Option<&str>,
+) -> Option<i64> {
+    match resolved_quant_selection(explicit, trusted_bound_tier) {
+        ResolvedQuantSelection::Explicit(bits) | ResolvedQuantSelection::Bound(bits) => Some(bits),
+        ResolvedQuantSelection::Unselected | ResolvedQuantSelection::Null => None,
+    }
 }
 
 /// The tier the worker's source guard froze for this job (`advanced.__portableBoundTier`, written
@@ -363,6 +402,31 @@ mod tests {
             quant_selection(&advanced(json!({}))),
             QuantSelection::Unselected
         );
+    }
+
+    #[test]
+    fn typed_quant_selection_preserves_explicit_null_and_verified_tier_priority() {
+        use crate::resolved_options::Origin;
+        let explicit = Bound {
+            value: Some(8),
+            origin: Origin::Authored {
+                spelling: "mlxQuantize",
+            },
+        };
+        let null = Bound {
+            value: None,
+            origin: Origin::Authored {
+                spelling: "mlxQuantize",
+            },
+        };
+        assert_eq!(
+            resolved_quant_selection(Some(&explicit), Some("q4")),
+            ResolvedQuantSelection::Explicit(8)
+        );
+        assert_eq!(request_quant_bits_typed(Some(&null), Some("q4")), None);
+        assert_eq!(request_quant_bits_typed(None, Some("q4")), Some(4));
+        assert_eq!(request_quant_bits_typed(None, Some("bf16")), Some(0));
+        assert_eq!(request_quant_bits_typed(None, Some("other")), None);
     }
 
     #[test]
