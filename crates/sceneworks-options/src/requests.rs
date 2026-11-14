@@ -4,6 +4,11 @@
 
 use crate::*;
 
+const HIRES_FIX: Predicate = Predicate::All(&[
+    Predicate::Modality("image"),
+    Predicate::ModelNotFalse("image.supportsHiresFix"),
+]);
+
 pub(crate) const SPECS: &[OptionSpec] = &[
 
     // image
@@ -508,7 +513,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "crates/sceneworks-core/src/image_request.rs: hires_fix_request_error: text_to_image, img2img-capable model; excludes inline upscale, edit/reference/character/mask/control input, usePid, phases and lightning/lcm/hyper acceleration",
     ])
-    .applies(Predicate::Modality("image"))
+    .applies(HIRES_FIX)
     .ui("Hires fix", "object"),
     // apps/rust-api/src/dto.rs:952
     OptionSpec::new(
@@ -2360,7 +2365,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "crates/sceneworks-core/src/image_request.rs: hires_fix_request_error owns model/mode and incompatible-control refusals",
     ])
-    .applies(Predicate::Modality("image"))
+    .applies(HIRES_FIX)
     .effects(&[
         Effect { when: "true", action: "run second img2img pass after generation", target: "HiresFixRequest" },
         Effect { when: "enabled", action: "clear", target: "advanced.usePid" },
@@ -2380,7 +2385,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "crates/sceneworks-core/src/contracts.rs: effective_steps: nonzero clamps to 1..150; 0 inherits first-pass steps",
     ])
-    .applies(Predicate::Modality("image"))
+    .applies(HIRES_FIX)
     .effects(&[
         Effect { when: "0", action: "inherit first-pass steps", target: "GenerationRequest.steps" },
     ])
@@ -2398,7 +2403,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "crates/sceneworks-core/src/contracts.rs: effective_denoising_strength: clamp 0..1",
     ])
-    .applies(Predicate::Modality("image"))
+    .applies(HIRES_FIX)
     .ui("Denoising strength", "number"),
     // crates/sceneworks-core/src/contracts.rs:934
     OptionSpec::new(
@@ -2413,7 +2418,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "crates/sceneworks-core/src/contracts.rs: effective_upscale_by: clamp 1..4",
     ])
-    .applies(Predicate::Modality("image"))
+    .applies(HIRES_FIX)
     .ui("Upscale by", "number"),
     // crates/sceneworks-core/src/contracts.rs:936
     OptionSpec::new(
@@ -2428,7 +2433,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "crates/sceneworks-core/src/contracts.rs: effective_cfg_scale: finite values clamp 0..60; absent/non-finite inherits first-pass guidance",
     ])
-    .applies(Predicate::Modality("image"))
+    .applies(HIRES_FIX)
     .ui("Cfg scale", "number"),
 
     // videoUpscale

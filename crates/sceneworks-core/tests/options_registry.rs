@@ -144,3 +144,31 @@ fn image_capabilities_enable_vqa_interleave_and_inpaint_requests() {
         .applies_when
         .matches(&sdxl.context()));
 }
+
+#[test]
+fn hires_fix_respects_checkpoint_opt_out_for_parent_and_children() {
+    use sceneworks_core::{options_context, registry::builtin_model_spec};
+    for (id, supported) in [("realvisxl_lightning", false), ("realvisxl", true)] {
+        let facts = options_context::for_model(
+            builtin_model_spec(id).unwrap(),
+            "mlx",
+            "text_to_image",
+            None,
+        );
+        if supported {
+            assert!(facts.model["image"].get("supportsHiresFix").is_none());
+        } else {
+            assert_eq!(facts.model["image"]["supportsHiresFix"], false);
+        }
+        for option in registry()
+            .filter(|option| option.id == "image.hiresFix" || option.location == "image.hiresFix")
+        {
+            assert_eq!(
+                option.applies_when.matches(&facts.context()),
+                supported,
+                "{id}: {}",
+                option.id
+            );
+        }
+    }
+}

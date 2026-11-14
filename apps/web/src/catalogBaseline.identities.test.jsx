@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { beforeAll, expect, it, vi } from "vitest";
 vi.mock("./api.js", async (original) => ({ ...await original(), apiFetch: vi.fn(async () => ({})) }));
 import identities from "./testUtils/catalogBaseline/controlIdentities.json";
+import { frozenControlInventory } from "./testUtils/catalogBaseline/frozenControlInventory.js";
 import old from "./testUtils/catalogBaseline/old-catalog.json";
 import { currentCandidate } from "./testUtils/catalogBaseline/candidate.js";
 import { controlInventory, assertDeclaredEffects } from "./testUtils/catalogBaseline/controlInventory.js";
@@ -19,6 +20,7 @@ it("all 1,197 frozen surfaces have scoped identities independent of defaults and
     const [platform, studio] = key.split("/");
     const observed = { controls: packed.controls.map((id) => baseline.controls[id]), menus: packed.menus };
     const inventory = controlInventory(observed, old.catalog.platforms[platform], { studio });
+    expect(inventory, key).toEqual(frozenControlInventory(key));
     for (const ids of allIds(inventory)) {
       expect(ids.every(([id, controlId]) => id.length > 0 && controlId.length > 0), key).toBe(true);
       expect(new Set(ids.map(([, controlId]) => controlId)).size, key).toBe(ids.length);
@@ -37,6 +39,22 @@ it("all 1,197 frozen surfaces have scoped identities independent of defaults and
       control.selected = control.selected === "true" ? "false" : "true";
     }
     expect(allIds(controlInventory(changed, old.catalog.platforms[platform], { studio })), key).toEqual(allIds(inventory));
+  }
+});
+it("renaming a semantic ID cannot change the frozen expected identity", () => {
+  const key = "linux/audio/yue_en_cot/music";
+  const packed = baseline.rows[key];
+  const observed = { controls: packed.controls.map((id) => baseline.controls[id]), menus: packed.menus };
+  const expected = frozenControlInventory(key);
+  const seed = identities.fields.Seed;
+  try {
+    identities.fields.Seed = "silentlyRenamedSeed";
+    const mutated = controlInventory(observed, old.catalog.platforms.linux, { studio: "audio" });
+    expect(mutated.controls.some((control) => control.id === "silentlyRenamedSeed")).toBe(true);
+    expect(frozenControlInventory(key)).toEqual(expected);
+    expect(() => expect(mutated).toEqual(expected)).toThrow();
+  } finally {
+    identities.fields.Seed = seed;
   }
 });
 it("simple picker identities survive changed model, resolution and voice defaults", () => {

@@ -7,6 +7,7 @@ vi.mock("./api.js", async (original) => ({ ...await original(), apiFetch: vi.fn(
 import old from "./testUtils/catalogBaseline/old-catalog.json";
 import { population, unionPopulation, requireOldPopulation, keyFor, observe } from "./testUtils/catalogBaseline/harness.jsx";
 import { controlInventory } from "./testUtils/catalogBaseline/controlInventory.js";
+import { frozenControlInventory } from "./testUtils/catalogBaseline/frozenControlInventory.js";
 const observationsPath = "src/testUtils/catalogBaseline/old-observations.json";
 const candidate = currentCandidate();
 const candidateRows = population(candidate);
@@ -30,21 +31,6 @@ function packInventory(rows) {
   return { source: old.source, groups, rows: Object.fromEntries(Object.entries(rows).map(
     ([key, { backend, controls, menus }]) => [key, { backend, controls: intern(controls),
       menus: menus.map((menu) => ({ ...menu, controls: intern(menu.controls) })) }])) };
-}
-function expectedInventory(row) {
-  // Repair identity projection from the immutable old DOM observations. Never
-  // recapture historical behavior to accommodate a changed identity vocabulary.
-  const expected = controlInventory(unpack(baseline.rows[keyFor(row)]), old.catalog.platforms[row.platform], row);
-  const frozen = inventory.rows[keyFor(row)];
-  expect(frozen.backend).toBe(expected.backend);
-  const retainDeclarations = (controls, group) => controls.map((control, index) => ({
-    ...control, effects: inventory.groups[group][index].effects,
-  }));
-  expected.controls = retainDeclarations(expected.controls, frozen.controls);
-  expected.menus = expected.menus.map((menu, index) => ({ ...menu,
-    controls: retainDeclarations(menu.controls, frozen.menus[index].controls),
-  }));
-  return expected;
 }
 function unpack(row) { return { ...row, controls: row.controls.map((id) => baseline.controls[id]),
   submission: { ...row.submission, calls: baseline.calls[row.submission.calls] },
@@ -96,7 +82,7 @@ describe("pinned public catalog (SW-7028)", () => {
             expect(controls.every(({ id, controlId }) => Boolean(id) && Boolean(controlId))).toBe(true);
             expect(new Set(controls.map(({ controlId }) => controlId)).size).toBe(controls.length);
           }
-          expect(snapshot).toEqual(expectedInventory(row));
+          expect(snapshot).toEqual(frozenControlInventory(keyFor(row)));
         }
         expect(actual).toEqual(unpack(baseline.rows[keyFor(row)]));
       }
