@@ -53,7 +53,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "crates/sceneworks-core/src/moss_image_advanced.rs: explicit MOSS edit_image only",
     ])
-    .applies(Predicate::All(&[Predicate::Family("moss_image"), Predicate::Feature("edit_image")]))
+    .applies(Predicate::All(&[Predicate::Family("moss_image"), Predicate::Capability("edit_image")]))
     .compat("Top-level public carrier is normalized into advanced.mossImageAdvanced")
     .ui("Moss image advanced", "object"),
     // apps/rust-api/src/dto.rs:830
@@ -74,7 +74,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "image",
         "mode",
         Shape::OneOf("text_to_image | edit_image | character_image | style_variations"),
-        DefaultRule::Literal("text_to_image"),
+        DefaultRule::Literal("\"text_to_image\""),
         IntentClass::WhatToMake,
         "ImageRequest.mode",
     )
@@ -89,7 +89,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "image",
         "prompt",
         Shape::Text,
-        DefaultRule::Literal(""),
+        DefaultRule::Literal("\"\""),
         IntentClass::WhatToMake,
         "GenerationRequest.prompt",
     )
@@ -120,7 +120,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "image",
         "negativePrompt",
         Shape::Text,
-        DefaultRule::Literal(""),
+        DefaultRule::Literal("\"\""),
         IntentClass::WhatToMake,
         "GenerationRequest.negative_prompt",
     )
@@ -135,7 +135,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "image",
         "model",
         Shape::Text,
-        DefaultRule::Literal("z_image_turbo"),
+        DefaultRule::Literal("\"z_image_turbo\""),
         IntentClass::WhatToMake,
         "ImageRequest.model",
     )
@@ -209,7 +209,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "image",
         "stylePreset",
         Shape::Text,
-        DefaultRule::Literal("cinematic"),
+        DefaultRule::Literal("\"cinematic\""),
         IntentClass::WhatToMake,
         "ImageRequest.style_preset",
     )
@@ -297,7 +297,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "characterId",
         Shape::Text,
         DefaultRule::Absent,
-        IntentClass::Context,
+        IntentClass::WhatToMake,
         "ImageRequest.character_id",
     )
     .applies(Predicate::Modality("image"))
@@ -309,7 +309,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "characterLookId",
         Shape::Text,
         DefaultRule::Absent,
-        IntentClass::Context,
+        IntentClass::WhatToMake,
         "ImageRequest.character_look_id",
     )
     .applies(Predicate::Modality("image"))
@@ -456,7 +456,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "image",
         "fitMode",
         Shape::OneOf("crop | pad | outpaint | stretch"),
-        DefaultRule::Literal("crop"),
+        DefaultRule::Literal("\"crop\""),
         IntentClass::WhatToMake,
         "ImageRequest.fit_mode",
     )
@@ -474,7 +474,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "image",
         "requestedGpu",
         Shape::Text,
-        DefaultRule::Literal("auto"),
+        DefaultRule::Literal("\"auto\""),
         IntentClass::MachineBudget,
         "Job.requested_gpu -> worker routing",
     )
@@ -630,7 +630,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "vector",
         "prompt",
         Shape::Text,
-        DefaultRule::Literal(""),
+        DefaultRule::Literal("\"\""),
         IntentClass::WhatToMake,
         "VectorRequest.prompt",
     )
@@ -671,7 +671,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "vector",
         "requestedGpu",
         Shape::Text,
-        DefaultRule::Literal("auto"),
+        DefaultRule::Literal("\"auto\""),
         IntentClass::MachineBudget,
         "Job.requested_gpu -> worker routing",
     )
@@ -730,7 +730,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "vectorPrompt",
         "negativePrompt",
         Shape::Text,
-        DefaultRule::Literal(""),
+        DefaultRule::Literal("\"\""),
         IntentClass::WhatToMake,
         "ImageJobRequest.negative_prompt",
     )
@@ -842,7 +842,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "vectorPrompt",
         "requestedGpu",
         Shape::Text,
-        DefaultRule::Literal("auto"),
+        DefaultRule::Literal("\"auto\""),
         IntentClass::MachineBudget,
         "Job.requested_gpu -> worker routing",
     )
@@ -946,7 +946,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "vqa",
         "model",
         Shape::Text,
-        DefaultRule::Literal("sensenova_u1_8b"),
+        DefaultRule::Literal("\"sensenova_u1_8b\""),
         IntentClass::WhatToMake,
         "VqaRequest.model",
     )
@@ -976,7 +976,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "vqa",
         "requestedGpu",
         Shape::Text,
-        DefaultRule::Literal("auto"),
+        DefaultRule::Literal("\"auto\""),
         IntentClass::MachineBudget,
         "Job.requested_gpu -> worker routing",
     )
@@ -1066,7 +1066,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "interleave",
         "model",
         Shape::Text,
-        DefaultRule::Literal("sensenova_u1_8b"),
+        DefaultRule::Literal("\"sensenova_u1_8b\""),
         IntentClass::WhatToMake,
         "InterleaveRequest.model",
     )
@@ -1138,7 +1138,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "interleave",
         "requestedGpu",
         Shape::Text,
-        DefaultRule::Literal("auto"),
+        DefaultRule::Literal("\"auto\""),
         IntentClass::MachineBudget,
         "Job.requested_gpu -> worker routing",
     )
@@ -1216,7 +1216,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "video",
         "mode",
         Shape::OneOf("crates/sceneworks-core/src/video_request.rs::VIDEO_JOB_MODES"),
-        DefaultRule::Literal("image_to_video"),
+        DefaultRule::Literal("\"image_to_video\""),
         IntentClass::WhatToMake,
         "VideoRequest.mode",
     )
@@ -1247,7 +1247,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "video",
         "negativePrompt",
         Shape::Text,
-        DefaultRule::Literal(""),
+        DefaultRule::Literal("\"\""),
         IntentClass::WhatToMake,
         "GenerationRequest.negative_prompt",
     )
@@ -1262,7 +1262,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "video",
         "model",
         Shape::Text,
-        DefaultRule::Literal("ltx_2_3"),
+        DefaultRule::Literal("\"ltx_2_3\""),
         IntentClass::WhatToMake,
         "VideoRequest.model",
     )
@@ -1356,7 +1356,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "video",
         "quality",
         Shape::Text,
-        DefaultRule::Literal("balanced"),
+        DefaultRule::Literal("\"balanced\""),
         IntentClass::WhatToMake,
         "VideoRequest.quality",
     )
@@ -1440,7 +1440,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "characterId",
         Shape::Text,
         DefaultRule::Absent,
-        IntentClass::Context,
+        IntentClass::WhatToMake,
         "VideoRequest.character_id",
     )
     .applies(Predicate::Modality("video"))
@@ -1452,7 +1452,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "characterLookId",
         Shape::Text,
         DefaultRule::Absent,
-        IntentClass::Context,
+        IntentClass::WhatToMake,
         "VideoRequest.character_look_id",
     )
     .applies(Predicate::Modality("video"))
@@ -1464,7 +1464,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "personTrackId",
         Shape::Text,
         DefaultRule::Absent,
-        IntentClass::Context,
+        IntentClass::WhatToMake,
         "VideoRequest.person_track_id",
     )
     .applies(Predicate::Modality("video"))
@@ -1475,7 +1475,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "video",
         "replacementMode",
         Shape::Text,
-        DefaultRule::Literal("face_only"),
+        DefaultRule::Literal("\"face_only\""),
         IntentClass::WhatToMake,
         "VideoRequest.replacement_mode",
     )
@@ -1502,7 +1502,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "video",
         "fitMode",
         Shape::OneOf("crop | pad | outpaint | stretch"),
-        DefaultRule::Literal("crop"),
+        DefaultRule::Literal("\"crop\""),
         IntentClass::WhatToMake,
         "VideoRequest.fit_mode",
     )
@@ -1628,7 +1628,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "video",
         "requestedGpu",
         Shape::Text,
-        DefaultRule::Literal("auto"),
+        DefaultRule::Literal("\"auto\""),
         IntentClass::MachineBudget,
         "Job.requested_gpu -> worker routing",
     )
@@ -1750,7 +1750,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "audio",
         "model",
         Shape::Text,
-        DefaultRule::Literal("kokoro_82m"),
+        DefaultRule::Literal("\"kokoro_82m\""),
         IntentClass::WhatToMake,
         "GenerationRequest.model",
     )
@@ -2035,14 +2035,18 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "audio",
         "baseModel",
         Shape::Text,
-        DefaultRule::Literal("kokoro_82m"),
+        DefaultRule::Literal("\"kokoro_82m\""),
         IntentClass::WhatToMake,
         "voice clone base TTS generator",
     )
     .limits(&[
         "apps/rust-api/src/validators.rs: plain model id; selected catalog model must be audio",
     ])
-    .applies(Predicate::Feature("voice_clone"))
+    .applies(Predicate::All(&[
+        Predicate::Any(&[Predicate::ModelContains("audio.conditioning", "ReferenceAudio"), Predicate::ModelContains("audio.conditioning", "VoiceEmbedding")]),
+        Predicate::Not(&Predicate::ModelField("audio.supportsSegmentedLyrics")),
+        Predicate::Not(&Predicate::ModelField("audio.supportsSymbolicSong")),
+    ]))
     .ui("Base model", "text"),
     // apps/rust-api/src/dto.rs:1395
     OptionSpec::new(
@@ -2058,7 +2062,11 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "apps/rust-api/src/validators.rs: finite 0..1",
         "crates/sceneworks-worker/src/audio_jobs.rs: selected provider capability/validation remains binding",
     ])
-    .applies(Predicate::Feature("voice_clone"))
+    .applies(Predicate::All(&[
+        Predicate::Any(&[Predicate::ModelContains("audio.conditioning", "ReferenceAudio"), Predicate::ModelContains("audio.conditioning", "VoiceEmbedding")]),
+        Predicate::Not(&Predicate::ModelField("audio.supportsSegmentedLyrics")),
+        Predicate::Not(&Predicate::ModelField("audio.supportsSymbolicSong")),
+    ]))
     .ui("Match strength", "number"),
     // apps/rust-api/src/dto.rs:1402
     OptionSpec::new(
@@ -2136,7 +2144,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "apps/rust-api/src/validators.rs: mode and reference slots are exclusive; no voice clone or source edit reference",
     ])
-    .applies(Predicate::All(&[Predicate::ModelField("audio.supportsSegmentedLyrics"), Predicate::ModelField("audio.conditioning.ReferenceAudio")]))
+    .applies(Predicate::All(&[Predicate::ModelField("audio.supportsSegmentedLyrics"), Predicate::ModelContains("audio.conditioning", "ReferenceAudio")]))
     .effects(&[
         Effect { when: "single", action: "require only iclReferenceAssetId", target: "audio.iclReferenceAssetId" },
         Effect { when: "dual", action: "require vocal and instrumental ids, exclude mixed reference", target: "audio.iclVocalAssetId + audio.iclInstrumentalAssetId" },
@@ -2155,7 +2163,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "apps/rust-api/src/validators.rs: single mode uses mixed id; dual uses both vocal/instrumental ids; all ids project-scoped",
     ])
-    .applies(Predicate::ModelField("audio.conditioning.ReferenceAudio"))
+    .applies(Predicate::ModelContains("audio.conditioning", "ReferenceAudio"))
     .ui("Icl reference asset id", "text"),
     // apps/rust-api/src/dto.rs:1421
     OptionSpec::new(
@@ -2170,7 +2178,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "apps/rust-api/src/validators.rs: single mode uses mixed id; dual uses both vocal/instrumental ids; all ids project-scoped",
     ])
-    .applies(Predicate::ModelField("audio.conditioning.ReferenceAudio"))
+    .applies(Predicate::ModelContains("audio.conditioning", "ReferenceAudio"))
     .ui("Icl vocal asset id", "text"),
     // apps/rust-api/src/dto.rs:1423
     OptionSpec::new(
@@ -2185,7 +2193,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "apps/rust-api/src/validators.rs: single mode uses mixed id; dual uses both vocal/instrumental ids; all ids project-scoped",
     ])
-    .applies(Predicate::ModelField("audio.conditioning.ReferenceAudio"))
+    .applies(Predicate::ModelContains("audio.conditioning", "ReferenceAudio"))
     .ui("Icl instrumental asset id", "text"),
     // apps/rust-api/src/dto.rs:1427
     OptionSpec::new(
@@ -2264,7 +2272,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "audio",
         "requestedGpu",
         Shape::Text,
-        DefaultRule::Literal("auto"),
+        DefaultRule::Literal("\"auto\""),
         IntentClass::MachineBudget,
         "Job.requested_gpu -> worker routing",
     )
@@ -2302,6 +2310,10 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "ImageUpscaleRequest.enabled",
     )
     .applies(Predicate::Modality("image"))
+    .effects(&[
+        Effect { when: "enabled", action: "clear", target: "advanced.usePid" },
+        Effect { when: "enabled", action: "clear", target: "image.hiresFix.enabled" },
+    ])
     .ui("Enabled", "toggle"),
     // crates/sceneworks-core/src/contracts.rs:817
     OptionSpec::new(
@@ -2324,7 +2336,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "image.upscale",
         "engine",
         Shape::Text,
-        DefaultRule::Literal("real-esrgan"),
+        DefaultRule::Literal("\"real-esrgan\""),
         IntentClass::WhatToMake,
         "ImageUpscaleRequest.engine",
     )
@@ -2351,6 +2363,8 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .applies(Predicate::Modality("image"))
     .effects(&[
         Effect { when: "true", action: "run second img2img pass after generation", target: "HiresFixRequest" },
+        Effect { when: "enabled", action: "clear", target: "advanced.usePid" },
+        Effect { when: "enabled", action: "clear", target: "image.upscale.enabled" },
     ])
     .ui("Enabled", "toggle"),
     // crates/sceneworks-core/src/contracts.rs:930
@@ -2424,7 +2438,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "videoUpscale",
         "sourceAssetId",
         Shape::Text,
-        DefaultRule::Literal(""),
+        DefaultRule::Literal("\"\""),
         IntentClass::WhatToMake,
         "VideoUpscaleRequest.source_asset_id",
     )
@@ -2493,7 +2507,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "videoUpscale",
         "engine",
         Shape::OneOf("seedvr2 | seedvr2_3b | empty legacy alias"),
-        DefaultRule::Literal("seedvr2"),
+        DefaultRule::Literal("\"seedvr2\""),
         IntentClass::WhatToMake,
         "VideoUpscaleRequest.engine",
     )
@@ -2508,7 +2522,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "videoUpscale",
         "model",
         Shape::Text,
-        DefaultRule::Literal("seedvr2_3b"),
+        DefaultRule::Literal("\"seedvr2_3b\""),
         IntentClass::WhatToMake,
         "VideoUpscaleRequest.model -> output asset provenance",
     )
@@ -2869,7 +2883,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "crates/sceneworks-core/src/contracts.rs: ImageUpscaleRequest.validate",
         "crates/sceneworks-core/src/image_restoration.rs: clamp 0..1; Iris refuses this control",
     ])
-    .applies(Predicate::Feature("seedvr2_upscale"))
+    .applies(Predicate::Family("seedvr2"))
     .ui("Softness", "number"),
     // crates/sceneworks-core/src/contracts.rs:833
     OptionSpec::new(
@@ -2885,7 +2899,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "crates/sceneworks-core/src/contracts.rs: ImageUpscaleRequest.validate",
         "crates/sceneworks-core/src/image_restoration.rs: positive finite; Iris only",
     ])
-    .applies(Predicate::Feature("iris_restoration"))
+    .applies(Predicate::Family("iris"))
     .ui("Scale", "number"),
     // crates/sceneworks-core/src/contracts.rs:833
     OptionSpec::new(
@@ -2893,7 +2907,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "image.upscale",
         "inputSizing",
         Shape::OneOf("budgeted | original"),
-        DefaultRule::Literal("budgeted"),
+        DefaultRule::Literal("\"budgeted\""),
         IntentClass::WhatToMake,
         "IrisRestoreParams.input_sizing",
     )
@@ -2901,7 +2915,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "crates/sceneworks-core/src/contracts.rs: ImageUpscaleRequest.validate",
         "crates/sceneworks-core/src/image_restoration.rs: Iris only; trim and lowercase",
     ])
-    .applies(Predicate::Feature("iris_restoration"))
+    .applies(Predicate::Family("iris"))
     .ui("Input sizing", "select"),
     // crates/sceneworks-core/src/contracts.rs:833
     OptionSpec::new(
@@ -2917,7 +2931,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "crates/sceneworks-core/src/contracts.rs: ImageUpscaleRequest.validate",
         "crates/sceneworks-core/src/image_restoration.rs: Iris only",
     ])
-    .applies(Predicate::Feature("iris_restoration"))
+    .applies(Predicate::Family("iris"))
     .ui("Color fix", "toggle"),
     // crates/sceneworks-core/src/contracts.rs:833
     OptionSpec::new(
@@ -2925,7 +2939,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "image.upscale",
         "irisModel",
         Shape::Text,
-        DefaultRule::Literal("iris_3b_restore"),
+        DefaultRule::Literal("\"iris_3b_restore\""),
         IntentClass::WhatToMake,
         "trained Iris restoration model export",
     )
@@ -2933,7 +2947,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "crates/sceneworks-core/src/contracts.rs: ImageUpscaleRequest.validate",
         "crates/sceneworks-core/src/image_restoration.rs: Iris only; safe model id <=128 characters",
     ])
-    .applies(Predicate::Feature("iris_restoration"))
+    .applies(Predicate::Family("iris"))
     .ui("Iris model", "text"),
 
     // image.appearance
@@ -3098,7 +3112,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "crates/sceneworks-core/src/moss_image_advanced.rs: replaces prompt and prompts; both text carriers must be empty",
     ])
-    .applies(Predicate::All(&[Predicate::Family("moss_image"), Predicate::Feature("edit_image")]))
+    .applies(Predicate::All(&[Predicate::Family("moss_image"), Predicate::Capability("edit_image")]))
     .ui("Positive", "object"),
     // crates/sceneworks-core/src/moss_image_advanced.rs:38
     OptionSpec::new(
@@ -3113,7 +3127,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "crates/sceneworks-core/src/moss_image_advanced.rs: mutually exclusive with negativePrompts and non-empty negativePrompt",
     ])
-    .applies(Predicate::All(&[Predicate::Family("moss_image"), Predicate::Feature("edit_image")]))
+    .applies(Predicate::All(&[Predicate::Family("moss_image"), Predicate::Capability("edit_image")]))
     .ui("Negative", "object"),
     // crates/sceneworks-core/src/moss_image_advanced.rs:38
     OptionSpec::new(
@@ -3128,7 +3142,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "crates/sceneworks-core/src/moss_image_advanced.rs: 1..8 strings; each <=4000 characters; excludes negative embeddings and non-empty negativePrompt",
     ])
-    .applies(Predicate::All(&[Predicate::Family("moss_image"), Predicate::Feature("edit_image")]))
+    .applies(Predicate::All(&[Predicate::Family("moss_image"), Predicate::Capability("edit_image")]))
     .ui("Negative prompts", "list"),
     // crates/sceneworks-core/src/moss_image_advanced.rs:38
     OptionSpec::new(
@@ -3143,7 +3157,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "crates/sceneworks-core/src/moss_image_advanced.rs: exact owned inert NPY noise artifact; source validates shape",
     ])
-    .applies(Predicate::All(&[Predicate::Family("moss_image"), Predicate::Feature("edit_image")]))
+    .applies(Predicate::All(&[Predicate::Family("moss_image"), Predicate::Capability("edit_image")]))
     .ui("Noise", "object"),
     // crates/sceneworks-core/src/moss_image_advanced.rs:38
     OptionSpec::new(
@@ -3151,14 +3165,14 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "image.mossImageAdvanced",
         "output",
         Shape::OneOf("images | latents"),
-        DefaultRule::Literal("images"),
+        DefaultRule::Literal("\"images\""),
         IntentClass::WhatToMake,
         "MossImageAdvancedInputs.output",
     )
     .limits(&[
         "crates/sceneworks-core/src/moss_image_advanced.rs: latents refuses inline upscale",
     ])
-    .applies(Predicate::All(&[Predicate::Family("moss_image"), Predicate::Feature("edit_image")]))
+    .applies(Predicate::All(&[Predicate::Family("moss_image"), Predicate::Capability("edit_image")]))
     .ui("Output", "select"),
 
     // image.mossImageAdvanced.positive
@@ -3232,7 +3246,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "image.mossImageAdvanced.positive.values",
         "assetId",
         Shape::Text,
-        DefaultRule::Literal(""),
+        DefaultRule::Literal("\"\""),
         IntentClass::WhatToMake,
         "TensorRef.asset_id",
     )
@@ -3345,7 +3359,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "image.mossImageAdvanced.positive.mask",
         "assetId",
         Shape::Text,
-        DefaultRule::Literal(""),
+        DefaultRule::Literal("\"\""),
         IntentClass::WhatToMake,
         "TensorRef.asset_id",
     )
@@ -3458,7 +3472,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "image.mossImageAdvanced.negative.values",
         "assetId",
         Shape::Text,
-        DefaultRule::Literal(""),
+        DefaultRule::Literal("\"\""),
         IntentClass::WhatToMake,
         "TensorRef.asset_id",
     )
@@ -3571,7 +3585,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "image.mossImageAdvanced.negative.mask",
         "assetId",
         Shape::Text,
-        DefaultRule::Literal(""),
+        DefaultRule::Literal("\"\""),
         IntentClass::WhatToMake,
         "TensorRef.asset_id",
     )
@@ -3684,7 +3698,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         "image.mossImageAdvanced.noise",
         "assetId",
         Shape::Text,
-        DefaultRule::Literal(""),
+        DefaultRule::Literal("\"\""),
         IntentClass::WhatToMake,
         "TensorRef.asset_id",
     )

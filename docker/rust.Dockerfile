@@ -50,6 +50,7 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml ./
 COPY vendor ./vendor
 COPY .cargo/config.toml ./.cargo/config.toml
 COPY crates/sceneworks-core/Cargo.toml ./crates/sceneworks-core/Cargo.toml
+COPY crates/sceneworks-options/Cargo.toml ./crates/sceneworks-options/Cargo.toml
 COPY crates/sceneworks-worker/Cargo.toml ./crates/sceneworks-worker/Cargo.toml
 COPY crates/sceneworks-image-quality/Cargo.toml ./crates/sceneworks-image-quality/Cargo.toml
 COPY crates/sceneworks-memory-adapter/Cargo.toml ./crates/sceneworks-memory-adapter/Cargo.toml
@@ -63,6 +64,7 @@ RUN mkdir -p \
       apps/rust-api/src \
       apps/rust-worker/src \
       crates/sceneworks-core/src \
+      crates/sceneworks-options/src \
       crates/sceneworks-worker/src \
       crates/sceneworks-image-quality/src \
       crates/sceneworks-memory-adapter/src/bin \
@@ -70,7 +72,7 @@ RUN mkdir -p \
     && printf 'fn main() {}\n' > apps/desktop/src/main.rs \
     && printf 'fn main() {}\n' > apps/rust-api/src/main.rs \
     && printf 'fn main() {}\n' > apps/rust-worker/src/main.rs \
-    && touch crates/sceneworks-core/src/lib.rs crates/sceneworks-worker/src/lib.rs crates/sceneworks-image-quality/src/lib.rs crates/sceneworks-mcp/src/lib.rs \
+    && touch crates/sceneworks-options/src/lib.rs crates/sceneworks-core/src/lib.rs crates/sceneworks-worker/src/lib.rs crates/sceneworks-image-quality/src/lib.rs crates/sceneworks-mcp/src/lib.rs \
       crates/sceneworks-memory-adapter/src/lib.rs \
       crates/sceneworks-memory-adapter/src/bin/candle.rs \
       crates/sceneworks-memory-adapter/src/bin/mlx.rs
@@ -244,6 +246,7 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml ./
 COPY vendor ./vendor
 COPY .cargo/config.toml ./.cargo/config.toml
 COPY crates/sceneworks-core/Cargo.toml ./crates/sceneworks-core/Cargo.toml
+COPY crates/sceneworks-options/Cargo.toml ./crates/sceneworks-options/Cargo.toml
 COPY crates/sceneworks-worker/Cargo.toml ./crates/sceneworks-worker/Cargo.toml
 COPY crates/sceneworks-image-quality/Cargo.toml ./crates/sceneworks-image-quality/Cargo.toml
 COPY crates/sceneworks-memory-adapter/Cargo.toml ./crates/sceneworks-memory-adapter/Cargo.toml
@@ -253,12 +256,12 @@ COPY apps/rust-worker/Cargo.toml ./apps/rust-worker/Cargo.toml
 COPY apps/desktop/Cargo.toml ./apps/desktop/Cargo.toml
 RUN mkdir -p \
       apps/desktop/src apps/rust-api/src apps/rust-worker/src \
-      crates/sceneworks-core/src crates/sceneworks-worker/src crates/sceneworks-image-quality/src \
+      crates/sceneworks-core/src crates/sceneworks-options/src crates/sceneworks-worker/src crates/sceneworks-image-quality/src \
       crates/sceneworks-memory-adapter/src/bin crates/sceneworks-mcp/src \
     && printf 'fn main() {}\n' > apps/desktop/src/main.rs \
     && printf 'fn main() {}\n' > apps/rust-api/src/main.rs \
     && printf 'fn main() {}\n' > apps/rust-worker/src/main.rs \
-    && touch crates/sceneworks-core/src/lib.rs crates/sceneworks-worker/src/lib.rs crates/sceneworks-image-quality/src/lib.rs crates/sceneworks-mcp/src/lib.rs \
+    && touch crates/sceneworks-options/src/lib.rs crates/sceneworks-core/src/lib.rs crates/sceneworks-worker/src/lib.rs crates/sceneworks-image-quality/src/lib.rs crates/sceneworks-mcp/src/lib.rs \
       crates/sceneworks-memory-adapter/src/lib.rs \
       crates/sceneworks-memory-adapter/src/bin/candle.rs \
       crates/sceneworks-memory-adapter/src/bin/mlx.rs

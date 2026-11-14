@@ -1,0 +1,16 @@
+[package]
+name = "sceneworks-options"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+syn = { version = "2", features = ["full", "visit"] }

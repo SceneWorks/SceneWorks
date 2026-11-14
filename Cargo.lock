@@ -7225,6 +7225,7 @@ dependencies = [
  "sceneworks-gen-core-checkpoint",
  "sceneworks-gen-core-h3",
  "sceneworks-gen-core-moss-image",
+ "sceneworks-options",
  "serde",
  "serde_json",
  "serde_path_to_error",
@@ -7531,6 +7532,15 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+]
+
+[[package]]
+name = "sceneworks-options"
+version = "0.11.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "syn 2.0.119",
 ]
 
 [[package]]

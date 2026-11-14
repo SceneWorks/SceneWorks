@@ -200,6 +200,9 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         .compat("Numbers and trimmed numeric strings; null is absence"),
     advanced!("outputScope", Text, Target("defaults.advanced.outputScope"), Context, "training_output_scope").limits(&["target.limits.outputScopes"]).compat("Absent or blank resolves to project"),
     advanced!("requestedGpu", Text, Target("defaults.advanced.requestedGpu"), MachineBudget, "training_requested_gpu").compat("Absent resolves to auto"),
+    advanced!("personGate", Bool, Literal("false"), WhatToMake, "control_training_jobs::PersonFilter")
+        .applies(TrainingTarget("limits.controlTypes"))
+        .limits(&["control training person detector confidence floor"]),
     advanced!("qualityPreset", Text, Target("defaults.advanced.qualityPreset"), Context, "TrainingPlan.config.advanced.qualityPreset")
         .compat("Preset provenance label; no native trainer consumes it"),
     advanced!("optimizerDCoef", Number, Absent, WhatToMake, "TrainingConfig.model_options.optimizerDCoef")
