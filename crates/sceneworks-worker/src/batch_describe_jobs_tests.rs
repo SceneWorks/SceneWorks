@@ -876,7 +876,7 @@ fn qwen38_job_payload(stage: &Stage, tier: &str) -> Value {
 #[test]
 fn a_qwen38_tier_that_cannot_fit_is_refused_by_its_lane_floor() {
     let stage = stage("http://127.0.0.1:9".to_owned());
-    for (lane, expect) in [("mlx", [25.0, 38.0, 62.0]), ("candle", [24.0, 36.0, 58.0])] {
+    for (lane, expect) in [("mlx", [25.0, 38.0, 64.0]), ("candle", [24.0, 36.0, 58.0])] {
         let floors = ["q4", "q8", "bf16"].map(|tier| {
             let job = qwen38_job_payload(&stage, tier);
             qwen38_tier_floor_gb(job.as_object().expect("payload"), lane, tier)
@@ -887,7 +887,7 @@ fn a_qwen38_tier_that_cannot_fit_is_refused_by_its_lane_floor() {
     // A tier with no row falls back to the lane's conservative bf16 floor.
     let job = qwen38_job_payload(&stage, "q4");
     let job = job.as_object().expect("payload");
-    assert_eq!(qwen38_tier_floor_gb(job, "mlx", "q2"), Some(62.0));
+    assert_eq!(qwen38_tier_floor_gb(job, "mlx", "q2"), Some(64.0));
     assert_eq!(qwen38_tier_floor_gb(&JsonObject::new(), "mlx", "q4"), None);
 
     let error = qwen38_fit_refusal("q8", Some(38.0), Some(32.0)).expect_err("too big");
@@ -902,6 +902,99 @@ fn a_qwen38_tier_that_cannot_fit_is_refused_by_its_lane_floor() {
     qwen38_fit_refusal("q4", Some(25.0), Some(32.0)).expect("fits");
     qwen38_fit_refusal("q4", None, Some(8.0)).expect("no floor refuses nothing");
     qwen38_fit_refusal("q4", Some(25.0), None).expect("no budget refuses nothing");
+}
+
+/// A second describe job for the tier the first job left in the refine cache is admitted: the
+/// cached model is reused, so the free VRAM it occupies is not held against it. A different cached
+/// refiner is dropped before free VRAM is read, so the memory it held counts. No GPU or model: the
+/// cache holds unit models and the free-VRAM readings are the numbers a 32 GiB card would report.
+#[test]
+fn a_second_qwen38_job_is_not_refused_for_the_model_the_first_job_left_cached() {
+    use crate::cache_thread::{CacheAccess, CacheThread};
+    let stage = stage("http://127.0.0.1:9".to_owned());
+    let job = qwen38_job_payload(&stage, "q4");
+    let floor = qwen38_tier_floor_gb(job.as_object().expect("payload"), "candle", "q4");
+    assert_eq!(floor, Some(24.0));
+    // A 32 GiB card holding the first job's q4 model (measured 21.48 GiB) has about 10 GiB free.
+    let free_with_q4_cached = Some(32.0 - 21.48);
+    let free_after_drop = Some(32.0);
+
+    // The refused case the old check produced: the full floor against the free VRAM alone.
+    assert!(qwen38_fit_refusal("q4", floor, free_with_q4_cached).is_err());
+
+    // The same tier still cached: reused, admitted, and still resident afterwards.
+    let mut cache = CacheThread::<&str, ()>::new(true);
+    cache.install("q4", ());
+    let access = cache.evict_unless_resident(&"q4");
+    assert_eq!(access, CacheAccess::Warm);
+    assert_eq!(cache.resident_key(), Some(&"q4"));
+    qwen38_cached_fit_refusal(access, "q4", floor, None).expect("a cached tier is admitted");
+
+    // A different refiner cached: dropped first, then the fresh reading sees its memory freed.
+    cache.install("q8", ());
+    let access = cache.evict_unless_resident(&"q4");
+    assert_eq!(access, CacheAccess::Cold);
+    assert!(
+        cache.is_empty(),
+        "the other cached model is dropped before the probe"
+    );
+    qwen38_cached_fit_refusal(access, "q4", floor, free_after_drop)
+        .expect("the freed memory counts");
+
+    // A cold load that truly cannot fit is still refused.
+    let error =
+        qwen38_cached_fit_refusal(CacheAccess::Cold, "q4", floor, Some(20.0)).expect_err("too big");
+    assert!(error.to_string().contains("needs 24 GB"), "{error}");
+}
+
+/// The host size the Model Manager quotes for each tier (the catalog's memory guidance, served
+/// from the same entry on the platform that lane runs on) is the floor this worker admits from.
+#[test]
+fn the_catalog_quotes_the_floor_the_worker_admits_for_every_qwen38_tier() {
+    use sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_MODEL_ID;
+    let stage = stage("http://127.0.0.1:9".to_owned());
+    let admitted = |lane: &str, tier: &str| {
+        let job = qwen38_job_payload(&stage, tier);
+        qwen38_tier_floor_gb(job.as_object().expect("payload"), lane, tier)
+    };
+    for (lane, platforms) in [
+        ("mlx", &["macos"][..]),
+        ("candle", &["linux", "windows"][..]),
+    ] {
+        for platform in platforms {
+            let mut entry = Value::Object(
+                sceneworks_core::builtin_manifests::builtin_model_entry(
+                    QWEN38_27B_DESCRIBER_MODEL_ID,
+                )
+                .expect("the 27B describer is a builtin")
+                .clone(),
+            );
+            sceneworks_core::model_artifacts::artifact_selection::retain_downloads_for_os(
+                &mut entry, platform,
+            );
+            let guidance = sceneworks_core::memory_guidance::model_memory_guidance(&entry);
+            for tier in ["q4", "q8", "bf16"] {
+                let floor = admitted(lane, tier).expect("the worker reads a floor");
+                let quoted = &guidance[lane]["tiers"][tier];
+                assert_eq!(
+                    quoted["minHostGb"].as_f64(),
+                    Some(floor),
+                    "{lane} on {platform}, {tier}: {quoted}"
+                );
+                assert_eq!(quoted["floorGb"].as_f64(), Some(floor), "{lane} {tier}");
+            }
+            let suggestion = guidance[lane]["suggestion"].as_array().expect("suggestion");
+            assert_eq!(suggestion.len(), 3, "{lane} suggests every tier");
+            for row in suggestion {
+                let tier = row["tier"].as_str().expect("tier");
+                assert_eq!(
+                    row["minHostGb"].as_f64(),
+                    admitted(lane, tier),
+                    "{lane} on {platform}, suggestion for {tier}"
+                );
+            }
+        }
+    }
 }
 
 /// Stage `tier/config.json` in a re-host snapshot of `hf_cache`, as a finished tier download leaves

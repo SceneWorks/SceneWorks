@@ -207,34 +207,72 @@ pub(crate) fn qwen38_fit_refusal(
     }
 }
 
-/// Whether this worker can hold the job's tier, checked before any image: on MLX the tier's floor
-/// against total unified memory (the catalog's MLX floors are whole-machine sizes), on Candle the
-/// CUDA fit gate's own floor reader against the free VRAM a load would see.
+/// The Candle decision once the refine cache has answered: a tier already resident there is reused
+/// and needs no new VRAM, so only a cold load is checked against the free VRAM it will see (read
+/// after any other cached refiner was dropped). Pure, so it runs without a GPU.
+#[cfg(native_lane)]
+#[cfg_attr(
+    not(all(not(target_os = "macos"), feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) fn qwen38_cached_fit_refusal(
+    access: crate::cache_thread::CacheAccess,
+    tier: &str,
+    needed_gb: Option<f64>,
+    available_gb: Option<f64>,
+) -> WorkerResult<()> {
+    match access {
+        crate::cache_thread::CacheAccess::Warm => Ok(()),
+        crate::cache_thread::CacheAccess::Cold => qwen38_fit_refusal(tier, needed_gb, available_gb),
+    }
+}
+
+/// Whether this worker can hold the job's tier, checked before any image.
+///
+/// MLX: the tier's floor against TOTAL unified memory (the catalog's MLX floors are whole-machine
+/// sizes). A model held in the refine cache does not lower that total, so a second job never sees
+/// the first job's cached model here.
+///
+/// Candle: the CUDA fit gate's own floor reader against FREE VRAM, which a cached model does lower.
+/// So the refine cache is asked first: the same tier resident there is reused (admitted with no
+/// check), and a different cached refiner is dropped, as the load's own evict-before-load would,
+/// before free VRAM is read fresh.
 #[cfg(native_lane)]
 async fn qwen38_memory_admission(
     settings: &Settings,
     payload: &JsonObject,
     tier: &str,
+    weights_dir: &Path,
 ) -> WorkerResult<()> {
     #[cfg(target_os = "macos")]
-    let (needed_gb, available_gb) = {
-        let _ = settings;
-        (
+    {
+        let _ = (settings, weights_dir);
+        qwen38_fit_refusal(
+            tier,
             qwen38_tier_floor_gb(payload, "mlx", tier),
             crate::fit_gate::unified_total_gb(),
         )
-    };
+    }
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let (needed_gb, available_gb) = {
+    {
+        let (spec, requirements) = vision_describer_load(weights_dir);
+        let access =
+            crate::refine_model_cache::prepare_refiner_admission(&spec, &requirements).await?;
         let needed_gb = qwen38_catalog_entry(payload)
             .and_then(|entry| crate::vram_gate::predicted_peak_gb(entry, tier));
-        let reclaimable_gb = crate::vram_gate::reclaimable_pool_gb(&settings.gpu_id);
-        let available_gb = crate::vram_gate::live_capped_budget(&settings.gpu_id)
+        let available_gb = if access == crate::cache_thread::CacheAccess::Cold {
+            let gpu_id = settings.gpu_id.clone();
+            crate::load_progress::spawn_blocking(move || {
+                crate::vram_gate::live_capped_budget_fresh_blocking(&gpu_id)
+            })
             .await
-            .map(|budget| crate::vram_gate::with_reclaimable(budget, reclaimable_gb).free_gb);
-        (needed_gb, available_gb)
-    };
-    qwen38_fit_refusal(tier, needed_gb, available_gb)
+            .map_err(|error| task_join_error("describer VRAM probe", error))?
+            .map(|budget| budget.free_gb)
+        } else {
+            None
+        };
+        qwen38_cached_fit_refusal(access, tier, needed_gb, available_gb)
+    }
 }
 
 /// The messages one image is described with: the system text is the instruction followed by the
@@ -410,6 +448,31 @@ pub(crate) struct VisionCaptionerDescriber {
     pub(crate) job_id: String,
 }
 
+/// The refine-cache load a Vision Captioner-class describer makes for `weights_dir`: its spec and
+/// requirements, which together are the cache key. Shared with the 27B's memory check so that
+/// check asks the cache about exactly the model the describe call loads.
+#[cfg(native_lane)]
+fn vision_describer_load(
+    weights_dir: &Path,
+) -> (
+    gen_core::core_llm::LoadSpec,
+    gen_core::core_llm::ModelRequirements,
+) {
+    use gen_core::core_llm::{Constraint, ModelRequirements};
+    let spec = gen_core::core_llm::LoadSpec {
+        source: weights_dir.to_string_lossy().into_owned(),
+        // A snapshot directory carries its own projector (see `catalog_semantic_jobs`).
+        ..Default::default()
+    };
+    // Resolve on the JSON constraint alone, exactly like the `image_caption` task: no provider
+    // statically advertises vision + Json for a Qwen-VL snapshot; `mlx-llama`/`candle-llama`
+    // flip to vision at load (see `prompt_refine_jobs`).
+    (
+        spec,
+        ModelRequirements::default().with_constraint(Constraint::Json),
+    )
+}
+
 #[cfg(native_lane)]
 impl BatchDescriber for VisionCaptionerDescriber {
     fn describe(
@@ -419,18 +482,9 @@ impl BatchDescriber for VisionCaptionerDescriber {
         cancel: CancelFlag,
     ) -> DescribeFuture {
         use gen_core::core_llm::{
-            Constraint, Content, Message, ModelRequirements, Role, Sampling, StreamEvent,
-            TextLlmRequest, ThinkingMode,
+            Content, Message, Role, Sampling, StreamEvent, TextLlmRequest, ThinkingMode,
         };
-        let spec = gen_core::core_llm::LoadSpec {
-            source: self.weights_dir.to_string_lossy().into_owned(),
-            // A snapshot directory carries its own projector (see `catalog_semantic_jobs`).
-            ..Default::default()
-        };
-        // Resolve on the JSON constraint alone, exactly like the `image_caption` task: no provider
-        // statically advertises vision + Json for a Qwen-VL snapshot; `mlx-llama`/`candle-llama`
-        // flip to vision at load (see `prompt_refine_jobs`).
-        let requirements = ModelRequirements::default().with_constraint(Constraint::Json);
+        let (spec, requirements) = vision_describer_load(&self.weights_dir);
         let system = prompt.system();
         let user = prompt.user.clone();
         let job_id = self.job_id.clone();
@@ -927,7 +981,7 @@ pub(crate) async fn run_dataset_batch_describe_job(
                 sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_DEFAULT_TIER,
             );
             let weights_dir = qwen38_describer_weights_dir(settings, tier)?;
-            qwen38_memory_admission(settings, &job.payload, tier).await?;
+            qwen38_memory_admission(settings, &job.payload, tier, &weights_dir).await?;
             Box::new(VisionCaptionerDescriber {
                 weights_dir,
                 job_id: job.id.clone(),

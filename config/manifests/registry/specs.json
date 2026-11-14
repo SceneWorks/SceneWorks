@@ -66961,6 +66961,61 @@
     "routes": {}
   },
   "vision_describe_qwen3_8_27b": {
+    "downloadEvidence": [
+      {
+        "files": [
+          "q4/*"
+        ],
+        "footprint": {
+          "measuredPixels": 196608,
+          "peakMemoryBytes": 23622320128
+        },
+        "platforms": [
+          "macos"
+        ],
+        "provider": "huggingface",
+        "repo": "SceneWorks/qwen3.8-27b-abliterated-mlx",
+        "revision": "76f3c445cd5347fdb85fc24066350724fe272017",
+        "variant": "q4"
+      },
+      {
+        "files": [
+          "q8/*"
+        ],
+        "footprint": {
+          "measuredPixels": 196608,
+          "peakMemoryBytes": 36616930664
+        },
+        "platforms": [
+          "macos"
+        ],
+        "provider": "huggingface",
+        "repo": "SceneWorks/qwen3.8-27b-abliterated-mlx",
+        "revision": "76f3c445cd5347fdb85fc24066350724fe272017",
+        "variant": "q8"
+      },
+      {
+        "files": [
+          "config.json",
+          "generation_config.json",
+          "chat_template.jinja",
+          "preprocessor_config.json",
+          "video_preprocessor_config.json",
+          "tokenizer.json",
+          "tokenizer_config.json",
+          "model.safetensors.index.json",
+          "model-*.safetensors"
+        ],
+        "footprint": {
+          "measuredPixels": 196608,
+          "peakMemoryBytes": 60981763476
+        },
+        "provider": "huggingface",
+        "repo": "huihui-ai/Huihui-Qwen3.8-27B-abliterated",
+        "revision": "739e3c5b89849f6c238ce1e5b70008612ae42cdd",
+        "variant": "bf16"
+      }
+    ],
     "evidence": {
       "candle": {
         "measured": false,
@@ -66972,9 +67027,9 @@
         }
       },
       "mlx": {
-        "minMemoryGb": 62,
+        "minMemoryGb": 64,
         "minMemoryGbByTier": {
-          "bf16": 62,
+          "bf16": 64,
           "q4": 25,
           "q8": 38
         }
@@ -67071,6 +67126,9 @@
             "model.safetensors.index.json",
             "model-*.safetensors"
           ],
+          "footprint": {
+            "diskSizeBytes": 55575900000
+          },
           "provider": "huggingface",
           "repo": "huihui-ai/Huihui-Qwen3.8-27B-abliterated",
           "revision": "739e3c5b89849f6c238ce1e5b70008612ae42cdd",
