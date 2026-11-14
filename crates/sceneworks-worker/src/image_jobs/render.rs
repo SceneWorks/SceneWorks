@@ -14,6 +14,67 @@ use super::Progress;
 use super::PromptEnhance;
 use crate::WorkerError;
 use crate::WorkerResult;
+use gen_core::generator::{ExecutionIdentity, ExecutionUnavailable};
+
+/// The persisted execution report for one output. Ordinary renders preserve the provider's exact
+/// existing JSON shape; hires-fix outputs carry both completed provider stages in render order.
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+pub(crate) enum WorkerExecutionReport {
+    Provider(ExecutionIdentity),
+    HiresFix(HiresExecutionReport),
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct HiresExecutionReport {
+    state: &'static str,
+    reason: ExecutionUnavailable,
+    stages: [HiresExecutionStage; 2],
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct HiresExecutionStage {
+    stage: &'static str,
+    execution: ExecutionIdentity,
+}
+
+/// A final PNG is produced by two independent provider calls with a worker resize between them.
+/// The stage identities remain inspectable, while no single provider identity may claim that the
+/// composite can be replayed exactly. The stage count and order are checked before publication.
+fn completed_hires_report(
+    stages: Vec<(&'static str, WorkerExecutionReport)>,
+) -> WorkerResult<WorkerExecutionReport> {
+    let [base, refine]: [(&'static str, WorkerExecutionReport); 2] =
+        stages.try_into().map_err(|_| {
+            WorkerError::Engine("hires-fix needs exactly two completed stage reports".into())
+        })?;
+    let (
+        WorkerExecutionReport::Provider(base_execution),
+        WorkerExecutionReport::Provider(refine_execution),
+    ) = (base.1, refine.1)
+    else {
+        return Err(WorkerError::Engine(
+            "hires-fix stage reports must come from provider calls".into(),
+        ));
+    };
+    if base.0 != "base" || refine.0 != "refine" {
+        return Err(WorkerError::Engine(
+            "hires-fix stage reports are out of order".into(),
+        ));
+    }
+    Ok(WorkerExecutionReport::HiresFix(HiresExecutionReport {
+        state: "unavailable",
+        reason: ExecutionUnavailable {
+            code: "hires_fix_composite_replay_unavailable".into(),
+            detail: "the final image combines a base render, a worker image resize, and an independent refinement render; no exact composite replay contract is available".into(),
+            missing_facts: vec!["cross-stage resize and reference handoff replay contract".into()],
+        },
+        stages: [
+            HiresExecutionStage { stage: "base", execution: base_execution },
+            HiresExecutionStage { stage: "refine", execution: refine_execution },
+        ],
+    }))
+}
 /// Generate one image (RGB8) at the given seed; `on_progress` streams denoise steps.
 /// `guidance` is `None` for distilled variants (the engine rejects it on them).
 ///
@@ -131,8 +192,7 @@ pub(crate) struct LaneRgbaSurface<'a> {
         Option<&'a std::cell::RefCell<Option<gen_core::PrefixKvCacheReport>>>,
     /// Request-local completed provider report; a caller forwards it with the
     /// output instead of reading mutable generator state after another render.
-    pub(crate) execution_report:
-        Option<&'a std::cell::RefCell<Option<gen_core::generator::ExecutionIdentity>>>,
+    pub(crate) execution_report: Option<&'a std::cell::RefCell<Option<WorkerExecutionReport>>>,
     /// A native prompt batch (sc-25681): the request carries `prompt_batch` + `count` instead of
     /// one prompt, and the engine returns every image of the batch. `None` everywhere else.
     pub(crate) prompt_batch: Option<&'a lane_controls::NativePromptBatch>,
@@ -307,7 +367,7 @@ pub(super) fn render_on_surface(
     }
     .map_err(|error| WorkerError::Engine(format!("generation failed: {error}")))?;
     if let Some(sink) = surface.execution_report {
-        *sink.borrow_mut() = Some(report.execution);
+        *sink.borrow_mut() = Some(WorkerExecutionReport::Provider(report.execution));
     }
     let report = report.generation;
     if let Some(sink) = surface.warnings {
@@ -633,6 +693,11 @@ pub(super) fn generate_one_with_hires_on_surface(
         );
     };
 
+    // A retry may reuse the caller's sink. Publish only after both passes and their handoff succeed.
+    if let Some(sink) = surface.execution_report {
+        sink.borrow_mut().take();
+    }
+
     let first_pass_context = hires_first_pass_memory_context.cloned().or_else(|| {
         memory_strategy_context.map(|context| {
             hires_first_pass_context(
@@ -666,6 +731,7 @@ pub(super) fn generate_one_with_hires_on_surface(
     };
     // Enhancement belongs to the final persisted pass. Running it on the disposable base pass
     // would produce two reports for one image and could feed two different prompts into one recipe.
+    let base_execution_report = std::cell::RefCell::new(None);
     let base_surface = LaneRgbaSurface {
         multi_reference_alpha: surface.multi_reference_alpha,
         flux3_references: surface.flux3_references,
@@ -674,7 +740,7 @@ pub(super) fn generate_one_with_hires_on_surface(
         controls: surface.controls,
         warnings: surface.warnings,
         prefix_kv_cache: surface.prefix_kv_cache,
-        execution_report: None,
+        execution_report: Some(&base_execution_report),
         // A hires-fix render is per image; the arms refuse a prompt batch with it.
         prompt_batch: None,
     };
@@ -706,6 +772,9 @@ pub(super) fn generate_one_with_hires_on_surface(
         cancel,
         &mut first_progress,
     )?;
+    let base_execution = base_execution_report.take().ok_or_else(|| {
+        WorkerError::Engine("hires-fix base pass returned no completed execution report".into())
+    })?;
     if cancel.is_cancelled() {
         return Err(WorkerError::Engine("generation cancelled".to_owned()));
     }
@@ -735,6 +804,7 @@ pub(super) fn generate_one_with_hires_on_surface(
             on_progress(Progress::Upsampling { tokens, max_tokens })
         }
     };
+    let refine_execution_report = std::cell::RefCell::new(None);
     let refine_surface = LaneRgbaSurface {
         multi_reference_alpha: &[],
         flux3_references: None,
@@ -743,11 +813,11 @@ pub(super) fn generate_one_with_hires_on_surface(
         controls: surface.controls,
         warnings: surface.warnings,
         prefix_kv_cache: surface.prefix_kv_cache,
-        execution_report: surface.execution_report,
+        execution_report: Some(&refine_execution_report),
         // A hires-fix render is per image; the arms refuse a prompt batch with it.
         prompt_batch: None,
     };
-    generate_one_on_surface(
+    let final_image = generate_one_on_surface(
         generator,
         prompt,
         hires.width,
@@ -774,7 +844,16 @@ pub(super) fn generate_one_with_hires_on_surface(
         &refine_surface,
         cancel,
         &mut second_progress,
-    )
+    )?;
+    let refine_execution = refine_execution_report.take().ok_or_else(|| {
+        WorkerError::Engine("hires-fix refine pass returned no completed execution report".into())
+    })?;
+    let completed =
+        completed_hires_report(vec![("base", base_execution), ("refine", refine_execution)])?;
+    if let Some(sink) = surface.execution_report {
+        *sink.borrow_mut() = Some(completed);
+    }
+    Ok(final_image)
 }
 
 /// Within-image step fraction mapped into the 0.10..0.95 generation band.
@@ -786,4 +865,189 @@ pub(super) fn step_fraction(index: usize, current: u32, total: u32, count: u32) 
         0.0
     };
     (0.1 + per * (index as f64 + within)).min(0.95)
+}
+
+#[cfg(test)]
+mod hires_report_tests {
+    use super::*;
+    use gen_core::generator::CompletedGeneration;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Probe {
+        descriptor: gen_core::ModelDescriptor,
+        calls: AtomicUsize,
+        fail_on: usize,
+        cancel_on: usize,
+    }
+
+    impl Probe {
+        fn new(fail_on: usize, cancel_on: usize) -> Self {
+            Self {
+                descriptor: gen_core::ModelDescriptor {
+                    id: "hires-report-probe",
+                    family: "test",
+                    backend: "test",
+                    modality: gen_core::Modality::Image,
+                    capabilities: Default::default(),
+                    denoiser_output_latent_space: None,
+                    control_kinds: None,
+                    encoder_contract: None,
+                    required_components: &[],
+                },
+                calls: AtomicUsize::new(0),
+                fail_on,
+                cancel_on,
+            }
+        }
+
+        fn render(
+            &self,
+            req: &GenerationRequest,
+            on_progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<(GenerationOutput, ExecutionIdentity)> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == self.fail_on {
+                return Err(gen_core::Error::Msg("fixture pass failed".into()));
+            }
+            if call == self.cancel_on {
+                req.cancel.cancel();
+                return Err(gen_core::Error::Canceled);
+            }
+            on_progress(Progress::Step {
+                current: 1,
+                total: req.steps.unwrap_or(1),
+            });
+            Ok((
+                GenerationOutput::Images(vec![Image {
+                    width: req.width,
+                    height: req.height,
+                    pixels: vec![call as u8; (req.width * req.height * 3) as usize],
+                }]),
+                ExecutionIdentity::Unavailable {
+                    reason: ExecutionUnavailable {
+                        code: format!("pass-{call}"),
+                        detail: "fixture stage identity".into(),
+                        missing_facts: vec!["fixture replay".into()],
+                    },
+                },
+            ))
+        }
+    }
+
+    impl Generator for Probe {
+        fn descriptor(&self) -> &gen_core::ModelDescriptor {
+            &self.descriptor
+        }
+        fn validate(&self, _req: &GenerationRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn generate(
+            &self,
+            req: &GenerationRequest,
+            on_progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<GenerationOutput> {
+            self.render(req, on_progress).map(|(output, _)| output)
+        }
+        fn generate_with_execution_report(
+            &self,
+            req: &GenerationRequest,
+            on_progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<CompletedGeneration> {
+            let (output, identity) = self.render(req, on_progress)?;
+            CompletedGeneration::new(
+                gen_core::GenerationReport::from_output(output),
+                identity,
+                &self.descriptor,
+            )
+        }
+    }
+
+    fn run(
+        probe: &Probe,
+        sink: &std::cell::RefCell<Option<WorkerExecutionReport>>,
+        cancel: &CancelFlag,
+    ) -> WorkerResult<(u32, u32, Vec<u8>)> {
+        generate_one_with_hires_on_surface(
+            probe,
+            "fixture",
+            4,
+            4,
+            7,
+            2,
+            None,
+            None,
+            None,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &PromptEnhance::default(),
+            Some(HiresFixPlan {
+                width: 8,
+                height: 8,
+                steps: 2,
+                guidance: None,
+                true_cfg: None,
+                provider_reference_strength: 0.5,
+            }),
+            gen_core::PreviewSink::default(),
+            gen_core::PromptEnhancementSink::default(),
+            &LaneRgbaSurface {
+                execution_report: Some(sink),
+                ..Default::default()
+            },
+            cancel,
+            &mut |_| {},
+        )
+    }
+
+    #[test]
+    fn hires_report_keeps_ordered_attempts_and_refuses_composite_exact_replay() {
+        let probe = Probe::new(0, 0);
+        let sink = std::cell::RefCell::new(None);
+        let first = run(&probe, &sink, &CancelFlag::default()).unwrap();
+        assert_eq!((first.0, first.1), (8, 8));
+        let report = serde_json::to_value(sink.take().unwrap()).unwrap();
+        assert_eq!(report["state"], "unavailable");
+        assert_eq!(
+            report["reason"]["code"],
+            "hires_fix_composite_replay_unavailable"
+        );
+        assert_eq!(report["stages"].as_array().unwrap().len(), 2);
+        assert_eq!(report["stages"][0]["stage"], "base");
+        assert_eq!(report["stages"][0]["execution"]["reason"]["code"], "pass-1");
+        assert_eq!(report["stages"][1]["stage"], "refine");
+        assert_eq!(report["stages"][1]["execution"]["reason"]["code"], "pass-2");
+
+        run(&probe, &sink, &CancelFlag::default()).unwrap();
+        let retry = serde_json::to_value(sink.take().unwrap()).unwrap();
+        assert_eq!(retry["stages"][0]["execution"]["reason"]["code"], "pass-3");
+        assert_eq!(retry["stages"][1]["execution"]["reason"]["code"], "pass-4");
+    }
+
+    #[test]
+    fn hires_report_drops_failed_or_cancelled_attempts_and_rejects_wrong_stage_order() {
+        for (fail_on, cancel_on) in [(2, 0), (0, 2)] {
+            let probe = Probe::new(fail_on, cancel_on);
+            let sink = std::cell::RefCell::new(Some(WorkerExecutionReport::Provider(
+                ExecutionIdentity::provider_default(),
+            )));
+            assert!(run(&probe, &sink, &CancelFlag::default()).is_err());
+            assert!(sink.borrow().is_none());
+        }
+        let identity = || WorkerExecutionReport::Provider(ExecutionIdentity::provider_default());
+        assert!(completed_hires_report(vec![("base", identity())]).is_err());
+        assert!(
+            completed_hires_report(vec![("refine", identity()), ("base", identity())]).is_err()
+        );
+    }
 }
