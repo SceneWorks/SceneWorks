@@ -113,6 +113,8 @@ video_option_fields! {
     enhance_prompt: bool => boolean("enhancePrompt"),
     enhance_max_tokens: i64 => integer("enhanceMaxTokens"),
     enhance_temperature: f64 => number("enhanceTemperature"),
+    timeline_action: String => text("timelineAction"),
+    timeline_context: JsonObject => structured("timelineContext"),
 }
 
 impl VideoOptions {
@@ -819,6 +821,12 @@ impl VideoRequest {
     /// Explicit quantization bits (or the verified portable binding's frozen tier), before
     /// model-specific defaults or tier validation.
     pub fn quant_bits(&self) -> Option<i64> {
+        if let Some(options) = &self.options {
+            return crate::payload_util::request_quant_bits_typed(
+                options.mlx_quantize.as_ref(),
+                self.portable_aux.bound_tier(),
+            );
+        }
         crate::payload_util::request_quant_bits(&self.advanced)
     }
 
@@ -2414,6 +2422,23 @@ mod tests {
             options.reference_image_resize_mode().unwrap(),
             ReferenceImageResizeMode::Max
         );
+    }
+
+    #[test]
+    fn resolved_video_quantization_uses_only_verified_tier_when_key_absent() {
+        let bound_dispatch = payload(json!({"advanced": {
+            "__portableFrozenSources": true, "__portableBoundTier": "q4"
+        }}));
+        let portable_aux = PortableAuxBindings::from_trusted_dispatch(&bound_dispatch).unwrap();
+        let absent = payload(json!({"advanced": {}}));
+        let mut request = VideoRequest::from_resolved(&absent, &absent).unwrap();
+        request.portable_aux = portable_aux.clone();
+        assert_eq!(request.quant_bits(), Some(4));
+
+        let explicit_null = payload(json!({"advanced": {"mlxQuantize": null}}));
+        let mut request = VideoRequest::from_resolved(&explicit_null, &explicit_null).unwrap();
+        request.portable_aux = portable_aux;
+        assert_eq!(request.quant_bits(), None);
     }
 
     // ----------------------------------------------------------------------------------------
