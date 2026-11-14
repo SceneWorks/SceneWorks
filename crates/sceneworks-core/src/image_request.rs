@@ -125,6 +125,16 @@ pub fn default_resolution(model_manifest_entry: &JsonObject) -> Option<(u32, u32
     declared_resolution(model_manifest_entry, MIN_DIMENSION, MAX_DIMENSION)
 }
 
+/// The two caller-selectable PiD checkpoint fields; filename confinement remains a native
+/// artifact-selection check after binding.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PidCheckpoint {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+}
+
 /// Image options lowered once from the shared resolver's canonical effective request.
 /// Each value retains whether the caller supplied it or the resolver applied a default.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -144,7 +154,7 @@ pub struct ImageAdvanced {
     pub decoder: Option<Bound<String>>,
     pub use_pid: Option<Bound<bool>>,
     pub pid_target: Option<Bound<String>>,
-    pub pid_checkpoint: Option<Bound<JsonObject>>,
+    pub pid_checkpoint: Option<Bound<PidCheckpoint>>,
     pub pid_gemma: Option<Bound<String>>,
     pub ip_adapter_scale: Option<Bound<f64>>,
     pub ip_adapter_repo: Option<Bound<String>>,
@@ -537,6 +547,19 @@ impl ImageRequest {
     /// model-specific defaults or tier validation.
     pub fn quant_bits(&self) -> Option<i64> {
         crate::payload_util::request_quant_bits(&self.advanced)
+    }
+
+    /// Precision for native execution, including the verified portable tier only when the
+    /// caller left `mlxQuantize` absent. Authored null deliberately suppresses that fallback.
+    pub fn resolved_quant_bits(&self) -> Option<i64> {
+        let options = self
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved");
+        crate::payload_util::request_quant_bits_typed(
+            options.mlx_quantize.as_ref(),
+            self.portable_aux.bound_tier(),
+        )
     }
 
     /// The prompt image `index` of this job rendered: `prompt` for an ordinary request, and
@@ -1211,6 +1234,7 @@ mod tests {
         let authored = payload(json!({"advanced": {"mlxQuantize": null}}));
         let request = ImageRequest::from_resolved(&authored, &authored).unwrap();
         assert_eq!(request.advanced_i64("mlxQuantize"), None);
+        assert_eq!(request.resolved_quant_bits(), None);
         assert_eq!(
             request.effective_advanced_wire().get("mlxQuantize"),
             Some(&Value::Null)
@@ -1233,6 +1257,47 @@ mod tests {
             .unwrap()
             .mlx_quantize
             .is_none());
+    }
+
+    #[test]
+    fn verified_bound_tier_fills_only_absent_quantization() {
+        let trusted = payload(json!({"advanced": {
+            "__portableFrozenSources": true,
+            "__portableBoundTier": "q4"
+        }}));
+        let portable_aux =
+            crate::portable_aux_bindings::PortableAuxBindings::from_trusted_dispatch(&trusted)
+                .unwrap();
+        let empty = payload(json!({"advanced": {}}));
+        let mut request = ImageRequest::from_resolved(&empty, &empty).unwrap();
+        request.portable_aux = portable_aux.clone();
+        assert_eq!(request.resolved_quant_bits(), Some(4));
+
+        let explicit = payload(json!({"advanced": {"mlxQuantize": 8}}));
+        let mut request = ImageRequest::from_resolved(&explicit, &explicit).unwrap();
+        request.portable_aux = portable_aux.clone();
+        assert_eq!(request.resolved_quant_bits(), Some(8));
+
+        let null = payload(json!({"advanced": {"mlxQuantize": null}}));
+        let mut request = ImageRequest::from_resolved(&null, &null).unwrap();
+        request.portable_aux = portable_aux;
+        assert_eq!(request.resolved_quant_bits(), None);
+    }
+
+    #[test]
+    fn pid_checkpoint_binds_named_fields() {
+        let payload = payload(json!({"advanced": {"pidCheckpoint": {
+            "repo": "SceneWorks/pid-flux", "filename": "student.safetensors"
+        }}}));
+        let request = ImageRequest::from_resolved(&payload, &payload).unwrap();
+        let checkpoint = &request
+            .resolved_advanced
+            .unwrap()
+            .pid_checkpoint
+            .unwrap()
+            .value;
+        assert_eq!(checkpoint.repo.as_deref(), Some("SceneWorks/pid-flux"));
+        assert_eq!(checkpoint.filename.as_deref(), Some("student.safetensors"));
     }
 
     #[test]
