@@ -788,6 +788,18 @@ fn unavailable_completed_receipt(
                 return Ok(None);
             };
             output.artifact_ids.push(id.to_owned());
+            if let Some(report) = fact.get("workerExecutionReport") {
+                if output
+                    .execution
+                    .as_ref()
+                    .is_some_and(|previous| previous != report)
+                {
+                    return Err(WorkerError::InvalidPayload(
+                        "completed output has conflicting provider reports".into(),
+                    ));
+                }
+                output.execution = Some(report.clone());
+            }
             if let Some(relative) = fact.get("mediaPath").and_then(Value::as_str) {
                 let root = confined_root.as_ref().ok_or_else(|| {
                     WorkerError::InvalidPayload("completed media has no project root".into())
@@ -821,14 +833,19 @@ fn unavailable_completed_receipt(
     }
     let receipt = WorkerExecutionReceipt {
         version: sceneworks_core::execution_receipt::EXECUTION_RECEIPT_VERSION,
-        execution: serde_json::json!({
-            "state":"unavailable",
-            "reason":{
-                "code":"provider_report_unavailable",
-                "detail":"completed route did not publish a provider execution report",
-                "missing_facts":["provider_resolved_execution"]
-            }
-        }),
+        execution: result
+            .get("workerExecutionReport")
+            .cloned()
+            .unwrap_or_else(|| {
+                serde_json::json!({
+                    "state":"unavailable",
+                    "reason":{
+                        "code":"provider_report_unavailable",
+                        "detail":"completed route did not publish a provider execution report",
+                        "missing_facts":["provider_resolved_execution"]
+                    }
+                })
+            }),
         outputs,
     };
     if sceneworks_core::execution_receipt::validate_worker_receipt(&receipt, result).is_err() {
@@ -860,6 +877,26 @@ fn unavailable_receipt_keeps_each_completed_output_association() {
         receipt["outputs"][1]["artifactIds"],
         serde_json::json!(["base-b"])
     );
+}
+
+#[cfg(test)]
+#[test]
+fn completed_media_receipt_keeps_the_provider_report_with_its_asset() {
+    let report =
+        serde_json::to_value(gen_core::generator::ExecutionIdentity::provider_default()).unwrap();
+    let result = serde_json::json!({
+        "expectedCount":1,
+        "assetWrites":[{"assetId":"svg","index":0,"workerExecutionReport":report}]
+    });
+    let receipt = unavailable_completed_receipt(result.as_object().unwrap(), None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt["outputs"][0]["execution"], report);
+    let answer = serde_json::json!({"answer":"yes","workerExecutionReport":report});
+    let answer_receipt = unavailable_completed_receipt(answer.as_object().unwrap(), None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(answer_receipt["execution"], report);
 }
 
 #[cfg(test)]
