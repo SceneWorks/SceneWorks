@@ -477,6 +477,8 @@ impl CandleStrictControl for ZImageStrictControl {
         &self,
         model: &Self::Model,
         control: &Image,
+        // This lane renders without a pre-load plan (`requires_preload_plan` is false).
+        _plan: Option<&gen_core::RenderPlan>,
         seed: u64,
         cancel: &CancelFlag,
         // Forward the per-item preview sink into the provider; `None` remains the zero-cost default.

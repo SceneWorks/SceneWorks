@@ -291,14 +291,16 @@ pub(super) struct Flux1StrictControl {
     /// discrete mode index). The whole pose set shares one `controlMode`, so a single label is correct.
     control_kind: String,
     memory: gen_core::GenerationMemory,
+    memory_context: Option<gen_core::MemoryRunContext>,
     adapters: Vec<gen_core::AdapterSpec>,
+    planning_spec: gen_core::LoadSpec,
 }
 
 #[cfg(test)]
 pub(super) fn flux1_strict_control_test_fixture(path: PathBuf) -> Flux1StrictControl {
     Flux1StrictControl {
         base: path.clone(),
-        control: path,
+        control: path.clone(),
         prompt: "p".to_owned(),
         width: 512,
         height: 512,
@@ -307,8 +309,45 @@ pub(super) fn flux1_strict_control_test_fixture(path: PathBuf) -> Flux1StrictCon
         guidance: 3.5,
         control_scale: 0.7,
         adapters: Vec::new(),
+        planning_spec: gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(path.clone()))
+            .with_control(gen_core::WeightsSource::File(path)),
         control_kind: "pose".to_owned(),
         memory: gen_core::GenerationMemory::default(),
+        memory_context: None,
+    }
+}
+
+impl Flux1StrictControl {
+    fn paths(&self) -> Flux1ControlPaths {
+        Flux1ControlPaths {
+            flux_base: self.base.clone(),
+            control: self.control.clone(),
+            adapters: self.adapters.clone(),
+        }
+    }
+
+    fn request_for(
+        &self,
+        seed: u64,
+        cancel: &CancelFlag,
+        preview: &gen_core::PreviewSink,
+    ) -> Flux1ControlRequest {
+        Flux1ControlRequest {
+            prompt: self.prompt.clone(),
+            width: self.width,
+            height: self.height,
+            steps: self.steps as usize,
+            sampler: self.sampling.sampler.clone(),
+            scheduler: self.sampling.scheduler.clone(),
+            scheduler_shift: self.sampling.scheduler_shift,
+            guidance: self.guidance,
+            control_scale: Some(self.control_scale),
+            control_kind: self.control_kind.clone(),
+            seed,
+            memory: self.memory,
+            preview: preview.clone(),
+            cancel: cancel.clone(),
+        }
     }
 }
 
@@ -354,46 +393,70 @@ impl CandleStrictControl for Flux1StrictControl {
     }
 
     fn load(&self) -> WorkerResult<Self::Model> {
-        let paths = Flux1ControlPaths {
-            flux_base: self.base.clone(),
-            control: self.control.clone(),
-            adapters: self.adapters.clone(),
+        let paths = self.paths();
+        let loaded = match self.memory_context.as_ref() {
+            Some(context) => Flux1DevControl::load_with_memory_context_spec(
+                &paths,
+                context.clone(),
+                &self.planning_spec,
+            ),
+            None => {
+                Flux1DevControl::load_with_memory_spec(&paths, self.memory, &self.planning_spec)
+            }
         };
-        Flux1DevControl::load_with_memory(&paths, self.memory).map_err(|error| {
+        loaded.map_err(|error| {
             WorkerError::Engine(format!("FLUX.1-dev strict-control load failed: {error}"))
         })
+    }
+
+    fn requires_preload_plan(&self) -> bool {
+        true
+    }
+
+    /// Bind this pose's preprocessed control map, the request and the resolved load contract into one
+    /// render plan before any weights open (SW-6936). A refusal here is a pre-load job failure.
+    fn compile_one_before_load(
+        &self,
+        control: &Image,
+        seed: u64,
+        cancel: &CancelFlag,
+    ) -> WorkerResult<gen_core::RenderPlan> {
+        // Preview never shapes the trajectory; the live sink is bound at generation time.
+        let req = self.request_for(seed, cancel, &gen_core::PreviewSink::default());
+        runtime_cuda::providers::flux::control_provider::compile_control_plan(
+            &self.paths(),
+            &self.planning_spec,
+            &req,
+            control,
+        )
+        .map_err(|error| super::render::preload_plan_error("FLUX.1-dev strict-control", error))
     }
 
     fn generate_one(
         &self,
         model: &Self::Model,
         control: &Image,
+        plan: Option<&gen_core::RenderPlan>,
         seed: u64,
         cancel: &CancelFlag,
         preview: &gen_core::PreviewSink,
         on_progress: &mut dyn FnMut(Progress),
     ) -> WorkerResult<Image> {
-        let req = Flux1ControlRequest {
-            prompt: self.prompt.clone(),
-            width: self.width,
-            height: self.height,
-            steps: self.steps as usize,
-            sampler: self.sampling.sampler.clone(),
-            scheduler: self.sampling.scheduler.clone(),
-            scheduler_shift: self.sampling.scheduler_shift,
-            guidance: self.guidance,
-            // The worker resolves `controlScale` itself (user value or `FLUX1_CONTROL_CANDLE_DEFAULT_SCALE`)
-            // before building the provider, so always pass the resolved value explicitly. `None` (engine
-            // default) is only for callers that never resolved a scale; sc-9024 keeps explicit 0.0 = "control
-            // off" honored verbatim.
-            control_scale: Some(self.control_scale),
-            control_kind: self.control_kind.clone(),
-            seed,
-            memory: self.memory,
-            preview: preview.clone(),
-            cancel: cancel.clone(),
+        let plan = plan.ok_or_else(|| {
+            WorkerError::Engine("FLUX.1-dev strict-control has no pre-load render plan".into())
+        })?;
+        let req = self.request_for(seed, cancel, preview);
+        let generated = match self.memory_context.as_ref() {
+            Some(context) => model.generate_with_memory_context_planned(
+                context,
+                &req,
+                control,
+                plan,
+                on_progress,
+            ),
+            None => model.generate_with_injector_planned(&req, control, None, plan, on_progress),
         };
-        model.generate(&req, control, on_progress).map_err(|error| {
+        generated.map_err(|error| {
             WorkerError::Engine(format!(
                 "FLUX.1-dev strict-control generation failed: {error}"
             ))
@@ -544,7 +607,9 @@ pub(super) async fn generate_candle_flux1_control_stream(
         control_scale,
         control_kind,
         memory: generation_memory,
+        memory_context: memory_evaluation.map(|evaluation| evaluation.context),
         adapters,
+        planning_spec: strategy_spec,
     };
 
     run_candle_strict_control(
@@ -564,6 +629,55 @@ pub(super) async fn generate_candle_flux1_control_stream(
 #[cfg(test)]
 mod memory_artifact_tests {
     use super::*;
+
+    #[test]
+    fn conditional_base_prefers_external_model_path_then_the_selected_tier() {
+        super::super::render::flux1_conditional_route_tests::assert_conditional_base_resolution(
+            "FLUX.1 ControlNet (Candle)",
+            json!({
+                "projectId": "p", "model": "flux_dev", "prompt": "a dancer", "count": 1,
+                "advanced": { "poses": [{ "id": "a" }] }
+            }),
+            "SceneWorks/flux1-dev-mlx",
+            resolve_flux1_control_base,
+        );
+    }
+
+    /// SW-6936: a load contract the provider refuses fails while compiling the pre-load plan, as a
+    /// payload error the job reports, before any weights open.
+    #[test]
+    fn preload_plan_refusals_are_payload_errors_before_load() {
+        let root = tempfile::tempdir().expect("control fixture");
+        let base = root.path().to_path_buf();
+        let control = Image {
+            width: 512,
+            height: 512,
+            pixels: vec![0; 512 * 512 * 3],
+        };
+        let cancel = CancelFlag::new();
+        for (case, spec) in [
+            (
+                "missing control overlay",
+                gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(base.clone())),
+            ),
+            (
+                "mixed IP-Adapter + control",
+                gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(base.clone()))
+                    .with_control(gen_core::WeightsSource::File(base.clone()))
+                    .with_ip_adapter(gen_core::WeightsSource::File(base.clone())),
+            ),
+        ] {
+            let mut provider = flux1_strict_control_test_fixture(base.clone());
+            provider.planning_spec = spec;
+            match provider.compile_one_before_load(&control, 7, &cancel) {
+                Err(WorkerError::InvalidPayload(message)) => assert!(
+                    message.contains("cannot compile render plan before load"),
+                    "{case}: {message}"
+                ),
+                other => panic!("{case}: expected a pre-load payload refusal, got {other:?}"),
+            }
+        }
+    }
 
     #[test]
     fn optimized_control_evidence_requires_the_canonical_tuple_and_exact_path() {

@@ -202,9 +202,9 @@ use super::events::PreviewSlot;
 use super::events::PromptEnhancementReports;
 use super::existing_lora_install_marker;
 #[cfg(target_os = "macos")]
-use super::flux1_control::flux1_control_generate_one;
-#[cfg(target_os = "macos")]
 use super::flux1_control::flux1_control_load;
+#[cfg(target_os = "macos")]
+use super::flux1_control::flux1_control_render_for_test;
 #[cfg(target_os = "macos")]
 use super::flux1_control::flux1_control_repo_file;
 #[cfg(target_os = "macos")]
@@ -10074,7 +10074,7 @@ fn flux1_dev_control_real_weights_generates_each_mode() {
             .expect("control weights file")
         });
 
-    let generator =
+    let (generator, spec) =
         flux1_control_load(base, control, Some(gen_core::Quant::Q8), Vec::new()).unwrap();
 
     // A flat 512² control map — enough to exercise the VAE-encode of the control hint on real weights;
@@ -10084,13 +10084,12 @@ fn flux1_dev_control_real_weights_generates_each_mode() {
         height: 512,
         pixels: vec![128u8; 512 * 512 * 3],
     };
-    let cancel = gen_core::CancelFlag::new();
     for kind in [ControlKind::Pose, ControlKind::Canny, ControlKind::Depth] {
         // pose/canny → Control { kind, scale }; depth → the dedicated Depth variant (build_control_*).
         let conditioning = build_control_conditioning(control_map.clone(), kind.clone(), 0.7, None);
-        let (w, h, pixels) = flux1_control_generate_one(
+        let (w, h, pixels) = flux1_control_render_for_test(
             generator.as_ref(),
-            &gen_core::GenerationRequest::default(),
+            &spec,
             "a person standing in a meadow, photorealistic",
             512,
             512,
@@ -10098,10 +10097,6 @@ fn flux1_dev_control_real_weights_generates_each_mode() {
             28,
             Some(3.5), // dev embedded guidance
             conditioning,
-            None,
-            gen_core::PreviewSink::default(),
-            &cancel,
-            &mut |_| {},
         )
         .unwrap_or_else(|e| panic!("{kind:?} render failed: {e}"));
         assert_eq!((w, h), (512, 512), "{kind:?}");
@@ -17876,13 +17871,13 @@ fn matrix_flux1_paths() -> (std::path::PathBuf, std::path::PathBuf) {
 #[cfg(target_os = "macos")]
 fn matrix_flux1_render(
     generator: &dyn Generator,
+    spec: &LoadSpec,
     side: u32,
     conditioning: Vec<Conditioning>,
 ) -> Vec<u8> {
-    let cancel = gen_core::CancelFlag::new();
-    let (_, _, pixels) = flux1_control_generate_one(
+    let (_, _, pixels) = flux1_control_render_for_test(
         generator,
-        &gen_core::GenerationRequest::default(),
+        spec,
         "a person standing in a meadow, photorealistic",
         side,
         side,
@@ -17890,10 +17885,6 @@ fn matrix_flux1_render(
         28,
         Some(3.5),
         conditioning,
-        None,
-        gen_core::PreviewSink::default(),
-        &cancel,
-        &mut |_| {},
     )
     .expect("flux1 control render");
     pixels
@@ -17907,12 +17898,13 @@ fn matrix_flux1_render(
 #[ignore = "real-weight matrix: FLUX.1-dev + Shakker Union-Pro-2.0 + Metal"]
 fn real_weight_matrix_flux1_pose_directed() {
     let (base, control) = matrix_flux1_paths();
-    let generator =
+    let (generator, spec) =
         flux1_control_load(base, control, Some(gen_core::Quant::Q8), Vec::new()).unwrap();
     let side = 512u32;
-    let baseline = matrix_flux1_render(&*generator, side, Vec::new());
+    let baseline = matrix_flux1_render(&*generator, &spec, side, Vec::new());
     let left = matrix_flux1_render(
         &*generator,
+        &spec,
         side,
         build_control_conditioning(
             directed_pose_skeleton(side, -0.18),
@@ -17923,6 +17915,7 @@ fn real_weight_matrix_flux1_pose_directed() {
     );
     let right = matrix_flux1_render(
         &*generator,
+        &spec,
         side,
         build_control_conditioning(
             directed_pose_skeleton(side, 0.18),
@@ -17946,7 +17939,7 @@ fn real_weight_matrix_flux1_pose_directed() {
 #[ignore = "real-weight matrix: FLUX.1-dev + Shakker Union-Pro-2.0 + Metal"]
 fn real_weight_matrix_flux1_canny() {
     let (base, control) = matrix_flux1_paths();
-    let generator =
+    let (generator, spec) =
         flux1_control_load(base, control, Some(gen_core::Quant::Q8), Vec::new()).unwrap();
     let side = 512u32;
     let source = matrix_structured_source(side);
@@ -17961,9 +17954,10 @@ fn real_weight_matrix_flux1_canny() {
         None,
     )
     .expect("auto-canny");
-    let baseline = matrix_flux1_render(&*generator, side, Vec::new());
+    let baseline = matrix_flux1_render(&*generator, &spec, side, Vec::new());
     let render = matrix_flux1_render(
         &*generator,
+        &spec,
         side,
         build_control_conditioning(map, ControlKind::Canny, 0.7, None),
     );
@@ -17976,7 +17970,7 @@ fn real_weight_matrix_flux1_canny() {
 fn real_weight_matrix_flux1_depth() {
     let (base, control) = matrix_flux1_paths();
     let depth = matrix_depth_weights_dir();
-    let generator =
+    let (generator, spec) =
         flux1_control_load(base, control, Some(gen_core::Quant::Q8), Vec::new()).unwrap();
     let side = 512u32;
     let source = matrix_structured_source(side);
@@ -17991,9 +17985,10 @@ fn real_weight_matrix_flux1_depth() {
         Some(depth.as_path()),
     )
     .expect("auto-depth");
-    let baseline = matrix_flux1_render(&*generator, side, Vec::new());
+    let baseline = matrix_flux1_render(&*generator, &spec, side, Vec::new());
     let render = matrix_flux1_render(
         &*generator,
+        &spec,
         side,
         build_control_conditioning(map, ControlKind::Depth, 0.7, None),
     );
@@ -23039,6 +23034,7 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             });
         let handoff = [
             "start_gen_stream(",
+            "start_gen_stream_with_cancel(",
             "start_cached_gen_stream(",
             "start_cached_gen_stream_with_request_state(",
             "start_cached_gen_stream_after_cold_admission(",
@@ -23291,7 +23287,7 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             .find("admit_conditioning_overlay(")
             .expect("the gate call is inside the driver")
             < preamble
-                .find("start_gen_stream(")
+                .find("start_gen_stream_with_cancel(")
                 .expect("the driver starts a generation stream"),
         "the conditioning gate must run BEFORE the load stream starts, or it is not a PRE-flight check \
          (sc-16069)"
@@ -23367,17 +23363,21 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             .lines()
             .position(|line| line.contains(marker) && !line.trim_start().starts_with("//"))
             .expect("a live gate call, asserted in step 3");
-        let handoff = ["start_gen_stream(", "run_candle_strict_control("]
-            .iter()
-            .filter_map(|needle| {
-                source
-                    .lines()
-                    .position(|line| line.contains(needle) && !line.trim_start().starts_with("//"))
-            })
-            .min()
-            .unwrap_or_else(|| {
-                panic!("{file} must hand off to start_gen_stream or run_candle_strict_control")
-            });
+        let handoff = [
+            "start_gen_stream(",
+            "start_gen_stream_with_cancel(",
+            "run_candle_strict_control(",
+        ]
+        .iter()
+        .filter_map(|needle| {
+            source
+                .lines()
+                .position(|line| line.contains(needle) && !line.trim_start().starts_with("//"))
+        })
+        .min()
+        .unwrap_or_else(|| {
+            panic!("{file} must hand off to start_gen_stream or run_candle_strict_control")
+        });
         assert!(
             gate < handoff,
             "candle conditioning route {route} ({file}) gates AFTER it hands off to the load — the check \

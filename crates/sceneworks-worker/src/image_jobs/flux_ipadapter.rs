@@ -13,7 +13,7 @@ use super::sampling::resolve_advanced_or_manifest_f32_with;
 use super::sampling::resolve_advanced_or_manifest_u32_with;
 use super::standard_tier_subdir;
 use super::stream::drive_gen_items_scored;
-use super::stream::start_gen_stream;
+use super::stream::start_gen_stream_with_cancel;
 use super::Image;
 use super::ImagePlan;
 use super::ImageRequest;
@@ -267,6 +267,68 @@ fn flux_ipadapter_raw_settings(
     raw
 }
 
+/// The per-output request numerics of one FLUX IP-Adapter job. The pre-load planner and the render
+/// build each output's request from this one source, so the plan is compiled from the request it runs.
+struct FluxIpRequests {
+    width: u32,
+    height: u32,
+    steps: u32,
+    sampling: gen_core::GenerationRequest,
+    guidance: f32,
+    ip_scale: f32,
+    memory: gen_core::GenerationMemory,
+}
+
+impl FluxIpRequests {
+    fn request(
+        &self,
+        seed: i64,
+        prompt: String,
+        preview: &gen_core::PreviewSink,
+        cancel: &gen_core::CancelFlag,
+    ) -> IpAdapterFluxRequest {
+        IpAdapterFluxRequest {
+            prompt,
+            width: self.width,
+            height: self.height,
+            steps: self.steps as usize,
+            sampler: self.sampling.sampler.clone(),
+            scheduler: self.sampling.scheduler.clone(),
+            scheduler_shift: self.sampling.scheduler_shift,
+            guidance: self.guidance,
+            ip_adapter_scale: self.ip_scale,
+            seed: seed as u64,
+            memory: self.memory,
+            preview: preview.clone(),
+            cancel: cancel.clone(),
+        }
+    }
+}
+
+/// Compile every output's render plan before any weights open (SW-6936): each plan binds the
+/// reference, the request and the resolved load contract, so a request the provider refuses (a
+/// load contract without the overlay it needs, a mixed overlay, an unsupported request) fails the job
+/// here with a payload error instead of after the load.
+fn plan_flux_ip_outputs(
+    paths: &IpAdapterFluxPaths,
+    spec: &gen_core::LoadSpec,
+    requests: &FluxIpRequests,
+    work: Vec<(i64, String)>,
+    reference: &Image,
+    cancel: &gen_core::CancelFlag,
+) -> WorkerResult<Vec<gen_core::RenderPlan>> {
+    work.into_iter()
+        .map(|(seed, prompt)| {
+            // Preview never shapes the trajectory; the live sink is bound at generation time.
+            let req = requests.request(seed, prompt, &gen_core::PreviewSink::default(), cancel);
+            runtime_cuda::providers::flux::ip_provider::compile_ip_plan(
+                paths, spec, &req, reference,
+            )
+            .map_err(|error| super::render::preload_plan_error("FLUX IP-Adapter", error))
+        })
+        .collect()
+}
+
 /// Real candle FLUX IP-Adapter generation: resolve the reference + weights on the async side, then load
 /// the `IpAdapterFlux` provider once + generate each image on the blocking thread. `request.count`
 /// images, each its own seed; `generate` takes the per-job `CancelFlag` + a `Progress` callback, so
@@ -429,6 +491,7 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
             Value::String(format!("{:?}", evaluation.context.selection.strategy)),
         );
     }
+    let memory_context = memory_evaluation.map(|evaluation| evaluation.context);
 
     // Conditioning-overlay VRAM admission (sc-16069, epic 15448) — the FLUX.1 base held co-resident with
     // the XLabs IP-Adapter and its CLIP image encoder. This lane loads through the UNcached
@@ -446,11 +509,22 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
         .await?;
     }
 
-    let (cancel, rx, blocking) = start_gen_stream(
+    let requests = FluxIpRequests {
+        width,
+        height,
+        steps,
+        sampling,
+        guidance,
+        ip_scale,
+        memory: generation_memory,
+    };
+    let planning_work = work.clone();
+
+    let (cancel, rx, blocking) = start_gen_stream_with_cancel(
         job.id.clone(),
         "flux_ipadapter",
         0,
-        move || {
+        move |planning_cancel| {
             let paths = IpAdapterFluxPaths {
                 flux_base,
                 ip_adapter: adapter_file,
@@ -459,10 +533,32 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
                 // performed.
                 adapters: Vec::new(),
             };
-            let model =
-                IpAdapterFlux::load_with_memory(&paths, generation_memory).map_err(|error| {
-                    WorkerError::Engine(format!("FLUX IP-Adapter load failed: {error}"))
-                })?;
+            let plans = plan_flux_ip_outputs(
+                &paths,
+                &strategy_spec,
+                &requests,
+                planning_work,
+                &reference,
+                planning_cancel,
+            )?;
+            if planning_cancel.is_cancelled() {
+                return Err(WorkerError::Canceled(
+                    "FLUX IP-Adapter generation canceled before load".into(),
+                ));
+            }
+            let loaded = match memory_context.as_ref() {
+                Some(context) => IpAdapterFlux::load_with_memory_context_spec(
+                    &paths,
+                    context.clone(),
+                    &strategy_spec,
+                ),
+                None => {
+                    IpAdapterFlux::load_with_memory_spec(&paths, generation_memory, &strategy_spec)
+                }
+            };
+            let model = loaded.map_err(|error| {
+                WorkerError::Engine(format!("FLUX IP-Adapter load failed: {error}"))
+            })?;
             // Per-job identity-likeness scorer built ONCE here (`!Send` face stack on the blocking
             // thread); source embedded once, reused across every output (sc-4411). `None` ⇒ non-fatal
             // staging / construction failure ⇒ scores omitted.
@@ -472,34 +568,37 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
                 }
                 _ => None,
             };
-            Ok((model, reference, scorer))
+            Ok((model, reference, plans, scorer, memory_context, requests))
         },
-        move |(model, reference, scorer), tx, cancel| {
-            // `IpAdapterFlux::generate` takes `&self` (the IP tokens live in a per-call injector, not on
+        move |(model, reference, plans, scorer, memory_context, requests), tx, cancel| {
+            // `IpAdapterFlux` renders through `&self` (the IP tokens live in a per-call injector, not on
             // the DiT), so — unlike the SDXL/Kolors lanes — the per-item closure needs no `mut model`.
             drive_gen_items_scored(
                 tx,
                 work,
-                move |_index, (seed, prompt), preview, on_progress| {
+                move |index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
-                    let req = IpAdapterFluxRequest {
-                        prompt,
-                        width,
-                        height,
-                        steps: steps as usize,
-                        sampler: sampling.sampler.clone(),
-                        scheduler: sampling.scheduler.clone(),
-                        scheduler_shift: sampling.scheduler_shift,
-                        guidance,
-                        ip_adapter_scale: ip_scale,
-                        seed: seed as u64,
-                        memory: generation_memory,
-                        preview: preview.clone(),
-                        cancel: cancel.clone(),
+                    let req = requests.request(seed, prompt, &preview, &cancel);
+                    let render_plan = plans.get(index).ok_or_else(|| {
+                        WorkerError::Engine(format!(
+                            "FLUX IP-Adapter: no pre-load render plan for output {index}"
+                        ))
+                    })?;
+                    let generated = match memory_context.as_ref() {
+                        Some(context) => model.generate_with_memory_context_planned(
+                            context,
+                            &req,
+                            &reference,
+                            render_plan,
+                            &mut *on_progress,
+                        ),
+                        None => {
+                            model.generate_planned(&req, &reference, render_plan, &mut *on_progress)
+                        }
                     };
-                    let out = match model.generate(&req, &reference, &mut *on_progress) {
+                    let out = match generated {
                         Ok(out) => out,
                         Err(_) if cancel.is_cancelled() => return Ok(None),
                         Err(error) => {
@@ -554,6 +653,84 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
 #[cfg(test)]
 mod memory_artifact_tests {
     use super::*;
+
+    #[test]
+    fn conditional_base_prefers_external_model_path_then_the_selected_tier() {
+        for (model, repo) in [
+            ("flux_dev", "SceneWorks/flux1-dev-mlx"),
+            ("flux_schnell", "SceneWorks/flux1-schnell-mlx"),
+        ] {
+            super::super::render::flux1_conditional_route_tests::assert_conditional_base_resolution(
+                &format!("FLUX.1 XLabs IP-Adapter (Candle, {model})"),
+                json!({
+                    "projectId": "p", "model": model, "prompt": "a portrait", "count": 1,
+                    "mode": "character_image", "referenceAssetId": "asset_1"
+                }),
+                repo,
+                resolve_flux_ipadapter_base,
+            );
+        }
+    }
+
+    /// SW-6936: a load contract the provider refuses fails while compiling the pre-load plans, as a
+    /// payload error the job reports, before any weights open.
+    #[test]
+    fn preload_plan_refusals_are_payload_errors_before_load() {
+        let root = tempfile::tempdir().expect("ip fixture");
+        let base = root.path().join("base");
+        let adapter = root.path().join("ip_adapter.safetensors");
+        let encoder = root.path().join("encoder");
+        let paths = IpAdapterFluxPaths {
+            flux_base: base.clone(),
+            ip_adapter: adapter.clone(),
+            image_encoder: encoder.clone(),
+            adapters: Vec::new(),
+        };
+        let requests = FluxIpRequests {
+            width: 512,
+            height: 512,
+            steps: 4,
+            sampling: gen_core::GenerationRequest::default(),
+            guidance: 3.5,
+            ip_scale: 0.7,
+            memory: gen_core::GenerationMemory::default(),
+        };
+        let reference = Image {
+            width: 64,
+            height: 64,
+            pixels: vec![0; 64 * 64 * 3],
+        };
+        let base_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(base.clone()));
+        for (case, spec) in [
+            ("missing IP-Adapter overlay", base_spec.clone()),
+            (
+                "mixed IP-Adapter + control",
+                base_spec
+                    .clone()
+                    .with_ip_adapter(gen_core::WeightsSource::File(adapter.clone()))
+                    .with_component(
+                        "flux_ip_image_encoder",
+                        gen_core::WeightsSource::Dir(encoder.clone()),
+                    )
+                    .with_control(gen_core::WeightsSource::File(adapter.clone())),
+            ),
+        ] {
+            match plan_flux_ip_outputs(
+                &paths,
+                &spec,
+                &requests,
+                vec![(7, "a portrait".to_owned())],
+                &reference,
+                &gen_core::CancelFlag::new(),
+            ) {
+                Err(WorkerError::InvalidPayload(message)) => assert!(
+                    message.contains("cannot compile render plan before load"),
+                    "{case}: {message}"
+                ),
+                other => panic!("{case}: expected a pre-load payload refusal, got {other:?}"),
+            }
+        }
+    }
 
     #[test]
     fn optimized_ip_evidence_requires_both_exact_overlay_artifacts() {

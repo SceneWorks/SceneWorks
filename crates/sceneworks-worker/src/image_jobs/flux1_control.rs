@@ -17,7 +17,7 @@ use super::routing::mlx_flux_strict_control_engine_id;
 use super::sampling::resolve_guidance;
 use super::sampling::resolve_steps;
 use super::stream::drive_gen_items_scored;
-use super::stream::start_cached_gen_stream_with_request_state;
+use super::stream::start_cached_gen_stream_with_request_state_using_prepared;
 use super::strict_control::build_control_conditioning;
 use super::strict_control::ensure_depth_estimator_dir;
 use super::strict_control::preprocess_control_entry;
@@ -179,14 +179,14 @@ fn flux1_control_scale(request: &ImageRequest) -> f32 {
     advanced::f32_clamped(&request.advanced, "controlScale", 0.7, 0.0..=2.0)
 }
 
-/// Generate one FLUX.1-dev strict-control image: the pre-built `conditioning` (the required `Control` /
-/// `Depth`, assembled by the shared [`build_control_conditioning`] driver) drives the Shakker
-/// Union-Pro-2.0 branch. dev is guidance-distilled (embedded scalar) — `guidance` rides the
+/// The FLUX.1-dev strict-control request for one pose: the pre-built `conditioning` (the required
+/// `Control` / `Depth`, assembled by the shared [`build_control_conditioning`] driver) drives the
+/// Shakker Union-Pro-2.0 branch. dev is guidance-distilled (embedded scalar) — `guidance` rides the
 /// transformer's guidance embedder (no true-CFG). FLUX.1 control has no img2img-init seam (unlike
-/// FLUX.2), so no identity `Reference` is appended.
+/// FLUX.2), so no identity `Reference` is appended. The pre-load planner and the render both build
+/// their request here, so a plan is compiled from the request it runs.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn flux1_control_generate_one(
-    generator: &dyn Generator,
+fn flux1_control_request(
     sampling: &GenerationRequest,
     prompt: &str,
     width: u32,
@@ -195,12 +195,11 @@ pub(super) fn flux1_control_generate_one(
     steps: u32,
     guidance: Option<f32>,
     conditioning: Vec<Conditioning>,
-    memory_evaluation: Option<&crate::mlx_fit_gate::MlxRequestEvaluation>,
+    memory: Option<gen_core::GenerationMemory>,
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
-    on_progress: &mut dyn FnMut(Progress),
-) -> WorkerResult<(u32, u32, Vec<u8>)> {
-    let mut request = GenerationRequest {
+) -> GenerationRequest {
+    GenerationRequest {
         prompt: prompt.to_owned(),
         width,
         height,
@@ -209,25 +208,37 @@ pub(super) fn flux1_control_generate_one(
         steps: Some(steps),
         guidance,
         conditioning,
-        memory: memory_evaluation.map(|evaluation| evaluation.memory),
+        memory,
         preview,
         cancel: cancel.clone(),
         sampler: sampling.sampler.clone(),
         scheduler: sampling.scheduler.clone(),
         scheduler_shift: sampling.scheduler_shift,
         ..Default::default()
-    };
-    let output = crate::memory_strategy::generate_with_scope(
+    }
+}
+
+/// Render one FLUX.1-dev strict-control image from the request [`flux1_control_request`] built and
+/// the render plan compiled for it before load (SW-6936), inside the admitted memory scope.
+pub(super) fn flux1_control_generate_one(
+    generator: &dyn Generator,
+    mut request: GenerationRequest,
+    plan: &gen_core::RenderPlan,
+    memory_evaluation: Option<&crate::mlx_fit_gate::MlxRequestEvaluation>,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<(u32, u32, Vec<u8>)> {
+    let report = crate::memory_strategy::generate_with_scope_report_planned(
         generator,
         &mut request,
+        plan,
         memory_evaluation.map(|evaluation| &evaluation.context),
         on_progress,
     )
     .map_err(|error| {
         WorkerError::Engine(format!("FLUX.1-dev control generation failed: {error}"))
     })?;
-    match output {
-        GenerationOutput::Images(mut images) => {
+    match report.output {
+        Some(GenerationOutput::Images(mut images)) => {
             let image = images.pop().ok_or_else(|| {
                 WorkerError::Engine("FLUX.1-dev control generator produced no image".to_owned())
             })?;
@@ -290,15 +301,76 @@ fn flux1_control_spec(
     spec
 }
 
+/// Real-weight test seam: the loaded control generator and the load spec its render plans bind to.
 #[cfg(all(target_os = "macos", test))]
 pub(super) fn flux1_control_load(
     weights_dir: PathBuf,
     control_weights: PathBuf,
     quant: Option<Quant>,
     adapters: Vec<AdapterSpec>,
-) -> WorkerResult<Box<dyn Generator>> {
+) -> WorkerResult<(Box<dyn Generator>, LoadSpec)> {
     let spec = flux1_control_spec(weights_dir, control_weights, quant, adapters);
-    load_control_engine(FLUX1_DEV_CONTROL_ENGINE_ID, &spec)
+    Ok((
+        load_control_engine(FLUX1_DEV_CONTROL_ENGINE_ID, &spec)?,
+        spec,
+    ))
+}
+
+/// Real-weight test seam: render one image through the worker's planned control path (compile the
+/// plan, then [`flux1_control_generate_one`]). An empty `conditioning` is the control-free baseline
+/// the matrix tests measure steering against; no worker route renders it, and the control
+/// provider has no plan for it, so it calls the generator directly.
+#[cfg(all(target_os = "macos", test))]
+#[allow(clippy::too_many_arguments)]
+pub(super) fn flux1_control_render_for_test(
+    generator: &dyn Generator,
+    spec: &LoadSpec,
+    prompt: &str,
+    width: u32,
+    height: u32,
+    seed: i64,
+    steps: u32,
+    guidance: Option<f32>,
+    conditioning: Vec<Conditioning>,
+) -> WorkerResult<(u32, u32, Vec<u8>)> {
+    let cancel = CancelFlag::new();
+    let baseline = conditioning.is_empty();
+    let request = flux1_control_request(
+        &GenerationRequest::default(),
+        prompt,
+        width,
+        height,
+        seed,
+        steps,
+        guidance,
+        conditioning,
+        None,
+        gen_core::PreviewSink::default(),
+        &cancel,
+    );
+    if baseline {
+        let output = generator
+            .generate(&request, &mut |_| {})
+            .map_err(|error| WorkerError::Engine(format!("baseline render failed: {error}")))?;
+        return match output {
+            GenerationOutput::Images(mut images) => {
+                let image = images
+                    .pop()
+                    .ok_or_else(|| WorkerError::Engine("baseline produced no image".into()))?;
+                Ok((image.width, image.height, image.pixels))
+            }
+            _ => Err(WorkerError::Engine(
+                "baseline returned non-image output".into(),
+            )),
+        };
+    }
+    let plan = super::render::compile_required_render_plan(
+        crate::inference_runtime::media(),
+        FLUX1_DEV_CONTROL_ENGINE_ID,
+        spec,
+        &request,
+    )?;
+    flux1_control_generate_one(generator, request, &plan, None, &mut |_| {})
 }
 
 /// Real FLUX.1-dev strict-control generation: one image per pose, each conditioned on the requested
@@ -470,22 +542,69 @@ pub(super) async fn generate_flux1_dev_control_stream(
         },
     )
     .await?;
-    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
+    // Every pose's control map is preprocessed and its render plan compiled on the generator's own
+    // owner command before the cache loads any weights (SW-6936), so a request the provider refuses
+    // fails pre-load, and each pose renders from the plan compiled for its exact map.
+    let planning_spec = spec.clone();
+    let planning_sampling = sampling.clone();
+    let planning_prompt = prompt.clone();
+    let prepare_poses = move |planning_cancel: &CancelFlag| {
+        poses
+            .iter()
+            .map(|pose| {
+                let control = preprocess_control_entry(
+                    &control_kind,
+                    user_control.as_ref(),
+                    Some(pose),
+                    control_source.as_ref(),
+                    width,
+                    height,
+                    stickwidth,
+                    depth_weights_dir.as_deref(),
+                )?;
+                // FLUX.1 control has no img2img-init seam — no identity Reference (None).
+                let conditioning =
+                    build_control_conditioning(control, control_kind.clone(), control_scale, None);
+                // Preview never shapes the trajectory; the live sink is bound at generation time.
+                let candidate = flux1_control_request(
+                    &planning_sampling,
+                    &planning_prompt,
+                    width,
+                    height,
+                    seed,
+                    steps,
+                    guidance,
+                    conditioning.clone(),
+                    None,
+                    gen_core::PreviewSink::default(),
+                    planning_cancel,
+                );
+                let plan = super::render::compile_required_render_plan(
+                    crate::inference_runtime::media(),
+                    FLUX1_DEV_CONTROL_ENGINE_ID,
+                    &planning_spec,
+                    &candidate,
+                )?;
+                Ok((conditioning, plan))
+            })
+            .collect::<WorkerResult<Vec<_>>>()
+    };
+    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state_using_prepared(
         job.id.clone(),
         FLUX1_DEV_CONTROL_ENGINE_ID,
         adapter_count,
         spec,
         "FLUX.1-dev control load failed".to_owned(),
+        prepare_poses,
+        crate::inference_runtime::load,
         move |generator,
               initial_cache_state,
               loaded_policy,
               warm_policy,
               external_committed_bytes,
+              planned_poses,
               tx,
               cancel| {
-            let user_control = user_control.as_ref();
-            let control_source = control_source.as_ref();
-            let depth_weights_dir = depth_weights_dir.as_deref();
             // Per-job identity-likeness scorer built ONCE; source embedded once, reused across every
             // pose (sc-4410). `None` ⇒ no identity reference / non-fatal construction failure.
             let scorer = match (&face_stack_dir, &likeness_source) {
@@ -500,65 +619,61 @@ pub(super) async fn generate_flux1_dev_control_stream(
             // item. Hand the real proposal to the first evaluation and an inert one to the rest, so a
             // multi-image job settles exactly one decision and emits exactly one event.
             let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(warm_policy);
-            drive_gen_items_scored(tx, poses, move |_index, pose, preview, on_progress| {
-                let control = preprocess_control_entry(
-                    &control_kind,
-                    user_control,
-                    Some(&pose),
-                    control_source,
-                    width,
-                    height,
-                    stickwidth,
-                    depth_weights_dir,
-                )?;
-                // FLUX.1 control has no img2img-init seam — no identity Reference (None).
-                let conditioning =
-                    build_control_conditioning(control, control_kind.clone(), control_scale, None);
-                let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
-                    generator,
-                    &memory_plan,
-                    &memory_inputs,
-                    cache_state,
-                    loaded_policy.offload_policy,
-                    warm_policy.take(),
-                    external_committed_bytes,
-                )?;
-                cache_state = gen_core::MemoryCacheState::Warm;
-                let _request_memory_limit = memory_evaluation
-                    .process_limit_bytes
-                    .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
-                let (out_w, out_h, pixels) = flux1_control_generate_one(
-                    generator,
-                    &sampling,
-                    &prompt,
-                    width,
-                    height,
-                    seed,
-                    steps,
-                    guidance,
-                    conditioning,
-                    Some(&memory_evaluation),
-                    preview,
-                    &cancel,
-                    on_progress,
-                )?;
-                // Score this finished pose against the cached source embedding (sc-4410). The strict-
-                // control lane produces the FINAL image directly (no face-restore pass), so this scores
-                // what the user sees. Clone paid ONLY when a scorer exists; a full-body / turned pose
-                // with no reliable frontal face → honest detected:false N/A.
-                let face_likeness = scorer.as_ref().and_then(|scorer| {
-                    crate::face_likeness::score_generated_image(
-                        Some(scorer),
-                        &Image {
-                            width: out_w,
-                            height: out_h,
-                            pixels: pixels.clone(),
-                        },
-                        likeness_source_ref.as_deref(),
-                    )
-                });
-                Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
-            })
+            drive_gen_items_scored(
+                tx,
+                planned_poses,
+                move |_index, (conditioning, render_plan), preview, on_progress| {
+                    let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
+                        generator,
+                        &memory_plan,
+                        &memory_inputs,
+                        cache_state,
+                        loaded_policy.offload_policy,
+                        warm_policy.take(),
+                        external_committed_bytes,
+                    )?;
+                    cache_state = gen_core::MemoryCacheState::Warm;
+                    let _request_memory_limit = memory_evaluation
+                        .process_limit_bytes
+                        .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
+                    let request = flux1_control_request(
+                        &sampling,
+                        &prompt,
+                        width,
+                        height,
+                        seed,
+                        steps,
+                        guidance,
+                        conditioning,
+                        Some(memory_evaluation.memory),
+                        preview,
+                        &cancel,
+                    );
+                    let (out_w, out_h, pixels) = flux1_control_generate_one(
+                        generator,
+                        request,
+                        &render_plan,
+                        Some(&memory_evaluation),
+                        on_progress,
+                    )?;
+                    // Score this finished pose against the cached source embedding (sc-4410). The strict-
+                    // control lane produces the FINAL image directly (no face-restore pass), so this scores
+                    // what the user sees. Clone paid ONLY when a scorer exists; a full-body / turned pose
+                    // with no reliable frontal face → honest detected:false N/A.
+                    let face_likeness = scorer.as_ref().and_then(|scorer| {
+                        crate::face_likeness::score_generated_image(
+                            Some(scorer),
+                            &Image {
+                                width: out_w,
+                                height: out_h,
+                                pixels: pixels.clone(),
+                            },
+                            likeness_source_ref.as_deref(),
+                        )
+                    });
+                    Ok(Some((seed, out_w, out_h, pixels, face_likeness)))
+                },
+            )
         },
     );
 

@@ -82,25 +82,30 @@ fn function_body(source: &'static str, declaration: &str) -> &'static str {
 
 #[test]
 fn every_lane_that_binds_a_declared_policy_offers_the_resident_release() {
+    // FLUX.1 control and PuLID compile their render plans on the owner before the load (SW-6936).
     let lanes = [
         (
             include_str!("../flux2.rs"),
             "async fn generate_flux2_edit_stream(",
+            "start_cached_gen_stream_with_request_state(",
         ),
         (
             include_str!("../flux2.rs"),
             "async fn generate_flux2_dev_control_stream(",
+            "start_cached_gen_stream_with_request_state(",
         ),
         (
             include_str!("../flux1_control.rs"),
             "async fn generate_flux1_dev_control_stream(",
+            "start_cached_gen_stream_with_request_state_using_prepared(",
         ),
         (
             include_str!("../pulid.rs"),
             "async fn generate_pulid_flux_stream(",
+            "start_cached_gen_stream_with_request_state_using_prepared(",
         ),
     ];
-    for (source, declaration) in lanes {
+    for (source, declaration, handoff) in lanes {
         let body = function_body(source, declaration);
         let before = body
             .find("let pre_policy_spec = spec.clone();")
@@ -111,9 +116,7 @@ fn every_lane_that_binds_a_declared_policy_offers_the_resident_release() {
         let release = body
             .find("release_declared_sequential_for_request(")
             .expect(declaration);
-        let load = body
-            .find("start_cached_gen_stream_with_request_state(")
-            .expect(declaration);
+        let load = body.find(handoff).expect(declaration);
         assert!(
             before < shaped && shaped < release && release < load,
             "{declaration}"

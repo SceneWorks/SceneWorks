@@ -432,6 +432,8 @@ impl CandleStrictControl for QwenStrictControl {
         &self,
         model: &Self::Model,
         control: &Image,
+        // This lane renders without a pre-load plan (`requires_preload_plan` is false).
+        _plan: Option<&gen_core::RenderPlan>,
         seed: u64,
         cancel: &CancelFlag,
         preview: &gen_core::PreviewSink,
