@@ -20,6 +20,7 @@ use crate::payload_util::{
     array_or_empty, declared_resolution, int_array, nonempty_string_or, object_or_empty,
     optional_i64, optional_id, string_list, string_or,
 };
+use crate::resolved_options::{BindingError, BindingInput, Bound};
 
 /// Default model when the payload omits one (matches the Python worker).
 const DEFAULT_MODEL: &str = "z_image_turbo";
@@ -124,6 +125,136 @@ pub fn default_resolution(model_manifest_entry: &JsonObject) -> Option<(u32, u32
     declared_resolution(model_manifest_entry, MIN_DIMENSION, MAX_DIMENSION)
 }
 
+/// Image options lowered once from the shared resolver's canonical effective request.
+/// Each value retains whether the caller supplied it or the resolver applied a default.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ImageAdvanced {
+    pub sampler: Option<Bound<String>>,
+    pub scheduler: Option<Bound<String>>,
+    pub scheduler_shift: Option<Bound<f64>>,
+    pub steps: Option<Bound<i64>>,
+    pub guidance_scale: Option<Bound<f64>>,
+    pub guidance_method: Option<Bound<String>>,
+    pub cfg_interval: Option<Bound<Vec<f64>>>,
+    pub caption_overflow: Option<Bound<String>>,
+    pub num_inference_steps: Option<Bound<i64>>,
+    pub enhance_prompt: Option<Bound<bool>>,
+    pub enhance_max_tokens: Option<Bound<i64>>,
+    pub enhance_temperature: Option<Bound<f64>>,
+    pub decoder: Option<Bound<String>>,
+    pub use_pid: Option<Bound<bool>>,
+    pub pid_target: Option<Bound<String>>,
+    pub pid_checkpoint: Option<Bound<JsonObject>>,
+    pub pid_gemma: Option<Bound<String>>,
+    pub ip_adapter_scale: Option<Bound<f64>>,
+    pub ip_adapter_repo: Option<Bound<String>>,
+    pub controlnet_conditioning_scale: Option<Bound<f64>>,
+    pub true_cfg_scale: Option<Bound<f64>>,
+    pub strength: Option<Bound<f64>>,
+    pub reference_strength: Option<Bound<f64>>,
+    pub text_style_gain: Option<Bound<f64>>,
+    pub view_angle: Option<Bound<String>>,
+    pub view_angles: Option<Bound<Vec<String>>>,
+    pub poses: Option<Bound<Vec<Value>>>,
+    pub face_restore: Option<Bound<bool>>,
+    pub control_mode: Option<Bound<String>>,
+    pub control_image: Option<Bound<String>>,
+    pub control_weights: Option<Bound<JsonObject>>,
+    pub control_scale: Option<Bound<f64>>,
+    pub cn_scale: Option<Bound<f64>>,
+    pub tile: Option<Bound<i64>>,
+    pub overlap: Option<Bound<i64>>,
+    pub prompt: Option<Bound<String>>,
+    pub negative_prompt: Option<Bound<String>>,
+    pub timestep_to_start_cfg: Option<Bound<i64>>,
+    pub angle_set: Option<Bound<bool>>,
+    pub keypoint_collection_id: Option<Bound<String>>,
+    pub system_message: Option<Bound<String>>,
+    pub image_guidance_scale: Option<Bound<f64>>,
+    pub max_images: Option<Bound<i64>>,
+    pub max_new_tokens: Option<Bound<i64>>,
+    pub think_mode: Option<Bound<bool>>,
+    pub phases: Option<Bound<Vec<Value>>>,
+    pub flash_attn: Option<Bound<bool>>,
+    pub mlx_quantize: Option<Bound<i64>>,
+    pub mlx_quantize_explicit: Option<Bound<bool>>,
+    pub conv_rot: Option<Bound<bool>>,
+    pub quant_tier: Option<Bound<String>>,
+    pub quant: Option<Bound<String>>,
+    pub model_path: Option<Bound<String>>,
+    pub text_encoder_model: Option<Bound<String>>,
+    pub transparent_background: Option<Bound<bool>>,
+    pub flux3_layout: Option<Bound<JsonObject>>,
+    pub flux3_reference_ids: Option<Bound<Vec<String>>>,
+    pub moss_image_advanced: Option<Bound<crate::moss_image_advanced::EditAdvanced>>,
+}
+
+impl ImageAdvanced {
+    pub fn bind(input: &BindingInput<'_>) -> Result<Self, BindingError> {
+        Ok(Self {
+            sampler: input.text("advanced", "sampler")?,
+            scheduler: input.text("advanced", "scheduler")?,
+            scheduler_shift: input.number("advanced", "schedulerShift")?,
+            steps: input.integer("advanced", "steps")?,
+            guidance_scale: input.number("advanced", "guidanceScale")?,
+            guidance_method: input.text("advanced", "guidanceMethod")?,
+            cfg_interval: input.structured("advanced", "cfgInterval")?,
+            caption_overflow: input.text("advanced", "captionOverflow")?,
+            num_inference_steps: input.integer("advanced", "numInferenceSteps")?,
+            enhance_prompt: input.boolean("advanced", "enhancePrompt")?,
+            enhance_max_tokens: input.integer("advanced", "enhanceMaxTokens")?,
+            enhance_temperature: input.number("advanced", "enhanceTemperature")?,
+            decoder: input.text("advanced", "decoder")?,
+            use_pid: input.boolean("advanced", "usePid")?,
+            pid_target: input.text("advanced", "pidTarget")?,
+            pid_checkpoint: input.structured("advanced", "pidCheckpoint")?,
+            pid_gemma: input.text("advanced", "pidGemma")?,
+            ip_adapter_scale: input.number("advanced", "ipAdapterScale")?,
+            ip_adapter_repo: input.text("advanced", "ipAdapterRepo")?,
+            controlnet_conditioning_scale: input
+                .number("advanced", "controlnetConditioningScale")?,
+            true_cfg_scale: input.number("advanced", "trueCfgScale")?,
+            strength: input.number("advanced", "strength")?,
+            reference_strength: input.number("advanced", "referenceStrength")?,
+            text_style_gain: input.number("advanced", "textStyleGain")?,
+            view_angle: input.text("advanced", "viewAngle")?,
+            view_angles: input.structured("advanced", "viewAngles")?,
+            poses: input.structured("advanced", "poses")?,
+            face_restore: input.boolean("advanced", "faceRestore")?,
+            control_mode: input.text("advanced", "controlMode")?,
+            control_image: input.text("advanced", "controlImage")?,
+            control_weights: input.structured("advanced", "controlWeights")?,
+            control_scale: input.number("advanced", "controlScale")?,
+            cn_scale: input.number("advanced", "cnScale")?,
+            tile: input.integer("advanced", "tile")?,
+            overlap: input.integer("advanced", "overlap")?,
+            prompt: input.text("advanced", "prompt")?,
+            negative_prompt: input.text("advanced", "negativePrompt")?,
+            timestep_to_start_cfg: input.integer("advanced", "timestepToStartCfg")?,
+            angle_set: input.boolean("advanced", "angleSet")?,
+            keypoint_collection_id: input.text("advanced", "keypointCollectionId")?,
+            system_message: input.text("advanced", "systemMessage")?,
+            image_guidance_scale: input.number("advanced", "imageGuidanceScale")?,
+            max_images: input.integer("advanced", "maxImages")?,
+            max_new_tokens: input.integer("advanced", "maxNewTokens")?,
+            think_mode: input.boolean("advanced", "thinkMode")?,
+            phases: input.structured("advanced", "phases")?,
+            flash_attn: input.boolean("advanced", "flashAttn")?,
+            mlx_quantize: input.integer("advanced", "mlxQuantize")?,
+            mlx_quantize_explicit: input.boolean("advanced", "mlxQuantizeExplicit")?,
+            conv_rot: input.boolean("advanced", "convRot")?,
+            quant_tier: input.text("advanced", "quantTier")?,
+            quant: input.text("advanced", "quant")?,
+            model_path: input.text("advanced", "modelPath")?,
+            text_encoder_model: input.text("advanced", "textEncoderModel")?,
+            transparent_background: input.boolean("advanced", "transparentBackground")?,
+            flux3_layout: input.structured("advanced", "flux3_layout")?,
+            flux3_reference_ids: input.structured("advanced", "flux3_reference_ids")?,
+            moss_image_advanced: input.structured("advanced", "mossImageAdvanced")?,
+        })
+    }
+}
+
 /// A typed image-generation request, parsed from a job payload.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImageRequest {
@@ -173,6 +304,9 @@ pub struct ImageRequest {
     pub model_manifest_entry: JsonObject,
     /// Per-family advanced knobs (steps, guidanceScale, mlxQuantize, …), passed through.
     pub advanced: JsonObject,
+    /// Canonical effective options for execution. `None` denotes a legacy authoring/parser
+    /// request that has not crossed the shared resolver boundary.
+    pub resolved_advanced: Option<ImageAdvanced>,
     /// Image Studio "Upscale" toggle (sc-8091): when `enabled`, the worker upscales each
     /// generated image with `engine` (`seedvr2` / `real-esrgan`) at `factor` and writes a
     /// second "(Nx upscaled)" asset — mirroring the Python worker. Disabled when omitted.
@@ -182,6 +316,114 @@ pub struct ImageRequest {
 }
 
 impl ImageRequest {
+    /// Access canonical scalar options only after `from_resolved`. A missing binding is a
+    /// programming error at an execution boundary, not a reason to reinterpret authored JSON.
+    pub fn advanced_bool(&self, key: &'static str) -> Option<bool> {
+        let options = self
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved");
+        let value = match key {
+            "enhancePrompt" => &options.enhance_prompt,
+            "usePid" => &options.use_pid,
+            "faceRestore" => &options.face_restore,
+            "angleSet" => &options.angle_set,
+            "thinkMode" => &options.think_mode,
+            "flashAttn" => &options.flash_attn,
+            "mlxQuantizeExplicit" => &options.mlx_quantize_explicit,
+            "convRot" => &options.conv_rot,
+            "transparentBackground" => &options.transparent_background,
+            _ => panic!("undeclared image boolean accessor: {key}"),
+        };
+        value.as_ref().map(|bound| bound.value)
+    }
+
+    pub fn advanced_i64(&self, key: &'static str) -> Option<i64> {
+        let options = self
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved");
+        let value = match key {
+            "steps" => &options.steps,
+            "enhanceMaxTokens" => &options.enhance_max_tokens,
+            "numInferenceSteps" => &options.num_inference_steps,
+            "tile" => &options.tile,
+            "overlap" => &options.overlap,
+            "timestepToStartCfg" => &options.timestep_to_start_cfg,
+            "maxImages" => &options.max_images,
+            "maxNewTokens" => &options.max_new_tokens,
+            "mlxQuantize" => &options.mlx_quantize,
+            _ => panic!("undeclared image integer accessor: {key}"),
+        };
+        value.as_ref().map(|bound| bound.value)
+    }
+
+    pub fn advanced_f64(&self, key: &'static str) -> Option<f64> {
+        let options = self
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved");
+        let value = match key {
+            "schedulerShift" | "timestepShift" => &options.scheduler_shift,
+            "guidanceScale" => &options.guidance_scale,
+            "enhanceTemperature" => &options.enhance_temperature,
+            "ipAdapterScale" => &options.ip_adapter_scale,
+            "controlnetConditioningScale" => &options.controlnet_conditioning_scale,
+            "trueCfgScale" => &options.true_cfg_scale,
+            "strength" => &options.strength,
+            "referenceStrength" => &options.reference_strength,
+            "textStyleGain" => &options.text_style_gain,
+            "controlScale" => &options.control_scale,
+            "cnScale" => &options.cn_scale,
+            "imageGuidanceScale" => &options.image_guidance_scale,
+            _ => panic!("undeclared image number accessor: {key}"),
+        };
+        value.as_ref().map(|bound| bound.value)
+    }
+
+    pub fn advanced_text(&self, key: &'static str) -> Option<&str> {
+        let options = self
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved");
+        let value = match key {
+            "sampler" => &options.sampler,
+            "scheduler" => &options.scheduler,
+            "guidanceMethod" => &options.guidance_method,
+            "captionOverflow" => &options.caption_overflow,
+            "decoder" => &options.decoder,
+            "pidTarget" => &options.pid_target,
+            "pidGemma" => &options.pid_gemma,
+            "ipAdapterRepo" => &options.ip_adapter_repo,
+            "viewAngle" => &options.view_angle,
+            "controlMode" => &options.control_mode,
+            "controlImage" => &options.control_image,
+            "prompt" => &options.prompt,
+            "negativePrompt" => &options.negative_prompt,
+            "keypointCollectionId" => &options.keypoint_collection_id,
+            "systemMessage" => &options.system_message,
+            "quantTier" => &options.quant_tier,
+            "quant" => &options.quant,
+            "modelPath" => &options.model_path,
+            "textEncoderModel" => &options.text_encoder_model,
+            _ => panic!("undeclared image text accessor: {key}"),
+        };
+        value.as_ref().map(|bound| bound.value.as_str())
+    }
+
+    /// Bind a request after portable validation has produced `effective`. The legacy parser
+    /// remains available to authoring and persistence callers; execution uses these typed fields.
+    pub fn from_resolved(
+        authored: &JsonObject,
+        effective: &JsonObject,
+    ) -> Result<Self, BindingError> {
+        let mut request = Self::from_payload(effective);
+        request.resolved_advanced = Some(ImageAdvanced::bind(&BindingInput::new(
+            authored, effective,
+        ))?);
+        Ok(request)
+    }
+
     /// Explicit quantization bits (or the verified portable binding's frozen tier), before
     /// model-specific defaults or tier validation.
     pub fn quant_bits(&self) -> Option<i64> {
@@ -279,6 +521,7 @@ impl ImageRequest {
             fit_mode: normalize_fit_mode(payload.get("fitMode").and_then(Value::as_str)),
             model_manifest_entry,
             advanced: object_or_empty(payload, "advanced"),
+            resolved_advanced: None,
             upscale: parse_upscale(payload),
             hires_fix: parse_hires_fix(payload),
         }
