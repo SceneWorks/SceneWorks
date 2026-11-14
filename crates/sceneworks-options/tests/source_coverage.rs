@@ -189,6 +189,7 @@ struct Scanner<'a> {
     imports: BTreeMap<String, String>,
     delegated: BTreeSet<String>,
     closures: BTreeMap<String, usize>,
+    writing: bool,
     coverage: &'a mut Coverage,
 }
 
@@ -389,6 +390,16 @@ fn describe(expr: &Expr) -> String {
 }
 
 impl<'ast> Visit<'ast> for Scanner<'_> {
+    fn visit_expr_assign(&mut self, expr: &'ast syn::ExprAssign) {
+        if !production(&expr.attrs) {
+            return;
+        }
+        let old = std::mem::replace(&mut self.writing, true);
+        self.visit_expr(&expr.left);
+        self.writing = old;
+        self.visit_expr(&expr.right);
+    }
+
     fn visit_file(&mut self, file: &'ast syn::File) {
         if production(&file.attrs) {
             visit::visit_file(self, file);
@@ -627,7 +638,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         if !production(&expr.attrs) {
             return;
         }
-        if self.map(&expr.expr) {
+        if !self.writing && self.map(&expr.expr) {
             self.read(&expr.index);
         }
         visit::visit_expr_index(self, expr);
@@ -786,6 +797,7 @@ fn scan(sources: &[(String, syn::File)]) -> Coverage {
             bindings: Bindings::default(),
             delegated: BTreeSet::new(),
             closures: BTreeMap::new(),
+            writing: false,
             constants: &scoped_constants,
             imports,
             coverage: &mut coverage,
@@ -978,6 +990,18 @@ fn injecting_an_unseen_production_key_fails_coverage() {
 }
 
 #[test]
+fn advanced_index_writes_are_not_execution_reads() {
+    let coverage = fixture(
+        r#"fn production() {
+            body["advanced"]["filmHarness"]["seed"] = json!(7);
+            let value = body["advanced"]["steps"];
+        }"#,
+    );
+    assert_eq!(coverage.reads.len(), 1);
+    assert!(coverage.reads.iter().any(|read| read.key == "steps"));
+}
+
+#[test]
 fn adding_an_unregistered_key_to_a_dynamic_domain_fails_coverage() {
     let path = "crates/sceneworks-core/src/training/body_losses.rs";
     let valid = scan(&[(
@@ -1127,9 +1151,20 @@ fn print_production_binding_inventory() {
     }
     eprintln!("TOTAL production advanced reads: {}", coverage.reads.len());
     eprintln!("Whole-map reads: {}", coverage.whole_map_reads.len());
+    for site in &coverage.whole_map_reads {
+        eprintln!("whole-map read: {site:?}");
+    }
     eprintln!("Raw-map mutations: {}", coverage.mutations.len());
     for (file, count) in by_file {
         eprintln!("{count:>3} {file}");
+    }
+    for read in &coverage.reads {
+        if read.file.ends_with("/film_compile.rs") {
+            eprintln!(
+                "film read: {} {}.{}",
+                read.function, read.location, read.key
+            );
+        }
     }
 }
 
