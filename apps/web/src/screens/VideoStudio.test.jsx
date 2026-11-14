@@ -175,10 +175,13 @@ describe("VideoStudio Quality segment adapter gate (sc-15398)", () => {
   });
 
   it("submits image-only SVD with no authored prompt", async () => {
+    const manifestPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../../../config/manifests/builtin.models.jsonc");
+    const shippedSvd = JSON5.parse(readFileSync(manifestPath, "utf8")).models.find((entry) => entry.id === "svd");
+    expect(shippedSvd?.promptless).toBe(true);
     window.localStorage.setItem("sceneworks-studio-video-project_1", JSON.stringify({
       mode: "image_to_video", model: "svd", prompt: "", sourceAssetId: "still",
     }));
-    const context = baseContext({ videoModels: [SVD], assets: [
+    const context = baseContext({ videoModels: [{ ...shippedSvd, installState: "installed", usable: true }], assets: [
       { id: "still", projectId: "project_1", type: "image", displayName: "Start frame", status: {} },
     ] });
     await render(context);
