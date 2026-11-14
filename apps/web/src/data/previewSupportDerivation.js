@@ -293,6 +293,51 @@ export function parseBespokePreviewRoutes(rustSource) {
 }
 
 /**
+ * The top-level field entries of every `TypeName { … }` struct literal in comment-stripped Rust
+ * `source`, whitespace-collapsed (`preview`, `preview: preview.clone()`, `..Default::default()`).
+ * Braces, brackets and parentheses are balanced, so a nested literal's fields and the commas inside
+ * a call belong to the nested expression, not to the outer literal. String literals are not
+ * special-cased: the PuLID request literals carry none that contain a bracket.
+ *
+ * @param {string} source comment-stripped Rust source
+ * @param {string} typeName the struct name, matched as a whole identifier
+ * @returns {string[][]} one field list per literal, in source order
+ */
+function structLiteralFields(source, typeName) {
+  const literals = [];
+  const opener = new RegExp(`(?<![A-Za-z0-9_])${typeName}\\s*\\{`, "g");
+  for (const match of source.matchAll(opener)) {
+    const fields = [];
+    let depth = 0;
+    let field = "";
+    let closed = false;
+    for (let index = match.index + match[0].length; index < source.length; index += 1) {
+      const char = source[index];
+      if ("{[(".includes(char)) depth += 1;
+      if ("}])".includes(char)) {
+        if (depth === 0) {
+          closed = char === "}";
+          break;
+        }
+        depth -= 1;
+      }
+      if (char === "," && depth === 0) {
+        fields.push(field);
+        field = "";
+      } else {
+        field += char;
+      }
+    }
+    if (!closed) continue;
+    fields.push(field);
+    literals.push(
+      fields.map((entry) => entry.split(/\s+/).join(" ").trim()).filter((entry) => entry.length > 0),
+    );
+  }
+  return literals;
+}
+
+/**
  * Parse the direct-dispatch PuLID preview routes from both platform worker implementations.
  * PuLID is intentionally absent from MODEL_TABLE: MLX loads the registry engine through its
  * identity route and Candle calls its bespoke provider by name. The exact model constants and live
@@ -310,10 +355,16 @@ export function parsePulidPreviewRoutes(mlxSource, candleSource) {
   if (!modelId || modelId !== candleModelId) {
     throw new Error("parsePulidPreviewRoutes: platform model declarations are missing or disagree");
   }
-  if (!/GenerationRequest\s*\{[\s\S]*?\bpreview,\s*[\s\S]*?\};/.test(mlx)) {
+  // Judged per struct literal, at the literal's own top level: a `preview` field that only appears
+  // in a LATER closure's parameter list, or inside a nested literal, must not satisfy the check.
+  if (!structLiteralFields(mlx, "GenerationRequest").some((fields) => fields.includes("preview"))) {
     throw new Error("parsePulidPreviewRoutes: MLX GenerationRequest has no live preview sink");
   }
-  if (!/PulidFluxRequest\s*\{[\s\S]*?\bpreview:\s*preview\.clone\(\),[\s\S]*?\};/.test(candle)) {
+  if (
+    !structLiteralFields(candle, "PulidFluxRequest").some((fields) =>
+      fields.includes("preview: preview.clone()"),
+    )
+  ) {
     throw new Error("parsePulidPreviewRoutes: Candle PulidFluxRequest has no live preview sink");
   }
   return ["mlx", "candle"].map((backend) => ({
