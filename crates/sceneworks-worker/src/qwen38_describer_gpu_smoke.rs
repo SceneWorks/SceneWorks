@@ -222,6 +222,10 @@ async fn qwen38_describer_describes_a_synthetic_scene_on_cuda() {
             .expect("create the owned describer result, never replace an existing file");
         serde_json::to_writer_pretty(&mut file, &result).expect("persist the describer result");
     }
+    // The CUDA guard samples the card as soon as this process exits and refuses a card above 5%
+    // utilisation. `nvidia-smi` averages utilisation over the last second, so exiting straight after
+    // generation reads as a busy card (q4 and q8 runs, 2026-11-14). Stay idle until the average decays.
+    std::thread::sleep(std::time::Duration::from_secs(5));
     // A missing fixture, a failed load or generation, or an empty field cannot emit this.
     eprintln!("MODEL_INFERENCE_BODY_COMPLETED {test_fqn}");
 }
