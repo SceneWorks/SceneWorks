@@ -522,6 +522,7 @@ pub struct SubmitVideoJobArgs {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct EstimateDepthArgs {
+    pub options_schema_version: Option<u64>,
     #[schemars(description = "Project id (from list_projects).")]
     pub project_id: String,
     #[schemars(description = "The image asset to estimate depth from. It is not modified.")]
@@ -543,6 +544,7 @@ pub struct EstimateDepthArgs {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RestoreImageArgs {
+    pub options_schema_version: Option<u64>,
     #[schemars(description = "Project id (from list_projects).")]
     pub project_id: String,
     #[schemars(
@@ -569,6 +571,9 @@ pub struct RestoreImageArgs {
 /// API's own defaults (4x, budgeted, colour fix on) stay authoritative.
 pub(crate) fn restore_job_body(args: &RestoreImageArgs) -> Result<Value, String> {
     let mut payload = Map::new();
+    if let Some(version) = args.options_schema_version {
+        payload.insert("optionsSchemaVersion".to_owned(), json!(version));
+    }
     payload.insert("projectId".to_owned(), json!(args.project_id));
     payload.insert("sourceAssetId".to_owned(), json!(args.source_asset_id));
     payload.insert("engine".to_owned(), json!("iris"));
@@ -623,6 +628,9 @@ pub(crate) fn depth_job_body(args: &EstimateDepthArgs) -> Result<Value, String> 
         "sourceAssetId": args.source_asset_id,
         "resolution": resolution,
     });
+    if let Some(version) = args.options_schema_version {
+        body["optionsSchemaVersion"] = json!(version);
+    }
     if let Some(model) = args.iris_model.as_deref().filter(|model| !model.is_empty()) {
         body["irisModel"] = json!(model);
     }
@@ -2672,6 +2680,36 @@ mod tests {
             upgrade(&future, Carrier::Request).unwrap_err().code,
             "UnsupportedSchemaVersion"
         );
+    }
+
+    #[test]
+    fn permissive_job_args_preserve_options_version_for_typed_api_refusal() {
+        use sceneworks_core::options::upgrade::{upgrade, Carrier};
+        for version in [None, Some(1), Some(9)] {
+            let mut input = json!({"projectId":"p","prompt":"fox","sourceAssetId":"source"});
+            if let Some(version) = version {
+                input["optionsSchemaVersion"] = json!(version);
+            }
+            let bodies = [
+                image_job_body(&serde_json::from_value(input.clone()).unwrap()).unwrap(),
+                video_job_body(&serde_json::from_value(input.clone()).unwrap()).unwrap(),
+                depth_job_body(&serde_json::from_value(input.clone()).unwrap()).unwrap(),
+                restore_job_body(&serde_json::from_value(input).unwrap()).unwrap(),
+            ];
+            for body in bodies {
+                let payload = body.get("payload").unwrap_or(&body);
+                assert_eq!(
+                    payload.get("optionsSchemaVersion"),
+                    version.as_ref().map(|v| json!(v)).as_ref()
+                );
+                let result = upgrade(&body, Carrier::Request);
+                if version == Some(9) {
+                    assert_eq!(result.unwrap_err().code, "UnsupportedSchemaVersion");
+                } else {
+                    assert!(result.is_ok());
+                }
+            }
+        }
     }
 
     fn args_from(value: Value) -> GenerateImageArgs {

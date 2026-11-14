@@ -681,6 +681,24 @@ mod tests {
     }
 
     #[test]
+    fn closed_score_and_render_args_refuse_future_options_instead_of_dropping_them() {
+        let future = json!({"optionsSchemaVersion":9});
+        for error in [
+            serde_json::from_value::<Yue2CreateArgs>(future.clone()).unwrap_err(),
+            serde_json::from_value::<Yue2EditArgs>(future.clone()).unwrap_err(),
+            serde_json::from_value::<Yue2RenderArgs>(future.clone()).unwrap_err(),
+            serde_json::from_value::<Yue2CoverArgs>(future).unwrap_err(),
+        ] {
+            assert!(
+                error
+                    .to_string()
+                    .contains("unknown field `optionsSchemaVersion`"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
     fn render_bodies_never_acknowledge_the_licence_or_declare_commercial_use() {
         let render = render_body(&Yue2RenderArgs {
             project_id: "p1".into(),

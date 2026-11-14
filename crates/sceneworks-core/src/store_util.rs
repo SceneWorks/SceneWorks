@@ -81,6 +81,28 @@ pub(crate) fn read_json(path: &Path) -> ProjectStoreResult<Value> {
     )
 }
 
+/// Read-only history/index readers retain unsupported carriers visibly. Mutation and execution
+/// callers must continue using `read_json`, which refuses rather than rewriting unknown options.
+pub(crate) fn read_json_history(path: &Path) -> ProjectStoreResult<Value> {
+    let payload = fs::read_to_string(path)?;
+    let value = serde_json::from_str(&payload)?;
+    upgrade_history(value)
+}
+
+pub(crate) fn upgrade_history(value: Value) -> ProjectStoreResult<Value> {
+    if !value.is_object() {
+        return Ok(value);
+    }
+    match crate::options::upgrade::upgrade(&value, crate::options::upgrade::Carrier::Recipe) {
+        Ok(upgraded) => Ok(upgraded),
+        Err(error) => {
+            let mut original = value;
+            original["optionsUpgradeError"] = serde_json::to_value(error)?;
+            Ok(original)
+        }
+    }
+}
+
 /// Store-error adapter for the shared neutral filesystem writer.
 pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> ProjectStoreResult<()> {
     Ok(crate::fsutil::write_atomic(path, contents)?)

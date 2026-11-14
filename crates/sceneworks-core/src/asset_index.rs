@@ -15,8 +15,8 @@ use crate::project_store::{
     ProjectStoreResult,
 };
 use crate::store_util::{
-    is_safe_id, is_safe_relative_path, optional_bool, optional_str, optional_u64, read_json,
-    relative_string, required_str, sql_int,
+    is_safe_id, is_safe_relative_path, optional_bool, optional_str, optional_u64,
+    read_json_history, relative_string, required_str, sql_int,
 };
 
 pub(crate) const ASSET_SIDECAR_PATTERN: &str = "*.sceneworks.json";
@@ -104,7 +104,7 @@ pub(crate) fn find_asset_sidecar_path_on_connection(
         }
     }
     for sidecar_path in asset_sidecars(project_path)? {
-        let Ok(asset) = read_json(&sidecar_path) else {
+        let Ok(asset) = read_json_history(&sidecar_path) else {
             continue;
         };
         if asset.get("id").and_then(Value::as_str) == Some(asset_id) {
@@ -263,7 +263,7 @@ pub(crate) fn normalize_asset_cached(
     generation_sets: &mut GenerationSetCache,
 ) -> ProjectStoreResult<Value> {
     record_asset_list_filesystem_operation(AssetListFilesystemOperation::SidecarRead);
-    let mut asset = read_json(sidecar_path)?;
+    let mut asset = read_json_history(sidecar_path)?;
     hydrate_asset(project_id, project_path, &mut asset, generation_sets, false)?;
     let sidecar_rel = relative_string(project_path, sidecar_path)?;
     if let Some(object) = asset.as_object_mut() {
@@ -342,7 +342,7 @@ fn hydrate_asset(
                 record_asset_list_filesystem_operation(
                     AssetListFilesystemOperation::GenerationSetRead,
                 );
-                read_json(&generation_set_path).ok()
+                read_json_history(&generation_set_path).ok()
             });
         if let Some(generation_set) = cached.clone() {
             if let Some(object) = asset.as_object_mut() {
@@ -534,20 +534,7 @@ pub(crate) fn hydrate_indexed_asset_cached(
     asset: Value,
     _generation_sets: &mut GenerationSetCache,
 ) -> ProjectStoreResult<Value> {
-    match crate::options::upgrade::upgrade(&asset, crate::options::upgrade::Carrier::Recipe) {
-        Ok(upgraded) => Ok(upgraded),
-        Err(error) => {
-            // A future recipe must not hide the historical asset or mutate its indexed original.
-            let mut original = asset;
-            if let Some(object) = original.as_object_mut() {
-                object.insert(
-                    "optionsUpgradeError".to_owned(),
-                    serde_json::to_value(error)?,
-                );
-            }
-            Ok(original)
-        }
-    }
+    crate::store_util::upgrade_history(asset)
 }
 
 fn upsert_asset_row(

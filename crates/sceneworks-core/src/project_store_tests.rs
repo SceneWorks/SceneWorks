@@ -2048,6 +2048,91 @@ fn list_assets_auto_reindexes_pre_migration_project_with_sidecars_on_disk() {
 }
 
 #[test]
+fn unsupported_recipe_stays_visible_through_lookup_and_reindex_without_rewrite() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::new(temp.path().join("data"), "test-version");
+    let project = store.create_project("Future recipe history").unwrap();
+    let fact = json!({
+        "assetId":"historic", "mediaPath":"assets/images/history/shot_0_up2x.png",
+        "mimeType":"image/png", "displayName":"Historic", "createdAt":"2026-05-25T00:00:00Z",
+        "mode":"text_to_image", "model":"z_image_turbo", "prompt":"keep me"
+    });
+    store
+        .persist_generated_asset(&project.id, "old-job", "history", &fact)
+        .unwrap();
+    let project_path = store.find_project_path(&project.id).unwrap();
+    // A real matching parent makes lineage backfill eligible; the unknown child must still
+    // remain byte-identical rather than having its refusal annotation written into the sidecar.
+    let mut base = fact.clone();
+    base["assetId"] = json!("historic-base");
+    base["mediaPath"] = json!("assets/images/history/shot_0.png");
+    store
+        .persist_generated_asset(&project.id, "old-job", "history", &base)
+        .unwrap();
+    fs::write(
+        project_path.join("assets/images/history/shot_0.png"),
+        b"historical base",
+    )
+    .unwrap();
+    let media = project_path.join("assets/images/history/shot_0_up2x.png");
+    fs::write(&media, b"historical media").unwrap();
+    let sidecar = media.with_extension("sceneworks.json");
+    let mut asset: Value = serde_json::from_slice(&fs::read(&sidecar).unwrap()).unwrap();
+    asset["recipe"] = json!({"optionsSchemaVersion":9,"prompt":"keep me",
+        "rawAdapterSettings":{"upscale":{"scale":2}}});
+    asset["provenance"] = json!({"checkpoint":"legacy"});
+    let original = serde_json::to_vec_pretty(&asset).unwrap();
+    fs::write(&sidecar, &original).unwrap();
+    let connection = connect_project_db(&project_path).unwrap();
+    connection.execute("delete from assets", []).unwrap();
+    // Exercise the real unindexed sidecar fallback, not direct hydration of a fabricated row.
+    let found = store.get_asset(&project.id, "historic").unwrap();
+    assert_eq!(
+        found["optionsUpgradeError"]["code"],
+        "UnsupportedSchemaVersion"
+    );
+    assert_eq!(found["recipe"], asset["recipe"]);
+    // Library's empty-index recovery and explicit reindex must both retain the same asset.
+    for explicit in [false, true] {
+        if explicit {
+            store.reindex_project(&project.id).unwrap();
+        }
+        let listed = store
+            .list_assets(&project.id, false, false, AssetScope::All)
+            .unwrap();
+        assert_eq!(listed.len(), 2);
+        let visible = listed
+            .iter()
+            .find(|asset| asset["id"] == "historic")
+            .unwrap();
+        assert_eq!(visible["id"], "historic");
+        assert_eq!(visible["recipe"], asset["recipe"]);
+        assert_eq!(visible["provenance"], asset["provenance"]);
+        assert_eq!(
+            visible["optionsUpgradeError"]["code"],
+            "UnsupportedSchemaVersion"
+        );
+        assert_eq!(fs::read(&sidecar).unwrap(), original);
+    }
+    // Read-modify-write callers still refuse this carrier.
+    assert!(matches!(
+        store.update_asset_status(
+            &project.id,
+            "historic",
+            AssetStatusPatch {
+                favorite: Some(true),
+                ..Default::default()
+            }
+        ),
+        Err(ProjectStoreError::FieldInvalid {
+            code: "UnsupportedSchemaVersion",
+            ..
+        })
+    ));
+    assert_eq!(fs::read(&sidecar).unwrap(), original);
+}
+
+#[test]
 fn list_assets_rebuild_skips_a_corrupt_sidecar_and_stays_recovered() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");

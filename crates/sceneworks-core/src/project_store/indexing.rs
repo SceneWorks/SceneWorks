@@ -31,7 +31,7 @@ pub(super) fn reindex_project_path(
     let mut counts = ReindexCounts::default();
     for sidecar_path in asset_sidecars(project_path)? {
         record_asset_list_filesystem_operation(AssetListFilesystemOperation::SidecarRead);
-        let asset = match read_json(&sidecar_path) {
+        let asset = match crate::store_util::read_json_history(&sidecar_path) {
             Ok(asset) => asset,
             Err(error) => {
                 tracing::warn!(event = "asset_reindex_sidecar_invalid", sidecar = %sidecar_path.display(), error = %error, "skipping malformed asset sidecar during reindex");
@@ -64,7 +64,7 @@ pub(super) fn reindex_project_path(
             continue;
         }
         record_asset_list_filesystem_operation(AssetListFilesystemOperation::GenerationSetRead);
-        let generation_set = match read_json(&entry) {
+        let generation_set = match crate::store_util::read_json_history(&entry) {
             Ok(generation_set) => generation_set,
             Err(error) => {
                 tracing::warn!(event = "generation_set_reindex_sidecar_invalid", sidecar = %entry.display(), error = %error, "skipping malformed generation set sidecar during reindex");
@@ -105,7 +105,7 @@ pub(super) fn reindex_project_path(
             continue;
         }
         record_asset_list_filesystem_operation(AssetListFilesystemOperation::TimelineRead);
-        let timeline = match read_json(&entry) {
+        let timeline = match crate::store_util::read_json_history(&entry) {
             Ok(timeline) => timeline,
             Err(error) => {
                 tracing::warn!(event = "timeline_reindex_sidecar_invalid", sidecar = %entry.display(), error = %error, "skipping malformed timeline sidecar during reindex");

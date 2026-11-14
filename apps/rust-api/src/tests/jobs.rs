@@ -4024,6 +4024,68 @@ async fn retry_and_duplicate_reject_path_unsafe_merged_generation_model_before_c
     assert_eq!(jobs.as_array().expect("jobs array").len(), 3);
 }
 
+#[tokio::test]
+async fn retry_and_duplicate_alias_patches_override_persisted_values() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp = tempfile::tempdir().unwrap();
+    write_style_test_manifests(&temp.path().join("config"));
+    let app = pinned_jobs_fixture_app(test_settings(&temp)).unwrap();
+    let (_, project) = create_project(app.clone(), "Alias patches").await;
+    let (status, original) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId":project["id"], "mode":"text_to_image", "prompt":"fox", "model":"sdxl",
+            "count":1,"width":1024,"height":1024,"ipAdapterScale":0.5
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    let original_id = original["id"].as_str().unwrap();
+    for operation in ["retry", "duplicate"] {
+        let (status, patched) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{original_id}/{operation}"),
+            json!({"payloadChanges":{"ip_adapter_scale":0.75}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {patched}");
+        assert_eq!(patched["payload"]["ipAdapterScale"], 0.75);
+        assert_eq!(patched["payload"]["ip_adapter_scale"], 0.75);
+        // A later canonical patch must also update the retained legacy spelling.
+        let id = patched["id"].as_str().unwrap();
+        let (status, repatched) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{id}/{operation}"),
+            json!({"payloadChanges":{"ipAdapterScale":0.25}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {repatched}");
+        assert_eq!(repatched["payload"]["ipAdapterScale"], 0.25);
+        assert_eq!(repatched["payload"]["ip_adapter_scale"], 0.25);
+        let (status, refused) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{id}/{operation}"),
+            json!({"payloadChanges":{"ipAdapterScale":0.25,"ip_adapter_scale":0.9}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+        assert_eq!(refused["code"], "ConflictingAliases");
+    }
+    let (_, unchanged) = request(
+        app,
+        "GET",
+        &format!("/api/v1/jobs/{original_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(unchanged["payload"], original["payload"]);
+}
+
 /// sc-13639: retry/duplicate are alternate image-job creation boundaries. Their shallow
 /// `payloadChanges` merge must not let a caller manufacture the catalog-only authorization bit,
 /// a hosted tuple, or an app-managed local path that the original typed image route would reject.
