@@ -303,3 +303,9 @@ pub mod image_request;
 pub mod h3_veda;
 pub mod jsonc;
 pub mod minimax_h3_turbo;
+
+pub mod prompt_enhancement;
+
+pub mod h3_import_facts;
+
+pub mod utility_validation;

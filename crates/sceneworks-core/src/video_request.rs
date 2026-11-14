@@ -709,10 +709,6 @@ fn floor_to_multiple(value: u32, multiple: u32) -> u32 {
     (value - (value % multiple)).max(256)
 }
 
-/// Parse a float (JSON number or numeric string), clamp to `[min, max]`, default
-/// when absent/unparseable — the `safe_float` contract. Video-specific (image has no
-/// float payload field), so it stays local rather than moving into `payload_util`.
-
 /// The *parse* half of [`safe_float`], split out so "did the caller name a readable value?" is
 /// answered by the same code that resolves it. `Some` exactly when [`safe_float`] would use the
 /// caller's value instead of the default: a JSON number **or** a numeric string (`"7.5"`), finite.
@@ -1295,6 +1291,9 @@ pub(crate) mod test_fixtures;
 mod tests {
     use super::test_fixtures::builtin_video_models;
     use super::*;
+    use sceneworks_options::video_request::{
+        DEFAULT_DURATION, DEFAULT_MAX_REFERENCE_ASSETS, MAX_DURATION, MIN_DURATION,
+    };
     use serde_json::json;
 
     fn payload(value: Value) -> JsonObject {
@@ -5294,3 +5293,5 @@ mod tests {
         assert_eq!(ltx_frame_count(297), 297);
     }
 }
+
+pub use sceneworks_options::video_request::normalize_ltx25_generation_controls;

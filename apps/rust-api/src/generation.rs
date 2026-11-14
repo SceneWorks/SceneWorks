@@ -1,5 +1,5 @@
 use super::*;
-use crate::dto::{VectorSampling, MAX_VECTOR_WALL_TIME_MS};
+use crate::dto::VectorSampling;
 
 pub(super) async fn create_generation_job_with_binding(
     state: AppState,
@@ -1332,6 +1332,14 @@ async fn create_vector_prompt_workflow_internal(
             .await?
             .unwrap_or_else(|| json!({}))
     };
+    sceneworks_core::request_validation::validate(
+        "vectorPrompt",
+        &to_json_object(&payload)?,
+        json!({"raster":raster_model,"vector":vector_model})
+            .as_object()
+            .unwrap(),
+    )
+    .map_err(ApiError::from)?;
     let raster_revision = if replay_source.is_some() {
         authoritative_workflow_revision(&raster_model)?
     } else {
@@ -2460,104 +2468,12 @@ fn normalize_ltx25_generation_controls(
     job_payload: &mut JsonObject,
     model_manifest_entry: &Value,
 ) -> Result<bool, ApiError> {
-    const KEYS: [&str; 6] = [
-        "vaeDecoder",
-        "autoDuration",
-        "autoDurationMinSeconds",
-        "autoDurationMaxSeconds",
-        "temporalUpsampleRounds",
-        // `transformerVariant` is read only by `ltx25_transformer_variant`, on the 2.5 arm. It
-        // belongs in this list for the same reason `vaeDecoder` does: on any other family it is a
-        // control the UI shows and nothing reads.
-        "transformerVariant",
-    ];
-    /// The legacy LTX guider knobs. LTX-2.5 has no reader for any of them — distilled guidance is
-    /// baked in and the dev checkpoint uses its fixed native video/audio guider parameters — so
-    /// they are inert in exactly the way `guidanceScale` is, and get the same refusal rather than
-    /// being accepted and silently dropped.
-    const DEAD_GUIDANCE_KEYS: [&str; 4] = [
-        "guidanceScale",
-        "videoCfgGuidanceScale",
-        "videoStgGuidanceScale",
-        "videoRescaleScale",
-    ];
-    let advanced = job_payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-    let carries_ltx25_control = KEYS.iter().any(|key| advanced.contains_key(*key));
-    if model_id != "ltx_2_5" {
-        if carries_ltx25_control {
-            return Err(ApiError::bad_request(format!(
-                "LTX-2.5 transformer-variant, decoder, auto-duration, and temporal-upsample controls are not supported by {model_id}"
-            )));
-        }
-        return Ok(false);
-    }
-
-    if let Some(key) = DEAD_GUIDANCE_KEYS
-        .iter()
-        .find(|key| advanced.contains_key(**key))
-    {
-        return Err(ApiError::bad_request(format!(
-            "LTX-2.5 does not accept advanced.{key}; distilled guidance is baked in and \
-             the dev checkpoint uses its fixed native video/audio guider parameters"
-        )));
-    }
-
-    requested_ltx25_vae_decoder(&advanced).map_err(ApiError::bad_request)?;
-    requested_temporal_upsample_rounds(&advanced).map_err(ApiError::bad_request)?;
-
-    let explicit_duration = job_payload
-        .get("duration")
-        .and_then(Value::as_f64)
-        .is_some();
-    let auto_enabled = match advanced.get("autoDuration") {
-        None => false,
-        Some(Value::Bool(value)) => *value,
-        Some(_) => {
-            return Err(ApiError::bad_request(
-                "advanced.autoDuration must be a boolean when present",
-            ))
-        }
-    };
-    if explicit_duration && auto_enabled {
-        if let Some(advanced) = job_payload
-            .get_mut("advanced")
-            .and_then(Value::as_object_mut)
-        {
-            for key in [
-                "autoDuration",
-                "autoDurationMinSeconds",
-                "autoDurationMaxSeconds",
-            ] {
-                advanced.remove(key);
-            }
-        }
-        return Ok(false);
-    }
-
-    let Some(range) = requested_auto_duration(&advanced).map_err(ApiError::bad_request)? else {
-        return Ok(false);
-    };
-    if range.min_seconds < 1.0 || range.max_seconds > 30.0 {
-        return Err(ApiError::bad_request(
-            "advanced auto-duration min/max seconds must stay between 1 and 30",
-        ));
-    }
-    let entry = model_manifest_entry
-        .as_object()
-        .cloned()
-        .unwrap_or_default();
-    if let Some(message) = duration_limit_error(model_id, range.min_seconds, &entry)
-        .or_else(|| duration_limit_error(model_id, range.max_seconds, &entry))
-    {
-        return Err(ApiError::bad_request(format!(
-            "Auto-duration range is outside the model's supported duration window. {message}"
-        )));
-    }
-    Ok(true)
+    sceneworks_core::video_request::normalize_ltx25_generation_controls(
+        model_id,
+        job_payload,
+        model_manifest_entry,
+    )
+    .map_err(ApiError::from)
 }
 
 #[cfg(test)]

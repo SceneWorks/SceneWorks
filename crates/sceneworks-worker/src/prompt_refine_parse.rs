@@ -43,11 +43,8 @@ pub(super) async fn parse_refine_request(
         .to_owned();
     // The vision tasks (image_caption / image_describe) are driven by the reference image, not a text
     // prompt, so they do not require a `prompt`; every other task does.
-    if original_prompt.is_empty() && !task.is_vision() {
-        return Err(WorkerError::InvalidPayload(
-            "Prompt refinement requires a non-empty prompt.".to_owned(),
-        ));
-    }
+    sceneworks_core::request_validation::validate_shape("promptRefine", payload)
+        .map_err(WorkerError::Validation)?;
     // The vision tasks resolve + decode a reference image (the JoyCaption `load_caption_image` pattern →
     // RGB8) into the vision contract's `ImageRef`. Accept either `imagePath` or `referencePath`. The path
     // is UNTRUSTED (it arrives on the job payload over the LAN-remote API boundary, epic 4484), so — like
@@ -92,15 +89,6 @@ pub(super) async fn parse_refine_request(
         // same way (S3 edit contract: 1–10 ordered references). Over the cap is a refusal rather
         // than a silent truncation: a rewrite whose `<imageN>` numbering does not match the render's
         // references would name the wrong picture.
-        if task == RefineTask::QwenImageRewrite
-            && paths.len() > crate::qwen_prompt_rewrite::MAX_REWRITE_REFERENCES
-        {
-            return Err(WorkerError::InvalidPayload(format!(
-                "Qwen Image 2.1 prompt rewriting takes at most {} reference images; {} were sent.",
-                crate::qwen_prompt_rewrite::MAX_REWRITE_REFERENCES,
-                paths.len()
-            )));
-        }
         let safe_paths = paths
             .iter()
             .map(|path| normalize_app_managed_model_path(settings, path, "Vision reference image"))

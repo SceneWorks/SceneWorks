@@ -10,8 +10,14 @@ pub fn kind_for_job(job_type: &crate::contracts::JobType) -> Option<&'static str
         VideoGenerate | VideoExtend | VideoBridge | PersonReplace => Some("video"),
         AudioGenerate => Some("audio"),
         VectorGenerate => Some("vector"),
+        VideoUpscale => Some("videoUpscale"),
+        PromptRefine => Some("promptRefine"),
         ImageVqa => Some("vqa"),
         ImageInterleave => Some("interleave"),
         _ => None,
     }
 }
+
+pub use sceneworks_options::prompt_enhancement;
+
+pub use sceneworks_options::utility_validation;

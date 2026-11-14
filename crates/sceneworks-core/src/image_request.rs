@@ -68,7 +68,7 @@ pub const BASE_MAX_IMAGE_STEPS: u32 = 80;
 ///
 /// This is the product/request contract. The workflow-share envelope derives its entry cap from
 /// this value, and the web's mechanically pinned twin is checked by a cross-file drift test.
-pub const MAX_JOB_POSES: usize = 8 * MAX_COUNT as usize;
+pub use sceneworks_options::MAX_JOB_POSES;
 
 /// `defaults.count` from a resolved manifest entry, or `None` for the blanket [`DEFAULT_COUNT`].
 ///
@@ -92,11 +92,6 @@ pub const MAX_JOB_POSES: usize = 8 * MAX_COUNT as usize;
 /// Same never-invent-from-a-typo posture as its siblings: a declared count outside
 /// [`MIN_COUNT`]`..=`[`MAX_COUNT`] is not a batch anyone meant, so it falls back to the blanket.
 pub use sceneworks_options::image_request::default_count;
-
-/// The payload-sanity bounds on either dimension (the Python `safe_int` clamp). Deliberately wider
-/// than the video lane's 1920 ceiling: image models legitimately render at 2048 (the sensenova U1
-/// family declares `2048x2048`), which is why [`default_resolution`] takes its bounds rather than
-/// sharing one envelope across lanes.
 
 /// `defaults.resolution` from a resolved manifest entry as `(width, height)`, or `None` for the
 /// blanket [`DEFAULT_DIMENSION`] square.

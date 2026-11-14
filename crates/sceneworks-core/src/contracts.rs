@@ -813,73 +813,10 @@ pub use sceneworks_options::contracts::{
     default_image_upscale_factor, image_upscale_factor, HiresFixRequest, ImageUpscaleRequest,
 };
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct VideoUpscaleRequest {
-    /// The source video asset to upscale (required; the worker validates non-empty).
-    #[serde(default)]
-    pub source_asset_id: String,
-    /// Integer scale factor applied to the source dimensions (2 or 4). Ignored when explicit
-    /// `target_width`/`target_height` are supplied.
-    #[serde(default = "default_video_upscale_factor")]
-    pub factor: u8,
-    /// Explicit target width override (snapped to ÷16). `None` ⇒ `factor × source_width`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_width: Option<u32>,
-    /// Explicit target height override (snapped to ÷16). `None` ⇒ `factor × source_height`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_height: Option<u32>,
-    /// Upscale engine. Only `seedvr2` is Mac-supported today (native MLX).
-    #[serde(default = "default_video_upscale_engine")]
-    pub engine: String,
-    /// SeedVR2 model variant id. `seedvr2_3b` is the only wired variant (7B = sc-5197).
-    #[serde(default = "default_video_upscale_model")]
-    pub model: String,
-    /// SeedVR2 input pre-blur (0.0 = none, the reference default). Higher smooths source artifacts.
-    #[serde(default)]
-    pub softness: f32,
-    /// Optional reproducibility seed (SeedVR2 invents plausible detail; one-step but non-deterministic).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seed: Option<u64>,
-    /// Project the source asset belongs to. `None` ⇒ the worker falls back to the job's project id.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<String>,
-    /// Optional display name for the result asset.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
-    #[serde(flatten)]
-    pub extra: ExtraFields,
-}
-
-impl Default for VideoUpscaleRequest {
-    fn default() -> Self {
-        Self {
-            source_asset_id: String::new(),
-            factor: default_video_upscale_factor(),
-            target_width: None,
-            target_height: None,
-            engine: default_video_upscale_engine(),
-            model: default_video_upscale_model(),
-            softness: 0.0,
-            seed: None,
-            project_id: None,
-            display_name: None,
-            extra: ExtraFields::default(),
-        }
-    }
-}
-
-pub const fn default_video_upscale_factor() -> u8 {
-    2
-}
-
-pub fn default_video_upscale_engine() -> String {
-    "seedvr2".to_owned()
-}
-
-pub fn default_video_upscale_model() -> String {
-    "seedvr2_3b".to_owned()
-}
+pub use sceneworks_options::contracts::{
+    default_video_upscale_engine, default_video_upscale_factor, default_video_upscale_model,
+    VideoUpscaleRequest,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

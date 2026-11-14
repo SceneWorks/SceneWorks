@@ -396,7 +396,7 @@ mod tests {
 
 impl From<sceneworks_core::request_validation::ValidationRefusal> for ApiError {
     fn from(error: sceneworks_core::request_validation::ValidationRefusal) -> Self {
-        let mut context = error.context;
+        let mut context = *error.context;
         context["field"] = json!(error.field);
         Self::typed(StatusCode::BAD_REQUEST, error.detail, error.code, context)
     }

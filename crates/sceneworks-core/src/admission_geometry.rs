@@ -2,7 +2,7 @@ pub use sceneworks_options::admission_geometry::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{json, Map as JsonObject, Value};
 
     fn shipped_entry(id: &str) -> JsonObject<String, Value> {
         let manifest = crate::builtin_manifests::builtin_manifest("builtin.models.jsonc")

@@ -912,8 +912,10 @@ pub fn validate_video_reference_asset_ids_payload(
             .is_some_and(|id| !id.trim().is_empty())
     {
         let imported_partition = model_manifest_entry
-            .get("minimaxH3Partition")
-            .and_then(Value::as_str);
+            .as_object()
+            .filter(|entry| crate::h3_import_facts::entry_is_imported_minimax_h3(entry))
+            .and_then(|entry| crate::h3_import_facts::MiniMaxH3Partition::from_entry(entry).ok())
+            .map(|partition| partition.as_str());
         if !crate::h3_keyframes::accepts_last_only_resolved_image_to_video(
             model_manifest_entry
                 .get("id")
@@ -1183,10 +1185,13 @@ pub fn validate_vector_provider_request(
             .and_then(Value::as_bool)
             == Some(false)
     {
-        return Err(ApiError::bad_request(format!(
-            "Model {} does not accept text guidance for image_to_svg",
-            payload.model
-        )));
+        return Err(ApiError::new(
+            "prompt",
+            format!(
+                "Model {} does not accept text guidance for image_to_svg",
+                payload.model
+            ),
+        ));
     }
     for (field, requested) in [
         (

@@ -73,8 +73,8 @@ fn defaults_and_capabilities_come_from_real_model_facts() {
 
 #[test]
 fn video_limits_apply_before_tolerant_worker_parsing() {
-    let entry = facts("mochi_1", "text_to_video");
-    let valid = json!({"projectId":"p","model":"mochi_1","mode":"text_to_video","prompt":"a tree"});
+    let entry = facts("ltx_2_5", "text_to_video");
+    let valid = json!({"projectId":"p","model":"ltx_2_5","mode":"text_to_video","prompt":"a tree"});
     compare("video", valid.clone(), entry.clone()).unwrap();
     for (key, value, field) in [
         ("duration", json!(30), "duration"),
@@ -122,4 +122,26 @@ fn absent_image_reference_cap_is_not_the_video_default() {
     );
     let caps = options::video_request::reference_caps(&Default::default());
     assert_eq!((caps.images, caps.clips, caps.audio), (8, 8, 0));
+}
+
+#[test]
+fn portable_corpus_model_facts_are_actual_exports() {
+    let corpus: Value = serde_json::from_str(include_str!(
+        "../../sceneworks-options/tests/fixtures/validation_corpus.json"
+    ))
+    .unwrap();
+    for (id, entry) in corpus["modelFacts"].as_object().unwrap() {
+        let mode = match entry["type"].as_str().unwrap() {
+            "image" => "text_to_image",
+            "video" => "text_to_video",
+            "audio" => "text_to_speech",
+            "vector" => "image_to_svg",
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            &facts(id, mode),
+            entry,
+            "model facts must be regenerated from the actual ModelSpec: {id}"
+        );
+    }
 }

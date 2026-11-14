@@ -112,6 +112,7 @@ pub(super) fn validate_person_track_job(payload: &PersonTrackJobRequest) -> Resu
 /// to jobs.db and re-serialized to every SSE subscriber on each status change. Cap the
 /// negative prompt at the same char limit as `prompt` and bound `advanced`'s serialized
 /// size. Shared by `validate_image_job` / `validate_video_job`.
+#[cfg(test)]
 pub(super) fn validate_prompt_extras(
     negative_prompt: &str,
     advanced: &impl Serialize,
@@ -135,65 +136,13 @@ pub(super) fn validate_image_prompt_extras(
     .map_err(ApiError::from)
 }
 
-pub(super) const PROMPT_ENHANCE_MAX_TEMPERATURE: f64 = 2.0;
-pub(super) const PROMPT_ENHANCEMENT_FACT_KEY: &str = "promptEnhancement";
-
-/// Validate the typed, bounded part of the FLUX.2 prompt-enhancement request at every image enqueue
-/// boundary. `advanced` is otherwise intentionally extensible, but these fields cross into a native
-/// LLM sampler and must never inherit the old truthy/coercing behavior.
 pub(super) fn validate_prompt_enhancement_fields(
     model_id: &str,
     advanced: &JsonObject,
 ) -> Result<bool, ApiError> {
-    let max_tokens = sceneworks_worker::prompt_enhancement_max_tokens(model_id);
-    if advanced.contains_key(PROMPT_ENHANCEMENT_FACT_KEY) {
-        return Err(ApiError::bad_request(format!(
-            "advanced.{PROMPT_ENHANCEMENT_FACT_KEY} is worker-owned and cannot be supplied by a client"
-        )));
-    }
-    let enabled = match advanced.get("enhancePrompt") {
-        None => false,
-        Some(Value::Bool(enabled)) => *enabled,
-        Some(_) => {
-            return Err(ApiError::bad_request(
-                "advanced.enhancePrompt must be a boolean",
-            ));
-        }
-    };
-    if let Some(value) = advanced.get("enhanceTemperature") {
-        let temperature = value
-            .as_f64()
-            .filter(|value| value.is_finite())
-            .ok_or_else(|| {
-                ApiError::bad_request("advanced.enhanceTemperature must be a finite number")
-            })?;
-        if !(0.0..=PROMPT_ENHANCE_MAX_TEMPERATURE).contains(&temperature) {
-            return Err(ApiError::bad_request(format!(
-                "advanced.enhanceTemperature must be between 0 and {PROMPT_ENHANCE_MAX_TEMPERATURE}"
-            )));
-        }
-        if !enabled {
-            return Err(ApiError::bad_request(
-                "advanced.enhanceTemperature requires advanced.enhancePrompt=true",
-            ));
-        }
-    }
-    if let Some(value) = advanced.get("enhanceMaxTokens") {
-        let tokens = value
-            .as_u64()
-            .ok_or_else(|| ApiError::bad_request("advanced.enhanceMaxTokens must be an integer"))?;
-        if !(1..=max_tokens).contains(&tokens) {
-            return Err(ApiError::bad_request(format!(
-                "advanced.enhanceMaxTokens must be between 1 and {max_tokens}"
-            )));
-        }
-        if !enabled {
-            return Err(ApiError::bad_request(
-                "advanced.enhanceMaxTokens requires advanced.enhancePrompt=true",
-            ));
-        }
-    }
-    Ok(enabled)
+    sceneworks_core::request_validation::prompt_enhancement::fields(model_id, advanced)
+        .map(|(enabled, _, _)| enabled)
+        .map_err(ApiError::from)
 }
 
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
@@ -308,25 +257,10 @@ pub(super) fn validate_prompt_enhancement_payload(payload: &JsonObject) -> Resul
         .get("model")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if !validate_prompt_enhancement_fields(model, advanced)? {
+    if !sceneworks_core::request_validation::prompt_enhancement::validate(model, advanced)
+        .map_err(ApiError::from)?
+    {
         return Ok(());
-    }
-    if !matches!(model, "flux2_dev" | "flux3_klein" | "flux3_klein_base") {
-        return Err(ApiError::bad_request(
-            "advanced.enhancePrompt is supported only by FLUX.2-dev and FLUX 3 Image Klein; FLUX.2-Klein and other models reject it",
-        ));
-    }
-    let strict_control = advanced
-        .get("poses")
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty())
-        || advanced.contains_key("controlWeights")
-        || advanced.contains_key("controlImage")
-        || advanced.contains_key("controlMode");
-    if strict_control {
-        return Err(ApiError::bad_request(
-            "advanced.enhancePrompt cannot be combined with strict control",
-        ));
     }
     validate_prompt_enhancement_route(payload)
 }
@@ -359,29 +293,9 @@ pub(super) fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiErr
     sceneworks_core::request_validation::shape::validate_image_job(payload).map_err(ApiError::from)
 }
 
-/// Bound strict-pose fan-out at the image-job creation boundary. Each `advanced.poses` entry
-/// renders one image, so this is an output-count contract rather than a JSON-size guard.
-///
-/// Existing stored jobs are immutable and remain readable. Retry/duplicate pass their merged
-/// payload through this same helper in `jobs.rs`, so a legacy over-limit job must be reduced before
-/// it can create new work instead of silently reproducing the old unbounded behavior.
-pub(super) fn validate_image_pose_count(advanced: &JsonObject) -> Result<(), ApiError> {
-    sceneworks_core::request_validation::shape::validate_image_pose_count(advanced)
-        .map_err(ApiError::from)
-}
-
 pub(super) fn validate_character_test_job(payload: &CharacterTestRequest) -> Result<(), ApiError> {
-    if payload.prompt.is_empty() || payload.prompt.chars().count() > MAX_PROMPT_CHARS {
-        return Err(ApiError::bad_request(format!(
-            "prompt must be between 1 and {MAX_PROMPT_CHARS} characters"
-        )));
-    }
-    if !(1..=8).contains(&payload.count) {
-        return Err(ApiError::bad_request("count must be between 1 and 8"));
-    }
-    validate_dimension(payload.width, "width", MAX_IMAGE_DIMENSION)?;
-    validate_dimension(payload.height, "height", MAX_IMAGE_DIMENSION)?;
-    Ok(())
+    sceneworks_core::request_validation::utility_validation::validate_character_test(payload)
+        .map_err(ApiError::from)
 }
 
 /// Every `mode` a `POST /api/v1/video/jobs` request may name — the enqueue allow-list, and a
@@ -399,6 +313,7 @@ pub(super) fn validate_character_test_job(payload: &CharacterTestRequest) -> Res
 /// [`sceneworks_core::jobs_store::routing`]'s `VIDEO_UI_MODES`, `video_mode_is_mlx_eligible` +
 /// `VIDEO_MODEL_CAPS`, the candle claim gate, THIS list plus the per-mode required-asset `match`
 /// below it, and the worker's dispatch arm.
+#[cfg(test)]
 pub(crate) use sceneworks_core::video_request::VIDEO_JOB_MODES;
 
 pub(super) fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
@@ -414,26 +329,6 @@ pub(super) fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiErr
 /// rejected by the generator's `validate`, which owns the per-model surface.
 pub(super) fn validate_audio_job(payload: &AudioJobRequest) -> Result<(), ApiError> {
     sceneworks_core::request_validation::shape::validate_audio_job(payload).map_err(ApiError::from)
-}
-
-/// The ICL reference modes a YuE `_icl` checkpoint accepts (sc-19384): one mixed clip, or a
-/// vocal + instrumental pair.
-pub(super) const AUDIO_ICL_MODES: &[&str] = &["single", "dual"];
-/// The weight tiers an audio model can ship as physical per-tier downloads (sc-19384).
-pub(super) const AUDIO_QUANT_TIERS: &[&str] = &["bf16", "q8", "q4"];
-/// Upstream YuE's `prompt_end_time` default: the ICL window end when only a start is given.
-pub(super) const AUDIO_ICL_DEFAULT_END_SECS: f32 = 30.0;
-/// The output limiters a segmented-song model applies to its stems (YuE `save_audio`, sc-19384).
-pub(super) const AUDIO_OUTPUT_LIMITERS: &[&str] = &["clamp", "rescale"];
-
-/// Payload-shape floor for the segmented-song / ICL / tier fields (YuE, sc-19384), before the model
-/// is known: numeric knobs finite and in a sane blanket range, guidance on/off coherent with the
-/// scale, the ICL mode a known token with exactly its own asset ids, and the reference window
-/// well-ordered. [`validate_audio_job_for_model`] then gates each field on the model's declared
-/// capability once the manifest entry is resolved.
-pub(super) fn validate_audio_song_fields(payload: &AudioJobRequest) -> Result<(), ApiError> {
-    sceneworks_core::request_validation::shape::validate_audio_song_fields(payload)
-        .map_err(ApiError::from)
 }
 
 /// Gate the segmented-song / ICL / tier fields on the resolved model's DECLARED audio capabilities
@@ -452,36 +347,11 @@ pub(crate) fn validate_audio_job_for_model(
         .map_err(ApiError::from)
 }
 
-/// The edit operations the audio route accepts up front (the union across audio models — each model's
-/// advertised `audio.editModes` is the real gate the generator's `validate` applies). Matches the
-/// [`gen_core::AudioEditMode`] variant set.
-pub(super) const AUDIO_EDIT_MODES: &[&str] = &["inpaint", "repaint", "extend", "cover"];
-
-/// Sanity-bound the extend/edit source-band fields on an [`AudioJobRequest`] (Conditioning::AudioEdit,
-/// sc-13410). This is the API blanket floor: the source id + edit mode must be a well-formed pair, the
-/// mode a known token, the region seconds finite/ordered, and the strength a 0..=1 weight. The
-/// per-model gates (mode ∈ advertised `audio.editModes`, region inside the clip, 48 kHz source) belong
-/// to the worker/provider, which knows the model surface and the loaded clip.
-pub(super) fn validate_audio_edit_fields(payload: &AudioJobRequest) -> Result<(), ApiError> {
-    sceneworks_core::request_validation::shape::validate_audio_edit_fields(payload)
-        .map_err(ApiError::from)
-}
-
 /// Upper bound for image width/height. A backstop only — per-model resolution is
 /// governed by manifest `limits.resolutions` + the UI. Covers SenseNova-U1's
 /// largest trained bucket (3456) with headroom; video uses its own lower cap.
 pub(super) const MAX_IMAGE_DIMENSION: u32 = 4096;
 
-/// Payload-sanity FLOOR for a named image width/height, before the model is known (sc-24113).
-///
-/// 16 because MOSS-Image accepts 16 px per side (Qwen-Image 2.1 starts at 32) and this
-/// check runs before preset/model resolution. It is the outer bound only — see
-/// the shared core image-request boundary for the per-model floor that still applies.
-pub(super) const SHAPE_MIN_IMAGE_DIMENSION: u32 = 16;
-
-/// Upper bound for video width/height — a lower backstop than images, matching
-/// the cap enforced when validating a video job request.
-pub(super) const MAX_VIDEO_DIMENSION: u32 = 1920;
 // ---------------------------------------------------------------------------
 // Reference-media payload-sanity blankets (sc-17160).
 //
@@ -500,14 +370,6 @@ pub(super) const MAX_VIDEO_DIMENSION: u32 = 1920;
 // The COMBINED cap has no blanket at all, only a per-model declaration, for the same reason
 // in the opposite direction: see the note where the per-list checks end.
 // ---------------------------------------------------------------------------
-
-/// 9 — MiniMax-H3 Ref2VA's image-reference ceiling, the largest of any shipped video model
-/// (every other family stops at [`sceneworks_core::video_request::DEFAULT_MAX_REFERENCE_ASSETS`]).
-pub(super) const MAX_VIDEO_REFERENCE_ASSET_IDS: usize = 9;
-pub(super) const MAX_VIDEO_SOURCE_CLIP_ASSET_IDS: usize = 8;
-/// 3 — Ref2VA's audio-reference ceiling. No model declares more; models that declare
-/// nothing take none at all (`DEFAULT_MAX_REFERENCE_AUDIO_ASSETS` is 0).
-pub(super) const MAX_VIDEO_REFERENCE_AUDIO_ASSET_IDS: usize = 3;
 
 /// Validate the exact model/mode spelling and reference array every video creation boundary will
 /// persist. The typed submit route and retry/duplicate all call this after preset/patch merging and
@@ -535,21 +397,6 @@ pub(super) fn validate_dimension(
     max: u32,
 ) -> Result<(), ApiError> {
     sceneworks_core::request_validation::shape::validate_dimension(value, field, max)
-        .map_err(ApiError::from)
-}
-
-/// [`validate_dimension`] with an explicit floor (sc-24113).
-///
-/// Every caller but the image-generation shape check passes the historical 256 through the wrapper
-/// above and is byte-identical. The image route passes [`SHAPE_MIN_IMAGE_DIMENSION`] because its
-/// real floor is per-model and is applied once the manifest entry is resolved.
-pub(super) fn validate_dimension_in(
-    value: u32,
-    field: &'static str,
-    min: u32,
-    max: u32,
-) -> Result<(), ApiError> {
-    sceneworks_core::request_validation::shape::validate_dimension_in(value, field, min, max)
         .map_err(ApiError::from)
 }
 

@@ -2326,6 +2326,19 @@ mod tests {
     use std::collections::BTreeSet;
 
     #[test]
+    fn shared_validation_refusal_preserves_machine_fields() {
+        let body = json!({"code":"invalid_generation_option", "field":"advanced.steps",
+            "detail":"steps exceeds the model limit", "context":{"field":"advanced.steps", "model":"flux_dev", "kind":"image"}});
+        let error = api_error(ApiClientError::Api {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            detail: body.to_string(),
+        });
+        assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert_eq!(error.message, "steps exceeds the model limit");
+        assert_eq!(error.data, Some(body));
+    }
+
+    #[test]
     fn compact_projects_keeps_only_id_name_created_at() {
         let full = json!([{
             "id": "p1",

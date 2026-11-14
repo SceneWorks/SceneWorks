@@ -628,3 +628,111 @@ pub struct VectorRequest {
     #[serde(default = "default_requested_gpu")]
     pub requested_gpu: String,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptRefineRequest {
+    // Optional so the `image_caption` task (epic 8102, sc-8108) — driven by a reference image, not
+    // text — can omit it. The handler still requires a non-empty prompt for every other task.
+    #[serde(default)]
+    pub prompt: String,
+    pub model_id: Option<String>,
+    pub workflow: Option<String>,
+    /// The selected model's Markdown prompt guide, sent by the client so the
+    /// worker can build a guide-aware system prompt without filesystem access to
+    /// the web assets.
+    pub guide: Option<String>,
+    /// `"refine"` (default), `"magic_prompt"` (expand a plain idea into a structured
+    /// Ideogram 4 JSON caption, epic 4725/sc-5997), `"image_caption"` (turn a
+    /// reference image into the same structured caption via the vision model, epic
+    /// 8102/sc-8108), or `"image_describe"` (turn a reference image into a plain-text
+    /// description for a non-structured t2i model, epic 8203/sc-8206). The two vision
+    /// tasks carry a `source_asset_id` + `project_id` instead of a prompt; the handler
+    /// resolves them to the worker's confined `imagePath`.
+    pub task: Option<String>,
+    /// Target image aspect ratio as `"W:H"` (magic-prompt only); drives bbox/layout
+    /// decisions in the caption. Defaults to `"1:1"` worker-side when absent.
+    pub aspect_ratio: Option<String>,
+    /// Reference image for the vision tasks (`image_caption` / `image_describe`): a project
+    /// asset id resolved to a confined on-disk path before the job is enqueued (epic 8102/8203).
+    pub source_asset_id: Option<String>,
+    /// Multiple reference images for a "mood board" synthesis (epic 8588, sc-8595): the vision task
+    /// examines them together and emits ONE prompt/caption capturing the aesthetic they share. When
+    /// non-empty this takes precedence over `source_asset_id`; each id is resolved to a confined path
+    /// and forwarded as the worker's `imagePaths` array. Empty/absent → the single-image path above.
+    #[serde(default)]
+    pub source_asset_ids: Vec<String>,
+    /// Project owning `source_asset_id` (required for the vision tasks so the
+    /// asset's relative `file.path` can be resolved to an absolute path).
+    pub project_id: Option<String>,
+    /// HF repo string of the model the worker should load (the worker resolves by repo,
+    /// not by catalog id). The web sends the vision model's repo for the vision tasks.
+    pub model: Option<String>,
+    /// Native planner reasoning control (`disabled`, `enabled`, or `auto`). Only the film-plan task
+    /// forwards it; other prompt-refine products retain their established model defaults.
+    pub thinking_mode: Option<String>,
+    /// Plain-text describe style for `image_describe` (epic 8203, sc-8205): `"prose"`
+    /// (default) or `"tags"` (booru/danbooru tags for anime SDXL checkpoints). Forwarded
+    /// verbatim; the worker parses it (unknown/absent → prose).
+    pub caption_style: Option<String>,
+    /// Compressed KV cache opt-in for this generation (sc-20682): `"off"` or `"qualified"`.
+    /// Absent leaves the worker's own default (`SCENEWORKS_LLM_KV_COMPRESSION`, off unless set).
+    /// `"qualified"` never forces compression: the engine runs compressed only for a single
+    /// sequence on a model matching one of its two measured architectures (Llama-3.2-3B-Instruct,
+    /// dense Qwen3-1.7B) within that row's context range (`docs/kv-baseline-harness.md`); batched,
+    /// short and other-model requests run dense with a reason, and the job result's
+    /// `generation.kvCache` records what ran.
+    pub kv_compression: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CharacterTestRequest {
+    pub prompt: String,
+    #[serde(default = "default_image_model")]
+    pub model: String,
+    #[serde(default = "default_image_count")]
+    pub count: u32,
+    #[serde(default = "default_image_size")]
+    pub width: u32,
+    #[serde(default = "default_image_size")]
+    pub height: u32,
+    #[serde(default = "default_requested_gpu")]
+    pub requested_gpu: String,
+    #[serde(default)]
+    pub look_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VectorPromptWorkflowRequest {
+    pub project_id: String,
+    #[serde(default)]
+    pub project_name: Option<String>,
+    pub prompt: String,
+    #[serde(default)]
+    pub negative_prompt: String,
+    pub raster_model: String,
+    pub vector_model: String,
+    #[serde(default)]
+    pub seed: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(default)]
+    pub sampling: VectorSampling,
+    #[serde(default)]
+    pub detail_budget: VectorDetailBudget,
+    #[serde(default = "default_requested_gpu")]
+    pub requested_gpu: String,
+    /// Optional immutable identities used only by replay. Fresh requests omit them; the API stamps
+    /// authoritative revisions. Replay supplies them and fails typed if the catalog has moved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_raster_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_vector_revision: Option<String>,
+}
+fn default_image_count() -> u32 {
+    4
+}

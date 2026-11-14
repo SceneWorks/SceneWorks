@@ -3,6 +3,9 @@
 //! memory admission and native provider validation remain with their existing owners.
 pub mod shape;
 
+/// Version of the portable validator input/output contract (independent of workflow carriers).
+pub const VALIDATOR_SCHEMA_VERSION: u32 = 1;
+
 use crate::contracts::JsonObject;
 use crate::generation_contracts::*;
 use serde::{de::DeserializeOwned, Serialize};
@@ -13,7 +16,7 @@ pub struct ValidationRefusal {
     pub code: &'static str,
     pub field: String,
     pub detail: String,
-    pub context: Value,
+    pub context: Box<Value>,
 }
 
 impl ValidationRefusal {
@@ -22,7 +25,7 @@ impl ValidationRefusal {
             code: "invalid_generation_option",
             field: field.into(),
             detail: detail.into(),
-            context: json!({}),
+            context: Box::new(json!({})),
         }
     }
     // Existing source-owned compound rules retain their human-readable wording. The stable
@@ -30,20 +33,36 @@ impl ValidationRefusal {
     pub fn bad_request(detail: impl Into<String>) -> Self {
         let detail = detail.into();
         let field = crate::registry()
-            .filter(|option| detail.contains(option.key))
-            .max_by_key(|option| option.key.len())
-            .map(|option| {
-                if option.location.starts_with("advanced") {
-                    option.id
+            .filter_map(|option| {
+                let path = if option.location.starts_with("advanced") {
+                    option.id.to_owned()
+                } else if let Some((_, nested)) = option.location.split_once('.') {
+                    format!("{nested}.{}", option.key)
                 } else {
-                    option.key
+                    option.key.to_owned()
+                };
+                if detail.contains(&path) {
+                    Some((path.len() + 1000, path))
+                } else if detail.contains(option.key) {
+                    Some((option.key.len(), option.key.to_owned()))
+                } else {
+                    None
                 }
             })
-            .unwrap_or("request");
+            .max_by_key(|(rank, _)| *rank)
+            .map(|(_, field)| field)
+            .unwrap_or_else(|| "request".into());
         Self::new(field, detail)
     }
     pub fn with_request(mut self, kind: &str, payload: &JsonObject) -> Self {
-        self.context = json!({"kind":kind, "model":payload.get("model"), "mode":payload.get("mode"), "field":self.field});
+        let context = self
+            .context
+            .as_object_mut()
+            .expect("refusal context object");
+        context.insert("kind".into(), json!(kind));
+        context.insert("model".into(), json!(payload.get("model")));
+        context.insert("mode".into(), json!(payload.get("mode")));
+        context.insert("field".into(), json!(self.field));
         self
     }
 }
@@ -76,6 +95,12 @@ pub fn validate_shape(kind: &str, payload: &JsonObject) -> Result<(), Validation
             "vqa" => shape::validate_vqa_job(&decode(payload)?),
             "interleave" => shape::validate_interleave_job(&decode(payload)?),
             "vector" => shape::validate_vector_request(&decode_vector(payload)?),
+            "vectorPrompt" => crate::utility_validation::validate_vector_prompt(&decode(payload)?),
+            "characterTest" => {
+                crate::utility_validation::validate_character_test(&decode(payload)?)
+            }
+            "videoUpscale" => crate::utility_validation::validate_video_upscale(&decode(payload)?),
+            "promptRefine" => crate::utility_validation::validate_prompt_refine(payload),
             _ => Ok(()),
         }
     })()
@@ -171,6 +196,7 @@ pub fn validate(
         }
         match kind {
             "image" => {
+                crate::prompt_enhancement::validate(model, advanced)?;
                 check(
                     "advanced.quantTier",
                     crate::image_request::image_quant_tier_refusal(model, advanced),
@@ -259,9 +285,12 @@ pub fn validate(
                     &Value::Object(entry.clone()),
                 )?;
                 let request: VideoJobRequest = decode(payload)?;
-                let auto = crate::video_request::requested_auto_duration(advanced)
-                    .map_err(ValidationRefusal::bad_request)?;
-                if auto.is_none() {
+                let auto = crate::video_request::normalize_ltx25_generation_controls(
+                    model,
+                    &mut payload.clone(),
+                    &Value::Object(entry.clone()),
+                )?;
+                if !auto {
                     check(
                         "duration",
                         crate::video_request::duration_limit_error(
@@ -302,6 +331,28 @@ pub fn validate(
                         request.reference_audio_asset_ids.len(),
                         entry,
                     ),
+                )?;
+            }
+            "vectorPrompt" => {
+                let request: VectorPromptWorkflowRequest = decode(payload)?;
+                let (raster, vector) = crate::utility_validation::vector_prompt_stages(&request);
+                let raster_payload = serde_json::to_value(raster).expect("raster request");
+                let vector_payload = serde_json::to_value(vector).expect("vector request");
+                validate(
+                    "image",
+                    raster_payload.as_object().unwrap(),
+                    entry
+                        .get("raster")
+                        .and_then(Value::as_object)
+                        .unwrap_or(&empty),
+                )?;
+                validate(
+                    "vector",
+                    vector_payload.as_object().unwrap(),
+                    entry
+                        .get("vector")
+                        .and_then(Value::as_object)
+                        .unwrap_or(&empty),
                 )?;
             }
             "vector" => {

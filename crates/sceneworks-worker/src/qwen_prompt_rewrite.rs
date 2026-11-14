@@ -124,13 +124,6 @@ pub(crate) const REWRITE_TOP_K: usize = 20;
 pub(crate) const T2I_MAX_NEW_TOKENS: u32 = 16256;
 pub(crate) const I2I_MAX_NEW_TOKENS: u32 = 24000;
 
-/// Upper bound on reference images sent to the edit rewriter.
-///
-/// The same 10 the render takes (S3 edit contract): the rewrite must see EXACTLY the ordered list
-/// the render will condition on, or its `ratio_follow: "<imageN>"` names a different picture than
-/// the one the user attached.
-pub(crate) const MAX_REWRITE_REFERENCES: usize = 10;
-
 /// Which of the two rewriters a request selects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Rewriter {

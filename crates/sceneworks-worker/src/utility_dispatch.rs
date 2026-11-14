@@ -613,10 +613,11 @@ async fn handle_job_failure(
     match error {
         WorkerError::Canceled(_) => {}
         WorkerError::Validation(error) => {
-            let result = JsonObject::from_iter([(
+            let mut result = job.result.clone();
+            result.insert(
                 "validationRefusal".to_owned(),
                 serde_json::to_value(&error).expect("serializable refusal"),
-            )]);
+            );
             let payload = progress_payload(
                 JobStatus::Failed,
                 ProgressStage::Failed,

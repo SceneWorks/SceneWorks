@@ -96,10 +96,6 @@ pub(crate) fn default_track_name() -> String {
     "Selected person".to_owned()
 }
 
-pub(crate) fn default_image_mode() -> String {
-    "text_to_image".to_owned()
-}
-
 pub(crate) fn default_image_model() -> String {
     "z_image_turbo".to_owned()
 }
@@ -108,40 +104,8 @@ pub(crate) fn default_image_count() -> u32 {
     4
 }
 
-pub(crate) fn default_image_size() -> u32 {
-    1024
-}
-
-pub(crate) fn default_style_preset() -> String {
-    "cinematic".to_owned()
-}
-
-pub(crate) fn default_fit_mode() -> String {
-    // epic 2551: never stretch by default. "crop" covers the frame undistorted; the
-    // worker normalizes unknown values back to crop, so this is just the wire default.
-    "crop".to_owned()
-}
-
-pub(crate) fn default_video_mode() -> String {
-    "image_to_video".to_owned()
-}
-
 pub(crate) fn default_video_model() -> String {
     "ltx_2_3".to_owned()
-}
-
-/// The default audio model a `POST /api/v1/audio/jobs` resolves when the caller names none
-/// (SceneWorks Audio Studio, epic 13400 / sc-13404). Kokoro-82M is the recommended Speech model
-/// (`recommended: true` in the seeded manifest), 24 kHz mono TTS, Candle-native on every platform.
-pub(crate) fn default_audio_model() -> String {
-    "kokoro_82m".to_owned()
-}
-
-/// The default base TTS model for a Voice Clone job (sc-13411 C4): the "content" generator whose speech
-/// OpenVoice V2 re-timbres toward the reference. Kokoro-82M is the recommended, always-installed Speech
-/// model — the base clip's voice is itself a knob (`voice`), but the base generator is Kokoro.
-pub(crate) fn default_audio_base_model() -> String {
-    "kokoro_82m".to_owned()
 }
 
 // No `default_video_duration` either, and for a sharper reason than fps: the blanket 6.0 that used
@@ -159,11 +123,3 @@ pub(crate) fn default_audio_base_model() -> String {
 // declared `defaults.resolution` (core's `default_resolution`). The blanket 768x512 that used to
 // live here is not in `limits.resolutions` for 7 of the 9 shipped video models — e.g. `bernini`
 // would render at 768x512 instead of its native, only-trained 848x480 (sc-12400). See `VideoJobRequest::width`.
-
-pub(crate) fn default_video_quality() -> String {
-    "balanced".to_owned()
-}
-
-pub(crate) fn default_replacement_mode() -> String {
-    "face_only".to_owned()
-}

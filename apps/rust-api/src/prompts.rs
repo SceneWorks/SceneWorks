@@ -4,20 +4,11 @@ use super::*;
 /// reference is downscaled to ~1 MP before the dense Qwen-VL ViT, so the cost scales with N; this bounds
 /// the vision attention + context a single request can demand. The Image Studio picker enforces the same
 /// ceiling client-side — this is the authoritative server-side guard.
-pub(crate) const MAX_MOOD_BOARD_IMAGES: usize = 6;
+#[cfg(test)]
+pub(crate) use sceneworks_core::request_validation::utility_validation::MAX_MOOD_BOARD_IMAGES;
 
 // The API and worker classify the same core-owned discriminator.
 pub(crate) use sceneworks_core::contracts::QWEN_IMAGE_REWRITE_TASK;
-
-/// Maximum reference images on a Qwen-Image 2.1 rewrite request.
-///
-/// TEN, not [`MAX_MOOD_BOARD_IMAGES`], and the difference is not a loosened guard but a different
-/// contract. A mood board is a synthesis whose cost the 6 bounds; a rewrite must be shown EXACTLY
-/// the ordered list the render will condition on (S3 edit contract: 1–10), or its `ratio_follow`
-/// ("<image2>") names a different picture than the one the user attached. The engine and the image
-/// enqueue path both cap at 10, so this is the same number stated at the third seam rather than a
-/// new one.
-pub(crate) const MAX_QWEN_REWRITE_IMAGES: usize = 10;
 
 /// Enqueue a `prompt_refine` job: a lightweight, non-GPU job that asks an
 /// OpenAI-compatible LLM to rewrite the user's prompt to follow the selected
@@ -27,6 +18,8 @@ pub(crate) async fn create_prompt_refine_job(
     State(state): State<AppState>,
     ApiJson(payload): ApiJson<PromptRefineRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    sceneworks_core::request_validation::validate_shape("promptRefine", &to_json_object(&payload)?)
+        .map_err(ApiError::from)?;
     let task = payload
         .task
         .as_deref()
@@ -45,9 +38,6 @@ pub(crate) async fn create_prompt_refine_job(
     let carries_reference_images = is_vision_task || is_qwen_rewrite;
 
     let prompt = payload.prompt.trim();
-    if prompt.is_empty() && !is_vision_task {
-        return Err(ApiError::bad_request("Prompt cannot be empty"));
-    }
 
     let mut job_payload = JsonObject::new();
     if !prompt.is_empty() {
@@ -81,34 +71,6 @@ pub(crate) async fn create_prompt_refine_job(
         // A VISION task has nothing to look at without a reference. A rewrite with none is the
         // text-to-image case and proceeds — so this requirement, and everything below it that needs
         // a project to resolve asset ids against, is skipped when the list is legitimately empty.
-        if asset_ids.is_empty() && is_vision_task {
-            return Err(ApiError::bad_request(
-                "sourceAssetId (or sourceAssetIds) is required for a reference-image task",
-            ));
-        }
-        // Bound the board: each reference is downscaled to ~1 MP before the dense Qwen-VL ViT, so N
-        // references cost ~N MP of vision attention + context. Cap it so a runaway list cannot exhaust
-        // memory. The UI enforces the same ceiling; this is the server-side guard.
-        //
-        // The rewrite's ceiling is 10 rather than 6, and for a different reason — see
-        // `MAX_QWEN_REWRITE_IMAGES`: it must be shown exactly the ordered list the render will use.
-        let (cap, cap_message) = if is_qwen_rewrite {
-            (
-                MAX_QWEN_REWRITE_IMAGES,
-                format!(
-                    "Qwen Image 2.1 prompt rewriting accepts at most {MAX_QWEN_REWRITE_IMAGES} \
-                     reference images — the same ordered list the render takes"
-                ),
-            )
-        } else {
-            (
-                MAX_MOOD_BOARD_IMAGES,
-                format!("A mood board accepts at most {MAX_MOOD_BOARD_IMAGES} reference images"),
-            )
-        };
-        if asset_ids.len() > cap {
-            return Err(ApiError::bad_request(cap_message));
-        }
         if !asset_ids.is_empty() {
             let project_id = payload
                 .project_id
@@ -183,11 +145,6 @@ pub(crate) async fn create_prompt_refine_job(
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            if !matches!(thinking_mode, "disabled" | "enabled" | "auto") {
-                return Err(ApiError::bad_request(
-                    "thinkingMode must be disabled, enabled, or auto",
-                ));
-            }
             job_payload.insert(
                 "thinkingMode".to_owned(),
                 Value::String(thinking_mode.to_owned()),
@@ -203,11 +160,6 @@ pub(crate) async fn create_prompt_refine_job(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        if !matches!(kv_compression, "off" | "qualified") {
-            return Err(ApiError::bad_request(
-                "kvCompression must be off or qualified",
-            ));
-        }
         job_payload.insert(
             "kvCompression".to_owned(),
             Value::String(kv_compression.to_owned()),

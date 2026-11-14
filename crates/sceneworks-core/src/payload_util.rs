@@ -2,7 +2,8 @@ pub use sceneworks_options::payload_util::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use crate::contracts::JsonObject;
+    use serde_json::{json, Value};
 
     fn payload(value: Value) -> JsonObject {
         value.as_object().cloned().unwrap()

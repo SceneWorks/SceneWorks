@@ -121,7 +121,22 @@ pub fn shape(kind: &str, payload: &Value) -> Result<(), ShapeError> {
                                     .is_some())
                     }
                     Shape::Number => number().is_some(),
-                    Shape::Text | Shape::OneOf(_) => value.is_string(),
+                    Shape::Text => value.is_string(),
+                    Shape::OneOf(description) if description.starts_with("JSON value retained") => {
+                        true
+                    }
+                    Shape::OneOf("2 | 4") => matches!(value.as_u64(), Some(2 | 4)),
+                    Shape::OneOf(_) if spec.location == "promptRefine" => value.is_string(),
+                    Shape::OneOf(description)
+                        if !spec.compatibility.contains("Unknown or absent")
+                            && description.contains(" | ")
+                            && !description.contains("empty legacy alias") =>
+                    {
+                        value.as_str().is_some_and(|text| {
+                            description.split(" | ").any(|choice| choice == text)
+                        })
+                    }
+                    Shape::OneOf(_) => value.is_string(),
                     Shape::Strings => value
                         .as_array()
                         .is_some_and(|a| a.iter().all(Value::is_string)),

@@ -1580,6 +1580,12 @@ async fn validate_and_canonicalize_merged_generation_payload(
         }
         merged.insert("modelManifestEntry".to_owned(), entry);
     }
+    if matches!(job_type, JobType::VideoUpscale | JobType::PromptRefine) {
+        let kind = sceneworks_core::request_validation::kind_for_job(&job_type)
+            .expect("registered utility");
+        sceneworks_core::request_validation::validate(kind, &merged, &JsonObject::new())
+            .map_err(ApiError::from)?;
+    }
     let checkpoint_key = crate::iris_training::CHECKPOINT_MODEL_ID_KEY;
     if persisted.contains_key(checkpoint_key) && !merged.contains_key(checkpoint_key) {
         merged.insert(checkpoint_key.to_owned(), Value::Null);

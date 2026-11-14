@@ -13,3 +13,7 @@ pub use sceneworks_options::generation_contracts::{
 pub use sceneworks_options::generation_contracts::{
     VectorDetailBudget, VectorMode, VectorRequest, VectorSampling, MAX_VECTOR_WALL_TIME_MS,
 };
+
+pub use sceneworks_options::generation_contracts::{
+    CharacterTestRequest, PromptRefineRequest, VectorPromptWorkflowRequest,
+};

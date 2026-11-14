@@ -3,7 +3,7 @@ pub use sceneworks_options::minimax_h3_turbo::*;
 mod tests {
     use super::*;
     use crate::video_request::steps_limit_error;
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     fn lora(id: &str) -> Value {
         json!({ "id": id })
