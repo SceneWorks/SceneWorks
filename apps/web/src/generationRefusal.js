@@ -1,7 +1,8 @@
 // The worker keeps the readable error and a structured refusal beside existing result telemetry.
 export function generationRefusal(value) {
   const refusal = value?.result?.validationRefusal ?? value;
-  if (refusal?.code !== "invalid_generation_option" || typeof refusal.detail !== "string") {
+  if (typeof refusal?.code !== "string" || typeof refusal.detail !== "string"
+      || (typeof refusal.field !== "string" && typeof refusal.context?.field !== "string")) {
     return null;
   }
   return {

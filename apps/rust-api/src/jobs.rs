@@ -165,13 +165,9 @@ pub(crate) async fn create_job(
     )
     .await?;
     if let Some(kind) = sceneworks_core::request_validation::kind_for_job(&payload.job_type) {
-        let empty = JsonObject::new();
-        let entry = payload
-            .payload
-            .get("modelManifestEntry")
-            .and_then(Value::as_object)
-            .unwrap_or(&empty);
-        sceneworks_core::request_validation::validate(kind, &payload.payload, entry)
+        let entry =
+            sceneworks_core::request_validation::facts_for_job(&payload.job_type, &payload.payload);
+        sceneworks_core::request_validation::validate(kind, &payload.payload, &entry)
             .map_err(ApiError::from)?;
     }
     if matches!(payload.job_type, JobType::ImageDetail) {
@@ -1580,11 +1576,21 @@ async fn validate_and_canonicalize_merged_generation_payload(
         }
         merged.insert("modelManifestEntry".to_owned(), entry);
     }
-    if matches!(job_type, JobType::VideoUpscale | JobType::PromptRefine) {
+    if matches!(
+        job_type,
+        JobType::VideoUpscale
+            | JobType::PromptRefine
+            | JobType::LoraTrain
+            | JobType::ControlTraining
+    ) {
         let kind = sceneworks_core::request_validation::kind_for_job(&job_type)
             .expect("registered utility");
-        sceneworks_core::request_validation::validate(kind, &merged, &JsonObject::new())
-            .map_err(ApiError::from)?;
+        sceneworks_core::request_validation::validate(
+            kind,
+            &merged,
+            &sceneworks_core::request_validation::facts_for_job(&job_type, &merged),
+        )
+        .map_err(ApiError::from)?;
     }
     let checkpoint_key = crate::iris_training::CHECKPOINT_MODEL_ID_KEY;
     if persisted.contains_key(checkpoint_key) && !merged.contains_key(checkpoint_key) {

@@ -136,6 +136,7 @@ pub(super) fn validate_image_prompt_extras(
     .map_err(ApiError::from)
 }
 
+#[cfg(test)]
 pub(super) fn validate_prompt_enhancement_fields(
     model_id: &str,
     advanced: &JsonObject,
@@ -258,7 +259,7 @@ pub(super) fn validate_prompt_enhancement_payload(payload: &JsonObject) -> Resul
         .and_then(Value::as_str)
         .unwrap_or_default();
     if !sceneworks_core::request_validation::prompt_enhancement::validate(model, advanced)
-        .map_err(ApiError::from)?
+        .map_err(|error| ApiError::from(error.with_request("image", payload)))?
     {
         return Ok(());
     }
@@ -289,7 +290,6 @@ pub(super) fn validate_model_id(model: &str) -> Result<(), ApiError> {
 }
 
 pub(super) fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
-    validate_prompt_enhancement_fields(&payload.model, &payload.advanced)?;
     sceneworks_core::request_validation::shape::validate_image_job(payload).map_err(ApiError::from)
 }
 

@@ -5,7 +5,9 @@ use super::*;
 /// the vision attention + context a single request can demand. The Image Studio picker enforces the same
 /// ceiling client-side — this is the authoritative server-side guard.
 #[cfg(test)]
-pub(crate) use sceneworks_core::request_validation::utility_validation::MAX_MOOD_BOARD_IMAGES;
+pub(crate) use sceneworks_core::request_validation::utility_validation::{
+    MAX_MOOD_BOARD_IMAGES, MAX_QWEN_REWRITE_IMAGES,
+};
 
 // The API and worker classify the same core-owned discriminator.
 pub(crate) use sceneworks_core::contracts::QWEN_IMAGE_REWRITE_TASK;

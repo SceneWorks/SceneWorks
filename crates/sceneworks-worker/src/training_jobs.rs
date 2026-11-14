@@ -40,10 +40,10 @@ use sceneworks_core::training::latent_perceptual::{
 };
 use sceneworks_core::training::{
     parse_resolution_bucket_config, parse_training_bucket_config, subject_mask_loss_weights,
-    technique_value, ResolutionBucketConfig, TrainingPlan, GRADIENT_NOISE_ETA_KEY,
-    GRADIENT_NOISE_ETA_MAX, GRADIENT_NOISE_GAMMA_DEFAULT, GRADIENT_NOISE_GAMMA_KEY,
-    GRADIENT_NOISE_GAMMA_MAX, RESOLUTION_BUCKETS_KEY, SUBJECT_MASK_LOSS_KEY, TRAINING_PLAN_VERSION,
-    WEIGHT_NOISE_SIGMA_KEY, WEIGHT_NOISE_SIGMA_MAX,
+    ResolutionBucketConfig, TrainingPlan, GRADIENT_NOISE_ETA_KEY, GRADIENT_NOISE_ETA_MAX,
+    GRADIENT_NOISE_GAMMA_DEFAULT, GRADIENT_NOISE_GAMMA_KEY, GRADIENT_NOISE_GAMMA_MAX,
+    RESOLUTION_BUCKETS_KEY, SUBJECT_MASK_LOSS_KEY, TRAINING_PLAN_VERSION, WEIGHT_NOISE_SIGMA_KEY,
+    WEIGHT_NOISE_SIGMA_MAX,
 };
 use sceneworks_core::training_subject_masks::{
     lookup_subject_mask_for_image, read_subject_mask_index_at, subject_mask_relative_path,

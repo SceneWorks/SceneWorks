@@ -48,7 +48,7 @@ async fn shared_video_upscale_refusals_match_raw_create_retry_duplicate() {
         app.clone(),
         "POST",
         "/api/v1/jobs",
-        json!({"jobType":"video_upscale","projectId":project["id"],"payload":payload}),
+        json!({"type":"video_upscale","projectId":project["id"],"payload":payload}),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{job}");
@@ -63,7 +63,7 @@ async fn shared_video_upscale_refusals_match_raw_create_retry_duplicate() {
         app.clone(),
         "POST",
         "/api/v1/jobs",
-        json!({"jobType":"video_upscale","projectId":project["id"],"payload":invalid}),
+        json!({"type":"video_upscale","projectId":project["id"],"payload":invalid}),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");

@@ -418,7 +418,11 @@ const HEARTBEAT_SSE_WIRE: &str = "event: heartbeat\ndata: {}\n\n";
 fn generation_wire_kind<T: 'static>() -> Option<&'static str> {
     use std::any::TypeId;
     let id = TypeId::of::<T>();
-    if id == TypeId::of::<ImageJobRequest>() {
+    if id == TypeId::of::<LoraTrainingRequest>() {
+        Some("training")
+    } else if id == TypeId::of::<sceneworks_core::yue2_score::jobs::Yue2JobSpec>() {
+        Some("yue2")
+    } else if id == TypeId::of::<ImageJobRequest>() {
         Some("image")
     } else if id == TypeId::of::<VideoJobRequest>() {
         Some("video")
@@ -529,7 +533,7 @@ where
     type Rejection = Response;
 
     async fn from_request(request: AxumRequest, state: &S) -> Result<Self, Self::Rejection> {
-        let Json(value) = Json::<Value>::from_request(request, state)
+        let Json(mut value) = Json::<Value>::from_request(request, state)
             .await
             .map_err(json_rejection_response)?;
         if let Some(kind) = generation_wire_kind::<T>() {
@@ -538,6 +542,11 @@ where
             })?;
             sceneworks_core::request_validation::validate_shape(kind, payload)
                 .map_err(|error| ApiError::from(error).into_response())?;
+            // The canonical upgrader has checked this envelope field. Strict DTOs only own options.
+            value
+                .as_object_mut()
+                .expect("request object")
+                .remove("optionsSchemaVersion");
         }
         serde_json::from_value(value)
             .map(Self)

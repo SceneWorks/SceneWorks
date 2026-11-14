@@ -198,13 +198,9 @@ async fn run_utility_job_inner(
     let metrics_probe = job_metrics::JobMetricsProbe::start(&settings.gpu_id);
     let result = with_shutdown_flag(shutdown.clone(), async {
         if let Some(kind) = sceneworks_core::request_validation::kind_for_job(&job.job_type) {
-            let empty = JsonObject::new();
-            let entry = job
-                .payload
-                .get("modelManifestEntry")
-                .and_then(Value::as_object)
-                .unwrap_or(&empty);
-            sceneworks_core::request_validation::validate(kind, &job.payload, entry).map_err(
+            let entry =
+                sceneworks_core::request_validation::facts_for_job(&job.job_type, &job.payload);
+            sceneworks_core::request_validation::validate(kind, &job.payload, &entry).map_err(
                 |error| {
                     (
                         "Invalid generation options.",

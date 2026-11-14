@@ -83,6 +83,7 @@ pub fn validate_model_id(model: &str) -> Result<(), ApiError> {
 pub fn validate_image_job<A: Serialize, M: Serialize>(
     payload: &ImageJobRequest<A, M>,
 ) -> Result<(), ApiError> {
+    crate::prompt_enhancement::fields(&payload.model, &payload.advanced)?;
     if payload.project_id.is_empty() {
         return Err(ApiError::bad_request("projectId is required"));
     }

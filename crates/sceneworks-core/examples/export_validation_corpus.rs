@@ -22,12 +22,40 @@ fn main() {
             .model,
         );
     }
+    let target = sceneworks_core::training::effective_training_targets_for_candle(false)
+        .targets
+        .into_iter()
+        .find(|target| target.id == "z_image_turbo_lora")
+        .unwrap();
+    models.insert(target.id.clone(), serde_json::to_value(&target).unwrap());
+    let control_target = sceneworks_core::training::effective_training_targets_for_candle(true)
+        .targets
+        .into_iter()
+        .find(|target| target.id == "krea_2_control")
+        .unwrap();
+    models.insert(
+        control_target.id.clone(),
+        serde_json::to_value(&control_target).unwrap(),
+    );
+    models.insert(
+        "vectorPrompt".into(),
+        json!({"raster":models["flux_dev"],"vector":models["starvector_1b"]}),
+    );
     let image = json!({"projectId":"p","model":"flux_dev","prompt":"a tree"});
     let video = json!({"projectId":"p","model":"ltx_2_5","mode":"text_to_video","prompt":"a tree"});
     let vector = json!({"projectId":"p","model":"starvector_1b","mode":"image_to_svg","sourceAssetId":"source"});
     let mut cases = vec![];
     let mut add = |name: &str, kind: &str, payload: Value| {
-        let model = payload.get("model").and_then(Value::as_str).unwrap_or("");
+        let model = if kind == "vectorPrompt" {
+            "vectorPrompt"
+        } else {
+            payload
+                .get("model")
+                .or_else(|| payload.get("targetId"))
+                .or_else(|| payload.pointer("/plan/target/targetId"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+        };
         let empty = serde_json::Map::new();
         let facts = models
             .get(model)
@@ -134,6 +162,65 @@ fn main() {
         "character test",
         "characterTest",
         json!({"prompt":"a tree"}),
+    );
+    add(
+        "character test invalid count",
+        "characterTest",
+        json!({"prompt":"a tree","count":9}),
+    );
+    add(
+        "vector composition",
+        "vectorPrompt",
+        json!({"projectId":"p","prompt":"a tree","rasterModel":"flux_dev","vectorModel":"starvector_1b"}),
+    );
+    add(
+        "vector composition invalid sampler",
+        "vectorPrompt",
+        json!({"projectId":"p","prompt":"a tree","rasterModel":"flux_dev","vectorModel":"starvector_1b","sampling":{"topP":2}}),
+    );
+    add(
+        "Yue2 create",
+        "yue2",
+        json!({"kind":"create","lyrics":"verse","computePolicy":"auto"}),
+    );
+    add(
+        "Yue2 invalid steps",
+        "yue2",
+        json!({"kind":"create","lyrics":"verse","computePolicy":"auto","steps":0}),
+    );
+    add(
+        "Yue2 execution",
+        "yue2Execution",
+        json!({"kind":"create","lyrics":"verse","computePolicy":"auto","runId":"yue2run_test"}),
+    );
+    add(
+        "Yue2 execution invalid steps",
+        "yue2Execution",
+        json!({"kind":"create","lyrics":"verse","computePolicy":"auto","runId":"yue2run_test","steps":0}),
+    );
+    let training = json!({"targetId":target.id,"datasetId":"dataset","outputName":"adapter","dryRun":true,"config":target.defaults});
+    add("training defaults", "training", training.clone());
+    let mut invalid_training = training.clone();
+    invalid_training["config"]["rank"] = json!(129);
+    add("training target limit", "training", invalid_training);
+    let plan = json!({"plan":{"target":{"targetId":target.id,"kernel":target.kernel,"baseModel":target.base_model},"config":target.defaults}});
+    add("lora_train defaults", "lora_train", plan.clone());
+    let mut invalid = plan.clone();
+    invalid["plan"]["config"]["rank"] = json!(129);
+    add("lora_train target limit", "lora_train", invalid);
+    add("control_training wrong kernel", "control_training", plan);
+    let control = json!({"plan":{"target":{"targetId":control_target.id,"kernel":control_target.kernel,"baseModel":control_target.base_model},"config":control_target.defaults}});
+    add(
+        "control_training defaults",
+        "control_training",
+        control.clone(),
+    );
+    let mut invalid = control.clone();
+    invalid["plan"]["config"]["batchSize"] = json!(0);
+    add(
+        "control_training invalid batch",
+        "control_training",
+        invalid,
     );
     println!("{}",serde_json::to_string_pretty(&json!({"schemaVersion":options::request_validation::VALIDATOR_SCHEMA_VERSION,"modelFacts":models,"cases":cases})).unwrap());
 }

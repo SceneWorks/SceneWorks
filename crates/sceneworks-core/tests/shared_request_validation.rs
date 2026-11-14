@@ -131,6 +131,22 @@ fn portable_corpus_model_facts_are_actual_exports() {
     ))
     .unwrap();
     for (id, entry) in corpus["modelFacts"].as_object().unwrap() {
+        if id == "z_image_turbo_lora" || id == "krea_2_control" {
+            let target = sceneworks_core::training::effective_training_targets_for_candle(
+                id == "krea_2_control",
+            )
+            .targets
+            .into_iter()
+            .find(|target| target.id == *id)
+            .unwrap();
+            assert_eq!(serde_json::to_value(target).unwrap(), *entry);
+            continue;
+        }
+        if id == "vectorPrompt" {
+            assert_eq!(entry["raster"], corpus["modelFacts"]["flux_dev"]);
+            assert_eq!(entry["vector"], corpus["modelFacts"]["starvector_1b"]);
+            continue;
+        }
         let mode = match entry["type"].as_str().unwrap() {
             "image" => "text_to_image",
             "video" => "text_to_video",

@@ -736,3 +736,22 @@ pub struct VectorPromptWorkflowRequest {
 fn default_image_count() -> u32 {
     4
 }
+
+/// Wire defaults used in refusal context before a malformed request can be deserialized.
+pub(crate) fn default_model_for(kind: &str) -> Option<String> {
+    match kind {
+        "image" => Some(default_image_model()),
+        "video" => Some(default_video_model()),
+        "audio" => Some(default_audio_model()),
+        "vqa" => Some(default_vqa_model()),
+        "interleave" => Some(default_interleave_model()),
+        _ => None,
+    }
+}
+pub(crate) fn default_mode_for(kind: &str) -> Option<String> {
+    match kind {
+        "image" => Some(default_image_mode()),
+        "video" => Some(default_video_mode()),
+        _ => None,
+    }
+}

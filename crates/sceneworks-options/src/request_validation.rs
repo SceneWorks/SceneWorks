@@ -59,9 +59,21 @@ impl ValidationRefusal {
             .context
             .as_object_mut()
             .expect("refusal context object");
-        context.insert("kind".into(), json!(kind));
-        context.insert("model".into(), json!(payload.get("model")));
-        context.insert("mode".into(), json!(payload.get("mode")));
+        context.entry("kind").or_insert_with(|| json!(kind));
+        context.insert(
+            "model".into(),
+            payload
+                .get("model")
+                .cloned()
+                .unwrap_or_else(|| json!(default_model_for(kind))),
+        );
+        context.insert(
+            "mode".into(),
+            payload
+                .get("mode")
+                .cloned()
+                .unwrap_or_else(|| json!(default_mode_for(kind))),
+        );
         context.insert("field".into(), json!(self.field));
         self
     }
@@ -74,7 +86,10 @@ impl std::fmt::Display for ValidationRefusal {
 impl std::error::Error for ValidationRefusal {}
 
 fn decode<T: DeserializeOwned>(payload: &JsonObject) -> Result<T, ValidationRefusal> {
-    serde_path_to_error::deserialize(Value::Object(payload.clone())).map_err(|error| {
+    let mut fields = payload.clone();
+    // Carrier version is checked by the canonical upgrader, not a generation DTO option.
+    fields.remove("optionsSchemaVersion");
+    serde_path_to_error::deserialize(Value::Object(fields)).map_err(|error| {
         ValidationRefusal::new(error.path().to_string(), error.inner().to_string())
     })
 }
@@ -85,6 +100,22 @@ fn check(field: &str, error: Option<String>) -> Result<(), ValidationRefusal> {
 /// Shape policy runs on raw JSON, before any tolerant historical request parser. This is also
 /// the HTTP extractor's gate before DTO deserialization can erase malformed advanced carriers.
 pub fn validate_shape(kind: &str, payload: &JsonObject) -> Result<(), ValidationRefusal> {
+    if crate::training_validation::handles(kind) {
+        return crate::training_validation::validate_shape(kind, payload);
+    }
+    if kind == "audio" && payload.contains_key("yue2") {
+        let block = payload
+            .get("yue2")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                ValidationRefusal::new("yue2", "yue2 must be an object").with_request(kind, payload)
+            })?;
+        return validate_yue2("yue2Execution", block)
+            .map_err(|error| error.with_request(kind, payload));
+    }
+    if matches!(kind, "yue2" | "yue2Execution") {
+        return validate_yue2(kind, payload).map_err(|error| error.with_request(kind, payload));
+    }
     (|| {
         crate::validate::shape(kind, &Value::Object(payload.clone()))
             .map_err(|error| ValidationRefusal::new(error.field, error.detail))?;
@@ -114,8 +145,41 @@ pub fn resolve(
     payload: &JsonObject,
     entry: &JsonObject,
 ) -> Result<JsonObject, ValidationRefusal> {
+    if crate::training_validation::handles(kind) {
+        return crate::training_validation::resolve_payload(kind, payload, entry);
+    }
     validate(kind, payload, entry)?;
-    Ok(resolved_values(kind, payload, entry))
+    let mut resolved = resolved_values(kind, payload, entry);
+    let defaults = match kind {
+        "vector" => Some(serde_json::to_value(decode_vector(payload)?).expect("vector defaults")),
+        "vectorPrompt" => Some(
+            serde_json::to_value(decode::<VectorPromptWorkflowRequest>(payload)?)
+                .expect("workflow defaults"),
+        ),
+        "characterTest" => Some(
+            serde_json::to_value(decode::<CharacterTestRequest>(payload)?)
+                .expect("character defaults"),
+        ),
+        "videoUpscale" => Some(
+            serde_json::to_value(decode::<crate::contracts::VideoUpscaleRequest>(payload)?)
+                .expect("upscale defaults"),
+        ),
+        "vqa" => {
+            Some(serde_json::to_value(decode::<VqaJobRequest>(payload)?).expect("VQA defaults"))
+        }
+        "interleave" => Some(
+            serde_json::to_value(decode::<InterleaveJobRequest>(payload)?)
+                .expect("interleave defaults"),
+        ),
+        "audio" if !payload.contains_key("yue2") => {
+            Some(serde_json::to_value(decode::<AudioJobRequest>(payload)?).expect("audio defaults"))
+        }
+        _ => None,
+    };
+    if let Some(Value::Object(defaults)) = defaults {
+        resolved.extend(defaults);
+    }
+    Ok(resolved)
 }
 fn resolved_values(kind: &str, payload: &JsonObject, entry: &JsonObject) -> JsonObject {
     let mut result = payload.clone();
@@ -164,7 +228,13 @@ pub fn validate(
     payload: &JsonObject,
     entry: &JsonObject,
 ) -> Result<(), ValidationRefusal> {
+    if crate::training_validation::handles(kind) {
+        return crate::training_validation::validate(kind, payload, entry);
+    }
     validate_shape(kind, payload)?;
+    if kind == "audio" && payload.contains_key("yue2") {
+        return Ok(());
+    }
     (|| {
         let empty = JsonObject::new();
         let advanced = payload
@@ -175,16 +245,14 @@ pub fn validate(
             .get("model")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if let Some(value) = advanced.get("lowResStart").filter(|v| !v.is_null()) {
-            if value.get("enabled") != Some(&Value::Bool(false))
-                && entry.get("features").and_then(|f| f.get("low_res_start"))
-                    != Some(&Value::Bool(true))
-            {
-                return Err(ValidationRefusal::new(
-                    "advanced.lowResStart",
-                    "The selected model route does not support Low Res Start.",
-                ));
-            }
+        if advanced.get("lowResStart").is_some_and(|v| !v.is_null())
+            && entry.get("features").and_then(|f| f.get("low_res_start"))
+                != Some(&Value::Bool(true))
+        {
+            return Err(ValidationRefusal::new(
+                "advanced.lowResStart",
+                "The selected model route does not support Low Res Start.",
+            ));
         }
         if matches!(kind, "image" | "video") {
             if let Some(steps) = crate::limits::requested_steps(advanced) {
@@ -386,4 +454,19 @@ fn decode_vector(payload: &JsonObject) -> Result<VectorRequest, ValidationRefusa
         authored.remove(key);
     }
     decode(&authored)
+}
+
+fn validate_yue2(kind: &str, payload: &JsonObject) -> Result<(), ValidationRefusal> {
+    let spec: crate::yue2_validation::Yue2JobSpec = decode(payload)?;
+    let result = if kind == "yue2Execution" {
+        crate::yue2_validation::validate_for_execution(&spec)
+    } else {
+        crate::yue2_validation::validate_new_submission(&spec)
+    };
+    result.map_err(|error| ValidationRefusal {
+        code: error.code,
+        field: error.field,
+        detail: error.message,
+        context: Box::new(json!({})),
+    })
 }

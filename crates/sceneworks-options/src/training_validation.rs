@@ -2007,6 +2007,15 @@ pub fn validate(
     validate_shape(kind, payload)?;
     let (carrier, _) = config_carrier(kind, payload)?;
     let target = resolve_target(kind, carrier, entry)?;
+    if kind == "control_training" && target.kernel != "krea_control" {
+        return Err(refusal(
+            "target.kernel",
+            format!(
+                "control_training expects a 'krea_control' plan, got kernel '{}'.",
+                target.kernel
+            ),
+        ));
+    }
     let config: TrainingConfig = serde_json::from_value(carrier["config"].clone())
         .map_err(|error| refusal("config", error.to_string()))?;
     validate_training_config_for_target(&target, &config).map_err(policy_refusal)?;

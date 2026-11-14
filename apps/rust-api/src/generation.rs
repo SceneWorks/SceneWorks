@@ -48,7 +48,8 @@ pub(super) async fn create_generation_job_with_binding(
         .and_then(Value::as_object)
         .unwrap_or(&empty);
     if let Some(kind) = sceneworks_core::request_validation::kind_for_job(&job_type) {
-        sceneworks_core::request_validation::validate(kind, &payload, entry)
+        let facts = sceneworks_core::request_validation::facts_for_job(&job_type, &payload);
+        sceneworks_core::request_validation::validate(kind, &payload, &facts)
             .map_err(ApiError::from)?;
     }
     validate_expected_imported_model_reference(&payload, entry, model_provenance.as_ref())?;
@@ -2663,8 +2664,6 @@ pub(crate) async fn create_video_job(
         .to_owned();
     let model_manifest_entry = resolve_model_manifest_entry(&state, &model_id).await?;
     ensure_expected_imported_model_reference(&state, &job_payload, &model_manifest_entry)?;
-    let auto_duration_active =
-        normalize_ltx25_generation_controls(&model_id, &mut job_payload, &model_manifest_entry)?;
     // Do not advertise or enqueue the paired source layout until the pinned inference descriptor
     // records it. The worker implementation is deliberately source-ready ahead of that pin, but a
     // direct API client must not be able to send additional references to an older engine that
@@ -2674,6 +2673,8 @@ pub(crate) async fn create_video_job(
         sceneworks_core::request_validation::validate("video", &job_payload, entry)
             .map_err(ApiError::from)?;
     }
+    let auto_duration_active =
+        normalize_ltx25_generation_controls(&model_id, &mut job_payload, &model_manifest_entry)?;
     validate_video_reference_asset_ids_payload(&job_payload, &model_manifest_entry)?;
     validate_selected_decoder_for_manifest(
         enqueue_backend(&state),
