@@ -3349,7 +3349,7 @@ test("macOS lanes lint every crate they ship, in the configuration they ship it"
   assert.match(mlx, /uses: \.\/\.github\/workflows\/nax-kernel-validation\.yml/);
   // Running the command is only half of it — the lane must actually TRIGGER for the
   // crates it now lints. apps/rust-api carries the largest macOS-conditional surface
-  // outside the worker and is NOT under `crates/**`, so without this path entry the
+  // outside the worker and is not covered by the crate paths, so without this path entry the
   // widened lint is declared but unreachable for rust-api-only PRs. That is the same
   // declaration-without-reachability trap as the bug this story came from.
   // Lint must come BEFORE test. A failed step aborts the job, so with the tests first
@@ -3364,7 +3364,11 @@ test("macOS lanes lint every crate they ship, in the configuration they ship it"
 
   const mlxPaths = mlx.slice(mlx.indexOf("paths: &mlx_paths"), mlx.indexOf("pull_request:"));
   assert.ok(mlxPaths.length > 0, "macos-mlx.yml must declare an &mlx_paths anchor");
-  for (const watched of ['- "crates/**"', '- "apps/rust-api/**"', '- "apps/rust-worker/**"']) {
+  const manifest = await source("Cargo.toml");
+  const defaultMembers = manifest.match(/^default-members = \[([\s\S]*?)^\]/m)?.[1];
+  assert.ok(defaultMembers, "workspace must declare default members");
+  const lintedCrates = [...defaultMembers.matchAll(/^\s+"(crates\/[^"]+)"/gm)].map(([, dir]) => `- "${dir}/**"`);
+  for (const watched of [...lintedCrates, '- "apps/rust-api/**"', '- "apps/rust-worker/**"']) {
     assert.ok(mlxPaths.includes(watched), `&mlx_paths must watch ${watched}`);
   }
   // The narrow spelling this replaced. `--all-targets` on one crate is not coverage of
