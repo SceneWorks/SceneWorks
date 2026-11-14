@@ -990,20 +990,136 @@ async fn run_image_generate_job_unexplained(
     if !warnings.is_empty() {
         message.push_str(&format!(" Warning: {}", warnings.join(" ")));
     }
-    update_job(
-        api,
-        &job.id,
-        image_progress(
+    update_job(api, &job.id, {
+        let mut terminal = image_progress(
             JobStatus::Completed,
             ProgressStage::Completed,
             1.0,
             &message,
             Some(streaming_result(&plan, &asset_writes)),
             backend,
-        ),
-    )
+        );
+        terminal.extra.insert(
+            "executionReceipt".to_owned(),
+            serde_json::to_value(image_execution_receipt(
+                &project_path,
+                &asset_writes,
+                plan.image_count as usize,
+            )?)
+            .map_err(WorkerError::Json)?,
+        );
+        terminal
+    })
     .await?;
     Ok(())
+}
+
+/// Build the output map from files already written by this worker, after all
+/// inline variants are appended and before the terminal POST. Provider reports
+/// are unavailable until the matching completed-report route supplies them;
+/// request settings and sidecars never stand in for engine observations.
+fn image_execution_receipt(
+    project_path: &Path,
+    asset_writes: &[Value],
+    image_count: usize,
+) -> WorkerResult<sceneworks_core::execution_receipt::WorkerExecutionReceipt> {
+    use sceneworks_core::execution_receipt::{OutputExecutionBinding, WorkerExecutionReceipt};
+    use std::io::Read;
+
+    let project_root = project_path.canonicalize()?;
+    let mut outputs = (0..image_count)
+        .map(|output_index| OutputExecutionBinding {
+            output_index,
+            execution: None,
+            artifact_ids: Vec::new(),
+            artifact_sha256: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    for fact in asset_writes {
+        let output_index = fact
+            .get("index")
+            .and_then(Value::as_u64)
+            .and_then(|index| usize::try_from(index).ok())
+            .filter(|index| *index < image_count)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("completed image output index is invalid".into())
+            })?;
+        let id = fact
+            .get("assetId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| WorkerError::InvalidPayload("completed image asset has no ID".into()))?;
+        let relative = fact
+            .get("mediaPath")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("completed image asset has no media path".into())
+            })?;
+        let path = project_root.join(relative).canonicalize()?;
+        if !path.starts_with(&project_root) || !path.is_file() {
+            return Err(WorkerError::InvalidPayload(
+                "completed image asset escapes the project".into(),
+            ));
+        }
+        let mut file = std::fs::File::open(path)?;
+        let mut digest = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            digest.update(&buffer[..count]);
+        }
+        outputs[output_index].artifact_ids.push(id.to_owned());
+        outputs[output_index]
+            .artifact_sha256
+            .push(sceneworks_core::hashing::hex(&digest.finalize()));
+    }
+    if outputs.iter().any(|output| output.artifact_ids.is_empty()) {
+        return Err(WorkerError::InvalidPayload(
+            "completed image output has no artifact".into(),
+        ));
+    }
+    Ok(WorkerExecutionReceipt {
+        version: sceneworks_core::execution_receipt::EXECUTION_RECEIPT_VERSION,
+        execution: serde_json::json!({
+            "state":"unavailable",
+            "reason":{
+                "code":"provider_report_unavailable",
+                "detail":"completed image route has not supplied a provider execution report",
+                "missing_facts":["provider_resolved_execution"]
+            }
+        }),
+        outputs,
+    })
+}
+
+#[cfg(test)]
+#[test]
+fn completed_image_receipt_hashes_written_bytes_and_rejects_escape() {
+    let project = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join("assets/images")).unwrap();
+    std::fs::write(
+        project.path().join("assets/images/render.png"),
+        b"rendered bytes",
+    )
+    .unwrap();
+    std::fs::write(outside.path().join("outside.png"), b"other bytes").unwrap();
+    let facts = vec![serde_json::json!({
+        "assetId":"asset-one", "index":0, "mediaPath":"assets/images/render.png"
+    })];
+    let receipt = image_execution_receipt(project.path(), &facts, 1).unwrap();
+    assert_eq!(receipt.outputs[0].artifact_ids, ["asset-one"]);
+    assert_eq!(
+        receipt.outputs[0].artifact_sha256[0],
+        sceneworks_core::hashing::hex(&Sha256::digest(b"rendered bytes"))
+    );
+    assert_eq!(receipt.execution["state"], "unavailable");
+    let escaped = vec![serde_json::json!({
+        "assetId":"asset-one", "index":0, "mediaPath":outside.path().join("outside.png")
+    })];
+    assert!(image_execution_receipt(project.path(), &escaped, 1).is_err());
 }
 
 /// Procedural stub generation (sc-3020): a deterministic per-seed gradient per image.

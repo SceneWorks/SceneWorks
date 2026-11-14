@@ -4502,12 +4502,20 @@ impl JobsStore {
             })?;
             crate::execution_receipt::validate_worker_receipt(receipt, result)
                 .map_err(|error| JobsStoreError::InvalidResultItem(error.reason))?;
-            if receipt.execution.get("state").and_then(Value::as_str) == Some("resolved")
-                && receipt
-                    .execution
-                    .pointer("/identity/backend")
-                    .and_then(Value::as_str)
-                    != Some(accepted_backend.as_str())
+            if std::iter::once(&receipt.execution)
+                .chain(
+                    receipt
+                        .outputs
+                        .iter()
+                        .filter_map(|output| output.execution.as_ref()),
+                )
+                .any(|execution| {
+                    execution.get("state").and_then(Value::as_str) == Some("resolved")
+                        && execution
+                            .pointer("/identity/backend")
+                            .and_then(Value::as_str)
+                            != Some(accepted_backend.as_str())
+                })
             {
                 return Err(JobsStoreError::InvalidResultItem(
                     "completed report backend differs from the claimed route".into(),

@@ -103,16 +103,6 @@ fn output_asset_ids(result: &Map<String, Value>) -> Result<Vec<String>, ReplayUn
     let writes = writes
         .as_array()
         .ok_or_else(|| ReplayUnavailable::new("invalid_completed_assets", "assetWrites"))?;
-    if result
-        .get("expectedCount")
-        .and_then(Value::as_u64)
-        .is_some_and(|count| count as usize != writes.len())
-    {
-        return Err(ReplayUnavailable::new(
-            "incomplete_completed_assets",
-            "expectedCount",
-        ));
-    }
     let mut ids = Vec::with_capacity(writes.len());
     let mut unique = BTreeSet::new();
     for write in writes {
@@ -173,7 +163,20 @@ pub fn validate_worker_receipt(
             return Err(ReplayUnavailable::new("invalid_output_hashes", "outputs"));
         }
     }
-    if submitted_ids != expected_ids {
+    if terminal_result
+        .get("expectedCount")
+        .and_then(Value::as_u64)
+        .is_some_and(|count| count as usize != submitted.outputs.len())
+    {
+        return Err(ReplayUnavailable::new(
+            "incomplete_completed_assets",
+            "expectedCount",
+        ));
+    }
+    if submitted_ids.len() != expected_ids.len()
+        || submitted_ids.iter().collect::<BTreeSet<_>>()
+            != expected_ids.iter().collect::<BTreeSet<_>>()
+    {
         return Err(ReplayUnavailable::new(
             "output_artifacts_changed",
             "outputs",
@@ -382,6 +385,13 @@ mod tests {
                 .reason,
             "output_artifacts_changed"
         );
+        let mut variants = worker_receipt();
+        variants.outputs[0].artifact_ids.push("upscaled-a".into());
+        variants.outputs[0].artifact_sha256.push("c".repeat(64));
+        let variant_result = json!({"expectedCount":2,"assetWrites":[
+            {"assetId":"a"},{"assetId":"b"},{"assetId":"upscaled-a"}
+        ]});
+        assert!(validate_worker_receipt(&variants, variant_result.as_object().unwrap()).is_ok());
     }
 
     #[test]

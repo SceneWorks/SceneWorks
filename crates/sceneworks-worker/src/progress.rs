@@ -715,10 +715,97 @@ pub(crate) async fn post_job_progress(
                 "executionClaimCapability".to_owned(),
                 Value::String(capability),
             );
+            if payload.status == JobStatus::Completed
+                && !payload.extra.contains_key("executionReceipt")
+            {
+                if let Some(receipt) = payload
+                    .result
+                    .as_ref()
+                    .and_then(unavailable_completed_receipt)
+                {
+                    payload.extra.insert("executionReceipt".to_owned(), receipt);
+                }
+            }
         }
     }
     api.post_json(&format!("/api/v1/jobs/{job_id}/progress"), &payload)
         .await
+}
+
+/// A completed route without the provider's report still records its claimed
+/// attempt and output association. It cannot qualify for exact replay. Native
+/// routes replace this with their actual completed provider report and file
+/// digests at their terminal boundary.
+fn unavailable_completed_receipt(result: &JsonObject) -> Option<Value> {
+    use sceneworks_core::execution_receipt::{OutputExecutionBinding, WorkerExecutionReceipt};
+    let writes = result.get("assetWrites").and_then(Value::as_array);
+    let output_count = result
+        .get("expectedCount")
+        .and_then(Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())
+        .or_else(|| writes.map(|writes| writes.len()))
+        .unwrap_or(1);
+    if output_count == 0 || output_count > 10_000 {
+        return None;
+    }
+    let mut outputs = (0..output_count)
+        .map(|output_index| OutputExecutionBinding {
+            output_index,
+            execution: None,
+            artifact_ids: Vec::new(),
+            artifact_sha256: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    if let Some(writes) = writes {
+        for (position, fact) in writes.iter().enumerate() {
+            let id = fact.get("assetId").and_then(Value::as_str)?;
+            let output_index = fact
+                .get("index")
+                .and_then(Value::as_u64)
+                .and_then(|index| usize::try_from(index).ok())
+                .unwrap_or(position);
+            outputs
+                .get_mut(output_index)?
+                .artifact_ids
+                .push(id.to_owned());
+        }
+    }
+    serde_json::to_value(WorkerExecutionReceipt {
+        version: sceneworks_core::execution_receipt::EXECUTION_RECEIPT_VERSION,
+        execution: serde_json::json!({
+            "state":"unavailable",
+            "reason":{
+                "code":"provider_report_unavailable",
+                "detail":"completed route did not publish a provider execution report",
+                "missing_facts":["provider_resolved_execution"]
+            }
+        }),
+        outputs,
+    })
+    .ok()
+}
+
+#[cfg(test)]
+#[test]
+fn unavailable_receipt_keeps_each_completed_output_association() {
+    let result = serde_json::json!({
+        "expectedCount":2,
+        "assetWrites":[
+            {"assetId":"base-a","index":0},
+            {"assetId":"base-b","index":1},
+            {"assetId":"variant-a","index":0}
+        ]
+    });
+    let receipt = unavailable_completed_receipt(result.as_object().unwrap()).unwrap();
+    assert_eq!(receipt["execution"]["state"], "unavailable");
+    assert_eq!(
+        receipt["outputs"][0]["artifactIds"],
+        serde_json::json!(["base-a", "variant-a"])
+    );
+    assert_eq!(
+        receipt["outputs"][1]["artifactIds"],
+        serde_json::json!(["base-b"])
+    );
 }
 
 pub(crate) fn progress_payload(
