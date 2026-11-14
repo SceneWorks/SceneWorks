@@ -447,7 +447,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         IntentClass::WhatToMake,
         "Conditioning::Mask",
     )
-    .applies(Predicate::ModelField("image_inpaint"))
+    .applies(Predicate::Capability("image_inpaint"))
     .compat("Non-inpaint-capable models ignore the mask and perform whole-image editing")
     .ui("Mask asset id", "text"),
     // apps/rust-api/src/dto.rs:939
@@ -896,7 +896,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "apps/rust-api/src/validators.rs: non-empty project id; project-scoped asset access",
     ])
-    .applies(Predicate::Modality("vqa"))
+    .applies(Predicate::Capability("vqa"))
     .ui("Project id", "text"),
     // apps/rust-api/src/dto.rs:1084
     OptionSpec::new(
@@ -908,7 +908,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         IntentClass::Context,
         "Job.project_name",
     )
-    .applies(Predicate::Modality("vqa"))
+    .applies(Predicate::Capability("vqa"))
     .ui("Project name", "text"),
     // apps/rust-api/src/dto.rs:1085
     OptionSpec::new(
@@ -923,7 +923,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "apps/rust-api/src/generation.rs: nonblank project image asset id",
     ])
-    .applies(Predicate::Modality("vqa"))
+    .applies(Predicate::Capability("vqa"))
     .ui("Source asset id", "text"),
     // apps/rust-api/src/dto.rs:1086
     OptionSpec::new(
@@ -938,7 +938,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "apps/rust-api/src/generation.rs: trimmed 1..4000 characters",
     ])
-    .applies(Predicate::Modality("vqa"))
+    .applies(Predicate::Capability("vqa"))
     .ui("Question", "text"),
     // apps/rust-api/src/dto.rs:1088
     OptionSpec::new(
@@ -953,7 +953,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "apps/rust-api/src/validators.rs: validate_model_id: non-empty plain path component; resolved catalog/provider must support the request",
     ])
-    .applies(Predicate::Modality("vqa"))
+    .applies(Predicate::Capability("vqa"))
     .ui("Model", "text"),
     // apps/rust-api/src/dto.rs:1090
     OptionSpec::new(
@@ -968,7 +968,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "apps/rust-api/src/generation.rs: integer 16..2048",
     ])
-    .applies(Predicate::Modality("vqa"))
+    .applies(Predicate::Capability("vqa"))
     .ui("Max new tokens", "number"),
     // apps/rust-api/src/dto.rs:1092
     OptionSpec::new(
@@ -980,7 +980,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         IntentClass::MachineBudget,
         "Job.requested_gpu -> worker routing",
     )
-    .applies(Predicate::Modality("vqa"))
+    .applies(Predicate::Capability("vqa"))
     .effects(&[
         Effect { when: "explicit device", action: "route to requested worker/device", target: "Job.requested_gpu" },
     ])
@@ -998,7 +998,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "apps/rust-api/src/validators.rs: validate_prompt_extras serialized advanced size guard",
     ])
-    .applies(Predicate::Modality("vqa"))
+    .applies(Predicate::Capability("vqa"))
     .compat("Carrier only; do not present the object as a scalar option")
     .ui("Advanced", "object"),
 
@@ -1016,7 +1016,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "apps/rust-api/src/validators.rs: non-empty project id; project-scoped asset access",
     ])
-    .applies(Predicate::Modality("interleave"))
+    .applies(Predicate::Capability("interleave"))
     .ui("Project id", "text"),
     // apps/rust-api/src/dto.rs:1110
     OptionSpec::new(
@@ -1028,7 +1028,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         IntentClass::Context,
         "Job.project_name",
     )
-    .applies(Predicate::Modality("interleave"))
+    .applies(Predicate::Capability("interleave"))
     .ui("Project name", "text"),
     // apps/rust-api/src/dto.rs:1111
     OptionSpec::new(
@@ -1043,7 +1043,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "apps/rust-api/src/generation.rs: trimmed nonblank; <=4000 characters",
     ])
-    .applies(Predicate::Modality("interleave"))
+    .applies(Predicate::Capability("interleave"))
     .ui("Prompt", "text"),
     // apps/rust-api/src/dto.rs:1114
     OptionSpec::new(
@@ -1058,7 +1058,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "apps/rust-api/src/generation.rs: no blank ids; project-owned image conditioning",
     ])
-    .applies(Predicate::Modality("interleave"))
+    .applies(Predicate::Capability("interleave"))
     .ui("Source asset ids", "list"),
     // apps/rust-api/src/dto.rs:1116
     OptionSpec::new(
@@ -1073,7 +1073,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "apps/rust-api/src/validators.rs: validate_model_id: non-empty plain path component; resolved catalog/provider must support the request",
     ])
-    .applies(Predicate::Modality("interleave"))
+    .applies(Predicate::Capability("interleave"))
     .ui("Model", "text"),
     // apps/rust-api/src/dto.rs:1118
     OptionSpec::new(
@@ -1088,7 +1088,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "apps/rust-api/src/generation.rs: integer 1..10",
     ])
-    .applies(Predicate::Modality("interleave"))
+    .applies(Predicate::Capability("interleave"))
     .ui("Max images", "number"),
     // apps/rust-api/src/dto.rs:1120
     OptionSpec::new(
@@ -1103,7 +1103,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "apps/rust-api/src/generation.rs: dimension 256..4096",
     ])
-    .applies(Predicate::Modality("interleave"))
+    .applies(Predicate::Capability("interleave"))
     .ui("Width", "number"),
     // apps/rust-api/src/dto.rs:1122
     OptionSpec::new(
@@ -1118,7 +1118,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "apps/rust-api/src/generation.rs: dimension 256..4096",
     ])
-    .applies(Predicate::Modality("interleave"))
+    .applies(Predicate::Capability("interleave"))
     .ui("Height", "number"),
     // apps/rust-api/src/dto.rs:1124
     OptionSpec::new(
@@ -1130,7 +1130,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         IntentClass::WhatToMake,
         "InterleaveRequest.seed",
     )
-    .applies(Predicate::Modality("interleave"))
+    .applies(Predicate::Capability("interleave"))
     .ui("Seed", "number"),
     // apps/rust-api/src/dto.rs:1126
     OptionSpec::new(
@@ -1142,7 +1142,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
         IntentClass::MachineBudget,
         "Job.requested_gpu -> worker routing",
     )
-    .applies(Predicate::Modality("interleave"))
+    .applies(Predicate::Capability("interleave"))
     .effects(&[
         Effect { when: "explicit device", action: "route to requested worker/device", target: "Job.requested_gpu" },
     ])
@@ -1160,7 +1160,7 @@ pub(crate) const SPECS: &[OptionSpec] = &[
     .limits(&[
         "apps/rust-api/src/validators.rs: validate_prompt_extras serialized advanced size guard",
     ])
-    .applies(Predicate::Modality("interleave"))
+    .applies(Predicate::Capability("interleave"))
     .compat("Carrier only; do not present the object as a scalar option")
     .ui("Advanced", "object"),
 

@@ -1458,3 +1458,43 @@ fn javascript_advanced_reads_resolve_to_option_specs() {
         "JavaScript computed accesses need explicit finite coverage:\n{dynamic:#?}"
     );
 }
+
+#[test]
+fn timeline_context_reads_require_nested_declarations() {
+    // This consumer names its nested advanced.timelineContext map `context`.
+    // Reuse the JS lexer/reader guard with that binding isolated from the outer map.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = std::fs::read_to_string(root.join("apps/web/src/timelineGeneration.js")).unwrap();
+    assert!(source.contains("const context = payload.advanced?.timelineContext ?? {}"));
+    let nested_reads = |source: &str| {
+        let source = source
+            .replace("payload.advanced", "payload.settings")
+            .replace("context.", "advanced.")
+            .replace("context?.", "advanced?.")
+            .replace("context[", "advanced[");
+        let mut coverage = js_coverage("apps/web/src/timelineGeneration.js", &source);
+        coverage.reads = coverage
+            .reads
+            .into_iter()
+            .map(|mut read| {
+                read.location = "advanced.timelineContext";
+                read
+            })
+            .collect();
+        coverage
+    };
+    let coverage = nested_reads(&source);
+    assert!(!coverage.reads.is_empty());
+    assert!(coverage.dynamic.is_empty(), "{:?}", coverage.dynamic);
+    assert!(missing(&coverage).is_empty(), "{:?}", missing(&coverage));
+    for expression in [
+        "context.__unknown__",
+        "context?.__unknown__",
+        "context['__unknown__']",
+    ] {
+        assert_eq!(
+            missing(&nested_reads(&format!("{source}\n{expression};"))).len(),
+            1
+        );
+    }
+}

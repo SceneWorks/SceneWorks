@@ -143,3 +143,24 @@ fn yue2_job_kind_predicates_use_request_context() {
         .applies_when
         .matches(&rendering));
 }
+
+#[test]
+fn timeline_context_fields_are_typed_context() {
+    use sceneworks_options::Shape;
+    for (key, shape) in [
+        ("action", Shape::OneOf("extend | replace | bridge")),
+        ("timelineId", Shape::Text),
+        ("timelineName", Shape::Text),
+        ("itemId", Shape::Text),
+        ("trackId", Shape::Text),
+        ("sourceAssetId", Shape::Text),
+        ("sourceTimestamp", Shape::Number),
+        ("timelineStart", Shape::Number),
+        ("timelineEnd", Shape::Number),
+    ] {
+        let spec = by_wire("advanced.timelineContext", key).unwrap();
+        assert_eq!(spec.shape, shape);
+        assert_eq!(spec.intent, IntentClass::Context);
+        assert_eq!(spec.default, DefaultRule::Absent);
+    }
+}

@@ -107,3 +107,40 @@ fn guidance_opt_out_and_phase_compatibility_preserve_existing_controls() {
         );
     }
 }
+
+#[test]
+fn image_capabilities_enable_vqa_interleave_and_inpaint_requests() {
+    use sceneworks_core::{options_context, registry::builtin_model_spec};
+    let sense = options_context::for_model(
+        builtin_model_spec("sensenova_u1_8b").unwrap(),
+        "mlx",
+        "vqa",
+        None,
+    );
+    assert_eq!(sense.model["type"], "image");
+    for option in registry().filter(|option| matches!(option.location, "vqa" | "interleave")) {
+        assert!(
+            option.applies_when.matches(&sense.context()),
+            "{}",
+            option.id
+        );
+    }
+    let sdxl = options_context::for_model(
+        builtin_model_spec("sdxl").unwrap(),
+        "mlx",
+        "edit_image",
+        None,
+    );
+    assert!(by_wire("image", "maskAssetId")
+        .unwrap()
+        .applies_when
+        .matches(&sdxl.context()));
+    assert!(!by_wire("image", "maskAssetId")
+        .unwrap()
+        .applies_when
+        .matches(&sense.context()));
+    assert!(!by_wire("vqa", "question")
+        .unwrap()
+        .applies_when
+        .matches(&sdxl.context()));
+}
