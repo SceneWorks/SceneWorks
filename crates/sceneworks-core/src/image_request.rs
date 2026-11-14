@@ -524,6 +524,14 @@ pub struct ImageRequest {
 }
 
 impl ImageRequest {
+    pub fn resolved_flux3_tier(&self) -> Result<Flux3Tier, String> {
+        flux3_requested_tier_resolved(
+            self.resolved_advanced
+                .as_ref()
+                .expect("image options must be resolved"),
+        )
+    }
+
     pub fn effective_advanced_wire(&self) -> JsonObject {
         self.resolved_advanced
             .as_ref()
@@ -1222,6 +1230,57 @@ pub fn flux3_requested_tier(advanced: &JsonObject) -> Result<Flux3Tier, String> 
     }
 }
 
+/// FLUX.3 tier selection from canonical typed options. The portable bound tier is intentionally
+/// excluded: the historical FLUX.3 route considers only these three request carriers.
+pub fn flux3_requested_tier_resolved(options: &ImageAdvanced) -> Result<Flux3Tier, String> {
+    let named = options
+        .quant_tier
+        .as_ref()
+        .map(|bound| bound.value.trim())
+        .filter(|tier| !tier.is_empty())
+        .map(|tier| {
+            let key = tier.to_ascii_lowercase();
+            match key.as_str() {
+                "dense" => Ok(Flux3Tier::Bf16),
+                other => Flux3Tier::from_key(other).ok_or_else(|| {
+                    format!(
+                        "advanced.quantTier {tier:?} is not a FLUX 3 Image Klein package; the \
+                         packages are bf16, q4, q8, fp8r and nvfp4"
+                    )
+                }),
+            }
+        })
+        .transpose()?;
+    let bits = options
+        .mlx_quantize
+        .as_ref()
+        .and_then(|bound| bound.value)
+        .map(|bits| match bits {
+            bits if bits <= 0 => Ok(Flux3Tier::Bf16),
+            4 => Ok(Flux3Tier::Q4),
+            8 => Ok(Flux3Tier::Q8),
+            other => Err(format!(
+                "advanced.mlxQuantize {other} is not a FLUX 3 Image Klein package; the bit \
+                 tiers are 0 (bf16), 4 and 8"
+            )),
+        })
+        .transpose()?;
+    if options.conv_rot.as_ref().is_some_and(|bound| bound.value) {
+        return Err("advanced.convRot is not a FLUX 3 Image Klein package".to_owned());
+    }
+    match (named, bits) {
+        (None, None) => Ok(Flux3Tier::Bf16),
+        (Some(tier), None) | (None, Some(tier)) => Ok(tier),
+        (Some(named), Some(bits)) if named == bits => Ok(named),
+        (Some(named), Some(bits)) => Err(format!(
+            "advanced.quantTier {:?} and advanced.mlxQuantize ({}) name different FLUX 3 \
+             packages; send one",
+            named.key(),
+            bits.key()
+        )),
+    }
+}
+
 /// The request-shape rule for named precision tiers, shared by the API (typed 400), routing (the
 /// candle gap wording) and the worker trust boundary (raw queue writes, stored jobs). `None` =
 /// acceptable; `Some(reason)` = refuse.
@@ -1246,6 +1305,24 @@ pub fn image_quant_tier_refusal(model: &str, advanced: &JsonObject) -> Option<St
     })
 }
 
+pub fn image_quant_tier_refusal_resolved(model: &str, options: &ImageAdvanced) -> Option<String> {
+    if FLUX3_TIERED_MODEL_IDS.contains(&model) {
+        return flux3_requested_tier_resolved(options)
+            .err()
+            .map(|reason| format!("{model}: {reason}"));
+    }
+    options
+        .quant_tier
+        .as_ref()
+        .is_some_and(|tier| tier.value.trim().eq_ignore_ascii_case(FP8R_QUANT_TIER))
+        .then(|| {
+            format!(
+                "advanced.quantTier \"{FP8R_QUANT_TIER}\" selects a publisher FP8 rowwise package, and \
+                 {model} ships none (only {FLUX3_TIERED_MODEL_IDS:?} do)"
+            )
+        })
+}
+
 /// Refuse a FLUX 3 package absent from the authoritative catalog. Tier routing is a native
 /// capability, not proof that an artifact has verified pins. In particular, base q4/q8 cannot
 /// borrow distilled conversion hashes or silently fall through to the default dense row.
@@ -1263,6 +1340,29 @@ pub fn flux3_catalog_tier_refusal(
         Ok(tier) => tier,
         Err(reason) => return Some(format!("{model}: {reason}")),
     };
+    flux3_catalog_tier_refusal_for_tier(model, tier, manifest)
+}
+
+pub fn flux3_catalog_tier_refusal_resolved(
+    model: &str,
+    options: &ImageAdvanced,
+    manifest: &Value,
+) -> Option<String> {
+    if !FLUX3_TIERED_MODEL_IDS.contains(&model) {
+        return None;
+    }
+    let tier = match flux3_requested_tier_resolved(options) {
+        Ok(tier) => tier,
+        Err(reason) => return Some(format!("{model}: {reason}")),
+    };
+    flux3_catalog_tier_refusal_for_tier(model, tier, manifest)
+}
+
+fn flux3_catalog_tier_refusal_for_tier(
+    model: &str,
+    tier: Flux3Tier,
+    manifest: &Value,
+) -> Option<String> {
     let declared =
         manifest
             .get("downloads")
@@ -1420,6 +1520,29 @@ mod tests {
                 .origin,
             crate::resolved_options::Origin::Internal("artifact tier probe")
         );
+    }
+
+    #[test]
+    fn typed_flux3_tier_preserves_named_bits_and_conflict() {
+        for (advanced, expected) in [
+            (json!({}), Ok(Flux3Tier::Bf16)),
+            (json!({"quantTier":"Q4"}), Ok(Flux3Tier::Q4)),
+            (json!({"mlxQuantize":8}), Ok(Flux3Tier::Q8)),
+            (
+                json!({"quantTier":"dense","mlxQuantize":0}),
+                Ok(Flux3Tier::Bf16),
+            ),
+            (json!({"quantTier":"q4","mlxQuantize":8}), Err(())),
+            (json!({"convRot":true}), Err(())),
+        ] {
+            let authored = payload(json!({"advanced": advanced}));
+            let request = ImageRequest::from_resolved(&authored, &authored).unwrap();
+            assert_eq!(request.resolved_flux3_tier().map_err(|_| ()), expected);
+            assert_eq!(
+                request.resolved_flux3_tier(),
+                flux3_requested_tier(&request.advanced)
+            );
+        }
     }
 
     #[test]
