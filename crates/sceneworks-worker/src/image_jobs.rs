@@ -819,7 +819,7 @@ async fn run_image_generate_job_unexplained(
     let plan = ImagePlan::with_count_and_adapter(
         &request,
         route.as_ref().map_or(request.count, |route| {
-            route.kind().image_count(&request, settings)
+            route.kind().image_count(&execution, settings)
         }) * upscale_mult,
         route
             .as_ref()
@@ -846,7 +846,7 @@ async fn run_image_generate_job_unexplained(
     let plan = ImagePlan::with_count_and_adapter(
         &request,
         route.as_ref().map_or(request.count, |route| {
-            route.kind().image_count(&request, settings)
+            route.kind().image_count(&execution, settings)
         }) * upscale_mult,
         route
             .as_ref()
