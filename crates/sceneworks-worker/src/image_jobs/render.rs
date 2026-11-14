@@ -581,6 +581,7 @@ pub(super) fn hires_first_pass_context(
 
 /// Run the normal first pass followed by an optional high-resolution img2img refinement while
 /// keeping progress monotonic across both denoise schedules.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn generate_one_with_hires(
     generator: &dyn Generator,

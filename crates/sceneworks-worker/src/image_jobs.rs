@@ -1099,6 +1099,16 @@ fn image_execution_receipt(
             }
             *slot = Some(report.clone());
         }
+        if let Some(stages) = fact.get("workerExecutionStages") {
+            let parsed: Vec<sceneworks_core::execution_receipt::ExecutionStageBinding> =
+                serde_json::from_value(stages.clone()).map_err(WorkerError::Json)?;
+            if parsed.is_empty() || !outputs[output_index].stages.is_empty() {
+                return Err(WorkerError::InvalidPayload(
+                    "completed image output has duplicate or empty provider stages".into(),
+                ));
+            }
+            outputs[output_index].stages = parsed;
+        }
         if let Some(report) = fact.get("workerChildExecutionReport") {
             if child_reports[output_index]
                 .replace(report.clone())
@@ -1117,6 +1127,11 @@ fn image_execution_receipt(
     }
     for (output, child) in outputs.iter_mut().zip(child_reports) {
         if let Some(child) = child {
+            if !output.stages.is_empty() {
+                return Err(WorkerError::InvalidPayload(
+                    "completed image output has conflicting child and inline stages".into(),
+                ));
+            }
             let base = output.execution.take().unwrap_or_else(|| {
                 serde_json::to_value(gen_core::generator::ExecutionIdentity::provider_default())
                     .expect("provider default serializes")
@@ -1246,6 +1261,75 @@ fn inline_upscale_receipt_orders_base_and_child_reports_with_both_png_hashes() {
         sceneworks_core::execution_receipt::validate_worker_receipt(
             &receipt,
             omitted.as_object().unwrap(),
+        )
+        .unwrap_err()
+        .reason,
+        "output_stages_changed"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn image_receipt_binds_restored_and_hires_stages_to_final_outputs() {
+    let project = tempfile::tempdir().unwrap();
+    let report =
+        serde_json::to_value(gen_core::generator::ExecutionIdentity::provider_default()).unwrap();
+    for (name, bytes) in [
+        ("direct.png", &b"direct"[..]),
+        ("restored.png", &b"restored"[..]),
+        ("hires.png", &b"hires"[..]),
+    ] {
+        std::fs::write(project.path().join(name), bytes).unwrap();
+    }
+    let restored_stages = serde_json::json!([
+        {"stage":"angle","execution":report},
+        {"stage":"restore_face","execution":report},
+    ]);
+    let hires_stages = serde_json::json!([
+        {"stage":"base","execution":report},
+        {"stage":"refine","execution":report},
+    ]);
+    let facts = vec![
+        serde_json::json!({"assetId":"direct","index":0,"mediaPath":"direct.png","workerExecutionReport":report}),
+        serde_json::json!({"assetId":"restored","index":1,"mediaPath":"restored.png","workerExecutionReport":report,"workerExecutionStages":restored_stages}),
+        serde_json::json!({"assetId":"hires","index":2,"mediaPath":"hires.png","workerExecutionReport":report,"workerExecutionStages":hires_stages}),
+    ];
+    let receipt = image_execution_receipt(project.path(), &facts, 3).unwrap();
+    assert!(receipt.outputs[0].stages.is_empty());
+    assert_eq!(receipt.outputs[1].stages[0].stage, "angle");
+    assert_eq!(receipt.outputs[1].stages[1].stage, "restore_face");
+    assert_eq!(receipt.outputs[2].stages[0].stage, "base");
+    assert_eq!(receipt.outputs[2].stages[1].stage, "refine");
+    assert_eq!(
+        receipt.outputs[1].artifact_sha256[0],
+        sceneworks_core::hashing::hex(&Sha256::digest(b"restored"))
+    );
+    let result = serde_json::json!({"expectedCount":3,"assetWrites":facts});
+    sceneworks_core::execution_receipt::validate_worker_receipt(
+        &receipt,
+        result.as_object().unwrap(),
+    )
+    .unwrap();
+    let mut swapped = receipt.clone();
+    swapped.outputs[1].stages.swap(0, 1);
+    assert_eq!(
+        sceneworks_core::execution_receipt::validate_worker_receipt(
+            &swapped,
+            result.as_object().unwrap(),
+        )
+        .unwrap_err()
+        .reason,
+        "invalid_output_stages"
+    );
+    let mut missing = result;
+    missing["assetWrites"][1]
+        .as_object_mut()
+        .unwrap()
+        .remove("workerExecutionStages");
+    assert_eq!(
+        sceneworks_core::execution_receipt::validate_worker_receipt(
+            &receipt,
+            missing.as_object().unwrap(),
         )
         .unwrap_err()
         .reason,
