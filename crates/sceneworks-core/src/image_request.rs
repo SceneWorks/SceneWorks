@@ -561,16 +561,15 @@ impl ImageRequest {
     pub fn image_count(&self) -> u32 {
         let embedding_batch =
             if crate::moss_image::is_moss(&self.model) && self.mode == "edit_image" {
-                self.advanced
-                    .get(crate::moss_image_advanced::KEY)
-                    .and_then(|v| v.get("positive"))
-                    .and_then(|v| v.get("values"))
-                    .and_then(|v| v.get("metadata"))
-                    .and_then(|v| v.get("shape"))
-                    .and_then(|v| v.get(0))
-                    .and_then(Value::as_u64)
-                    .filter(|n| *n <= 8)
-                    .unwrap_or(1) as usize
+                self.resolved_advanced
+                    .as_ref()
+                    .and_then(|options| options.moss_image_advanced.as_ref())
+                    .and_then(|bound| bound.value.positive.as_ref())
+                    .and_then(|positive| positive.values.metadata.as_ref())
+                    .and_then(|metadata| metadata.shape.first())
+                    .copied()
+                    .filter(|count| *count <= 8)
+                    .unwrap_or(1)
             } else {
                 1
             };
@@ -1234,6 +1233,21 @@ mod tests {
             .unwrap()
             .mlx_quantize
             .is_none());
+    }
+
+    #[test]
+    fn moss_embedding_batch_count_uses_bound_metadata() {
+        let request = payload(json!({
+            "model": "moss_image_sft",
+            "mode": "edit_image",
+            "count": 2,
+            "advanced": {"mossImageAdvanced": {"positive": {"values": {
+                "assetId": "embedding-1", "sha256": "abc",
+                "metadata": {"dtype": "f32", "shape": [3, 64], "byteLength": 768, "sha256": "abc"}
+            }}}}
+        }));
+        let bound = ImageRequest::from_resolved(&request, &request).unwrap();
+        assert_eq!(bound.image_count(), 6);
     }
 
     #[test]
