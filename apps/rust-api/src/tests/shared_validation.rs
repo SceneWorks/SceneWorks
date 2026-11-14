@@ -419,7 +419,7 @@ async fn shared_source_utility_refusal_precedes_local_paths_on_create_retry_dupl
 }
 
 #[tokio::test]
-async fn shared_malformed_image_references_render_identically_over_http_and_mcp() {
+async fn shared_malformed_image_inputs_render_identically_over_http_and_mcp() {
     use rmcp::transport::{
         streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport,
     };
@@ -446,8 +446,14 @@ async fn shared_malformed_image_references_render_identically_over_http_and_mcp(
         ))
         .await
         .unwrap();
+    let mut cases = Vec::new();
     for member in [Value::Null, json!(42), json!(" bad")] {
-        let payload = json!({"projectId":"p","model":"moss_image_base","mode":"edit_image","prompt":"edit","referenceAssetIds":["source",member]});
+        cases.push(("referenceAssetIds", json!({"projectId":"p","model":"moss_image_base","mode":"edit_image","prompt":"edit","referenceAssetIds":["source",member]})));
+    }
+    for carrier in [json!(42), json!("invalid"), json!([]), json!(false)] {
+        cases.push(("mossImageAdvanced", json!({"projectId":"p","model":"moss_image_base","mode":"edit_image","prompt":"edit","referenceAssetIds":["source"],"mossImageAdvanced":carrier})));
+    }
+    for (field, payload) in cases {
         let expected = serde_json::to_value(
             sceneworks_core::request_validation::validate_shape(
                 "image",
@@ -460,6 +466,12 @@ async fn shared_malformed_image_references_render_identically_over_http_and_mcp(
             request(app.clone(), "POST", "/api/v1/image/jobs", payload.clone()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert_eq!(body, expected);
+        assert_eq!(body["code"], "invalid_generation_option");
+        assert_eq!(body["field"], field);
+        assert_eq!(
+            body["context"],
+            json!({"kind":"image","model":"moss_image_base","mode":"edit_image","field":field})
+        );
         let error = client
             .call_tool(
                 CallToolRequestParams::new("generate_image")

@@ -294,8 +294,9 @@ impl GenerateImageInput {
         }
         // Project the tool's flat controls onto its HTTP carrier before the shared gate.
         // This is transport mapping only: the portable owner decides shape and compatibility.
+        // mossImageAdvanced is also an HTTP top-level carrier. Keep its authored value there
+        // until shared shape validation has checked it; the typed mapper folds it afterward.
         let advanced: Map<String, Value> = [
-            "mossImageAdvanced",
             "mossImage",
             "mossImageEdit",
             "steps",
