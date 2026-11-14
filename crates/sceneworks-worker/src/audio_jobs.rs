@@ -1733,32 +1733,25 @@ async fn run_audio_synthesis_with_completed(
             };
             // Gate PURELY on the loaded generator's advertised capability (sc-13675), never a hardcoded
             // id: a `supports_streaming` model streams incremental chunks; every other model keeps the
-            // exact one-shot `generate` path unchanged. `generate_streaming` also returns the same
-            // aggregate `GenerationOutput` as `generate`, so the written asset is identical either way.
-            let (output, execution) = if generator.descriptor().capabilities.supports_streaming {
+            // exact one-shot path unchanged. The streaming report method must run the
+            // provider's incremental path once and return that attempt's aggregate and facts.
+            let completed = if generator.descriptor().capabilities.supports_streaming {
                 let mut on_chunk = |chunk: gen_core::AudioChunk| {
                     // The 1-based running chunk count.
                     let update = fold.borrow_mut().chunk(chunk.index.saturating_add(1));
                     publish(update);
                 };
                 generator
-                    .generate_streaming(&req, &mut on_chunk, &mut on_progress)
-                    .map(|output| (
-                        output,
-                        gen_core::generator::ExecutionIdentity::provider_default(),
-                    ))
+                    .generate_streaming_with_execution_report(&req, &mut on_chunk, &mut on_progress)
             } else {
-                generator
-                    .generate_with_execution_report(&req, &mut on_progress)
-                    .and_then(|completed| {
-                        completed
-                            .generation
-                            .output
-                            .map(|output| (output, completed.execution))
-                            .ok_or_else(|| gen_core::Error::Unsupported("audio model returned no output".into()))
-                    })
+                generator.generate_with_execution_report(&req, &mut on_progress)
             }
             .map_err(|error| classify_audio_synthesis_error("audio generation failed", error))?;
+            let (output, execution) = completed
+                .generation
+                .output
+                .map(|output| (output, completed.execution))
+                .ok_or_else(|| WorkerError::Engine("audio model returned no output".into()))?;
             match output {
                 GenerationOutput::Audio(track) => Ok((track, execution)),
                 // Either channel count is the same defect: an audio job asked for a track and
@@ -3435,6 +3428,7 @@ mod tests {
         descriptor: gen_core::ModelDescriptor,
         chunks: usize,
         per_chunk: usize,
+        report_called: Arc<AtomicBool>,
     }
 
     impl StreamingStubGenerator {
@@ -3501,6 +3495,21 @@ mod tests {
                 channels: 1,
                 stems: Vec::new(),
             }))
+        }
+
+        fn generate_streaming_with_execution_report(
+            &self,
+            req: &GenerationRequest,
+            on_chunk: &mut dyn FnMut(gen_core::AudioChunk),
+            on_progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<gen_core::generator::CompletedGeneration> {
+            self.report_called.store(true, Ordering::SeqCst);
+            let output = self.generate_streaming(req, on_chunk, on_progress)?;
+            gen_core::generator::CompletedGeneration::new(
+                gen_core::GenerationReport::from_output(output),
+                gen_core::generator::ExecutionIdentity::provider_default(),
+                &self.descriptor,
+            )
         }
     }
 
@@ -5014,13 +5023,17 @@ mod tests {
             descriptor: streaming_stub_descriptor(),
             chunks: 5,
             per_chunk: 4,
+            report_called: Arc::new(AtomicBool::new(false)),
         }
         .aggregate();
+        let report_called = Arc::new(AtomicBool::new(false));
+        let report_observer = report_called.clone();
         let load = move |_id: &str, _spec: &LoadSpec| {
             Ok(Box::new(StreamingStubGenerator {
                 descriptor: streaming_stub_descriptor(),
                 chunks: 5,
                 per_chunk: 4,
+                report_called: report_observer.clone(),
             }) as Box<dyn Generator>)
         };
 
@@ -5043,6 +5056,10 @@ mod tests {
         );
         assert_eq!(track.sample_rate, 24_000);
         assert_eq!(track.channels, 1);
+        assert!(
+            report_called.load(Ordering::SeqCst),
+            "the streaming provider report method must drive the same incremental attempt"
+        );
 
         // The coalescing pump forwards a streaming update even when the five chunks arrive
         // within one 250 ms interval; a non-streaming generator posts none (see below).
