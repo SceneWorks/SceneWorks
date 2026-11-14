@@ -183,6 +183,26 @@ fn nested_helper_key(name: &str) -> Option<usize> {
     }
 }
 
+// These portable parsers return typed training techniques, but a native caller passing its raw
+// `config.advanced` still makes an execution decision outside the one-time training binder.
+fn training_technique_map_arg(name: &str) -> Option<usize> {
+    match name {
+        "subject_mask_loss_weights"
+        | "depth_anchoring_settings"
+        | "body_loss_settings"
+        | "identity_loss_settings"
+        | "face_landmark_loss_settings"
+        | "training_adapter_model"
+        | "parse_training_bucket_config"
+        | "moss_model_options"
+        | "resolve_advanced"
+        | "resolve_advanced_for_kernel"
+        | "resolve_advanced_for_model" => Some(0),
+        "latent_loss_settings" => Some(1),
+        _ => None,
+    }
+}
+
 struct Scanner<'a> {
     file: &'a str,
     function: String,
@@ -779,6 +799,15 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
         }
         if let Some(called) = name(&expr.func) {
             let called = self.imports.get(&called).cloned().unwrap_or(called);
+            if let Some(index) = training_technique_map_arg(&called) {
+                if expr.args.iter().nth(index).is_some_and(|arg| self.map(arg)) {
+                    self.coverage.whole_map_reads.insert((
+                        self.file.into(),
+                        self.function.clone(),
+                        format!("delegated training technique: {called}"),
+                    ));
+                }
+            }
             // The typed route binder uses a small generic `field(advanced, key, decode)`
             // parser. Track its literal key just like `advanced.get(key)`; otherwise moving a
             // raw read into that parser would make the inventory silently shrink.
@@ -1178,6 +1207,22 @@ fn injecting_an_unseen_production_key_fails_coverage() {
             .len(),
         1
     );
+}
+
+#[test]
+fn native_training_technique_calls_remain_visible_as_raw_map_reads() {
+    let coverage = fixture(
+        r#"fn worker(plan: Plan) {
+            subject_mask_loss_weights(&plan.config.advanced);
+            latent_loss_settings(&VAE_ANCHOR, &plan.config.advanced);
+            parse_training_bucket_config(&plan.config.advanced);
+        }"#,
+    );
+    assert_eq!(coverage.whole_map_reads.len(), 3);
+    assert!(coverage
+        .whole_map_reads
+        .iter()
+        .any(|(_, _, site)| site == "delegated training technique: latent_loss_settings"));
 }
 
 #[test]

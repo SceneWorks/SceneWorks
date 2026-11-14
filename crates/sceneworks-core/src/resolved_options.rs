@@ -485,6 +485,9 @@ pub struct IrisTrainingOptions {
     pub repa_weight: Option<Bound<f64>>,
     /// Portable Iris policy decides whether the validated REPA settings activate the loss.
     pub repa_active: bool,
+    pub activation_checkpointing: Option<Bound<String>>,
+    /// The portable memory-floor policy treats full and selective-op as full recomputation.
+    pub full_activation_checkpointing: bool,
     pub restore_init: Option<Bound<String>>,
     pub restore_resume_data_policy: Option<Bound<String>>,
     /// Validated opaque engine ABI; callers may pass it to the engine parser, not read its keys.
@@ -524,6 +527,14 @@ impl IrisTrainingOptions {
             .unwrap_or_default();
         let repa_active = BindingInput::parent(input.effective, "training.config.advanced.iris")
             .is_some_and(crate::training::iris::curricula::iris_repa_enabled);
+        let activation_checkpointing =
+            input.text("training.config.advanced.iris", "activation_checkpointing")?;
+        let full_activation_checkpointing =
+            crate::training::iris::iris_full_activation_checkpointing_mode(
+                activation_checkpointing
+                    .as_ref()
+                    .map(|bound| bound.value.as_str()),
+            );
         Ok(Self {
             network_type: input.text("training.config.advanced", "networkType")?,
             mixed_precision: input.text("training.config.advanced", "mixedPrecision")?,
@@ -551,6 +562,8 @@ impl IrisTrainingOptions {
             dist_topology,
             repa_weight: input.number("training.config.advanced.iris.repa", "weight")?,
             repa_active,
+            activation_checkpointing,
+            full_activation_checkpointing,
             restore_init: input.text("training.config.advanced.iris_restore", "init")?,
             restore_resume_data_policy: input.text(
                 "training.config.advanced.iris_restore",
@@ -599,6 +612,22 @@ impl ValidatedModelOptionsWire {
 
     pub fn as_json_for_engine(&self) -> &JsonObject {
         &self.0
+    }
+
+    /// Iris task trainers accept exactly their objective's nested options bag. Preserve the
+    /// historical empty-object fallback for missing or malformed saved bags.
+    pub fn for_iris_task(&self, objective: crate::training::iris::IrisObjective) -> JsonObject {
+        let key = objective.options_key();
+        let mut selected = JsonObject::new();
+        selected.insert(
+            key.to_owned(),
+            self.0
+                .get(key)
+                .filter(|value| value.is_object())
+                .cloned()
+                .unwrap_or_else(|| Value::Object(JsonObject::new())),
+        );
+        selected
     }
 }
 
@@ -1360,5 +1389,43 @@ mod tests {
         assert_eq!(malformed.mlx_quantize, RouteField::Invalid);
         assert_eq!(malformed.true_cfg_scale, RouteField::Invalid);
         assert_eq!(malformed.angle_set, RouteField::Valid(false));
+    }
+
+    #[test]
+    fn iris_task_wire_keeps_only_the_selected_object() {
+        let wire = ValidatedModelOptionsWire(obj(json!({
+            "iris": {"stage": "s1"},
+            "iris_restore": {"init": "parent"},
+            "unused": true
+        })));
+        assert_eq!(
+            wire.for_iris_task(crate::training::iris::IrisObjective::Generation),
+            obj(json!({"iris":{"stage":"s1"}}))
+        );
+        assert_eq!(
+            wire.for_iris_task(crate::training::iris::IrisObjective::Restoration),
+            obj(json!({"iris_restore":{"init":"parent"}}))
+        );
+        let malformed = ValidatedModelOptionsWire(obj(json!({"iris": false})));
+        assert_eq!(
+            malformed.for_iris_task(crate::training::iris::IrisObjective::Depth),
+            obj(json!({"iris":{}}))
+        );
+    }
+
+    #[test]
+    fn iris_activation_checkpointing_uses_owner_memory_floor_policy() {
+        for (mode, full) in [
+            ("full", true),
+            ("selective_op", true),
+            ("selective_layer", false),
+            ("none", false),
+        ] {
+            let payload = obj(json!({"config":{"advanced":{"iris":{
+                "activation_checkpointing": mode
+            }}}}));
+            let bound = IrisTrainingOptions::bind(&BindingInput::new(&payload, &payload)).unwrap();
+            assert_eq!(bound.full_activation_checkpointing, full, "{mode}");
+        }
     }
 }

@@ -435,14 +435,19 @@ impl VideoRequest {
 
     /// Shared API/worker controls, bounded by the actual selected H3 schedule.
     pub fn h3_veda_settings(&self) -> Result<Option<H3VedaSettings>, String> {
-        if !self.advanced.contains_key("veda") {
+        let options = self.options();
+        if options.veda.is_none() {
             return Ok(None);
         }
         let recipe = crate::minimax_h3_turbo::resolve_turbo_recipe(&self.model, &self.loras)?;
-        let steps = requested_steps(&self.advanced)
+        let steps = options
+            .steps
+            .as_ref()
+            .and_then(|steps| u64::try_from(steps.value).ok())
+            .map(|steps| steps as u32)
             .or_else(|| recipe.map(|r| r.steps))
             .unwrap_or(50);
-        requested_h3_veda(&self.model, &self.advanced, steps)
+        options.h3_veda_settings(&self.model, steps)
     }
 
     /// Raw frame count from `duration * fps` (Python `round(duration * fps)`), at
