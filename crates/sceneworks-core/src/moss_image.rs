@@ -14,7 +14,7 @@ pub const OPTIONS_KEY: &str = "mossImage";
 pub const EDIT_OPTIONS_KEY: &str = "mossImageEdit";
 pub const EDIT_REPORT_KEY: &str = "mossImageEditExecutionReport";
 pub const EDIT_PURPOSE: &str = "moss_image_edit";
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EditOptions {
     pub reference_max_edge: u32,

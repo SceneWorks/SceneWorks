@@ -161,11 +161,14 @@ pub struct ImageAdvanced {
     pub control_image: Option<Bound<String>>,
     pub control_weights: Option<Bound<JsonObject>>,
     pub control_scale: Option<Bound<f64>>,
+    pub open_pose_scale: Option<Bound<f64>>,
     pub cn_scale: Option<Bound<f64>>,
     pub tile: Option<Bound<i64>>,
     pub overlap: Option<Bound<i64>>,
     pub prompt: Option<Bound<String>>,
     pub negative_prompt: Option<Bound<String>>,
+    pub tile_control_net_repo: Option<Bound<String>>,
+    pub id_weight: Option<Bound<f64>>,
     pub timestep_to_start_cfg: Option<Bound<i64>>,
     pub angle_set: Option<Bound<bool>>,
     pub keypoint_collection_id: Option<Bound<String>>,
@@ -186,10 +189,92 @@ pub struct ImageAdvanced {
     pub transparent_background: Option<Bound<bool>>,
     pub flux3_layout: Option<Bound<JsonObject>>,
     pub flux3_reference_ids: Option<Bound<Vec<String>>>,
+    pub moss_image: Option<Bound<gen_core::moss_image::MossImageOptions>>,
+    pub moss_image_edit: Option<Bound<crate::moss_image::EditOptions>>,
     pub moss_image_advanced: Option<Bound<crate::moss_image_advanced::EditAdvanced>>,
 }
 
 impl ImageAdvanced {
+    /// Serialize the resolved typed fields at the provider and workflow wire boundary.
+    /// This never reads the authored option bag and does not parse a serialized value back.
+    pub fn provider_wire(&self) -> JsonObject {
+        let mut wire = JsonObject::new();
+        macro_rules! put {
+            ($field:ident, $key:literal) => {
+                if let Some(value) = &self.$field {
+                    wire.insert(
+                        $key.to_owned(),
+                        serde_json::to_value(&value.value).expect("bound image option serializes"),
+                    );
+                }
+            };
+        }
+        put!(sampler, "sampler");
+        put!(scheduler, "scheduler");
+        put!(scheduler_shift, "schedulerShift");
+        put!(steps, "steps");
+        put!(guidance_scale, "guidanceScale");
+        put!(guidance_method, "guidanceMethod");
+        put!(cfg_interval, "cfgInterval");
+        put!(caption_overflow, "captionOverflow");
+        put!(num_inference_steps, "numInferenceSteps");
+        put!(enhance_prompt, "enhancePrompt");
+        put!(enhance_max_tokens, "enhanceMaxTokens");
+        put!(enhance_temperature, "enhanceTemperature");
+        put!(decoder, "decoder");
+        put!(use_pid, "usePid");
+        put!(pid_target, "pidTarget");
+        put!(pid_checkpoint, "pidCheckpoint");
+        put!(pid_gemma, "pidGemma");
+        put!(ip_adapter_scale, "ipAdapterScale");
+        put!(ip_adapter_repo, "ipAdapterRepo");
+        put!(controlnet_conditioning_scale, "controlnetConditioningScale");
+        put!(true_cfg_scale, "trueCfgScale");
+        put!(strength, "strength");
+        put!(reference_strength, "referenceStrength");
+        put!(text_style_gain, "textStyleGain");
+        put!(view_angle, "viewAngle");
+        put!(view_angles, "viewAngles");
+        put!(poses, "poses");
+        put!(face_restore, "faceRestore");
+        put!(control_mode, "controlMode");
+        put!(control_image, "controlImage");
+        put!(control_weights, "controlWeights");
+        put!(control_scale, "controlScale");
+        put!(open_pose_scale, "openPoseScale");
+        put!(cn_scale, "cnScale");
+        put!(tile, "tile");
+        put!(overlap, "overlap");
+        put!(prompt, "prompt");
+        put!(negative_prompt, "negativePrompt");
+        put!(tile_control_net_repo, "tileControlNetRepo");
+        put!(id_weight, "idWeight");
+        put!(timestep_to_start_cfg, "timestepToStartCfg");
+        put!(angle_set, "angleSet");
+        put!(keypoint_collection_id, "keypointCollectionId");
+        put!(system_message, "systemMessage");
+        put!(image_guidance_scale, "imageGuidanceScale");
+        put!(max_images, "maxImages");
+        put!(max_new_tokens, "maxNewTokens");
+        put!(think_mode, "thinkMode");
+        put!(phases, "phases");
+        put!(flash_attn, "flashAttn");
+        put!(mlx_quantize, "mlxQuantize");
+        put!(mlx_quantize_explicit, "mlxQuantizeExplicit");
+        put!(conv_rot, "convRot");
+        put!(quant_tier, "quantTier");
+        put!(quant, "quant");
+        put!(model_path, "modelPath");
+        put!(text_encoder_model, "textEncoderModel");
+        put!(transparent_background, "transparentBackground");
+        put!(flux3_layout, "flux3_layout");
+        put!(flux3_reference_ids, "flux3_reference_ids");
+        put!(moss_image, "mossImage");
+        put!(moss_image_edit, "mossImageEdit");
+        put!(moss_image_advanced, "mossImageAdvanced");
+        wire
+    }
+
     pub fn bind(input: &BindingInput<'_>) -> Result<Self, BindingError> {
         Ok(Self {
             sampler: input.text("advanced", "sampler")?,
@@ -225,11 +310,14 @@ impl ImageAdvanced {
             control_image: input.text("advanced", "controlImage")?,
             control_weights: input.structured("advanced", "controlWeights")?,
             control_scale: input.number("advanced", "controlScale")?,
+            open_pose_scale: input.number("advanced", "openPoseScale")?,
             cn_scale: input.number("advanced", "cnScale")?,
             tile: input.integer("advanced", "tile")?,
             overlap: input.integer("advanced", "overlap")?,
             prompt: input.text("advanced", "prompt")?,
             negative_prompt: input.text("advanced", "negativePrompt")?,
+            tile_control_net_repo: input.text("advanced", "tileControlNetRepo")?,
+            id_weight: input.number("advanced", "idWeight")?,
             timestep_to_start_cfg: input.integer("advanced", "timestepToStartCfg")?,
             angle_set: input.boolean("advanced", "angleSet")?,
             keypoint_collection_id: input.text("advanced", "keypointCollectionId")?,
@@ -250,6 +338,8 @@ impl ImageAdvanced {
             transparent_background: input.boolean("advanced", "transparentBackground")?,
             flux3_layout: input.structured("advanced", "flux3_layout")?,
             flux3_reference_ids: input.structured("advanced", "flux3_reference_ids")?,
+            moss_image: input.structured("advanced", "mossImage")?,
+            moss_image_edit: input.structured("advanced", "mossImageEdit")?,
             moss_image_advanced: input.structured("advanced", "mossImageAdvanced")?,
         })
     }
@@ -316,6 +406,13 @@ pub struct ImageRequest {
 }
 
 impl ImageRequest {
+    pub fn effective_advanced_wire(&self) -> JsonObject {
+        self.resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved")
+            .provider_wire()
+    }
+
     /// Access canonical scalar options only after `from_resolved`. A missing binding is a
     /// programming error at an execution boundary, not a reason to reinterpret authored JSON.
     pub fn advanced_bool(&self, key: &'static str) -> Option<bool> {
@@ -374,7 +471,9 @@ impl ImageRequest {
             "referenceStrength" => &options.reference_strength,
             "textStyleGain" => &options.text_style_gain,
             "controlScale" => &options.control_scale,
+            "openPoseScale" => &options.open_pose_scale,
             "cnScale" => &options.cn_scale,
+            "idWeight" => &options.id_weight,
             "imageGuidanceScale" => &options.image_guidance_scale,
             _ => panic!("undeclared image number accessor: {key}"),
         };
@@ -400,6 +499,7 @@ impl ImageRequest {
             "controlImage" => &options.control_image,
             "prompt" => &options.prompt,
             "negativePrompt" => &options.negative_prompt,
+            "tileControlNetRepo" => &options.tile_control_net_repo,
             "keypointCollectionId" => &options.keypoint_collection_id,
             "systemMessage" => &options.system_message,
             "quantTier" => &options.quant_tier,
@@ -1048,6 +1148,52 @@ mod tests {
 
     fn payload(value: Value) -> JsonObject {
         value.as_object().cloned().unwrap()
+    }
+
+    #[test]
+    fn resolved_image_options_preserve_effective_values_and_authored_origin() {
+        let authored = payload(json!({
+            "projectId": "p",
+            "advanced": {"steps": "8", "timestepShift": "2.5", "enhancePrompt": true}
+        }));
+        let effective = payload(json!({
+            "projectId": "p",
+            "advanced": {"steps": 8, "schedulerShift": 2.5, "enhancePrompt": true, "decoder": "native"}
+        }));
+        let request = ImageRequest::from_resolved(&authored, &effective).unwrap();
+        assert_eq!(request.advanced_i64("steps"), Some(8));
+        assert_eq!(request.advanced_f64("timestepShift"), Some(2.5));
+        assert_eq!(request.advanced_bool("enhancePrompt"), Some(true));
+        assert_eq!(request.advanced_text("decoder"), Some("native"));
+        assert_eq!(
+            request.effective_advanced_wire(),
+            effective
+                .get("advanced")
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .clone()
+        );
+        let options = request.resolved_advanced.unwrap();
+        assert_eq!(
+            options.scheduler_shift.unwrap().origin,
+            crate::resolved_options::Origin::Authored {
+                spelling: "timestepShift"
+            }
+        );
+        assert!(matches!(
+            options.decoder.unwrap().origin,
+            crate::resolved_options::Origin::Default(_)
+        ));
+    }
+
+    #[test]
+    fn resolved_image_options_reject_noncanonical_effective_numbers() {
+        let payload = payload(json!({"advanced": {"steps": "8"}}));
+        assert!(matches!(
+            ImageRequest::from_resolved(&payload, &payload),
+            Err(BindingError::InvalidEffectiveValue { .. })
+        ));
     }
 
     #[test]
