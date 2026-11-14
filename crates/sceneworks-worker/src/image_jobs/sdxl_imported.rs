@@ -256,7 +256,7 @@ pub(super) fn sdxl_imported_available_resolved(
     settings: &Settings,
 ) -> bool {
     sdxl_imported_request_shape_available_resolved(execution)
-        && matches!(resolve_imported_sdxl_file(execution, settings), Ok(Some(_)))
+        && matches!(resolve_imported_sdxl_pin(execution, settings), Ok(Some(_)))
 }
 
 /// Resolve imported SDXL img2img/edit/inpaint/outpaint conditioning. The exact registered provider
