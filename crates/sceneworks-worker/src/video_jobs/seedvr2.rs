@@ -1245,6 +1245,8 @@ struct Seedvr2Stream {
     src_w: u32,
     src_h: u32,
     seed: u64,
+    /// One completed provider call per processed temporal window, in render order.
+    execution_stages: Vec<sceneworks_core::execution_receipt::ExecutionStageBinding>,
 }
 
 /// RAII guard for a worker-owned scratch directory (sc-9595). The streamed 4× PNG sequence can be many
@@ -1307,6 +1309,7 @@ async fn run_seedvr2_stream(
     weights_dir: PathBuf,
 ) -> WorkerResult<Seedvr2Stream> {
     let seed = req.seed.unwrap_or(0);
+    let mut execution_stages = Vec::new();
     // Probe BEFORE creating either PNG sequence. The source and output sequences coexist at peak, so
     // admission must account for both before the first source frame can consume scratch. The same
     // pass measures the frame timing the output keeps (sc-24391).
@@ -1427,6 +1430,14 @@ async fn run_seedvr2_stream(
         // advanced block generate_video reads for those is empty here (F-118).
         let decoded =
             generate_video(api, settings, job, backend, &JsonObject::new(), input).await?;
+        let execution = decoded
+            .execution_report
+            .clone()
+            .unwrap_or_else(gen_core::generator::ExecutionIdentity::provider_default);
+        execution_stages.push(sceneworks_core::execution_receipt::ExecutionStageBinding {
+            stage: format!("seedvr2_window_{}", execution_stages.len()),
+            execution: serde_json::to_value(execution).map_err(WorkerError::Json)?,
+        });
         if let Some(frame) = decoded.frames.first() {
             out_w = frame.width;
             out_h = frame.height;
@@ -1465,6 +1476,7 @@ async fn run_seedvr2_stream(
         src_w,
         src_h,
         seed,
+        execution_stages,
     })
 }
 
@@ -1718,6 +1730,7 @@ pub(crate) async fn run_video_upscale_job(
         src_w,
         src_h,
         seed,
+        execution_stages,
     } = stream;
     let duration = timing.frames.picture_seconds(out_count);
 
@@ -1885,6 +1898,7 @@ pub(crate) async fn run_video_upscale_job(
             "createdAt": created_at,
         },
         "assetWrites": [fact],
+        "workerExecutionStages": execution_stages,
     })
     .as_object()
     .cloned()

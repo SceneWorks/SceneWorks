@@ -943,6 +943,37 @@ fn terminal_media_receipt_hashes_audio_video_vector_and_document_files() {
     );
 }
 
+#[cfg(test)]
+#[test]
+fn seedvr2_upscale_receipt_binds_window_order_and_final_mp4_bytes() {
+    let project = tempfile::tempdir().unwrap();
+    let bytes = b"final encoded and muxed clip";
+    std::fs::write(project.path().join("upscaled.mp4"), bytes).unwrap();
+    let report =
+        serde_json::to_value(gen_core::generator::ExecutionIdentity::provider_default()).unwrap();
+    let stages = [0, 1]
+        .into_iter()
+        .map(|index| {
+            serde_json::json!({"stage":format!("seedvr2_window_{index}"),"execution":report.clone()})
+        })
+        .collect::<Vec<_>>();
+    let result = serde_json::json!({
+        "expectedCount":1,
+        "generationSet":{"mode":"video_upscale"},
+        "assetWrites":[{"assetId":"upscaled","index":0,"mediaPath":"upscaled.mp4"}],
+        "workerExecutionStages":stages,
+    });
+    let receipt = unavailable_completed_receipt(result.as_object().unwrap(), Some(project.path()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt["stages"], result["workerExecutionStages"]);
+    assert_eq!(receipt["outputs"][0]["artifactIds"][0], "upscaled");
+    assert_eq!(
+        receipt["outputs"][0]["artifactSha256"][0],
+        sceneworks_core::hashing::hex(&Sha256::digest(bytes))
+    );
+}
+
 pub(crate) fn progress_payload(
     status: JobStatus,
     stage: ProgressStage,

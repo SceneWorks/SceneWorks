@@ -221,8 +221,8 @@ fn moss_render(
     adapter_identities: &[lane_controls::AdapterIdentity],
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(Vec<(i64, Image)>, JsonObject)> {
-    let output = generator
-        .generate(request, on_progress)
+    let completed = generator
+        .generate_with_execution_report(request, on_progress)
         .map_err(|error| crate::classify_engine_error("MOSS generation", error))?;
     if request.cancel.is_cancelled() {
         return Err(WorkerError::Canceled("MOSS generation canceled".into()));
@@ -230,7 +230,7 @@ fn moss_render(
     let receipt = generator.moss_image_execution_report().ok_or_else(|| {
         WorkerError::Engine("MOSS provider completed without its actual execution receipt".into())
     })?;
-    let GenerationOutput::Images(images) = output else {
+    let Some(GenerationOutput::Images(images)) = completed.generation.output else {
         return Err(WorkerError::Engine(
             "MOSS provider returned non-image output".into(),
         ));
@@ -264,6 +264,10 @@ fn moss_render(
     facts.insert(
         sceneworks_core::moss_image::REPORT_KEY.into(),
         serde_json::to_value(receipt).map_err(|e| WorkerError::Engine(e.to_string()))?,
+    );
+    facts.insert(
+        "workerExecutionReport".into(),
+        serde_json::to_value(completed.execution).map_err(WorkerError::Json)?,
     );
     Ok((images, facts))
 }
@@ -361,8 +365,8 @@ fn moss_edit_render(
     adapter_identities: &[lane_controls::AdapterIdentity],
     progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(gen_core::moss_image::MossImageAdvancedOutput, JsonObject)> {
-    let output = generator
-        .generate_moss_image_edit(
+    let completed = generator
+        .generate_moss_image_edit_with_execution_report(
             request,
             gen_core::moss_image_edit::MossImageEditInputs {
                 references,
@@ -398,7 +402,7 @@ fn moss_edit_render(
             "MOSS edit receipt differs from actual output/reference provenance".into(),
         ));
     }
-    let output_count = match &output {
+    let output_count = match &completed.output {
         gen_core::moss_image::MossImageAdvancedOutput::Images(images)
             if advanced.output == gen_core::moss_image::MossImageOutputKind::Images =>
         {
@@ -459,7 +463,11 @@ fn moss_edit_render(
         sceneworks_core::moss_image::EDIT_REPORT_KEY.into(),
         serde_json::to_value(report).map_err(|e| WorkerError::Engine(e.to_string()))?,
     );
-    Ok((output, facts))
+    facts.insert(
+        "workerExecutionReport".into(),
+        serde_json::to_value(completed.execution).map_err(WorkerError::Json)?,
+    );
+    Ok((completed.output, facts))
 }
 
 fn write_moss_tensor_companion(
@@ -588,7 +596,8 @@ fn emit_moss_advanced_outputs(
                     "mode":"edit_image","model":plan.request.model,"adapter":plan.adapter,"prompt":plan.request.image_prompt(index),"negativePrompt":plan.request.negative_prompt,
                     "seed":sample.seed,"count":plan.request.count,"normalizedWidth":request.width,"normalizedHeight":request.height,
                     "sourceAssetId":reference_ids.first(),
-                    "rawAdapterSettings":settings,"extra":{"workflowCompanion":companion,"mossOutput":{"kind":"sampled_latents","sampleIndex":index,"nativeBatchShape":shape,"artifactSha256":metadata.sha256}}});
+                    "rawAdapterSettings":settings,"workerExecutionReport":facts.get("workerExecutionReport"),
+                    "extra":{"workflowCompanion":companion,"mossOutput":{"kind":"sampled_latents","sampleIndex":index,"nativeBatchShape":shape,"artifactSha256":metadata.sha256}}});
                 tx.blocking_send(GenEvent::AssetWritten {
                     index,
                     fact: fact.as_object().expect("fact object").clone(),

@@ -162,11 +162,21 @@ pub fn validate_worker_receipt(
             validate_execution_identity(execution, 1)?;
         }
     }
+    let voice_stages = submitted.stages.len() == 2
+        && submitted.stages[0].stage == "base_tts"
+        && submitted.stages[1].stage == "voice_conversion";
+    let seedvr2_stages = terminal_result
+        .get("generationSet")
+        .and_then(|set| set.get("mode"))
+        .and_then(Value::as_str)
+        == Some("video_upscale")
+        && submitted
+            .stages
+            .iter()
+            .enumerate()
+            .all(|(index, stage)| stage.stage == format!("seedvr2_window_{index}"));
     if !submitted.stages.is_empty()
-        && (submitted.stages.len() != 2
-            || submitted.outputs.len() != 1
-            || submitted.stages[0].stage != "base_tts"
-            || submitted.stages[1].stage != "voice_conversion")
+        && (submitted.outputs.len() != 1 || !(voice_stages || seedvr2_stages))
     {
         return Err(ReplayUnavailable::new("invalid_execution_stages", "stages"));
     }
@@ -561,6 +571,42 @@ mod tests {
     }
 
     #[test]
+    fn seedvr2_window_receipts_require_contiguous_order_and_upscale_result() {
+        let unavailable = json!({"state":"unavailable","reason":{
+            "code":"provider_report_unavailable","detail":"fixture","missing_facts":["provider_resolved_execution"]
+        }});
+        let stages = (0..3)
+            .map(|index| ExecutionStageBinding {
+                stage: format!("seedvr2_window_{index}"),
+                execution: unavailable.clone(),
+            })
+            .collect::<Vec<_>>();
+        let mut receipt = worker_receipt();
+        receipt.execution = unavailable;
+        receipt.outputs.truncate(1);
+        receipt.stages = stages.clone();
+        let result = json!({"expectedCount":1,"generationSet":{"mode":"video_upscale"},
+            "assetWrites":[{"assetId":"a"}],"workerExecutionStages":stages});
+        assert!(validate_worker_receipt(&receipt, result.as_object().unwrap()).is_ok());
+        receipt.stages.swap(0, 1);
+        assert_eq!(
+            validate_worker_receipt(&receipt, result.as_object().unwrap())
+                .unwrap_err()
+                .reason,
+            "invalid_execution_stages"
+        );
+        receipt.stages.swap(0, 1);
+        let mut wrong_route = result.clone();
+        wrong_route["generationSet"]["mode"] = json!("video_generate");
+        assert_eq!(
+            validate_worker_receipt(&receipt, wrong_route.as_object().unwrap())
+                .unwrap_err()
+                .reason,
+            "invalid_execution_stages"
+        );
+    }
+
+    #[test]
     fn deterministic_scope_is_explicit_and_exact() {
         let input = worker_receipt();
         let receipt = TrustedExecutionReceipt {
@@ -582,6 +628,17 @@ mod tests {
         assert!(require_deterministic_scope(&receipt, "same-device").is_ok());
         assert_eq!(
             require_deterministic_scope(&receipt, "other-device")
+                .unwrap_err()
+                .reason,
+            "replay_scope_changed"
+        );
+        let mut broad_token_claim = receipt.clone();
+        broad_token_claim.execution["identity"]["deterministic_replay"] = json!({
+            "kind":"deterministic",
+            "scope":"Same pinned model/tokenizer bytes, inference revision, device, dtype and effective decode/cache policy; identical conditioning and recorded RNG stream"
+        });
+        assert_eq!(
+            require_deterministic_scope(&broad_token_claim, SAME_DEVICE_PINNED_RUNTIME_SCOPE)
                 .unwrap_err()
                 .reason,
             "replay_scope_changed"
