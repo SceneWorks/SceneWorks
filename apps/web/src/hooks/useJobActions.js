@@ -24,8 +24,14 @@ export function useJobActions({
         const updatedJob = await jobActionRequest(job.id, action, token, { method: "POST", body: JSON.stringify(body) });
         setJobs((items) => upsertJobNewest(items, updatedJob));
         setError("");
+        return { ok: true, job: updatedJob };
       } catch (err) {
+        if (action === "exact-replay" && err.code === "replay_unavailable") {
+          setError("");
+          return { ok: false, code: err.code, reason: err.context?.reason };
+        }
         setError(err.message);
+        return { ok: false, code: err.code };
       }
     },
     [setError, setJobs, token],

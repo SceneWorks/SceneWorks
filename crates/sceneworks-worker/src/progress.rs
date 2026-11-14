@@ -622,6 +622,19 @@ tokio::task_local! {
     /// The private capability minted by the accepted claim. It is scoped to one
     /// job future and leaves the worker only on that job's terminal progress POST.
     pub(crate) static EXECUTION_CLAIM_CAPABILITY: Option<String>;
+    /// Immutable receipt supplied only by the exact-replay claim. Route
+    /// preflight compares this with the chosen plan before inference starts.
+    pub(crate) static EXACT_REPLAY_EXPECTED: Option<sceneworks_core::execution_receipt::TrustedExecutionReceipt>;
+}
+
+pub(crate) async fn with_exact_replay_expected<F>(
+    expected: Option<sceneworks_core::execution_receipt::TrustedExecutionReceipt>,
+    future: F,
+) -> F::Output
+where
+    F: std::future::Future,
+{
+    EXACT_REPLAY_EXPECTED.scope(expected, future).await
 }
 
 pub(crate) async fn with_execution_claim_capability<F>(
@@ -692,7 +705,7 @@ pub(crate) async fn post_job_progress(
     // resulting 409 propagates as WorkerError::Api and aborts the local job
     // handling — i.e. the worker abandons the job (sc-4172).
     payload.worker_id = Some(api.worker_id.clone());
-    if payload.status == JobStatus::Completed {
+    if JobStatus::terminal_statuses().contains(&payload.status.as_str()) {
         if let Some(capability) = EXECUTION_CLAIM_CAPABILITY
             .try_with(Clone::clone)
             .ok()

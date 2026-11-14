@@ -281,11 +281,19 @@ pub(crate) async fn claim_job(
                 .map(|claimed| store.execution_claim_capability(&claimed.id, &payload.worker_id))
                 .transpose()?
                 .flatten();
+            let exact_replay_expected = job
+                .as_ref()
+                .map(|claimed| {
+                    store.exact_replay_expected_for_claim(&claimed.id, &payload.worker_id)
+                })
+                .transpose()?
+                .flatten();
             Ok::<_, JobsStoreError>((
                 job,
                 decision,
                 portable_binding,
                 execution_claim_capability,
+                exact_replay_expected,
                 stranded,
                 unsupported,
                 candle_stranded,
@@ -302,6 +310,7 @@ pub(crate) async fn claim_job(
         decision,
         portable_binding,
         execution_claim_capability,
+        exact_replay_expected,
         stranded,
         unsupported,
         candle_stranded,
@@ -393,6 +402,7 @@ pub(crate) async fn claim_job(
         job: response,
         portable_model_binding,
         execution_claim_capability,
+        exact_replay_expected,
         extra: Default::default(),
     }))
 }
@@ -750,6 +760,73 @@ pub(crate) async fn get_job(
     Ok(Json(public_job_snapshot(
         store_call(state, move |store, _timeout| store.get_job(&job_id)).await?,
     )))
+}
+
+/// Public execution facts omit the private source route and the claim secret.
+/// The result remains read-only; exact replay is a separate POST action.
+pub(crate) async fn get_execution_receipt(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let receipt = store_call(state, move |store, _timeout| {
+        store.completed_execution_receipt(&job_id)
+    })
+    .await?
+    .ok_or_else(|| {
+        ApiError::typed(
+            StatusCode::CONFLICT,
+            "This job has no complete execution receipt.",
+            "replay_unavailable",
+            json!({"reason":"receipt_missing","field":"executionReceipt"}),
+        )
+    })?;
+    Ok(Json(json!({
+        "version": receipt.version,
+        "jobId": receipt.job_id,
+        "jobType": receipt.job_type,
+        "attemptId": receipt.attempt_id,
+        "acceptedBackend": receipt.accepted_backend,
+        "acceptedDevice": receipt.accepted_device,
+        "inferenceRevision": receipt.inference_revision,
+        "acceptedBindingSha256": receipt.accepted_binding_sha256,
+        "acceptedResultSha256": receipt.accepted_result_sha256,
+        "execution": receipt.execution,
+        "outputs": receipt.outputs,
+    })))
+}
+
+/// Re-enter the queue only through the stored completed identity. The store
+/// atomically freezes the expected receipt on the new job and pins the worker,
+/// device, source route and current inference revision at claim.
+pub(crate) async fn exact_replay_job(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+    request: AxumRequest,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    let headers = request.headers().clone();
+    let body = to_bytes(request.into_body(), 1024)
+        .await
+        .map_err(|error| ApiError::bad_request(format!("Invalid exact replay body: {error}")))?;
+    auth::require_json_content_type(&headers, !body.is_empty())?;
+    if !body.iter().all(|byte| byte.is_ascii_whitespace())
+        && serde_json::from_slice::<Value>(&body)
+            .map_err(|error| ApiError::bad_request(format!("Invalid exact replay body: {error}")))?
+            != json!({})
+    {
+        return Err(ApiError::typed(
+            StatusCode::BAD_REQUEST,
+            "Exact replay accepts no changed options.",
+            "replay_unavailable",
+            json!({"reason":"options_not_allowed","field":"payload"}),
+        ));
+    }
+    let job = store_call(state.clone(), move |store, timeout| {
+        store.create_exact_replay_job(&job_id, timeout)
+    })
+    .await?;
+    publish(&state, "job.updated", &public_job_snapshot(job.clone()));
+    publish_queue(&state).await?;
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 #[derive(Deserialize)]
