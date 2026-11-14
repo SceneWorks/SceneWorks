@@ -15640,7 +15640,28 @@
       // candle-llm `prepare_snapshot` tiers (stored GGML blocks) from
       // `SceneWorks/qwen3.8-27b-abliterated-candle` @ accaccc1. Exactly one q4 and one q8 row is in
       // scope on any platform. Candle q4 was loaded on Metal and grounded on an image (peak
-      // footprint 41 GB); neither Candle tier has been measured on CUDA yet.
+      // footprint 41 GB).
+      //
+      // MEMORY FLOORS (registry evidence.json, `mlx` / `candle` `minMemoryGbByTier`, GiB). A describe
+      // job reads its tier's floor on the worker's lane and refuses before any image when the
+      // worker cannot hold it. The scalar `minMemoryGb` of each lane is the bf16 floor, the
+      // conservative fallback for a tier with no row.
+      //   candle (free VRAM, measured peak above idle + the 2 GiB allocator slack, rounded up):
+      //     q4 24 — measured 21,993 MiB (21.48 GiB) on CUDA (qwen38-describer-validation run
+      //             43604077657)
+      //     q8 36 — measured 34,409 MiB (33.60 GiB) on CUDA (run 43604907453)
+      //     bf16 58 — UNMEASURED, derived: 51.76 GiB of bf16 files + the 3.45 GiB the q8 peak
+      //               holds above its files + 2 GiB slack
+      //   `candle.measured` stays false: the flag covers the whole block, including the scalar
+      //   `minMemoryGb` (the derived bf16 floor), so it cannot claim calibrated evidence.
+      //   mlx (total unified memory, peak / 0.9 as the catalog's MLX fit rule, rounded up):
+      //     q4 25 — measured describe peak about 22 GiB (input image size not recorded)
+      //     q8 38 — DERIVED: 30.15 GiB of files + the 3.38 GiB the q4 peak holds above its files
+      //     bf16 62 — UNMEASURED, derived the same way from 51.76 GiB of files
+      //   These floors are what the worker admits from. The Model Manager's host-size quote for
+      //   this entry does NOT use them: it still comes from the catalog's image-generation estimate
+      //   (the tier's files plus a 14 GiB decode transient), so it is higher than the worker's
+      //   floor on MLX (about 37 GB quoted for q4, where the worker admits from 25).
       //
       // The file list names what the loader reads, so a metadata-only revision can never look
       // installed (the lesson recorded on `film_planner_qwen3_6_27b`).
@@ -15720,6 +15741,9 @@
       },
       "defaults": {},
       "limits": {},
+      // Both lanes run it; their per-tier memory floors are registry evidence (see above).
+      "mlx": {},
+      "candle": {},
       "loraCompatibility": {
         "families": [],
         "types": []

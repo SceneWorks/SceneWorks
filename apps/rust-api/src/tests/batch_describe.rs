@@ -4,7 +4,7 @@
 use super::support::*;
 use sceneworks_core::dataset_batch_describe::{
     JOYCAPTION_REPO, MAX_DESCRIBE_PROMPT_CHARS, MAX_JOYCAPTION_DESCRIBE_PROMPT_CHARS,
-    QWEN38_27B_DESCRIBER_REPO, VISION_CAPTIONER_REPO,
+    QWEN38_27B_DESCRIBER_MODEL_ID, QWEN38_27B_DESCRIBER_REPO, VISION_CAPTIONER_REPO,
 };
 
 fn png_rgb(w: u32, h: u32, shade: u8) -> Vec<u8> {
@@ -257,9 +257,13 @@ async fn batch_describe_accepts_joycaption_with_its_own_prompt_limit() {
 #[tokio::test]
 async fn batch_describe_accepts_the_qwen38_27b_describer_with_a_tier() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    let (app, project_id, dataset_id, _, _, _) = dataset_fixture(&temp_dir).await;
+    let (app, project_id, dataset_id, _, _, state) = dataset_fixture(&temp_dir).await;
+    let _hub = private_hub(&state);
     let route =
         format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
+    for tier in ["q4", "q8", "bf16"] {
+        seed_qwen38_tier(&state.settings.data_dir, tier);
+    }
     for (tier, expect) in [(None, "q4"), (Some("q8"), "q8"), (Some("bf16"), "bf16")] {
         let mut body = json!({ "model": QWEN38_27B_DESCRIBER_REPO });
         if let Some(tier) = tier {
@@ -314,7 +318,15 @@ async fn batch_describe_items_round_trip_on(worker_route: TestPortableRoute, lan
     assert_eq!(status, StatusCode::CREATED, "{job}");
     let job_id = job["id"].as_str().expect("job id").to_owned();
     const WORKER: &str = "test-describe-worker";
-    bind_inserted_test_job(&state, &job_id, worker_route);
+    // Admission froze every native route at creation; the claim runs on the one this worker is.
+    assert!(
+        state
+            .jobs_store
+            .portable_model_binding(&job_id)
+            .expect("binding reads")
+            .is_some(),
+        "the describe job is bound when it is created"
+    );
     claim_job_as_worker_on_route(
         &app,
         &job_id,
@@ -484,4 +496,292 @@ async fn batch_describe_jobs_list_the_datasets_runs_newest_first() {
     let (status, none) = request(app.clone(), "GET", &other, Value::Null).await;
     assert_eq!(status, StatusCode::OK, "{none}");
     assert_eq!(none, json!([]));
+}
+
+// ── Qwen3.8 27B tiers: install, source binding, routing and refusal (SW-7121) ───────────────
+
+/// The catalog row of the 27B's `tier` on `platform`.
+fn qwen38_tier_row(platform: &str, tier: &str) -> Value {
+    let mut entry = Value::Object(
+        sceneworks_core::builtin_manifests::builtin_model_entry(QWEN38_27B_DESCRIBER_MODEL_ID)
+            .expect("the 27B describer is a builtin")
+            .clone(),
+    );
+    crate::models::retain_downloads_for_os(&mut entry, platform);
+    entry["downloads"]
+        .as_array()
+        .expect("downloads")
+        .iter()
+        .find(|row| row["variant"] == tier)
+        .cloned()
+        .unwrap_or_else(|| panic!("{platform} has a {tier} row"))
+}
+
+/// Give this app its own Hugging Face cache, so tiers staged by a test running alongside never
+/// read as installed here. Hold the guard for the whole test.
+fn private_hub(state: &crate::AppState) -> sceneworks_core::hf_home::test_support::CacheRootGuard {
+    sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+        state.settings.data_dir.clone(),
+        state.settings.data_dir.join("cache/huggingface/hub"),
+    )
+}
+
+/// Stage `tier` of the 27B in this host's Hugging Face cache, one file per selector of its row,
+/// exactly where a finished download of that tier leaves it.
+fn seed_qwen38_tier(data_dir: &std::path::Path, tier: &str) {
+    let row = qwen38_tier_row(std::env::consts::OS, tier);
+    let repo = row["repo"].as_str().expect("repo");
+    let revision = row["revision"].as_str().expect("revision");
+    let cache = huggingface_repo_cache_path(data_dir, repo).expect("cache path");
+    std::fs::create_dir_all(cache.join("refs")).expect("refs dir");
+    std::fs::write(cache.join("refs/main"), revision).expect("ref");
+    for selector in row["files"].as_array().expect("files") {
+        let file = selector.as_str().expect("selector").replace('*', "fixture");
+        let path = cache.join("snapshots").join(revision).join(&file);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("snapshot dir");
+        // A shard index names the one staged shard, so the sharded tier reads complete.
+        let body = if file.ends_with(".safetensors.index.json") {
+            json!({ "weight_map": { "w": "model-fixture.safetensors" } }).to_string()
+        } else {
+            "fixture".to_owned()
+        };
+        std::fs::write(path, body).expect("fixture file");
+    }
+}
+
+/// The pinned source the job's binding froze for the describer on `backend:platform`:
+/// (repository, revision, variant, every frozen file).
+fn bound_describer_source(
+    state: &crate::AppState,
+    job_id: &str,
+    backend: &str,
+    platform: &str,
+) -> (String, String, String, Vec<String>) {
+    use sceneworks_core::model_artifacts::portable_binding::{
+        PortableJobBinding, PortableSourceIdentity,
+    };
+    let binding: PortableJobBinding = serde_json::from_value(
+        state
+            .jobs_store
+            .portable_model_binding(job_id)
+            .expect("binding reads")
+            .expect("the job is bound at creation"),
+    )
+    .expect("binding parses");
+    let route = binding
+        .select_route(backend, platform)
+        .unwrap_or_else(|error| panic!("{backend}:{platform} is admitted: {error}"));
+    assert_eq!(route.models.len(), 1, "{backend}:{platform}");
+    let model = &route.models[0];
+    assert_eq!(model.model_id, QWEN38_27B_DESCRIBER_MODEL_ID);
+    assert_eq!(model.members.len(), 1, "one source: the tier's own row");
+    let member = &model.members[0];
+    let PortableSourceIdentity::Revision { identity } = &member.source else {
+        panic!("a catalog tier is a pinned revision: {:?}", member.source);
+    };
+    (
+        identity.repository.clone(),
+        identity.revision.clone(),
+        identity.variant.clone(),
+        member
+            .files
+            .iter()
+            .map(|file| file.relative_path.to_string_lossy().into_owned())
+            .collect(),
+    )
+}
+
+/// The recorded defect: a q4/q8 job bound the full-precision upstream row on every tier, so the
+/// re-host folder the worker actually loads was verified by nothing. Each route of a job now
+/// freezes the row of the job's tier on that route's platform: the MLX re-host on macOS, the Candle
+/// re-host on Linux and Windows, and the upstream repository for full precision.
+#[tokio::test]
+async fn a_qwen38_job_binds_its_tiers_row_on_every_route() {
+    use sceneworks_core::dataset_batch_describe::{
+        QWEN38_27B_DESCRIBER_CANDLE_REPO, QWEN38_27B_DESCRIBER_MLX_REPO,
+    };
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id, dataset_id, _, _, state) = dataset_fixture(&temp_dir).await;
+    let _hub = private_hub(&state);
+    let route =
+        format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
+    for tier in ["q4", "q8", "bf16"] {
+        seed_qwen38_tier(&state.settings.data_dir, tier);
+        let (status, job) = request(
+            app.clone(),
+            "POST",
+            &route,
+            json!({ "model": QWEN38_27B_DESCRIBER_REPO, "variant": tier }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{tier}: {job}");
+        let job_id = job["id"].as_str().expect("job id");
+        for (backend, platform, repo) in [
+            ("mlx", "macos", QWEN38_27B_DESCRIBER_MLX_REPO),
+            ("candle", "linux", QWEN38_27B_DESCRIBER_CANDLE_REPO),
+            ("candle", "windows", QWEN38_27B_DESCRIBER_CANDLE_REPO),
+        ] {
+            let (bound_repo, revision, variant, files) =
+                bound_describer_source(&state, job_id, backend, platform);
+            let row = qwen38_tier_row(platform, tier);
+            assert_eq!(variant, tier, "{backend}:{platform}");
+            assert_eq!(revision, row["revision"], "{backend}:{platform} {tier}");
+            if tier == "bf16" {
+                assert_eq!(bound_repo, QWEN38_27B_DESCRIBER_REPO, "{platform}");
+            } else {
+                assert_eq!(bound_repo, repo, "{platform} {tier}");
+                assert!(
+                    !files.is_empty()
+                        && files
+                            .iter()
+                            .all(|file| file.starts_with(&format!("{tier}/"))),
+                    "{platform} {tier} freezes only its own folder: {files:?}"
+                );
+            }
+        }
+    }
+}
+
+/// AC2: the job routes to a capable worker on each lane, through the binding admission froze
+/// (no fixture binding): the MLX worker on macOS and the Candle worker on Linux and Windows.
+#[tokio::test]
+async fn a_qwen38_job_is_claimed_by_a_capable_worker_on_each_lane() {
+    for (worker_route, lane) in [
+        (TestPortableRoute::MlxMacos, "mlx"),
+        (TestPortableRoute::CandleLinux, "candle"),
+        (TestPortableRoute::CandleWindows, "candle"),
+    ] {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let (app, project_id, dataset_id, _, _, state) = dataset_fixture(&temp_dir).await;
+        let _hub = private_hub(&state);
+        seed_qwen38_tier(&state.settings.data_dir, "q4");
+        let (status, job) = request(
+            app.clone(),
+            "POST",
+            &format!(
+                "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs"
+            ),
+            json!({ "model": QWEN38_27B_DESCRIBER_REPO }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{job}");
+        claim_job_as_worker_on_route(
+            &app,
+            job["id"].as_str().expect("job id"),
+            "test-27b-describe-worker",
+            &["gpu", "prompt_refine", lane],
+            worker_route,
+        )
+        .await;
+    }
+}
+
+/// AC3 (install half): a tier this host has not installed is refused before a job exists, with a
+/// message that names the tier and what to do. Another installed tier does not stand in for it.
+#[tokio::test]
+async fn a_qwen38_tier_that_is_not_installed_is_refused_before_queueing() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id, dataset_id, _, _, state) = dataset_fixture(&temp_dir).await;
+    let _hub = private_hub(&state);
+    let route =
+        format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs");
+    seed_qwen38_tier(&state.settings.data_dir, "q4");
+    for tier in ["q8", "bf16"] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            &route,
+            json!({ "model": QWEN38_27B_DESCRIBER_REPO, "variant": tier }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{tier}: {body}");
+        let detail = body["detail"].as_str().expect("detail");
+        assert!(
+            detail.starts_with(&format!(
+                "The {tier} tier of Vision Describer (Qwen3.8-27B) is not installed."
+            )),
+            "{detail}"
+        );
+        assert!(detail.contains("Model Manager"), "{detail}");
+    }
+    let (status, jobs) = request(app.clone(), "GET", &route, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{jobs}");
+    assert_eq!(jobs, json!([]), "a refused request queues nothing");
+    // The installed tier (the default) is accepted.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &route,
+        json!({ "model": QWEN38_27B_DESCRIBER_REPO }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+}
+
+/// AC1: installing the q4 tier downloads the q4 folder of this platform's re-host and nothing
+/// else (never the full-precision files), and it is the same pinned source a q4 describe job binds
+/// for this platform's worker, so the installed tier is the one the worker loads.
+#[tokio::test]
+async fn installing_the_q4_tier_downloads_only_the_q4_files_the_q4_job_loads() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    // The catalog this app serves holds the shipped 27B row (its tiers come from the registry).
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    let entry =
+        sceneworks_core::builtin_manifests::builtin_model_entry(QWEN38_27B_DESCRIBER_MODEL_ID)
+            .expect("the 27B describer is a builtin");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        json!({ "schemaVersion": 1, "models": [entry] }).to_string(),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+    let (app, project_id, dataset_id, _, _, state) = dataset_fixture(&temp_dir).await;
+    let _hub = private_hub(&state);
+    let (status, download) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/models/{QWEN38_27B_DESCRIBER_MODEL_ID}/download"),
+        json!({ "variant": "q4" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{download}");
+    let payload = &download["payload"];
+    let row = qwen38_tier_row(std::env::consts::OS, "q4");
+    assert_eq!(payload["repo"], row["repo"]);
+    assert_ne!(payload["repo"], QWEN38_27B_DESCRIBER_REPO);
+    assert_eq!(payload["revision"], row["revision"]);
+    assert_eq!(payload["files"], json!(["q4/*"]));
+    assert_eq!(payload["variant"], "q4");
+
+    seed_qwen38_tier(&state.settings.data_dir, "q4");
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &format!(
+            "/api/v1/projects/{project_id}/training/datasets/{dataset_id}/batch-describe-jobs"
+        ),
+        json!({ "model": QWEN38_27B_DESCRIBER_REPO, "variant": "q4" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let (backend, platform) = if cfg!(target_os = "macos") {
+        ("mlx", "macos")
+    } else {
+        ("candle", std::env::consts::OS)
+    };
+    let (repo, revision, variant, files) = bound_describer_source(
+        &state,
+        job["id"].as_str().expect("job id"),
+        backend,
+        platform,
+    );
+    assert_eq!(repo, payload["repo"].as_str().expect("repo"));
+    assert_eq!(revision, payload["revision"].as_str().expect("revision"));
+    assert_eq!(variant, "q4");
+    assert!(
+        files.iter().all(|file| file.starts_with("q4/")),
+        "{files:?}"
+    );
 }

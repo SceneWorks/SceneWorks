@@ -1535,7 +1535,7 @@
                 "type": "integer",
                 "minimum": 1,
                 "x-sceneworks-contract": "advisory",
-                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/memory_guidance.rs", "anchor": "fn blanket_floor_gb(" }, { "path": "apps/web/src/screens/modelManager/ModelCard.jsx", "anchor": "memoryLane(model, \"mlx\")?.entryFloorGb" }],
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/memory_guidance.rs", "anchor": "fn blanket_floor_gb(" }, { "path": "apps/web/src/screens/modelManager/ModelCard.jsx", "anchor": "memoryLane(model, \"mlx\")?.entryFloorGb" }, { "path": "crates/sceneworks-worker/src/batch_describe_jobs.rs", "anchor": "fn qwen38_tier_floor_gb(" }],
                 "description": "Minimum unified memory (GB) to run this model on MLX. Mirrors MlxVideoAdapter.estimate_requirements peak_gb."
               },
               "minMemoryGbByTier": {
@@ -1547,9 +1547,10 @@
                 "x-sceneworks-readers": [
                   { "path": "apps/web/src/screens/modelManager/ModelCard.jsx", "anchor": "memoryLane(model, \"mlx\")?.entryFloorGb" },
                   { "path": "crates/sceneworks-core/src/memory_guidance.rs", "anchor": "fn tier_floor_row_gb(" },
-                  { "path": "crates/sceneworks-core/src/memory_guidance.rs", "anchor": "fn blanket_floor_gb(" }
+                  { "path": "crates/sceneworks-core/src/memory_guidance.rs", "anchor": "fn blanket_floor_gb(" },
+                  { "path": "crates/sceneworks-worker/src/batch_describe_jobs.rs", "anchor": "fn qwen38_tier_floor_gb(" }
                 ],
-                "description": "Per-tier form of minMemoryGb for a model whose installable tiers have genuinely different floors (sc-24112). SAME semantics as the scalar: an ALREADY-PADDED floor, never a raw peak, so no consumer adds headroom on top of it — which is exactly what distinguishes it from vramGbByTier's measured/estimated peak ladder. A tier with no row falls back to the scalar minMemoryGb, so the scalar must stay the conservative value for any tier key not listed (including nvfp4). The value may be DERIVED (parameter counts x dtype width plus a stated transient model); the entry's own comment must say which, because this key carries no evidence class of its own. Advisory on MLX: the Model Manager quotes it and the tier suggestion vetoes a tier whose row exceeds the host; no MLX runtime gate reads it (the MLX fit gate admits from the provider's own memory contract)."
+                "description": "Per-tier form of minMemoryGb for a model whose installable tiers have genuinely different floors (sc-24112). SAME semantics as the scalar: an ALREADY-PADDED floor, never a raw peak, so no consumer adds headroom on top of it — which is exactly what distinguishes it from vramGbByTier's measured/estimated peak ladder. A tier with no row falls back to the scalar minMemoryGb, so the scalar must stay the conservative value for any tier key not listed (including nvfp4). The value may be DERIVED (parameter counts x dtype width plus a stated transient model); the entry's own comment must say which, because this key carries no evidence class of its own. Advisory on MLX: the Model Manager quotes it and the tier suggestion vetoes a tier whose row exceeds the host; the MLX fit gate does not read it (it admits from the provider's own memory contract). The one MLX runtime reader is the Qwen3.8 27B describer, which has no provider memory contract and refuses a tier whose row exceeds total unified memory before it describes any image."
               },
               "measuredSiblingActiveDiskFraction": {
                 "type": "number",

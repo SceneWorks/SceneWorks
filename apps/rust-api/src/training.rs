@@ -1554,19 +1554,36 @@ pub(crate) async fn create_training_dataset_batch_describe_job(
         &mut job_payload,
     )
     .await?;
+    if let Some(tier) = tier {
+        ensure_describe_tier_installed(&state.settings.data_dir, &job_payload, tier)?;
+    }
     let requested_gpu = payload.requested_gpu;
+    // Freeze the exact source each worker route loads (for a tiered describer, that tier's row on
+    // that platform) now, like the other dataset jobs, so a claim runs only what was admitted.
+    let portable_binding = portable_training_binding(
+        &state,
+        &JobType::DatasetBatchDescribe,
+        &job_payload,
+        &requested_gpu,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.create_job(CreateJob {
-            job_type: JobType::DatasetBatchDescribe,
-            project_id: Some(project_id),
-            project_name: Some(project_name),
-            payload: job_payload,
-            requested_gpu,
-            source_job_id: None,
-            duplicate_of_job_id: None,
-            attempts: 1,
-            initial_status: None,
-        })
+        store.create_job_with_portable_binding(
+            CreateJob {
+                job_type: JobType::DatasetBatchDescribe,
+                project_id: Some(project_id),
+                project_name: Some(project_name),
+                payload: job_payload,
+                requested_gpu,
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+                initial_status: None,
+            },
+            None,
+            None,
+            portable_binding.as_ref(),
+        )
     })
     .await?;
     publish(&state, "job.updated", &job);
@@ -1625,6 +1642,49 @@ pub(crate) fn validate_batch_describe_request(
         ));
     }
     Ok((model, tier, prompt.map(str::to_owned)))
+}
+
+/// Refuse a describe tier this host has not installed, before the job is queued. Each tier is its
+/// own download (the q4 and q8 tiers are separate folders of a re-host), so the model being
+/// installed in some tier says nothing about the tier the request names.
+fn ensure_describe_tier_installed(
+    data_dir: &std::path::Path,
+    job_payload: &JsonObject,
+    tier: &str,
+) -> Result<(), ApiError> {
+    use sceneworks_core::dataset_batch_describe::QWEN38_27B_DESCRIBER_MODEL_ID;
+    let Some(entry) = job_payload
+        .get("modelManifestEntries")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|entry| {
+            entry.get("id").and_then(Value::as_str) == Some(QWEN38_27B_DESCRIBER_MODEL_ID)
+        })
+    else {
+        return Err(ApiError::internal(
+            "Qwen3.8 27B describe job carries no catalog entry",
+        ));
+    };
+    let mut entry = entry.clone();
+    crate::models::retain_downloads_for_os(&mut entry, std::env::consts::OS);
+    if crate::models::installed_variant_keys(&entry, data_dir)
+        .iter()
+        .any(|installed| installed == tier)
+    {
+        return Ok(());
+    }
+    let name = entry
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or(QWEN38_27B_DESCRIBER_MODEL_ID);
+    Err(ApiError::model_artifact_conflict(
+        format!(
+            "The {tier} tier of {name} is not installed. Download that tier in the Model \
+             Manager, or choose a tier that is installed."
+        ),
+        "model_artifact_incomplete",
+    ))
 }
 
 /// The describe model a request names: absent or blank is the Vision Captioner, JoyCaption is the
