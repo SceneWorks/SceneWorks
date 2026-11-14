@@ -201,6 +201,46 @@ async fn options_preview_resolves_vector_training_and_model_free_policies() {
 }
 
 #[tokio::test]
+async fn options_preview_preserves_ltx_and_iris_baseline_refusals() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = create_app(preview_settings(&temp)).unwrap();
+    let path = "/api/v1/options/validate";
+    let (status, video) = request(
+        app.clone(),
+        "POST",
+        path,
+        json!({"validatorSchemaVersion":1,"kind":"video","requests":[{
+            "projectId":"p","model":"ltx_2_3","mode":"extend_clip",
+            "sourceClipAssetId":"clip","prompt":"A lighthouse in heavy fog"
+        }]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{video}");
+    assert_eq!(video["results"][0]["ok"], false, "{video}");
+    assert_eq!(video["results"][0]["refusal"]["field"], "mode", "{video}");
+
+    let target = crate::training::effective_training_targets()
+        .targets
+        .into_iter()
+        .find(|target| target.id == "iris_3b_depth")
+        .unwrap();
+    let mut config = serde_json::to_value(target.defaults).unwrap();
+    config["saveEvery"] = json!(32001);
+    let (status, training) = request(
+        app,
+        "POST",
+        path,
+        json!({"validatorSchemaVersion":1,"kind":"training","requests":[{
+            "targetId":target.id,"datasetId":"dataset","outputName":"adapter",
+            "config":config
+        }]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{training}");
+    assert_eq!(training["results"][0]["ok"], false, "{training}");
+}
+
+#[tokio::test]
 async fn shared_refusals_survive_http_raw_deserialization() {
     let temp = tempfile::tempdir().unwrap();
     let app = create_app(test_settings(&temp)).unwrap();
