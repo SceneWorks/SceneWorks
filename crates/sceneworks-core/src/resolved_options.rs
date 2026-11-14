@@ -347,6 +347,9 @@ pub struct TrainingRouteFacts {
     pub network_type: RouteField<String>,
     pub resume: RouteField<bool>,
     pub base_model_path: RouteField<String>,
+    /// Authored REPA weight affects the frozen source identity. Keep malformed archived plans
+    /// distinct from omission; the source projector uses only a valid JSON number.
+    pub repa_weight: RouteField<f64>,
 }
 
 impl TrainingRouteFacts {
@@ -383,6 +386,28 @@ impl TrainingRouteFacts {
             Err(()) if missing_advanced => RouteField::Absent,
             Err(()) => RouteField::Invalid,
         };
+        let repa_weight = match advanced {
+            Ok(advanced) => match advanced.get("iris") {
+                None => RouteField::Absent,
+                Some(Value::Null) => RouteField::Null,
+                Some(Value::Object(iris)) => match iris.get("repa") {
+                    None => RouteField::Absent,
+                    Some(Value::Null) => RouteField::Null,
+                    Some(Value::Object(repa)) => match repa.get("weight") {
+                        None => RouteField::Absent,
+                        Some(Value::Null) => RouteField::Null,
+                        Some(value) => value
+                            .as_f64()
+                            .map(RouteField::Valid)
+                            .unwrap_or(RouteField::Invalid),
+                    },
+                    Some(_) => RouteField::Invalid,
+                },
+                Some(_) => RouteField::Invalid,
+            },
+            Err(()) if missing_advanced => RouteField::Absent,
+            Err(()) => RouteField::Invalid,
+        };
         let base_model_path = match plan.get("target") {
             None => RouteField::Absent,
             Some(Value::Null) => RouteField::Null,
@@ -398,6 +423,7 @@ impl TrainingRouteFacts {
             network_type,
             resume,
             base_model_path,
+            repa_weight,
         }
     }
 }
@@ -1025,6 +1051,33 @@ mod tests {
         );
         assert_eq!(
             TrainingRouteFacts::from_plan_syntax(&malformed).resume,
+            RouteField::Invalid
+        );
+    }
+
+    #[test]
+    fn training_source_probe_preserves_authored_repa_weight_shape() {
+        for (value, expected) in [
+            (json!(0.5), RouteField::Valid(0.5)),
+            (json!(0), RouteField::Valid(0.0)),
+            (json!(-0.5), RouteField::Valid(-0.5)),
+            (json!("0.5"), RouteField::Invalid),
+            (Value::Null, RouteField::Null),
+        ] {
+            let plan = obj(json!({"config":{"advanced":{"iris":{"repa":{"weight":value}}}}}));
+            assert_eq!(
+                TrainingRouteFacts::from_plan_syntax(&plan).repa_weight,
+                expected
+            );
+        }
+        let absent = obj(json!({"config":{"advanced":{"iris":{"repa":{}}}}}));
+        assert_eq!(
+            TrainingRouteFacts::from_plan_syntax(&absent).repa_weight,
+            RouteField::Absent
+        );
+        let malformed = obj(json!({"config":{"advanced":{"iris":{"repa":[]}}}}));
+        assert_eq!(
+            TrainingRouteFacts::from_plan_syntax(&malformed).repa_weight,
             RouteField::Invalid
         );
     }
