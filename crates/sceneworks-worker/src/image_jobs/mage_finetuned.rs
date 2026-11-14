@@ -316,17 +316,47 @@ pub(super) fn prepare_mage_finetuned_transformer(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PreparedMageFinetunedTransformer>> {
+    prepare_mage_finetuned_transformer_with_shape(
+        request,
+        settings,
+        request_is_checkpoint_plan_backed(request),
+        imported_generate_request_supported(
+            request,
+            "mage-flow",
+            gen_core::ImportedModelSource::TransformerDirectory,
+        ),
+    )
+}
+
+pub(super) fn prepare_mage_finetuned_transformer_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> WorkerResult<Option<PreparedMageFinetunedTransformer>> {
+    prepare_mage_finetuned_transformer_with_shape(
+        execution,
+        settings,
+        super::checkpoint_plan::request_is_checkpoint_plan_backed_resolved(execution),
+        super::routing::imported_generate_request_supported_resolved(
+            execution,
+            "mage-flow",
+            gen_core::ImportedModelSource::TransformerDirectory,
+        ),
+    )
+}
+
+fn prepare_mage_finetuned_transformer_with_shape(
+    request: &ImageRequest,
+    settings: &Settings,
+    plan_backed: bool,
+    descriptor: Option<gen_core::ModelDescriptor>,
+) -> WorkerResult<Option<PreparedMageFinetunedTransformer>> {
     // A plan-backed entry (`importPlan.checkpointId`, epic 20398) belongs to the plan-driven
     // route; this bespoke lane never also claims it, so one entry has exactly one owner. Explicit
     // rather than left to arm ordering in the resolver (sc-20634 review): ordering is not a claim.
-    if request_is_checkpoint_plan_backed(request) {
+    if plan_backed {
         return Ok(None);
     }
-    let Some(descriptor) = imported_generate_request_supported(
-        request,
-        "mage-flow",
-        gen_core::ImportedModelSource::TransformerDirectory,
-    ) else {
+    let Some(descriptor) = descriptor else {
         return Ok(None);
     };
     if imported_model_quant(request, &descriptor, "Fine-tuned Mage-Flow").is_err() {

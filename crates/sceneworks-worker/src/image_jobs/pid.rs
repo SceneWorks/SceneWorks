@@ -3,6 +3,7 @@ use super::WeightsSource;
 use crate::huggingface_snapshot_dir;
 use crate::safe_weight_filename;
 use crate::Path;
+#[cfg(test)]
 use crate::Value;
 use crate::WorkerResult;
 // Per-generation PiD (pixel-diffusion) super-resolving decoder routing (epic 7840, sc-7849).

@@ -6,6 +6,7 @@ use super::bernini::bernini_image_available;
 use super::bernini::bernini_image_candle_available;
 #[cfg(not(target_os = "macos"))]
 use super::bernini::CANDLE_BERNINI_IMAGE_ADAPTER;
+#[cfg(all(test, native_lane))]
 use super::checkpoint_plan::prepare_checkpoint_plan_sources;
 use super::checkpoint_plan::PreparedCheckpointPlanSources;
 #[cfg(not(target_os = "macos"))]
@@ -115,7 +116,6 @@ use super::krea_multiphase::request_has_multiphase;
 use super::krea_turbo_raw::krea_turbo_on_raw_available;
 #[cfg(test)]
 use super::mage_finetuned::mage_finetuned_available;
-use super::mage_finetuned::prepare_mage_finetuned_transformer;
 use super::mage_finetuned::PreparedMageFinetunedTransformer;
 #[cfg(not(target_os = "macos"))]
 use super::mage_finetuned::MAGE_FINETUNED_ENGINE;
@@ -205,8 +205,27 @@ use crate::WorkerResult;
 /// never unioned in. The ComfyUI lanes are ordinary Generate routes; only a singular Reference is
 /// admitted when that exact descriptor advertises it.
 pub(super) fn imported_generate_request_has_unsupported_shape(request: &ImageRequest) -> bool {
+    imported_generate_request_has_unsupported_shape_with_pose_count(
+        request,
+        pose_entries(request).len(),
+    )
+}
+
+pub(super) fn imported_generate_request_has_unsupported_shape_resolved(
+    execution: &ResolvedImageExecution,
+) -> bool {
+    imported_generate_request_has_unsupported_shape_with_pose_count(
+        execution,
+        execution.pose_source_count(),
+    )
+}
+
+fn imported_generate_request_has_unsupported_shape_with_pose_count(
+    request: &ImageRequest,
+    pose_count: usize,
+) -> bool {
     request.mode == "edit_image"
-        || !pose_entries(request).is_empty()
+        || pose_count > 0
         || request.source_asset_id.is_some()
         || request.mask_asset_id.is_some()
         || request.character_id.is_some()
@@ -224,9 +243,36 @@ pub(super) fn imported_generate_request_supported(
     family: &str,
     source: gen_core::ImportedModelSource,
 ) -> Option<gen_core::ModelDescriptor> {
+    imported_generate_request_supported_with_shape(
+        request,
+        family,
+        source,
+        imported_generate_request_has_unsupported_shape(request),
+    )
+}
+
+pub(super) fn imported_generate_request_supported_resolved(
+    execution: &ResolvedImageExecution,
+    family: &str,
+    source: gen_core::ImportedModelSource,
+) -> Option<gen_core::ModelDescriptor> {
+    imported_generate_request_supported_with_shape(
+        execution,
+        family,
+        source,
+        imported_generate_request_has_unsupported_shape_resolved(execution),
+    )
+}
+
+fn imported_generate_request_supported_with_shape(
+    request: &ImageRequest,
+    family: &str,
+    source: gen_core::ImportedModelSource,
+    unsupported_shape: bool,
+) -> Option<gen_core::ModelDescriptor> {
     // Reject shape before registry/path resolution so every shared Generate consumer (Mage and the
     // three ComfyUI Candle lanes) refuses material control intent at the same admission seam.
-    if imported_generate_request_has_unsupported_shape(request) {
+    if unsupported_shape {
         return None;
     }
     let descriptor = crate::inference_runtime::imported_model_descriptor(
@@ -717,7 +763,8 @@ pub(super) fn prepare_image_route(
     // it does not serve declines to the entry's own bespoke family lane when the entry has loadable
     // bytes, and refuses outright when it does not. The decline RETAINS its refusal, re-raised
     // below if no lane claims the request at all (sc-20636).
-    let checkpoint_plan = prepare_checkpoint_plan_sources(request, settings)?;
+    let checkpoint_plan =
+        super::checkpoint_plan::prepare_checkpoint_plan_sources_resolved(request, settings)?;
     let imported_control =
         super::krea_imported::prepare_krea_imported_control_sources_resolved(request, settings)?;
     let imported = if imported_control.is_none() {
@@ -726,7 +773,8 @@ pub(super) fn prepare_image_route(
         None
     };
     let sdxl = super::sdxl_imported::prepare_sdxl_imported_sources_resolved(request, settings)?;
-    let mage_finetuned = prepare_mage_finetuned_transformer(request, settings)?;
+    let mage_finetuned =
+        super::mage_finetuned::prepare_mage_finetuned_transformer_resolved(request, settings)?;
     let Some(kind) = resolve_image_route_with_imported_availability(
         request,
         Some(request),
@@ -1610,7 +1658,8 @@ pub(super) fn prepare_candle_image_route(
     // The plan-driven route is offered the request first (sc-20634). Per-request claim, exactly as
     // in the macOS twin: it takes the shapes it serves, the family's bespoke lane keeps the rest,
     // and the decline's retained refusal is re-raised below when no lane claims it (sc-20636).
-    let checkpoint_plan = prepare_checkpoint_plan_sources(request, settings)?;
+    let checkpoint_plan =
+        super::checkpoint_plan::prepare_checkpoint_plan_sources_resolved(request, settings)?;
     // A pose-bearing imported checkpoint is claimed by the `KreaImportedControl` arm, which resolves
     // its own sources; skip pinning a second File token for the plain imported bundle in that case
     // (mirrors the macOS `prepare_image_route` guard).
@@ -1621,10 +1670,11 @@ pub(super) fn prepare_candle_image_route(
             super::krea_imported::prepare_krea_imported_sources_resolved(request, settings)?
         };
     let sdxl = super::sdxl_imported::prepare_sdxl_imported_sources_resolved(request, settings)?;
-    let zimage = zimage_comfyui_candle::prepare_zimage_comfyui_sources(request, settings)?;
-    let qwen = qwen_comfyui_candle::prepare_qwen_comfyui_sources(request, settings)?;
-    let flux2 = flux2_comfyui_candle::prepare_flux2_comfyui_sources(request, settings)?;
-    let mage_finetuned = prepare_mage_finetuned_transformer(request, settings)?;
+    let zimage = zimage_comfyui_candle::prepare_zimage_comfyui_sources_resolved(request, settings)?;
+    let qwen = qwen_comfyui_candle::prepare_qwen_comfyui_sources_resolved(request, settings)?;
+    let flux2 = flux2_comfyui_candle::prepare_flux2_comfyui_sources_resolved(request, settings)?;
+    let mage_finetuned =
+        super::mage_finetuned::prepare_mage_finetuned_transformer_resolved(request, settings)?;
     let Some(kind) = resolve_candle_image_route_with_prepared_availability(
         request,
         Some(request),

@@ -11,6 +11,7 @@ use super::resolve_seed;
 #[cfg(not(target_os = "macos"))]
 use super::routing::imported_base_snapshot_companions;
 use super::routing::imported_generate_request_has_unsupported_shape;
+use super::routing::imported_generate_request_has_unsupported_shape_resolved;
 use super::sdxl_imported::resolve_sdxl_imported_component_dir_cache_only;
 use super::sdxl_imported::resolve_sdxl_ldm_tokenizer_root_cache_only;
 use super::stream::drive_gen_items;
@@ -664,6 +665,14 @@ pub(crate) fn request_is_checkpoint_plan_backed(request: &ImageRequest) -> bool 
         && checkpoint_plan_serves_request_shape(request)
 }
 
+pub(crate) fn request_is_checkpoint_plan_backed_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+) -> bool {
+    checkpoint_plan_checkpoint_id(&execution.model_manifest_entry).is_some()
+        && checkpoint_plan_binds_request_operation(execution)
+        && checkpoint_plan_serves_request_shape_resolved(execution)
+}
+
 /// The request shapes the route's own generation body implements today.
 ///
 /// Distinct from [`checkpoint_plan_binds_request_operation`], which asks the REGISTRY whether a
@@ -680,6 +689,15 @@ fn checkpoint_plan_serves_request_shape(request: &ImageRequest) -> bool {
         && request.loras.is_empty()
         && request.reference_asset_id.is_none()
         && !request.hires_fix.enabled
+}
+
+fn checkpoint_plan_serves_request_shape_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+) -> bool {
+    !imported_generate_request_has_unsupported_shape_resolved(execution)
+        && execution.loras.is_empty()
+        && execution.reference_asset_id.is_none()
+        && !execution.hires_fix.enabled
 }
 
 /// How this route answers "I cannot serve this request": decline so the entry's own bespoke family
@@ -1307,10 +1325,33 @@ pub(super) fn prepare_checkpoint_plan_sources(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<CheckpointPlanSelection> {
+    prepare_checkpoint_plan_sources_with_shape(
+        request,
+        settings,
+        checkpoint_plan_serves_request_shape(request),
+    )
+}
+
+pub(super) fn prepare_checkpoint_plan_sources_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> WorkerResult<CheckpointPlanSelection> {
+    prepare_checkpoint_plan_sources_with_shape(
+        execution,
+        settings,
+        checkpoint_plan_serves_request_shape_resolved(execution),
+    )
+}
+
+fn prepare_checkpoint_plan_sources_with_shape(
+    request: &ImageRequest,
+    settings: &Settings,
+    serves_shape: bool,
+) -> WorkerResult<CheckpointPlanSelection> {
     let Some(checkpoint_id) = checkpoint_plan_checkpoint_id(&request.model_manifest_entry) else {
         return Ok(CheckpointPlanSelection::default());
     };
-    if !checkpoint_plan_serves_request_shape(request) {
+    if !serves_shape {
         return checkpoint_plan_unservable_shape(
             request,
             format!(
