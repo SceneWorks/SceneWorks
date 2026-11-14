@@ -377,7 +377,30 @@ pub(super) fn prepare_sdxl_imported_sources(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PreparedSdxlImportedSources>> {
-    if !sdxl_imported_request_shape_available(request) {
+    prepare_sdxl_imported_sources_with_shape(
+        request,
+        settings,
+        sdxl_imported_request_shape_available(request),
+    )
+}
+
+pub(super) fn prepare_sdxl_imported_sources_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> WorkerResult<Option<PreparedSdxlImportedSources>> {
+    prepare_sdxl_imported_sources_with_shape(
+        execution,
+        settings,
+        sdxl_imported_request_shape_available_resolved(execution),
+    )
+}
+
+fn prepare_sdxl_imported_sources_with_shape(
+    request: &ImageRequest,
+    settings: &Settings,
+    shape_available: bool,
+) -> WorkerResult<Option<PreparedSdxlImportedSources>> {
+    if !shape_available {
         return Ok(None);
     }
     let Some(checkpoint) = resolve_imported_sdxl_pin(request, settings)? else {
