@@ -33,7 +33,7 @@ import { WorkPanel } from "../components/WorkPanel.jsx";
 
 import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
 
-import { linkedGroupIssues, missingKeys, parsePromptResolution } from "../promptBatch.js";
+import { iterateBatch, linkedGroupIssues, missingKeys, parsePromptResolution } from "../promptBatch.js";
 import {
   dimensionConstraintMessage,
   evaluateModelDimensions,
@@ -125,7 +125,7 @@ import { usePidState, useStrictControlState } from "./imageStudio/useImageContro
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { imageBatchValidation, imageGenerateValidation } from "../imageStudioValidation.js";
 import { useImageReferenceStatus } from "../hooks/useImageReferenceStatus.js";
-import { usePortableFeedback } from "../hooks/usePortableFeedback.js";
+import { usePortableBatchFeedback, usePortableFeedback } from "../hooks/usePortableFeedback.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
 import { issue } from "../validation/issues.js";
@@ -2361,6 +2361,7 @@ export function ImageStudio() {
   // Layout references and model geometry are derived once above and passed unchanged
   // to the shared request builder; exact replay tiers and MOSS components must be ready.
   function preflightError(kind) {
+    if (kind === "batch" && portableBatchRefusal) return portableBatchRefusal.detail;
     if (!mossComponents.ready || mossEditError) return mossEditError || (mossEdit ? "Install or repair the exact MOSS edit adapter before editing." : "Install the selected MOSS 8-step components before generating.");
     if (!selectedModelServesMode) return `Install or select a model that supports ${modeLabel} generation.`;
     if (replayTierUnavailable) return "Recipe tier unavailable. Install it on a supported worker or choose another tier.";
@@ -2844,10 +2845,32 @@ export function ImageStudio() {
   }
   const portableFeedback = usePortableFeedback("image", portableDraft, selectedModel);
   const portableRefusal = portableFeedback?.state === "invalid" ? portableFeedback.refusal : null;
+  let portableBatchRevision = null;
+  if (batchMode && batchValidity.ready && selectedModel && !structuredPromptModel) {
+    try {
+      portableBatchRevision = JSON.stringify({
+        common: buildBatchJobRequest(""), batchPrompts, batchVariables, resolutionOptions,
+      });
+    } catch { /* The server checks requests built from this draft. */ }
+  }
+  const portableBatchFeedback = usePortableBatchFeedback(
+    "image",
+    portableBatchRevision,
+    function* batchRequests() {
+      for (const { prompt: resolvedPrompt } of iterateBatch(batchPrompts, batchVariables)) {
+        const { prompt: cleanPrompt, resolution: itemResolution } = parsePromptResolution(resolvedPrompt, resolutionOptions);
+        yield buildBatchJobRequest(cleanPrompt, { resolution: itemResolution });
+      }
+    },
+    selectedModel,
+    Boolean(portableBatchRevision),
+  );
+  const portableBatchRefusal = portableBatchFeedback?.result.state === "invalid"
+    ? portableBatchFeedback.result.refusal : null;
   // `submitting` is a busy gate, not a rule. `batchTotal === 0` is a requirement (silent),
   // already folded into batchValidity — no need to repeat it here.
   const batchRunDisabled =
-    !batchValidity.ready || !selectedModelServesMode || replayTierUnavailable || Boolean(characterReferenceError) || !mossComponents.ready || Boolean(mossEditError) || Boolean(batchRun?.submitting);
+    !batchValidity.ready || Boolean(portableBatchRefusal) || !selectedModelServesMode || replayTierUnavailable || Boolean(characterReferenceError) || !mossComponents.ready || Boolean(mossEditError) || Boolean(batchRun?.submitting);
   // The two conditions whose message has its own home stay explicit gates: a structured
   // caption's field errors live in the builder, and a Mac block prints its own note.
   const {
@@ -2937,6 +2960,8 @@ export function ImageStudio() {
             batchBusy={batchBusy}
             batchError={batchError}
             batchValidity={batchValidity}
+            portableBatchRefusal={portableBatchRefusal}
+            portableBatchRefusalIndex={portableBatchFeedback?.index}
             batchTotal={batchTotal}
             batchRun={batchRun}
             batchRunProgress={batchRunProgress}

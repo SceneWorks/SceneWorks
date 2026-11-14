@@ -5,6 +5,7 @@ import { serializeCaption, validateCaption } from "../../ideogramCaption.js";
 import { promptBatchSize } from "./samplingControls.js";
 import { batchPromptBudgetMessage, batchPromptBudgetOverages } from "../../imageStudioValidation.js";
 import { PROMPT_REFINE_MODEL_ID, terminalStatuses } from "../../constants.js";
+import { validatePortableRequest } from "../../portableValidation.js";
 
 // Extracted from ImageStudio along its existing concern boundary.
 export function useImageBatchRun({
@@ -224,6 +225,11 @@ export function useImageBatchRun({
           }
         }
         if (stopped()) break;
+        // Structured captions exist only after refinement. Validate the exact resolved
+        // request here, including a cold browser module, before admitting this batch item.
+        const portable = await validatePortableRequest({ kind: "image", payload: request, modelEntry: selectedModel });
+        if (stopped()) break;
+        if (portable.state === "invalid") throw new Error(portable.refusal.detail);
         const result = createImageJob.withResult
           ? await createImageJob.withResult([request], { shouldContinue: () => !stopped(), signal: owner.controller.signal })
           : { job: await createImageJob(request) };
