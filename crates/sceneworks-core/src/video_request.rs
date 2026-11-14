@@ -809,6 +809,7 @@ impl VideoRequest {
     ) -> Result<Self, BindingError> {
         let mut request = Self::from_payload(effective);
         request.options = Some(VideoOptions::bind(&BindingInput::new(authored, effective))?);
+        request.advanced = object_or_empty(authored, "advanced");
         Ok(request)
     }
 
@@ -2441,6 +2442,18 @@ mod tests {
         let mut request = VideoRequest::from_resolved(&explicit_null, &explicit_null).unwrap();
         request.portable_aux = portable_aux;
         assert_eq!(request.resolved_quant_bits(), None);
+    }
+
+    #[test]
+    fn resolved_video_preserves_authored_advanced_for_provenance() {
+        let authored = payload(json!({"advanced": {"steps": "8"}}));
+        let effective = payload(json!({"advanced": {"steps": 8}}));
+        let request = VideoRequest::from_resolved(&authored, &effective).unwrap();
+        assert_eq!(request.advanced.get("steps"), Some(&json!("8")));
+        assert_eq!(
+            request.options().steps.as_ref().map(|bound| bound.value),
+            Some(8)
+        );
     }
 
     // ----------------------------------------------------------------------------------------
