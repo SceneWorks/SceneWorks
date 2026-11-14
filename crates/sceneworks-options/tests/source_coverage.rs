@@ -1350,6 +1350,7 @@ fn print_production_binding_inventory() {
     }
     for read in &coverage.reads {
         if read.file.ends_with("/film_compile.rs")
+            || read.file.starts_with("apps/rust-api/src/")
             || read.file.ends_with("/workflow_parameters.rs")
             || read.file.ends_with("/workflow_resolution.rs")
             || read.file.ends_with("/workflow_share.rs")
@@ -1457,11 +1458,21 @@ fn production_execution_has_no_raw_advanced_reads() {
                 )
             )
     };
+    // The film controller reads its persisted attempt key only to recover a job after a crash.
+    // This key is not a generation option and never reaches the film compiler's model plan.
+    let persisted_film_attempt_read = |read: &Read| {
+        read.file == "apps/rust-api/src/film_harness/transport.rs"
+            && read.function == "find_job_by_idempotency_key"
+            && read.location == "advanced"
+            && read.key == "filmHarness"
+    };
     let direct = coverage
         .reads
         .iter()
         .filter(|read| {
-            !binding_boundary(&read.file, &read.function) && !authored_workflow_read(read)
+            !binding_boundary(&read.file, &read.function)
+                && !authored_workflow_read(read)
+                && !persisted_film_attempt_read(read)
         })
         .map(|read| {
             format!(
