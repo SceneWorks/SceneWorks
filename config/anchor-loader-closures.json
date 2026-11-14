@@ -1,15 +1,15 @@
 {
   "_comment": "Per-model loader-closure digests: the memory anchor currency key (sc-22511). An anchor is CURRENT while the digest it recorded still equals the digest here for its (model, backend lane). The unit is the source files the model's loader reaches, and nothing else — not the pin, not sibling models, not shared crates the loader never reaches. Regenerate when the pinned inference revision changes: node scripts/anchor-loader-closure.mjs --repo <inference> --write. A regeneration that leaves the digests unchanged is the expected case. A catalog alias (a model id the inference tree never names, such as z_image_edit) declares the engine id it resolves to as engineId; the alias is part of its hashed closure text.",
   "digestVersion": "anchor-loader-closure v2",
-  "inferenceRevision": "7e51f6aee90c4a3554555c21fffba43d205e3a91",
+  "inferenceRevision": "a8d54a31d5526507631eb60929eb0d0502ffbb48",
   "models": {
     "bernini:candle": {
       "entryPoints": [
         "crates/media/candle-gen/candle-gen-bernini/src/bernini.rs",
         "crates/media/candle-gen/candle-gen-bernini/src/memory_strategy.rs"
       ],
-      "digest": "7857617e87578d9c15e8b659b7cfafea595d1e6fdaa9740ec0464c35310c746a",
-      "closureFileCount": 406,
+      "digest": "2fe01f858d63c5a41ada1755df46688bad90dba8140af4abca30995c4c9d602d",
+      "closureFileCount": 407,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -130,6 +130,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -424,8 +425,8 @@
         "crates/media/mlx-gen/mlx-gen-bernini/src/bernini.rs",
         "crates/media/mlx-gen/mlx-gen-bernini/src/memory_strategy.rs"
       ],
-      "digest": "9d2c0531ef0a11d687e2aea416a5270db34ac1d0b431cf8e98b3e63d2caac639",
-      "closureFileCount": 400,
+      "digest": "e093fed3347b8224552eb3e487603a5c1d564764f45f3855c65303f68b51ca5b",
+      "closureFileCount": 401,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -564,6 +565,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -835,8 +837,8 @@
         "crates/media/candle-gen/candle-gen-bernini/src/bernini.rs",
         "crates/media/candle-gen/candle-gen-bernini/src/memory_strategy.rs"
       ],
-      "digest": "5c0b260737f42b9c3b2055bbab29949a64fd08d3a8acd26784b6316071a81636",
-      "closureFileCount": 406,
+      "digest": "561391180badfe21b24a95b5815e0428a2936b6883248a167a98ce7f5e9aa7fd",
+      "closureFileCount": 407,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -957,6 +959,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -1252,8 +1255,8 @@
         "crates/media/mlx-gen/mlx-gen-bernini/src/bernini.rs",
         "crates/media/mlx-gen/mlx-gen-bernini/src/memory_strategy.rs"
       ],
-      "digest": "f8c3460b4f5f40e24cb8c1d1126c3d03f1dade9096bd79846ce139cf16404dfd",
-      "closureFileCount": 400,
+      "digest": "9519558392645f7cb2fdba8ed9cd637287070ad46c6d962d20d277156919d146",
+      "closureFileCount": 401,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -1392,6 +1395,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -1663,8 +1667,8 @@
         "crates/media/candle-gen/candle-gen-chroma/src/lib.rs",
         "crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"
       ],
-      "digest": "5c077a1ebac089c7e543354b87f9404f6f923cff96837f1f32be91365c4d6237",
-      "closureFileCount": 346,
+      "digest": "f028cf8f871cba37c0b3128a58e461865eaaeb5bba5146c58540da41af7def5b",
+      "closureFileCount": 347,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -1772,6 +1776,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -2021,8 +2026,8 @@
         "crates/media/mlx-gen/mlx-gen-chroma/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-chroma/src/model.rs"
       ],
-      "digest": "6a40cb37c81907564e633039c1d3af82847d1a297524e86bcee3986c7d9ecc3a",
-      "closureFileCount": 579,
+      "digest": "9194ade62846d8c2cac8b906cc44d7678456ee506ba48e1762edb44985c986da",
+      "closureFileCount": 580,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -2154,6 +2159,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -2611,8 +2617,8 @@
         "crates/media/candle-gen/candle-gen-chroma/src/lib.rs",
         "crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"
       ],
-      "digest": "4a60f6506d1a0ce29c14d31a474490c655b940dd9d6bbae375a985098fe62535",
-      "closureFileCount": 346,
+      "digest": "da33025fbdc8bcacd6f58dc731aeaf9da9706080bd8d16bfc8fb7cac12ee084d",
+      "closureFileCount": 347,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -2720,6 +2726,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -2969,8 +2976,8 @@
         "crates/media/mlx-gen/mlx-gen-chroma/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-chroma/src/model.rs"
       ],
-      "digest": "7d7b8da3bd6b76de0ed15097c78de04ebb8cc42fb1226133c7c5502035b8544d",
-      "closureFileCount": 579,
+      "digest": "5c51d7883d17703f2b99a38c854f1b65aa033ea36a8bd04d1262c0313b2aeaf3",
+      "closureFileCount": 580,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -3102,6 +3109,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -3559,8 +3567,8 @@
         "crates/media/candle-gen/candle-gen-chroma/src/lib.rs",
         "crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"
       ],
-      "digest": "c666446c6ece42e91be27af899a6a38abdb5fb1a05abd8c57bf03899918ad2a5",
-      "closureFileCount": 346,
+      "digest": "48791fd99f1cff8e5069e9471c2811cf1f5707c963ae39e3b9b055e89d276a1d",
+      "closureFileCount": 347,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -3668,6 +3676,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -3917,8 +3926,8 @@
         "crates/media/mlx-gen/mlx-gen-chroma/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-chroma/src/model.rs"
       ],
-      "digest": "7534298dbe3c2b7e65faaa7c9b5ac6ee7a6e7d77553250311701276bf634fdc6",
-      "closureFileCount": 579,
+      "digest": "72b58da1ee6d55c91b4f4aedd2dc3a93bd50fa81cc0853b7a4a0aaf2fbee13f6",
+      "closureFileCount": 580,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -4050,6 +4059,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -4507,8 +4517,8 @@
         "crates/media/candle-gen/candle-gen-flux2/src/lib.rs",
         "crates/media/candle-gen/candle-gen-flux2/src/memory_strategy.rs"
       ],
-      "digest": "2de6eda2610f1c8f99cf9036e7ac0fe6b52bd72808ed56c01846633a04c2469b",
-      "closureFileCount": 449,
+      "digest": "618be9e89e81122dc34d38ac42ec23ed9916ad2356a8b8c1220c5584b3eb4a73",
+      "closureFileCount": 450,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -4632,6 +4642,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -4967,8 +4978,8 @@
         "crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-flux2/src/model.rs"
       ],
-      "digest": "2a907222bef44b41f68dbd32c72cb6cb199bdd42a1052df6c62d3d722262136e",
-      "closureFileCount": 333,
+      "digest": "594768ac89331be27d4db763d8f92609339dadff7bac779ea3a15c0feb980f7f",
+      "closureFileCount": 334,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -5086,6 +5097,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -5311,8 +5323,8 @@
         "crates/media/candle-gen/candle-gen-flux2/src/lib.rs",
         "crates/media/candle-gen/candle-gen-flux2/src/memory_strategy.rs"
       ],
-      "digest": "1f5d17a68752542ae7673dd421edc0747c2d87e5a9df51d16ea6c2c5f3f5f5ac",
-      "closureFileCount": 449,
+      "digest": "756e1b317da4bbff27787e8f750dc6aa276b6830c8979f5fec864f27086e16bc",
+      "closureFileCount": 450,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -5436,6 +5448,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -5772,8 +5785,8 @@
         "crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-flux2/src/model.rs"
       ],
-      "digest": "3e8fed382a93b78b1ba1da5126ee6931c10223858e63646c095a0731ddd56714",
-      "closureFileCount": 333,
+      "digest": "dbd2ae938ca26561fb839405428c57e983a4e800ac1f8469120962223abeb233",
+      "closureFileCount": 334,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -5891,6 +5904,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -6117,8 +6131,8 @@
         "crates/media/candle-gen/candle-gen-flux2/src/lib.rs",
         "crates/media/candle-gen/candle-gen-flux2/src/memory_strategy.rs"
       ],
-      "digest": "f244ecec7e5adbcb1ab885ac73b904da1feb85628cd3435a26558c6313dd00d3",
-      "closureFileCount": 449,
+      "digest": "add1db5a01325776f74ad6927cf54ad4724babd4f56cff4b4726b8202e349cc4",
+      "closureFileCount": 450,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -6242,6 +6256,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -6579,8 +6594,8 @@
         "crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-flux2/src/model.rs"
       ],
-      "digest": "c6cd65d9f8f3b465f80f6686718d63910f56632762e887f68c603140daada331",
-      "closureFileCount": 333,
+      "digest": "f58aa60bc809d8f7b6dbdd01fe73f2b219e783f74a4ad320a873e9a7083481da",
+      "closureFileCount": 334,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -6698,6 +6713,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -6923,8 +6939,8 @@
         "crates/media/candle-gen/candle-gen-flux3/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-flux3/src/model.rs"
       ],
-      "digest": "63c11d6c0aaabe90156de234f6aca6a9847083f26cb696c76801d67f27575c5d",
-      "closureFileCount": 432,
+      "digest": "5eab3e040505cf60917169abd1fd93a5f1814ce794a3f25fbe6de1dcb66dc399",
+      "closureFileCount": 433,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -7067,6 +7083,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -7366,8 +7383,8 @@
         "crates/media/mlx-gen/mlx-gen-flux3/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-flux3/src/model.rs"
       ],
-      "digest": "9b8262f1015c456b394c943c5a43ec977ff7ea5c0a49eed4b7ea3270ff7639e6",
-      "closureFileCount": 287,
+      "digest": "218a99a04e155bf6f60d66facbc136dae66c71d4c4b68888ec02b0c5ca9171d5",
+      "closureFileCount": 288,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -7499,6 +7516,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -7664,8 +7682,8 @@
         "crates/media/candle-gen/candle-gen-flux3/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-flux3/src/model.rs"
       ],
-      "digest": "41b6add9aa4a9f519f0c03de4ef8f37848fbb957f446b18844d75150f8e0ee0c",
-      "closureFileCount": 432,
+      "digest": "13523e9b2f977e51a132387b6d9ee8aba8a85b537ebd12f14094afd107ab27da",
+      "closureFileCount": 433,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -7808,6 +7826,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -8107,8 +8126,8 @@
         "crates/media/mlx-gen/mlx-gen-flux3/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-flux3/src/model.rs"
       ],
-      "digest": "8d96eb357ef44e1021ed059d80ddc01f185842eb8af775641e5c4a810164309e",
-      "closureFileCount": 287,
+      "digest": "982c42e88800f2b463a2937ad20136acfed21597be1a5e2e668e5592838a2da5",
+      "closureFileCount": 288,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -8240,6 +8259,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -8405,8 +8425,8 @@
         "crates/media/candle-gen/candle-gen-flux/src/lib.rs",
         "crates/media/candle-gen/candle-gen-flux/src/memory_strategy.rs"
       ],
-      "digest": "b35d11d1b44bfa94352af221c24c8848f9ce0e90a2487e1c49dbec2905dfeca7",
-      "closureFileCount": 425,
+      "digest": "6262ee7b82d122aa5d9335053d2a27fb654698aebd96bab16b871bd75f9c563f",
+      "closureFileCount": 426,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -8528,6 +8548,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -8842,8 +8863,8 @@
         "crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-flux/src/model.rs"
       ],
-      "digest": "e7091ce7cd8a1bed1c29dda67458a90ef2b20c722c623a48c3445f39face48cb",
-      "closureFileCount": 567,
+      "digest": "fa6dc1457c550289a9568277637943af06b4fdb3661f89f98eac7ee94c729693",
+      "closureFileCount": 568,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -8975,6 +8996,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -9420,8 +9442,8 @@
         "crates/media/candle-gen/candle-gen-flux/src/lib.rs",
         "crates/media/candle-gen/candle-gen-flux/src/memory_strategy.rs"
       ],
-      "digest": "bea9333de43390e0d869eed430512f8cf6a05b2a7a203044972ef86ffc0ebce5",
-      "closureFileCount": 425,
+      "digest": "47308e7be5b0c9332173b45361773c1eebadbda0f7210bc037b027ea93c04637",
+      "closureFileCount": 426,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -9543,6 +9565,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -9857,8 +9880,8 @@
         "crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-flux/src/model.rs"
       ],
-      "digest": "cc8adaf64b2a4ebd27444f0aba7badbcb09e490d4fd564f70a5be382c20e888c",
-      "closureFileCount": 567,
+      "digest": "c709c2fb6303e0938d1773c0769de9066be8f84e843e9a9841c0dcaad3eadbb4",
+      "closureFileCount": 568,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -9990,6 +10013,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -10434,8 +10458,8 @@
         "crates/media/candle-gen/candle-gen-ideogram/src/lib.rs",
         "crates/media/candle-gen/candle-gen-ideogram/src/memory_strategy.rs"
       ],
-      "digest": "b9afe2b6cbce8deb800609d8d1696b4330de146d88d04f3bbff4340058e616eb",
-      "closureFileCount": 345,
+      "digest": "59f0228e9a94c46797273f7f383ca2d371016fabcc80a6b3a69160026d9736e1",
+      "closureFileCount": 346,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -10543,6 +10567,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -10789,8 +10814,8 @@
         "crates/media/mlx-gen/mlx-gen-ideogram/src/lib.rs",
         "crates/media/mlx-gen/mlx-gen-ideogram/src/model.rs"
       ],
-      "digest": "487beb9b56f863987479dfbbd156ac3e1b65ddfe66c228d044280911586236e3",
-      "closureFileCount": 351,
+      "digest": "8010b56e6fa11fecd500a761c145a630d6fac02376362a0ebff86573d8c960af",
+      "closureFileCount": 352,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -10909,6 +10934,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -11150,8 +11176,8 @@
         "crates/media/candle-gen/candle-gen-ideogram/src/lib.rs",
         "crates/media/candle-gen/candle-gen-ideogram/src/memory_strategy.rs"
       ],
-      "digest": "aa383eba49d8eba30d9feec8371c53c5d0f9138815f707968e04d67e7f30de90",
-      "closureFileCount": 345,
+      "digest": "b73c389c96fda04152c1c0fc8e0cb001b7bbd83c9791bb54ad4e899fd0664f6d",
+      "closureFileCount": 346,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -11259,6 +11285,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -11505,8 +11532,8 @@
         "crates/media/mlx-gen/mlx-gen-ideogram/src/lib.rs",
         "crates/media/mlx-gen/mlx-gen-ideogram/src/model.rs"
       ],
-      "digest": "f3ee6ccd8e318671dca045f976ea133b6b333bb323db13ec2544c1889f7d186b",
-      "closureFileCount": 351,
+      "digest": "ecf3a32f0d3f9b3ccdce1fef18d5134fbbbdcbadbb6dc5a873b79487cd76411d",
+      "closureFileCount": 352,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -11625,6 +11652,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -11867,8 +11895,8 @@
         "crates/media/candle-gen/candle-gen-sdxl/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
       ],
-      "digest": "efc65ba82ea2c899b11213f1842b8bc7bb853ed7f163a23c9e3ffe58ef8241eb",
-      "closureFileCount": 397,
+      "digest": "3cdf93024f529c5ce6740ea0d9a3265f16e9244802873c8f6d7d07cd55e5426c",
+      "closureFileCount": 398,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -11981,6 +12009,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -12275,8 +12304,8 @@
         "crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sdxl/src/model.rs"
       ],
-      "digest": "e140215f87c1cc462a8b27614967f1d4ee3fac83f871324ab0dd866f7b451160",
-      "closureFileCount": 505,
+      "digest": "458ef32945f58901ca690deb1b8bb4b58b581c0499ed84a93695a259d3d3db24",
+      "closureFileCount": 506,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -12408,6 +12437,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -12791,8 +12821,8 @@
         "crates/media/candle-gen/candle-gen-sdxl/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
       ],
-      "digest": "062c17cc8fe1165526b48f4c7d342f114d1970b529c9fec01bacc98c6bdadd72",
-      "closureFileCount": 397,
+      "digest": "417c3a4a288a520382768331a41d8e1214d7d39f602990541ead9de8d021ff64",
+      "closureFileCount": 398,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -12905,6 +12935,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -13199,8 +13230,8 @@
         "crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sdxl/src/model.rs"
       ],
-      "digest": "22d75f28322841ebabf1035ec362b6c273af0d986697dd187b6ba04246d6ee1f",
-      "closureFileCount": 505,
+      "digest": "cc3ed2f5ff487ce14d74cf19a75855583f88fa02b2c5fa7ae78e03524954a0e5",
+      "closureFileCount": 506,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -13332,6 +13363,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -13715,8 +13747,8 @@
         "crates/media/candle-gen/candle-gen-instantid/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-instantid/src/model.rs"
       ],
-      "digest": "d23f195ce20f2106e638a7994d18af366f3f43b24dbe3c084f144d40dddd7888",
-      "closureFileCount": 404,
+      "digest": "c8725cbaa514fe7e0bb203bf453af1d008fa8816b1944b59cd0fe8ea1313c82b",
+      "closureFileCount": 405,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -13830,6 +13862,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -14130,8 +14163,8 @@
         "crates/media/mlx-gen/mlx-gen-instantid/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-instantid/src/model.rs"
       ],
-      "digest": "8f7fddd5c620cd450c939a7eff49881e1de252a763651a624e13cda56fae6e7d",
-      "closureFileCount": 513,
+      "digest": "0a473d43fcc67eb650a99a1c5797f000914d75b4d17197569af3721442e458ae",
+      "closureFileCount": 514,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -14264,6 +14297,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -14654,8 +14688,8 @@
         "crates/media/candle-gen/candle-gen-iris/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-iris/src/model.rs"
       ],
-      "digest": "c3c1b3334a1769c106f19632c90f6cdc45b243fa6dbc42f7dc16912d6cd7e724",
-      "closureFileCount": 434,
+      "digest": "928ac96041b297fedc5e9a6f7431688fdce4c7c2f09cf2ad9b3b565a2478ec7e",
+      "closureFileCount": 435,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -14801,6 +14835,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -15099,8 +15134,8 @@
         "crates/media/mlx-gen/mlx-gen-iris/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-iris/src/model.rs"
       ],
-      "digest": "b0299048d607b4051f1727b591f0d39aa635790363bb6aa3eab327c001c30e58",
-      "closureFileCount": 307,
+      "digest": "9b3b8e5a431bed728b8a92304cfcf1ede0abb11ac03ca7ec9edeb46070eaf9a2",
+      "closureFileCount": 308,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -15245,6 +15280,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -15417,8 +15453,8 @@
         "crates/media/candle-gen/candle-gen-iris/src/depth.rs",
         "crates/media/candle-gen/candle-gen-iris/src/memory_strategy.rs"
       ],
-      "digest": "12dc3013470c88176f4deadf56237f4c5095d857bf4505b3866a9424791d1460",
-      "closureFileCount": 434,
+      "digest": "873c3661359c31b227a9b1f172c9b354a7766fa26036465171fe8e139c40c10b",
+      "closureFileCount": 435,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -15564,6 +15600,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -15862,8 +15899,8 @@
         "crates/media/mlx-gen/mlx-gen-iris/src/depth.rs",
         "crates/media/mlx-gen/mlx-gen-iris/src/memory_strategy.rs"
       ],
-      "digest": "33ed5fd174d972ad98a91586099341d8e3a4e075593c226f031a5d888378972d",
-      "closureFileCount": 307,
+      "digest": "54256a0a58532249ccb6b842525be63a8bdb75fadd9cddf294561d118b675851",
+      "closureFileCount": 308,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -16008,6 +16045,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -16180,8 +16218,8 @@
         "crates/media/candle-gen/candle-gen-iris/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-iris/src/restoration.rs"
       ],
-      "digest": "902bcd724dde409400bdaf850346cd477e6d14712373e62400f3209ef2aacf3f",
-      "closureFileCount": 431,
+      "digest": "8f7d52bf0c5709b3f31977278cdd7be8dbbede59300c7d8886cbea36793ac907",
+      "closureFileCount": 432,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -16324,6 +16362,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -16622,8 +16661,8 @@
         "crates/media/mlx-gen/mlx-gen-iris/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-iris/src/restoration.rs"
       ],
-      "digest": "547a44ed601631cc5fb7fdffbcbb3f24a725934723013e95886ae1f90520b6fd",
-      "closureFileCount": 304,
+      "digest": "fadbcfa4f46ba05f657e5c41b9f2d95747f9b032153d959d798e68be3110bb94",
+      "closureFileCount": 305,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -16765,6 +16804,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -16936,8 +16976,8 @@
         "crates/media/candle-gen/candle-gen-kolors/src/lib.rs",
         "crates/media/candle-gen/candle-gen-kolors/src/memory_strategy.rs"
       ],
-      "digest": "4cb9cb9f31f61e1ebc3cc811822fb48c665e9d692c37403518c35ec1980c39df",
-      "closureFileCount": 411,
+      "digest": "b8e7108d331198d0353815d2d09f0ff67a7dc5ea9f9266b2b0313ead3f40456c",
+      "closureFileCount": 412,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -17050,6 +17090,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -17357,8 +17398,8 @@
         "crates/media/mlx-gen/mlx-gen-kolors/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-kolors/src/registry.rs"
       ],
-      "digest": "0488b2988f20502b9cde8a49b57221468a72367c81ebb7e60126d620b3329542",
-      "closureFileCount": 516,
+      "digest": "8fbc45adecdde105495f9e045a2a1d690ae7ddc836eafda6e531193aef30214f",
+      "closureFileCount": 517,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -17490,6 +17531,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -17882,8 +17924,8 @@
       "entryPoints": [
         "crates/media/candle-gen/candle-gen-krea/src/lib.rs"
       ],
-      "digest": "1553c63647eed735bac02b27ce379a1e8c5225ea31825609062f2f9c12d8c090",
-      "closureFileCount": 416,
+      "digest": "1128353277d07d51331932be5ed426e12befc33d829e149d65206580a4a0e3c3",
+      "closureFileCount": 417,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -17997,6 +18039,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -18308,8 +18351,8 @@
         "crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-krea/src/model.rs"
       ],
-      "digest": "db792dd1c9ffc81d90b72c423bb05c3e80413900d398bf2d4b869297a631b800",
-      "closureFileCount": 529,
+      "digest": "741ff03da916c6be9cac005ba4a29fce784a5398fd1bfb5db26e2aa7b4ba6e81",
+      "closureFileCount": 530,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -18450,6 +18493,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -18846,8 +18890,8 @@
       "entryPoints": [
         "crates/media/candle-gen/candle-gen-krea/src/lib.rs"
       ],
-      "digest": "249919dea54f58cd6a98924744645088dc183b426256f65163f649577565bb9d",
-      "closureFileCount": 416,
+      "digest": "ad4896baa996022ac680d790427b2712443f241c2f06f33bdffc245d0d3f46a4",
+      "closureFileCount": 417,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -18961,6 +19005,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -19272,8 +19317,8 @@
         "crates/media/mlx-gen/mlx-gen-krea/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-krea/src/model.rs"
       ],
-      "digest": "f97ce2a5a60925bcf24bf89001ce3fb4a12c7c011ff1e25cd09c92c33f90dd96",
-      "closureFileCount": 529,
+      "digest": "a6dbff3bf3ff519a35b2569713f53d9ca71f769acbf735703e90191005f92452",
+      "closureFileCount": 530,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -19414,6 +19459,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -19812,8 +19858,8 @@
         "crates/media/mlx-gen/mlx-gen-krea-realtime/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-krea-realtime/src/pipeline.rs"
       ],
-      "digest": "495e3e9d28dddb32112370a5d9079ebc94daa56871dc64e88818b6dfe20331a8",
-      "closureFileCount": 389,
+      "digest": "ae72e9ed90680839327108e3ecd9a441e4025c87849e937a14aa937e941a2c6e",
+      "closureFileCount": 390,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -19952,6 +19998,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -20210,8 +20257,8 @@
       "entryPoints": [
         "crates/media/candle-gen/candle-gen-lens/src/lib.rs"
       ],
-      "digest": "bcc4451b9226e9587541e900ef88392052d48b5ad6432d642216201c957b397c",
-      "closureFileCount": 475,
+      "digest": "ae67463b1dc5262bee8a67525369c2f47e10b11f9d266a4d89a31ee9166a61c2",
+      "closureFileCount": 476,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -20340,6 +20387,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -20695,8 +20743,8 @@
         "crates/media/mlx-gen/mlx-gen-lens/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-lens/src/registry.rs"
       ],
-      "digest": "57b21b3a8233a8cb967c8d16690d0ef69b5314f664930ca004a1f346aa073b50",
-      "closureFileCount": 381,
+      "digest": "0f98fbbf498e91b9806b698e33e38ed5007243043169343918c63126dc52d201",
+      "closureFileCount": 382,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -20824,6 +20872,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -21085,8 +21134,8 @@
       "entryPoints": [
         "crates/media/candle-gen/candle-gen-lens/src/lib.rs"
       ],
-      "digest": "7c83d26a6f1c44be5de839e971dfe93311ec1ce2fc162419cc049c6374f3731e",
-      "closureFileCount": 475,
+      "digest": "a51b07adbd49c2986131405c97bdce3fea8b07ae87002aebd66b71235da409dc",
+      "closureFileCount": 476,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -21215,6 +21264,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -21570,8 +21620,8 @@
         "crates/media/mlx-gen/mlx-gen-lens/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-lens/src/registry.rs"
       ],
-      "digest": "f4f0b0e4f7fbfbc9c907632a5535d965ca1139336afb5819b6d36345e03d4108",
-      "closureFileCount": 381,
+      "digest": "e3d48661012f3c3dc43591ed02ce2c77568b3c1108d0996d63b5c55655b14309",
+      "closureFileCount": 382,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -21699,6 +21749,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -21962,8 +22013,8 @@
         "crates/media/candle-gen/candle-gen-ltx/src/lib.rs",
         "crates/media/candle-gen/candle-gen-ltx/src/memory_strategy.rs"
       ],
-      "digest": "61d5a72e342df47faf045cf920057687e356eddb5702a9c02289212a86500af5",
-      "closureFileCount": 488,
+      "digest": "df6d0d40b8d2eacb03479fd941bc0f26d8112cdab1a3c844e7d339e7661ec9fc",
+      "closureFileCount": 489,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -22106,6 +22157,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
         "crates/contracts/gen-core/src/runtime/load_spec.rs",
@@ -22460,8 +22512,8 @@
         "crates/media/mlx-gen/mlx-gen-ltx/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-ltx/src/model.rs"
       ],
-      "digest": "2d119b4788ff24fa7f7e56270e601e0eedb2a8c24d28eb3be23d107d8121fc96",
-      "closureFileCount": 401,
+      "digest": "197ef5842409b42b3683430f0a074a8a63b8760093c55146bac370586baeefe7",
+      "closureFileCount": 402,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -22596,6 +22648,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -22872,8 +22925,8 @@
         "crates/media/candle-gen/candle-gen-ltx/src/lib.rs",
         "crates/media/candle-gen/candle-gen-ltx/src/memory_strategy_2_5.rs"
       ],
-      "digest": "d6b5b92b229aa8355d733a5aebeb0517a6ae6fef6a1b261b47cf19e794cb0d10",
-      "closureFileCount": 488,
+      "digest": "d4f35d68ec604d04eab7848c86de4c8d1e4ce7bbdbf0d29d507f1d84ed5ba1c1",
+      "closureFileCount": 489,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -23016,6 +23069,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
         "crates/contracts/gen-core/src/runtime/load_spec.rs",
@@ -23370,8 +23424,8 @@
         "crates/media/mlx-gen/mlx-gen-ltx/src/memory_strategy_2_5.rs",
         "crates/media/mlx-gen/mlx-gen-ltx/src/model.rs"
       ],
-      "digest": "6e478fd76c75b0df5f8ff3b59e039e13299fb0ec3861db4ba23e8aab78b6347f",
-      "closureFileCount": 401,
+      "digest": "a4d9d8fac1bc5c20429ce9c614e05fa7cf9cf0f499665f08d1e08d7428c6479c",
+      "closureFileCount": 402,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -23506,6 +23560,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -23782,8 +23837,8 @@
         "crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-mage/src/pipeline.rs"
       ],
-      "digest": "ac5895430d30b1072f40a6c99391c892da7dacbefcfbe1a10b0e849a7c3c28e0",
-      "closureFileCount": 345,
+      "digest": "1b391a330f4c911f521e26f6b9d7db8dedaa2f8142fff6e3ba1aa68f6d3a97e8",
+      "closureFileCount": 346,
       "closureFiles": [
         "crates/contracts/gen-core-family/src/face_align.rs",
         "crates/contracts/gen-core-family/src/fx_program.rs",
@@ -23877,6 +23932,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -24139,8 +24195,8 @@
         "crates/media/mlx-gen/mlx-gen-mage/src/model.rs",
         "crates/media/mlx-gen/mlx-gen-mage/src/pipeline.rs"
       ],
-      "digest": "0ecc0e86bb86b37926f2e098f931cf785bc2327707fb7a0fa6f91855953ca342",
-      "closureFileCount": 441,
+      "digest": "5db19dde734b4dac2b09aec1bf271b55e9a7a5204b541a2d49d0f6878d5bc760",
+      "closureFileCount": 442,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -24270,6 +24326,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -24591,8 +24648,8 @@
         "crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-mage/src/pipeline.rs"
       ],
-      "digest": "aa1d486e230a91469de7454a79ba0d290f2a4c9e1289a1276de3efe32e3fbaa4",
-      "closureFileCount": 345,
+      "digest": "eed57a3542d0b8de723a56e01f2ae3f04dd7136218d95705338ff4af4acdfa23",
+      "closureFileCount": 346,
       "closureFiles": [
         "crates/contracts/gen-core-family/src/face_align.rs",
         "crates/contracts/gen-core-family/src/fx_program.rs",
@@ -24686,6 +24743,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -24948,8 +25006,8 @@
         "crates/media/mlx-gen/mlx-gen-mage/src/model.rs",
         "crates/media/mlx-gen/mlx-gen-mage/src/pipeline.rs"
       ],
-      "digest": "eb679df013604e48a59be9f3e9448afcf3e2766b7d3af808f576be884ac40f73",
-      "closureFileCount": 441,
+      "digest": "8b4d03a5463a744a62932dedc91257c40c7191dac5afa3b9cd7c1c015af52bff",
+      "closureFileCount": 442,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -25079,6 +25137,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -25401,8 +25460,8 @@
         "crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-mage/src/pipeline.rs"
       ],
-      "digest": "9dc8350b8c647f827f780800c7cd53c1387d2af25f9fbc268114fa802c87895b",
-      "closureFileCount": 345,
+      "digest": "c6fe45f5c8d115e04f11736867d29ea2b89aafa831e197aa37e30fd8bb29632a",
+      "closureFileCount": 346,
       "closureFiles": [
         "crates/contracts/gen-core-family/src/face_align.rs",
         "crates/contracts/gen-core-family/src/fx_program.rs",
@@ -25496,6 +25555,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -25758,8 +25818,8 @@
         "crates/media/mlx-gen/mlx-gen-mage/src/model.rs",
         "crates/media/mlx-gen/mlx-gen-mage/src/pipeline.rs"
       ],
-      "digest": "16e45422f2e7a1b6c7f0d46429db7f3656bd5c1f6a09123ff7c487ad1c79a172",
-      "closureFileCount": 441,
+      "digest": "8dcc2773dda749c4b8cc034681807a37f5956b94c8e4d8a454279f51973b8c83",
+      "closureFileCount": 442,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -25889,6 +25949,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -26211,8 +26272,8 @@
         "crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-mage/src/pipeline.rs"
       ],
-      "digest": "fe65f96421c6ac8941014865425f05e81548cb7922bdd514c1c8f4a43eaf7ad9",
-      "closureFileCount": 345,
+      "digest": "fd092313e1d120f8018cbb39589d0e5349aae630c6081ce731dd65c523609b4a",
+      "closureFileCount": 346,
       "closureFiles": [
         "crates/contracts/gen-core-family/src/face_align.rs",
         "crates/contracts/gen-core-family/src/fx_program.rs",
@@ -26306,6 +26367,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -26568,8 +26630,8 @@
         "crates/media/mlx-gen/mlx-gen-mage/src/model.rs",
         "crates/media/mlx-gen/mlx-gen-mage/src/pipeline.rs"
       ],
-      "digest": "17821f8080e940800d6def12844a532b40be0f4fa9e0e61ce1557b3e0bd4af8b",
-      "closureFileCount": 441,
+      "digest": "042f625b9be0174647c6284c49d6c39c6cdf16c6b565e50c8c22df9dae219d5f",
+      "closureFileCount": 442,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -26699,6 +26761,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -27021,8 +27084,8 @@
         "crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-mage/src/pipeline.rs"
       ],
-      "digest": "ed5b398f9cac791d26c849ab2d8e7c34a39438b72bee7824f3d97e71ef658db8",
-      "closureFileCount": 345,
+      "digest": "3af77add14b5ff47d4b0287468e508f22eae64510361211eab2402bab5ba519e",
+      "closureFileCount": 346,
       "closureFiles": [
         "crates/contracts/gen-core-family/src/face_align.rs",
         "crates/contracts/gen-core-family/src/fx_program.rs",
@@ -27116,6 +27179,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -27378,8 +27442,8 @@
         "crates/media/mlx-gen/mlx-gen-mage/src/model.rs",
         "crates/media/mlx-gen/mlx-gen-mage/src/pipeline.rs"
       ],
-      "digest": "9f6f8c586be7c3b2809c63e1fa9cc977949124b12d76ff016f48263437a08524",
-      "closureFileCount": 441,
+      "digest": "d7d450978549dbbf488fbe943f4b7167b8f4e283435741cdd78d66ad0af382c4",
+      "closureFileCount": 442,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -27509,6 +27573,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -27830,8 +27895,8 @@
         "crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-mage/src/pipeline.rs"
       ],
-      "digest": "a15ce7d631d6cb56fe93efbba94c2a612b254e30b3321705584a9d8efc0bc823",
-      "closureFileCount": 345,
+      "digest": "dd336b6475a702e17a4421be8a24253b4b36d2654f11e4459e7b058367088dec",
+      "closureFileCount": 346,
       "closureFiles": [
         "crates/contracts/gen-core-family/src/face_align.rs",
         "crates/contracts/gen-core-family/src/fx_program.rs",
@@ -27925,6 +27990,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -28187,8 +28253,8 @@
         "crates/media/mlx-gen/mlx-gen-mage/src/model.rs",
         "crates/media/mlx-gen/mlx-gen-mage/src/pipeline.rs"
       ],
-      "digest": "0fc556c16617f2bbbe46e8ac0dc8bb698d7c49ef2dc9fecf7c2f0b6c1fb18e0d",
-      "closureFileCount": 441,
+      "digest": "c1635a85293e63635f227b4bb468dec7746245b48e5bb2dce339aa0cc172e710",
+      "closureFileCount": 442,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -28318,6 +28384,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -28638,8 +28705,8 @@
         "crates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/model.rs"
       ],
-      "digest": "16a74bef0c57248512ca6905741c646444efbf30d0868d3160f6db4762e324fc",
-      "closureFileCount": 726,
+      "digest": "7175c932140b524af4f9ff3817d456ec0f6b4e587281ffb15df43aaedda05b6c",
+      "closureFileCount": 727,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -28794,6 +28861,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -29374,8 +29442,8 @@
         "crates/media/mlx-gen/mlx-gen-minimax-h3/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-minimax-h3/src/model.rs"
       ],
-      "digest": "bd0c89e5c69b896b03a43cc6ba04c5a3bcecdb530e7830cfb586d683dfdc7bc8",
-      "closureFileCount": 487,
+      "digest": "ef4c0241550099cace4a082cacdf247089480f619630a121a19c05b1a921271c",
+      "closureFileCount": 488,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -29520,6 +29588,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -29872,8 +29941,8 @@
         "crates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/model.rs"
       ],
-      "digest": "5bfa3e51fd10e432c2f9819893bd2699f7b592130249fa9715ed9a6fd8a11a2f",
-      "closureFileCount": 726,
+      "digest": "df39f182b96927ceaafde28cbe62edb5b226bcedf7e18f56ac3e6b29c45b3159",
+      "closureFileCount": 727,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -30028,6 +30097,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -30609,8 +30679,8 @@
         "crates/media/mlx-gen/mlx-gen-minimax-h3/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-minimax-h3/src/model.rs"
       ],
-      "digest": "8f0f8c19d5fbc46c93be252a9451b5920b9c031b817e9b2afc4bf36b7681010a",
-      "closureFileCount": 487,
+      "digest": "d6ef1ca8c5cf42636fa06d5f9b17f19df2eb82b2716d3da474963c67f7215b59",
+      "closureFileCount": 488,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -30755,6 +30825,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -31107,8 +31178,8 @@
         "crates/media/candle-gen/candle-gen-pulid/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-pulid/src/pulid_flux.rs"
       ],
-      "digest": "1cb14c67a44b57952d63e90859670c646fe93dc1cd6c21916ed4aefcee38593d",
-      "closureFileCount": 381,
+      "digest": "2706906da7d96b9c46c174b0c64ad6292652450172cb26d250466665c60fcb10",
+      "closureFileCount": 382,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -31227,6 +31298,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -31499,8 +31571,8 @@
         "crates/media/mlx-gen/mlx-gen-pulid/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-pulid/src/pulid_flux.rs"
       ],
-      "digest": "2a47fb57b007b0e6b32e4f82fa3d35439d1ea8e5307dbbc6cf7ed0ff089acdc5",
-      "closureFileCount": 579,
+      "digest": "1445b0e74a1713597db9b3636e40a9734573724254588f4fd27f3993c006cad8",
+      "closureFileCount": 580,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -31632,6 +31704,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -32088,8 +32161,8 @@
         "crates/media/candle-gen/candle-gen-qwen-image/src/lib.rs",
         "crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"
       ],
-      "digest": "a795bd0b3922eb4f55b5af646386ce1506efccfbf5ca9a45cf8b88cc3b09b880",
-      "closureFileCount": 356,
+      "digest": "7a8fd5745ae50524a93f999c69bab6256bb14fc80003b215887e7f3153d5f7f5",
+      "closureFileCount": 357,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -32197,6 +32270,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -32454,8 +32528,8 @@
         "crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-qwen-image/src/model.rs"
       ],
-      "digest": "071621bcdd9fe8f309f733f2898da093b58b410fea855cd84225630333a021cc",
-      "closureFileCount": 440,
+      "digest": "3df471e6d0e8d3891e41f1ea73afca65f0855ee76c699d7fbc9709328e1ad85f",
+      "closureFileCount": 441,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -32594,6 +32668,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -32904,8 +32979,8 @@
         "crates/media/candle-gen/candle-gen-qwen-image-2-1/src/lib.rs",
         "crates/media/candle-gen/candle-gen-qwen-image-2-1/src/memory_strategy.rs"
       ],
-      "digest": "6968b04ab2b7c2ee8a2723c3310ab2818d13228f22c4d84e68e5895aa8620ac2",
-      "closureFileCount": 456,
+      "digest": "8202974b03f35a527d2077636606b74d432b73f4ac37e157f25374c37cadbf65",
+      "closureFileCount": 457,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -33037,6 +33112,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -33370,8 +33446,8 @@
         "crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/model.rs"
       ],
-      "digest": "d3b21c21d542b019ce7335e9bbfefef96fc454f1e16c5d9d5a45581cd104ecd9",
-      "closureFileCount": 411,
+      "digest": "1561819b319ca7960d0b92ab13d81436d4f50a6435d223cd98275a8a43ab954e",
+      "closureFileCount": 412,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -33505,6 +33581,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -33791,8 +33868,8 @@
         "crates/media/candle-gen/candle-gen-qwen-image-2-1/src/lib.rs",
         "crates/media/candle-gen/candle-gen-qwen-image-2-1/src/memory_strategy.rs"
       ],
-      "digest": "473aac01813afd050b56c68701ab8ea729b4a1d7b5979a76170c3f5e1210c52f",
-      "closureFileCount": 456,
+      "digest": "b7bee9a4fea37fa44440c46d372b58a5ea1a7a5e0fad0cccbd0e3270557fb2d4",
+      "closureFileCount": 457,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -33924,6 +34001,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -34257,8 +34335,8 @@
         "crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/model.rs"
       ],
-      "digest": "35adb32fab4964797e9ba32eaeb707f0e290b84b7a2b6905148255c1ca6c5146",
-      "closureFileCount": 411,
+      "digest": "432465898e1dd3fae74c831688c6bae80190ef568dc76fccfb4848976b66d781",
+      "closureFileCount": 412,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -34392,6 +34470,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -34679,8 +34758,8 @@
         "crates/media/candle-gen/candle-gen-qwen-image/src/edit.rs",
         "crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"
       ],
-      "digest": "baf01a29731ff581710fb676d19efd62d810df8a263ea516ba99a0ba5083804a",
-      "closureFileCount": 355,
+      "digest": "46bcd16a8fe0020a30cf6ea5e56f5be17ad8c922ff25e0c4019b7db363bfc5cc",
+      "closureFileCount": 356,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -34788,6 +34867,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -35045,8 +35125,8 @@
         "crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-qwen-image/src/model_edit.rs"
       ],
-      "digest": "c58e5a7aa72901b487c900becf96c97fe13ba1f626072939b2d1a21d0d84d41b",
-      "closureFileCount": 440,
+      "digest": "a10aee017cefc637f7f29e23097fc42c46afdcc992da4403af4f9bd3e89cae68",
+      "closureFileCount": 441,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -35185,6 +35265,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -35496,8 +35577,8 @@
         "crates/media/candle-gen/candle-gen-qwen-image/src/edit.rs",
         "crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"
       ],
-      "digest": "9b34c2587cebfcf34a59449f13a822fd57409ad40114dde676bc7cf8699c80df",
-      "closureFileCount": 355,
+      "digest": "1261a927daf0b5edacb3d963791952553ae69951112e5879bc59ef0493517672",
+      "closureFileCount": 356,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -35605,6 +35686,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -35862,8 +35944,8 @@
         "crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-qwen-image/src/model_edit.rs"
       ],
-      "digest": "0b1904efc05589e993bbf79a7501dab64738f95c6856b327517ff6668c2adcaf",
-      "closureFileCount": 440,
+      "digest": "53898a397475806faf2ea1a865bd81ac7534e3dec78de94403f49c16b37e44cd",
+      "closureFileCount": 441,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -36002,6 +36084,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -36313,8 +36396,8 @@
         "crates/media/candle-gen/candle-gen-sdxl/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
       ],
-      "digest": "4b018b2aff78e3ef73345407a8b99cb5487a544fb8b321a112368f9bda53889f",
-      "closureFileCount": 397,
+      "digest": "2d3bcb028c23afb7dad411e87d9ed1314b7b971ad315dbbbb85bb136ad85098c",
+      "closureFileCount": 398,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -36427,6 +36510,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -36721,8 +36805,8 @@
         "crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sdxl/src/model.rs"
       ],
-      "digest": "416b65eb4e56af2e4b3b6ccfff165ed72a42a70a2883cd6df224a38b721c4387",
-      "closureFileCount": 505,
+      "digest": "65f0af2540b2a23cbd67381418987d63e4cd1a48a1f18771391c3a20684db8b9",
+      "closureFileCount": 506,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -36854,6 +36938,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -37237,8 +37322,8 @@
         "crates/media/candle-gen/candle-gen-sdxl/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
       ],
-      "digest": "3006bc7befd35236f1238cafacb61457af0c026a5ea706a0801ad031468551b6",
-      "closureFileCount": 397,
+      "digest": "5369ac05251f1a6d809edfea280f8bee557c4c49341e0b207a5a2a29477a7734",
+      "closureFileCount": 398,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -37351,6 +37436,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -37645,8 +37731,8 @@
         "crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sdxl/src/model.rs"
       ],
-      "digest": "4a2482f31750a30103a8083d679559f5ef369eee49291d2b64db4ed6b7b1e172",
-      "closureFileCount": 505,
+      "digest": "1eba60944123fe49a894228e232f6e16c7138505fff3b62a2c1ddb38d6125a73",
+      "closureFileCount": 506,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -37778,6 +37864,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -38160,8 +38247,8 @@
         "crates/media/candle-gen/candle-gen-sana/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-sana/src/model.rs"
       ],
-      "digest": "bfa9216ec54ccdc5727f4db4b7b7936c3cbecd25f5eeb562e8edbd546bcd130b",
-      "closureFileCount": 329,
+      "digest": "dcdaf6e518112d4d038c7f169629854482f07c6279ba72c42e5762f818ad9435",
+      "closureFileCount": 330,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -38269,6 +38356,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
         "crates/contracts/gen-core/src/runtime/load_spec.rs",
@@ -38500,8 +38588,8 @@
         "crates/media/mlx-gen/mlx-gen-sana/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sana/src/model.rs"
       ],
-      "digest": "61a17d02b2cb437dc330cfbec5d9b0a50d3a85dff9148f6d0d37dd2d1b85a684",
-      "closureFileCount": 321,
+      "digest": "17e338976ddcd4a576811453d3e888d091b740f16100a0291c73f8e20b0e4f37",
+      "closureFileCount": 322,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -38622,6 +38710,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -38831,8 +38920,8 @@
         "crates/media/candle-gen/candle-gen-sana/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-sana/src/model.rs"
       ],
-      "digest": "dc79fe230367b50711d40d4befdf599f7541fd46360b0dd68897305dd8c954aa",
-      "closureFileCount": 329,
+      "digest": "1c74a43a9ce91cf5487a2394eb0eb78e48fd1b12467aceae0b1bd84aa51180a5",
+      "closureFileCount": 330,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -38940,6 +39029,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
         "crates/contracts/gen-core/src/runtime/load_spec.rs",
@@ -39171,8 +39261,8 @@
         "crates/media/mlx-gen/mlx-gen-sana/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sana/src/model.rs"
       ],
-      "digest": "45a1fb436b88d30bc4827caeb08f992cbb0ea6e1314feafa83cc1c891ea5c14c",
-      "closureFileCount": 321,
+      "digest": "a73340151561b6112029c957230f89507e504331d3c1af06ec1856e13a3fd7a2",
+      "closureFileCount": 322,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -39293,6 +39383,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -39502,8 +39593,8 @@
         "crates/media/candle-gen/candle-gen-scail2/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-scail2/src/pipeline.rs"
       ],
-      "digest": "e75b21b9ec1c4d36d6bd86dd365900c24a03cd7b7f473e282a2e52e46a61a7c2",
-      "closureFileCount": 395,
+      "digest": "9c29851819a378cb553063aff9bf9562762cfbbb5f21466e54869b6b6868962c",
+      "closureFileCount": 396,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -39624,6 +39715,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -39907,8 +39999,8 @@
         "crates/media/mlx-gen/mlx-gen-scail2/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-scail2/src/pipeline.rs"
       ],
-      "digest": "85a672c284a61dce60b6018c99023d6eead692894391691a0ee3110f5c816c82",
-      "closureFileCount": 390,
+      "digest": "58e8e1ac2e933cfa630dad656820a3dd8fd0c4f4885ee159423655677de05ec8",
+      "closureFileCount": 391,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -40047,6 +40139,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -40307,8 +40400,8 @@
         "crates/media/candle-gen/candle-gen-sd3/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sd3/src/memory_strategy.rs"
       ],
-      "digest": "a8135ed03217a511d074da075894ae9ed5a3d279f8caa7e1f520225bc98e79ae",
-      "closureFileCount": 344,
+      "digest": "92b0a9858eef043d55893876e89c5124799ab69643f97660f27eeb4e7ceaa219",
+      "closureFileCount": 345,
       "closureFiles": [
         "crates/contracts/gen-core-family/src/face_align.rs",
         "crates/contracts/gen-core-family/src/fx_program.rs",
@@ -40404,6 +40497,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -40663,8 +40757,8 @@
         "crates/media/mlx-gen/mlx-gen-sd3/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sd3/src/model.rs"
       ],
-      "digest": "f3075288c38d321468a1b8fa76bb79fc9a467eccb0db0173ee5e34dc51c797d3",
-      "closureFileCount": 585,
+      "digest": "b0aea79276d06a9115d669f4bda024bf44e94fc0ac8a0ebed474e4580af8132b",
+      "closureFileCount": 586,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -40799,6 +40893,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -41258,8 +41353,8 @@
         "crates/media/candle-gen/candle-gen-sd3/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sd3/src/memory_strategy.rs"
       ],
-      "digest": "69cd2a753784f44a04d16020eb630946b54cc9c95b6bc19b354c753e15c1d878",
-      "closureFileCount": 344,
+      "digest": "dd578466a9ace3d221ffbb8a190721b211658edc8b711cf55c4700bde5ec4674",
+      "closureFileCount": 345,
       "closureFiles": [
         "crates/contracts/gen-core-family/src/face_align.rs",
         "crates/contracts/gen-core-family/src/fx_program.rs",
@@ -41355,6 +41450,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -41614,8 +41710,8 @@
         "crates/media/mlx-gen/mlx-gen-sd3/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sd3/src/model.rs"
       ],
-      "digest": "67b1be0288a340c6aaefcf3f03c3fcbde7415cb4beda6efa13e25fb4bdda4809",
-      "closureFileCount": 585,
+      "digest": "b17affa483f9461ca6efdfab05b7621eb278e48ff5726aac2ed851d080682239",
+      "closureFileCount": 586,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -41750,6 +41846,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -42209,8 +42306,8 @@
         "crates/media/candle-gen/candle-gen-sd3/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sd3/src/memory_strategy.rs"
       ],
-      "digest": "b515119f0f4d049b56712047785cc020b771799945d63fea20dead4727d936bf",
-      "closureFileCount": 344,
+      "digest": "69b80e557ebae79a159087fd061ecf5d18c1d1d39fa526ccffda143616387cf6",
+      "closureFileCount": 345,
       "closureFiles": [
         "crates/contracts/gen-core-family/src/face_align.rs",
         "crates/contracts/gen-core-family/src/fx_program.rs",
@@ -42306,6 +42403,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -42565,8 +42663,8 @@
         "crates/media/mlx-gen/mlx-gen-sd3/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sd3/src/model.rs"
       ],
-      "digest": "073b709e986dbac6ca21d8f46ceba268ba667229049d1bdbc75719b1f26cf7ec",
-      "closureFileCount": 585,
+      "digest": "759b49c862984713553c3ae9e32a885faddd603bf5020d6a7a8b4ca183f4a46c",
+      "closureFileCount": 586,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -42701,6 +42799,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -43160,8 +43259,8 @@
         "crates/media/candle-gen/candle-gen-sdxl/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
       ],
-      "digest": "aa365ec597102d277c46b407cc911b856f9f92fd5ed9a588c9fc6fed1f085b7e",
-      "closureFileCount": 397,
+      "digest": "47352882a42043ec4fb090358ab8d03e1e4c03d4f2649a64912cec4c4e4d66ab",
+      "closureFileCount": 398,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -43274,6 +43373,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -43567,8 +43667,8 @@
         "crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sdxl/src/model.rs"
       ],
-      "digest": "1470f52065d90067e4fce6c0272e88a94cf70ddca16fcb7efad5ee37ca77bb9f",
-      "closureFileCount": 505,
+      "digest": "d4f42d9171309f5af18847a93661e27a5d6fb04a7fc9d7ff112e1071d664b7d3",
+      "closureFileCount": 506,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -43700,6 +43800,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -44082,8 +44183,8 @@
         "crates/media/candle-gen/candle-gen-sensenova/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs"
       ],
-      "digest": "5a7d2065a86e348703a14271a37e9a0095f7710ffc59024243d1f9b9a23db3a5",
-      "closureFileCount": 416,
+      "digest": "af30f95be3e3c7b3f9989af7499d82b6b96460b1c629b9377045db03350563d3",
+      "closureFileCount": 417,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -44214,6 +44315,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
         "crates/contracts/gen-core/src/runtime/load_spec.rs",
@@ -44508,8 +44610,8 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "f07444ee88788111ee72f0be1208b5a0243b763abd59a32957a237a6bebe312e",
-      "closureFileCount": 278,
+      "digest": "077905aec19040679deb5d82a4f11e84c15d5cee972037c0284202ea27782db7",
+      "closureFileCount": 279,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -44626,6 +44728,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -44796,8 +44899,8 @@
         "crates/media/candle-gen/candle-gen-sensenova/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs"
       ],
-      "digest": "ddc743c8c1f3339300ea8379f81bc665598b0e966488b11b63d7e8a3559ff513",
-      "closureFileCount": 416,
+      "digest": "52ee1de903402f098ac2e9e10e4237789ffe950e8256f4ede89facf81b39bad9",
+      "closureFileCount": 417,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -44928,6 +45031,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
         "crates/contracts/gen-core/src/runtime/load_spec.rs",
@@ -45222,8 +45326,8 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "1e544c51136a60a379b8ce58ce46f7fd0be250ad2dad45bd63a7c705e1c22d93",
-      "closureFileCount": 278,
+      "digest": "36ba29bb40b8600d5339a683a2bba55fd2b99061f41d6ef106be8ee6189106f3",
+      "closureFileCount": 279,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -45340,6 +45444,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -45511,8 +45616,8 @@
         "crates/media/candle-gen/candle-gen-sensenova/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs"
       ],
-      "digest": "df40b8fb0d1d28f43caf3e9c029f342efca719cdae39fc3efe7452400ec1e1c9",
-      "closureFileCount": 416,
+      "digest": "61a3330438893a5cca1d3e0a0c0d8e39853af20ac3918209bfa1feb8f6155b7f",
+      "closureFileCount": 417,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -45643,6 +45748,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
         "crates/contracts/gen-core/src/runtime/load_spec.rs",
@@ -45938,8 +46044,8 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "b61d2332048e74d25f1fdd93e79f209968d1f0f4eec9fe31e371f56d2f21cc42",
-      "closureFileCount": 278,
+      "digest": "2360e57a6fbd3185eed1aaee1f19d945160cf6068d2fad742ecb435020a561ca",
+      "closureFileCount": 279,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -46056,6 +46162,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -46227,8 +46334,8 @@
         "crates/media/candle-gen/candle-gen-sensenova/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs"
       ],
-      "digest": "b8aac7bdb603e3522256ebd7d7562ff39a2b96e125b56a26cc47772adf526ff4",
-      "closureFileCount": 416,
+      "digest": "bf4d749b110f8d780b9175d302b8b5e06bd56157814b398153f2f65862e53722",
+      "closureFileCount": 417,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -46359,6 +46466,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
         "crates/contracts/gen-core/src/runtime/load_spec.rs",
@@ -46654,8 +46762,8 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "e4022db45f362a6d106bae2baa745a8f89a0b3e77df08462cd76d267ff866c92",
-      "closureFileCount": 278,
+      "digest": "b71e70c142b5e229e8bdaadf62174c17187919de460dc9b0f8dda5babbac6c74",
+      "closureFileCount": 279,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -46772,6 +46880,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -46943,8 +47052,8 @@
         "crates/media/candle-gen/candle-gen-sensenova/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs"
       ],
-      "digest": "6097e2cd1c3ae7faed5484dd622fb443942fa2c6ed17d6eac37743c3c8a3ed19",
-      "closureFileCount": 416,
+      "digest": "4fcdcbea1c5bf99d6edda55d8819c2159c7194eb6d30de2f0ef9b675564686df",
+      "closureFileCount": 417,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -47075,6 +47184,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
         "crates/contracts/gen-core/src/runtime/load_spec.rs",
@@ -47370,8 +47480,8 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "f17b989ccabf6c2ce4b855b9debb5d6c95da3d7442aa21e45b10ffe8c29816c8",
-      "closureFileCount": 278,
+      "digest": "281292aa2594b48d1514f1bf31bb41f47614f12a50e28c8ee2d1222d88786e86",
+      "closureFileCount": 279,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -47488,6 +47598,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -47659,8 +47770,8 @@
         "crates/media/candle-gen/candle-gen-sensenova/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs"
       ],
-      "digest": "1333d57a16d458b872a6088a44df7949fa13a1346a5498b2c0683cfefa5597f6",
-      "closureFileCount": 416,
+      "digest": "caa22886a180bbcb3e04324b0e1ba8f5b456f65b07d48088db33480890ff78cf",
+      "closureFileCount": 417,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -47791,6 +47902,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
         "crates/contracts/gen-core/src/runtime/load_spec.rs",
@@ -48086,8 +48198,8 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "e0b39b7fd2f9891835ae16661c4be673a50bfea676c050dbba420011e3c4c44d",
-      "closureFileCount": 278,
+      "digest": "30bd3315bd7eb0e1bacd12397d1ae0c471d0060204a9b7f2ad79606fa23fea7f",
+      "closureFileCount": 279,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -48204,6 +48316,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -48375,8 +48488,8 @@
         "crates/media/candle-gen/candle-gen-supra2/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-supra2/src/model.rs"
       ],
-      "digest": "dec34576fd94036f79a329afb3f757f69332d317360b0d83fee4857eacf40704",
-      "closureFileCount": 404,
+      "digest": "84e667cbd25a54b309e123fc444a6e8ad6adb857f658d0c8bea358cadc9123bc",
+      "closureFileCount": 405,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -48492,6 +48605,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -48790,8 +48904,8 @@
         "crates/media/mlx-gen/mlx-gen-supra2/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-supra2/src/model.rs"
       ],
-      "digest": "b948e738e4cd0311bc6545936e22261aad317ed63df628af42c36372d4f5dbf2",
-      "closureFileCount": 511,
+      "digest": "739657789a58f393ab86d18dfb85c2f92d0e73e5fb921a4b2bf1cc39fd4d0af3",
+      "closureFileCount": 512,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -48924,6 +49038,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -49312,8 +49427,8 @@
         "crates/media/candle-gen/candle-gen-wan/src/config.rs",
         "crates/media/candle-gen/candle-gen-wan/src/memory_strategy.rs"
       ],
-      "digest": "cf6775b9c35f83fd1e36aecf8308e4c96a3bed395b6e3799bc432a400e63c0be",
-      "closureFileCount": 383,
+      "digest": "fc65a5817d7934dd3283ebb3df8006eb8f263d42feaa45d3b11f7851783da765",
+      "closureFileCount": 384,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -49434,6 +49549,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -49706,8 +49822,8 @@
         "crates/media/mlx-gen/mlx-gen-wan/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-wan/src/model.rs"
       ],
-      "digest": "912cae7bc906a464ae7c65bd2e552865636b03910d22e55f6fcf8250a31c8de3",
-      "closureFileCount": 378,
+      "digest": "077422db7d3419189565205ed949d9e704fbdb2e11dd4a47cbdace269d937f88",
+      "closureFileCount": 379,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -49846,6 +49962,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -50095,8 +50212,8 @@
         "crates/media/candle-gen/candle-gen-wan/src/config.rs",
         "crates/media/candle-gen/candle-gen-wan/src/i2v_memory_strategy.rs"
       ],
-      "digest": "cf697d22dcd99ae6367940d9dd9d9909e5e34b6b66e2a4e5dd3838f64757a514",
-      "closureFileCount": 383,
+      "digest": "76802805b1dd91c920bbe6df9fa5f9d4aa0f8642e4800b3c7daa6a4f7c433f41",
+      "closureFileCount": 384,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -50217,6 +50334,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -50489,8 +50607,8 @@
         "crates/media/mlx-gen/mlx-gen-wan/src/i2v_memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-wan/src/model.rs"
       ],
-      "digest": "bcfdaad4b9c5ec9f083765f634e43cfb9307ff4309669cd314d44b2bf5e44182",
-      "closureFileCount": 378,
+      "digest": "bda39306208675a0b785549da9e47eb25fc1ed8066c41f5ffdfbab0e7e3668f4",
+      "closureFileCount": 379,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -50629,6 +50747,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -50878,8 +50997,8 @@
         "crates/media/candle-gen/candle-gen-wan/src/config.rs",
         "crates/media/candle-gen/candle-gen-wan/src/i2v_memory_strategy.rs"
       ],
-      "digest": "347c156631e096a6ce906b1104252dfa1e4698c0bd9735eb37f5202943b6db9a",
-      "closureFileCount": 383,
+      "digest": "cf10ca90b89c71971db0de81d13edce1e7634a8f1a51ef7078f6602903d49926",
+      "closureFileCount": 384,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -51000,6 +51119,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -51272,8 +51392,8 @@
         "crates/media/mlx-gen/mlx-gen-wan/src/i2v_memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-wan/src/model.rs"
       ],
-      "digest": "880eee5da5e9a0664c2b4c3ad4449c4870f30508f0363847f64a9787a0f859c8",
-      "closureFileCount": 378,
+      "digest": "8bc555fbebcb692a8b91eb6f10e8685e36b919fddc5f28b308fe9257ff83ba2c",
+      "closureFileCount": 379,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -51412,6 +51532,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -51660,8 +51781,8 @@
         "crates/media/candle-gen/candle-gen-z-image/src/base.rs",
         "crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
       ],
-      "digest": "edb7849b9bc39ff013dba2b6b9388fb6051fada892f5c90e00f550c4e3b4e3cc",
-      "closureFileCount": 380,
+      "digest": "3680ae87acd5688df1177f131162302ae07e9530f1cf4941af46a463cfd27a45",
+      "closureFileCount": 381,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -51773,6 +51894,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -52050,8 +52172,8 @@
         "crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-z-image/src/model_base.rs"
       ],
-      "digest": "5f389a3e70d02169796d30ff955866b1ba54d65863749420088a4d0cdbe89fcd",
-      "closureFileCount": 392,
+      "digest": "e3757b6dfe6f884fb62cf3af03b29dccb884e318a3b15bc7c4d983e1b4be03b6",
+      "closureFileCount": 393,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -52181,6 +52303,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -52453,8 +52576,8 @@
         "crates/media/candle-gen/candle-gen-z-image/src/lib.rs",
         "crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
       ],
-      "digest": "98aa9d28ce41b3e7f8ff5aa9ca0c2acd8ef9392fd38234c660e0cf2fb91e688d",
-      "closureFileCount": 382,
+      "digest": "0a23d0b8e62f61a3e8ccb79b9b5b00c696fb536eb40a7f62cb33b6682a2b1e00",
+      "closureFileCount": 383,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -52566,6 +52689,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -52846,8 +52970,8 @@
         "crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-z-image/src/model.rs"
       ],
-      "digest": "18be985b5e8ead07ead69ca25a316b9ff2501f6da5a8acd253c07f0912edf462",
-      "closureFileCount": 392,
+      "digest": "65e9d5985211ec566129d972462e97011fbfd7a73161994a76806cf1b46be2aa",
+      "closureFileCount": 393,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -52977,6 +53101,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -53248,8 +53373,8 @@
         "crates/media/candle-gen/candle-gen-z-image/src/lib.rs",
         "crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
       ],
-      "digest": "d92efa4e85cf68b274921208104d6b12aa8bcc886f4e5db4fa313d8d53c8c075",
-      "closureFileCount": 382,
+      "digest": "39e80d7a823d5511edfa109da38d4b57a0f75296c1589a0990f25c4cf3895ada",
+      "closureFileCount": 383,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -53361,6 +53486,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
@@ -53640,8 +53766,8 @@
         "crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-z-image/src/model.rs"
       ],
-      "digest": "5249df1c28e5ec1ec623cf2ee4da2897892103911674c64944a0fd3b593a50e4",
-      "closureFileCount": 392,
+      "digest": "451ee60a3e905acf37b7ae48aed0d9b93e2a57a4f6de0598eebc90518d08d551",
+      "closureFileCount": 393,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -53771,6 +53897,7 @@
         "crates/contracts/gen-core/src/registry/providers.rs",
         "crates/contracts/gen-core/src/registry/registration.rs",
         "crates/contracts/gen-core/src/render.rs",
+        "crates/contracts/gen-core/src/render/conditional.rs",
         "crates/contracts/gen-core/src/residency.rs",
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/runtime/adapters.rs",
