@@ -19,7 +19,7 @@ use super::sampling::resolve_advanced_or_manifest_f32;
 use super::sampling::resolve_advanced_or_manifest_u32;
 use super::standard_tier_subdir;
 use super::stream::drive_gen_items_scored;
-use super::stream::start_gen_stream;
+use super::stream::start_gen_stream_with_cancel;
 use super::Image;
 use super::ImagePlan;
 use super::ImageRequest;
@@ -322,6 +322,71 @@ fn pulid_candle_raw_settings(
     raw
 }
 
+/// The per-output request numerics of one PuLID-FLUX job. The pre-load planner and the render build
+/// each output's request from this one source, so the plan is compiled from the request it runs.
+struct PulidRequests {
+    width: u32,
+    height: u32,
+    steps: u32,
+    guidance: f32,
+    id_weight: f32,
+    sampler: Option<String>,
+    scheduler: Option<String>,
+    scheduler_shift: Option<f32>,
+    /// PiD opt-in (sc-8044): in lockstep with the `with_pid` load.
+    use_pid: bool,
+}
+
+impl PulidRequests {
+    fn request(
+        &self,
+        seed: i64,
+        prompt: String,
+        preview: &gen_core::PreviewSink,
+        cancel: &gen_core::CancelFlag,
+    ) -> PulidFluxRequest {
+        PulidFluxRequest {
+            prompt,
+            width: self.width,
+            height: self.height,
+            steps: self.steps as usize,
+            guidance: self.guidance,
+            id_weight: self.id_weight,
+            seed: seed as u64,
+            sampler: self.sampler.clone(),
+            scheduler: self.scheduler.clone(),
+            scheduler_shift: self.scheduler_shift,
+            preview: preview.clone(),
+            use_pid: self.use_pid,
+            cancel: cancel.clone(),
+        }
+    }
+}
+
+/// Compile every output's render plan before any weights open (SW-6936): each plan binds the
+/// reference, the request and the resolved load contract, so a request the provider refuses (a
+/// load contract without the overlay it needs, a mixed overlay, an unsupported request) fails the job
+/// here with a payload error instead of after the load.
+fn plan_pulid_outputs(
+    paths: &PulidFluxPaths,
+    spec: &gen_core::LoadSpec,
+    requests: &PulidRequests,
+    work: Vec<(i64, String)>,
+    reference: &Image,
+    cancel: &gen_core::CancelFlag,
+) -> WorkerResult<Vec<gen_core::RenderPlan>> {
+    work.into_iter()
+        .map(|(seed, prompt)| {
+            // Preview never shapes the trajectory; the live sink is bound at generation time.
+            let req = requests.request(seed, prompt, &gen_core::PreviewSink::default(), cancel);
+            runtime_cuda::providers::pulid::pulid_flux::compile_pulid_plan(
+                paths, spec, &req, reference,
+            )
+            .map_err(|error| super::render::preload_plan_error("PuLID-FLUX", error))
+        })
+        .collect()
+}
+
 /// Real candle PuLID-FLUX generation: resolve the reference + weights on the async side, then load the
 /// `PulidFlux` provider once + generate each image on the blocking thread. `request.count` images, each
 /// its own seed; `idWeight` rides the provider's `id_weight`. `generate` takes `&self` (the id_embedding
@@ -451,9 +516,17 @@ pub(super) async fn generate_candle_pulid_stream(
                 WorkerError::Engine(format!("PuLID-FLUX memory contract failed: {error}"))
             })?;
     let runtime_overlay_bytes = pulid_contract.asset_facts.overlay_bytes;
-    let strategy_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(flux_base.clone()))
-        .with_offload_policy(gen_core::OffloadPolicy::Sequential)
-        .with_load_shape(gen_core::LoadShape::DeferredMaterialization);
+    let mut strategy_spec =
+        gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(flux_base.clone()))
+            .with_adapters(adapters.clone())
+            .with_offload_policy(gen_core::OffloadPolicy::Sequential)
+            .with_load_shape(gen_core::LoadShape::DeferredMaterialization);
+    strategy_spec.identity = Some(gen_core::IdentityWeights {
+        encoder: Some(gen_core::WeightsSource::File(adapter.clone())),
+        eva: Some(gen_core::WeightsSource::File(eva.clone())),
+        face_dir: Some(gen_core::WeightsSource::Dir(face_dir.clone())),
+    });
+    strategy_spec.pid = pid_weights.clone();
     let raw_budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     let predicted_peak = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
         &request.model_manifest_entry,
@@ -522,7 +595,18 @@ pub(super) async fn generate_candle_pulid_stream(
         );
     }
     let memory_context = memory_evaluation.map(|evaluation| evaluation.context);
-    let load_memory_context = memory_context.clone();
+    let requests = PulidRequests {
+        width,
+        height,
+        steps,
+        guidance,
+        id_weight,
+        sampler,
+        scheduler,
+        scheduler_shift,
+        use_pid,
+    };
+    let planning_work = work.clone();
 
     // Conditioning-overlay VRAM admission (sc-16069, epic 15448) — the FLUX.1-dev base held co-resident
     // with PuLID's whole identity stack: the ID adapter, the EVA-CLIP vision tower, the BiSeNet face
@@ -544,11 +628,11 @@ pub(super) async fn generate_candle_pulid_stream(
         .await?;
     }
 
-    let (cancel, rx, blocking) = start_gen_stream(
+    let (cancel, rx, blocking) = start_gen_stream_with_cancel(
         job.id.clone(),
         "pulid_flux",
         0,
-        move || {
+        move |planning_cancel| {
             let paths = PulidFluxPaths {
                 flux_base,
                 pulid_weights: adapter,
@@ -556,9 +640,30 @@ pub(super) async fn generate_candle_pulid_stream(
                 face_dir,
                 adapters,
             };
-            let model = match load_memory_context.as_ref() {
-                Some(context) => PulidFlux::load_with_memory_context(&paths, context.clone()),
-                None => PulidFlux::load(&paths),
+            let plans = plan_pulid_outputs(
+                &paths,
+                &strategy_spec,
+                &requests,
+                planning_work,
+                &reference,
+                planning_cancel,
+            )?;
+            if planning_cancel.is_cancelled() {
+                return Err(WorkerError::Canceled(
+                    "PuLID-FLUX generation canceled before load".into(),
+                ));
+            }
+            let model = match memory_context.as_ref() {
+                Some(context) => PulidFlux::load_with_memory_context_spec(
+                    &paths,
+                    context.clone(),
+                    &strategy_spec,
+                ),
+                None => PulidFlux::load_with_memory_spec(
+                    &paths,
+                    gen_core::GenerationMemory::default(),
+                    &strategy_spec,
+                ),
             }
             .map_err(|error| WorkerError::Engine(format!("PuLID-FLUX load failed: {error}")))?;
             // Attach the optional PiD decoder (sc-8044): `Some` only when opted in AND snapshots cached.
@@ -578,40 +683,33 @@ pub(super) async fn generate_candle_pulid_stream(
                 }
                 _ => None,
             };
-            Ok((model, reference, scorer))
+            Ok((model, reference, plans, scorer, memory_context, requests))
         },
-        move |(model, reference, scorer), tx, cancel| {
+        move |(model, reference, plans, scorer, memory_context, requests), tx, cancel| {
             drive_gen_items_scored(
                 tx,
                 work,
-                move |_index, (seed, prompt), preview, on_progress| {
+                move |index, (seed, prompt), preview, on_progress| {
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
-                    let req = PulidFluxRequest {
-                        prompt,
-                        width,
-                        height,
-                        steps: steps as usize,
-                        guidance,
-                        id_weight,
-                        seed: seed as u64,
-                        sampler: sampler.clone(),
-                        scheduler: scheduler.clone(),
-                        scheduler_shift,
-                        preview: preview.clone(),
-                        // PiD opt-in (sc-8044): in lockstep with the `with_pid` load above.
-                        use_pid,
-                        cancel: cancel.clone(),
-                    };
+                    let req = requests.request(seed, prompt, &preview, &cancel);
+                    let render_plan = plans.get(index).ok_or_else(|| {
+                        WorkerError::Engine(format!(
+                            "PuLID-FLUX: no pre-load render plan for output {index}"
+                        ))
+                    })?;
                     let generated = match memory_context.as_ref() {
-                        Some(context) => model.generate_with_memory_context(
+                        Some(context) => model.generate_with_memory_context_planned(
                             context,
                             &req,
                             &reference,
+                            render_plan,
                             &mut *on_progress,
                         ),
-                        None => model.generate(&req, &reference, &mut *on_progress),
+                        None => {
+                            model.generate_planned(&req, &reference, render_plan, &mut *on_progress)
+                        }
                     };
                     let out = match generated {
                         Ok(out) => out,
@@ -670,6 +768,79 @@ pub(super) async fn generate_candle_pulid_stream(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn conditional_base_prefers_external_model_path_then_the_selected_tier() {
+        super::super::render::flux1_conditional_route_tests::assert_conditional_base_resolution(
+            "PuLID-FLUX (Candle)",
+            json!({
+                "projectId": "p", "model": "pulid_flux_dev", "prompt": "a portrait", "count": 1,
+                "mode": "character_image", "referenceAssetId": "asset_1"
+            }),
+            PULID_CANDLE_FLUX_REPO,
+            resolve_pulid_candle_base,
+        );
+    }
+
+    /// SW-6936: a load contract the provider refuses fails while compiling the pre-load plans, as a
+    /// payload error the job reports, before any weights open.
+    #[test]
+    fn preload_plan_refusals_are_payload_errors_before_load() {
+        let root = tempfile::tempdir().expect("pulid fixture");
+        let base = root.path().join("base");
+        let paths = PulidFluxPaths {
+            flux_base: base.clone(),
+            pulid_weights: root.path().join("pulid.safetensors"),
+            eva_weights: root.path().join("eva.safetensors"),
+            face_dir: root.path().join("face"),
+            adapters: Vec::new(),
+        };
+        let requests = PulidRequests {
+            width: 512,
+            height: 512,
+            steps: 20,
+            guidance: 4.0,
+            id_weight: 1.0,
+            sampler: None,
+            scheduler: None,
+            scheduler_shift: None,
+            use_pid: false,
+        };
+        let reference = Image {
+            width: 64,
+            height: 64,
+            pixels: vec![0; 64 * 64 * 3],
+        };
+        let identity = gen_core::IdentityWeights {
+            encoder: Some(gen_core::WeightsSource::File(paths.pulid_weights.clone())),
+            eva: Some(gen_core::WeightsSource::File(paths.eva_weights.clone())),
+            face_dir: Some(gen_core::WeightsSource::Dir(paths.face_dir.clone())),
+        };
+        let base_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(base.clone()));
+        let mut mixed = base_spec
+            .clone()
+            .with_control(gen_core::WeightsSource::File(paths.pulid_weights.clone()));
+        mixed.identity = Some(identity);
+        for (case, spec) in [
+            ("missing identity overlay", base_spec),
+            ("mixed identity + control", mixed),
+        ] {
+            match plan_pulid_outputs(
+                &paths,
+                &spec,
+                &requests,
+                vec![(7, "a portrait".to_owned())],
+                &reference,
+                &gen_core::CancelFlag::new(),
+            ) {
+                Err(WorkerError::InvalidPayload(message)) => assert!(
+                    message.contains("cannot compile render plan before load"),
+                    "{case}: {message}"
+                ),
+                other => panic!("{case}: expected a pre-load payload refusal, got {other:?}"),
+            }
+        }
+    }
 
     fn request(loras: Value) -> ImageRequest {
         ImageRequest::from_payload(

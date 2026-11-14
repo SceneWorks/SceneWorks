@@ -403,8 +403,34 @@ pub(super) fn build_render_request(
     Ok(request)
 }
 
-/// Resolve a base provider's owner-local plan before `start_cached_gen_stream` can load weights.
-/// The registry returns `None` for routes that have not migrated yet; an invalid base request is a
+/// The FLUX.1 provider ids whose every request — base text-to-image, XLabs IP-Adapter, ControlNet
+/// and PuLID — renders from a render plan compiled before load (SW-6933 / SW-6936).
+pub(super) const FLUX1_PRELOAD_PLANNED_ENGINES: &[&str] = &[
+    "flux1_schnell",
+    "flux1_dev",
+    "flux1_dev_control",
+    "pulid_flux",
+];
+
+/// Map a provider's pre-load plan refusal onto the worker's error classes: an invalid request is a
+/// payload error the user can act on, cancellation stays cancellation, and a poisoned process keeps its
+/// typed recovery class.
+pub(super) fn preload_plan_error(route: &str, error: gen_core::Error) -> WorkerError {
+    match error {
+        gen_core::Error::ProcessPoisoned(_) => {
+            crate::classify_engine_error("render-plan compilation failed", error)
+        }
+        gen_core::Error::Canceled => WorkerError::Canceled(format!(
+            "{route}: generation canceled while compiling its render plan"
+        )),
+        other => WorkerError::InvalidPayload(format!(
+            "{route}: cannot compile render plan before load: {other}"
+        )),
+    }
+}
+
+/// Resolve a provider's owner-local plan before `start_cached_gen_stream` can load weights.
+/// The registry returns `None` for routes that have not migrated yet; an invalid request is a
 /// pre-load error rather than a fallback to the legacy call.
 pub(super) fn compile_render_plan(
     registry: &gen_core::ProviderRegistry,
@@ -414,23 +440,29 @@ pub(super) fn compile_render_plan(
 ) -> WorkerResult<Option<gen_core::RenderPlan>> {
     let plan = registry
         .compile_render_plan(engine_id, spec, request)
-        .map_err(|error| match error {
-            gen_core::Error::ProcessPoisoned(_) => {
-                crate::classify_engine_error("render-plan compilation failed", error)
-            }
-            other => WorkerError::InvalidPayload(format!(
-                "{engine_id}: cannot compile render plan before load: {other}"
-            )),
-        })?;
-    if plan.is_none()
-        && matches!(engine_id, "flux1_schnell" | "flux1_dev")
-        && request.conditioning.is_empty()
-    {
+        .map_err(|error| preload_plan_error(engine_id, error))?;
+    if plan.is_none() && FLUX1_PRELOAD_PLANNED_ENGINES.contains(&engine_id) {
         return Err(WorkerError::Engine(format!(
-            "{engine_id}: base text-to-image route has no registered pre-load render planner"
+            "{engine_id}: route has no registered pre-load render planner"
         )));
     }
     Ok(plan)
+}
+
+/// [`compile_render_plan`] for a route that only renders from a pre-load plan (the MLX FLUX.1
+/// ControlNet and PuLID lanes).
+#[cfg(target_os = "macos")]
+pub(super) fn compile_required_render_plan(
+    registry: &gen_core::ProviderRegistry,
+    engine_id: &str,
+    spec: &gen_core::LoadSpec,
+    request: &GenerationRequest,
+) -> WorkerResult<gen_core::RenderPlan> {
+    compile_render_plan(registry, engine_id, spec, request)?.ok_or_else(|| {
+        WorkerError::Engine(format!(
+            "{engine_id}: route has no registered pre-load render planner"
+        ))
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1016,3 +1048,7 @@ mod process_fault_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "tests/flux1_conditional_route_tests.rs"]
+pub(super) mod flux1_conditional_route_tests;

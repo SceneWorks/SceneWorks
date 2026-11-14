@@ -987,19 +987,17 @@ pub(super) async fn generate_stream_using(
     let reference_pricing_spec = flux3_references.as_ref().map(|_| spec.clone());
     // MLX's legacy schedule uses MLX arithmetic (linspace/exp/div) whose rounding is observable.
     // Compile on the very same serialized owner command that will load and execute this generator.
-    // Only pure base T2I migrates in this item; IP/Control/PuLID
-    // retain their actual conditioned route until SW-6936.
-    let base_flux = request.mode == "text_to_image"
-        && matches!(engine_id, "flux1_schnell" | "flux1_dev")
-        && identity_init.is_none()
-        && edit_refs.is_empty()
-        && ideogram_edit_mask.is_none()
-        && flux3_references.is_none()
-        && spec.ip_adapter.is_none();
-    let prepare_render_plans: PreparedRenderPlans = if base_flux {
+    // Every FLUX.1 request on this lane — base text-to-image (SW-6933) and the XLabs IP-Adapter
+    // reference (SW-6936) — renders only from that pre-load plan, built from exactly the inputs the
+    // render passes, so the provider refuses an unsupported request (a reference without its
+    // IP-Adapter, several references, a mask) before any weights load.
+    let flux1_planned = matches!(engine_id, "flux1_schnell" | "flux1_dev");
+    let prepare_render_plans: PreparedRenderPlans = if flux1_planned {
         if hires_fix.is_some() {
+            // The refinement pass is conditioned on the first pass's output, which no pre-load
+            // plan can bind.
             return Err(WorkerError::InvalidPayload(
-                "FLUX.1 base rendering does not support Hires.fix refinement".to_owned(),
+                "FLUX.1 rendering does not support Hires.fix refinement".to_owned(),
             ));
         }
         let planning_spec = spec.clone();
@@ -1011,8 +1009,13 @@ pub(super) async fn generate_stream_using(
         let planning_guidance_method = guidance_method.clone();
         let planning_enhance = enhance.clone();
         let planning_batch = native_batch.clone();
+        let planning_reference = identity_init.clone();
+        let planning_edit_refs = edit_refs.clone();
+        let planning_edit_ref_alpha = edit_ref_alpha.clone();
+        let planning_edit_mask = ideogram_edit_mask.clone();
         Box::new(move |planning_cancel| {
             let planning_surface = LaneRgbaSurface {
+                multi_reference_alpha: &planning_edit_ref_alpha,
                 output_channels: rgba_output_channels,
                 controls: lane_controls,
                 prompt_batch: planning_batch.as_ref(),
@@ -1037,9 +1040,9 @@ pub(super) async fn generate_stream_using(
                         steps,
                         guidance,
                         planning_negative.clone(),
-                        None,
-                        &[],
-                        None,
+                        planning_reference.as_ref(),
+                        &planning_edit_refs,
+                        planning_edit_mask.as_ref(),
                         true_cfg,
                         planning_sampler.as_deref(),
                         planning_scheduler.as_deref(),

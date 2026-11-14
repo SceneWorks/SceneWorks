@@ -601,6 +601,48 @@ where
     (cancel, rx, blocking)
 }
 
+/// Bespoke routes compile their source-bound plans in the owner command before loading weights.
+/// The preparation closure receives the stream's actual cancellation flag.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn start_gen_stream_with_cancel<G, L, D>(
+    job_id: String,
+    engine_id: &'static str,
+    adapter_count: usize,
+    load: L,
+    drive: D,
+) -> (
+    CancelFlag,
+    tokio::sync::mpsc::Receiver<GenEvent>,
+    tokio::task::JoinHandle<WorkerResult<()>>,
+)
+where
+    L: FnOnce(&CancelFlag) -> WorkerResult<G> + Send + 'static,
+    D: FnOnce(G, tokio::sync::mpsc::Sender<GenEvent>, CancelFlag) -> WorkerResult<()>
+        + Send
+        + 'static,
+{
+    let cancel = CancelFlag::new();
+    let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
+    let blocking_cancel = cancel.clone();
+    let blocking = crate::load_progress::spawn_blocking(move || -> WorkerResult<()> {
+        emit_load_event(
+            "image_pipeline_load_start",
+            &job_id,
+            engine_id,
+            adapter_count,
+        );
+        let generator = load(&blocking_cancel)?;
+        emit_load_event(
+            "image_pipeline_load_complete",
+            &job_id,
+            engine_id,
+            adapter_count,
+        );
+        drive(generator, tx, blocking_cancel)
+    });
+    (cancel, rx, blocking)
+}
+
 pub(super) fn start_cached_gen_stream<D>(
     job_id: String,
     engine_id: &'static str,
