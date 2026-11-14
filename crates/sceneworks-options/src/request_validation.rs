@@ -411,6 +411,13 @@ pub fn validate(
                     &Value::Object(entry.clone()),
                 )?;
                 let request: VideoJobRequest = decode(payload)?;
+                let promptless = model == "svd"
+                    && request.mode == "image_to_video"
+                    && entry.get("id").and_then(Value::as_str) == Some(model)
+                    && entry.get("promptless") == Some(&Value::Bool(true));
+                if request.prompt.trim().is_empty() && !promptless {
+                    return Err(ValidationRefusal::new("prompt", "prompt must be between 1 and 4000 characters"));
+                }
                 let auto = crate::video_request::normalize_ltx25_generation_controls(
                     model,
                     &mut payload.clone(),

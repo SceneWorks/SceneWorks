@@ -190,3 +190,36 @@ async fn shared_person_and_prompt_refusals_match_typed_raw_retry_and_duplicate()
         }
     }
 }
+
+#[tokio::test]
+async fn shared_promptless_svd_matches_create_retry_duplicate_and_preserves_raw_guard() {
+    let temp = tempfile::tempdir().unwrap();
+    let app = create_app(test_settings(&temp)).unwrap();
+    let (_, project) = create_project(app.clone(), "Promptless video").await;
+    let payload = json!({"projectId":project["id"],"model":"svd","mode":"image_to_video","prompt":"","sourceAssetId":"image"});
+    let (status, job) = request(app.clone(), "POST", "/api/v1/video/jobs", payload.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["payload"]["prompt"], "");
+    for operation in ["retry", "duplicate"] {
+        let (status, replay) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{}/{operation}", job["id"].as_str().unwrap()),
+            json!({"payloadChanges":{}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {replay}");
+        assert_eq!(replay["payload"]["prompt"], "");
+    }
+    let (status, refusal) = request(app.clone(), "POST", "/api/v1/jobs", json!({"type":"video_generate","requestedGpu":"auto","projectId":project["id"],"payload":payload})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(refusal["detail"]
+        .as_str()
+        .unwrap()
+        .contains("must be created via POST /api/v1/video/jobs"));
+    let ordinary =
+        json!({"projectId":project["id"],"model":"ltx_2_5","mode":"text_to_video","prompt":""});
+    let (status, refusal) = request(app, "POST", "/api/v1/video/jobs", ordinary).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
+    assert_eq!(refusal["field"], "prompt");
+}

@@ -239,3 +239,57 @@ fn effective_defaults_do_not_fabricate_unsupported_family_controls() {
         sceneworks_core::supra2::validate_request(&resolved, entry.as_object().unwrap()).unwrap();
     }
 }
+
+#[test]
+fn shared_promptless_video_requires_authoritative_svd_facts() {
+    use sceneworks_core::{options_context, registry::builtin_model_spec, request_validation};
+    let model = options_context::for_model(
+        builtin_model_spec("svd").unwrap(),
+        "candle",
+        "image_to_video",
+        None,
+    )
+    .model;
+    assert_eq!(model["promptless"], true);
+    let payload = serde_json::json!({"projectId":"p","model":"svd","mode":"image_to_video","prompt":"","sourceAssetId":"image"});
+    let resolved = request_validation::resolve(
+        "video",
+        payload.as_object().unwrap(),
+        model.as_object().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(resolved["prompt"], "");
+    for mut facts in [model.clone(), serde_json::json!({})] {
+        if facts.get("id").is_some() {
+            facts["promptless"] = serde_json::json!(false);
+        }
+        let error = request_validation::resolve(
+            "video",
+            payload.as_object().unwrap(),
+            facts.as_object().unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(error.field, "prompt");
+    }
+    let mut forged = payload.clone();
+    forged["model"] = serde_json::json!("ltx_2_5");
+    forged["promptless"] = serde_json::json!(true);
+    assert_eq!(
+        request_validation::resolve(
+            "video",
+            forged.as_object().unwrap(),
+            model.as_object().unwrap()
+        )
+        .unwrap_err()
+        .field,
+        "prompt"
+    );
+    let mut oversized = payload.clone();
+    oversized["prompt"] = serde_json::json!("x".repeat(4001));
+    assert_eq!(
+        request_validation::validate_shape("video", oversized.as_object().unwrap())
+            .unwrap_err()
+            .field,
+        "prompt"
+    );
+}

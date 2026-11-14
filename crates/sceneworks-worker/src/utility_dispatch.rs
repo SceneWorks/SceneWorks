@@ -772,3 +772,14 @@ fn shared_person_and_prompt_refusals_precede_worker_parsing() {
         }
     }
 }
+
+#[cfg(test)]
+#[test]
+fn shared_promptless_svd_passes_worker_admission_without_inventing_text() {
+    let model = sceneworks_core::registry::builtin_model_spec("svd")
+        .unwrap()
+        .project(None);
+    let payload = serde_json::json!({"projectId":"p","model":"svd","mode":"image_to_video","prompt":"","sourceAssetId":"image","modelManifestEntry":model});
+    validate_static_job_options(&JobType::VideoGenerate, payload.as_object().unwrap()).unwrap();
+    assert_eq!(payload["prompt"], "");
+}

@@ -13,6 +13,7 @@ fn main() {
         ("starvector_1b", "image_to_svg"),
         ("sensenova_u1_8b", "text_to_image"),
         ("scail2_14b", "animate_character"),
+        ("svd", "image_to_video"),
     ] {
         models.insert(
             model.into(),
@@ -96,6 +97,22 @@ fn main() {
         add(&format!("image {key} {value}"), "image", payload);
     }
     add("video model defaults", "video", video.clone());
+    add(
+        "SVD promptless image animation",
+        "video",
+        json!({"projectId":"p","model":"svd","mode":"image_to_video","prompt":"","sourceAssetId":"image"}),
+    );
+    add(
+        "ordinary video blank prompt",
+        "video",
+        json!({"projectId":"p","model":"ltx_2_5","mode":"text_to_video","prompt":""}),
+    );
+    add(
+        "SVD promptless unsupported mode",
+        "video",
+        json!({"projectId":"p","model":"svd","mode":"text_to_video","prompt":""}),
+    );
+
     add(
         "video unsupported backend mode",
         "video",

@@ -218,9 +218,12 @@ pub fn validate_video_job<A>(payload: &VideoJobRequest<A>) -> Result<(), ApiErro
         return Err(ApiError::bad_request("projectId is required"));
     }
     validate_model_id(&payload.model)?;
-    if payload.prompt.is_empty() || payload.prompt.chars().count() > MAX_PROMPT_CHARS {
-        return Err(ApiError::bad_request(
-            "prompt must be between 1 and 4000 characters",
+    // Whether text is required depends on authoritative model facts (SVD has no text axis).
+    // The model-aware owner checks that after this raw carrier/length gate.
+    if payload.prompt.chars().count() > MAX_PROMPT_CHARS {
+        return Err(ApiError::new(
+            "prompt",
+            "prompt must be at most 4000 characters",
         ));
     }
     validate_prompt_extras(&payload.negative_prompt, &payload.advanced)?;

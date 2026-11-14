@@ -26,6 +26,18 @@ pub fn legacy_number(value: &Value) -> Option<f64> {
         .filter(|value| value.is_finite())
 }
 
+/// Legacy image-flag truthiness only; full validation separately refuses unsupported shapes.
+/// Null and objects are false, as in the historical bare routing probes.
+pub fn legacy_image_flag(value: &Value) -> bool {
+    match value {
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_f64().is_some_and(|value| value != 0.0),
+        Value::String(value) => !value.is_empty(),
+        Value::Array(value) => !value.is_empty(),
+        _ => false,
+    }
+}
+
 pub fn resolve_advanced(payload: &mut JsonObject, entry: &JsonObject) {
     let model = Value::Object(entry.clone());
     let operation = payload
@@ -121,13 +133,7 @@ fn visit(value: &mut Value, path: &[&str], spec: &OptionSpec, context: &OptionCo
             }
         }
         if spec.shape == Shape::Bool && spec.compatibility.contains("Legacy image flag") {
-            effective = Value::Bool(match &effective {
-                Value::Bool(value) => *value,
-                Value::Number(value) => value.as_f64().is_some_and(|v| v != 0.0),
-                Value::String(value) => !value.is_empty(),
-                Value::Array(value) => !value.is_empty(),
-                _ => false,
-            });
+            effective = Value::Bool(legacy_image_flag(&effective));
         }
         object.insert(spec.key.into(), effective);
     } else {
@@ -151,6 +157,22 @@ fn matches_shape(value: &Value, shape: Shape) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn legacy_image_flag_retains_bare_route_truthiness() {
+        for value in [
+            json!(false),
+            json!(0),
+            json!(""),
+            json!([]),
+            json!(null),
+            json!({}),
+        ] {
+            assert!(!legacy_image_flag(&value), "{value}");
+        }
+        for value in [json!(true), json!(1), json!(-1), json!("false"), json!([0])] {
+            assert!(legacy_image_flag(&value), "{value}");
+        }
+    }
     #[test]
     fn bare_route_numeric_syntax_matches_effective_resolution() {
         assert_eq!(legacy_integer(&json!(" 8 ")), Some(json!(8)));

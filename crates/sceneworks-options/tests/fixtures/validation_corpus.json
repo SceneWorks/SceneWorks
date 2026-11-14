@@ -3979,6 +3979,110 @@
         "candleVideoLora": false
       }
     },
+    "svd": {
+      "id": "svd",
+      "name": "Stable Video Diffusion",
+      "family": "svd",
+      "type": "video",
+      "adapter": "svd_video",
+      "capabilities": [
+        "image_to_video"
+      ],
+      "defaults": {
+        "duration": 4,
+        "fps": 7,
+        "quality": "balanced",
+        "resolution": "1024x576"
+      },
+      "downloads": [
+        {
+          "estimatedSizeBytes": 9560000000,
+          "files": [],
+          "provider": "huggingface",
+          "repo": "stabilityai/stable-video-diffusion-img2vid-xt",
+          "revision": "9e43909513c6714f1bc78bcb44d96e733cd242aa"
+        }
+      ],
+      "limits": {
+        "durations": [
+          4
+        ],
+        "fps": [
+          6,
+          7,
+          8,
+          10,
+          12,
+          25
+        ],
+        "hardMaxDuration": 4,
+        "recommendedMaxDuration": 4,
+        "requiresDimensionsMultipleOf": 64,
+        "resolutions": [
+          "1024x576",
+          "576x1024"
+        ],
+        "samplers": [
+          "default",
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim"
+        ]
+      },
+      "loraCompatibility": {
+        "families": [
+          "svd"
+        ],
+        "types": []
+      },
+      "paths": {
+        "model": "${HF_CACHE}/stabilityai/stable-video-diffusion-img2vid-xt"
+      },
+      "promptless": true,
+      "ui": {
+        "description": "Stability AI Stable Video Diffusion (img2vid-XT) — animates a single source image into a short ~25-frame clip; image-conditioned only, no text prompt. Stability AI Community License: commercial use free under $1M annual revenue (paid Enterprise above), ungated. ~9.5GB fp16; motion strength + conditioning fps tunable in advanced settings.",
+        "durationHint": "Produces a fixed ~25-frame clip from one image; adjust playback fps for pacing.",
+        "label": "Stable Video Diffusion",
+        "promptGuide": {
+          "path": "/prompt-guides/svd.md",
+          "sources": [
+            {
+              "label": "SVD img2vid-XT model card",
+              "url": "https://huggingface.co/stabilityai/stable-video-diffusion-img2vid-xt"
+            },
+            {
+              "label": "Stability AI Community License",
+              "url": "https://stability.ai/community-license-agreement"
+            },
+            {
+              "label": "Diffusers SVD pipeline docs",
+              "url": "https://huggingface.co/docs/diffusers/main/en/api/pipelines/svd"
+            }
+          ],
+          "title": "Stable Video Diffusion Guide"
+        },
+        "recommendedFor": [
+          "image_to_video"
+        ]
+      },
+      "video": {
+        "supportsGuidance": false,
+        "supportsNegativePrompt": false,
+        "supportsSchedulerShift": false
+      },
+      "optionRouteFacts": {
+        "videoMlxRouted": true,
+        "candleVideoRouted": true,
+        "candleVideoI2v": true,
+        "candleVideoVace": false,
+        "candleVideoLora": false
+      }
+    },
     "z_image_turbo_lora": {
       "id": "z_image_turbo_lora",
       "name": "Z-Image-Turbo LoRA",
@@ -6126,6 +6230,89 @@
             "imageFrameIndex": 0,
             "maskingStrength": 1,
             "conditioningScale": 1
+          }
+        }
+      }
+    },
+    {
+      "name": "SVD promptless image animation",
+      "kind": "video",
+      "model": "svd",
+      "payload": {
+        "projectId": "p",
+        "model": "svd",
+        "mode": "image_to_video",
+        "prompt": "",
+        "sourceAssetId": "image"
+      },
+      "expected": {
+        "ok": true,
+        "resolved": {
+          "projectId": "p",
+          "model": "svd",
+          "mode": "image_to_video",
+          "prompt": "",
+          "sourceAssetId": "image",
+          "width": 1024,
+          "height": 576,
+          "duration": 4.0,
+          "fps": 7,
+          "advanced": {
+            "resolution": "1024x576",
+            "mlxQuantizeExplicit": false,
+            "motion": "slow push-in",
+            "quantization": "auto",
+            "conditioningScale": 1
+          }
+        }
+      }
+    },
+    {
+      "name": "ordinary video blank prompt",
+      "kind": "video",
+      "model": "ltx_2_5",
+      "payload": {
+        "projectId": "p",
+        "model": "ltx_2_5",
+        "mode": "text_to_video",
+        "prompt": ""
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "prompt",
+          "detail": "prompt must be between 1 and 4000 characters",
+          "context": {
+            "kind": "video",
+            "model": "ltx_2_5",
+            "mode": "text_to_video",
+            "field": "prompt"
+          }
+        }
+      }
+    },
+    {
+      "name": "SVD promptless unsupported mode",
+      "kind": "video",
+      "model": "svd",
+      "payload": {
+        "projectId": "p",
+        "model": "svd",
+        "mode": "text_to_video",
+        "prompt": ""
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "prompt",
+          "detail": "prompt must be between 1 and 4000 characters",
+          "context": {
+            "kind": "video",
+            "model": "svd",
+            "mode": "text_to_video",
+            "field": "prompt"
           }
         }
       }
