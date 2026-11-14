@@ -1279,9 +1279,11 @@ fn validate_training_config(config: &TrainingConfig) -> Result<(), TrainingPlanE
 pub fn subject_mask_consumer(
     advanced: &JsonObject,
 ) -> Result<Option<&'static str>, TrainingPlanError> {
-    let weights = subject_mask_loss_weights(advanced)?;
+    if subject_mask_loss_weights(advanced)?.is_some() {
+        return Ok(Some(SUBJECT_MASK_LOSS_KEY));
+    }
     let body = body_losses::body_loss_settings(advanced)?;
-    Ok(subject_mask_consumer_resolved(weights, &body))
+    Ok(subject_mask_consumer_resolved(None, &body))
 }
 
 pub fn subject_mask_consumer_resolved(
