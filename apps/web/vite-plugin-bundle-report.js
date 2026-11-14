@@ -10,6 +10,7 @@ import { brotliCompressSync, constants, gzipSync } from "node:zlib";
 //     `await import()` target) together with its static closure minus the initial chunks,
 //     i.e. what one lazy load actually fetches. Checked per chunk, not summed.
 //   - `largestRoute`: the heaviest route family in `routeFamilies`, same closure rule.
+//   - `largestRoute` also gates each form route plus validator JS/WASM fetched on draft input.
 //   - `initialExclusions`: named heavy domains must never appear in the initial graph.
 // Telemetry (reported in dist/bundle-report.json, never a gate):
 //   - `total`: every emitted JS chunk/asset and WASM asset. Growing the app with more lazy screens is
@@ -22,6 +23,7 @@ export const routeFamilies = Object.freeze({
   Characters: ["/src/screens/CharacterStudio.jsx"],
   "Document Studio": ["/src/screens/DocumentStudio.jsx"],
   Training: ["/src/screens/TrainingStudio.jsx"],
+  "Vector Studio": ["/src/screens/VectorStudio.jsx"],
   Presets: ["/src/screens/PresetManagerScreen.jsx"],
   "Pose Library": ["/src/screens/PoseLibraryScreen.jsx"],
   "Key Point Library": ["/src/screens/KeyPointLibraryScreen.jsx"],
@@ -36,6 +38,18 @@ export const routeFamilies = Object.freeze({
   "Setup Wizard": ["/src/screens/SetupWizard.jsx"],
   "Simple UI": ["/src/simple/SimpleShell.jsx"],
 });
+
+// These screens start the validator after a draft edit. Charge the validator's
+// dynamic JS and WASM to the interactive fetch as well as to its own lazy chunk.
+const validatorFormRoutes = new Set([
+  "Image Studio", "Video Studio", "Audio Studio", "Characters",
+  "Document Studio", "Training", "Vector Studio", "Simple UI",
+]);
+const validatorModuleSuffixes = [
+  "/src/portableValidation.js",
+  "/src/portableValidationEngine.js",
+  "/src/wasm/options-validator/options_validator.js",
+];
 
 export const initialExclusions = Object.freeze({
   "Stats/Recharts": [
@@ -243,6 +257,24 @@ export function buildBundleReport(bundle, budgets) {
     };
   }
 
+  const validatorStarts = [...chunks.values()]
+    .filter((chunk) => Object.keys(chunk.modules).some((moduleId) =>
+      validatorModuleSuffixes.some((suffix) => normalize(moduleId).endsWith(suffix))))
+    .map((chunk) => chunk.fileName);
+  const validatorLoaded = withWasmAssets(collectStaticChunks(validatorStarts, chunks), wasmOwners);
+  for (const initialName of initialNames) validatorLoaded.delete(initialName);
+  const interactiveRoutes = {};
+  for (const route of validatorFormRoutes) {
+    if (!routeChunks[route]) continue;
+    const loaded = new Set([...routeChunks[route].chunks, ...validatorLoaded]);
+    interactiveRoutes[route] = { chunks: [...loaded].sort(), ...summarize(loaded, chunkSizes) };
+  }
+  const largestInteractiveRoute = Object.entries(interactiveRoutes).reduce(
+    (largest, [route, values]) =>
+      values.gzipBytes > largest.gzipBytes ? { route, ...values } : largest,
+    { route: null, rawBytes: 0, gzipBytes: 0, brotliBytes: 0, chunks: [] },
+  );
+
   const allNames = reportNames;
   const initial = {
     chunks: [...initialNames].sort(),
@@ -299,16 +331,23 @@ export function buildBundleReport(bundle, budgets) {
         budgets.largestRoute,
       ),
     );
+    violations.push(...budgetViolations(
+      `Largest interactive route (${largestInteractiveRoute.route ?? "none"})`,
+      largestInteractiveRoute,
+      budgets.largestRoute,
+    ));
   }
 
   return {
     schemaVersion: 2,
     initial,
     routes: routeChunks,
+    interactiveRoutes,
     lazyChunks,
     largestLazyChunk,
     total,
     largestRoute,
+    largestInteractiveRoute,
     chunks: [...allNames]
       .map((fileName) => {
         const chunk = chunks.get(fileName);

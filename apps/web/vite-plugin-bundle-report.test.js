@@ -168,6 +168,35 @@ describe("bundle report", () => {
     expect(report.violations.some((message) => message.includes("Largest route") && message.includes("rawBytes"))).toBe(true);
   });
 
+  it("charges dynamically fetched validator JS and WASM to interactive form routes", () => {
+    const wasmFile = "assets/options-interactive.wasm";
+    const report = buildBundleReport(entryWith({
+      "assets/portableValidation.js": chunk("assets/portableValidation.js", {
+        isDynamicEntry: true,
+        modules: { "C:/repo/apps/web/src/portableValidation.js": {} },
+      }),
+      "assets/portableValidationEngine.js": chunk("assets/portableValidationEngine.js", {
+        isDynamicEntry: true,
+        modules: { "C:/repo/apps/web/src/portableValidationEngine.js": {} },
+      }),
+      "assets/options-validator.js": chunk("assets/options-validator.js", {
+        isDynamicEntry: true,
+        code: `const url = "/${wasmFile}";`,
+        modules: { "C:/repo/apps/web/src/wasm/options-validator/options_validator.js": {} },
+      }),
+      [wasmFile]: asset(wasmFile, Buffer.alloc(600, 0x42)),
+    }), {
+      ...roomyBudgets,
+      largestRoute: { rawBytes: 500, gzipBytes: 10000, brotliBytes: 10000 },
+    });
+    expect(report.routes["Image Studio"].chunks).not.toContain(wasmFile);
+    expect(report.interactiveRoutes["Image Studio"].chunks).toContain(wasmFile);
+    expect(report.interactiveRoutes["Simple UI"].chunks).toContain("assets/options-validator.js");
+    expect(report.interactiveRoutes["Vector Studio"].chunks).toContain(wasmFile);
+    expect(report.largestInteractiveRoute.rawBytes).toBeGreaterThan(report.largestRoute.rawBytes);
+    expect(report.violations.some((message) => message.startsWith("Largest interactive route") && message.includes("rawBytes"))).toBe(true);
+  });
+
   it("charges WASM fetched by a nested dynamic validator chunk", () => {
     const wasmFile = "assets/options-nested.wasm";
     const report = buildBundleReport(entryWith({
