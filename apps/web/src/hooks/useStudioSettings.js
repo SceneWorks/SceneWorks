@@ -1,4 +1,5 @@
 import { upgradeCarrier, UpgradeError } from "../requestUpgrade.js";
+import upgradeMetadata from "../optionUpgradeMetadata.json";
 import { useEffect, useRef } from "react";
 import { persistNavigationPreferences } from "../uiPreferences.js";
 
@@ -186,6 +187,13 @@ export function seedStudioSettingsFromServer(map) {
       // cached canonical value, not manufacture a conflict between two valid snapshots.
       const upgraded = upgradeCarrier(restored, "studioSettings");
       const cached = loadStudioSettings(studio, workspace);
+      // A server canonical value also supersedes cached legacy spellings. Validate each
+      // source first, then remove only aliases whose option the server actually authored.
+      for (const rule of upgradeMetadata.aliases) {
+        if (rule.location === "advanced" && Object.hasOwn(upgraded, rule.key)) {
+          for (const alias of rule.aliases) delete cached[alias];
+        }
+      }
       writeCache(studio, workspace, { ...cached, ...upgraded });
       written += 1;
     }

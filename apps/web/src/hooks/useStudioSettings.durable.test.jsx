@@ -182,6 +182,37 @@ describe("advanced studio settings are durable (sc-15425)", () => {
     expect(cached.batchPromptsText).toBe("kept");
   });
 
+  it("lets server canonical options supersede cached aliases on successive hydrations", () => {
+    const key = "sceneworks-studio-image-ws-1";
+    window.localStorage.setItem(key, JSON.stringify({ timestepShift: 3, batchPromptsText: "kept" }));
+    const hydrate = (image) => seedStudioSettingsFromServer({ "ws-1": { image } });
+
+    expect(hydrate({ schedulerShift: 4 })).toBe(1);
+    expect(loadStudioSettings("image", "ws-1")).toEqual({ schedulerShift: 4, batchPromptsText: "kept" });
+    // A later historical server snapshot can reintroduce an alias. Its next canonical
+    // replacement must work too, including an explicit null rather than an omitted option.
+    expect(hydrate({ timestepShift: 5 })).toBe(1);
+    expect(loadStudioSettings("image", "ws-1")).toMatchObject({ timestepShift: 5, schedulerShift: 5 });
+    expect(hydrate({ schedulerShift: null })).toBe(1);
+    expect(loadStudioSettings("image", "ws-1")).toEqual({ schedulerShift: null, batchPromptsText: "kept" });
+    expect(hydrate({ prompt: "restored" })).toBe(1);
+    expect(loadStudioSettings("image", "ws-1")).toEqual({ schedulerShift: null, batchPromptsText: "kept", prompt: "restored" });
+  });
+
+  it("refuses conflicts within either settings source without changing the cached original", () => {
+    const key = "sceneworks-studio-image-ws-1";
+    for (const [cached, restored] of [
+      [{ timestepShift: 3 }, { timestepShift: 4, schedulerShift: 5 }],
+      [{ timestepShift: 3, schedulerShift: 4 }, { schedulerShift: 5 }],
+    ]) {
+      const original = JSON.stringify(cached);
+      window.localStorage.setItem(key, original);
+      expect(() => seedStudioSettingsFromServer({ "ws-1": { image: restored } }))
+        .toThrow(expect.objectContaining({ code: "ConflictingAliases", field: "schedulerShift" }));
+      expect(window.localStorage.getItem(key)).toBe(original);
+    }
+  });
+
   // sc-23000: the YuE2 Song Lab's own snapshot (`yue2lab`) rides the same durable map and is seeded
   // back on launch, and a full-size ABC score stays out of the durable copy (it would push the whole
   // workspace entry past the server's per-entry budget, dropping every studio in it).
