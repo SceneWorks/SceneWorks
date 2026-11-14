@@ -1086,25 +1086,18 @@ pub(super) async fn generate_stream_using(
                             hires: None,
                         });
                     };
-                    // The refinement pass exactly as `generate_one_with_hires_on_surface` builds
-                    // it, minus the reference the plan binds from the first pass.
-                    let refine = super::render::build_render_request(
+                    // The refinement pass through the builder `generate_one_with_hires_on_surface`
+                    // runs, minus the reference the plan binds from the first pass.
+                    let refine = super::render::build_hires_refinement_request(
                         item_prompt,
-                        hires.width,
-                        hires.height,
                         seed,
-                        hires.steps,
-                        hires.guidance,
+                        &hires,
                         planning_negative.clone(),
                         None,
-                        &[],
-                        None,
-                        hires.true_cfg,
                         planning_sampler.as_deref(),
                         planning_scheduler.as_deref(),
                         scheduler_shift,
                         planning_guidance_method.as_deref(),
-                        use_pid,
                         text_style_gain,
                         None,
                         &planning_enhance,

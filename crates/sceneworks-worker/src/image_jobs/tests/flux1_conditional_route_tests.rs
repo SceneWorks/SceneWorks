@@ -392,3 +392,111 @@ fn mlx_ip_hires_fix_compiles_both_passes_before_load() {
         other => panic!("base FLUX.1 Hires.fix must be refused before load, got {other:?}"),
     }
 }
+
+/// SW-6936 review: with PiD on, the Hires.fix first pass decodes through PiD while the refinement
+/// pass decodes through the native VAE. Both pre-load plans must describe exactly the requests
+/// execution sends: the first pass with `use_pid`, the refinement (built by the same builder
+/// execution uses) without it. A refinement request that kept PiD would not match its plan.
+#[cfg(target_os = "macos")]
+#[test]
+fn mlx_ip_hires_fix_plans_match_execution_with_pid_on() {
+    use gen_core::{Conditioning, GenerationRequest, LoadSpec, WeightsSource};
+
+    let root = tempfile::tempdir().expect("fixture root");
+    let dir = |name: &str| {
+        let path = root.path().join(name);
+        std::fs::create_dir_all(&path).expect("fixture dir");
+        path
+    };
+    let mut spec = LoadSpec::new(WeightsSource::Dir(dir("base")))
+        .with_ip_adapter(WeightsSource::Dir(dir("ip_adapter")));
+    spec.pid = Some(gen_core::PidWeights {
+        checkpoint: WeightsSource::File(root.path().join("pid_flux.safetensors")),
+        gemma: WeightsSource::Dir(dir("gemma")),
+    });
+    let image = |side: u32| gen_core::Image {
+        width: side,
+        height: side,
+        pixels: vec![96; (side * side * 3) as usize],
+    };
+    let first = GenerationRequest {
+        prompt: "a portrait".to_owned(),
+        width: 512,
+        height: 512,
+        count: 1,
+        seed: Some(7),
+        steps: Some(4),
+        guidance: Some(3.5),
+        use_pid: true,
+        conditioning: vec![Conditioning::Reference {
+            image: image(512),
+            strength: Some(0.7),
+        }],
+        ..Default::default()
+    };
+    let hires = super::HiresFixPlan {
+        width: 1024,
+        height: 1024,
+        steps: 6,
+        guidance: Some(3.5),
+        true_cfg: None,
+        provider_reference_strength: 0.45,
+    };
+    let cancel = gen_core::CancelFlag::new();
+    let surface = super::LaneRgbaSurface::default();
+    let refinement = |reference: Option<&(gen_core::Image, f32)>| {
+        super::build_hires_refinement_request(
+            "a portrait",
+            7,
+            &hires,
+            None,
+            reference,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &super::super::PromptEnhance::default(),
+            gen_core::PromptEnhancementSink::default(),
+            gen_core::PreviewSink::default(),
+            &surface,
+            &cancel,
+        )
+        .expect("refinement request")
+    };
+    let planned_refinement = refinement(None);
+    assert!(
+        !planned_refinement.use_pid,
+        "the refinement decodes without PiD"
+    );
+
+    let (first_plan, refine_plan) = super::compile_hires_render_plans(
+        crate::inference_runtime::media(),
+        "flux1_dev",
+        &spec,
+        &first,
+        &planned_refinement,
+        &hires,
+    )
+    .expect("a PiD IP-Adapter Hires.fix request compiles both passes before load");
+
+    let descriptor = crate::engines::mlx_model("flux_dev")
+        .expect("linked FLUX.1-dev descriptor")
+        .descriptor;
+    first_plan
+        .check_request(&descriptor, &first)
+        .expect("the first pass runs the request its plan was compiled from");
+    let stretched = (image(1024), hires.provider_reference_strength);
+    let executed_refinement = refinement(Some(&stretched));
+    refine_plan
+        .check_request(&descriptor, &executed_refinement)
+        .expect("the refinement runs the request its plan was compiled from");
+
+    let mut kept_pid = executed_refinement;
+    kept_pid.use_pid = true;
+    assert!(
+        refine_plan.check_request(&descriptor, &kept_pid).is_err(),
+        "a refinement that kept PiD would not match its plan"
+    );
+}

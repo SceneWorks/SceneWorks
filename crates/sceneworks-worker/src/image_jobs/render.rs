@@ -233,7 +233,7 @@ pub(super) fn render_on_surface(
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<Vec<(u32, u32, Vec<u8>)>> {
-    let mut request = build_render_request(
+    let request = build_render_request(
         prompt,
         width,
         height,
@@ -258,6 +258,23 @@ pub(super) fn render_on_surface(
         surface,
         cancel,
     )?;
+    render_request_on_surface(
+        generator,
+        request,
+        memory_strategy_context,
+        surface,
+        on_progress,
+    )
+}
+
+/// Run one already-built generic-lane request on `surface` and return every image it produced.
+fn render_request_on_surface(
+    generator: &dyn Generator,
+    mut request: GenerationRequest,
+    memory_strategy_context: Option<&gen_core::MemoryRunContext>,
+    surface: &LaneRgbaSurface<'_>,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<Vec<(u32, u32, Vec<u8>)>> {
     // `generate_with_report` (sc-25681): the default implementation is exactly `generate`, so every
     // provider that reports nothing is unaffected; one that reports (Iris's `caption_truncated`)
     // has its warnings collected for the image's provenance.
@@ -466,6 +483,57 @@ pub(super) fn compile_required_render_plan(
             "{engine_id}: route has no registered pre-load render planner"
         ))
     })
+}
+
+/// The Hires.fix refinement request: the target size, the refinement steps and CFG, and the first
+/// pass's stretched output as `reference` (`None` while planning, where the multi-pass plan supplies
+/// the produced reference). The refinement always decodes through the native VAE, so PiD is off
+/// whatever the first pass used. Execution and the pre-load planner both build it here, so the
+/// plan is compiled from the request that runs.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_hires_refinement_request(
+    prompt: &str,
+    seed: i64,
+    hires: &HiresFixPlan,
+    negative_prompt: Option<String>,
+    reference: Option<&(Image, f32)>,
+    sampler: Option<&str>,
+    scheduler: Option<&str>,
+    scheduler_shift: Option<f32>,
+    guidance_method: Option<&str>,
+    text_style_gain: Option<f32>,
+    memory: Option<gen_core::GenerationMemory>,
+    enhance: &PromptEnhance,
+    prompt_enhancement: gen_core::PromptEnhancementSink,
+    preview: gen_core::PreviewSink,
+    surface: &LaneRgbaSurface<'_>,
+    cancel: &CancelFlag,
+) -> WorkerResult<GenerationRequest> {
+    build_render_request(
+        prompt,
+        hires.width,
+        hires.height,
+        seed,
+        hires.steps,
+        hires.guidance,
+        negative_prompt,
+        reference,
+        &[],
+        None,
+        hires.true_cfg,
+        sampler,
+        scheduler,
+        scheduler_shift,
+        guidance_method,
+        false,
+        text_style_gain,
+        memory,
+        enhance,
+        prompt_enhancement,
+        preview,
+        surface,
+        cancel,
+    )
 }
 
 /// The pre-load plans one generic-lane image renders from: its pass, and for a Hires.fix request the
@@ -958,34 +1026,33 @@ pub(super) fn generate_one_with_hires_on_surface(
         render_plan: surface.hires_render_plan,
         hires_render_plan: None,
     };
-    generate_one_on_surface(
-        generator,
+    let request = build_hires_refinement_request(
         prompt,
-        hires.width,
-        hires.height,
         seed,
-        hires.steps,
-        hires.guidance,
+        &hires,
         negative_prompt,
         Some(&reference),
-        &[],
-        None,
-        hires.true_cfg,
         sampler,
         scheduler,
         scheduler_shift,
         guidance_method,
-        false,
         text_style_gain,
         memory,
-        memory_strategy_context,
         enhance,
         prompt_enhancement,
         preview,
         &refine_surface,
         cancel,
+    )?;
+    render_request_on_surface(
+        generator,
+        request,
+        memory_strategy_context,
+        &refine_surface,
         &mut second_progress,
-    )
+    )?
+    .pop()
+    .ok_or_else(|| WorkerError::Engine("generator produced no image".to_owned()))
 }
 
 /// Within-image step fraction mapped into the 0.10..0.95 generation band.
