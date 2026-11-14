@@ -37,7 +37,6 @@ import { maxReferencesForModel } from "../imageReferenceLimits.js";
 import { nativeTierEligibility } from "../quantTier.js";
 import { OrderedReferenceList } from "../components/OrderedReferenceList.jsx";
 import {
-  dimensionConstraintMessage,
   evaluateModelDimensions,
   modelDimensionConstraints,
 } from "../resolutionOverride.js";
@@ -338,7 +337,6 @@ export function SimpleImageStudio() {
     widthOverride: nativeControls ? widthOverride : "",
     heightOverride: nativeControls ? heightOverride : "",
   });
-  const dimensionError = dimensionConstraintMessage(dimensionEval);
   const patchGridNotice = patchGridHint(selectedModel, dimensionEval.width, dimensionEval.height);
   // sc-24215: the same native-size and prompt-token statements Image Studio shows.
   const nativeResolutionNotice = nativeResolutionHint(selectedModel);
@@ -437,15 +435,12 @@ export function SimpleImageStudio() {
     Boolean(resolution) &&
     !busy &&
     !needsSource &&
-    // sc-24113: a broken free-size override blocks Generate the same way it does in the full
-    // studio. Without this the enqueue gate would 400 and the user would meet the model's own
-    // envelope as a failed submit rather than as a message under the field they typed in.
-    !dimensionEval.invalid &&
     // A required edit LoRA that isn't downloaded blocks the run HERE rather than letting the
     // worker reject it — the job would fail with an error the studio never surfaces.
     !editLoraMissing && mossComponents.ready && !mossEditError;
 
-  const portableDraft = buildSimpleImageRequest({
+  let portableDraft = null;
+  try { portableDraft = buildSimpleImageRequest({
     prompt: mossEdit ? prompt : prompt.trim(),
     mode,
     model,
@@ -485,9 +480,9 @@ export function SimpleImageStudio() {
     selectedModel,
     transparentBackground,
     ...tier,
-  });
+  }); } catch { /* Draft syntax errors are already shown by the form; submit rechecks. */ }
   // Pure option feedback still belongs beside its fields when another input is incomplete.
-  const portableFeedback = usePortableFeedback("image", portableDraft, selectedModel);
+  const portableFeedback = usePortableFeedback("image", portableDraft, selectedModel, Boolean(prompt.trim() || (mossEdit && mossImageAdvanced.positive)));
   const portableRefusal = portableFeedback?.state === "invalid" ? portableFeedback.refusal : null;
 
   async function generate() {
@@ -918,7 +913,6 @@ export function SimpleImageStudio() {
                 value={heightOverride}
               />
             </div>
-            {dimensionError ? <p className="su-error">{dimensionError}</p> : null}
           </div>
         </div>
       </details>

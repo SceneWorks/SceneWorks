@@ -29,6 +29,24 @@ function SingleHarness({ value }) {
   return <p>{feedback?.state === "invalid" ? feedback.refusal.detail : feedback?.state ?? "pending"}</p>;
 }
 
+function ModelHarness({ modelEntry }) {
+  const feedback = usePortableFeedback("image", { model: modelEntry.id, value: 1 }, modelEntry);
+  return <p>{feedback?.state ?? "pending"}</p>;
+}
+
+it("keeps feedback when the same catalog facts arrive in a new object", async () => {
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  await act(async () => root.render(<ModelHarness modelEntry={{ id: "m", limits: { count: [1, 2] } }} />));
+  await vi.waitFor(() => expect(container.textContent).toBe("valid"));
+  const calls = vi.mocked(validatePortableRequest).mock.calls.length;
+  await act(async () => root.render(<ModelHarness modelEntry={{ id: "m", limits: { count: [1, 2] } }} />));
+  expect(container.textContent).toBe("valid");
+  expect(vi.mocked(validatePortableRequest).mock.calls).toHaveLength(calls);
+});
+
 it("does not show a refusal returned after the input has changed", async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   let finish;
@@ -44,16 +62,29 @@ it("does not show a refusal returned after the input has changed", async () => {
   expect(container.textContent).not.toContain("Old draft refused");
 });
 
-function Harness({ revision, values }) {
+function Harness({ revision, values, modelEntry = null }) {
   const feedback = usePortableBatchFeedback(
     "image", revision, function* requests() {
       for (const value of values) yield { value };
-    }, null,
+    }, modelEntry,
   );
   return <p>{feedback?.result.state === "invalid"
     ? `${feedback.index}: ${feedback.result.refusal.detail}`
     : feedback?.result.state ?? "pending"}</p>;
 }
+
+it("keeps a completed batch when equivalent catalog facts are reallocated", async () => {
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  await act(async () => root.render(<Harness revision="a" values={[1, 2]} modelEntry={{ id: "m" }} />));
+  await vi.waitFor(() => expect(container.textContent).toBe("valid"));
+  const calls = vi.mocked(validatePortableRequest).mock.calls.length;
+  await act(async () => root.render(<Harness revision="a" values={[1, 2]} modelEntry={{ id: "m" }} />));
+  expect(container.textContent).toBe("valid");
+  expect(vi.mocked(validatePortableRequest).mock.calls).toHaveLength(calls);
+});
 
 it("checks every batch item and hides a refusal when the authored draft changes", async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;

@@ -11,6 +11,10 @@ vi.mock("../api.js", async (importOriginal) => {
     apiFetch: vi.fn(async () => ({})),
   };
 });
+vi.mock("../portableValidation.js", () => ({
+  validatePortableRequest: vi.fn(async () => ({ state: "valid" })),
+  validatePortableRequestNow: vi.fn(() => ({ state: "server-required" })),
+}));
 
 import { AppContext } from "../context/AppContext.js";
 import { apiFetch } from "../api.js";

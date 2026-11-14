@@ -1280,7 +1280,7 @@ describe("SceneWorks app shell", () => {
 
     // Submitting composes an interleave job with prompt, model, size, and max images.
     await changeField(document.body.querySelector("textarea"), "An illustrated guide to brewing tea");
-    await changeField(document.body.querySelector("input[type='number']"), "999");
+    await changeField(document.body.querySelector("input[type='number']"), "10");
     const submit = [...document.body.querySelectorAll("button")].find((button) =>
       button.textContent.includes("Compose document"),
     );

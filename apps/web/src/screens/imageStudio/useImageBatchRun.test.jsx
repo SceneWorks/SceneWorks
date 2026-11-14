@@ -2,6 +2,9 @@ import React, { act } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { mountRoot, unmountRoot } from "../../testUtils/dom.js";
 import { useImageBatchRun } from "./useImageBatchRun.js";
+vi.mock("../../portableValidation.js", () => ({
+  validatePortableRequest: vi.fn(async () => ({ state: "valid" })),
+}));
 let root, container;
 beforeEach(() => { globalThis.IS_REACT_ACT_ENVIRONMENT = true; ({ root, container } = mountRoot()); });
 afterEach(() => unmountRoot(root, container));
@@ -34,7 +37,7 @@ it("continues the committed project's batch while a different project render sus
   }
   await act(async () => root.render(<Harness />));
   await act(async () => container.querySelector("button").click());
-  expect(createImageJob).toHaveBeenCalledTimes(1);
+  await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(1));
   await act(async () => React.startTransition(() => changeProject("B")));
   await act(async () => { resolveFirst({ id: "first", status: "queued" }); await running; });
   expect(createImageJob).toHaveBeenCalledTimes(2);

@@ -35,7 +35,6 @@ import { PoseLibraryPicker } from "../components/PoseLibraryPicker.jsx";
 
 import { iterateBatch, linkedGroupIssues, missingKeys, parsePromptResolution } from "../promptBatch.js";
 import {
-  dimensionConstraintMessage,
   evaluateModelDimensions,
   isFlux3ReferenceRequest,
 } from "../resolutionOverride.js";
@@ -1192,7 +1191,6 @@ export function ImageStudio() {
   // de-duplicates, first occurrence kept) — a restored recipe can carry a repeated id, and blocking a
   // request the API accepts would be a client stricter than the gate.
   const maxStudioReferences = multiReference ? maxReferencesForModel(selectedModel, null) : null;
-  const distinctReferenceCount = mossEdit ? referenceAssetIds.length : new Set(referenceAssetIds).size;
   let mossEditError = "";
   if (mossEdit) {
     try {
@@ -1203,12 +1201,6 @@ export function ImageStudio() {
       if (referenceAssetIds.some((id) => !editImageAssets.some((asset) => asset.id === id))) mossEditError = "A MOSS reference is missing from this project. Reacquire that exact slot before editing.";
     } catch (error) { mossEditError = error.message; }
   }
-  const referenceOverflowError =
-    mode === "edit_image" && maxStudioReferences != null && distinctReferenceCount > maxStudioReferences
-      ? `${selectedModel?.name ?? "This model"} takes up to ${maxStudioReferences} reference images — remove ${
-          distinctReferenceCount - maxStudioReferences
-        }.`
-      : null;
   // Krea-style two-reference edit (epic 10871 P1.3): a model whose `ui.editReferences` adds an optional
   // SECOND source to the single-source edit — any two images, image 1 (required) + image 2 (optional),
   // fixed order. Only in single-source edit mode (never alongside the flat `multiReference`
@@ -2079,9 +2071,7 @@ export function ImageStudio() {
     referenceRequest: flux3ReferenceRequest,
     dimensionIntent: activeDimensionIntent,
   });
-  const { width, height, invalid: dimensionsInvalid, constraints: dimensionConstraints } = dimensionEval;
-  // A precise, user-facing ERROR (never a raw requirement): names this model's actual range/stride.
-  const dimensionError = dimensionConstraintMessage(dimensionEval);
+  const { width, height, constraints: dimensionConstraints } = dimensionEval;
   // sc-25681: a model that shows its patch grid below a declared side (Iris-3B, 1024) says so
   // whenever the effective width or height is under it.
   const patchGridNotice = patchGridHint(selectedModel, width, height);
@@ -2093,9 +2083,6 @@ export function ImageStudio() {
   const hiresFixTargetHeight = Math.round(height * hiresFixUpscaleBy);
   const hiresFixTargetInvalid =
     hiresFixEnabled && (hiresFixTargetWidth > 4096 || hiresFixTargetHeight > 4096);
-  const hiresFixTargetMessage = hiresFixTargetInvalid
-    ? `Hires.fix target ${hiresFixTargetWidth}×${hiresFixTargetHeight} exceeds the 4096px image limit.`
-    : "";
 
   // PiD high-res decode heads-up (sc-10144): PiD super-resolves the base render 4×, so a large base at
   // the default 4K tier is a multi-minute (auto-tiled above 4096², sc-10087) decode that can look hung.
@@ -2367,7 +2354,6 @@ export function ImageStudio() {
     if (replayTierUnavailable) return "Recipe tier unavailable. Install it on a supported worker or choose another tier.";
     if (characterReferenceError) return characterReferenceError;
     if (decoderCapabilitiesPending) return "Waiting for engine capabilities before using the restored decoder.";
-    if (dimensionsInvalid || hiresFixTargetInvalid) return hiresFixTargetMessage || dimensionError || "Width and height must each be between 256 and 4096.";
     if (cfgIntervalError) return cfgIntervalError;
     if (macActiveModeBlock) return macActiveModeBlock.text;
     const validity = kind === "batch" ? batchValidity : generateValidity;
@@ -2674,24 +2660,6 @@ export function ImageStudio() {
   );
   const batchMissingKeys = missingKeys(batchPrompts, batchVariables);
   const batchGroupIssues = linkedGroupIssues(batchPrompts);
-  // Prompt lines whose leading [WxH] directive (sc-10063) breaks the SELECTED model's geometry — the
-  // SAME per-model range + stride the single-generate gate enforces (sc-14058), not the raw backend
-  // envelope. For a native-resolution model (Mage-Flow) an off-range OR off-÷16-stride size blocks the
-  // Run; every other model keeps the global 256–4096 / no-stride check. Reuses evaluateModelDimensions
-  // so the batch and single paths cannot drift.
-  const batchResolutionIssues = batchPrompts
-    .map((line) => parsePromptResolution(line, resolutionOptions).resolution)
-    .filter(
-      (res) =>
-        res &&
-        evaluateModelDimensions({
-          model: selectedModel,
-          resolution: `${res.width}x${res.height}`,
-          widthOverride: "",
-          heightOverride: "",
-          referenceRequest: flux3ReferenceRequest,
-        }).invalid,
-    );
   // A structured-caption model can batch, but only if the prompt-refiner is available to
   // auto-write a caption per resolved prompt (sc-9980).
   const batchStructuredExpandBlocked =
@@ -2722,11 +2690,6 @@ export function ImageStudio() {
       batchTotal,
       missingKeys: batchMissingKeys,
       groupIssues: batchGroupIssues,
-      resolutionIssues: batchResolutionIssues,
-      // Per-model range + stride for the inline [WxH] directive — the SAME constraints the free
-      // Width/Height override uses (sc-14058). A native-resolution model narrows the batch check to its
-      // own 512–2048 / ÷16 envelope; every other model gets the global 256–4096 / no-stride default.
-      dimensionConstraints,
       decoderCapabilitiesPending,
       restorePlan: irisUpscale ? restorePlanStatus : null,
     }),
@@ -2738,8 +2701,6 @@ export function ImageStudio() {
       batchTotal,
       batchMissingKeys,
       batchGroupIssues,
-      batchResolutionIssues,
-      dimensionConstraints,
       decoderCapabilitiesPending,
       irisUpscale,
       restorePlanStatus,
@@ -2792,11 +2753,6 @@ export function ImageStudio() {
       modelName: selectedModel?.name,
       // Multi-phase denoise problems (sc-13885): an enabled-but-broken phase list blocks Generate.
       multiPhaseIssues: multiPhaseValidationIssues,
-      // Free Width/Height override out of the model's range or off its ÷16 stride (sc-14058). A precise
-      // ERROR message (not a raw requirement) so the dead Generate button states its reason pre-emptively,
-      // not only on click. null when the dimensions are valid.
-      dimensionError,
-      referenceOverflowError,
       decoderCapabilitiesPending,
       restorePlan: irisUpscale ? restorePlanStatus : null,
     }),
@@ -2822,8 +2778,6 @@ export function ImageStudio() {
       selectedLoraValidationResult,
       selectedModel,
       multiPhaseValidationIssues,
-      dimensionError,
-      referenceOverflowError,
       decoderCapabilitiesPending,
       irisUpscale,
       restorePlanStatus,
@@ -2845,7 +2799,10 @@ export function ImageStudio() {
       });
     } catch { /* Server keeps the authoritative gate. */ }
   }
-  const portableFeedback = usePortableFeedback("image", portableDraft, selectedModel);
+  const portableFeedback = usePortableFeedback(
+    "image", portableDraft, selectedModel,
+    Boolean(prompt.trim() || (structuredActive && captionHasContent) || (mossEdit && mossImageAdvanced.positive)),
+  );
   const portableRefusal = portableFeedback?.state === "invalid" ? portableFeedback.refusal : null;
   let portableBatchRevision = null;
   if (batchMode && selectedModel && !structuredPromptModel && batchTotal > 0) {

@@ -229,7 +229,7 @@ export function DocumentStudio() {
     sourceAssetIds,
     advanced,
   };
-  const portableFeedback = usePortableFeedback("interleave", portableDraft, selectedModel, canSubmit);
+  const portableFeedback = usePortableFeedback("interleave", portableDraft, selectedModel, Boolean(selectedModel && prompt.trim()));
   const portableRefusal = portableFeedback?.state === "invalid" ? portableFeedback.refusal : null;
 
   const referencedFrameCount = storyboardFrames.filter((frame) => frame.assetId).length;
@@ -334,7 +334,7 @@ export function DocumentStudio() {
 
   async function submit(event) {
     event.preventDefault();
-    if (!canSubmit) {
+    if (!canSubmit || portableRefusal) {
       return;
     }
     setSubmitting(true);

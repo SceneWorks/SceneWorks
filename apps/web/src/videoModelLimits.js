@@ -52,46 +52,6 @@ export function referenceCaps(model) {
   };
 }
 
-// A count phrased as its own clause so the refusal reads grammatically at 1 ("1 is selected")
-// as well as at many ("3 are selected") — the audio picker caps at 3, so the singular case is
-// an ordinary path, not an edge.
-function selectedClause(count) {
-  return count === 1 ? "1 is selected" : `${count} are selected`;
-}
-
-/**
- * The refusal for a reference selection over what the model declares, or `null` to admit —
- * the client half of `reference_limit_error`.
- *
- * Per-list caps are checked before the combined one so the message names the picker actually
- * over budget. The lever is the CONTROL, not the wire field the Rust message names: on this side
- * of the seam the user's move is "remove some from that picker", and the field name would be
- * jargon for a sentence rendered next to the picker itself.
- */
-export function referenceLimitError({ modelName, caps, images = 0, clips = 0, audio = 0 } = {}) {
-  if (!caps) return null;
-  const model = modelName || "This model";
-  for (const [count, cap, noun] of [
-    [images, caps.images, "reference images"],
-    [clips, caps.clips, "reference video clips"],
-    [audio, caps.audio, "reference audio clips"],
-  ]) {
-    if (count > cap) {
-      return cap === 0
-        ? `${model} takes no ${noun}, but ${selectedClause(count)}. Remove ${count === 1 ? "it" : "them"}, or choose a model that conditions on ${noun}.`
-        : `${model} takes up to ${cap} ${noun}, but ${selectedClause(count)}. Remove ${count - cap}.`;
-    }
-  }
-  if (caps.combined === null || caps.combined === undefined) return null;
-  const total = images + clips + audio;
-  if (total <= caps.combined) return null;
-  return (
-    `${model} takes up to ${caps.combined} reference files in total, but ${selectedClause(total)} ` +
-    `(${images} reference images + ${clips} video clips + ${audio} audio clips). ` +
-    `Remove ${total - caps.combined}.`
-  );
-}
-
 /**
  * The Steps floor a model declares (`limits.hardMinSteps`, sc-19426), or 1 when it declares none.
  *

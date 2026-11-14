@@ -25,6 +25,18 @@ vi.mock("../api.js", async (importOriginal) => {
   };
 });
 
+// The Rust validator owns the cap. The view receives a typed result for its outgoing list.
+vi.mock("../hooks/usePortableFeedback.js", () => ({
+  usePortableFeedback: vi.fn((kind, payload, modelEntry) => {
+    const distinct = new Set(payload?.referenceAssetIds ?? []).size;
+    const cap = modelEntry?.limits?.maxReferenceAssets;
+    return cap != null && distinct > cap
+      ? { state: "invalid", refusal: { code: "invalid_generation_option", field: "referenceAssetIds", detail: `${modelEntry.name} takes up to ${cap} reference images — remove ${distinct - cap}.` } }
+      : { state: "valid" };
+  }),
+  usePortableBatchFeedback: vi.fn(() => null),
+}));
+
 import { AppContext } from "../context/AppContext.js";
 import { ImageStudio } from "./ImageStudio.jsx";
 
@@ -159,7 +171,7 @@ describe("ImageStudio with Qwen Image 2.1 Turbo (sc-25908)", () => {
 
   // The enqueue gate counts DISTINCT references (first occurrence kept), so a restored list that
   // repeats an id is legal at ten distinct and must not be blocked; eleven distinct must be.
-  // *Mutation that reds this:* counting `referenceAssetIds.length` instead of distinct ids.
+  // The transport passes the full list; Rust applies the distinct-id rule.
   it("counts a restored list's distinct references against the cap", async () => {
     const restore = (ids) =>
       window.localStorage.setItem(
@@ -175,7 +187,7 @@ describe("ImageStudio with Qwen Image 2.1 Turbo (sc-25908)", () => {
 
     restore(REFS.map((ref) => ref.id));
     await render();
-    expect(container.textContent).toContain("takes up to 10 reference images — remove 1.");
+    await vi.waitFor(() => expect(container.textContent).toContain("takes up to 10 reference images — remove 1."));
     expect(generateButton().disabled).toBe(true);
   });
 
@@ -206,8 +218,7 @@ describe("ImageStudio with Qwen Image 2.1 Turbo (sc-25908)", () => {
     expect(context.createImageJob.mock.calls[0][0].advanced.transparentBackground).toBe(true);
   });
 
-  // *Mutation that reds this:* dropping `referenceOverflowError` from the Generate validation —
-  // eleven references then reach the enqueue gate, which 400s them.
+  // A typed portable refusal blocks the CTA before the server revalidates.
   it("shows the ordered reference list at the cap of ten and blocks an eleventh", async () => {
     const context = await render();
     await typePrompt("put the jacket from image 2 on the person in image 1");
@@ -230,7 +241,7 @@ describe("ImageStudio with Qwen Image 2.1 Turbo (sc-25908)", () => {
     };
 
     await pick(11);
-    expect(container.textContent).toContain("takes up to 10 reference images — remove 1.");
+    await vi.waitFor(() => expect(container.textContent).toContain("takes up to 10 reference images — remove 1."));
     expect(generateButton().disabled).toBe(true);
 
     await pick(2);

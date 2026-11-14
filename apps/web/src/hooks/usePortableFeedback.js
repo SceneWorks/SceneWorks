@@ -4,8 +4,12 @@ import { useEffect, useRef, useState } from "react";
 // draft, and a cold import remains a server-owned check until the Rust module is ready.
 export function usePortableFeedback(kind, payload, modelEntry, enabled = true) {
   let draft = null;
+  let modelSnapshot = null;
   if (enabled && payload) {
-    try { draft = JSON.stringify(payload); } catch { /* Server validates the request. */ }
+    try {
+      draft = JSON.stringify(payload);
+      modelSnapshot = JSON.stringify(modelEntry ?? null);
+    } catch { /* Server validates the request. */ }
   }
   const [feedback, setFeedback] = useState(null);
   useEffect(() => {
@@ -13,15 +17,15 @@ export function usePortableFeedback(kind, payload, modelEntry, enabled = true) {
     let current = true;
     import("../portableValidation.js")
       .then(({ validatePortableRequest }) => validatePortableRequest({
-        kind, payload: JSON.parse(draft), modelEntry,
+        kind, payload: JSON.parse(draft), modelEntry: JSON.parse(modelSnapshot),
       }))
       .then((result) => {
-        if (current) setFeedback({ draft, kind, modelEntry, result });
+        if (current) setFeedback({ draft, kind, modelSnapshot, result });
       })
       .catch(() => { if (current) setFeedback(null); });
     return () => { current = false; };
-  }, [draft, kind, modelEntry]);
-  return feedback?.draft === draft && feedback.kind === kind && feedback.modelEntry === modelEntry
+  }, [draft, kind, modelSnapshot]);
+  return feedback?.draft === draft && feedback.kind === kind && feedback.modelSnapshot === modelSnapshot
     ? feedback.result : null;
 }
 
@@ -30,32 +34,35 @@ export function usePortableFeedback(kind, payload, modelEntry, enabled = true) {
 export function usePortableBatchFeedback(kind, revision, requests, modelEntry, enabled = true) {
   const requestsRef = useRef(requests);
   requestsRef.current = requests;
+  let modelSnapshot = null;
+  try { modelSnapshot = JSON.stringify(modelEntry ?? null); } catch { /* Server validates the batch. */ }
   const [feedback, setFeedback] = useState(null);
   useEffect(() => {
     if (!enabled || !revision) return;
     let current = true;
     const inspect = async () => {
       const { validatePortableRequest } = await import("../portableValidation.js");
+      const modelFacts = modelSnapshot === null ? null : JSON.parse(modelSnapshot);
       let index = 0;
       let fallback = null;
       for (const payload of requestsRef.current()) {
         if (!current) return;
         index += 1;
-        const result = await validatePortableRequest({ kind, payload, modelEntry });
+        const result = await validatePortableRequest({ kind, payload, modelEntry: modelFacts });
         if (!current) return;
         if (result.state === "invalid") {
-          setFeedback({ revision, result, index });
+          setFeedback({ revision, modelSnapshot, result, index });
           return;
         }
         if (result.state === "server-required") fallback = result;
         if (index % 8 === 0) await new Promise((resolve) => window.setTimeout(resolve, 0));
       }
-      if (current) setFeedback({ revision, result: fallback ?? { state: "valid" }, index });
+      if (current) setFeedback({ revision, modelSnapshot, result: fallback ?? { state: "valid" }, index });
     };
     void inspect().catch(() => {
-      if (current) setFeedback({ revision, result: { state: "server-required" }, index: 0 });
+      if (current) setFeedback({ revision, modelSnapshot, result: { state: "server-required" }, index: 0 });
     });
     return () => { current = false; };
-  }, [enabled, kind, modelEntry, revision]);
-  return enabled && feedback?.revision === revision ? feedback : null;
+  }, [enabled, kind, modelSnapshot, revision]);
+  return enabled && feedback?.revision === revision && feedback.modelSnapshot === modelSnapshot ? feedback : null;
 }
