@@ -1530,6 +1530,20 @@ mod resolved_execution_tests {
         assert_eq!(execution.poses()[0].keypoints.len(), 18);
         assert!(execution.phases().is_none());
     }
+
+    #[test]
+    fn preflight_lowers_imported_krea_phases() {
+        let payload = serde_json::json!({
+            "model": "imported_krea_test",
+            "modelManifestEntry": {"family": "krea_2"},
+            "advanced": {"phases": [{"steps": 2}]}
+        });
+        let request =
+            ImageRequest::from_resolved(payload.as_object().unwrap(), payload.as_object().unwrap())
+                .unwrap();
+        let execution = ResolvedImageExecution::new(&request).unwrap();
+        assert_eq!(execution.phases().unwrap()[0].steps, 2);
+    }
 }
 
 #[cfg(native_lane)]
