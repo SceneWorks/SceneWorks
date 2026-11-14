@@ -619,6 +619,19 @@ tokio::task_local! {
     /// the scope reaches every checkpoint. Unset outside a job (e.g. unit tests) ⇒ [`shutdown_requested`]
     /// reads `false`.
     pub(crate) static SHUTDOWN_FLAG: gen_core::CancelFlag;
+    /// The private capability minted by the accepted claim. It is scoped to one
+    /// job future and leaves the worker only on that job's terminal progress POST.
+    pub(crate) static EXECUTION_CLAIM_CAPABILITY: Option<String>;
+}
+
+pub(crate) async fn with_execution_claim_capability<F>(
+    capability: Option<String>,
+    future: F,
+) -> F::Output
+where
+    F: std::future::Future,
+{
+    EXECUTION_CLAIM_CAPABILITY.scope(capability, future).await
 }
 
 /// Run `future` with the process-shutdown [`SHUTDOWN_FLAG`] task-local bound to `shutdown`, so every
@@ -679,6 +692,18 @@ pub(crate) async fn post_job_progress(
     // resulting 409 propagates as WorkerError::Api and aborts the local job
     // handling — i.e. the worker abandons the job (sc-4172).
     payload.worker_id = Some(api.worker_id.clone());
+    if payload.status == JobStatus::Completed {
+        if let Some(capability) = EXECUTION_CLAIM_CAPABILITY
+            .try_with(Clone::clone)
+            .ok()
+            .flatten()
+        {
+            payload.extra.insert(
+                "executionClaimCapability".to_owned(),
+                Value::String(capability),
+            );
+        }
+    }
     api.post_json(&format!("/api/v1/jobs/{job_id}/progress"), &payload)
         .await
 }

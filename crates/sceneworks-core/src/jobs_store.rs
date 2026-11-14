@@ -10,6 +10,7 @@ use rusqlite::{
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Number, Value};
+use subtle::ConstantTimeEq;
 
 use crate::contracts::{
     ContractNumber, ExtraFields, GenerationMetrics, GenerationMetricsRow, JobSnapshot, JobStatus,
@@ -35,6 +36,26 @@ fn mint_import_claim_capability(
         Value::String(secret),
     );
     Ok(())
+}
+
+fn execution_binding_sha256(
+    job: &JobSnapshot,
+    assigned_gpu: &str,
+    portable_binding: &Option<Value>,
+    backend: &str,
+    source_route: &Option<Value>,
+) -> JobsStoreResult<String> {
+    crate::execution_receipt::json_sha256(&serde_json::json!({
+        "jobType": job.job_type.as_str(),
+        "payload": &job.payload,
+        "requestedGpu": &job.requested_gpu,
+        "assignedGpu": assigned_gpu,
+        "portableModelBinding": portable_binding,
+        "acceptedBackend": backend,
+        "acceptedSourceRoute": source_route,
+        "modelProvenance": job.extra.get(crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY),
+    }))
+    .map_err(Into::into)
 }
 
 mod result_items;
@@ -742,6 +763,23 @@ impl JobsStore {
         ensure_column(&transaction, "jobs", "download_binding_json", "text")?;
         // A portable source commitment is private claim authority, not public job metadata.
         ensure_column(&transaction, "jobs", "portable_model_binding_json", "text")?;
+        // Execution receipts are private until a claim-bound terminal transaction accepts
+        // them. Never add these fields to JobSnapshot or result_json.
+        ensure_column(&transaction, "jobs", "execution_claim_capability", "text")?;
+        ensure_column(
+            &transaction,
+            "jobs",
+            "execution_claim_binding_sha256",
+            "text",
+        )?;
+        ensure_column(&transaction, "jobs", "execution_claim_backend", "text")?;
+        ensure_column(
+            &transaction,
+            "jobs",
+            "execution_claim_source_route_json",
+            "text",
+        )?;
+        ensure_column(&transaction, "jobs", "execution_receipt_json", "text")?;
         ensure_column(
             &transaction,
             "jobs",
@@ -3861,6 +3899,46 @@ impl JobsStore {
                 )?;
             }
         }
+        let accepted_backend = if portable_binding.is_some() {
+            portable_backend.unwrap_or_default()
+        } else if is_non_gpu_job_type(queued.job_type.as_str()) {
+            "cpu"
+        } else if worker_is_candle(&worker) {
+            "candle"
+        } else if worker.gpu_id.eq_ignore_ascii_case("mlx") {
+            "mlx"
+        } else {
+            "unknown"
+        };
+        let accepted_source_route = portable_binding
+            .as_ref()
+            .map(|binding| -> JobsStoreResult<Value> {
+                let typed: crate::model_artifacts::portable_binding::PortableJobBinding =
+                    serde_json::from_value(binding.clone())?;
+                let route = typed
+                    .select_route(
+                        portable_backend.unwrap_or_default(),
+                        portable_platform.unwrap_or_default(),
+                    )
+                    .map_err(|error| JobsStoreError::InvalidStatus(error.to_string()))?;
+                Ok(serde_json::to_value(route)?)
+            })
+            .transpose()?;
+        let accepted = self.get_job_on_connection(&transaction, &queued.id)?;
+        let accepted_binding_sha256 = execution_binding_sha256(
+            &accepted,
+            &assigned_gpu,
+            &portable_binding,
+            accepted_backend,
+            &accepted_source_route,
+        )?;
+        // Only a worker proving its derived private key receives this attempt capability.
+        // An unauthenticated legacy worker can still complete its old job contract, but it
+        // cannot publish a trusted execution receipt or enable exact replay.
+        let execution_capability = authenticated_for_dynamic_source
+            .then(|| random_hex(32))
+            .transpose()
+            .map_err(|error| JobsStoreError::Io(std::io::Error::other(error.to_string())))?;
         transaction.execute(
             "
             update jobs
@@ -3870,10 +3948,24 @@ impl JobsStore {
                    stage = 'preparing',
                    message = 'Worker claimed job.',
                    started_at = coalesce(started_at, ?3),
-                   updated_at = ?3
+                   updated_at = ?3,
+                   execution_claim_capability = ?5,
+                   execution_claim_binding_sha256 = ?6,
+                   execution_claim_backend = ?7,
+                   execution_claim_source_route_json = ?8,
+                   execution_receipt_json = null
              where id = ?4 and status = 'queued'
             ",
-            params![assigned_gpu, worker_id, now, queued.id],
+            params![
+                assigned_gpu,
+                worker_id,
+                now,
+                queued.id,
+                execution_capability,
+                accepted_binding_sha256,
+                accepted_backend,
+                accepted_source_route.as_ref().map(dumps).transpose()?,
+            ],
         )?;
         transaction.execute(
             "update workers set status = 'busy', current_job_id = ?1, last_seen_at = ?2 where id = ?3",
@@ -3887,12 +3979,54 @@ impl JobsStore {
         Ok((Some(job), decision, portable_binding))
     }
 
+    /// Read the secret only for the current claiming worker. The public job
+    /// snapshot, SSE projection and result item API never include this column.
+    pub fn execution_claim_capability(
+        &self,
+        job_id: &str,
+        worker_id: &str,
+    ) -> JobsStoreResult<Option<String>> {
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
+        connection
+            .query_row(
+                "select execution_claim_capability from jobs
+                  where id = ?1 and worker_id = ?2 and status = 'preparing'",
+                params![job_id, worker_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(|value| value.flatten())
+            .map_err(Into::into)
+    }
+
+    /// A receipt is usable for replay only after the terminal transition and
+    /// its durable asset/catalog side effects have both completed.
+    pub fn completed_execution_receipt(
+        &self,
+        job_id: &str,
+    ) -> JobsStoreResult<Option<crate::execution_receipt::TrustedExecutionReceipt>> {
+        let connection = self.open_connection()?;
+        let row: Option<Option<String>> = connection
+            .query_row(
+                "select execution_receipt_json from jobs
+                  where id = ?1 and status = 'completed'
+                    and progress_side_effects_pending = 0",
+                params![job_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        row.flatten()
+            .map(|value| serde_json::from_str(&value).map_err(Into::into))
+            .transpose()
+    }
+
     pub fn update_job_progress(
         &self,
         job_id: &str,
         update: ProgressUpdate,
     ) -> JobsStoreResult<JobSnapshot> {
-        self.update_job_progress_internal(job_id, update, false)
+        self.update_job_progress_internal(job_id, update, false, None, None)
             .map(|outcome| outcome.job)
     }
 
@@ -3905,7 +4039,20 @@ impl JobsStore {
         job_id: &str,
         update: ProgressUpdate,
     ) -> JobsStoreResult<ProgressUpdateOutcome> {
-        self.update_job_progress_internal(job_id, update, true)
+        self.update_job_progress_internal(job_id, update, true, None, None)
+    }
+
+    /// HTTP terminal acceptance with an optional completed engine report.
+    /// Receipt admission and the job terminal transition share one SQLite
+    /// transaction; a stale claim or mismatched artifact set commits neither.
+    pub fn update_job_progress_with_execution_receipt(
+        &self,
+        job_id: &str,
+        update: ProgressUpdate,
+        receipt: Option<&crate::execution_receipt::WorkerExecutionReceipt>,
+        capability: Option<&str>,
+    ) -> JobsStoreResult<ProgressUpdateOutcome> {
+        self.update_job_progress_internal(job_id, update, true, receipt, capability)
     }
 
     fn update_job_progress_internal(
@@ -3913,6 +4060,8 @@ impl JobsStore {
         job_id: &str,
         update: ProgressUpdate,
         track_terminal_side_effects: bool,
+        receipt: Option<&crate::execution_receipt::WorkerExecutionReceipt>,
+        capability: Option<&str>,
     ) -> JobsStoreResult<ProgressUpdateOutcome> {
         if !JOB_STATUSES.contains(&update.status.as_str()) {
             return Err(JobsStoreError::InvalidStatus(
@@ -3948,6 +4097,28 @@ impl JobsStore {
         // progress report — that's exactly the failure mode the heartbeat
         // machinery exists to handle.
         let current = self.get_job_on_connection(&transaction, job_id)?;
+        // A keyed claim makes every completed transition private, even when a
+        // provider can only report that execution facts are unavailable. A
+        // client that knows a worker ID cannot finish the job first and erase
+        // the worker's opportunity to publish its receipt.
+        if update.status == JobStatus::Completed {
+            let stored_secret: Option<String> = transaction.query_row(
+                "select execution_claim_capability from jobs where id = ?1",
+                params![job_id],
+                |row| row.get(0),
+            )?;
+            if let Some(stored_secret) = stored_secret {
+                let matches = capability.is_some_and(|submitted| {
+                    stored_secret.len() == submitted.len()
+                        && bool::from(stored_secret.as_bytes().ct_eq(submitted.as_bytes()))
+                });
+                if !matches {
+                    return Err(JobsStoreError::NotJobOwner {
+                        job_id: job_id.to_owned(),
+                    });
+                }
+            }
+        }
         let previous_status = current.status.clone();
         if is_terminal_status(current.status.as_str()) {
             let side_effects_pending =
@@ -3964,6 +4135,18 @@ impl JobsStore {
                         return Err(JobsStoreError::NotJobOwner {
                             job_id: job_id.to_owned(),
                         });
+                    }
+                }
+                if receipt.is_some() {
+                    let existing: Option<String> = transaction.query_row(
+                        "select execution_receipt_json from jobs where id = ?1",
+                        params![job_id],
+                        |row| row.get(0),
+                    )?;
+                    if existing.is_none() {
+                        return Err(JobsStoreError::InvalidResultItem(
+                            "terminal execution receipt is absent".into(),
+                        ));
                     }
                 }
                 return Ok(ProgressUpdateOutcome {
@@ -3986,6 +4169,112 @@ impl JobsStore {
                 });
             }
         }
+        let mut result = update.result.clone();
+        if let Some(result) = result.as_mut() {
+            merge_training_sample_history(Some(&current.result), result);
+            merge_progress_result_accumulations(Some(&current.result), result);
+            result.remove(crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY);
+            if let Some(provenance) = current
+                .extra
+                .get(crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY)
+            {
+                result.insert(
+                    crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY.to_owned(),
+                    provenance.clone(),
+                );
+            }
+        }
+        let execution_receipt_json = if let Some(receipt) = receipt {
+            if update.status != JobStatus::Completed {
+                return Err(JobsStoreError::InvalidResultItem(
+                    "execution receipt requires completed status".into(),
+                ));
+            }
+            let (stored_secret, frozen_digest, accepted_backend, source_route_json): (
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ) = transaction.query_row(
+                "select execution_claim_capability, execution_claim_binding_sha256,
+                            execution_claim_backend, execution_claim_source_route_json
+                       from jobs where id = ?1",
+                params![job_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+            let (Some(stored_secret), Some(submitted_secret), Some(frozen_digest)) =
+                (stored_secret, capability, frozen_digest)
+            else {
+                return Err(JobsStoreError::NotJobOwner {
+                    job_id: job_id.to_owned(),
+                });
+            };
+            if stored_secret.len() != submitted_secret.len()
+                || !bool::from(stored_secret.as_bytes().ct_eq(submitted_secret.as_bytes()))
+            {
+                return Err(JobsStoreError::NotJobOwner {
+                    job_id: job_id.to_owned(),
+                });
+            }
+            let assigned_gpu = current.assigned_gpu.as_deref().ok_or_else(|| {
+                JobsStoreError::InvalidResultItem("execution route is not assigned".into())
+            })?;
+            let portable_binding = Self::read_portable_binding(&transaction, job_id)?;
+            let accepted_backend = accepted_backend.ok_or_else(|| {
+                JobsStoreError::InvalidResultItem("accepted backend is absent".into())
+            })?;
+            let accepted_source_route: Option<Value> = source_route_json
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?;
+            let current_digest = execution_binding_sha256(
+                &current,
+                assigned_gpu,
+                &portable_binding,
+                &accepted_backend,
+                &accepted_source_route,
+            )?;
+            if current_digest != frozen_digest {
+                return Err(JobsStoreError::InvalidResultItem(
+                    "accepted execution binding changed after claim".into(),
+                ));
+            }
+            let result = result.as_ref().ok_or_else(|| {
+                JobsStoreError::InvalidResultItem("completed execution result is absent".into())
+            })?;
+            crate::execution_receipt::validate_worker_receipt(receipt, result)
+                .map_err(|error| JobsStoreError::InvalidResultItem(error.reason))?;
+            if receipt.execution.get("state").and_then(Value::as_str) == Some("resolved")
+                && receipt
+                    .execution
+                    .pointer("/identity/backend")
+                    .and_then(Value::as_str)
+                    != Some(accepted_backend.as_str())
+            {
+                return Err(JobsStoreError::InvalidResultItem(
+                    "completed report backend differs from the claimed route".into(),
+                ));
+            }
+            let trusted = crate::execution_receipt::TrustedExecutionReceipt {
+                version: crate::execution_receipt::EXECUTION_RECEIPT_VERSION,
+                job_id: job_id.to_owned(),
+                job_type: current.job_type.as_str().to_owned(),
+                worker_id: current.worker_id.clone().unwrap_or_default(),
+                attempt_id: crate::execution_receipt::capability_id(&stored_secret),
+                accepted_backend,
+                accepted_source_route,
+                inference_revision: crate::inference_provenance::INFERENCE_REVISION.to_owned(),
+                accepted_binding_sha256: frozen_digest,
+                completed_result_sha256: crate::execution_receipt::json_sha256(&Value::Object(
+                    result.clone(),
+                ))?,
+                execution: receipt.execution.clone(),
+                outputs: receipt.outputs.clone(),
+            };
+            Some(dumps(&trusted)?)
+        } else {
+            None
+        };
         let now = utc_now();
         let completed_at = is_terminal_status(update.status.as_str()).then_some(now.clone());
         let canceled_at = (update.status == JobStatus::Canceled).then_some(now.clone());
@@ -4000,29 +4289,6 @@ impl JobsStore {
         let peak_load = update
             .peak_gpu_load_pct
             .map(|value| value.clamp(0.0, 100.0));
-        let mut result = update.result;
-        if let Some(result) = result.as_mut() {
-            // Reuse the result we already read above (same transaction/row) rather
-            // than re-selecting result_json each update (sc-4274 / F-CORE-14).
-            merge_training_sample_history(Some(&current.result), result);
-            // Same wholesale-replace hazard, image lane (sc-8953 follow-through,
-            // 2026-10-27): the worker posts a SLIM result on every denoise step
-            // (`slim_step_result` — the accumulated `assetWrites`/`generationSet`/
-            // `prefixKvCache` ride only the per-image / terminal posts, or the
-            // per-step SSE fan-out OOM-kills the WebView2 renderer mid-batch). A slim
-            // tick omitting them must not blank them off the durable row.
-            merge_progress_result_accumulations(Some(&current.result), result);
-            result.remove(crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY);
-            if let Some(provenance) = current
-                .extra
-                .get(crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY)
-            {
-                result.insert(
-                    crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY.to_owned(),
-                    provenance.clone(),
-                );
-            }
-        }
         transaction.execute(
             "
             update jobs
@@ -4047,7 +4313,8 @@ impl JobsStore {
                    backend = coalesce(backend, ?13),
                    progress_side_effects_pending = ?14,
                    progress_side_effects_retry_count = 0,
-                   progress_side_effects_retry_at = 0
+                   progress_side_effects_retry_at = 0,
+                   execution_receipt_json = coalesce(?16, execution_receipt_json)
              where id = ?15
             ",
             params![
@@ -4066,6 +4333,7 @@ impl JobsStore {
                 update.backend,
                 side_effects_pending,
                 job_id,
+                execution_receipt_json,
             ],
         )?;
         let job = self.get_job_on_connection(&transaction, job_id)?;

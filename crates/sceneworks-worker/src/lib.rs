@@ -1788,6 +1788,7 @@ enum JobOutcome {
 struct ClaimedJob {
     job: JobSnapshot,
     portable_model_binding: Option<PortableRouteBinding>,
+    execution_claim_capability: Option<String>,
 }
 
 /// Runtime backend advertised to the private portable-source claim. The worker repeats this
@@ -1830,13 +1831,16 @@ async fn run_job_with_shutdown(
 ) -> JobOutcome {
     let job_id = claimed.job.id.clone();
     let shutdown = gen_core::CancelFlag::new();
-    let job_future = run_utility_job(
-        api,
-        settings,
-        http_client,
-        claimed.job,
-        claimed.portable_model_binding,
-        shutdown.clone(),
+    let job_future = with_execution_claim_capability(
+        claimed.execution_claim_capability,
+        run_utility_job(
+            api,
+            settings,
+            http_client,
+            claimed.job,
+            claimed.portable_model_binding,
+            shutdown.clone(),
+        ),
     );
     tokio::pin!(job_future);
 
@@ -1977,6 +1981,7 @@ async fn poll_once(
     Ok(Some(ClaimedJob {
         job,
         portable_model_binding: claim.portable_model_binding,
+        execution_claim_capability: claim.execution_claim_capability,
     }))
 }
 

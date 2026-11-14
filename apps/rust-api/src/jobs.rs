@@ -276,10 +276,16 @@ pub(crate) async fn claim_job(
                     payload.portable_platform.as_deref(),
                     keyed,
                 )?;
+            let execution_claim_capability = job
+                .as_ref()
+                .map(|claimed| store.execution_claim_capability(&claimed.id, &payload.worker_id))
+                .transpose()?
+                .flatten();
             Ok::<_, JobsStoreError>((
                 job,
                 decision,
                 portable_binding,
+                execution_claim_capability,
                 stranded,
                 unsupported,
                 candle_stranded,
@@ -295,6 +301,7 @@ pub(crate) async fn claim_job(
         response,
         decision,
         portable_binding,
+        execution_claim_capability,
         stranded,
         unsupported,
         candle_stranded,
@@ -385,6 +392,7 @@ pub(crate) async fn claim_job(
     Ok(Json(ClaimResponse {
         job: response,
         portable_model_binding,
+        execution_claim_capability,
         extra: Default::default(),
     }))
 }
@@ -2731,6 +2739,25 @@ pub(crate) async fn update_job_progress(
     let peak_gpu_load_pct =
         optional_number_to_f64(payload.peak_gpu_load_pct.as_ref(), "peakGpuLoadPct")?;
     let submitted_result = payload.result;
+    if submitted_result.as_ref().is_some_and(|result| {
+        result.contains_key("executionReceipt") || result.contains_key("executionClaimCapability")
+    }) {
+        return Err(ApiError::bad_request(
+            "Execution receipts use the private terminal report field",
+        ));
+    }
+    let submitted_execution_receipt = payload
+        .extra
+        .get("executionReceipt")
+        .cloned()
+        .map(serde_json::from_value::<sceneworks_core::execution_receipt::WorkerExecutionReceipt>)
+        .transpose()
+        .map_err(|error| ApiError::bad_request(format!("Invalid execution receipt: {error}")))?;
+    let execution_claim_capability = payload
+        .extra
+        .get("executionClaimCapability")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
 
     // Test-only one-shot rendezvous that makes a competing terminal transition
     // deterministic. Take the hook before awaiting so the competing request is
@@ -2756,8 +2783,10 @@ pub(crate) async fn update_job_progress(
         let message = payload.message.clone();
         let error = payload.error.clone();
         let backend = payload.backend.clone();
+        let receipt = submitted_execution_receipt.clone();
+        let capability = execution_claim_capability.clone();
         move |store, _timeout| {
-            store.update_job_progress_with_outcome(
+            store.update_job_progress_with_execution_receipt(
                 &job_id,
                 ProgressUpdate {
                     status,
@@ -2772,6 +2801,8 @@ pub(crate) async fn update_job_progress(
                     backend,
                     worker_id,
                 },
+                receipt.as_ref(),
+                capability.as_deref(),
             )
         }
     })
