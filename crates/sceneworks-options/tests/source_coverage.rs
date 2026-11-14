@@ -1499,6 +1499,15 @@ fn production_execution_has_no_raw_advanced_reads() {
                     | ("write_image_asset", "phases")
             )
     };
+    // The verified worker dispatch clone already has typed control-weight validity. This
+    // get_mut only finds the object to replace its private path with a confined source path;
+    // the exact rewrite site is pinned by raw_option_map_mutations_have_reviewed_sites.
+    let trusted_control_weights_write = |read: &Read| {
+        read.file == "crates/sceneworks-worker/src/external_library_runtime.rs"
+            && read.function == "rewrite_loader_locator"
+            && read.location == "advanced"
+            && read.key == "controlWeights"
+    };
     let direct = coverage
         .reads
         .iter()
@@ -1507,6 +1516,7 @@ fn production_execution_has_no_raw_advanced_reads() {
                 && !authored_workflow_read(read)
                 && !persisted_film_attempt_read(read)
                 && !authored_image_metadata_read(read)
+                && !trusted_control_weights_write(read)
         })
         .map(|read| {
             format!(
