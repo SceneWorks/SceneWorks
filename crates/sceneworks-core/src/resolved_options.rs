@@ -210,6 +210,44 @@ impl RouteOptionFacts {
     }
 }
 
+/// A bare training route probe cannot run submission resolution because it may omit the target
+/// catalog facts. Preserve malformed parent objects so unsupported training intent fails closed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrainingRouteFacts {
+    pub network_type: RouteField<String>,
+}
+
+impl TrainingRouteFacts {
+    pub fn from_plan_syntax(plan: &JsonObject) -> Self {
+        let network_type = plan
+            .get("config")
+            .ok_or(())
+            .and_then(|value| value.as_object().ok_or(()))
+            .and_then(|config| config.get("advanced").ok_or(()))
+            .and_then(|value| value.as_object().ok_or(()));
+        let network_type = match network_type {
+            Ok(advanced) => match advanced.get("networkType") {
+                None => RouteField::Absent,
+                Some(Value::Null) => RouteField::Null,
+                Some(Value::String(value)) => RouteField::Valid(value.clone()),
+                Some(_) => RouteField::Invalid,
+            },
+            // An omitted advanced object is ordinary absence; malformed or missing config is
+            // invalid because no training route can prove that the plan is well formed.
+            Err(())
+                if plan
+                    .get("config")
+                    .and_then(Value::as_object)
+                    .is_some_and(|config| !config.contains_key("advanced")) =>
+            {
+                RouteField::Absent
+            }
+            Err(()) => RouteField::Invalid,
+        };
+        Self { network_type }
+    }
+}
+
 /// Training controls that API admission, portable routing and worker orchestration inspect.
 /// The shared training resolver owns their defaults and refusals; this only lowers its effective
 /// payload once into typed fields. The engine's complete validated model options travel through
@@ -586,6 +624,25 @@ mod tests {
         assert_eq!(
             bound.restore_degradation_wire.unwrap().value,
             obj(json!({"use_hflip":false}))
+        );
+    }
+
+    #[test]
+    fn training_route_probe_retains_missing_and_malformed_network_intent() {
+        let plan = obj(json!({"config":{"advanced":{"networkType":"LoKr"}}}));
+        assert_eq!(
+            TrainingRouteFacts::from_plan_syntax(&plan).network_type,
+            RouteField::Valid("LoKr".to_owned())
+        );
+        let absent = obj(json!({"config":{"advanced":{}}}));
+        assert_eq!(
+            TrainingRouteFacts::from_plan_syntax(&absent).network_type,
+            RouteField::Absent
+        );
+        let malformed = obj(json!({"config":{"advanced":[]}}));
+        assert_eq!(
+            TrainingRouteFacts::from_plan_syntax(&malformed).network_type,
+            RouteField::Invalid
         );
     }
 }

@@ -3460,12 +3460,13 @@ pub(crate) use routing::mlx_flux_strict_control_engine_id;
 use routing::prepare_image_route;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use routing::{candle_adapter_label, is_candle_engine, prepare_candle_image_route};
+#[cfg(test)]
+pub(crate) use sampling::read_advanced_guidance_method;
 #[cfg(native_lane)]
 #[allow(unused_imports)]
 // Retain the existing crate-visible interface on every original cfg lane.
 pub(crate) use sampling::{
     curated_image_menu, emit_load_event, emit_sampling_knob_unsupported, normalize_sampling_knob,
-    read_advanced_guidance_method,
 };
 
 #[cfg(target_os = "macos")]

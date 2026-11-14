@@ -69,12 +69,14 @@ pub(crate) use routing::mlx::*;
 // (`tests/jobs_store.rs`) import these already-public items from `jobs_store::` directly.
 pub use routing::catalog::{
     candle_routed_image_models, checkpoint_plan_checkpoint_id, imported_control_intent_is_material,
-    imported_entry_installed_path, imported_entry_loadable_path, imported_entry_source_codec,
+    imported_control_intent_is_material_resolved, imported_entry_installed_path,
+    imported_entry_loadable_path, imported_entry_source_codec,
     imported_image_model_lora_advertisement, imported_image_request_provider_eligible,
-    imported_pose_control_mode_is_supported, imported_provider_routes,
-    imported_video_adapter_surface_claimable, imported_video_lane_claims_with_lora,
-    imported_video_model_candle_support, imported_video_model_mac_support, is_builtin_image_model,
-    mac_capabilities, model_candle_support, model_mac_support, training_kernel_is_candle_routed,
+    imported_pose_control_mode_is_supported, imported_pose_control_mode_is_supported_resolved,
+    imported_provider_routes, imported_video_adapter_surface_claimable,
+    imported_video_lane_claims_with_lora, imported_video_model_candle_support,
+    imported_video_model_mac_support, is_builtin_image_model, mac_capabilities,
+    model_candle_support, model_mac_support, training_kernel_is_candle_routed,
     video_job_type_for_mode, ImportedProviderSurface, MacCapabilities, ModelCandleSupport,
     MAC_NOT_AVAILABLE_LABEL, MLX_ROUTED_TRAINING_KERNELS,
 };
