@@ -15,9 +15,9 @@ pub struct H3VedaSettings {
     pub full_attention_layers: Vec<usize>,
     pub full_attention_steps: Vec<usize>,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Wire {
+pub struct H3VedaWire {
     #[serde(default)]
     enabled: bool,
     #[serde(default = "budget_default")]
@@ -123,13 +123,33 @@ pub fn requested_h3_veda(
     if !matches!(model, "minimax_h3" | "minimax_h3_ref") {
         return Err("advanced.veda is only supported by MiniMax-H3".into());
     }
+    if !(1..=200).contains(&effective_steps) {
+        return Err("advanced.veda: H3 sampling steps must be in 1..=200".into());
+    }
+    let wire: H3VedaWire =
+        serde_json::from_value(value.clone()).map_err(|e| format!("advanced.veda: {e}"))?;
+    requested_h3_veda_wire(model, Some(&wire), effective_steps)
+}
+
+/// Resolve the already-bound Veda control against the selected native schedule. The
+/// schedule is only known after the route chooses its recipe, so index expansion lives
+/// here rather than in the portable static validator or the binder.
+pub fn requested_h3_veda_wire(
+    model: &str,
+    wire: Option<&H3VedaWire>,
+    effective_steps: u32,
+) -> Result<Option<H3VedaSettings>, String> {
+    let Some(wire) = wire else {
+        return Ok(None);
+    };
+    if !matches!(model, "minimax_h3" | "minimax_h3_ref") {
+        return Err("advanced.veda is only supported by MiniMax-H3".into());
+    }
     // Both native H3 providers declare MAX_STEPS=200 (model.rs). Check the actual
     // schedule before expanding ranges, including disabled persisted controls.
     if !(1..=200).contains(&effective_steps) {
         return Err("advanced.veda: H3 sampling steps must be in 1..=200".into());
     }
-    let wire: Wire =
-        serde_json::from_value(value.clone()).map_err(|e| format!("advanced.veda: {e}"))?;
     let field = |name: &str, e: String| format!("advanced.veda.{name}: {e}");
     Ok(Some(H3VedaSettings {
         enabled: wire.enabled,

@@ -18,9 +18,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub use crate::h3_veda::{requested_h3_veda, H3VedaBudget, H3VedaSettings};
+pub use crate::h3_veda::{
+    requested_h3_veda, requested_h3_veda_wire, H3VedaBudget, H3VedaSettings, H3VedaWire,
+};
 
 use crate::contracts::JsonObject;
+use crate::resolved_options::{BindingError, BindingInput, Bound};
 // Compatibility exports preserve established callers while canonical image/neutral
 // request code imports its own owner. No image implementation remains in this module.
 pub use crate::image_limits::{
@@ -40,6 +43,88 @@ use crate::payload_util::{
     array_or_empty, clamped_u32, declared_resolution, nonempty_string_or, object_or_empty,
     optional_i64, optional_id, parse_u32, string_list,
 };
+
+// These are effective controls, lowered once after the portable validator resolves the
+// request. None of the reads below supplies a fallback or interprets an authored spelling.
+// A missing provider/model default stays absent for the native route to resolve from its
+// typed model facts. `Bound` retains whether the value was authored or resolved.
+macro_rules! video_option_fields {
+    ($($field:ident: $ty:ty => $read:ident($key:literal),)+) => {
+        #[derive(Debug, Clone, PartialEq, Default)]
+        pub struct VideoOptions {
+            $(pub $field: Option<Bound<$ty>>,)+
+        }
+
+        impl VideoOptions {
+            pub fn bind(input: &BindingInput<'_>) -> Result<Self, BindingError> {
+                Ok(Self {
+                    $($field: input.$read("advanced", $key)?,)+
+                })
+            }
+        }
+    };
+}
+
+video_option_fields! {
+    steps: i64 => integer("steps"),
+    guidance_scale: f64 => number("guidanceScale"),
+    scheduler_shift: f64 => number("schedulerShift"),
+    sampler: String => text("sampler"),
+    scheduler: String => text("scheduler"),
+    mlx_quantize: i64 => integer("mlxQuantize"),
+    text_encoder_model: String => text("textEncoderModel"),
+    motion: String => text("motion"),
+    ltx_pipeline: String => text("ltxPipeline"),
+    distilled_variant: String => text("distilledVariant"),
+    precision: String => text("precision"),
+    quantization: String => text("quantization"),
+    transformer_variant: String => text("transformerVariant"),
+    vae_decoder: String => text("vaeDecoder"),
+    auto_duration: bool => boolean("autoDuration"),
+    auto_duration_min_seconds: f64 => number("autoDurationMinSeconds"),
+    auto_duration_max_seconds: f64 => number("autoDurationMaxSeconds"),
+    temporal_upsample_rounds: i64 => integer("temporalUpsampleRounds"),
+    use_distill_lora: bool => boolean("useDistillLora"),
+    distill_stage1_strength: f64 => number("distillStage1Strength"),
+    distill_stage2_strength: f64 => number("distillStage2Strength"),
+    use_uncensored_enhancer: bool => boolean("useUncensoredEnhancer"),
+    no_audio: bool => boolean("noAudio"),
+    lightning: bool => boolean("lightning"),
+    video_cfg_guidance_scale: f64 => number("videoCfgGuidanceScale"),
+    video_stg_guidance_scale: f64 => number("videoStgGuidanceScale"),
+    video_rescale_scale: f64 => number("videoRescaleScale"),
+    video_conditioning_strength: f64 => number("videoConditioningStrength"),
+    bridge_right_video_conditioning_strength: f64 => number("bridgeRightVideoConditioningStrength"),
+    image_conditioning_strength: f64 => number("imageConditioningStrength"),
+    last_frame_conditioning_strength: f64 => number("lastFrameConditioningStrength"),
+    image_frame_index: i64 => integer("imageFrameIndex"),
+    masking_strength: f64 => number("maskingStrength"),
+    conditioning_scale: f64 => number("conditioningScale"),
+    motion_anchor_frames: i64 => integer("motionAnchorFrames"),
+    veda: H3VedaWire => structured("veda"),
+    reference_image_short_edge: i64 => integer("referenceImageShortEdge"),
+    reference_image_resize_mode: String => text("referenceImageResizeMode"),
+    conditioning_fps: i64 => integer("conditioningFps"),
+    num_frames: i64 => integer("numFrames"),
+    motion_bucket_id: i64 => integer("motionBucketId"),
+    noise_aug_strength: f64 => number("noiseAugStrength"),
+    decode_chunk_size: i64 => integer("decodeChunkSize"),
+    enhance_prompt: bool => boolean("enhancePrompt"),
+}
+
+impl VideoOptions {
+    pub fn h3_veda_settings(
+        &self,
+        model: &str,
+        effective_steps: u32,
+    ) -> Result<Option<H3VedaSettings>, String> {
+        requested_h3_veda_wire(
+            model,
+            self.veda.as_ref().map(|bound| &bound.value),
+            effective_steps,
+        )
+    }
+}
 
 /// Every wire mode the video enqueue API admits. Model/backend eligibility is
 /// checked separately; MCP reachability compares its emitted modes to this contract.
@@ -2163,6 +2248,32 @@ mod tests {
 
     fn payload(value: Value) -> JsonObject {
         value.as_object().cloned().unwrap()
+    }
+
+    #[test]
+    fn video_options_bind_canonical_values_with_authored_origin() {
+        let authored = payload(json!({"advanced": {
+            "steps": "8", "guidanceScale": "3.5", "noAudio": true
+        }}));
+        let effective = payload(json!({"advanced": {
+            "steps": 8, "guidanceScale": 3.5, "noAudio": true,
+            "referenceImageResizeMode": "match"
+        }}));
+        let options = VideoOptions::bind(&BindingInput::new(&authored, &effective)).unwrap();
+        assert_eq!(options.steps.unwrap().value, 8);
+        assert_eq!(options.guidance_scale.unwrap().value, 3.5);
+        assert_eq!(options.no_audio.unwrap().value, true);
+        assert_eq!(options.reference_image_resize_mode.unwrap().value, "match");
+        assert!(options.vae_decoder.is_none());
+
+        let unresolved = VideoOptions::bind(&BindingInput::new(&authored, &authored));
+        assert!(matches!(
+            unresolved,
+            Err(BindingError::InvalidEffectiveValue {
+                id: "advanced.steps",
+                ..
+            })
+        ));
     }
 
     // ----------------------------------------------------------------------------------------
