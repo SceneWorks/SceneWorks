@@ -224,8 +224,9 @@ function writeCache(studio, workspaceId, settings) {
     window.localStorage.setItem(storageKey(studio, workspaceId), JSON.stringify(settings));
     return true;
   } catch {
-    // localStorage unavailable — preserve the durable write attempt below.
-    return true;
+    // The durable PUT rebuilds the whole map from this cache. A failed write must
+    // not send an empty or stale replacement map to the server.
+    return false;
   }
 }
 

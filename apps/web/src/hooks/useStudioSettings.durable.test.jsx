@@ -234,13 +234,13 @@ describe("advanced studio settings are durable (sc-15425)", () => {
     }
   });
 
-  it("still sends the durable copy when localStorage cannot be written", async () => {
+  it("does not replace the durable map when localStorage cannot be written", async () => {
     const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
       throw new Error("storage unavailable");
     });
     try {
       await render(<Harness settings={{ prompt: "server only" }} />);
-      expect(persistNavigationPreferences).toHaveBeenCalledOnce();
+      expect(persistNavigationPreferences).not.toHaveBeenCalled();
     } finally {
       setItem.mockRestore();
     }
