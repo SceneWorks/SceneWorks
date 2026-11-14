@@ -125,7 +125,10 @@ impl DescribeModel {
 /// snapshot. A quantised tier is the `<tier>/` folder of this engine's re-host repository: it was
 /// quantised ahead of time, so loading it never reads or load-quantises the full-precision files.
 #[cfg(native_lane)]
-fn qwen38_describer_weights_dir(settings: &Settings, tier: &str) -> WorkerResult<PathBuf> {
+pub(crate) fn qwen38_describer_weights_dir(
+    settings: &Settings,
+    tier: &str,
+) -> WorkerResult<PathBuf> {
     use sceneworks_core::dataset_batch_describe::{
         QWEN38_27B_DESCRIBER_CANDLE_REPO, QWEN38_27B_DESCRIBER_MLX_REPO,
     };
@@ -317,9 +320,9 @@ pub(crate) trait BatchDescriber: Send + Sync {
 /// The Vision Captioner (Qwen3-VL) describer: a JSON-constrained decode on the resident refine-model
 /// cache, the model loaded once and reused across the dataset's images.
 #[cfg(native_lane)]
-struct VisionCaptionerDescriber {
-    weights_dir: PathBuf,
-    job_id: String,
+pub(crate) struct VisionCaptionerDescriber {
+    pub(crate) weights_dir: PathBuf,
+    pub(crate) job_id: String,
 }
 
 #[cfg(native_lane)]
