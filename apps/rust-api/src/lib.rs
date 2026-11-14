@@ -418,7 +418,11 @@ const HEARTBEAT_SSE_WIRE: &str = "event: heartbeat\ndata: {}\n\n";
 fn generation_wire_kind<T: 'static>() -> Option<&'static str> {
     use std::any::TypeId;
     let id = TypeId::of::<T>();
-    if id == TypeId::of::<LoraTrainingRequest>() {
+    if id == TypeId::of::<PersonDetectionJobRequest>() {
+        Some("personDetect")
+    } else if id == TypeId::of::<PersonTrackJobRequest>() {
+        Some("personTrack")
+    } else if id == TypeId::of::<LoraTrainingRequest>() {
         Some("training")
     } else if id == TypeId::of::<sceneworks_core::yue2_score::jobs::Yue2JobSpec>() {
         Some("yue2")

@@ -132,6 +132,9 @@ pub fn validate_shape(kind: &str, payload: &JsonObject) -> Result<(), Validation
             }
             "videoUpscale" => crate::utility_validation::validate_video_upscale(&decode(payload)?),
             "promptRefine" => crate::utility_validation::validate_prompt_refine(payload),
+            "personDetect" | "personTrack" => {
+                crate::utility_validation::person_controls(payload).map(|_| ())
+            }
             _ => Ok(()),
         }
     })()
@@ -202,6 +205,15 @@ pub fn resolve(
     }
     if matches!(kind, "image" | "video" | "vqa" | "interleave") {
         crate::effective_values::resolve_advanced(&mut resolved, entry);
+    }
+    if matches!(kind, "personDetect" | "personTrack") {
+        let controls = crate::utility_validation::person_controls(payload)?;
+        let advanced = resolved.entry("advanced").or_insert_with(|| json!({}));
+        if advanced.is_null() {
+            *advanced = json!({});
+        }
+        advanced["confidence"] = json!(controls.confidence);
+        advanced["segment"] = json!(controls.segment);
     }
     Ok(resolved)
 }

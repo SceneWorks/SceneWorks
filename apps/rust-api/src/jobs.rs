@@ -1579,6 +1579,8 @@ async fn validate_and_canonicalize_merged_generation_payload(
     if matches!(
         job_type,
         JobType::VideoUpscale
+            | JobType::PersonDetect
+            | JobType::PersonTrack
             | JobType::PromptRefine
             | JobType::LoraTrain
             | JobType::ControlTraining

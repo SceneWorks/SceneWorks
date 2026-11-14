@@ -126,6 +126,12 @@ pub fn shape(kind: &str, payload: &Value) -> Result<(), ShapeError> {
                         true
                     }
                     Shape::OneOf("2 | 4") => matches!(value.as_u64(), Some(2 | 4)),
+                    Shape::OneOf(_) if spec.id == "advanced.captionOverflow" => {
+                        parent.as_object().is_some_and(|advanced| {
+                            crate::image_sampling_controls::requested_caption_overflow(advanced)
+                                .is_ok()
+                        })
+                    }
                     Shape::OneOf(_) if spec.location == "promptRefine" => value.is_string(),
                     Shape::OneOf(description)
                         if !spec.compatibility.contains("Unknown or absent")

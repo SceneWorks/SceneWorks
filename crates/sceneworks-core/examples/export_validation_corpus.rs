@@ -72,6 +72,11 @@ fn main() {
         );
     };
     add("image model defaults", "image", image.clone());
+    add(
+        "image default caption policy",
+        "image",
+        json!({"projectId":"p","model":"flux_dev","prompt":"tree","advanced":{"captionOverflow":" default "}}),
+    );
     for (key, value) in [
         ("width", json!("1024")),
         ("count", json!(1.5)),
@@ -159,6 +164,18 @@ fn main() {
         json!({"sourceAssetId":"clip","factor":3}),
     );
     add("prompt refine", "promptRefine", json!({"prompt":"a tree"}));
+    for kind in ["personDetect", "personTrack"] {
+        add(
+            &format!("{kind} legacy confidence"),
+            kind,
+            json!({"confidence":0.7}),
+        );
+        add(
+            &format!("{kind} invalid confidence"),
+            kind,
+            json!({"advanced":{"confidence":"bad"}}),
+        );
+    }
     add(
         "prompt refine malformed policy",
         "promptRefine",

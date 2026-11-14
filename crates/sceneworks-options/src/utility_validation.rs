@@ -174,3 +174,87 @@ pub fn validate_prompt_refine(payload: &JsonObject) -> Result<(), ValidationRefu
     }
     Ok(())
 }
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PersonControls {
+    pub confidence: f64,
+    pub segment: bool,
+}
+/// Shared detector/tracker controls. A present advanced confidence owns precedence even when
+/// null; only an absent key consults the historical top-level spelling.
+pub fn person_controls(payload: &JsonObject) -> Result<PersonControls, ValidationRefusal> {
+    let advanced = match payload.get("advanced") {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(value)) => Some(value),
+        Some(_) => {
+            return Err(ValidationRefusal::new(
+                "advanced",
+                "advanced must be an object",
+            ))
+        }
+    };
+    let confidence = advanced
+        .and_then(|value| value.get("confidence"))
+        .or_else(|| payload.get("confidence"));
+    let confidence = match confidence {
+        None | Some(Value::Null) => 0.25,
+        Some(value) => value
+            .as_f64()
+            .or_else(|| value.as_str()?.parse().ok())
+            .filter(|value: &f64| value.is_finite())
+            .ok_or_else(|| {
+                ValidationRefusal::new(
+                    "advanced.confidence",
+                    "confidence must be a finite number or numeric string",
+                )
+            })?,
+    }
+    .clamp(0.01, 1.0);
+    let segment = match advanced.and_then(|value| value.get("segment")) {
+        None | Some(Value::Null) => true,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => {
+            return Err(ValidationRefusal::new(
+                "advanced.segment",
+                "segment must be a boolean",
+            ))
+        }
+    };
+    Ok(PersonControls {
+        confidence,
+        segment,
+    })
+}
+
+#[cfg(test)]
+#[test]
+fn person_controls_preserve_precedence_and_refuse_malformed_authored_values() {
+    let resolve = |value: Value| person_controls(value.as_object().unwrap());
+    assert_eq!(
+        resolve(json!({})).unwrap(),
+        PersonControls {
+            confidence: 0.25,
+            segment: true
+        }
+    );
+    assert_eq!(resolve(json!({"confidence":0.7})).unwrap().confidence, 0.7);
+    assert_eq!(
+        resolve(json!({"confidence":0.7,"advanced":{"confidence":null}}))
+            .unwrap()
+            .confidence,
+        0.25
+    );
+    assert_eq!(
+        resolve(json!({"confidence":0.7,"advanced":{"confidence":"3","segment":false}})).unwrap(),
+        PersonControls {
+            confidence: 1.0,
+            segment: false
+        }
+    );
+    for value in [json!("bad"), json!(" 0.3 "), json!({})] {
+        assert_eq!(
+            resolve(json!({"confidence":value})).unwrap_err().field,
+            "advanced.confidence"
+        );
+    }
+}

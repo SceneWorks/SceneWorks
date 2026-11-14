@@ -14,6 +14,8 @@ pub fn kind_for_job(job_type: &crate::contracts::JobType) -> Option<&'static str
         VectorGenerate => Some("vector"),
         VideoUpscale => Some("videoUpscale"),
         PromptRefine => Some("promptRefine"),
+        PersonDetect => Some("personDetect"),
+        PersonTrack => Some("personTrack"),
         ImageVqa => Some("vqa"),
         ImageInterleave => Some("interleave"),
         _ => None,

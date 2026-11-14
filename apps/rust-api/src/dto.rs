@@ -409,6 +409,10 @@ pub(crate) struct FrameExtractRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PersonDetectionJobRequest {
+    #[serde(default)]
+    pub(crate) advanced: JsonObject,
+    #[serde(default)]
+    pub(crate) confidence: Option<Value>,
     pub(crate) source_asset_id: String,
     #[serde(default)]
     pub(crate) source_timestamp: Option<f64>,
@@ -423,6 +427,10 @@ pub(crate) struct PersonDetectionJobRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PersonTrackJobRequest {
+    #[serde(default)]
+    pub(crate) advanced: JsonObject,
+    #[serde(default)]
+    pub(crate) confidence: Option<Value>,
     pub(crate) source_asset_id: String,
     pub(crate) representative_frame_asset_id: String,
     pub(crate) detection: JsonObject,

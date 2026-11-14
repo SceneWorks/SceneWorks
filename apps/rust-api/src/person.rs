@@ -46,6 +46,10 @@ pub(crate) async fn create_person_detection_job(
     })
     .await?;
     let mut job_payload = JsonObject::new();
+    job_payload.insert("advanced".into(), Value::Object(payload.advanced));
+    if let Some(confidence) = payload.confidence {
+        job_payload.insert("confidence".into(), confidence);
+    }
     job_payload.insert("projectId".to_owned(), Value::String(project_id.clone()));
     job_payload.insert(
         "sourceAssetId".to_owned(),
@@ -82,6 +86,10 @@ pub(crate) async fn create_person_track_job(
     })
     .await?;
     let mut job_payload = JsonObject::new();
+    job_payload.insert("advanced".into(), Value::Object(payload.advanced));
+    if let Some(confidence) = payload.confidence {
+        job_payload.insert("confidence".into(), confidence);
+    }
     job_payload.insert("projectId".to_owned(), Value::String(project_id.clone()));
     job_payload.insert(
         "sourceAssetId".to_owned(),

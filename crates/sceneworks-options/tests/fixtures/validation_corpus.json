@@ -4858,13 +4858,46 @@
             "faceRestore": false,
             "controlScale": 0.7,
             "openPoseScale": 0.7,
-            "flashAttn": true,
-            "mlxQuantize": 4,
             "mlxQuantizeExplicit": false,
-            "convRot": false,
-            "segment": true,
-            "confidence": 0.25
+            "convRot": false
           }
+        }
+      }
+    },
+    {
+      "name": "image default caption policy",
+      "kind": "image",
+      "model": "flux_dev",
+      "payload": {
+        "projectId": "p",
+        "model": "flux_dev",
+        "prompt": "tree",
+        "advanced": {
+          "captionOverflow": " default "
+        }
+      },
+      "expected": {
+        "ok": true,
+        "resolved": {
+          "projectId": "p",
+          "model": "flux_dev",
+          "prompt": "tree",
+          "advanced": {
+            "resolution": "1024x1024",
+            "steps": 28,
+            "guidanceScale": 3.5,
+            "usePid": false,
+            "pidTarget": "4k",
+            "trueCfgScale": 4.0,
+            "faceRestore": false,
+            "controlScale": 0.7,
+            "openPoseScale": 0.7,
+            "mlxQuantizeExplicit": false,
+            "convRot": false
+          },
+          "width": 1024,
+          "height": 1024,
+          "count": 1
         }
       }
     },
@@ -4973,12 +5006,8 @@
             "faceRestore": false,
             "controlScale": 0.7,
             "openPoseScale": 0.7,
-            "flashAttn": true,
-            "mlxQuantize": 4,
             "mlxQuantizeExplicit": false,
-            "convRot": false,
-            "segment": true,
-            "confidence": 0.25
+            "convRot": false
           },
           "width": 1024,
           "height": 1024,
@@ -5110,9 +5139,7 @@
             "lastFrameConditioningStrength": 1,
             "imageFrameIndex": 0,
             "maskingStrength": 1,
-            "conditioningScale": 1,
-            "segment": true,
-            "confidence": 0.25
+            "conditioningScale": 1
           }
         }
       }
@@ -5480,12 +5507,8 @@
             "maxImages": 6,
             "maxNewTokens": 2048,
             "thinkMode": false,
-            "flashAttn": true,
-            "mlxQuantize": 4,
             "mlxQuantizeExplicit": false,
-            "convRot": false,
-            "segment": true,
-            "confidence": 0.25
+            "convRot": false
           }
         }
       }
@@ -5550,12 +5573,8 @@
             "maxImages": 6,
             "maxNewTokens": 2048,
             "thinkMode": false,
-            "flashAttn": true,
-            "mlxQuantize": 4,
             "mlxQuantizeExplicit": false,
-            "convRot": false,
-            "segment": true,
-            "confidence": 0.25
+            "convRot": false
           }
         }
       }
@@ -5638,6 +5657,90 @@
         "ok": true,
         "resolved": {
           "prompt": "a tree"
+        }
+      }
+    },
+    {
+      "name": "personDetect legacy confidence",
+      "kind": "personDetect",
+      "model": "",
+      "payload": {
+        "confidence": 0.7
+      },
+      "expected": {
+        "ok": true,
+        "resolved": {
+          "confidence": 0.7,
+          "advanced": {
+            "confidence": 0.7,
+            "segment": true
+          }
+        }
+      }
+    },
+    {
+      "name": "personDetect invalid confidence",
+      "kind": "personDetect",
+      "model": "",
+      "payload": {
+        "advanced": {
+          "confidence": "bad"
+        }
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "advanced.confidence",
+          "detail": "advanced.confidence has an invalid value for Number",
+          "context": {
+            "kind": "personDetect",
+            "model": null,
+            "mode": null,
+            "field": "advanced.confidence"
+          }
+        }
+      }
+    },
+    {
+      "name": "personTrack legacy confidence",
+      "kind": "personTrack",
+      "model": "",
+      "payload": {
+        "confidence": 0.7
+      },
+      "expected": {
+        "ok": true,
+        "resolved": {
+          "confidence": 0.7,
+          "advanced": {
+            "confidence": 0.7,
+            "segment": true
+          }
+        }
+      }
+    },
+    {
+      "name": "personTrack invalid confidence",
+      "kind": "personTrack",
+      "model": "",
+      "payload": {
+        "advanced": {
+          "confidence": "bad"
+        }
+      },
+      "expected": {
+        "ok": false,
+        "refusal": {
+          "code": "invalid_generation_option",
+          "field": "advanced.confidence",
+          "detail": "advanced.confidence has an invalid value for Number",
+          "context": {
+            "kind": "personTrack",
+            "model": null,
+            "mode": null,
+            "field": "advanced.confidence"
+          }
         }
       }
     },

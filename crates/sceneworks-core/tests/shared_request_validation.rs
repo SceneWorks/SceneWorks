@@ -222,3 +222,20 @@ fn portable_video_refusal_agrees_with_native_lane_owner() {
         }
     }
 }
+
+#[test]
+fn effective_defaults_do_not_fabricate_unsupported_family_controls() {
+    for model in ["moss_image_base", "moss_image_sft", "supra2_img"] {
+        let entry = facts(model, "text_to_image");
+        let payload = json!({"projectId":"p","model":model,"prompt":"tree"});
+        let resolved = options::request_validation::resolve(
+            "image",
+            payload.as_object().unwrap(),
+            entry.as_object().unwrap(),
+        )
+        .unwrap();
+        assert!(resolved["advanced"].get("flashAttn").is_none());
+        sceneworks_core::moss_image::native_request(&resolved, entry.as_object().unwrap()).unwrap();
+        sceneworks_core::supra2::validate_request(&resolved, entry.as_object().unwrap()).unwrap();
+    }
+}

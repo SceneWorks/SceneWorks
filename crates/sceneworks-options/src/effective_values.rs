@@ -64,7 +64,9 @@ fn visit(value: &mut Value, path: &[&str], spec: &OptionSpec, context: &OptionCo
             .find_map(|key| object.get(*key).cloned())
     });
     if effective.as_ref().is_none_or(Value::is_null) {
-        effective = if spec.applies_when.matches(context) {
+        effective = if spec.applies_when.matches(context)
+            && context.model.get("family").and_then(Value::as_str) != Some("moss_image")
+        {
             match spec.default {
                 DefaultRule::Literal(json) => serde_json::from_str(json).ok(),
                 DefaultRule::Model(path) => path
@@ -79,6 +81,11 @@ fn visit(value: &mut Value, path: &[&str], spec: &OptionSpec, context: &OptionCo
         // Some declaration paths identify a compound selection rather than its resolved object.
         // Leave those to the owning structured resolver instead of inserting the wrong wire type.
         effective = effective.filter(|value| matches_shape(value, spec.shape));
+    }
+    if spec.id == "advanced.captionOverflow" {
+        effective = crate::image_sampling_controls::requested_caption_overflow(object)
+            .expect("validated caption policy")
+            .map(|policy| Value::from(policy.name()));
     }
     if let Some(mut effective) = effective {
         if spec.compatibility.contains("numeric string") {
