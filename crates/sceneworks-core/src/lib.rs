@@ -85,6 +85,8 @@ pub mod preview_support;
 pub mod process;
 pub mod project_store;
 pub mod registry;
+pub use sceneworks_options as options;
+pub mod options_context;
 pub mod safe_path;
 pub mod safetensors;
 pub mod session_log;

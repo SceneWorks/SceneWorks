@@ -13,6 +13,7 @@ test-support = []
 model-inference-proof = []
 
 [dependencies]
+sceneworks-options = { path = "../sceneworks-options" }
 reqwest = { workspace = true, features = ["rustls-tls", "json", "stream"] }
 tokio = { workspace = true, features = ["rt", "time", "process", "io-util", "macros"] }
 sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "4a36a7f8c9645110df4df656ca9d492e55ab6c7c" }

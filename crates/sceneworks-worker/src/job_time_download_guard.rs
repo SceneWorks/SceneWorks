@@ -858,11 +858,16 @@ const SCANNED_CRATES: &[(&str, &str, &str, usize)] = &[
 
 /// Workspace members deliberately NOT scanned, as `(path, why)`.
 ///
-/// Empty, and [`scanned_crates_cover_the_workspace`] keeps it honest: a crate added to
+/// [`scanned_crates_cover_the_workspace`] keeps this explicit: a crate added to
 /// `[workspace] members` must either be scanned or be excluded here on purpose. Without that tie a
 /// brand-new crate can hold a brand-new `<data_dir>/cache` weight destination and never be looked
 /// at — which is the same "hand-maintained list nobody validates" failure the primitive list had.
-const UNSCANNED_WORKSPACE_MEMBERS: &[(&str, &str)] = &[];
+const UNSCANNED_WORKSPACE_MEMBERS: &[(&str, &str)] = &[
+    (
+        "crates/sceneworks-options",
+        "Portable declarations and pure JSON predicates, depending only on serde/serde_json in production. No settings, filesystem, network or job-execution API exposes the app data dir; reclassify if that boundary changes.",
+    ),
+];
 
 /// The externally-visible, network-reaching surface of every [`HTTP_CLIENT_FILES`] member **other
 /// than `downloads.rs`**, as `(file, fn name, what it does)`.

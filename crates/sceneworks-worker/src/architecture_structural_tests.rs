@@ -469,6 +469,7 @@ fn workspace_manifests() -> Vec<(String, toml::Value)> {
 #[test]
 fn cargo_dependency_direction_is_an_executable_graph_rule() {
     let expected: BTreeSet<(String, String)> = [
+        ("sceneworks-core", "sceneworks-options"),
         ("sceneworks-desktop", "sceneworks-core"),
         ("sceneworks-rust-api", "sceneworks-core"),
         ("sceneworks-rust-api", "sceneworks-image-quality"),
@@ -486,7 +487,7 @@ fn cargo_dependency_direction_is_an_executable_graph_rule() {
     .collect();
     let mut manifests = workspace_manifests();
     assert_eq!(internal_edges(&manifests), expected, "internal crate edges changed: reconsider layering explicitly (including dev/build/target dependencies)");
-    // Core -> gen-core and memory-adapter -> core are valid. A renamed, target-specific
+    // Core consumes portable options and backend-neutral gen-core. A renamed, target-specific
     // dependency back to the worker is not: inspect Cargo's package field, not its alias.
     let core = manifests
         .iter_mut()
