@@ -826,7 +826,7 @@ pub(crate) async fn exact_replay_job(
         store.create_exact_replay_job(&job_id, timeout)
     })
     .await
-    .map_err(|error| {
+    .inspect_err(|error| {
         if error.code == Some("replay_unavailable") {
             let reason = error
                 .context
@@ -836,7 +836,6 @@ pub(crate) async fn exact_replay_job(
                 .unwrap_or("unspecified");
             tracing::info!(event = "exact_replay_refused", job_id = %replay_job_id, reason);
         }
-        error
     })?;
     publish(&state, "job.updated", &public_job_snapshot(job.clone()));
     publish_queue(&state).await?;
