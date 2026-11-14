@@ -1962,37 +1962,11 @@ async fn run_voice_clone_synthesis_completed(
     .await
 }
 
-/// [`run_voice_clone_synthesis`] with the base-TTS + converter loaders injected (sc-13469). Both
+/// Base-TTS and converter loaders injected for the two-call clone path (sc-13469). Both
 /// backend calls run inside ONE blocking task under ONE shared engine [`CancelFlag`] threaded into
 /// BOTH the base [`GenerationRequest::cancel`] and the [`AudioTransformRequest::cancel`], so a cancel
 /// requested while EITHER call is in-flight trips promptly — the two-call trap (the converter request
 /// used to default `cancel` to a fresh, never-tripped flag via `..Default::default()`).
-#[allow(clippy::too_many_arguments)]
-#[cfg(test)]
-async fn run_voice_clone_synthesis_using(
-    api: &ApiClient,
-    settings: &Settings,
-    job: &JobSnapshot,
-    request: &AudioRequest,
-    plan: VoiceClonePlan,
-    load_base: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>> + Send + 'static,
-    load_converter: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn AudioTransform>>
-        + Send
-        + 'static,
-) -> WorkerResult<gen_core::AudioTrack> {
-    run_voice_clone_synthesis_using_completed(
-        api,
-        settings,
-        job,
-        request,
-        plan,
-        load_base,
-        load_converter,
-    )
-    .await
-    .map(|(track, _)| track)
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn run_voice_clone_synthesis_using_completed(
     api: &ApiClient,
