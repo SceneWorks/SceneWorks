@@ -343,6 +343,10 @@ impl TrainingRouteFacts {
 pub struct IrisTrainingOptions {
     pub network_type: Option<Bound<String>>,
     pub mixed_precision: Option<Bound<String>>,
+    pub control_type: Option<Bound<String>>,
+    pub person_gate: Option<Bound<bool>>,
+    pub resume_from_job_id: Option<Bound<String>>,
+    pub load_from_job_id: Option<Bound<String>>,
     pub depth_init: Option<Bound<String>>,
     pub stage: Option<Bound<String>>,
     pub parent_stage: Option<Bound<String>>,
@@ -361,6 +365,10 @@ impl IrisTrainingOptions {
         Ok(Self {
             network_type: input.text("training.config.advanced", "networkType")?,
             mixed_precision: input.text("training.config.advanced", "mixedPrecision")?,
+            control_type: input.text("training.config.advanced", "controlType")?,
+            person_gate: input.boolean("training.config.advanced", "personGate")?,
+            resume_from_job_id: input.text("training.config.advanced", "resumeFromJobId")?,
+            load_from_job_id: input.text("training.config.advanced", "loadFromJobId")?,
             depth_init: input.text("training.config.advanced", "depthInit")?,
             stage: input.text("training.config.advanced.iris", "stage")?,
             parent_stage: input.text("training.config.advanced.iris", "parent_stage")?,
@@ -792,13 +800,18 @@ mod tests {
     #[test]
     fn nested_training_controls_bind_without_reinterpreting_the_engine_wire() {
         let authored = obj(json!({"plan":{"config":{"advanced":{
-            "networkType":"full", "mixedPrecision":"fp16",
+            "networkType":"full", "mixedPrecision":"fp16", "controlType":"canny",
+            "personGate":true, "resumeFromJobId":"job-r", "loadFromJobId":"job-l",
             "iris":{"stage":"S2", "repa":{"weight":0.25},
                 "dist":{"strategy":"ddp"}},
             "iris_restore":{"init":"parent","degradation":{"use_hflip":false}}
         }}}}));
         let bound = IrisTrainingOptions::bind(&BindingInput::new(&authored, &authored)).unwrap();
         assert_eq!(bound.network_type.as_ref().unwrap().value, "full");
+        assert_eq!(bound.control_type.as_ref().unwrap().value, "canny");
+        assert!(bound.person_gate.as_ref().unwrap().value);
+        assert_eq!(bound.resume_from_job_id.as_ref().unwrap().value, "job-r");
+        assert_eq!(bound.load_from_job_id.as_ref().unwrap().value, "job-l");
         assert_eq!(bound.stage.as_ref().unwrap().value, "S2");
         assert_eq!(bound.dist_strategy.as_ref().unwrap().value, "ddp");
         assert!(bound.repa_enabled());
