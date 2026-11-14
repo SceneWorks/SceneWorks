@@ -123,6 +123,26 @@ pub(crate) fn resolve_selected_aux_source(
     data_dir: &Path,
     payload: &JsonObject,
 ) -> Option<(PathBuf, bool)> {
+    let tile_repo = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("tileControlNetRepo"))
+        .and_then(Value::as_str);
+    let plan_base_model_path = payload
+        .get("plan")
+        .and_then(|plan| plan.get("target"))
+        .and_then(|target| target.get("baseModelPath"))
+        .and_then(Value::as_str);
+    resolve_selected_aux_source_typed(source_id, data_dir, tile_repo, plan_base_model_path)
+}
+
+/// Resolve an auxiliary source from the bound tile repository selection.
+pub(crate) fn resolve_selected_aux_source_typed(
+    source_id: &str,
+    data_dir: &Path,
+    tile_control_net_repo: Option<&str>,
+    plan_base_model_path: Option<&str>,
+) -> Option<(PathBuf, bool)> {
     let snapshot = |repo| crate::model_jobs::huggingface_snapshot_dir(data_dir, repo);
     match source_id {
         "instantid_mlx" => {
@@ -270,11 +290,7 @@ pub(crate) fn resolve_selected_aux_source(
         }
         #[cfg(native_lane)]
         "ltx_training_text_encoder" => {
-            let model_dir = payload
-                .get("plan")?
-                .get("target")?
-                .get("baseModelPath")?
-                .as_str()?;
+            let model_dir = plan_base_model_path?;
             let path = crate::video_jobs::ltx::resolve_bundled_ltx_gemma_dir(Path::new(model_dir))?;
             let overridden = std::env::var_os("LTX_GEMMA_DIR")
                 .is_some_and(|value| path.as_os_str() == value.as_os_str());
@@ -372,11 +388,7 @@ pub(crate) fn resolve_selected_aux_source(
             }
         }
         "sdxl_detail_tile_control" => {
-            let repo = payload
-                .get("advanced")
-                .and_then(Value::as_object)
-                .and_then(|advanced| advanced.get("tileControlNetRepo"))
-                .and_then(Value::as_str)
+            let repo = tile_control_net_repo
                 .filter(|repo| !repo.trim().is_empty())
                 .unwrap_or("xinsir/controlnet-tile-sdxl-1.0");
             let root = snapshot(repo)?;
