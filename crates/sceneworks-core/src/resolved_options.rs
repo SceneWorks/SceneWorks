@@ -49,6 +49,117 @@ pub enum BindingError {
     },
 }
 
+/// The syntactic state of an option in a saved request or a bare routing probe. Routing must
+/// retain malformed intent so a different provider cannot silently claim the request. Policy,
+/// coercion, and defaults are applied by the shared resolver for full submissions.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RouteField<T> {
+    Absent,
+    Null,
+    Valid(T),
+    Invalid,
+}
+
+impl<T> RouteField<T> {
+    pub fn is_absent_or_null(&self) -> bool {
+        matches!(self, Self::Absent | Self::Null)
+    }
+
+    pub fn is_present_nonnull(&self) -> bool {
+        matches!(self, Self::Valid(_) | Self::Invalid)
+    }
+}
+
+/// A one-time typed projection for routing probes, including old or malformed saved payloads.
+/// Structured carriers expose only the shape routing needs; execution binds their full domain
+/// structs after the shared resolver has returned an effective request.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RouteOptionFacts {
+    pub poses: RouteField<usize>,
+    pub phases: RouteField<usize>,
+    pub control_mode: RouteField<String>,
+    pub control_image: RouteField<String>,
+    pub control_weights: RouteField<()>,
+    pub mlx_quantize: RouteField<i64>,
+    pub quant_tier: RouteField<String>,
+    pub decoder: RouteField<String>,
+    pub enhance_prompt: RouteField<bool>,
+    pub use_pid: RouteField<bool>,
+    pub veda_enabled: RouteField<bool>,
+    pub use_uncensored_enhancer: RouteField<bool>,
+    pub text_encoder_model: RouteField<String>,
+    pub strength: RouteField<f64>,
+    pub hires_fix_enabled: RouteField<bool>,
+    pub conv_rot: RouteField<bool>,
+}
+
+impl RouteOptionFacts {
+    /// Parse only JSON syntax. A malformed `advanced` object marks every advanced carrier invalid
+    /// because treating it as empty could make an unsupported route appear eligible.
+    pub fn from_payload_syntax(payload: &JsonObject) -> Self {
+        fn parent<'a>(root: &'a JsonObject, key: &str) -> Result<Option<&'a JsonObject>, ()> {
+            match root.get(key) {
+                None | Some(Value::Null) => Ok(None),
+                Some(Value::Object(map)) => Ok(Some(map)),
+                Some(_) => Err(()),
+            }
+        }
+        fn field<T>(
+            map: Result<Option<&JsonObject>, ()>,
+            key: &str,
+            decode: impl FnOnce(&Value) -> Option<T>,
+        ) -> RouteField<T> {
+            match map {
+                Err(()) => RouteField::Invalid,
+                Ok(None) => RouteField::Absent,
+                Ok(Some(map)) => match map.get(key) {
+                    None => RouteField::Absent,
+                    Some(Value::Null) => RouteField::Null,
+                    Some(value) => decode(value)
+                        .map(RouteField::Valid)
+                        .unwrap_or(RouteField::Invalid),
+                },
+            }
+        }
+        fn text(value: &Value) -> Option<String> {
+            value.as_str().map(str::to_owned)
+        }
+        fn boolean(value: &Value) -> Option<bool> {
+            value.as_bool()
+        }
+        fn count(value: &Value) -> Option<usize> {
+            value.as_array().map(Vec::len)
+        }
+        let advanced = parent(payload, "advanced");
+        let veda = match advanced {
+            Err(()) => Err(()),
+            Ok(None) => Ok(None),
+            Ok(Some(map)) => parent(map, "veda"),
+        };
+        let hires_fix = parent(payload, "hiresFix");
+        Self {
+            poses: field(advanced, "poses", count),
+            phases: field(advanced, "phases", count),
+            control_mode: field(advanced, "controlMode", text),
+            control_image: field(advanced, "controlImage", text),
+            control_weights: field(advanced, "controlWeights", |v| v.as_object().map(|_| ())),
+            mlx_quantize: field(advanced, "mlxQuantize", Value::as_i64),
+            quant_tier: field(advanced, "quantTier", text),
+            decoder: field(advanced, "decoder", text),
+            enhance_prompt: field(advanced, "enhancePrompt", boolean),
+            use_pid: field(advanced, "usePid", boolean),
+            veda_enabled: field(veda, "enabled", boolean),
+            use_uncensored_enhancer: field(advanced, "useUncensoredEnhancer", boolean),
+            text_encoder_model: field(advanced, "textEncoderModel", text),
+            strength: field(advanced, "strength", |v| {
+                v.as_f64().filter(|n| n.is_finite())
+            }),
+            hires_fix_enabled: field(hires_fix, "enabled", boolean),
+            conv_rot: field(advanced, "convRot", boolean),
+        }
+    }
+}
+
 /// Ephemeral input used only at the boundary where the shared validator has already returned
 /// its effective clone. Domain-specific lowering consumes this and retains typed `Bound<T>`
 /// fields. Neither raw map is stored in an execution request.
@@ -308,5 +419,28 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn route_projection_preserves_absent_null_valid_and_malformed_intent() {
+        let facts = RouteOptionFacts::from_payload_syntax(&obj(json!({
+            "advanced": {
+                "poses": [], "controlMode": null, "controlImage": 17,
+                "mlxQuantize": 4, "veda": {"enabled": true}
+            },
+            "hiresFix": {"enabled": false}
+        })));
+        assert_eq!(facts.poses, RouteField::Valid(0));
+        assert_eq!(facts.phases, RouteField::Absent);
+        assert_eq!(facts.control_mode, RouteField::Null);
+        assert_eq!(facts.control_image, RouteField::Invalid);
+        assert_eq!(facts.mlx_quantize, RouteField::Valid(4));
+        assert_eq!(facts.veda_enabled, RouteField::Valid(true));
+        assert_eq!(facts.hires_fix_enabled, RouteField::Valid(false));
+
+        let malformed = RouteOptionFacts::from_payload_syntax(&obj(json!({"advanced": []})));
+        assert_eq!(malformed.poses, RouteField::Invalid);
+        assert_eq!(malformed.control_mode, RouteField::Invalid);
+        assert_eq!(malformed.veda_enabled, RouteField::Invalid);
     }
 }
