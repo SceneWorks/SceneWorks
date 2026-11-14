@@ -210,6 +210,55 @@ impl RouteOptionFacts {
     }
 }
 
+/// Training controls that API admission, portable routing and worker orchestration inspect.
+/// The shared training resolver owns their defaults and refusals; this only lowers its effective
+/// payload once into typed fields. The engine's complete validated model options travel through
+/// its existing wire contract separately.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct IrisTrainingOptions {
+    pub network_type: Option<Bound<String>>,
+    pub mixed_precision: Option<Bound<String>>,
+    pub stage: Option<Bound<String>>,
+    pub parent_stage: Option<Bound<String>>,
+    pub resume_data_policy: Option<Bound<String>>,
+    pub resume_optimizer: Option<Bound<String>>,
+    pub dist_strategy: Option<Bound<String>>,
+    pub repa_weight: Option<Bound<f64>>,
+    pub restore_init: Option<Bound<String>>,
+    pub restore_resume_data_policy: Option<Bound<String>>,
+    /// Validated opaque engine ABI; callers may pass it to the engine parser, not read its keys.
+    pub restore_degradation_wire: Option<Bound<JsonObject>>,
+}
+
+impl IrisTrainingOptions {
+    pub fn bind(input: &BindingInput<'_>) -> Result<Self, BindingError> {
+        Ok(Self {
+            network_type: input.text("training.config.advanced", "networkType")?,
+            mixed_precision: input.text("training.config.advanced", "mixedPrecision")?,
+            stage: input.text("training.config.advanced.iris", "stage")?,
+            parent_stage: input.text("training.config.advanced.iris", "parent_stage")?,
+            resume_data_policy: input
+                .text("training.config.advanced.iris", "resume_data_policy")?,
+            resume_optimizer: input.text("training.config.advanced.iris", "resume_optimizer")?,
+            dist_strategy: input.text("training.config.advanced.iris.dist", "strategy")?,
+            repa_weight: input.number("training.config.advanced.iris.repa", "weight")?,
+            restore_init: input.text("training.config.advanced.iris_restore", "init")?,
+            restore_resume_data_policy: input.text(
+                "training.config.advanced.iris_restore",
+                "resume_data_policy",
+            )?,
+            restore_degradation_wire: input
+                .structured("training.config.advanced.iris_restore", "degradation")?,
+        })
+    }
+
+    pub fn repa_enabled(&self) -> bool {
+        self.repa_weight
+            .as_ref()
+            .is_some_and(|weight| weight.value > 0.0)
+    }
+}
+
 /// Ephemeral input used only at the boundary where the shared validator has already returned
 /// its effective clone. Domain-specific lowering consumes this and retains typed `Bound<T>`
 /// fields. Neither raw map is stored in an execution request.
@@ -228,8 +277,17 @@ impl<'a> BindingInput<'a> {
     }
 
     fn parent(root: &'a JsonObject, location: &str) -> Option<&'a Map<String, Value>> {
-        let mut map = root;
-        for part in location.split('.') {
+        // Registry training locations are logical paths. Submission payloads store `config`
+        // at the root or under `plan`; neither serializes a literal `training` wrapper.
+        let (mut map, path) = if let Some(path) = location.strip_prefix("training.") {
+            (
+                root.get("plan").and_then(Value::as_object).unwrap_or(root),
+                path,
+            )
+        } else {
+            (root, location)
+        };
+        for part in path.split('.') {
             map = map.get(part)?.as_object()?;
         }
         Some(map)
@@ -494,5 +552,40 @@ mod tests {
         assert_eq!(malformed.poses_all_objects, RouteField::Invalid);
         assert_eq!(malformed.control_mode, RouteField::Invalid);
         assert_eq!(malformed.veda_enabled, RouteField::Invalid);
+    }
+
+    #[test]
+    fn training_logical_paths_bind_root_and_plan_payloads() {
+        for authored in [
+            obj(json!({"config":{"advanced":{"iris":{"stage":"S2"}}}})),
+            obj(json!({"plan":{"config":{"advanced":{"iris":{"stage":"S2"}}}}})),
+        ] {
+            let bound = BindingInput::new(&authored, &authored)
+                .text("training.config.advanced.iris", "stage")
+                .unwrap()
+                .unwrap();
+            assert_eq!(bound.value, "S2");
+            assert_eq!(bound.origin, Origin::Authored { spelling: "stage" });
+        }
+    }
+
+    #[test]
+    fn nested_training_controls_bind_without_reinterpreting_the_engine_wire() {
+        let authored = obj(json!({"plan":{"config":{"advanced":{
+            "networkType":"full", "mixedPrecision":"fp16",
+            "iris":{"stage":"S2", "repa":{"weight":0.25},
+                "dist":{"strategy":"ddp"}},
+            "iris_restore":{"init":"parent","degradation":{"use_hflip":false}}
+        }}}}));
+        let bound = IrisTrainingOptions::bind(&BindingInput::new(&authored, &authored)).unwrap();
+        assert_eq!(bound.network_type.as_ref().unwrap().value, "full");
+        assert_eq!(bound.stage.as_ref().unwrap().value, "S2");
+        assert_eq!(bound.dist_strategy.as_ref().unwrap().value, "ddp");
+        assert!(bound.repa_enabled());
+        assert_eq!(bound.restore_init.as_ref().unwrap().value, "parent");
+        assert_eq!(
+            bound.restore_degradation_wire.unwrap().value,
+            obj(json!({"use_hflip":false}))
+        );
     }
 }
