@@ -13,9 +13,13 @@
 //! Fail-loud: the tier, the cache and the pinned snapshot must all be present. Nothing is downloaded
 //! (`qwen38-describer-provision.yml` fills the cache).
 //!
+//! The scene is 512x384 by default; `SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE=1536` draws the same
+//! scene at 1536x1536, so the peak of a large image can be measured.
+//!
 //! ```text
 //! $env:HF_HUB_CACHE = "E:\huggingface\hub"
 //! $env:SCENEWORKS_QWEN38_DESCRIBER_TIER = "q4"
+//! $env:SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE = "default"
 //! cargo test -p sceneworks-worker --features backend-candle --release --lib qwen38_describer_gpu_smoke -- --ignored --nocapture --test-threads=1
 //! ```
 
@@ -33,6 +37,7 @@ use crate::batch_describe_jobs::{
 };
 
 const TIER_ENV: &str = "SCENEWORKS_QWEN38_DESCRIBER_TIER";
+const IMAGE_SIDE_ENV: &str = "SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE";
 const CATALOG_ID: &str = "vision_describe_qwen3_8_27b";
 
 /// The catalog's pinned revision of the Candle re-host for `tier`.
@@ -53,16 +58,28 @@ fn catalog_candle_revision(tier: &str) -> String {
         .to_owned()
 }
 
+/// The scene size `$SCENEWORKS_QWEN38_DESCRIBER_IMAGE_SIDE` selects: unset, blank or `default` is
+/// 512x384; `1536` is 1536x1536. Anything else fails the run.
+fn scene_size() -> (u32, u32) {
+    let side = std::env::var(IMAGE_SIDE_ENV).unwrap_or_default();
+    match side.trim() {
+        "" | "default" => (512, 384),
+        "1536" => (1536, 1536),
+        other => panic!("${IMAGE_SIDE_ENV} must be default or 1536, got {other:?}"),
+    }
+}
+
 /// A simple synthetic scene: a red house with a brown roof and a door on green grass, under a blue
-/// sky with a yellow sun. Generated, so the run needs no checked-in or personal image.
-fn synthetic_scene() -> image::DynamicImage {
-    const WIDTH: u32 = 512;
-    const HEIGHT: u32 = 384;
-    let scene = image::RgbImage::from_fn(WIDTH, HEIGHT, |x, y| {
-        let (xf, yf) = (x as f32, y as f32);
+/// sky with a yellow sun. Generated, so the run needs no checked-in or personal image. The scene is
+/// laid out on a 512x384 plan and stretched to `width`x`height`; at 512x384 every pixel is the plan's.
+fn synthetic_scene(width: u32, height: u32) -> image::DynamicImage {
+    let (scale_x, scale_y) = (512.0 / width as f32, 384.0 / height as f32);
+    let scene = image::RgbImage::from_fn(width, height, |x, y| {
+        // This pixel's position on the 512x384 plan.
+        let (xf, yf) = (x as f32 * scale_x, y as f32 * scale_y);
         let sun = (xf - 410.0).powi(2) + (yf - 70.0).powi(2) <= 38.0_f32.powi(2);
-        let wall = (120..=250).contains(&x) && (190..=290).contains(&y);
-        let door = (170..=200).contains(&x) && (235..=290).contains(&y);
+        let wall = (120.0..=250.0).contains(&xf) && (190.0..=290.0).contains(&yf);
+        let door = (170.0..=200.0).contains(&xf) && (235.0..=290.0).contains(&yf);
         // Roof: a triangle with its apex at (185, 120) over the wall's top edge.
         let roof =
             (120.0..190.0).contains(&yf) && (xf - 185.0).abs() <= (yf - 120.0) * (75.0 / 70.0);
@@ -74,10 +91,10 @@ fn synthetic_scene() -> image::DynamicImage {
             image::Rgb([110, 70, 40])
         } else if sun {
             image::Rgb([250, 215, 60])
-        } else if y >= 270 {
-            image::Rgb([60, 150 - ((y - 270) / 4) as u8, 50])
+        } else if yf >= 270.0 {
+            image::Rgb([60, 150 - ((yf - 270.0) / 4.0) as u8, 50])
         } else {
-            let t = y as f32 / 270.0;
+            let t = yf / 270.0;
             image::Rgb([(110.0 + 80.0 * t) as u8, (160.0 + 60.0 * t) as u8, 235])
         }
     });
@@ -150,9 +167,10 @@ async fn qwen38_describer_describes_a_synthetic_scene_on_cuda() {
         })
     };
 
-    let scene = synthetic_scene();
-    let (scene_width, scene_height) = (scene.width(), scene.height());
+    let (scene_width, scene_height) = scene_size();
+    let scene = synthetic_scene(scene_width, scene_height);
     let describer = VisionCaptionerDescriber {
+        model: DescribeModel::Qwen38,
         weights_dir: weights_dir.clone(),
         job_id: "sw-7120-qwen38-describer-smoke".to_owned(),
     };
@@ -163,7 +181,8 @@ async fn qwen38_describer_describes_a_synthetic_scene_on_cuda() {
     stop.store(true, Ordering::Relaxed);
     let peak_mib = sampler.join().expect("sampler thread joins");
     eprintln!(
-        "RESULT model=qwen38_27b backend=candle tier={tier} gpu={gpu_index} baseline_mib={baseline_mib} \
+        "RESULT model=qwen38_27b backend=candle tier={tier} image={scene_width}x{scene_height} \
+         gpu={gpu_index} baseline_mib={baseline_mib} \
          peak_mib={peak_mib} peak_delta_mib={} wall_s={wall_seconds:.1}",
         peak_mib.saturating_sub(baseline_mib)
     );

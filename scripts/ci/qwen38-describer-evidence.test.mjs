@@ -52,6 +52,7 @@ for (const [name, mutate, tier] of [
   ['missing peak memory', (copy) => { delete copy.gpu_memory.peak_mib; }, 'q4'],
   ['a peak that was never sampled', (copy) => { copy.gpu_memory.peak_mib = 0; }, 'q4'],
   ['an unknown schema', (copy) => { copy.schema_version = 2; }, 'q4'],
+  ['a missing image size', (copy) => { delete copy.image; }, 'q4'],
 ]) {
   test(`reject ${name}`, () => {
     const copy = result();
@@ -65,10 +66,19 @@ test('the guard receipt must come from this actor and complete', () => {
   assert.throws(() => validateReceipt({ ...receipt(), actor: 'iris-worker' }));
   assert.throws(() => validateReceipt({ ...receipt(), kind: 'other' }));
 });
-test('the summary escapes table pipes and names the peak', () => {
+test('the summary escapes table pipes and names the peak and the image size', () => {
   const text = summary({ accepted: true, result: validateResult(result(), 'q4') });
   assert.match(text, /Peak GPU memory: 21000 MiB/);
+  assert.match(text, /Image: synthetic-scene, 512x384/);
   assert.match(text, /description text \\\| with a pipe/);
+});
+test('a 1536 run must have described a 1536x1536 scene', () => {
+  const large = result();
+  large.image = { kind: 'synthetic-scene', width: 1536, height: 1536 };
+  assert.match(summary({ accepted: true, result: validateResult(large, 'q4', '1536') }), /Image: synthetic-scene, 1536x1536/);
+  assert.throws(() => validateResult(result(), 'q4', '1536'), /image size/);
+  assert.throws(() => validateResult(large, 'q4', 'default'), /image size/);
+  assert.throws(() => validateResult(large, 'q4', '2048'), /image side/);
 });
 
 async function scratch(fn) {

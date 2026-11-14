@@ -66972,11 +66972,11 @@
         }
       },
       "mlx": {
-        "minMemoryGb": 62,
+        "minMemoryGb": 65,
         "minMemoryGbByTier": {
-          "bf16": 62,
-          "q4": 25,
-          "q8": 38
+          "bf16": 65,
+          "q4": 28,
+          "q8": 41
         }
       }
     },
