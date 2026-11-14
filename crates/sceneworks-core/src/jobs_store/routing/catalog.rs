@@ -2032,7 +2032,16 @@ pub fn training_kernel_is_candle_routed(kernel: &str) -> bool {
 }
 
 /// Both native MOSS lanes train adapters for the exact selected Base/SFT checkpoint only.
+#[cfg(test)]
 pub(crate) fn moss_training_plan_is_supported(plan: &Map<String, Value>) -> bool {
+    let route = crate::resolved_options::TrainingRouteFacts::from_plan_syntax(plan);
+    moss_training_plan_is_supported_with_facts(plan, &route)
+}
+
+pub(crate) fn moss_training_plan_is_supported_with_facts(
+    plan: &Map<String, Value>,
+    route: &crate::resolved_options::TrainingRouteFacts,
+) -> bool {
     let base = plan
         .get("target")
         .and_then(Value::as_object)
@@ -2041,7 +2050,6 @@ pub(crate) fn moss_training_plan_is_supported(plan: &Map<String, Value>) -> bool
     if !matches!(base, Some("moss_image_base" | "moss_image_sft")) {
         return false;
     }
-    let route = crate::resolved_options::TrainingRouteFacts::from_plan_syntax(plan);
     let method = match &route.network_type {
         crate::resolved_options::RouteField::Absent => "lora",
         crate::resolved_options::RouteField::Valid(value) if value.trim().is_empty() => "lora",

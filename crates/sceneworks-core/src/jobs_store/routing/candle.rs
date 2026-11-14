@@ -987,6 +987,7 @@ fn moss_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
 /// `advanced.mlxQuantize` is an optional advanced override, so a payload-level value `> 0` is a
 /// deliberate tier/quant request. Individual families may provide their own default tier or reject
 /// explicit dense encodings; this helper deliberately reports only an explicit positive request.
+#[cfg(test)]
 pub(crate) fn candle_request_wants_quant(payload: &Map<String, Value>) -> bool {
     candle_requested_quant_bits(payload).is_some()
 }
@@ -1011,8 +1012,16 @@ fn candle_requested_quant_bits_from_facts(
     }
 }
 
+#[cfg(test)]
 fn candle_request_wants_torch_quantization(payload: &Map<String, Value>) -> bool {
-    match crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload).quantization {
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    candle_request_wants_torch_quantization_with_facts(&facts)
+}
+
+fn candle_request_wants_torch_quantization_with_facts(
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
+    match &facts.quantization {
         crate::resolved_options::RouteField::Valid(value) => {
             let value = value.trim();
             !value.is_empty() && !value.eq_ignore_ascii_case("auto")
@@ -1041,6 +1050,13 @@ pub(crate) fn video_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     video_request_is_candle_eligible(&job.job_type, &job.payload)
 }
 
+pub(crate) fn video_job_is_candle_eligible_with_context(
+    job: &JobSnapshot,
+    context: &super::RouteContext<'_>,
+) -> bool {
+    video_request_is_candle_eligible_with_context(&job.job_type, context)
+}
+
 /// The `(job_type, payload)` form of [`video_job_is_candle_eligible`] — the same predicate,
 /// reachable before a [`JobSnapshot`] exists (sc-19504). See
 /// [`super::mlx::video_request_is_mlx_eligible`] for why the seam is shaped this way.
@@ -1048,10 +1064,25 @@ pub(crate) fn video_request_is_candle_eligible(
     job_type: &JobType,
     payload: &Map<String, Value>,
 ) -> bool {
+    let options = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    video_request_is_candle_eligible_with_context(
+        job_type,
+        &super::RouteContext {
+            payload,
+            options: &options,
+        },
+    )
+}
+
+fn video_request_is_candle_eligible_with_context(
+    job_type: &JobType,
+    context: &super::RouteContext<'_>,
+) -> bool {
+    let payload = context.payload;
     let Some(model) = payload.get("model").and_then(Value::as_str) else {
         return false;
     };
-    if candle_request_wants_torch_quantization(payload) {
+    if candle_request_wants_torch_quantization_with_facts(context.options) {
         // `advanced.quantization` selects a Torch GGUF overlay. Native Candle tiers use
         // `mlxQuantize`; accepting this field would silently discard the user's explicit choice.
         return false;
@@ -1074,8 +1105,8 @@ pub(crate) fn video_request_is_candle_eligible(
         // The base txt2video / image→video lane (sc-5097 / sc-5175 / sc-5493), plus SCAIL-2 standalone
         // character animation (`animate_character`, sc-6837 — a distinct candle engine, not VACE).
         JobType::VideoGenerate => {
-            video_request_candle_eligible(model, payload)
-                || scail2_animate_candle_eligible(model, payload)
+            video_request_candle_eligible_with_facts(model, payload, context.options)
+                || scail2_animate_candle_eligible_with_facts(model, payload, context.options)
                 // Bernini (sc-10997, epic 6562): t2v + the editing/reference/multi-source modes on the
                 // distinct candle `bernini` engine — its own gate (not the generic txt2video path).
                 || bernini_video_candle_eligible(model, payload)
@@ -1084,14 +1115,19 @@ pub(crate) fn video_request_is_candle_eligible(
         }
         // replace_person → candle Wan-VACE (sc-5494) OR candle SCAIL-2 (sc-6837, routed by model id).
         JobType::PersonReplace => {
-            video_request_candle_vace_eligible(model, payload, job_type)
-                || scail2_replace_candle_eligible(model, payload)
-                || ltx_replace_candle_eligible(model, payload)
+            video_request_candle_vace_eligible_with_facts(model, payload, job_type, context.options)
+                || scail2_replace_candle_eligible_with_facts(model, payload, context.options)
+                || ltx_replace_candle_eligible_with_facts(model, payload, context.options)
         }
         // extend_clip / video_bridge → candle Wan-VACE only (sc-5494).
         JobType::VideoExtend | JobType::VideoBridge => {
-            video_request_candle_eligible(model, payload)
-                || video_request_candle_vace_eligible(model, payload, job_type)
+            video_request_candle_eligible_with_facts(model, payload, context.options)
+                || video_request_candle_vace_eligible_with_facts(
+                    model,
+                    payload,
+                    job_type,
+                    context.options,
+                )
         }
         _ => false,
     }
@@ -1190,10 +1226,19 @@ pub(crate) fn video_mode_is_candle_eligible(model: &str, mode: &str) -> bool {
 /// Per-model candle txt2video-eligibility, factored out so the routing tests can probe it with
 /// synthetic payloads (parity with `image_request_candle_eligible`).
 pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    video_request_candle_eligible_with_facts(model, payload, &facts)
+}
+
+fn video_request_candle_eligible_with_facts(
+    model: &str,
+    payload: &Map<String, Value>,
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
     if !CANDLE_VIDEO_ROUTED_MODELS.contains(&model) {
         return false;
     }
-    if candle_request_wants_torch_quantization(payload) {
+    if candle_request_wants_torch_quantization_with_facts(facts) {
         return false;
     }
     if matches!(model, "ltx_2_3" | "ltx_2_3_eros" | "ltx_2_5") {
@@ -1360,8 +1405,9 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
     // lane — production q8 means the hosted packed `q8/` split bundle (INT8-ConvRot stays a
     // measurement-only selector on the inference side) — with no residual exclusion or parity
     // obligation. Other video providers remain dense and fail closed for positive tier requests.
-    if (candle_request_wants_quant(payload) || matches!(model, "ltx_2_3" | "ltx_2_5"))
-        && !candle_video_tier_select_eligible(model, payload)
+    if (candle_requested_quant_bits_from_facts(facts).is_some()
+        || matches!(model, "ltx_2_3" | "ltx_2_5"))
+        && !candle_video_tier_select_eligible(model, payload, facts)
     {
         return false;
     }
@@ -1376,9 +1422,11 @@ enum CandleLtxTier {
 }
 
 /// Parse only the exact packed tiers published by the shared LTX bundle.
-fn candle_ltx_requested_tier(payload: &Map<String, Value>) -> Option<CandleLtxTier> {
+fn candle_ltx_requested_tier(
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> Option<CandleLtxTier> {
     use crate::resolved_options::RouteField;
-    match crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload).mlx_quantize {
+    match &facts.mlx_quantize {
         RouteField::Absent | RouteField::Null => Some(CandleLtxTier::Q4),
         RouteField::Valid(..=0) => Some(CandleLtxTier::Bf16),
         RouteField::Valid(4) => Some(CandleLtxTier::Q4),
@@ -1387,9 +1435,13 @@ fn candle_ltx_requested_tier(payload: &Map<String, Value>) -> Option<CandleLtxTi
     }
 }
 
-fn candle_ltx_product_tier_eligible(model: &str, mode: &str, payload: &Map<String, Value>) -> bool {
+fn candle_ltx_product_tier_eligible(
+    model: &str,
+    mode: &str,
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
     matches!(
-        (model, candle_ltx_requested_tier(payload)),
+        (model, candle_ltx_requested_tier(facts)),
         ("ltx_2_3", Some(CandleLtxTier::Q4 | CandleLtxTier::Q8))
             | (
                 "ltx_2_5",
@@ -1406,7 +1458,11 @@ fn candle_ltx_product_tier_eligible(model: &str, mode: &str, payload: &Map<Strin
     )
 }
 
-fn candle_video_tier_select_eligible(model: &str, payload: &Map<String, Value>) -> bool {
+fn candle_video_tier_select_eligible(
+    model: &str,
+    payload: &Map<String, Value>,
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
     if matches!(
         model,
         "wan_2_2" | "wan_2_2_t2v_14b" | "wan_2_2_i2v_14b" | "minimax_h3" | "minimax_h3_ref"
@@ -1416,13 +1472,23 @@ fn candle_video_tier_select_eligible(model: &str, payload: &Map<String, Value>) 
     let Some(mode) = payload.get("mode").and_then(Value::as_str) else {
         return false;
     };
-    candle_ltx_product_tier_eligible(model, mode, payload)
+    candle_ltx_product_tier_eligible(model, mode, facts)
 }
 
 /// Native LTX replace-person eligibility. Unlike the historical generic Wan-VACE substitution, this
 /// route keeps the selected LTX/Eros model and forwards the tracked clip, masks, references, and
 /// selected IC-LoRA to that model's `ControlClip`/keyframe-append provider path.
+#[cfg(test)]
 pub(crate) fn ltx_replace_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    ltx_replace_candle_eligible_with_facts(model, payload, &facts)
+}
+
+fn ltx_replace_candle_eligible_with_facts(
+    model: &str,
+    payload: &Map<String, Value>,
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
     // SC-18902 withdrew the Eros Candle route after the exact-head CUDA render proved that its
     // undistilled checkpoint is not compatible with Candle's single-pass distilled recipe. Keep
     // this newer advanced-mode route aligned with the same product decision as the base lane.
@@ -1437,7 +1503,7 @@ pub(crate) fn ltx_replace_candle_eligible(model: &str, payload: &Map<String, Val
     {
         return false;
     }
-    candle_ltx_product_tier_eligible(model, "replace_person", payload)
+    candle_ltx_product_tier_eligible(model, "replace_person", facts)
 }
 
 /// Candle Wan-VACE eligibility for the advanced video job types (sc-5494): `PersonReplace`
@@ -1446,10 +1512,21 @@ pub(crate) fn ltx_replace_candle_eligible(model: &str, payload: &Map<String, Val
 /// dedicated VACE-Fun provider is admitted here only for PersonReplace and accepts user adapters;
 /// generic VACE still rejects them. Factored out so the routing tests can probe it with synthetic
 /// payloads (parity with [`video_request_candle_eligible`]).
+#[cfg(test)]
 pub(crate) fn video_request_candle_vace_eligible(
     model: &str,
     payload: &Map<String, Value>,
     job_type: &JobType,
+) -> bool {
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    video_request_candle_vace_eligible_with_facts(model, payload, job_type, &facts)
+}
+
+fn video_request_candle_vace_eligible_with_facts(
+    model: &str,
+    payload: &Map<String, Value>,
+    job_type: &JobType,
+    facts: &crate::resolved_options::RouteOptionFacts,
 ) -> bool {
     if model == "wan_2_2_vace_fun_14b" {
         if !matches!(job_type, JobType::PersonReplace) {
@@ -1488,7 +1565,7 @@ pub(crate) fn video_request_candle_vace_eligible(
     if model != "wan_2_2_vace_fun_14b" && has_nonempty_array(payload, "loras") {
         return false;
     }
-    if candle_request_wants_quant(payload) {
+    if candle_requested_quant_bits_from_facts(facts).is_some() {
         return false;
     }
     true
@@ -1498,9 +1575,11 @@ pub(crate) fn video_request_candle_vace_eligible(
 /// precision. Absence retains the established dense bf16 Candle baseline; q4/q8 are exact explicit
 /// package selections. This is deliberately stricter than the historical MLX range mapping: q6
 /// must not silently select q4/q8.
-fn scail2_candle_effective_tier(payload: &Map<String, Value>) -> Option<&'static str> {
+fn scail2_candle_effective_tier(
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> Option<&'static str> {
     use crate::resolved_options::RouteField;
-    match crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload).mlx_quantize {
+    match &facts.mlx_quantize {
         RouteField::Absent | RouteField::Null | RouteField::Valid(..=0) => Some("bf16"),
         RouteField::Valid(4) => Some("q4"),
         RouteField::Valid(8) => Some("q8"),
@@ -1509,12 +1588,21 @@ fn scail2_candle_effective_tier(payload: &Map<String, Value>) -> Option<&'static
 }
 
 /// The request selects one exact tier and never asks a packed provider to merge an adapter.
+#[cfg(test)]
 pub(crate) fn scail2_candle_source_tier_eligible(payload: &Map<String, Value>) -> bool {
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    scail2_candle_source_tier_eligible_with_facts(payload, &facts)
+}
+
+fn scail2_candle_source_tier_eligible_with_facts(
+    payload: &Map<String, Value>,
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
     let has_adapters = payload
         .get("loras")
         .and_then(Value::as_array)
         .is_some_and(|loras| !loras.is_empty());
-    let Some(tier) = scail2_candle_effective_tier(payload) else {
+    let Some(tier) = scail2_candle_effective_tier(facts) else {
         return false;
     };
     !has_adapters || tier == "bf16"
@@ -1528,12 +1616,12 @@ pub(crate) fn scail2_candle_source_tier_eligible(payload: &Map<String, Value>) -
 fn scail2_candle_product_tier_eligible(
     model: &str,
     mode: &str,
-    payload: &Map<String, Value>,
+    facts: &crate::resolved_options::RouteOptionFacts,
 ) -> bool {
     model == "scail2_14b"
         && matches!(mode, "animate_character" | "replace_person")
         && matches!(
-            scail2_candle_effective_tier(payload),
+            scail2_candle_effective_tier(facts),
             Some("q4" | "q8" | "bf16")
         )
 }
@@ -1547,7 +1635,17 @@ fn scail2_candle_product_tier_eligible(
 /// preserved and resolved to bf16 by the worker. Mirrors the MLX
 /// `video_mode_is_mlx_eligible(scail2_14b, animate_character)` shape, expressed as a candle-claim
 /// gate. Factored out so the routing tests can probe it (parity with [`video_request_candle_eligible`]).
+#[cfg(test)]
 pub(crate) fn scail2_animate_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    scail2_animate_candle_eligible_with_facts(model, payload, &facts)
+}
+
+fn scail2_animate_candle_eligible_with_facts(
+    model: &str,
+    payload: &Map<String, Value>,
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
     if model != "scail2_14b" {
         return false;
     }
@@ -1563,8 +1661,8 @@ pub(crate) fn scail2_animate_candle_eligible(model: &str, payload: &Map<String, 
     if !has_nonempty_string(payload, "sourceClipAssetId") {
         return false;
     }
-    scail2_candle_source_tier_eligible(payload)
-        && scail2_candle_product_tier_eligible(model, "animate_character", payload)
+    scail2_candle_source_tier_eligible_with_facts(payload, facts)
+        && scail2_candle_product_tier_eligible(model, "animate_character", facts)
 }
 
 /// Candle SCAIL-2 `replace_person` eligibility (sc-6837, epic 6563). The `scail2_14b` model behind a
@@ -1573,7 +1671,17 @@ pub(crate) fn scail2_animate_candle_eligible(model: &str, payload: &Map<String, 
 /// seam as standalone animation (LoRA / LoKr / LoHa / diff-patch) on dense bf16 only; the exact
 /// q4/q8 package tiers reject adapter merging. A distinct candle engine, so it is gated here rather than
 /// added to [`CANDLE_VIDEO_VACE_MODELS`]. Factored out so the routing tests can probe it.
+#[cfg(test)]
 pub(crate) fn scail2_replace_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
+    let facts = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    scail2_replace_candle_eligible_with_facts(model, payload, &facts)
+}
+
+fn scail2_replace_candle_eligible_with_facts(
+    model: &str,
+    payload: &Map<String, Value>,
+    facts: &crate::resolved_options::RouteOptionFacts,
+) -> bool {
     if model != "scail2_14b" {
         return false;
     }
@@ -1583,8 +1691,8 @@ pub(crate) fn scail2_replace_candle_eligible(model: &str, payload: &Map<String, 
     {
         return false;
     }
-    scail2_candle_source_tier_eligible(payload)
-        && scail2_candle_product_tier_eligible(model, "replace_person", payload)
+    scail2_candle_source_tier_eligible_with_facts(payload, facts)
+        && scail2_candle_product_tier_eligible(model, "replace_person", facts)
 }
 
 /// Candle Bernini VIDEO eligibility (sc-10997, epic 6562). Bernini is a DISTINCT candle engine (the
@@ -2502,6 +2610,18 @@ pub(crate) fn worker_is_candle(worker: &WorkerSnapshot) -> bool {
 /// dense TI2V-5B base. The resolved plan is stamped into the payload at submit (apps/rust-api
 /// training.rs), so the kernel + base model are readable without touching the dataset or weights.
 pub(crate) fn training_job_is_candle_eligible(job: &JobSnapshot) -> bool {
+    let route = job
+        .payload
+        .get("plan")
+        .and_then(Value::as_object)
+        .map(crate::resolved_options::TrainingRouteFacts::from_plan_syntax);
+    training_job_is_candle_eligible_with_facts(job, route.as_ref())
+}
+
+pub(crate) fn training_job_is_candle_eligible_with_facts(
+    job: &JobSnapshot,
+    route: Option<&crate::resolved_options::TrainingRouteFacts>,
+) -> bool {
     // The ControlNet studio job (epic 10159) trains through the SAME native executor keyed on the
     // resolved plan's kernel (`krea_control` ∈ [`CANDLE_ROUTED_TRAINING_KERNELS`]), so it is
     // candle-eligible on the same terms as a `lora_train` run.
@@ -2523,7 +2643,9 @@ pub(crate) fn training_job_is_candle_eligible(job: &JobSnapshot) -> bool {
         .and_then(|target| target.get("baseModel"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let network = crate::resolved_options::TrainingRouteFacts::from_plan_syntax(plan);
+    let Some(network) = route else {
+        return false;
+    };
     let network_type = match &network.network_type {
         crate::resolved_options::RouteField::Absent => "lora",
         crate::resolved_options::RouteField::Valid(value) if value.trim().is_empty() => "lora",
@@ -2539,7 +2661,7 @@ pub(crate) fn training_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     match kernel {
         "moss_image_lora" => {
             job.job_type == JobType::LoraTrain
-                && super::catalog::moss_training_plan_is_supported(plan)
+                && super::catalog::moss_training_plan_is_supported_with_facts(plan, network)
         }
         "flux3_klein_lora" | "flux3_klein_edit_lora" => {
             base_model == "flux3_klein_base" && network_type == "lora"

@@ -428,6 +428,7 @@ pub(super) fn conditioned_reference_count(
 }
 
 /// True when `payload[object_key][array_key]` is a non-empty array.
+#[cfg(test)]
 pub(super) fn has_nonempty_nested_array(
     payload: &Map<String, Value>,
     object_key: &str,

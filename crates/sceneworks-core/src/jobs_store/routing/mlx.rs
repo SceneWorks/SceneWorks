@@ -1443,6 +1443,18 @@ pub(crate) fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
 /// training.rs) for both dry-run and real runs, so the kernel + network type are
 /// readable here without touching the dataset or weights.
 pub(crate) fn training_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
+    let route = job
+        .payload
+        .get("plan")
+        .and_then(Value::as_object)
+        .map(crate::resolved_options::TrainingRouteFacts::from_plan_syntax);
+    training_job_is_mlx_eligible_with_facts(job, route.as_ref())
+}
+
+pub(crate) fn training_job_is_mlx_eligible_with_facts(
+    job: &JobSnapshot,
+    route: Option<&crate::resolved_options::TrainingRouteFacts>,
+) -> bool {
     if !matches!(job.job_type, JobType::LoraTrain) {
         return false;
     }
@@ -1459,15 +1471,15 @@ pub(crate) fn training_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
         return false;
     }
     if kernel == "moss_image_lora" {
-        return super::catalog::moss_training_plan_is_supported(plan);
+        return route.is_some_and(|route| {
+            super::catalog::moss_training_plan_is_supported_with_facts(plan, route)
+        });
     }
     if crate::training::flux3::KERNELS.contains(&kernel) {
-        let route = crate::resolved_options::TrainingRouteFacts::from_plan_syntax(plan);
-        let network_is_lora = match route.network_type {
-            crate::resolved_options::RouteField::Absent => true,
-            crate::resolved_options::RouteField::Valid(value) => value == "lora",
-            crate::resolved_options::RouteField::Null
-            | crate::resolved_options::RouteField::Invalid => false,
+        let network_is_lora = match route.map(|route| &route.network_type) {
+            Some(crate::resolved_options::RouteField::Absent) => true,
+            Some(crate::resolved_options::RouteField::Valid(value)) => value == "lora",
+            _ => false,
         };
         return plan
             .get("target")
@@ -1477,7 +1489,9 @@ pub(crate) fn training_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
             && network_is_lora;
     }
     // LoKr-on-Wan is refused (no Kronecker merge in the mlx Wan path).
-    if matches!(kernel, "wan_lora" | "wan_moe_lora") && training_plan_is_lokr(plan) {
+    if matches!(kernel, "wan_lora" | "wan_moe_lora")
+        && route.is_some_and(|route| training_plan_is_lokr_with_facts(route))
+    {
         return false;
     }
     // Iris (sc-25685 / sc-25687 / sc-25688): `mlx-gen-iris` registers one trainer per task install
@@ -1593,12 +1607,17 @@ pub(crate) fn training_kernel_is_mlx_only(job: &JobSnapshot) -> bool {
 /// Whether a resolved training plan requests a LoKr (Kronecker) adapter. The network
 /// type lives in the plan's `config.advanced.networkType` (SceneWorks training
 /// contract), distinct from a generation request's per-LoRA `networkType`.
+#[cfg(test)]
 pub(crate) fn training_plan_is_lokr(plan: &Map<String, Value>) -> bool {
-    matches!(
-        crate::resolved_options::TrainingRouteFacts::from_plan_syntax(plan).network_type,
-        crate::resolved_options::RouteField::Valid(value)
-            if value.trim().eq_ignore_ascii_case("lokr")
+    training_plan_is_lokr_with_facts(
+        &crate::resolved_options::TrainingRouteFacts::from_plan_syntax(plan),
     )
+}
+
+fn training_plan_is_lokr_with_facts(route: &crate::resolved_options::TrainingRouteFacts) -> bool {
+    matches!(&route.network_type,
+        crate::resolved_options::RouteField::Valid(value)
+            if value.trim().eq_ignore_ascii_case("lokr"))
 }
 
 #[cfg(test)]

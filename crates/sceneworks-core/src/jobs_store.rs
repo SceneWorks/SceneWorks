@@ -5730,6 +5730,12 @@ impl ClaimRoutingFacts {
             payload: &job.payload,
             options: &route_options,
         };
+        let training_route = job
+            .payload
+            .get("plan")
+            .and_then(Value::as_object)
+            .filter(|_| matches!(job.job_type, JobType::LoraTrain | JobType::ControlTraining))
+            .map(crate::resolved_options::TrainingRouteFacts::from_plan_syntax);
         let mlx_eligible = match job.job_type {
             JobType::ImageGenerate | JobType::ImageEdit | JobType::ImageDetail => {
                 image_job_is_mlx_eligible_with_context(job, &route_context)
@@ -5739,7 +5745,9 @@ impl ClaimRoutingFacts {
             | JobType::VideoExtend
             | JobType::VideoBridge
             | JobType::PersonReplace => video_job_is_mlx_eligible(job),
-            JobType::LoraTrain | JobType::ControlTraining => training_job_is_mlx_eligible(job),
+            JobType::LoraTrain | JobType::ControlTraining => {
+                training_job_is_mlx_eligible_with_facts(job, training_route.as_ref())
+            }
             JobType::TrainingCaption => caption_job_is_mlx_eligible(job),
             JobType::ImageUpscale => upscale_job_is_mlx_eligible(job),
             JobType::VideoUpscale => video_upscale_job_is_mlx_eligible(job),
@@ -5754,8 +5762,12 @@ impl ClaimRoutingFacts {
             JobType::VideoGenerate
             | JobType::VideoExtend
             | JobType::VideoBridge
-            | JobType::PersonReplace => video_job_is_candle_eligible(job),
-            JobType::LoraTrain | JobType::ControlTraining => training_job_is_candle_eligible(job),
+            | JobType::PersonReplace => {
+                video_job_is_candle_eligible_with_context(job, &route_context)
+            }
+            JobType::LoraTrain | JobType::ControlTraining => {
+                training_job_is_candle_eligible_with_facts(job, training_route.as_ref())
+            }
             JobType::TrainingCaption => caption_job_is_mlx_eligible(job),
             JobType::ImageVqa | JobType::ImageInterleave => understanding_job_is_mlx_eligible(job),
             JobType::ImageUpscale => upscale_job_is_candle_eligible(job),
