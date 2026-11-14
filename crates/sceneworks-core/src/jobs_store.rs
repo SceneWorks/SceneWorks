@@ -5724,9 +5724,16 @@ fn is_apple_unified_gpu_id(gpu_id: &str) -> bool {
 
 impl ClaimRoutingFacts {
     fn from_job(job: &JobSnapshot) -> Self {
+        let route_options =
+            crate::resolved_options::RouteOptionFacts::from_payload_syntax(&job.payload);
+        let route_context = routing::RouteContext {
+            payload: &job.payload,
+            options: &route_options,
+        };
         let mlx_eligible = match job.job_type {
             JobType::ImageGenerate | JobType::ImageEdit | JobType::ImageDetail => {
-                job_is_mlx_eligible(job)
+                image_job_is_mlx_eligible_with_context(job, &route_context)
+                    || image_detail_native_eligible(job)
             }
             JobType::VideoGenerate
             | JobType::VideoExtend
@@ -5740,7 +5747,9 @@ impl ClaimRoutingFacts {
             _ => true,
         };
         let candle_eligible = match job.job_type {
-            JobType::ImageGenerate | JobType::ImageEdit => image_job_is_candle_eligible(job),
+            JobType::ImageGenerate | JobType::ImageEdit => {
+                image_job_is_candle_eligible_with_context(job, &route_context)
+            }
             JobType::ImageDetail => image_detail_native_eligible(job),
             JobType::VideoGenerate
             | JobType::VideoExtend
@@ -5757,7 +5766,7 @@ impl ClaimRoutingFacts {
             job_type: job.job_type.clone(),
             mlx_eligible,
             candle_eligible,
-            candle_pose_reject: image_job_candle_pose_reject(job),
+            candle_pose_reject: image_job_candle_pose_reject_with_context(job, &route_context),
             training_mlx_only: training_kernel_is_mlx_only(job),
             seedvr2_upscale: upscale_job_requests_seedvr2(job),
             required_capability: required_capability(job).to_owned(),

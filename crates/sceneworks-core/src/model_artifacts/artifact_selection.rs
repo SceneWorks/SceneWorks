@@ -640,17 +640,15 @@ pub fn allow_pattern_matches(path: &str, patterns: &[String]) -> bool {
 /// request-shape vocabulary, never a model-name mapping.
 pub fn requested_runtime_variant(payload: &Map<String, Value>) -> Option<String> {
     let variant = payload.get("variant").and_then(Value::as_str);
-    let advanced = payload.get("advanced").and_then(Value::as_object);
-    let tier = advanced
-        .and_then(|advanced| advanced.get("quantTier"))
-        .and_then(Value::as_str);
-    let bits = advanced
-        .and_then(|advanced| advanced.get("mlxQuantize"))
-        .and_then(|value| {
-            value
-                .as_i64()
-                .or_else(|| value.as_str()?.trim().parse::<i64>().ok())
-        });
+    let route = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
+    let tier = match &route.quant_tier {
+        crate::resolved_options::RouteField::Valid(value) => Some(value.as_str()),
+        _ => None,
+    };
+    let bits = match route.mlx_quantize {
+        crate::resolved_options::RouteField::Valid(value) => Some(value),
+        _ => None,
+    };
     requested_runtime_variant_typed(variant, tier, bits)
 }
 
@@ -711,13 +709,12 @@ pub fn selected_portable_model_artifact_closure(
     payload: &Map<String, Value>,
 ) -> Result<Value, String> {
     let model_id = model.get("id").and_then(Value::as_str);
+    let route = crate::resolved_options::RouteOptionFacts::from_payload_syntax(payload);
     let options = PortableArtifactOptions {
-        conv_rot: payload
-            .get("advanced")
-            .and_then(Value::as_object)
-            .and_then(|advanced| advanced.get("convRot"))
-            .and_then(Value::as_bool)
-            == Some(true),
+        conv_rot: matches!(
+            route.conv_rot,
+            crate::resolved_options::RouteField::Valid(true)
+        ),
         yue2_decoder: if model_id == Some("yue2") {
             payload
                 .get("yue2")
