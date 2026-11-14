@@ -10,6 +10,7 @@ use serde_json::{Map, Value};
 
 use crate::contracts::JsonObject;
 use crate::image_request::ControlWeightsFields;
+use crate::video_request::ReferenceImageResizeMode;
 use sceneworks_options::{by_wire, DefaultRule, OptionSpec, Shape};
 
 /// How the value reached the effective request. Omission remains distinct from an authored
@@ -78,6 +79,32 @@ pub enum RouteField<T> {
     Null,
     Valid(T),
     Invalid,
+}
+
+/// A persisted film job can predate the resize-mode claim stamp. Keep absence distinct from a
+/// stamped value when the film controller decides what a later attempt should reproduce.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PersistedVideoResizeModeFact {
+    pub mode: RouteField<ReferenceImageResizeMode>,
+}
+
+impl PersistedVideoResizeModeFact {
+    pub fn from_payload_syntax(payload: &JsonObject) -> Self {
+        let mode = match payload.get("advanced") {
+            None => RouteField::Absent,
+            Some(Value::Null) => RouteField::Null,
+            Some(Value::Object(advanced)) => match advanced.get("referenceImageResizeMode") {
+                None => RouteField::Absent,
+                Some(Value::Null) => RouteField::Null,
+                Some(Value::String(value)) => ReferenceImageResizeMode::parse(value)
+                    .map(RouteField::Valid)
+                    .unwrap_or(RouteField::Invalid),
+                Some(_) => RouteField::Invalid,
+            },
+            Some(_) => RouteField::Invalid,
+        };
+        Self { mode }
+    }
 }
 
 impl<T> RouteField<T> {
@@ -1080,6 +1107,32 @@ mod tests {
             TrainingRouteFacts::from_plan_syntax(&malformed).repa_weight,
             RouteField::Invalid
         );
+    }
+
+    #[test]
+    fn persisted_video_resize_mode_keeps_unclaimed_and_invalid_history_distinct() {
+        for (payload, expected) in [
+            (json!({}), RouteField::Absent),
+            (json!({"advanced":{}}), RouteField::Absent),
+            (json!({"advanced":null}), RouteField::Null),
+            (
+                json!({"advanced":{"referenceImageResizeMode":"match"}}),
+                RouteField::Valid(ReferenceImageResizeMode::Match),
+            ),
+            (
+                json!({"advanced":{"referenceImageResizeMode":"diffusers"}}),
+                RouteField::Valid(ReferenceImageResizeMode::Diffusers),
+            ),
+            (
+                json!({"advanced":{"referenceImageResizeMode":"typo"}}),
+                RouteField::Invalid,
+            ),
+        ] {
+            assert_eq!(
+                PersistedVideoResizeModeFact::from_payload_syntax(&obj(payload)).mode,
+                expected
+            );
+        }
     }
 
     #[test]
