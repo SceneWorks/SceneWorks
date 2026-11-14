@@ -15,6 +15,7 @@ import { formatPromptBatch, snapRatio } from "../promptBatchDescribe.js";
 import { extractKeys } from "../promptBatch.js";
 import { serializePromptBatchExport } from "../promptBatchIO.js";
 import { saveExportFile } from "../saveExportFile.js";
+import { promptBudget } from "../styleComposer.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { issue, summarize } from "../validation/issues.js";
 import { ValidationSummary, invalidProps } from "../validation/Validation.jsx";
@@ -103,6 +104,8 @@ function rowFromResultItem(item, model = null) {
     fields: Object.fromEntries(DESCRIBE_FIELDS.map(([key]) => [key, typeof item[key] === "string" ? item[key] : ""])),
     failed: Boolean(item.failed),
     error: item.error ?? null,
+    // Set when the reply was cut off at the describer's length limit and only part was kept.
+    notice: typeof item.notice === "string" && item.notice ? item.notice : null,
   };
 }
 
@@ -818,6 +821,19 @@ export function DatasetPromptBatchDialog({ dataset, dirty = false, renderThumbna
                     {row.failed ? (
                       <p className="inline-warning" role="alert">Flagged: {row.error || "The describer could not describe this image."}</p>
                     ) : null}
+                    {!row.failed && row.notice ? (
+                      <p className="dataset-caption-mode-note" data-row-note="cut-off" role="status">{row.notice}</p>
+                    ) : null}
+                    {(() => {
+                      // Image generation refuses a prompt over PROMPT_MAX_CHARS; warn, never block.
+                      const budget = promptBudget(formatPromptBatch([row]).text);
+                      return budget.over ? (
+                        <p className="inline-warning" data-row-note="too-long">
+                          This prompt is {budget.length.toLocaleString()} characters; image generation accepts at most{" "}
+                          {budget.max.toLocaleString()}, so shorten it before generating.
+                        </p>
+                      ) : null;
+                    })()}
                     {DESCRIBE_FIELDS.map(([key, label]) => (
                       <label key={key}>
                         {label}

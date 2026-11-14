@@ -23,17 +23,17 @@ For each person describe:
 - Accessories: glasses, sunglasses, hats, jewelry, watches, bags, held objects.
 - Expression: brows, eyes (open, narrowed, closed, where the gaze points), mouth (closed, parted, smiling, tense), jaw, and the emotion these add up to.
 - Demeanor: the attitude the body language conveys (relaxed, guarded, confident, hesitant, playful, tense) and the cues that show it.
-When two or more people or animals are present, their INTERACTIONS are the most important part of the description: who is looking at whom, physical contact (where, how firm), distance and orientation toward each other, who is leading or reacting, gestures directed at another, and the emotional dynamic between them.
+When two or more people or animals are present, their INTERACTIONS are the most important part of the description: who is looking at whom, physical contact (where, how firm), who is leading or reacting, gestures directed at another, and the emotional dynamic between them.
 If there are no people or animals, describe the main subject instead.
 Do not describe pose in the description: pose has its own field, below.
 
 ## POSE — the pose field, exact, from the whole body down to the fingers
-Someone who cannot see the image must be able to put a mannequin into the identical pose, seen from the identical angle. The pose field holds one entry per person, keyed by their label, and each entry has the eleven slots below. Fill every slot, even when the answer seems obvious; a slot is never left empty. Pose is the part most often described wrongly, so give it the most care. Before writing, check the three facts most often got wrong: is the body upright or horizontal, which way does the chest point relative to the camera, and which limb is the person's left and which their right.
+Someone who cannot see the image must be able to put a mannequin into the identical pose, seen from the identical angle. The pose field is a list with one entry per person, in order of prominence (the same order the labels were assigned); each entry gives the person's label and the eleven slots below. Fill every slot, even when the answer seems obvious; a slot is never left empty. Pose is the part most often described wrongly, so give it the most care. Before writing, check the three facts most often got wrong: is the body upright or horizontal, which way does the chest point relative to the camera, and which limb is the person's left and which their right.
 
 Sides: for a body part, always use the person's OWN side ("their left hand", "their right knee"). For a position or direction in the picture, use "frame-left" and "frame-right". A person facing the camera has their right hand at frame-left. Never write a bare "left" or "right".
 Angles: give a rough amount, not just a direction: slightly (about 15°), halfway (about 45°), fully (about 90°).
 
-- body_line: is the body upright, leaning, bent over at the waist, horizontal, upside down, or diagonal in the frame? If horizontal: lying on their back, their front, their left side or their right side, and at which side of the frame is the head and at which the feet. If the body runs toward or away from the camera, say whether the head or the feet are nearer the camera.
+- body_line: is the body upright, leaning, bent over at the waist, reclined and propped up, horizontal, upside down, or diagonal in the frame? Reclined and propped up is the in-between case: the torso is raised off the ground but not upright, held up on an elbow, on a straight arm, or against a backrest; say what props the torso up and roughly how far the torso is from upright (about 30°, 45°, 60°). Horizontal is only for a body whose torso lies flat: then say lying on their back, their front, their left side or their right side. For a horizontal or reclined body, say at which side of the frame is the head and at which the feet. If the body runs toward or away from the camera, say whether the head or the feet are nearer the camera.
 - stance: stance and support. Standing, seated, kneeling, crouching, squatting, on all fours, reclining, lying, or in mid-air. Name what they rest on, every body part that touches it, and which part carries the weight (which leg, which hip, which hand).
 - facing: relative to the camera, where the chest points. Choose one: straight at the camera (front view); three-quarter front, turned toward frame-left or frame-right; full profile, facing frame-left or frame-right; three-quarter back; straight away (back to the camera). If the hips point a different way than the chest, give both and name the twist.
 - torso: lean forward, back or to which side, and how far; spine straight, arched or hunched; shoulders level, or which one is raised or pushed forward.
@@ -43,7 +43,7 @@ Angles: give a rough amount, not just a direction: slightly (about 15°), halfwa
 - depth: which shoulder, arm and leg are nearer the camera; any limb that points toward or away from the camera and so looks shortened; which body part overlaps or hides which.
 - placement: where they are relative to other people and objects — in front of, behind, at frame-left or frame-right of, how far, and whether turned toward or away from them.
 
-When a limb is hidden or out of frame, write "hidden" in its slot (you may add where it is hidden, "hidden behind their hip") and do not guess its position. For an animal subject, give one entry with no label: name the animal in plain words at the start of body_line and adapt the slots to its body. When there are no people or animals, the pose field is empty.
+When a limb is hidden or out of frame, write "hidden" in its slot and what hides it ("hidden behind their hip", "out of frame"), and nothing about where it probably is: words like "likely", "probably" or "presumably" never belong in a pose slot. Give each animal its own entry with no label: name the animal in plain words at the start of body_line and adapt the slots to its body. When there are no people or animals, the pose field is empty.
 
 ## ENVIRONMENT — every detail
 Describe the setting exhaustively: location type, architecture, surfaces and materials, furniture, props and objects (with their positions), foreground / midground / background layers, vegetation, weather, time-of-day cues, and any legible text (quoted verbatim in single quotes).
@@ -72,9 +72,9 @@ LABELS: Refer to each person only by a label: man_N, woman_N, boy_N, girl_N, or 
 
 NO PHYSICAL TRAITS: Never describe a person's hair, facial hair, skin color or tone, ethnicity, eye color, age, body size, build, weight, height, piercings, tattoos, or makeup.
 
-DESCRIPTION: For each person: every garment (type, color, material, fit), accessories and held objects, expression (brows, eyes and gaze, mouth), and demeanor. No pose here. When two or more people or animals are present, their interactions matter most: who looks at whom, physical contact, distance and orientation, and the emotional dynamic. With no people or animals, describe the main subject.
+DESCRIPTION: For each person: every garment (type, color, material, fit), accessories and held objects, expression (brows, eyes and gaze, mouth), and demeanor. No pose here. When two or more people or animals are present, their interactions matter most: who looks at whom, physical contact, and the emotional dynamic. With no people or animals, describe the main subject.
 
-POSE, its own field, plain text, one sentence per person starting with their label: body upright or horizontal (on back, front or side); stance and support; where the chest points relative to the camera (front, three-quarter, profile, back); head turn; each arm and leg by the person's own left and right. Write hidden for a hidden or out-of-frame limb; never guess. Empty with no people or animals.
+POSE, its own field, plain text, one line per person or animal, each person's line starting with their label: body upright, reclined and propped up (on what, how far from upright), or horizontal only if the torso lies flat (on back, front or side); stance and support; where the chest points relative to the camera (front, three-quarter, profile, back); head turn; each arm and leg by the person's own left and right. Write hidden and what hides it for a hidden or out-of-frame limb; never guess where it probably is. Empty with no people or animals.
 
 ENVIRONMENT: Location type, architecture, surfaces, furniture, props and their positions, foreground, midground and background, vegetation, weather, time-of-day cues, and any legible text quoted in single quotes.
 
@@ -92,6 +92,11 @@ Keep the whole reply under about 500 words so it is never cut off.
 ## OUTPUT — one JSON object, no other text
 {
   "description": "<the people (or main subject), their clothing, accessories, expression, demeanor, and interactions; never their pose>",
+  "style":       "<medium, aesthetic, palette, era with its cues, photographic process, film character>",
+  "camera":      "<apparent camera type, format, focal length character, aperture/depth of field; empty string if not determinable>",
+  "composition": "<shot size, framing, angle, subject placement>",
+  "lighting":    "<light sources, direction, hardness, color temperature, shadows>",
+  "environment": "<the full setting description>",
   "pose": [
     {
       "label":     "<the person's label, e.g. woman_1; empty string for an animal>",
@@ -107,27 +112,22 @@ Keep the whole reply under about 500 words so it is never cut off.
       "depth":     "<which side is nearer the camera, foreshortening, overlaps>",
       "placement": "<position relative to other people and objects>"
     }
-  ],
-  "style":       "<medium, aesthetic, palette, era with its cues, photographic process, film character>",
-  "camera":      "<apparent camera type, format, focal length character, aperture/depth of field; empty string if not determinable>",
-  "composition": "<shot size, framing, angle, subject placement>",
-  "lighting":    "<light sources, direction, hardness, color temperature, shadows>",
-  "environment": "<the full setting description>"
+  ]
 }
-Write flowing prose inside each text field. "pose" has one object per person, in label order, plus one object with an empty "label" for an animal subject; it is an empty list when the image has no people or animals. Fill every pose slot: write "hidden" for a limb that is hidden or out of frame, never a guess and never an empty string. In the other fields, if a detail is hidden or unreadable, leave it out rather than guess.
+Write the keys in this order, with "pose" last. Write flowing prose inside each text field. "pose" is a list with one object per person, in order of prominence (the same order the labels were assigned), plus one object with an empty "label" for each animal; it is an empty list when the image has no people or animals. Fill every pose slot: write "hidden" for a limb that is hidden or out of frame, never a guess and never an empty string. In the other fields, if a detail is hidden or unreadable, leave it out rather than guess. This output format takes precedence over any earlier instruction about where pose is written.
 
 [JOYCAPTION_OUTPUT]
 ## OUTPUT — one JSON object, no other text
 {
-"description": "<the people (or main subject): clothing, accessories, expression, demeanor, interactions>",
-"pose": "<each person's pose, one sentence per person starting with their label; empty string if none>",
-"style": "<medium, aesthetic, palette, era and its cues, photographic process, film character>",
-"camera": "<camera type, format, focal length character, depth of field; empty string if unknown>",
-"composition": "<shot size, framing, angle, subject placement>",
-"lighting": "<light sources, direction, hardness, color temperature, shadows>",
-"environment": "<the full setting description>"
+"description": "<people or main subject: clothing, accessories, expression, demeanor, interactions>",
+"style": "<medium, palette, era and its cues, process, film look>",
+"camera": "<camera type, format, focal length, depth of field; empty if unknown>",
+"composition": "<shot size, framing, angle, placement>",
+"lighting": "<sources, direction, hardness, color, shadows>",
+"environment": "<the full setting>",
+"pose": "<one line per person or animal, a person's line starting with their label; empty if none>"
 }
-Write prose inside each field. Leave out a hidden or unreadable detail rather than guess.
+Write prose in each field. Outside pose, omit hidden or unreadable details rather than guess. This output format takes precedence over any earlier instruction about where pose is written.
 
 [USER]
 Examine the attached image meticulously and return the JSON object as specified. Introduce each person with a noun and their label, never describe any physical trait of a person, and capture the image's era and film look in the style field.

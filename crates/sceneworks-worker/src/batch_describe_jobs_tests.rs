@@ -105,13 +105,53 @@ fn the_vision_contract_asks_for_pose_as_eleven_named_slots_per_person() {
             "contract names {key}"
         );
     }
-    // Pose follows description in the contract, as in DESCRIBE_FIELDS.
-    let at = |field: &str| contract.find(&format!("\"{field}\":")).unwrap();
-    for pair in DESCRIBE_FIELDS.windows(2) {
-        assert!(at(pair[0]) < at(pair[1]), "{} before {}", pair[0], pair[1]);
-    }
+    assert_pose_is_written_last(contract);
     assert!(contract.contains("write \"hidden\" for a limb that is hidden or out of frame"));
     assert!(contract.contains("empty list when the image has no people or animals"));
+    assert!(contract.contains(
+        "in order of prominence (the same order the labels were assigned), plus one object with \
+         an empty \"label\" for each animal"
+    ));
+    assert!(!contract.contains("label order"));
+}
+
+/// The contract lists the six other fields in `DESCRIBE_FIELDS` order and `pose` LAST, so a reply
+/// cut off at the reply budget loses only pose entries, never another field.
+fn assert_pose_is_written_last(contract: &str) {
+    let at = |field: &str| {
+        contract
+            .find(&format!("\"{field}\":"))
+            .unwrap_or_else(|| panic!("contract names {field}"))
+    };
+    let others: Vec<&str> = DESCRIBE_FIELDS
+        .iter()
+        .copied()
+        .filter(|field| *field != "pose")
+        .collect();
+    for pair in others.windows(2) {
+        assert!(at(pair[0]) < at(pair[1]), "{} before {}", pair[0], pair[1]);
+    }
+    assert!(at("environment") < at("pose"), "pose is written last");
+}
+
+#[test]
+fn both_contracts_take_precedence_over_an_old_preset_about_pose() {
+    for model in [DescribeModel::VisionCaptioner, DescribeModel::JoyCaption] {
+        // A preset saved from the old default still asks for pose inside the description.
+        let (prompt, _) = DescribePrompt::for_instruction(
+            model,
+            Some("Describe each person's clothing, accessories, pose, expression and demeanor."),
+        );
+        assert!(prompt.output_contract.contains("\"pose\":"), "{model:?}");
+        assert!(
+            prompt.output_contract.contains(
+                "This output format takes precedence over any earlier instruction about where \
+                 pose is written."
+            ),
+            "{model:?}"
+        );
+        assert!(prompt.system().ends_with(&prompt.output_contract));
+    }
 }
 
 #[test]
@@ -133,8 +173,24 @@ fn the_describing_prompt_keeps_pose_out_of_description_and_labels_off_animals() 
     for (key, _) in POSE_SLOTS {
         assert!(pose.contains(key), "the POSE rules explain {key}");
     }
-    assert!(pose.contains("write \"hidden\" in its slot"));
-    assert!(pose.contains("For an animal subject, give one entry with no label"));
+    assert!(pose.contains("write \"hidden\" in its slot and what hides it"));
+    assert!(pose.contains("words like \"likely\", \"probably\" or \"presumably\" never belong"));
+    // A half-reclined body has its own body_line option; horizontal means the torso lies flat.
+    assert!(pose.contains("reclined and propped up"));
+    assert!(pose.contains("on an elbow, on a straight arm, or against a backrest"));
+    assert!(pose.contains("roughly how far the torso is from upright"));
+    assert!(pose.contains("Horizontal is only for a body whose torso lies flat"));
+    assert!(pose.contains(
+        "For a horizontal or reclined body, say at which side of the frame is the head and at \
+         which the feet."
+    ));
+    assert!(pose.contains("Give each animal its own entry with no label"));
+    assert!(pose.contains("The pose field is a list with one entry per person"));
+    assert!(pose.contains("in order of prominence (the same order the labels were assigned)"));
+    assert!(!instruction.contains("keyed by their label"));
+    // Interactions keep who looks at whom, contact and dynamic; position is the pose slots' job.
+    assert!(description.contains("who is looking at whom, physical contact"));
+    assert!(!description.contains("distance and orientation"));
     assert!(instruction.contains("Animals never get a label."));
     // No animal label anywhere in the asset (every section, every model).
     for animal in ["dog_", "cat_", "horse_", "animal_"] {
@@ -146,6 +202,8 @@ fn the_describing_prompt_keeps_pose_out_of_description_and_labels_off_animals() 
     let joy = default_describe_instruction(DescribeModel::JoyCaption);
     assert!(joy.contains("Animals get no label"));
     assert!(joy.contains("demeanor. No pose here."));
+    assert!(joy.contains("who looks at whom, physical contact, and the emotional dynamic"));
+    assert!(!joy.contains("distance and orientation"));
 }
 
 // ── Reply parsing ─────────────────────────────────────────────────────────────────────────────
@@ -222,6 +280,15 @@ fn unusable_replies_are_errors_not_silent_blanks() {
 
 const POSE: usize = 1;
 
+/// A parsed field by name (indexes past `pose` read better by name than by position).
+fn field_text<'a>(parsed: &'a DescribedFields, name: &str) -> &'a str {
+    let index = DESCRIBE_FIELDS
+        .iter()
+        .position(|field| *field == name)
+        .unwrap_or_else(|| panic!("{name} is a describe field"));
+    &parsed.fields[index]
+}
+
 /// A pose entry for `label` whose every slot reads `<label> <slot key>`.
 fn pose_entry(label: &str) -> Value {
     let mut entry = JsonObject::new();
@@ -260,7 +327,7 @@ fn a_two_person_pose_is_one_line_per_label_with_all_eleven_slots() {
     for line in lines {
         assert_eq!(line.matches("; ").count(), POSE_SLOTS.len() - 1, "{line}");
     }
-    assert_eq!(parsed.fields[5], "soft");
+    assert_eq!(field_text(&parsed, "lighting"), "soft");
 }
 
 #[test]
@@ -337,12 +404,206 @@ fn a_joycaption_plain_text_pose_is_stored_as_written() {
         parsed.fields[POSE],
         "man_1 stands upright, chest toward frame-left; their left hand is hidden."
     );
-    assert_eq!(parsed.fields[5], "dusk");
+    assert_eq!(field_text(&parsed, "lighting"), "dusk");
     // JoyCaption may still emit slots; they flatten the same way.
     let slotted =
         parse_lenient_described_fields(&reply(&[("pose", json!([pose_entry("woman_1")]))]))
             .unwrap();
     assert_eq!(slotted.fields[POSE], pose_line_for("woman_1"));
+}
+
+#[test]
+fn a_pose_map_keyed_by_label_is_one_entry_per_key() {
+    let mut man = pose_entry("man_1");
+    man.as_object_mut().unwrap().remove("label");
+    let mut woman = pose_entry("woman_1");
+    woman.as_object_mut().unwrap().remove("label");
+    let parsed = parse_described_fields(&reply(&[(
+        "pose",
+        json!({ "woman_1": woman, "man_1": man, "girl_1": "girl_1 sits cross-legged" }),
+    )]))
+    .expect("parses");
+    let lines: Vec<&str> = parsed.fields[POSE].lines().collect();
+    assert_eq!(lines.len(), 3, "{}", parsed.fields[POSE]);
+    assert!(lines.contains(&pose_line_for("woman_1").as_str()));
+    assert!(lines.contains(&pose_line_for("man_1").as_str()));
+    assert!(lines.contains(&"girl_1 — girl_1 sits cross-legged"));
+    // A lone entry object (it names slots) is still one entry, not a map.
+    let lone = parse_described_fields(&reply(&[("pose", pose_entry("boy_1"))])).unwrap();
+    assert_eq!(lone.fields[POSE], pose_line_for("boy_1"));
+}
+
+#[test]
+fn a_list_or_object_slot_is_flattened_not_dropped() {
+    let mut entry = pose_entry("woman_1");
+    entry["left_arm"] = json!({
+        "upper_arm": "down along their side",
+        "elbow": "bent about 45°",
+        "hand": ["on their hip", "fingers spread"],
+    });
+    entry["right_leg"] = json!(["straight", "", "heel lifted", null]);
+    entry["depth"] = json!([]);
+    entry["torso"] = json!({ "lean": null });
+    let parsed = parse_described_fields(&reply(&[("pose", json!([entry]))])).expect("parses");
+    let line = &parsed.fields[POSE];
+    assert!(
+        line.contains(
+            "Left arm: upper arm: down along their side, elbow: bent about 45°, hand: on their \
+             hip, fingers spread;"
+        ),
+        "{line}"
+    );
+    assert!(line.contains("Right leg: straight, heel lifted;"), "{line}");
+    // Only a missing, null or blank slot (an empty list or object counts as blank) is not stated.
+    assert!(line.contains("Depth: not stated;"), "{line}");
+    assert!(line.contains("Torso: not stated;"), "{line}");
+}
+
+/// One pose entry as compact JSON text, its members in contract order (written by hand so the
+/// order never depends on how a JSON map orders its keys).
+fn entry_json(label: &str, with_label: bool) -> String {
+    let mut members = Vec::new();
+    if with_label {
+        members.push(format!("\"label\":{}", json!(label)));
+    }
+    for (key, _) in POSE_SLOTS {
+        members.push(format!("\"{key}\":{}", json!(format!("{label} {key}"))));
+    }
+    format!("{{{}}}", members.join(","))
+}
+
+/// A Vision Captioner reply in contract order (pose last) for `labels`, as compact JSON.
+fn contract_order_reply(labels: &[&str]) -> String {
+    let mut members: Vec<String> = DESCRIBE_FIELDS
+        .iter()
+        .filter(|field| **field != "pose")
+        .map(|field| format!("\"{field}\":{}", json!(format!("full {field}"))))
+        .collect();
+    let entries: Vec<String> = labels.iter().map(|label| entry_json(label, true)).collect();
+    members.push(format!("\"pose\":[{}]", entries.join(",")));
+    format!("{{{}}}", members.join(","))
+}
+
+/// `reply` cut just before the start of the pose entry for `label` plus `keep` more bytes.
+fn cut_at_entry(reply: &str, label: &str, keep: usize) -> String {
+    let entry = reply
+        .find(&format!("{{\"label\":\"{label}\""))
+        .unwrap_or_else(|| panic!("entry {label} in {reply}"));
+    reply[..entry + keep].to_owned()
+}
+
+#[test]
+fn a_reply_cut_after_two_complete_pose_entries_keeps_them_and_every_other_field() {
+    let full = contract_order_reply(&["woman_1", "man_1", "girl_1"]);
+    let raw = cut_at_entry(&full, "girl_1", 40);
+    let error = parse_described_fields(&raw).expect_err("a cut-off reply does not parse");
+    assert!(error.contains("not a JSON object"), "{error}");
+    let recovered = recover_cut_off_reply(&raw)
+        .expect("a cut-off object")
+        .expect("described");
+    assert_eq!(
+        recovered.fields[POSE],
+        format!("{}\n{}", pose_line_for("woman_1"), pose_line_for("man_1")),
+        "the third entry, cut part-way, is dropped"
+    );
+    for (field, text) in DESCRIBE_FIELDS.iter().zip(&recovered.fields) {
+        if *field != "pose" {
+            assert_eq!(text, &format!("full {field}"));
+        }
+    }
+    assert_eq!(
+        recovered.notice.as_deref(),
+        Some(
+            "The reply reached the length limit: the pose covers only the first 2 people in \
+             this image; the other fields are complete."
+        )
+    );
+}
+
+#[test]
+fn a_reply_cut_inside_the_first_pose_entry_keeps_the_other_fields_and_no_pose() {
+    let full = contract_order_reply(&["woman_1", "man_1"]);
+    let raw = cut_at_entry(&full, "woman_1", 60);
+    let recovered = recover_cut_off_reply(&raw).unwrap().expect("described");
+    assert_eq!(recovered.fields[POSE], "", "a half entry is never kept");
+    assert_eq!(recovered.fields[0], "full description");
+    assert_eq!(field_text(&recovered, "environment"), "full environment");
+    let notice = recovered.notice.expect("the cut is reported");
+    assert!(
+        notice.starts_with("The reply reached the length limit: the pose was cut off"),
+        "{notice}"
+    );
+    assert!(
+        notice.ends_with("the other fields are complete."),
+        "{notice}"
+    );
+    // A fenced reply cut off (its closing fence never came) recovers the same way.
+    let fenced = recover_cut_off_reply(&format!("```json\n{raw}"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(fenced.fields[0], "full description");
+    // A reply cut inside a later text field keeps what completed and names what did not.
+    let early = &full[..full.find("\"lighting\"").unwrap() + 20];
+    let recovered = recover_cut_off_reply(early).unwrap().expect("described");
+    assert_eq!(
+        field_text(&recovered, "lighting"),
+        "",
+        "the cut lighting is dropped"
+    );
+    assert_eq!(field_text(&recovered, "composition"), "full composition");
+    assert_eq!(
+        recovered.notice.as_deref(),
+        Some(
+            "The reply reached the length limit: the pose is missing; lighting, environment \
+             were cut off."
+        )
+    );
+}
+
+#[test]
+fn a_reply_cut_before_the_description_completes_is_a_plain_failure() {
+    for raw in [
+        "{\"description\": \"a woman, woman_1, in a long",
+        "{\"descrip",
+        "{",
+        "```json\n{\"description\"",
+    ] {
+        assert_eq!(
+            recover_cut_off_reply(raw),
+            Some(Err(CUT_OFF_BEFORE_DESCRIPTION.to_owned())),
+            "{raw}"
+        );
+    }
+    // A reply that closes, or is malformed rather than cut off, is not recovered.
+    for raw in [
+        "no json",
+        "{}",
+        "{\"description\": \"x\"}",
+        "{\"description\" \"x\", \"pose\": [",
+    ] {
+        assert_eq!(recover_cut_off_reply(raw), None, "{raw}");
+    }
+}
+
+#[test]
+fn a_cut_off_map_shaped_pose_keeps_its_complete_entries() {
+    let full = format!(
+        "{{\"description\":\"two people\",\"pose\":{{\"woman_1\":{},\"man_1\":{}}}}}",
+        entry_json("woman_1", false),
+        entry_json("man_1", false)
+    );
+    let raw = &full[..full.find("\"man_1\"").unwrap() + 30];
+    let recovered = recover_cut_off_reply(raw).unwrap().expect("described");
+    assert_eq!(recovered.fields[POSE], pose_line_for("woman_1"));
+    let notice = recovered.notice.unwrap();
+    assert!(
+        notice.contains("the pose covers only the first 1 person in this image"),
+        "{notice}"
+    );
+    assert!(
+        notice.contains("style, camera, composition, lighting, environment were cut off"),
+        "{notice}"
+    );
 }
 
 #[test]
@@ -454,8 +715,15 @@ fn the_joycaption_prompt_is_one_turn_that_fits_the_providers_limit() {
         );
     }
     assert!(!instruction.contains(DRAFT_OUTPUT_HEADING));
-    assert!(instruction.contains("POSE, its own field, plain text"));
-    assert!(instruction.contains("Write hidden for a hidden or out-of-frame limb"));
+    assert!(instruction.contains("POSE, its own field, plain text, one line per person or animal"));
+    assert!(instruction.contains(
+        "Write hidden and what hides it for a hidden or out-of-frame limb; never guess where it \
+         probably is."
+    ));
+    assert!(instruction.contains(
+        "reclined and propped up (on what, how far from upright), or horizontal only if the \
+         torso lies flat"
+    ));
     // The built-in default is itself an instruction the API accepts for JoyCaption.
     assert!(instruction.chars().count() <= MAX_JOYCAPTION_DESCRIBE_PROMPT_CHARS);
     // JoyCaption's own contract: every field, pose as one plain-text string, no slots.
@@ -474,6 +742,13 @@ fn the_joycaption_prompt_is_one_turn_that_fits_the_providers_limit() {
             "JoyCaption's contract has no {key} slot"
         );
     }
+    assert_pose_is_written_last(&prompt.output_contract);
+    assert!(prompt
+        .output_contract
+        .contains("one line per person or animal"));
+    assert!(prompt
+        .output_contract
+        .contains("Outside pose, omit hidden or unreadable details rather than guess."));
     // One prompt: instruction, then the contract, then the user line.
     assert_eq!(
         prompt.single_turn(),
@@ -522,9 +797,9 @@ fn the_lenient_parse_finds_the_object_inside_fences_and_prose() {
     )
     .expect("parses");
     assert_eq!(parsed.fields[0], "a man, man_1, waving");
-    assert_eq!(parsed.fields[5], "soft window light");
+    assert_eq!(field_text(&parsed, "lighting"), "soft window light");
     assert!(parsed.fields[1..5].iter().all(String::is_empty));
-    assert!(parsed.fields[6].is_empty());
+    assert!(field_text(&parsed, "environment").is_empty());
 }
 
 #[test]
@@ -1123,6 +1398,107 @@ async fn a_generation_error_is_flagged_without_a_retry() {
 }
 
 #[tokio::test]
+async fn a_cut_off_vision_reply_is_stored_described_with_its_notice() {
+    let (url, api) = spawn_stub_api().await;
+    let stage = stage(url);
+    let full = contract_order_reply(&["woman_1", "man_1", "girl_1"]);
+    let raw = cut_at_entry(&full, "girl_1", 40);
+    let describer = StubDescriber::new(vec![Ok(Ok(raw))]);
+    run_job(
+        &stage,
+        one_image_payload(&stage, VISION_CAPTIONER_REPO),
+        &describer,
+    )
+    .await
+    .expect("completes");
+    assert_eq!(describer.calls.lock().unwrap().len(), 1, "not retried");
+    assert_eq!(terminal(&api, "completed")["result"]["failedCount"], 0);
+    let items = stored_items(&api);
+    assert_eq!(items[0]["failed"], false);
+    assert_eq!(items[0]["error"], Value::Null);
+    assert_eq!(items[0]["description"], "full description");
+    assert_eq!(
+        items[0]["pose"],
+        format!("{}\n{}", pose_line_for("woman_1"), pose_line_for("man_1"))
+    );
+    assert!(items[0]["notice"]
+        .as_str()
+        .unwrap()
+        .contains("the pose covers only the first 2 people"));
+}
+
+#[tokio::test]
+async fn a_cut_off_joycaption_reply_is_retried_then_recovered() {
+    let (url, api) = spawn_stub_api().await;
+    let staged = stage(url);
+    let cut = "{\"description\": \"a man, man_1, in a coat\", \"style\": \"photo\", \
+               \"camera\": \"\", \"composition\": \"wide\", \"lighting\": \"dusk\", \
+               \"environment\": \"a street\", \"pose\": \"man_1 stands upright, chest";
+    let describer = StubDescriber::joycaption_like(vec![
+        Ok(Ok(cut.to_owned())),
+        Ok(Ok(cut.to_owned())),
+        Ok(Ok(cut.to_owned())),
+    ]);
+    run_job(
+        &staged,
+        one_image_payload(&staged, JOYCAPTION_REPO),
+        &describer,
+    )
+    .await
+    .expect("completes");
+    assert_eq!(
+        describer.calls.lock().unwrap().len(),
+        1 + JOYCAPTION_PARSE_RETRIES,
+        "the retries are spent before anything is recovered"
+    );
+    let items = stored_items(&api);
+    assert_eq!(items[0]["failed"], false);
+    assert_eq!(items[0]["lighting"], "dusk");
+    assert_eq!(items[0]["pose"], "", "a cut plain-text pose is never kept");
+    assert_eq!(
+        items[0]["notice"],
+        "The reply reached the length limit: the pose was cut off before any person was \
+         complete, so it is left out; the other fields are complete."
+    );
+
+    // A retry that completes wins over recovery.
+    let (url, api) = spawn_stub_api().await;
+    let staged = stage(url);
+    let describer =
+        StubDescriber::joycaption_like(vec![Ok(Ok(cut.to_owned())), Ok(Ok(full_reply("whole")))]);
+    run_job(
+        &staged,
+        one_image_payload(&staged, JOYCAPTION_REPO),
+        &describer,
+    )
+    .await
+    .expect("completes");
+    let items = stored_items(&api);
+    assert_eq!(items[0]["pose"], "whole pose");
+    assert_eq!(items[0]["notice"], Value::Null);
+
+    // Cut before the description: still a failure, with the plain length message after retries.
+    let (url, api) = spawn_stub_api().await;
+    let staged = stage(url);
+    let early = "{\"description\": \"a man, man_1, in a";
+    let describer = StubDescriber::joycaption_like(vec![
+        Ok(Ok(early.to_owned())),
+        Ok(Ok(early.to_owned())),
+        Ok(Ok(early.to_owned())),
+    ]);
+    run_job(
+        &staged,
+        one_image_payload(&staged, JOYCAPTION_REPO),
+        &describer,
+    )
+    .await
+    .expect("completes");
+    let items = stored_items(&api);
+    assert_eq!(items[0]["failed"], true);
+    assert_eq!(items[0]["error"], CUT_OFF_BEFORE_DESCRIPTION);
+}
+
+#[tokio::test]
 async fn the_vision_captioner_is_not_retried() {
     let (url, api) = spawn_stub_api().await;
     let stage = stage(url);
@@ -1524,6 +1900,7 @@ fn an_item_over_the_limit_is_stored_flagged_without_its_text() {
         size: Some((10, 20)),
         outcome: Ok(DescribedFields {
             fields: std::array::from_fn(|_| "text".to_owned()),
+            notice: None,
         }),
     };
     let stored = stored_item_json(&described);

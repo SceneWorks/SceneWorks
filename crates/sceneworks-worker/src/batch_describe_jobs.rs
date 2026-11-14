@@ -192,6 +192,9 @@ pub(crate) fn default_describe_instruction(model: DescribeModel) -> String {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct DescribedFields {
     pub(crate) fields: [String; DESCRIBE_FIELDS.len()],
+    /// Set when the reply was cut off at the reply budget and only part of it was kept (see
+    /// [`recover_cut_off_reply`]): what the cut cost, shown on the image's row.
+    pub(crate) notice: Option<String>,
 }
 
 /// The named slots of one pose entry, in order: the key the Vision Captioner writes and the label
@@ -286,26 +289,37 @@ fn described_fields_from<'a>(
     if fields.iter().all(String::is_empty) {
         return Err("The describer reply has none of the description fields.".to_owned());
     }
-    Ok(DescribedFields { fields })
+    Ok(DescribedFields {
+        fields,
+        notice: None,
+    })
 }
 
 /// The stored text of a structured `pose`: one line per entry, in reply order. An entry object is
-/// `<label> — Body line: …; Stance: …; …` with every [`POSE_SLOTS`] clause (a missing or blank slot
-/// reads [`POSE_SLOT_NOT_STATED`]); an entry without a label (an animal) is the clauses alone. A
-/// lone object is one entry, a text entry is kept as written, and an empty entry is skipped, so an
-/// empty list is an empty field.
+/// `<label> — Body line: …; Stance: …; …` with every [`POSE_SLOTS`] clause (a missing, null or
+/// blank slot reads [`POSE_SLOT_NOT_STATED`]); an entry without a label (an animal) is the clauses
+/// alone. The list form the contract asks for, a lone entry object, and a map keyed by label
+/// (`{"woman_1": {slots…}}`, each key the label of its entry) are all accepted. A text entry is
+/// kept as written, and an empty entry is skipped, so an empty list is an empty field.
 #[cfg(native_lane)]
 pub(crate) fn flatten_pose(value: &Value) -> Result<String, String> {
-    let entries = match value {
-        Value::Array(entries) => entries.as_slice(),
-        entry => std::slice::from_ref(entry),
+    let entries: Vec<(Option<&str>, &Value)> = match value {
+        Value::Array(entries) => entries.iter().map(|entry| (None, entry)).collect(),
+        Value::Object(map) if is_pose_map(map) => map
+            .iter()
+            .map(|(label, entry)| (Some(label.as_str()), entry))
+            .collect(),
+        entry => vec![(None, entry)],
     };
     let mut lines = Vec::new();
-    for entry in entries {
+    for (label, entry) in entries {
         let line = match entry {
             Value::Null => String::new(),
-            Value::String(text) => one_line(text),
-            Value::Object(object) => pose_line(object),
+            Value::String(text) => match label.map(one_line).filter(|label| !label.is_empty()) {
+                Some(label) if !text.trim().is_empty() => format!("{label} — {}", one_line(text)),
+                _ => one_line(text),
+            },
+            Value::Object(object) => pose_line(object, label),
             other => {
                 return Err(format!(
                     "The describer reply's \"pose\" entry is not an object ({other})."
@@ -319,9 +333,23 @@ pub(crate) fn flatten_pose(value: &Value) -> Result<String, String> {
     Ok(lines.join("\n"))
 }
 
-/// One person's stored pose line; empty when the entry has no label and no slot text at all.
+/// Whether a `pose` object is a map keyed by label rather than one entry: it has members, and none
+/// of them is a slot or `label`.
 #[cfg(native_lane)]
-fn pose_line(entry: &JsonObject) -> String {
+fn is_pose_map(map: &JsonObject) -> bool {
+    !map.is_empty()
+        && !map.keys().any(|key| {
+            key.eq_ignore_ascii_case("label")
+                || POSE_SLOTS
+                    .iter()
+                    .any(|(slot, _)| key.eq_ignore_ascii_case(slot))
+        })
+}
+
+/// One person's stored pose line; empty when the entry has no label and no slot text at all.
+/// `map_label` is the entry's key when the pose came as a map keyed by label.
+#[cfg(native_lane)]
+fn pose_line(entry: &JsonObject, map_label: Option<&str>) -> String {
     let text = |key: &str| {
         entry
             .get(key)
@@ -331,15 +359,17 @@ fn pose_line(entry: &JsonObject) -> String {
                     .find(|(name, _)| name.eq_ignore_ascii_case(key))
                     .map(|(_, value)| value)
             })
-            .and_then(Value::as_str)
-            .map(one_line)
+            .map(slot_text)
             .unwrap_or_default()
     };
     let slots: Vec<(&str, String)> = POSE_SLOTS
         .iter()
         .map(|(key, name)| (*name, text(key)))
         .collect();
-    let label = text("label");
+    let mut label = text("label");
+    if label.is_empty() {
+        label = map_label.map(one_line).unwrap_or_default();
+    }
     if label.is_empty() && slots.iter().all(|(_, value)| value.is_empty()) {
         return String::new();
     }
@@ -362,11 +392,248 @@ fn pose_line(entry: &JsonObject) -> String {
     }
 }
 
+/// One slot's text: a string as written; a list's items joined with ", "; a nested object as
+/// `key: value` clauses joined with ", "; a number or boolean as written. Empty for null or blank.
+#[cfg(native_lane)]
+fn slot_text(value: &Value) -> String {
+    let joined = |parts: Vec<String>| {
+        parts
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match value {
+        Value::Null => String::new(),
+        Value::String(text) => one_line(text),
+        Value::Bool(_) | Value::Number(_) => value.to_string(),
+        Value::Array(items) => joined(items.iter().map(slot_text).collect()),
+        Value::Object(members) => joined(
+            members
+                .iter()
+                .map(|(key, value)| {
+                    let text = slot_text(value);
+                    if text.is_empty() {
+                        text
+                    } else {
+                        format!("{}: {text}", one_line(&key.replace('_', " ")))
+                    }
+                })
+                .collect(),
+        ),
+    }
+}
+
 /// `text` with every whitespace run (newlines included) collapsed to one space, so a slot can
 /// never break the one-line-per-person layout.
 #[cfg(native_lane)]
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The error of a reply cut off at the reply budget before its description was complete.
+#[cfg(native_lane)]
+pub(crate) const CUT_OFF_BEFORE_DESCRIPTION: &str =
+    "The reply reached the length limit before the description was complete.";
+
+/// What survives of a reply that did not parse because it was cut off at the reply budget: the
+/// JSON object it started ends before it closes. Every complete top-level field is kept, and a cut
+/// `pose` keeps only its complete entries (an entry cut part-way is dropped, never half-kept). The
+/// image is described, with a [`DescribedFields::notice`] saying what the cut cost; a reply cut
+/// before `description` is complete is a failure with [`CUT_OFF_BEFORE_DESCRIPTION`]. `None` when
+/// the reply is not a cut-off object (it closes, or is malformed), so its own parse error stands.
+#[cfg(native_lane)]
+pub(crate) fn recover_cut_off_reply(raw: &str) -> Option<Result<DescribedFields, String>> {
+    let text = crate::text_clean::strip_reasoning_and_fence(raw);
+    let open = text
+        .match_indices('{')
+        .find_map(|(start, _)| open_members(&text[start + 1..], true))?;
+    let mut object = JsonObject::new();
+    for (key, value) in open.complete {
+        object.insert(key.unwrap_or_default(), value);
+    }
+    let has =
+        |object: &JsonObject, name: &str| object.keys().any(|key| key.eq_ignore_ascii_case(name));
+    // A pose cut part-way keeps its complete entries; `pose_cut` is how many.
+    let mut pose_cut: Option<usize> = None;
+    if let Some(cut) = open.cut.filter(|cut| {
+        cut.key
+            .as_deref()
+            .is_some_and(|key| key.eq_ignore_ascii_case("pose"))
+    }) {
+        let partial = cut.partial.trim_start();
+        let is_map = partial.starts_with('{');
+        let entries = if is_map || partial.starts_with('[') {
+            open_members(&partial[1..], is_map)
+                .map(|inner| inner.complete)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        pose_cut = Some(entries.len());
+        let value = if is_map {
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key.unwrap_or_default(), value))
+                    .collect(),
+            )
+        } else {
+            Value::Array(entries.into_iter().map(|(_, value)| value).collect())
+        };
+        object.insert("pose".to_owned(), value);
+    }
+    if !has(&object, "description") {
+        return Some(Err(CUT_OFF_BEFORE_DESCRIPTION.to_owned()));
+    }
+    let mut parts = Vec::new();
+    match pose_cut {
+        Some(0) => parts.push(
+            "the pose was cut off before any person was complete, so it is left out".to_owned(),
+        ),
+        Some(count) => parts.push(format!(
+            "the pose covers only the first {count} {} in this image",
+            if count == 1 { "person" } else { "people" }
+        )),
+        None if !has(&object, "pose") => parts.push("the pose is missing".to_owned()),
+        None => {}
+    }
+    let missing: Vec<&str> = DESCRIBE_FIELDS
+        .iter()
+        .copied()
+        .filter(|field| *field != "pose" && !has(&object, field))
+        .collect();
+    if missing.is_empty() {
+        if !parts.is_empty() {
+            parts.push("the other fields are complete".to_owned());
+        }
+    } else {
+        parts.push(format!(
+            "{} {} cut off",
+            missing.join(", "),
+            if missing.len() == 1 { "was" } else { "were" }
+        ));
+    }
+    let notice = (!parts.is_empty())
+        .then(|| format!("The reply reached the length limit: {}.", parts.join("; ")));
+    Some(
+        described_fields_from(|name| {
+            object.get(name).or_else(|| {
+                object
+                    .iter()
+                    .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                    .map(|(_, value)| value)
+            })
+        })
+        .map(|fields| DescribedFields { notice, ..fields }),
+    )
+}
+
+/// The members of a JSON container that the text ends inside: every complete member (with its key
+/// for an object) and the member cut off part-way, if any.
+#[cfg(native_lane)]
+struct OpenMembers<'a> {
+    complete: Vec<(Option<String>, Value)>,
+    cut: Option<CutMember<'a>>,
+}
+
+/// A member the text ends inside: its key (when it got that far) and the text of its value so far.
+#[cfg(native_lane)]
+struct CutMember<'a> {
+    key: Option<String>,
+    partial: &'a str,
+}
+
+/// Read a container from just after its opening bracket (`keyed` for an object). `None` when the
+/// container closes or the text is malformed: only a container the text ends inside is cut off.
+#[cfg(native_lane)]
+fn open_members(text: &str, keyed: bool) -> Option<OpenMembers<'_>> {
+    let skip_whitespace = |at: usize| text.len() - text[at..].trim_start().len();
+    let mut complete = Vec::new();
+    let mut at = 0;
+    loop {
+        at = skip_whitespace(at);
+        let rest = &text[at..];
+        if rest.is_empty() {
+            return Some(OpenMembers {
+                complete,
+                cut: None,
+            });
+        }
+        if rest.starts_with(',') {
+            at += 1;
+            continue;
+        }
+        if rest.starts_with(['}', ']']) {
+            return None;
+        }
+        let key = if keyed {
+            let key = match next_json_value(rest) {
+                NextValue::Complete(Value::String(key), length) => {
+                    at += length;
+                    key
+                }
+                NextValue::CutOff => {
+                    let cut = Some(CutMember {
+                        key: None,
+                        partial: "",
+                    });
+                    return Some(OpenMembers { complete, cut });
+                }
+                _ => return None,
+            };
+            at = skip_whitespace(at);
+            if text[at..].is_empty() {
+                let cut = Some(CutMember {
+                    key: Some(key),
+                    partial: "",
+                });
+                return Some(OpenMembers { complete, cut });
+            }
+            if !text[at..].starts_with(':') {
+                return None;
+            }
+            at = skip_whitespace(at + 1);
+            Some(key)
+        } else {
+            None
+        };
+        match next_json_value(&text[at..]) {
+            NextValue::Complete(value, length) => {
+                complete.push((key, value));
+                at += length;
+            }
+            NextValue::CutOff => {
+                let cut = Some(CutMember {
+                    key,
+                    partial: &text[at..],
+                });
+                return Some(OpenMembers { complete, cut });
+            }
+            NextValue::Malformed => return None,
+        }
+    }
+}
+
+#[cfg(native_lane)]
+enum NextValue {
+    /// A complete value and the bytes it spans.
+    Complete(Value, usize),
+    /// The text ends inside (or before) the value.
+    CutOff,
+    Malformed,
+}
+
+/// The JSON value at the start of `text`.
+#[cfg(native_lane)]
+fn next_json_value(text: &str) -> NextValue {
+    let mut stream = serde_json::Deserializer::from_str(text).into_iter::<Value>();
+    match stream.next() {
+        Some(Ok(value)) => NextValue::Complete(value, stream.byte_offset()),
+        None => NextValue::CutOff,
+        Some(Err(error)) if error.is_eof() => NextValue::CutOff,
+        Some(Err(_)) => NextValue::Malformed,
+    }
 }
 
 /// What a describer returns for one image. The outer `Err` fails the whole job (the model could not
@@ -399,6 +666,12 @@ pub(crate) trait BatchDescriber: Send + Sync {
     /// object's shape, so it is not retried.
     fn parse_retries(&self) -> usize {
         0
+    }
+
+    /// What survives of a reply that still does not parse after the last retry because it was cut
+    /// off at the reply budget ([`recover_cut_off_reply`]); `None` keeps the parse error.
+    fn recover(&self, raw: &str) -> Option<Result<DescribedFields, String>> {
+        recover_cut_off_reply(raw)
     }
 }
 
@@ -700,6 +973,7 @@ impl DescribedItem {
         for (name, text) in DESCRIBE_FIELDS.iter().zip(&fields.fields) {
             object.insert((*name).to_owned(), json!(text));
         }
+        object.insert("notice".to_owned(), json!(fields.notice));
         object.insert("failed".to_owned(), json!(self.outcome.is_err()));
         object.insert(
             "error".to_owned(),
@@ -1098,11 +1372,14 @@ async fn describe_with_retries(
         match describer.parse(&raw) {
             Ok(fields) => return Ok(Some(Ok(fields))),
             Err(error) if attempt >= retries => {
+                if let Some(recovered) = describer.recover(&raw) {
+                    return Ok(Some(recovered));
+                }
                 return Ok(Some(Err(if attempt == 0 {
                     error
                 } else {
                     format!("{error} (after {} attempts)", attempt + 1)
-                })))
+                })));
             }
             Err(_) => {}
         }

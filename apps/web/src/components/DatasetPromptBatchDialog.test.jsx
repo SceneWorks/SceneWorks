@@ -354,6 +354,33 @@ describe("DatasetPromptBatchDialog", () => {
     expect(payload.variables.map((variable) => variable.key)).toEqual(["woman_1", "man_1"]);
   });
 
+  it("shows a cut-off notice on a described row and keeps the row in the saved batch", async () => {
+    await render();
+    const notice =
+      "The reply reached the length limit: the pose covers only the first 2 people in this image; the other fields are complete.";
+    await runWith([described("item_a", 2400, 3200, { pose: "woman_1 — Body line: upright", notice }), described("item_b", 4000, 2250)]);
+    const rowNote = (itemId, kind) => document.body.querySelector(`[data-item-id="${itemId}"] [data-row-note="${kind}"]`);
+    expect(rowNote("item_a", "cut-off").textContent).toBe(notice);
+    expect(rowNote("item_b", "cut-off")).toBeNull();
+    await click(button("Save prompt batch"));
+    await settle();
+    expect(context.createPromptBatch.mock.calls[0][0].prompts).toHaveLength(2);
+  });
+
+  it("warns, without blocking Save, on a row whose prompt is over the generation limit", async () => {
+    await render();
+    await runWith([described("item_a", 2400, 3200, { environment: "x".repeat(3900) }), described("item_b", 4000, 2250)]);
+    const tooLong = (itemId) => document.body.querySelector(`[data-item-id="${itemId}"] [data-row-note="too-long"]`);
+    expect(tooLong("item_a").textContent).toMatch(/^This prompt is 4,\d{3} characters; image generation accepts at most 4,000/);
+    expect(tooLong("item_b")).toBeNull();
+    // Editing the row under the limit clears the warning.
+    const environment = [...document.body.querySelectorAll('[data-item-id="item_a"] textarea')].at(-1);
+    await act(async () => setText(environment, "A kitchen"));
+    expect(tooLong("item_a")).toBeNull();
+    await act(async () => setText(environment, "y".repeat(3950)));
+    expect(button("Save prompt batch").disabled).toBe(false);
+  });
+
   it("exports the batch as the standard prompt-batch .json", async () => {
     await render();
     await runWith([described("item_a", 300, 400)]);

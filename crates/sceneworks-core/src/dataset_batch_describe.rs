@@ -24,7 +24,7 @@ pub const DESCRIBE_FIELDS: [&str; 7] = [
 ];
 
 /// Longest describing instruction a Vision Captioner request may carry, in characters. The default
-/// instruction is about 4,800 characters; this leaves room for a much longer edit without letting
+/// instruction is about 8,700 characters; this leaves room for a much longer edit without letting
 /// a request push an unbounded system prompt at the model.
 pub const MAX_DESCRIBE_PROMPT_CHARS: usize = 32_000;
 
