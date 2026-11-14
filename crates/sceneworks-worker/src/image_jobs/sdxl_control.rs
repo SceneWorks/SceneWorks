@@ -101,6 +101,29 @@ pub(super) fn sdxl_control_candidate(request: &ImageRequest) -> bool {
     has_material_sdxl_control_intent(request)
 }
 
+pub(super) fn sdxl_control_candidate_resolved(execution: &ResolvedImageExecution) -> bool {
+    let request: &ImageRequest = execution;
+    if !is_sdxl_control_model(&request.model) {
+        return false;
+    }
+    execution.pose_source_count() > 0
+        || request
+            .advanced_text("controlMode")
+            .is_some_and(|mode| !mode.trim().is_empty())
+        || request
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved")
+            .control_image
+            .is_some()
+        || request
+            .resolved_advanced
+            .as_ref()
+            .expect("image options must be resolved")
+            .control_weights
+            .is_some()
+}
+
 /// The terminal CUDA campaign proved only the q4 composition. Missing selectors resolve to each
 /// accepted model's default q4 package; explicit selectors must name q4 exactly so q8/bf16 cannot
 /// borrow the q4 receipt or fall through to a dense/on-the-fly load.
@@ -752,7 +775,8 @@ mod sdxl_control_tests {
     use super::*;
 
     fn request(value: Value) -> ImageRequest {
-        ImageRequest::from_payload(value.as_object().expect("payload"))
+        let payload = value.as_object().expect("payload");
+        ImageRequest::from_resolved(payload, payload).expect("resolved image request")
     }
 
     fn validate_request(request: &ImageRequest) -> WorkerResult<Vec<PoseInput>> {
@@ -1071,13 +1095,16 @@ mod sdxl_control_tests {
             json!({ "model": "sdxl", "advanced": { "controlMode": "canny" } }),
             json!({ "model": "sdxl", "advanced": { "controlMode": "pose" } }),
             json!({ "model": "sdxl", "advanced": { "poses": [] } }),
-            json!({ "model": "sdxl", "advanced": { "poses": "bad" } }),
             json!({ "model": "sdxl", "advanced": { "poses": [null] } }),
             json!({ "model": "sdxl", "advanced": { "poses": [{}], "usePid": true } }),
             json!({ "model": "sdxl", "advanced": { "poses": [{}], "phases": [] } }),
         ] {
             assert!(validate_request(&request(bad)).is_err());
         }
+
+        let malformed = json!({ "model": "sdxl", "advanced": { "poses": "bad" } });
+        let payload = malformed.as_object().unwrap();
+        assert!(ImageRequest::from_resolved(payload, payload).is_err());
 
         let overflowing_scale = request(json!({
             "model": "sdxl",

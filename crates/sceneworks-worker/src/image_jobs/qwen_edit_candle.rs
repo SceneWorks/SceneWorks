@@ -2,8 +2,10 @@ use super::adapters::resolve_adapters;
 use super::artifact_resolution::requested_receipt_variant;
 use super::conditioning::candle_conditioned_edit_work;
 use super::conditioning::load_reference_image;
+#[cfg(test)]
+use super::conditioning::parse_poses;
 use super::conditioning::PoseInput;
-use super::conditioning::{parse_poses, ResolvedImageExecution};
+use super::conditioning::ResolvedImageExecution;
 use super::events::consume_gen_events;
 use super::load_policy::apply_candle_qwen_load_shape;
 use super::load_spec::attach_manifest_text_encoder;
@@ -624,6 +626,19 @@ fn qwen_edit_candle_base_dir(
 pub(super) fn qwen_edit_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
     is_qwen_edit_candle_model(&request.model)
         && qwen_edit_candle_mode(request)
+        && matches!(
+            resolve_qwen_edit_candle_base(request, settings),
+            Ok(Some(_))
+        )
+}
+
+pub(super) fn qwen_edit_candle_available_resolved(
+    execution: &ResolvedImageExecution,
+    settings: &Settings,
+) -> bool {
+    let request: &ImageRequest = execution;
+    is_qwen_edit_candle_model(&request.model)
+        && qwen_edit_candle_mode_resolved(execution)
         && matches!(
             resolve_qwen_edit_candle_base(request, settings),
             Ok(Some(_))
@@ -1277,7 +1292,8 @@ mod qwen_edit_tier_reconcile_tests {
             for (advanced, expected) in [(json!({}), default), (json!({"guidanceScale":1.5}), 1.5)]
             {
                 let value = json!({"projectId":"p","model":model,"advanced":advanced});
-                let mut request = ImageRequest::from_payload(value.as_object().unwrap());
+                let payload = value.as_object().unwrap();
+                let mut request = ImageRequest::from_resolved(payload, payload).unwrap();
                 // This nested scale is embedded guidance, separate from native true CFG.
                 request
                     .model_manifest_entry
@@ -1305,7 +1321,8 @@ mod qwen_edit_tier_reconcile_tests {
             "referenceAssetIds": ["first", "second"],
             "advanced": { "trueCfgScale": 6.0, "imageGuidanceScale": 2.0 }
         });
-        let request = ImageRequest::from_payload(value.as_object().expect("image request object"));
+        let payload = value.as_object().expect("image request object");
+        let request = ImageRequest::from_resolved(payload, payload).unwrap();
         assert_eq!(
             qwen_edit_candle_reference_ids(&request),
             vec!["first".to_owned(), "second".to_owned()]
@@ -1326,9 +1343,13 @@ mod qwen_edit_tier_reconcile_tests {
                 ]
             }
         });
-        let request = ImageRequest::from_payload(value.as_object().expect("image request object"));
+        let payload = value.as_object().expect("image request object");
+        let request = ImageRequest::from_resolved(payload, payload).unwrap();
+        let execution = ResolvedImageExecution::new(&request).unwrap();
         assert_eq!(qwen_edit_candle_pose_count(&request), Some(2));
         assert!(qwen_edit_candle_mode(&request));
+        assert_eq!(qwen_edit_candle_pose_count_resolved(&execution), Some(2));
+        assert!(qwen_edit_candle_mode_resolved(&execution));
         assert_eq!(
             qwen_edit_candle_work(&request),
             vec![
@@ -1336,6 +1357,11 @@ mod qwen_edit_tier_reconcile_tests {
                 (42, "keep the person".to_owned())
             ],
             "one output per pose must share the identity seed"
+        );
+
+        assert_eq!(
+            qwen_edit_candle_work_resolved(&execution),
+            qwen_edit_candle_work(&request)
         );
 
         let poses = parse_poses(&request);
@@ -1366,23 +1392,33 @@ mod qwen_edit_tier_reconcile_tests {
             });
             let mut payload = value.as_object().expect("image request object").clone();
             payload.extend(references.as_object().expect("reference object").clone());
-            ImageRequest::from_payload(&payload)
+            ImageRequest::from_resolved(&payload, &payload)
         };
         for poses in [Value::Null, json!([])] {
             let request = make(
                 "character_image",
                 json!({ "referenceAssetId": "identity" }),
                 poses,
-            );
+            )
+            .unwrap();
             assert_eq!(qwen_edit_candle_pose_count(&request), Some(0));
             assert!(qwen_edit_candle_mode(&request));
         }
-        for poses in [json!({}), json!(false), json!([{}, null])] {
+        for poses in [json!({}), json!(false)] {
+            assert!(make(
+                "character_image",
+                json!({ "referenceAssetId": "identity" }),
+                poses
+            )
+            .is_err());
+        }
+        for poses in [json!([{}, null])] {
             let request = make(
                 "character_image",
                 json!({ "referenceAssetId": "identity" }),
                 poses,
-            );
+            )
+            .unwrap();
             assert_eq!(qwen_edit_candle_pose_count(&request), None);
             assert!(!qwen_edit_candle_mode(&request));
         }
@@ -1394,7 +1430,8 @@ mod qwen_edit_tier_reconcile_tests {
                     .map(|_| json!({}))
                     .collect(),
             ),
-        );
+        )
+        .unwrap();
         assert_eq!(qwen_edit_candle_pose_count(&oversize), None);
         assert!(!qwen_edit_candle_mode(&oversize));
 
@@ -1402,7 +1439,8 @@ mod qwen_edit_tier_reconcile_tests {
             "character_image",
             json!({ "referenceAssetIds": ["identity", "extra"] }),
             json!([{}]),
-        );
+        )
+        .unwrap();
         assert!(!qwen_edit_candle_mode(&plural));
         let conflicting = make(
             "character_image",
@@ -1411,14 +1449,16 @@ mod qwen_edit_tier_reconcile_tests {
                 "referenceAssetId": "other"
             }),
             json!([{}]),
-        );
+        )
+        .unwrap();
         assert!(qwen_edit_candle_reference_ids(&conflicting).is_empty());
         assert!(!qwen_edit_candle_mode(&conflicting));
         let edit = make(
             "edit_image",
             json!({ "sourceAssetId": "source" }),
             json!([{}]),
-        );
+        )
+        .unwrap();
         assert!(!qwen_edit_candle_mode(&edit));
     }
 
@@ -1710,15 +1750,13 @@ mod qwen_edit_tier_reconcile_tests {
         manifest: serde_json::Value,
         advanced: serde_json::Value,
     ) -> ImageRequest {
-        ImageRequest::from_payload(
-            json!({
-                "model": model,
-                "modelManifestEntry": manifest,
-                "advanced": advanced,
-            })
-            .as_object()
-            .unwrap(),
-        )
+        let value = json!({
+            "model": model,
+            "modelManifestEntry": manifest,
+            "advanced": advanced,
+        });
+        let payload = value.as_object().unwrap();
+        ImageRequest::from_resolved(payload, payload).unwrap()
     }
 
     /// The real manifest shape for both live edit ids (config/manifests/builtin.models.jsonc): the

@@ -251,6 +251,14 @@ pub(super) fn sdxl_imported_available(request: &ImageRequest, settings: &Setting
         && matches!(resolve_imported_sdxl_file(request, settings), Ok(Some(_)))
 }
 
+pub(super) fn sdxl_imported_available_resolved(
+    execution: &super::conditioning::ResolvedImageExecution,
+    settings: &Settings,
+) -> bool {
+    sdxl_imported_request_shape_available_resolved(execution)
+        && matches!(resolve_imported_sdxl_file(execution, settings), Ok(Some(_)))
+}
+
 /// Resolve imported SDXL img2img/edit/inpaint/outpaint conditioning. The exact registered provider
 /// owns the capability claim; this helper only turns SceneWorks asset ids into that contract.
 fn resolve_imported_sdxl_conditioning(

@@ -1,6 +1,5 @@
 use super::adapters::resolve_adapters;
 use super::artifact_resolution::krea_model_subdir;
-use super::conditioning::parse_poses;
 use super::conditioning::pose_entries;
 use super::conditioning::resolve_control_identity_source;
 use super::conditioning::resolve_text_style_gain;

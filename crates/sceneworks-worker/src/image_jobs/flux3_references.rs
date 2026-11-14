@@ -16,6 +16,16 @@ use crate::{WorkerError, WorkerResult};
 pub(crate) const FACT_KEY: &str = "flux3ReferenceEditing";
 
 /// The native lanes share this ingress: reserved provenance is never caller-authored.
+pub(crate) fn resolved_output_settings(
+    request: &ImageRequest,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut wire = request.effective_advanced_wire();
+    wire.remove(FACT_KEY);
+    wire.remove("flux3Layout");
+    wire
+}
+
+/// Legacy authored settings are used only by persistence regression tests.
 #[cfg(test)]
 pub(crate) fn caller_raw_settings(
     advanced: &serde_json::Map<String, serde_json::Value>,
@@ -393,7 +403,7 @@ mod tests {
         fn request(&self, extra: serde_json::Value) -> ImageRequest {
             let mut payload = json!({"projectId":self.project_id,"model":"flux3_klein","mode":"edit_image","referenceAssetId":self.id}).as_object().unwrap().clone();
             payload.extend(extra.as_object().unwrap().clone());
-            ImageRequest::from_payload(&payload)
+            ImageRequest::from_resolved(&payload, &payload).expect("resolved reference request")
         }
 
         fn resolve(&self, request: &ImageRequest) -> ResolvedReferences {
@@ -436,7 +446,8 @@ mod tests {
             }
         }
         let payload = json!({"model":"flux3_klein","prompt":"scene","width":64,"height":64,"advanced":{"flux3_layout":{"version":1,"boxes":[{"id":"placed","desc":"cat","bbox":[0.1,0.2,0.7,0.8]}]}}});
-        let request = ImageRequest::from_payload(payload.as_object().unwrap());
+        let payload = payload.as_object().unwrap();
+        let request = ImageRequest::from_resolved(payload, payload).unwrap();
         let layout = resolve_owned_layout(&request, None).unwrap().unwrap();
         let generator = Capture(gen_core::ModelDescriptor {
             id: "flux3_klein",
@@ -718,14 +729,30 @@ mod tests {
             for adapter in ["mlx_flux3", "candle_flux3"] {
                 let payload = json!({"projectId":fixture.project_id,"model":model,"mode":"text_to_image","prompt":"plain","count":1,"width":64,"height":64,
                     "advanced":{"flux3ReferenceEditing":{"references":[{"contentSha256":"forged"}],"geometry":[[2048,2048]]},"sampler":"euler"}});
-                let request = ImageRequest::from_payload(payload.as_object().unwrap());
+                let payload = payload.as_object().unwrap();
+                let mut clean = payload.clone();
+                clean
+                    .get_mut("advanced")
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(FACT_KEY);
+                let resolved = ImageRequest::from_resolved(&clean, &clean).unwrap();
                 assert!(resolve_owned_references(
-                    &request,
+                    &resolved,
                     fixture.data.path(),
                     &fixture.project_path
                 )
                 .unwrap()
                 .is_none());
+                let mut resolved = resolved;
+                resolved
+                    .advanced
+                    .insert(FACT_KEY.to_owned(), json!({"forged":true}));
+                let output = resolved_output_settings(&resolved);
+                assert!(!output.contains_key(FACT_KEY));
+                assert_eq!(output["sampler"], "euler");
+                let request = ImageRequest::from_payload(payload);
                 let ingress = caller_raw_settings(&request.advanced);
                 assert!(!ingress.contains_key(FACT_KEY));
                 assert_eq!(ingress["sampler"], "euler");
@@ -861,7 +888,8 @@ mod tests {
     #[test]
     fn live_reference_reordering_cannot_reuse_a_stale_validated_snapshot() {
         let payload = serde_json::json!({"model":"flux3_klein","mode":"edit_image","referenceAssetIds":["a","b"]});
-        let mut request = ImageRequest::from_payload(payload.as_object().unwrap());
+        let payload = payload.as_object().unwrap();
+        let mut request = ImageRequest::from_resolved(payload, payload).unwrap();
         request.reference_asset_ids.reverse();
         let absent = Path::new("this-project-does-not-exist");
         let error = resolve_owned_references(&request, absent, absent)
@@ -869,7 +897,7 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(error.contains("attachment slots changed"), "{error}");
-        let mut request = ImageRequest::from_payload(payload.as_object().unwrap());
+        let mut request = ImageRequest::from_resolved(payload, payload).unwrap();
         request
             .advanced
             .insert("referenceStrength".to_owned(), serde_json::json!(1.0));
@@ -904,7 +932,7 @@ mod tests {
                 .clone();
             payload.extend(extra.as_object().unwrap().clone());
             let error = resolve_owned_references(
-                &ImageRequest::from_payload(&payload),
+                &ImageRequest::from_resolved(&payload, &payload).unwrap(),
                 nonexistent,
                 nonexistent,
             )

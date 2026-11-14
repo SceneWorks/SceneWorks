@@ -623,7 +623,8 @@ mod tests {
                 json!({ "guidanceScale": guidance }),
             );
         }
-        ImageRequest::from_payload(value.as_object().expect("image request object"))
+        let payload = value.as_object().expect("image request object");
+        ImageRequest::from_resolved(payload, payload).expect("resolved image request")
     }
 
     #[test]

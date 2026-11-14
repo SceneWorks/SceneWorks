@@ -1108,15 +1108,13 @@ mod krea_control_tier_reconcile_tests {
     use serde_json::json;
 
     fn request(bits: i64) -> ImageRequest {
-        ImageRequest::from_payload(
-            json!({
-                "model": "krea_2_turbo",
-                "advanced": { "mlxQuantize": bits },
-                "modelManifestEntry": {}
-            })
-            .as_object()
-            .unwrap(),
-        )
+        let value = json!({
+            "model": "krea_2_turbo",
+            "advanced": { "mlxQuantize": bits },
+            "modelManifestEntry": {}
+        });
+        let payload = value.as_object().unwrap();
+        ImageRequest::from_resolved(payload, payload).unwrap()
     }
 
     #[test]

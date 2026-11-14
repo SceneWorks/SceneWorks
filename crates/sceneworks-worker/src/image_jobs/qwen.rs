@@ -1,9 +1,7 @@
 use super::adapters::resolve_adapters;
 use super::artifact_resolution::model_repo;
 use super::artifact_resolution::resolve_weights_dir;
-use super::conditioning::edit_grouping;
 use super::conditioning::load_reference_image;
-use super::conditioning::parse_poses;
 use super::conditioning::pose_entries;
 use super::conditioning::resolve_control_identity_source;
 use super::conditioning::stage_likeness;
@@ -843,7 +841,7 @@ pub(super) async fn generate_qwen_edit_stream(
     // sc-4409 angles / sc-4410 poses / sc-4411 plain With-Character) is generator-agnostic — Qwen-Edit
     // produces the FINAL image directly (no face-restore pass), so scoring the generated image scores
     // what the user sees.
-    let grouping = edit_grouping(request);
+    let grouping = super::conditioning::edit_grouping_resolved(execution);
     let EditBatch {
         seeds,
         prompts,
@@ -1039,11 +1037,22 @@ mod qwen_control_tier_tests {
     use serde_json::json;
 
     fn request(advanced: serde_json::Value) -> ImageRequest {
-        ImageRequest::from_payload(
-            json!({ "model": "qwen_image", "advanced": advanced })
-                .as_object()
-                .unwrap(),
-        )
+        let value = json!({ "model": "qwen_image", "advanced": advanced });
+        let authored = value.as_object().unwrap();
+        let mut effective = authored.clone();
+        if let Some("0") = effective
+            .get("advanced")
+            .and_then(|value| value.get("mlxQuantize"))
+            .and_then(serde_json::Value::as_str)
+        {
+            effective
+                .get_mut("advanced")
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("mlxQuantize".to_owned(), json!(0));
+        }
+        ImageRequest::from_resolved(authored, &effective).unwrap()
     }
 
     /// Write a present `<tier>/model.safetensors` overlay so [`qwen_control_tier_subdir`]'s clamp sees

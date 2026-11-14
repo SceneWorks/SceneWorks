@@ -3,10 +3,8 @@ use super::artifact_resolution::model_repo;
 use super::artifact_resolution::resolve_weights_dir;
 use super::artifact_resolution::resolved_mlx_artifact_tier_for_model;
 use super::conditioning::augment_prompt_for_angle;
-use super::conditioning::edit_grouping;
 use super::conditioning::edit_reference_ids;
 use super::conditioning::load_reference_image;
-use super::conditioning::parse_poses;
 use super::conditioning::pose_entries;
 use super::conditioning::resolve_control_identity_source;
 use super::conditioning::resolve_identity_init;
@@ -808,7 +806,7 @@ pub(super) async fn generate_flux2_edit_stream(
     // plain With-Character) applies to EVERY character_image generation on this FLUX.2 edit lane,
     // which produces the FINAL image directly (no face-restore pass), so scoring the generated
     // image scores what the user sees.
-    let grouping = edit_grouping(request);
+    let grouping = super::conditioning::edit_grouping_resolved(execution);
     let EditBatch {
         seeds,
         prompts,
@@ -1724,11 +1722,22 @@ mod flux2_dev_admission_tests {
     use serde_json::json;
 
     fn advanced_request(advanced: Value) -> ImageRequest {
-        ImageRequest::from_payload(
-            json!({ "model": "flux2_dev", "advanced": advanced })
-                .as_object()
-                .unwrap(),
-        )
+        let value = json!({ "model": "flux2_dev", "advanced": advanced });
+        let authored = value.as_object().unwrap();
+        let mut effective = authored.clone();
+        if let Some("true") = effective
+            .get("advanced")
+            .and_then(|value| value.get("usePid"))
+            .and_then(Value::as_str)
+        {
+            effective
+                .get_mut("advanced")
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("usePid".to_owned(), Value::Bool(true));
+        }
+        ImageRequest::from_resolved(authored, &effective).unwrap()
     }
 
     /// The exact edit contract shape the pinned engine builds

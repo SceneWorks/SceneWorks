@@ -2,7 +2,6 @@ use super::adapters::resolve_adapters;
 use super::artifact_resolution::model_repo;
 use super::artifact_resolution::resolve_weights_dir;
 use super::artifact_resolution::resolved_mlx_artifact_tier;
-use super::conditioning::parse_poses;
 use super::conditioning::pose_entries;
 use super::conditioning::resolve_control_identity_source;
 use super::conditioning::stage_likeness;
